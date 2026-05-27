@@ -197,11 +197,11 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** full permission modes + security checkers + interactive approval.
 **Depends on:** 6 · **Size:** M
 
-- [ ] `PermissionMode`: Default/Plan/AcceptEdits/ReadOnly/Restricted/Bypass `M` · #14
-- [ ] Security checkers: CommandInjection/PrivilegeEscalation/PathTraversal/NetworkExfil/DestructiveCommand `M`
-- [ ] `SecurityEvent` log `.rustykeys/security.jsonl` (structured `checker`) `S`
-- [ ] `ApprovalGate`: channel-based approval (uses the `async before_tool` from Phase 1) `M`
-- [ ] `/permissions` CLI `S`
+- [x] `PermissionMode`: Default/Plan/AcceptEdits/ReadOnly/Restricted/Bypass `M` · #14
+- [x] Security checkers: CommandInjection/PrivilegeEscalation/PathTraversal/NetworkExfil/DestructiveCommand `M`
+- [x] `SecurityEvent` log `.rustykeys/security.jsonl` (structured `checker`) `S`
+- [x] `ApprovalGate`: channel-based approval (uses the `async before_tool` from Phase 1) `M`
+- [x] `/permissions` CLI `S`
 
 **Definition of Done:** modes gate tool classes exhaustively; `Bypass` requires `RUSTYKEYS_ALLOW_BYPASS=1`; blocked approvals log a `tool_block` intervention.
 **Acceptance:** `ReadOnly` blocks writes/bash; an approval prompt round-trips Allow/AllowAlways/Block.

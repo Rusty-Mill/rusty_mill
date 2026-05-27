@@ -26,7 +26,7 @@ use rk_feed::{
     Store, Stream, TaskState, TaskStore, ToolError, ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
-use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
+use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
 
 const CONSOLIDATE_SYSTEM: &str =
     "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
@@ -241,6 +241,21 @@ where
         let turn_id = format!("{}_turn_{n}", self.session_id);
         self.journal
             .record_turn(&self.session_id, &turn_id, &reply, &episode, &report)?;
+
+        // A policy block (workspace boundary, security checker, mode gate, or
+        // approval denial) is the permission boundary working — recorded as a
+        // `tool_block` intervention, never an `unsafe_invalid` outcome (PRD 02/05).
+        if episode
+            .tool_events
+            .iter()
+            .any(|e| e.outcome.status == ToolStatus::Blocked)
+        {
+            self.interventions.record(
+                InterventionKind::ToolBlock,
+                "policy blocked a tool call",
+                &format!("{turn_id}_block"),
+            )?;
+        }
 
         // Capture the turn into the short-term stream.
         self.stream

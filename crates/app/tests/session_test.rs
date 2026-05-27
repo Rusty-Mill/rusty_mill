@@ -192,6 +192,8 @@ async fn read_only_mode_blocks_a_write_turn() {
     assert_eq!(a.layer, "constrain/policy");
     // The write never happened.
     assert!(!dir.join("out.txt").exists());
+    // The block is recorded as an (unavoidable) tool_block intervention.
+    assert_eq!(session.mhir().unwrap().n_unavoidable, 1);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

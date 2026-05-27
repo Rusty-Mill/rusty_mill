@@ -42,6 +42,9 @@ pub enum PolicyError {
         /// The matched pattern.
         pattern: String,
     },
+    /// The human (or remote ACL) denied an approval request (ApprovalGate).
+    #[error("blocked by approval gate")]
+    ApprovalDenied,
 }
 
 /// Runs an ordered set of policies; the first block wins (fail-closed).
