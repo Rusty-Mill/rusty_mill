@@ -48,6 +48,12 @@ async fn send_reads_workspace_file_then_replies_verified() {
             "list_directory",
             "read_file",
             "set_task",
+            "task_create",
+            "task_get",
+            "task_list",
+            "task_output",
+            "task_stop",
+            "task_update",
             "write_file"
         ]
     );

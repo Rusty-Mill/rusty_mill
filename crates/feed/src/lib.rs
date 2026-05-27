@@ -17,6 +17,7 @@ pub mod chaos;
 mod error;
 pub mod memory;
 mod prompt;
+mod taskmgmt;
 mod tool;
 mod web;
 
@@ -32,5 +33,6 @@ pub use memory::{
     Stream, TaskState, TaskStatus, TaskStore, DEFAULT_RECALL_K,
 };
 pub use prompt::system_prompt;
+pub use taskmgmt::{register_task_management_tools, BackgroundTaskStore};
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};
 pub use web::register_web_tools;
