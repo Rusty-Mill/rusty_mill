@@ -14,10 +14,16 @@ mod builtins;
 #[cfg(feature = "chaos")]
 pub mod chaos;
 mod error;
+pub mod memory;
 mod prompt;
 mod tool;
 
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
+pub use memory::{
+    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, AttributionContext,
+    ConsolidationScope, ConsolidationStats, ContextEntry, Edge, MemType, Memory, Observation,
+    RecallOutput, SqliteStore, SqliteStream, Store, Stream, DEFAULT_RECALL_K,
+};
 pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};

@@ -1,7 +1,9 @@
-//! `Session` — the centre of the harness (ARCHITECTURE §6). Phase-2: wires
-//! config + a policy-vetted, traced tool registry + a model, runs one turn per
-//! [`Session::send`], then verifies the turn and journals an evidence record.
-//! Memory and the semantic judge land in later phases.
+//! `Session` — the centre of the harness (ARCHITECTURE §6). Phase-3: the full
+//! OODA loop. Each [`Session::send`] orients (recall → context), runs the turn
+//! through the policy-vetted traced registry, verifies, journals, captures the
+//! turn into the short-term stream, promotes recalled candidate skills on a
+//! verified turn, and (past an idle threshold) consolidates into long-term
+//! memory. `/reflect`, `/sleep`, `/groom`, `/memory` drive memory explicitly.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,9 +14,17 @@ use aisdk::core::language_model::LanguageModel;
 use rk_compose::{EvidenceJournal, VerificationReport, Verifier};
 use rk_config::Config;
 use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
-use rk_feed::{register_builtins, system_prompt, ToolRegistry};
-use rk_kernel::run_turn;
+use rk_feed::{
+    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
+    system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats, Memory, Observation,
+    SqliteStore, SqliteStream, Store, Stream, ToolRegistry, DEFAULT_RECALL_K,
+};
+use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
+
+const CONSOLIDATE_SYSTEM: &str =
+    "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
+const CONSOLIDATE_WINDOW: usize = 20;
 
 /// The result of one turn: the reply plus its verification verdict.
 pub struct TurnOutcome {
@@ -24,7 +34,7 @@ pub struct TurnOutcome {
     pub report: VerificationReport,
 }
 
-/// A live conversation against a model, bound to one workspace + policy.
+/// A live conversation against a model, bound to one workspace + policy + memory.
 pub struct Session<M> {
     model: M,
     dispatch: Arc<dyn ToolDispatch>,
@@ -32,21 +42,26 @@ pub struct Session<M> {
     journal: EvidenceJournal,
     interventions: InterventionLogger,
     verifier: Verifier,
+    stream: Arc<dyn Stream>,
+    store: Arc<dyn Store>,
     system: String,
     session_id: String,
+    recall_k: usize,
+    idle_threshold: usize,
     turn_counter: AtomicUsize,
     msg_counter: AtomicUsize,
     last_report: Mutex<Option<VerificationReport>>,
     last_unverified: AtomicBool,
+    last_attribution: Mutex<Option<AttributionContext>>,
 }
 
 impl<M> Session<M>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone,
 {
-    /// Build a session: workspace policy + traced built-in tools + the static
-    /// system prompt + a deterministic verifier + the evidence journal.
-    pub fn new(config: &Config, model: M) -> Self {
+    /// Build a session: workspace policy + traced built-in tools + verifier +
+    /// evidence journal + the short/long-term memory stores under `.rustykeys/`.
+    pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
         let policy =
             PolicyChain::new().with(Arc::new(WorkspacePolicy::new(config.workspace.clone())));
@@ -54,26 +69,41 @@ where
         register_builtins(&mut registry, config.workspace.clone());
 
         let state_dir = config.workspace.join(".rustykeys");
+        std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();
-        Self {
+
+        let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
+        let store = SqliteStore::open(&state_dir.join("store.db"))?;
+
+        let idle_threshold = std::env::var("RUSTYKEYS_IDLE_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+
+        Ok(Self {
             model,
             dispatch: Arc::new(registry),
             tracer,
             journal: EvidenceJournal::new(&state_dir),
             interventions: InterventionLogger::new(&state_dir, session_id.clone()),
             verifier: Verifier::deterministic(),
+            stream: Arc::new(stream),
+            store: Arc::new(store),
             system: system_prompt(config.harness_level),
             session_id,
+            recall_k: DEFAULT_RECALL_K,
+            idle_threshold,
             turn_counter: AtomicUsize::new(0),
             msg_counter: AtomicUsize::new(0),
             last_report: Mutex::new(None),
             last_unverified: AtomicBool::new(false),
-        }
+            last_attribution: Mutex::new(None),
+        })
     }
 
-    /// Run one user turn: dispatch (traced) → verify → journal. If the *previous*
-    /// turn was unverified, records an `unverified_followup` intervention against
-    /// this message first (PRD 04).
+    /// Run one user turn: orient → dispatch (traced) → verify → journal → capture
+    /// → promote/consolidate. Records `unverified_followup` if the prior turn was
+    /// unverified.
     pub async fn send(&self, prompt: &str) -> anyhow::Result<TurnOutcome> {
         let msg_id = self.next_msg_id();
         if self.last_unverified.load(Ordering::Relaxed) {
@@ -81,11 +111,34 @@ where
                 .record(InterventionKind::UnverifiedFollowup, "", &msg_id)?;
         }
 
+        // Orient: recall long-term memory (boosted by the failure being recovered
+        // from), prepend it to the turn as oriented context.
+        let boost = self
+            .last_attribution
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let oriented = recall(
+            self.store.as_ref(),
+            prompt,
+            self.recall_k,
+            now(),
+            boost.as_ref(),
+        )
+        .await?;
+        let prompt_with_context = if oriented.block.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{}\n\n{prompt}", oriented.block)
+        };
+
+        self.stream.append(&obs("user", "message", prompt)).await?;
+
         self.tracer.start_episode();
         let reply = run_turn(
             self.model.clone(),
             &self.system,
-            prompt,
+            &prompt_with_context,
             self.dispatch.clone(),
         )
         .await?;
@@ -99,11 +152,131 @@ where
         self.journal
             .record_turn(&self.session_id, &turn_id, &reply, &episode, &report)?;
 
+        // Capture the turn into the short-term stream.
+        self.stream
+            .append(&obs("assistant", "message", &reply))
+            .await?;
+        self.stream
+            .append(&obs("system", "verification", &report.as_observation()))
+            .await?;
+
+        // Close the loop: a VERIFIED turn promotes the candidate skills it
+        // recalled (ADR-0031); a failed turn records its attribution for the next
+        // turn's boost + consolidation feed.
+        if report.verified {
+            self.promote_recalled_candidates(&oriented.entries).await?;
+            *self
+                .last_attribution
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = None;
+        } else {
+            *self
+                .last_attribution
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = attribution_context(&report);
+        }
+
         self.last_unverified
             .store(!report.verified, Ordering::Relaxed);
         *self.last_report.lock().unwrap_or_else(|p| p.into_inner()) = Some(report.clone());
 
+        // Idle consolidation once enough observations have accrued.
+        if self.stream.recent(self.idle_threshold).await?.len() >= self.idle_threshold {
+            let _ = self.consolidate(ConsolidationScope::Idle).await;
+        }
+
         Ok(TurnOutcome { reply, report })
+    }
+
+    /// Recall block for `query` (the `/memory`-style preview; also what `send`
+    /// prepends). Exposed so cross-session recall is observable.
+    pub async fn recall_block(&self, query: &str) -> anyhow::Result<String> {
+        Ok(
+            recall(self.store.as_ref(), query, self.recall_k, now(), None)
+                .await?
+                .block,
+        )
+    }
+
+    /// Explicit idle-style consolidation (`/reflect`).
+    pub async fn reflect(&self) -> anyhow::Result<ConsolidationStats> {
+        self.consolidate(ConsolidationScope::Explicit).await
+    }
+
+    /// Session-end consolidation + prune + groom (`/sleep`).
+    pub async fn sleep(&self) -> anyhow::Result<ConsolidationStats> {
+        let mut stats = self.consolidate(ConsolidationScope::Sleep).await?;
+        // Decay/prune non-validated, low-importance, stale memories.
+        stats.pruned = self.store.prune(now(), 0.3).await?;
+        stats.groomed = self.groom().await?.groomed;
+        Ok(stats)
+    }
+
+    /// Skill grooming via the model (`/groom`).
+    pub async fn groom(&self) -> anyhow::Result<ConsolidationStats> {
+        let skills = self.store.skills().await?;
+        if skills.is_empty() {
+            return Ok(ConsolidationStats::default());
+        }
+        let emit = complete(
+            self.model.clone(),
+            CONSOLIDATE_SYSTEM,
+            &groom_prompt(&skills),
+        )
+        .await?;
+        let stats = groom_apply(self.store.as_ref(), &emit, now()).await?;
+        self.journal.record_improvement(
+            &self.session_id,
+            "groom",
+            stats.created,
+            stats.updated,
+            stats.pruned,
+            stats.groomed,
+        )?;
+        Ok(stats)
+    }
+
+    /// The most-recently-created `n` memories (`/memory`).
+    pub async fn memory_recent(&self, n: usize) -> anyhow::Result<Vec<Memory>> {
+        Ok(self.store.recent(n).await?)
+    }
+
+    async fn consolidate(&self, scope: ConsolidationScope) -> anyhow::Result<ConsolidationStats> {
+        let observations = self.stream.recent(CONSOLIDATE_WINDOW).await?;
+        let attribution = self
+            .last_attribution
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let prompt = consolidation_prompt(&observations, scope, attribution.as_ref());
+        let emit = complete(self.model.clone(), CONSOLIDATE_SYSTEM, &prompt).await?;
+        let stats = consolidate_apply(self.store.as_ref(), &emit, now()).await?;
+        self.journal.record_improvement(
+            &self.session_id,
+            scope.as_str(),
+            stats.created,
+            stats.updated,
+            stats.pruned,
+            stats.groomed,
+        )?;
+        Ok(stats)
+    }
+
+    async fn promote_recalled_candidates(
+        &self,
+        entries: &[rk_feed::ContextEntry],
+    ) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let recalled: std::collections::HashSet<&str> =
+            entries.iter().map(|e| e.artifact.as_str()).collect();
+        for skill in self.store.skills().await? {
+            if !skill.validated && recalled.contains(skill.title.as_str()) {
+                self.store.set_validated(&skill.title, true).await?;
+            }
+        }
+        Ok(())
     }
 
     /// The most recent turn's verification report, if any (`/verify`).
@@ -146,10 +319,34 @@ where
     }
 }
 
-fn new_session_id() -> String {
-    let nanos = SystemTime::now()
+fn obs(role: &str, kind: &str, content: &str) -> Observation {
+    Observation {
+        ts: now(),
+        role: role.to_string(),
+        kind: kind.to_string(),
+        content: content.to_string(),
+    }
+}
+
+/// Build the consolidation attribution feed from a failed report's first attribution.
+fn attribution_context(report: &VerificationReport) -> Option<AttributionContext> {
+    report.attributions.first().map(|a| AttributionContext {
+        failure_type: serde_json::to_value(a.failure_type)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default(),
+        layer: a.layer.clone(),
+        evidence: a.evidence.clone(),
+    })
+}
+
+fn now() -> f64 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("s_{nanos:x}")
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn new_session_id() -> String {
+    format!("s_{:x}", now().to_bits())
 }

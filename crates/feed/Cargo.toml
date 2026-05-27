@@ -12,7 +12,11 @@ rk-observe.workspace = true
 rk-constrain.workspace = true
 aisdk.workspace = true
 async-trait.workspace = true
+# Pinned: libsqlite3-sys 0.38 (rusqlite 0.40) build script uses the unstable
+# `cfg_select`, which does not compile on stable. 0.32 bundles cleanly.
+rusqlite = { version = "0.32", features = ["bundled"] }
 schemars.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

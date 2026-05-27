@@ -100,6 +100,25 @@ where
     Ok(response.text().unwrap_or_default())
 }
 
+/// A single no-tools completion (system + prompt → text). Used for the post-turn
+/// memory work — consolidation and grooming JSON emits (PRD 03) — which do not
+/// dispatch tools.
+pub async fn complete<M>(model: M, system: &str, prompt: &str) -> Result<String, KernelError>
+where
+    M: LanguageModel + TextInputSupport,
+{
+    let mut request = LanguageModelRequest::builder()
+        .model(model)
+        .system(system.to_string())
+        .prompt(prompt.to_string())
+        .build();
+    let response = request
+        .generate_text()
+        .await
+        .map_err(|e| KernelError::Model(e.to_string()))?;
+    Ok(response.text().unwrap_or_default())
+}
+
 /// Run one user turn with streaming. Identical dispatch semantics to
 /// [`run_turn`], but each text delta is handed to `on_token` as it arrives;
 /// returns the accumulated final text. (CLI wiring is post-phase per the

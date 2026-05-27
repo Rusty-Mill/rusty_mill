@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .build()
         .context("building model provider")?;
 
-    let session = Session::new(&config, model);
+    let session = Session::new(&config, model).context("building session")?;
 
     eprintln!(
         "rusty-keys · model={} · endpoint={} · workspace={} · level={:?} · tools=[{}]",
@@ -61,7 +61,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -74,7 +74,9 @@ where
         match line {
             "" => continue,
             "/quit" | "/exit" => break,
-            "/help" => eprintln!("commands: /verify  /mhir  /help  /quit"),
+            "/help" => eprintln!(
+                "commands: /verify  /mhir  /memory  /reflect  /sleep  /groom  /help  /quit"
+            ),
             "/verify" => {
                 session.note_manual_verify()?;
                 match session.last_report() {
@@ -88,6 +90,31 @@ where
                     "M-HIR {:.3} = {} avoidable / {} turns (excluded: {} unavoidable, {} benign)",
                     m.rate, m.n_interventions, m.n_turns, m.n_unavoidable, m.n_benign,
                 );
+            }
+            "/memory" => {
+                let mems = session.memory_recent(10).await?;
+                if mems.is_empty() {
+                    println!("(no memories yet)");
+                }
+                for m in mems {
+                    let v = if m.validated { "✓" } else { " " };
+                    println!("[{}{}] {}: {}", m.mem_type.as_str(), v, m.title, m.body);
+                }
+            }
+            "/reflect" => {
+                let s = session.reflect().await?;
+                println!("reflected: +{} created, {} updated", s.created, s.updated);
+            }
+            "/sleep" => {
+                let s = session.sleep().await?;
+                println!(
+                    "slept: +{} created, {} updated, {} pruned, {} groomed",
+                    s.created, s.updated, s.pruned, s.groomed
+                );
+            }
+            "/groom" => {
+                let s = session.groom().await?;
+                println!("groomed: {} ops", s.groomed);
             }
             prompt => {
                 let outcome = session.send(prompt).await.context("running turn")?;
