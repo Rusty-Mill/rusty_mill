@@ -26,7 +26,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 rk-kernel = { workspace = true, features = ["fake"] }
-rk-feed = { workspace = true, features = ["chaos"] }
+rk-feed = { workspace = true, features = ["chaos", "fake-embed"] }
 serde_json.workspace = true
 async-trait.workspace = true
 

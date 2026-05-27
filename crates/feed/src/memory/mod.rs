@@ -4,6 +4,7 @@
 //! and validation-gated skills land in later increments.
 
 mod consolidate;
+mod embed;
 mod groom;
 mod recall;
 mod store;
@@ -14,6 +15,9 @@ pub use consolidate::{
     apply as consolidate_apply, build_prompt as consolidation_prompt, AttributionContext,
     ConsolidationScope, ConsolidationStats,
 };
+#[cfg(any(test, feature = "fake-embed"))]
+pub use embed::HashEmbedder;
+pub use embed::{cosine, Embedder};
 pub use groom::{apply as groom_apply, build_prompt as groom_prompt};
 pub use recall::{recall, ContextEntry, RecallOutput, DEFAULT_RECALL_K};
 pub use store::SqliteStore;
@@ -105,6 +109,9 @@ pub struct Memory {
     pub use_count: u32,
     /// Provenance: the observation window distilled from, if any.
     pub source_ts: Option<(f64, f64)>,
+    /// Dense embedding for semantic recall (Phase 5); `None` ⇒ lexical-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<Vec<f32>>,
     /// Outgoing typed edges.
     pub edges: Vec<Edge>,
 }
@@ -127,6 +134,7 @@ impl Memory {
             last_used_ts: ts,
             use_count: 0,
             source_ts: None,
+            embedding: None,
             edges: Vec::new(),
         }
     }
@@ -148,8 +156,9 @@ pub trait Stream: Send + Sync {
 pub trait Store: Send + Sync {
     /// Insert or update a memory (keyed by `title`) and its edges.
     async fn upsert(&self, memory: &Memory) -> Result<(), ToolError>;
-    /// Top-`k` candidates for `query` with raw relevance (bm25 lexical in v1;
-    /// `embed` reserved for the Phase-5 semantic backend).
+    /// Top-`k` candidates for `query` with raw relevance. `embed` `None` ⇒ FTS5
+    /// lexical (bm25); `Some(query_vec)` ⇒ semantic (cosine over stored
+    /// embeddings, with a lexical fallback over non-embedded memories).
     async fn candidates(
         &self,
         query: &str,

@@ -24,6 +24,8 @@ tokio.workspace = true
 [features]
 # Ships the FaultyTool fixture for the chaos / resilience eval tier (eval-plan §7).
 chaos = []
+# Ships the deterministic HashEmbedder fixture for offline semantic-recall tests.
+fake-embed = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }

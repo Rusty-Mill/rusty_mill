@@ -19,7 +19,7 @@ use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
     register_task_tools, system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats,
-    Memory, Observation, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
+    Embedder, Memory, Observation, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
     ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
@@ -50,6 +50,7 @@ pub struct Session<M> {
     stream: Arc<dyn Stream>,
     store: Arc<dyn Store>,
     task: Arc<TaskStore>,
+    embedder: Option<Arc<dyn Embedder>>,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -98,6 +99,7 @@ where
             stream: Arc::new(stream),
             store: Arc::new(store),
             task,
+            embedder: None,
             system: system_prompt(config.harness_level),
             session_id,
             recall_k: DEFAULT_RECALL_K,
@@ -108,6 +110,13 @@ where
             last_unverified: AtomicBool::new(false),
             last_attribution: Mutex::new(None),
         })
+    }
+
+    /// Attach an embedder to enable semantic recall (Phase 5). Without one,
+    /// recall falls back to FTS5 lexical.
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Run one user turn: orient → dispatch (traced) → verify → journal → capture
@@ -145,6 +154,7 @@ where
             self.recall_k,
             now(),
             boost.as_ref(),
+            self.embedder.as_deref(),
         )
         .await?;
         let extra: String = [task_block, oriented.block.clone()]
@@ -229,11 +239,16 @@ where
     /// Recall block for `query` (the `/memory`-style preview; also what `send`
     /// prepends). Exposed so cross-session recall is observable.
     pub async fn recall_block(&self, query: &str) -> anyhow::Result<String> {
-        Ok(
-            recall(self.store.as_ref(), query, self.recall_k, now(), None)
-                .await?
-                .block,
+        Ok(recall(
+            self.store.as_ref(),
+            query,
+            self.recall_k,
+            now(),
+            None,
+            self.embedder.as_deref(),
         )
+        .await?
+        .block)
     }
 
     /// Explicit idle-style consolidation (`/reflect`).
@@ -298,7 +313,8 @@ where
             .clone();
         let prompt = consolidation_prompt(&observations, scope, attribution.as_ref());
         let emit = complete(self.model.clone(), CONSOLIDATE_SYSTEM, &prompt).await?;
-        let stats = consolidate_apply(self.store.as_ref(), &emit, now()).await?;
+        let stats =
+            consolidate_apply(self.store.as_ref(), &emit, now(), self.embedder.as_deref()).await?;
         self.journal.record_improvement(
             &self.session_id,
             scope.as_str(),

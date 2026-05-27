@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{AttributionContext, MemType, Memory, Store};
+use super::{AttributionContext, Embedder, MemType, Memory, Store};
 use crate::error::ToolError;
 
 /// Default top-k (`RUSTYKEYS_RECALL_K`).
@@ -108,9 +108,17 @@ pub async fn recall(
     k: usize,
     now: f64,
     boost: Option<&AttributionContext>,
+    embedder: Option<&dyn Embedder>,
 ) -> Result<RecallOutput, ToolError> {
     let fetch = (k * 4).max(16);
-    let batch = store.candidates(query, None, fetch).await?;
+    // Semantic when an embedder is configured; lexical fallback otherwise.
+    let query_embedding = match embedder {
+        Some(e) => Some(e.embed(query).await?),
+        None => None,
+    };
+    let batch = store
+        .candidates(query, query_embedding.as_deref(), fetch)
+        .await?;
     if batch.is_empty() {
         return Ok(RecallOutput::default());
     }
@@ -241,7 +249,7 @@ mod tests {
         other.last_used_ts = now - 30.0 * 86_400.0;
         let store = store_with(&[auth, other]).await;
 
-        let out = recall(&store, "login token", DEFAULT_RECALL_K, now, None)
+        let out = recall(&store, "login token", DEFAULT_RECALL_K, now, None, None)
             .await
             .unwrap();
         assert!(out.block.starts_with("## Relevant memory"));
@@ -252,7 +260,9 @@ mod tests {
     #[tokio::test]
     async fn empty_corpus_yields_empty_block() {
         let store = SqliteStore::in_memory().unwrap();
-        let out = recall(&store, "anything", 6, 1.0, None).await.unwrap();
+        let out = recall(&store, "anything", 6, 1.0, None, None)
+            .await
+            .unwrap();
         assert!(out.block.is_empty());
         assert!(out.entries.is_empty());
     }
@@ -273,7 +283,7 @@ mod tests {
         fact.last_used_ts = old;
         let store = store_with(&[skill, fact]).await;
 
-        let out = recall(&store, "token", DEFAULT_RECALL_K, now, None)
+        let out = recall(&store, "token", DEFAULT_RECALL_K, now, None, None)
             .await
             .unwrap();
         assert_eq!(out.entries[0].artifact, "alpha");
@@ -303,10 +313,10 @@ mod tests {
         let (skill, fact) = boost_pair(now, true);
         let store = store_with(&[skill, fact]).await;
 
-        let no_boost = recall(&store, "tools", DEFAULT_RECALL_K, now, None)
+        let no_boost = recall(&store, "tools", DEFAULT_RECALL_K, now, None, None)
             .await
             .unwrap();
-        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr))
+        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr), None)
             .await
             .unwrap();
         assert_eq!(no_boost.entries[0].artifact, "tools doc");
@@ -324,7 +334,7 @@ mod tests {
         let (skill, fact) = boost_pair(now, false); // candidate ⇒ not boosted
         let store = store_with(&[skill, fact]).await;
 
-        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr))
+        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr), None)
             .await
             .unwrap();
         assert_eq!(boosted.entries[0].artifact, "tools doc");
@@ -346,7 +356,7 @@ mod tests {
         let nbr = Memory::new("nbr", "neighbor body", MemType::Fact, now);
         let store = store_with(&[a, nbr]).await;
 
-        let out = recall(&store, "zzz", DEFAULT_RECALL_K, now, None)
+        let out = recall(&store, "zzz", DEFAULT_RECALL_K, now, None, None)
             .await
             .unwrap();
         assert!(out.block.contains("↳ related: nbr"));

@@ -219,6 +219,42 @@ async fn unparseable_judge_is_unavailable_not_a_pass() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn semantic_recall_matches_a_paraphrase() {
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("rk-app-sem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+    let embedder = Arc::new(rk_feed::HashEmbedder::new(128));
+
+    // Plant a fact via /reflect — it is embedded on the way into the store.
+    let emit = r#"{"memories":[{"op":"create","type":"fact","title":"build system",
+        "body":"compile the project using cargo","importance":0.6}]}"#;
+    let model_a = FakeLanguageModel::new(vec![vec![Scripted::Text(emit.into())]]);
+    let a = Session::new(&config, model_a)
+        .unwrap()
+        .with_embedder(embedder.clone());
+    assert_eq!(a.reflect().await.unwrap().created, 1);
+    drop(a);
+
+    // A paraphrase that shares no distinctive keyword with the title is recalled
+    // via embedding cosine.
+    let b = Session::new(&config, FakeLanguageModel::new(vec![]))
+        .unwrap()
+        .with_embedder(embedder);
+    let block = b
+        .recall_block("how do I compile this project with cargo")
+        .await
+        .unwrap();
+    assert!(
+        block.contains("build system"),
+        "semantic recall missed the paraphrase: {block:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fact_taught_in_session_a_is_recalled_in_session_b() {
     let dir = std::env::temp_dir().join(format!("rk-app-recall-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
