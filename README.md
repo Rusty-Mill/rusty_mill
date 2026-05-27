@@ -50,5 +50,13 @@ Four harness verbs wrap the aisdk agent kernel:
 └─────────────────────────────────────────────────┘
 ```
 
-See [`docs/prd/`](docs/prd) for component PRDs and the decision log.
-See [`BACKLOG.md`](BACKLOG.md) for the development roadmap.
+This sketch shows the four verbs over the kernel. The full system is **eight
+crates** — the four verbs plus `kernel`, `config`, `mcp`, and `app` (the
+`Session` and its adapters). The authoritative component map and crate
+dependency DAG live in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §4.
+
+## Documentation
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system view: component map, crate DAG, concurrency, topologies, faithfulness map. **Read this first.**
+- [`docs/`](docs) — PRDs ([`prd/`](docs/prd)), decision records ([`adr/`](docs/adr)), the on-disk [data model](docs/architecture/data-model.md), and the [configuration reference](docs/reference/configuration.md).
+- [`BACKLOG.md`](BACKLOG.md) — the development roadmap.
