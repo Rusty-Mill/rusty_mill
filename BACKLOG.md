@@ -73,10 +73,11 @@ These are not a phase; they are the floor every phase builds on (see the dev doc
 | `async before_tool` retrofitted late = churn | 1, 7 | Make it `async` at Phase 1 (ADR-0016). |
 | Secrets leak into append-only evidence journal | 2 | Redaction-by-default before any write (ADR-0026, threat-model). |
 | SQLite contention across multi-session/subagents | 3, 12, 14 | WAL + `busy_timeout` + single-writer (ARCHITECTURE §10). |
-| Faithfulness drift from the paper (M-HIR, entropy, episode unit) | 10, 11 | ADR-0018/0019/0020; verify exact paper defs on a poppler machine before freezing. |
+| Faithfulness drift from the paper (M-HIR, entropy, episode unit) | 10, 11 | ADR-0018/0019/0020 **Accepted** — confirmed against the clean extraction (`docs/research/2605.13357v1.txt`); the freeze is DONE. Remaining risk is the ladder R1/R5 build (ADR-0035) + episode-package producers (ADR-0036). |
 | Doc/spec drift across many files | all | SSOT ownership (consolidated plan); cross-link, never restate. |
 | Tool side-effects escape in-process checks | 7B | Opt-in OS-sandbox `ToolExecutor` (`RUSTYKEYS_ISOLATION=sandboxed`), network-deny-by-default (ADR-0030). |
 | Agent games its own eval (reads answers / benchmark) | 2, 10 | Eval-integrity guard: answer keys / expected outputs / benchmark IDs kept out of agent context (ADR-0033). |
+| Paper's separability claim depends on R1 visibility-hiding + R5 all-levels adjudication (additive-capability ladder confounds H1-vs-H2) | 10, 11 | Build the controlled-visibility ablation substrate (ADR-0035); **gate any Hn-vs-Hm lift reporting until it lands.** |
 
 ---
 
@@ -129,6 +130,7 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 - [ ] Short-term `Stream` trait + `SqliteStream` (`stream.db`, WAL) `M`
 - [ ] Long-term `Store` trait + SQLite impl (FTS5 lexical recall, edges) `L`
 - [ ] **Recall scoring** — pinned formula (weights, decay, batch normalization, neighbor rule, output-block format) `M`
+- [ ] **`recall()` → `Vec<ContextEntry>`** (ADR-0036; D5): recall/orient emit structured entries (with a v1 `influenced_decision` heuristic), not a bare `String`, so the `context_trace` producer exists and the H2 cross-session-recall gate is measurable `M`
 - [ ] Tiered consolidation idle/sleep/explicit + **JSON emit contract** `L`
 - [ ] Skill grooming (refine/merge/split); skills exempt from pruning `M`
 - [ ] **Close the loop:** feed `Attribution` into consolidation; boost failure-born skills at recall `M`
@@ -267,13 +269,17 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 - [ ] `reproduce`, `attribute_failure` (fixed `FailureType`), `verification_report` tools `M`
 - [ ] `ReproduceBeforeEdit`, `VerificationReportRequired` checks (H3) `S`
 - [ ] **Versioned `EpisodePackage`** with all 8 traces incl. `context_trace` → `episodes/` `M`
+- [ ] **Episode-package assembly projector** (ADR-0036; D5): the `compose`-time builder between raw evidence and the 8 typed traces — define `ActionEvent` and project `action_trace` (read_file/edit_file/run_tool/write_report/update_task_state/inspect_diff/declare_complete, distinct from `tool_trace`), the `tool_trace` `recovered`/`exit_code`/`timeout` fields, and the `CheckResult`→`VerifyEntry` (`method`/`covers[]`/`interpretation`) producers `M`
+- [ ] **Per-turn intervention filter** (ADR-0036): pin which `intervention_log` records (by `source_message_id`/time-window) belong to *this* turn's package `S`
+- [ ] **`ToolStatus` reconcile** (ADR-0036): one 5-variant set `ok/error/blocked/timeout/truncated` (resolves the 3-vs-5 data-model §7 contradiction); `McpToolFn`→`ToolOutcome` (F15, see PRD 07) `S`
 - [ ] Five-label outcome classifier `S`
 - [ ] verify → re-attribute back-edge `S`
+- [ ] **Controlled-visibility ablation eval-substrate** (ADR-0035; D3) — make the H0–H3 ladder a true ablation, not just additive capability. One workstream sequenced isolation→visibility→adjudication, landing in the golden-episode replay: (a) per-episode **isolated workspace at a fixed commit** with a per-episode `.rustykeys/` (R2/Methods); (b) **R1 artifact-hiding at the feed/context-read seam** — lower levels do not see higher-level artifacts (H2 memory/`AGENT_GUIDE`/`TASK_STATE`/`checks.toml`); (c) **R5 evaluator-side checks at ALL levels** — `CheckRegistry::run_all()` as an independent adjudication pass that assigns `EpisodeOutcome` at H0–H3 (not from the agent's self-report). **Gate before reporting any Hn-vs-Hm lift.** `L`
 
-**Definition of Done:** every H3 turn writes a complete 8-trace package; outcome classifier covers all five labels; golden-episode replay green.
-**Acceptance:** a bug-fix turn produces a package with reproduction + attribution + verification linked to requirement IDs.
+**Definition of Done:** every H3 turn writes a complete 8-trace package (every trace has a named producer via the assembly projector, none ships empty); outcome classifier covers all five labels; golden-episode replay green; the eval substrate isolates per-episode, hides higher-level artifacts (R1), and adjudicates every level evaluator-side (R5) — no Hn-vs-Hm lift is reported before that substrate lands.
+**Acceptance:** a bug-fix turn produces a package with reproduction + attribution + verification linked to requirement IDs; `action_trace` is populated and distinct from `tool_trace`.
 **Test gate:** golden-episode replay (deterministic) + eval-plan H3 gate.
-**Risks:** episode=turn vs paper's episode=task → `episode_id` grouping (ADR-0018).
+**Risks:** episode=turn vs paper's episode=task → `episode_id` grouping (ADR-0018). Traces with a schema but no producer ship empty → the assembly projector (ADR-0036) is the named root-cause fix.
 **Demo:** `RUSTYKEYS_HARNESS_LEVEL=h3`, fix a failing check, inspect `episodes/`.
 
 ## Phase 11 — Entropy auditor ⭐
@@ -290,7 +296,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Definition of Done:** each heuristic has a unit test; `UnsafeInvalid` triggers on TestWeakening/BoundaryViolation severity ≥2.
 **Acceptance:** removing an assertion in a `*_test.rs` produces a severity-2+ `test_weakening` finding and `delta<0`.
 **Test gate:** unit per heuristic.
-**Risks:** semantic heuristics (StaleDocs/TaskContradiction) are best-effort → mark v1, LLM-assist is a seam.
+**Risks:** semantic heuristics (StaleDocs/TaskContradiction) are best-effort → mark v1, LLM-assist is a seam. Entropy sev≥2 forces an `unsafe_invalid` outcome label, so it feeds the R5 all-levels adjudication — the per-level outcome assignment is only meaningful once the controlled-visibility ablation substrate (ADR-0035, Phase 10 / eval-plan) lands; gate Hn-vs-Hm lift on it.
 **Demo:** weaken a test, see `/entropy`.
 
 ## Phase 12 — MCP integration
@@ -372,7 +378,7 @@ Surface `stream_text()` so tokens appear in the terminal REPL as they arrive (de
 `ratatui` TUI: streaming display, syntax highlighting, status bar (model/mode/tokens/M-HIR), vim keys. · #17
 
 ### Controlled-visibility H0–H3 ablation
-Make H0 a real selectable level (no tool registry) and enforce per-level artifact visibility (paper R1), so the maturity self-assessment is a valid ablation (ADR-0028).
+Promoted to a committed eval-substrate workstream in **Phase 10** (ADR-0035; D3): per-episode isolated workspace at a fixed commit + R1 artifact-hiding at the feed/context-read seam + R5 evaluator-side adjudication at all levels, gating any Hn-vs-Hm lift. Remaining post-phase item: making **H0 runtime-selectable** (no tool registry) as a product/cost call (ADR-0028, scope broadened per D4 to cover R1/R5).
 
 ### Hierarchical temporal consolidation
 Multi-cadence rollups: idle/hourly/daily/weekly summaries-of-summaries.

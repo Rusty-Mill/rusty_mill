@@ -163,9 +163,10 @@ Compaction event:
 
 ### 4.4 `entropy.jsonl` — per-turn entropy audit (PRD 04)
 
-```json
+```jsonc
 {"v":1,"ts":…,"session_id":"s_abc","kind":"entropy","turn_id":"turn_…","delta":-2,
- "findings":[{"category":"test_weakening","severity":2,
+ "findings":[{"category":"test_weakening",   // RK category; paper = test (snake_case RK enum, not a paper category name — ADR-0020 map, PRD 04)
+              "severity":2,
               "description":"Removed assertion in auth_test.rs","evidence":"src/auth_test.rs:47"}]}
 ```
 `category` is snake_case (§7); `severity` 0–3; `delta = -Σ severity`. Heuristics + the paper's 7-category map: PRD 04.
@@ -174,7 +175,7 @@ Compaction event:
 
 ## 5. Episode package — `episodes/<turn_id>.json` (H3, PRD 05)
 
-The paper's central output artifact. **Versioned** and carrying **all eight traces** (the prior spec omitted `context_trace`). Written when `RUSTYKEYS_HARNESS_LEVEL=h3`; a summary line also goes to `evidence.jsonl`.
+The paper's central output artifact. **Versioned** and carrying **all eight traces** (the prior spec omitted `context_trace`). Written when `RUSTYKEYS_HARNESS_LEVEL=h3`; a summary line also goes to `evidence.jsonl`. The package is assembled by the **episode-package assembly projector** (ADR-0036), which projects raw evidence into the typed trace elements defined in [§5.1](#51-trace-element-schemas-produced-by-the-assembly-projector--adr-0036).
 
 ```jsonc
 {
@@ -203,6 +204,60 @@ The paper's central output artifact. **Versioned** and carrying **all eight trac
 - `verification_trace[].method` draws from a controlled vocabulary (bug_reproduction, deterministic_check, registered_test, targeted_test, full_regression, lint, patch_review, manual) — PRD 05.
 - `outcome` ∈ `EpisodeOutcome` (§7).
 
+### 5.1 Trace-element schemas (produced by the assembly projector — ADR-0036)
+
+The eight-trace package is built by the **episode-package assembly projector** (ADR-0036): the named builder that projects raw evidence (the stream, `ToolOutcome`s, recall output, `CheckResult`s) into the typed traces below. These are the minimal on-disk shapes; the producing Rust structs live in PRD 05 (`EpisodePackage`) and PRD 04 (`Tracer`). All are **versioned with their parent package** (`schema_version`, ADR-0027) — they are not separately versioned records but elements of the §5 package, and unknown fields are ignored on read (§7).
+
+**`ToolEvent` — one `tool_trace[]` element (F13).** Carries the structural `ToolStatus` plus the recovery-metric fields the prior 4-field shape lacked (`exit_code`, `timeout`, `recovered`), so the tool-recovery-rate metric has data:
+
+```jsonc
+{
+  "name":        "read_file",   // tool name surfaced to aisdk
+  "status":      "ok",          // ToolStatus (§7) — structural, not sniffed (ADR-0022)
+  "exit_code":   0,             // process exit for shell-backed tools; null/omitted otherwise
+  "timeout":     false,         // did the call hit its deadline? (pairs with status=timeout)
+  "recovered":   false,         // did a later turn-step succeed after this one errored/timed out? — feeds tool-recovery-rate (ADR-0036)
+  "duration_ms": 42,
+  "result":      "…"            // redacted before write (§11, ADR-0026)
+}
+```
+
+`recovered` is projected by the assembly projector (ADR-0036), not the tracer: it is knowable only across the episode (a retry/alternative after a failed call), so the projector sets it when assembling `tool_trace` rather than at `record_tool()` time.
+
+**`ActionEvent` — one `action_trace[]` element (F11).** Distinct from `tool_trace` (the paper lists the action trace as a *separate* trace tied to episode coherence): an action is an externally-meaningful operation, not a 1:1 tool call.
+
+```jsonc
+{
+  "op":     "edit_file",        // read_file | edit_file | run_tool | write_report | update_task_state | declare_complete
+  "target": "src/auth.rs",      // file/report/task the op acted on (workspace-relative)
+  "ts":     1748346622.5        // when the action was taken
+}
+```
+
+The `op` set mirrors the §5 package example and PRD 05's `EpisodePackage`; ADR-0036/F11 also names the paper's `inspect_diff` op — reconciling the 6-op list here/§5/PRD-05 to the paper's full set is a follow-up owned by the §5 example / PRD 05.
+
+**`ContextEntry` — one `context_trace[]` element (F12).** Projected from the `Vec<ContextEntry>` that `recall()`/`orient()` now emits (PRD 03), giving `context_trace` a real producer so the H2 cross-session-recall gate (defined on `influenced_decision`) is measurable:
+
+```jsonc
+{
+  "artifact":            "src/auth.rs",   // a recalled memory title, a read file, or a static artifact (e.g. AGENT_GUIDE)
+  "contribution":        "primary",       // primary | supporting | unused
+  "influenced_decision": true             // did this artifact change what the agent did? (v1 heuristic in PRD 03)
+}
+```
+
+**`VerifyEntry` — one `verification_trace[]` element (F14).** Carries the requirement-coverage link (`covers[]`) on every check, not only the deterministic path, so the report stays requirement-linked:
+
+```jsonc
+{
+  "type":           "deterministic_check", // class of check
+  "method":         "registered_test",     // controlled vocab (see note above)
+  "result":         "pass",                // pass | fail | skipped
+  "covers":         ["req-1"],             // requirement IDs this check evidences
+  "interpretation": "…"                    // what the result means for the requirement
+}
+```
+
 ---
 
 ## 6. Sessions — `sessions/<session_id>.json`
@@ -222,7 +277,24 @@ Defines what `/resume [id]` restores and what a gateway/MCP `session_id` maps to
 
 ## 7. Serde wire conventions (ADR-0025)
 
-- **All on-disk/wire enums use `#[serde(rename_all = "snake_case")]`.** This makes `EpisodeOutcome` (`autonomous_verified_success`), `ToolStatus` (`ok`/`error`/`blocked`), `InterventionKind`, `EntropyCategory` (`test_weakening`), `CompactionTier` (`session_summary`), and `FailureType` (`f_verify`) consistent. The prior spec mixed PascalCase, snake_case, and lowercase — this rule supersedes every inline example.
+- **All on-disk/wire enums use `#[serde(rename_all = "snake_case")]`.** This makes `EpisodeOutcome` (`autonomous_verified_success`), `ToolStatus` (`ok`/`error`/`blocked`/`timeout`/`truncated`), `InterventionKind`, `EntropyCategory` (`test_weakening`), `CompactionTier` (`session_summary`), and `FailureType` (`f_verify`) consistent. The prior spec mixed PascalCase, snake_case, and lowercase — this rule supersedes every inline example.
+
+#### `ToolStatus` — the 5-member SSOT (resolves the 3-vs-5 contradiction, F13)
+
+This file is the single source of truth for `ToolStatus`. The enum has **five** members; the earlier 3-member listing (`ok`/`error`/`blocked`) was incomplete and is superseded here so PRD 03 and PRD 04 agree:
+
+```rust
+#[serde(rename_all = "snake_case")]   // ADR-0025
+pub enum ToolStatus {
+    Ok,         // ok        — call succeeded
+    Error,      // error     — call ran but failed (non-zero exit, ToolError)
+    Blocked,    // blocked   — policy vetoed before dispatch (call() never ran)
+    Timeout,    // timeout   — call exceeded its deadline
+    Truncated,  // truncated — output was capped (e.g. grep 200-line / web 50k-char limit)
+}
+```
+
+`ToolStatus` is the `status` field carried structurally by `ToolOutcome` (ADR-0022) and projected into `tool_trace[].status` (§5, below). The single formatter/parser in [`error-handling.md`](../dev/error-handling.md) is the only place this maps to/from the model-facing string.
 - **Timestamps** are `ts: f64` epoch seconds everywhere (not RFC3339), matching existing examples.
 - **Paths** are stored workspace-relative where possible; absolute paths only when they escape the workspace (and such writes are themselves policy-gated).
 - **Unknown fields** are ignored on read (`#[serde(default)]` for added fields; never `deny_unknown_fields` on persisted types) so older binaries tolerate newer records (§9).

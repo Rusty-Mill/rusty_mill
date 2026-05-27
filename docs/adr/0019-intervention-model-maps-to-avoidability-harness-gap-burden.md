@@ -1,6 +1,6 @@
 # ADR-0019: Intervention model maps UI actions to avoidability / harness_gap / burden
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-05-27
 - Tags: faithfulness, mhir, observe
 
@@ -29,6 +29,14 @@ schema lives in `docs/architecture/data-model.md`.
   intent rather than raw human-action counts.
 - The seven RK kinds are retained as the UI-facing taxonomy but each carries the
   three paper-aligned attributes.
-- Status is Proposed pending human confirmation of the exact paper field names
-  (`avoidability` / `harness_gap` / `burden`) against the rendered PDF (see the
-  PDF verification caveat in the consolidated plan).
+- The three field names (avoidability + burden level + harness gap) are confirmed
+  verbatim against the clean extraction (p.10); the PDF verification caveat is
+  therefore lifted (Round 3 D1).
+- The M-HIR numerator is now **avoidable-only** (Round 3 D2): a correct
+  `tool_block` is `unavoidable` — the policy working as intended is the harness
+  *working*, not "support the human would otherwise have to provide" (p.4) — so it
+  no longer counts toward M-HIR. This resolves the prior self-contradiction where
+  an `unavoidable` block was both "not a missing-harness signal" and counted. The
+  field definitions and the avoidable-only numerator live in
+  `docs/prd/04-observe.md`; the record schema lives in
+  `docs/architecture/data-model.md`.

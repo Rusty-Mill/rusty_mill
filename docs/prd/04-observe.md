@@ -23,7 +23,8 @@ exposes. At turn end the tracer holds a complete episode:
 
 ```rust
 pub struct Episode {
-    pub tool_events: Vec<ToolEvent>,
+    pub tool_events: Vec<ToolEvent>,       // raw dispatch-level record (every tool call)
+    pub action_events: Vec<ActionEvent>,   // externally-meaningful operations (NOT a copy of tool_events)
     pub final_reached: bool,
     pub total_tokens: u64,
 }
@@ -32,6 +33,9 @@ pub struct ToolEvent {
     pub name: String,
     pub args: serde_json::Value,   // redacted before logging (see below)
     pub outcome: ToolOutcome,      // structured status + result (ADR-0022)
+    pub exit_code: Option<i32>,    // process exit code for run_tool/bash; None for in-proc tools
+    pub timeout: bool,             // the call hit its deadline
+    pub recovered: bool,           // a later turn step succeeded after this call failed (tool-recovery signal)
     pub duration_ms: u64,
 }
 ```
@@ -40,14 +44,24 @@ pub struct ToolEvent {
 directly — it does *not* re-parse the result string. The earlier design inferred
 `ToolStatus` from magic prefixes (`BLOCKED …` → `Blocked`, `ERROR …`/`TIMEOUT …`
 → `Error`, else `Ok`); any tool whose legitimate output began with one of those
-words was misclassified. Per **ADR-0022**, `ToolOutcome` carries the status
-(`ok | error | blocked`, snake_case per ADR-0025) as a field, produced once by
-the dispatch boundary and consumed unchanged by observe and compose. The single
-formatter/parser that renders `ToolOutcome` to/from the model-facing string is
-the authoritative `ToolResultClassifier`; its contract lives in
-[`docs/dev/error-handling.md`](../dev/error-handling.md) and the type's serde
-encoding in [`data-model.md`](../architecture/data-model.md). `NoToolErrors`
-(PRD 05) reads `outcome.status` rather than scanning text.
+words was misclassified. Per **ADR-0022**, `ToolOutcome` carries the status as a
+field, produced once by the dispatch boundary and consumed unchanged by observe
+and compose. **`ToolStatus` is the reconciled five-variant set
+`{ ok, error, blocked, timeout, truncated }`** (snake_case per ADR-0025) — the
+authoritative enum lives in [`data-model.md`](../architecture/data-model.md) §7
+(SSOT); `timeout` and `truncated` are first-class statuses, not inferred from a
+boolean flag. The single formatter/parser that renders `ToolOutcome` to/from the
+model-facing string is the authoritative `ToolResultClassifier`; its contract
+lives in [`docs/dev/error-handling.md`](../dev/error-handling.md) and the type's
+serde encoding in data-model §7. `NoToolErrors` (PRD 05) reads `outcome.status`
+rather than scanning text.
+
+**`tool_trace` records exit/timeout/recovery (F13).** Beyond `status`, each
+`ToolEvent` carries `exit_code` (the process exit code for `run_tool`/`bash`
+shellouts; `None` for in-process tools), `timeout` (the call hit its deadline),
+and `recovered` (a later step in the same episode succeeded after this call
+failed — the substrate for the eval plan's tool-recovery-rate metric). These
+populate the episode package's `tool_trace` (PRD 05, data-model §5) directly.
 
 **Tool args are redacted before logging (ADR-0026).** `ToolEvent.args` and the
 result may contain secrets (auth tokens, API keys, anything the model passes as
@@ -58,12 +72,52 @@ structure*, so the attribution and verification traces that depend on tool
 events stay intact. The deny-list and value patterns are owned by
 [`threat-model.md`](../architecture/threat-model.md); see data-model §11.
 
+### `ActionEvent` — the `action_trace` producer (ADR-0036, F11)
+
+`action_trace` and `tool_trace` are **distinct traces, not two views of the same
+list.** `tool_trace` is the raw dispatch-level record — every `[tool]` call the
+kernel made, with its `ToolOutcome.status`. `action_trace` is the higher-level
+record of **externally-meaningful operations**: the things the agent *did to the
+world or the task* that matter for audit and attribution, regardless of how many
+tool calls realised them.
+
+The tracer emits an `ActionEvent` (alongside the `ToolEvent`) when the kernel
+performs one of these operation kinds:
+
+- `read_file`, `edit_file`, `run_tool` — file and tool side-effects
+- `write_report` — the agent produced a verification report
+- `update_task_state` — the agent set/changed the active `TaskState`
+- `inspect_diff` — the agent reviewed a diff
+- `declare_complete` — the agent asserted the task is done
+
+```rust
+pub struct ActionEvent {
+    pub kind: ActionKind,            // the operation, not the underlying tool name
+    pub target: Option<String>,      // file path / report id / task id (redacted, ADR-0026)
+    pub tool_event_idx: Option<usize>, // back-pointer into Episode.tool_events when one tool realised it
+    pub ts: f64,
+}
+
+pub enum ActionKind {                // snake_case on the wire (ADR-0025)
+    ReadFile, EditFile, RunTool, WriteReport, UpdateTaskState, InspectDiff, DeclareComplete,
+}
+```
+
+Why not a copy of `tool_trace`: not every tool call is an externally-meaningful
+action (a recall lookup or a context-assembly probe is a tool call but not an
+*action*), and not every action is one tool call (an `edit_file` action may be
+preceded by a read; a `declare_complete` may be a control-flow signal with no
+dedicated tool). The `compose`-time **assembly projector** (PRD 05, ADR-0036)
+builds the package's typed `action_trace` from `Episode.action_events`; it does
+**not** re-derive it by relabelling `tool_trace`.
+
 ### Episode lifecycle
 
 ```rust
 impl Tracer {
-    pub fn start_episode(&mut self);   // reset per-run state; tokens stay cumulative
+    pub fn start_episode(&mut self);   // reset tool_events + action_events; tokens stay cumulative
     pub fn record_tool(&mut self, event: ToolEvent);
+    pub fn record_action(&mut self, action: ActionEvent);  // externally-meaningful op (F11)
     pub fn record_turn(&mut self, step: usize, n_tools: usize, tokens: u64);
     pub fn set_final_reached(&mut self, reached: bool);
     pub fn episode(&self) -> &Episode;
@@ -90,8 +144,9 @@ a complete episode.
 
 - `ToolEvent` is a value type; status lives in `ToolOutcome` as data, so there is
   no per-event string re-parse — no heap allocation per field beyond the strings.
-- `start_episode()` replaces the `Vec` in place — `Vec::clear()` retains
-  allocated capacity, so steady-state operation does not allocate.
+- `start_episode()` clears the `tool_events` and `action_events` `Vec`s in place
+  — `Vec::clear()` retains allocated capacity, so steady-state operation does not
+  allocate.
 - The tracer is `!Send` by design (owned by the `Session`, never shared) —
   no lock needed.
 
@@ -109,14 +164,22 @@ UI-observable kinds are mapped onto those three attributes (ADR-0019).
 #### M-HIR computation (v1 intent)
 
 ```
-M-HIR(window) = count(interventions where avoidability != "benign") / denom
+M-HIR(window) = count(interventions where avoidability == "avoidable") / denom
 denom         = count(turns)        # RK unit = turn (one Session::send())
 ```
 
-- **Numerator — only non-`benign` records count.** A `benign` intervention (e.g.
-  the user types a normal follow-up the agent had already handled correctly) is
-  *excluded*. This exclusion is exactly what makes the metric *M*-HIR rather than
-  raw HIR; without `avoidability`, the log would count every human action.
+- **Numerator — only `avoidable` records count (D2/F23).** An intervention enters
+  the numerator *only* when it represents runtime support a maturing harness could
+  have closed — the help "the human would otherwise have to provide" (paper p.4).
+  Both other classes are **excluded**: a `benign` intervention (e.g. the user types
+  a normal follow-up the agent had already handled correctly, or a default
+  `manual_verify`) is healthy, not a gap; and an `unavoidable` intervention (an
+  `tool_block` where the permission boundary correctly stopped a disallowed action)
+  is *the policy working as intended*, not a missing harness. Counting only
+  `avoidable` is exactly what makes the metric *M*-HIR (missing-harness) rather than
+  raw HIR; without `avoidability`, the log would count every human action. (A
+  *recurring* `tool_block` on the same legitimate action is a policy gap and may be
+  reclassified `avoidable`, at which point it *does* count — see the kinds table.)
 - **Denominator = turns, not episodes (DIVERGENCE).** The paper defines
   M-HIR per *episode* (one full task attempt). RK's denominator is *turns*
   (`count(turns)` from `EvidenceJournal::count_turns()`), because RK's unit of
@@ -169,8 +232,10 @@ harness failure) and so does **not** enter the numerator; promote to `avoidable`
 only if the inspection surfaces a missed defect. ² `tool_block` is
 `unavoidable` (the policy working as intended is *not* a missing-harness signal),
 but a *recurring* block on the same legitimate action indicates a policy gap and
-may be reclassified `avoidable`. Both `avoidable` and `unavoidable` count toward
-M-HIR; only `benign` is excluded.
+may be reclassified `avoidable`. **Only `avoidable` records count toward M-HIR
+(D2/F23);** both `unavoidable` (a correct `tool_block`) and `benign` are excluded.
+An `unavoidable` `tool_block` is the policy doing its job and is therefore *not* a
+missing-harness signal — it counts only after reclassification to `avoidable`.
 
 ### Storage
 
@@ -206,12 +271,13 @@ impl InterventionLogger {
     pub fn record(&self, kind: InterventionKind, note: &str,
                   source_message_id: &str) -> Result<()>;
     pub fn recent(&self, n: usize) -> Result<Vec<InterventionRecord>>;
-    /// Numerator counts only records where `avoidability != Benign` (M-HIR, not raw HIR).
+    /// Numerator counts only records where `avoidability == Avoidable` (M-HIR, not raw HIR; D2/F23).
     pub fn mhir(&self, total_turns: usize) -> MhirReport;
 }
 
 pub struct MhirReport {
-    pub n_interventions: usize,   // non-benign only (the M-HIR numerator)
+    pub n_interventions: usize,   // avoidable only (the M-HIR numerator — D2/F23)
+    pub n_unavoidable: usize,     // recorded but excluded (e.g. correct tool_block) — surfaced for transparency
     pub n_benign: usize,          // recorded but excluded — surfaced for transparency
     pub n_turns: usize,           // denominator = turns (ADR-0018 divergence)
     pub rate: f64,                // all-time cumulative

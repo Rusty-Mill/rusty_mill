@@ -1,6 +1,6 @@
 # ADR-0020: Entropy categories — RK's 6 reconciled to the paper's 7
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-05-27
 - Tags: faithfulness, entropy, observe
 
@@ -24,6 +24,14 @@ category is renamed to its RK equivalent. The authoritative category map and the
 
 - Entropy findings can be translated to the paper's seven categories for
   comparison without changing the RK enum.
-- Status is Proposed pending human confirmation of the exact seven paper
-  categories and the 0-3 severity thresholds against the rendered PDF (see the
-  consolidated plan's PDF verification caveat).
+- All seven paper categories (code, documentation, dependency, test, file
+  residue, architecture, workflow) and the 0-3 severity scale are confirmed
+  verbatim against the clean extraction (p.10); the PDF verification caveat is
+  therefore lifted (Round 3 D1).
+- The 6→7 map is lossless for entropy-delta: the paper's "code" and "file
+  residue" fold into RK's `Residue` and "workflow" maps to `TaskContradiction`,
+  with the remaining four 1:1. Because entropy-delta is the category-agnostic
+  `−Σ severity`, the fold loses labeling granularity but no comparison data.
+- RK keeps its six-variant `EntropyCategory` enum plus the map rather than
+  splitting `Residue` back into code/file-residue (Round 3 D8); the split would
+  add labeling granularity with no metric benefit.
