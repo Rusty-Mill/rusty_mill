@@ -34,12 +34,12 @@ The kernel is deliberately thin — it knows nothing about memory, policy, verif
 
 | Level | Definition (paper) | Rusty Keys |
 |---|---|---|
-| H0 | Task + repo files, **no tool registry** | Ablation floor — selectable or eval-only (ADR-0028) |
+| H0 | Task + repo files, **no tool registry** | Ablation floor — selectable or eval-only (ADR-0028); adjudicated by the same evaluator-side checks as every level (ADR-0035 R5) |
 | H1 | Tool registry + tool-use protocol | Phase 1 |
 | H2 | Project memory, Task State, context selection | Phases 3–4 |
 | H3 | Deterministic checks, attribution, verification protocol | Phase 2 (deterministic), Phase 4/10 (semantic + episode packages) |
 
-The ladder is meant to be a **controlled-visibility ablation**: each level sees only its artifacts, higher levels inherit lower ones. Enforcing that monotonicity (which artifacts each level hides) is tracked as a refinement item (see the eval plan and ADR-0028); today the level gates tools/checks but does not yet hide H2 memory from H1.
+The ladder is meant to be a **controlled-visibility ablation**: each level sees only its artifacts, higher levels inherit lower ones. Today the level gates tools/checks *additively* but does not yet hide H2 memory from H1. Enforcing that monotonicity — **R1** controlled visibility plus **R5** all-levels adjudication — is built as the **ADR-0035 ablation seam**: R1 hides higher-level artifacts at the **feed/context-read seam** (it withholds *existence*, not *authority*, so it is not a `constrain` concern), and R5 runs an **evaluator-side `CheckRegistry::run_all()` pass at all four levels** (H0–H3) so every level carries a comparable outcome label. Scope and sequencing are tracked in ADR-0028 (broadened) and the eval plan.
 
 ## 4. Logical view — components
 
@@ -137,6 +137,8 @@ sequenceDiagram
 
 The three post-turn tasks overlap while the reply is already in the caller's hands; all three are joined before their learning signals are observed (ADR-0012). The 16-step breakdown is in PRD 06.
 
+The `record_episode` (H3) step assembles the episode package's eight typed traces from raw evidence via the **compose-time assembly projector (ADR-0036)** — the named builder that produces `action_trace`, `recovered`, and the `CheckResult → VerifyEntry` projection rather than leaving those traces without a producer.
+
 ## 7. Concurrency model
 
 - **One `Session` per `tokio` task**, driven by an `mpsc::channel(1)` pair (`SessionMessage` in, `SessionResult` out). Channel size 1 preserves strict turn-by-turn ordering.
@@ -190,6 +192,8 @@ Capability isolation is sequenced as a **roadmap phase in the [BACKLOG](../BACKL
 
 (Runtime gates like `RUSTYKEYS_ALLOW_WEB` and `RUSTYKEYS_ISOLATION` are distinct from compile features; the standards doc pins which is which.)
 
+> **H0–H3 ablation seam (ADR-0035) is a separate runtime concern.** The `RUSTYKEYS_ISOLATION` profile above governs *where* a vetted side-effect runs (the `ToolExecutor` substrate); it does **not** govern the eval ladder. Running the controlled-visibility ablation is the ADR-0035 seam: **R1** hides higher-level artifacts at the feed/context-read seam, and **R5** runs an evaluator-side `CheckRegistry::run_all()` pass at all four levels (§3) — it lands in the golden-episode replay (eval plan), not the live topology matrix.
+
 ## 10. Failure modes & resilience
 
 | Failure | Handling |
@@ -215,25 +219,28 @@ Modest and honest for a local-first, pre-implementation system — bounded, not 
 
 ## 12. Faithfulness to the research paper
 
-Rusty Keys implements *AI Harness Engineering* (Zhong & Zhu, arXiv 2605.13357v1). This table is the canonical map; each deliberate divergence links to an ADR.
+Rusty Keys implements *AI Harness Engineering* (Zhong & Zhu, arXiv 2605.13357v1). This table is the canonical map; each deliberate divergence links to an ADR. Status legend: **✅** faithful · **⚠️** faithful with an acknowledged in-progress gap · **◆** deliberate divergence / superset (still measured against the paper) · **➕** beyond the paper (RK defense-in-depth, *not* a paper concept — kept visually distinct so "faithful to the paper" is never conflated with RK's own additions).
 
 | Paper concept | Where realized | Status |
 |---|---|---|
 | `C_system = F(C_model, C_harness, C_env, T)` | §2; PRD 00 | ✅ Faithful (verbatim) |
-| 11 responsibilities | Mapped onto the four verbs (constrain ≈ permissions+task-interface; feed ≈ context+tools+memory+task-state; observe ≈ observability+intervention+entropy; compose ≈ attribution+verification) | ✅ Faithful (mapping made explicit) |
-| H0–H3 controlled-visibility ladder | §3 | ⚠️ H0 unreachable today; monotonic visibility not yet enforced → **ADR-0028** |
-| Episode package (8 traces) | `episodes/<turn_id>.json` (data-model §5) | ⚠️ `context_trace` was missing (now added); **episode = turn, not task** → **ADR-0018** (adds `episode_id` grouping) |
+| 11 responsibilities | Mapped onto the four verbs (constrain ≈ permission boundary; feed ≈ task interface+context+tools+memory+task-state; observe ≈ observability+intervention+entropy; compose ≈ attribution+verification, plus the task-interface judge) | ✅ Faithful (mapping made explicit). The paper's **task interface** (Table 1, p.6) is an input/feed-shaped responsibility: RK realises it in **feed** (`TaskState`/`set_task`) **+ compose** (`CriteriaJudge`), not `constrain`; constrain owns the **permission boundary** only. |
+| H0–H3 controlled-visibility ladder | §3 | ⚠️ Today the ladder gates tools/checks *additively*: R1 controlled visibility not enforced (lower levels still see higher-level artifacts — H2 memory / `AGENT_GUIDE` / `TASK_STATE` / `checks.toml`), and R5 not met (only H3 is adjudicated; H0–H2 carry no outcome label) → **ADR-0028** (broadened to "does the ladder enforce R1 visibility + R5 all-levels adjudication?"). R1 controlled visibility + R5 all-levels adjudication built via **ADR-0035** (the controlled-visibility ablation: artifact-hiding at the feed/context-read seam + an evaluator-side `CheckRegistry::run_all()` pass at every level). |
+| Episode package (8 traces) | `episodes/<turn_id>.json` (data-model §5) | ✅ All 8 traces present (incl. restored `context_trace`). **Episode = turn, not task** → **ADR-0018** (Accepted; adds `episode_id` grouping). Traces are produced by the **compose-time assembly projector (ADR-0036)**, which names a builder for `action_trace` / `recovered` / `CheckResult → VerifyEntry` (previously schema-only). |
 | 5-label outcome taxonomy | `EpisodeOutcome` (PRD 05) | ✅ Faithful |
-| M-HIR | `InterventionLogger` (PRD 04) | ⚠️ Denominator is *turns*, paper uses *episodes*; intervention record lacked avoidability/harness_gap/burden → **ADR-0018/0019** |
+| M-HIR | `InterventionLogger` (PRD 04) | ⚠️ Denominator is *turns*, paper uses *episodes* → **ADR-0018** (Accepted; `episode_id` regroups losslessly). Intervention fields (avoidability / harness_gap / burden) confirmed verbatim (p.10) → **ADR-0019** (Accepted). Numerator counts **`avoidable` interventions only** — a correct `tool_block` is the boundary working, not missing-harness support "the human would otherwise have to provide" (p.4). |
 | Failure attribution | `Attribution` + `attribute_failure` (PRD 05) | ⚠️ Free strings → adopt the paper's fixed 8-type `FailureType` → **ADR-0021** |
-| Entropy audit | `EntropyAuditor`, 6 categories (PRD 04) | ⚠️ 6 vs the paper's 7; needs a paper→RK map → **ADR-0020** |
-| Reproduce → attribute → fix → verify → report | H3 tools + checks (PRD 03/05) | ⚠️ Missing the **verify → re-attribute back-edge** → fixed in PRD 05 |
+| Entropy audit | `EntropyAuditor`, 6 categories (PRD 04) | ✅ 6→7 reconciliation **verified** against the paper's 7 categories × 0–3 severity (p.10) → **ADR-0020** (Accepted); paper's code + file-residue fold into `Residue`, workflow → `TaskContradiction` (lossless for the category-agnostic entropy-delta). |
+| Reproduce → attribute → fix → verify → report | H3 tools + checks (PRD 03/05) | ✅ Faithful — the **verify → re-attribute back-edge** (Figure 4, p.12) is present, and the **full-regression-timeout exemption** matches Methods (p.14) verbatim. |
 | Deterministic-check dual role; limits-always-carried | PRD 05; ADR-013 | ✅ Faithful |
+| Project memory | 3-tier consolidating graph + failure-born skill loop (ADR-0008/0009/0011) | ◆ **Deliberate superset.** Paper memory = static consulted + traced artifacts (`AGENT_GUIDE`/`ARCHITECTURE`/`TESTING`/`KNOWN_FAILURES`); RK = a *generative* 3-tier consolidating graph + failure-born skill loop. A superset-of (in the spirit of p.13 "memory ages well or rots"), not a divergence-from. |
+| Context selection | Scored `recall()` + `context_trace` (PRD 03) | ◆ **Deliberate divergence.** Paper = a named, agent-visible context-selection *protocol* artifact (Table 3, H2); RK = an automatic scored `recall()` + `context_trace` — **the harness selects rather than instructs** (D6). |
+| Permission boundary → `unsafe_invalid` | `WorkspacePolicy` (PRD 02); `EpisodeOutcome` (PRD 05) | ✅ Faithful. A *blocked* risky action is a **working boundary**, recorded as a `tool_block` intervention; `unsafe_invalid` captures only actions that **got through** and weakened/violated (it fires on entropy, not on a correct block). |
 | Eval integrity (anti-gaming) | Golden episodes/`checks.toml` resist gaming: answer keys, expected outputs, and benchmark identifiers kept **out of the agent's context** during eval ([eval-plan §8](./dev/eval-plan.md)) | ➕ **Beyond the paper** — a deliberate guard (a model read git history for test answers / decrypted a benchmark's key) → **ADR-0033** |
 | Observability hook points (relates to *observe ≈ observability*, above) | Single `on_event` → fixed **`KernelEvent`** enum, one stream feeding `Tracer` + a pull-based OTLP exporter (§7) | ➕ Refinement of the observe verb (not a paper concept) → **ADR-0034** |
 | Capability isolation (relates to *constrain ≈ permissions*, above) | Optional **`ToolExecutor`** seam below `feed`/above the OS; `RUSTYKEYS_ISOLATION=none\|sandboxed` (§9–§10); does not change the vetting contract | ➕ **Beyond the paper** — a deterministic backstop for in-process checker misses, roadmap-phased (BACKLOG) → **ADR-0030** |
 
-> **PDF verification caveat.** The research PDF is not renderable in this environment (no poppler/pdftotext/pypdf); the faithfulness assessment was grounded in a raw zlib `FlateDecode` text recovery that stripped inter-word spaces and ligatures. Before the P0 faithfulness edits are **frozen**, a human (or a poppler-equipped run) must confirm against the rendered PDF: (a) the exact 7 entropy categories and 0–3 severity; (b) the M-HIR denominator wording ("total episodes"); (c) the intervention-log fields (avoidability / burden / harness-gap).
+> **Provenance.** Confirmed against [`docs/research/2605.13357v1.txt`](./research/2605.13357v1.txt) (Round 3). The previously-flagged items — the 7 entropy categories × 0–3 severity (p.10), the M-HIR "total episodes" denominator (p.4), and the intervention-log fields avoidability / burden / harness-gap (p.10) — are all verified verbatim against the clean extraction, so ADR-0018/0019/0020 are Accepted.
 
 ## 13. Glossary
 

@@ -1,6 +1,6 @@
 # ADR-0018: Episode = turn, with `episode_id` grouping
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-05-27
 - Tags: faithfulness, eval, observe
 
@@ -26,5 +26,9 @@ evaluation. The package schema and `episode_id` semantics live in
 - Turn-level packages stay cheap and aligned with the `send()` boundary.
 - Task-level metrics must aggregate over `episode_id` rather than reading a single
   package.
-- Status is Proposed: the owner must ratify whether turn-grained episodes with
-  grouping are an acceptable stand-in for the paper's task-grained unit.
+- The paper's unit "task" is confirmed against the clean extraction (p.8: "the
+  unit of evaluation is the episode, not a single model response"); the PDF
+  verification caveat is therefore lifted. Turn-as-stand-in-for-task with lossless
+  `episode_id` regrouping is the ratified faithfulness divergence (Round 3 D1).
+- M-HIR is computed over `episode_id`: the metric family aggregates turn-grained
+  packages back to the task unit, so the divergence costs no comparability.

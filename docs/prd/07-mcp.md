@@ -28,8 +28,8 @@ hand-rolled protocol code. Rusty Keys' value-add sits **above** `rmcp` and is th
 clean boundary it owns:
 
 - `mcp__<server>__<tool>` **namespacing** (collision-free, policy-addressable);
-- the `McpToolFn` → `ToolFn` adapter and the `"ERROR: MCP call failed: …"`
-  `ToolOutcome` mapping;
+- the `McpToolFn` → `ToolFn` adapter, which returns a structured **`ToolOutcome`**
+  (status carried structurally per ADR-0022, never a sniffed prefix — ADR-0036, F15);
 - `McpPolicy::before_tool` vetting (ADR-0007 still vets before dispatch);
 - `ApprovalGate::McpToolFirstUse`;
 - the **auth header + TLS pins** (the `Authorization: Bearer <token>` convention
@@ -153,7 +153,8 @@ governs whether a long-lived SSE connection survives a transient drop:
   `RUSTYKEYS_RETRY_BASE_MS` / `RUSTYKEYS_RETRY_MAX`), re-sending the bearer
   header and the last event id where the server supports resume. Repeated
   failure surfaces the same way a crashed stdio server does (warn; tools from
-  that server return `ERROR: MCP call failed`; `/mcp reconnect` forces a retry).
+  that server return a `ToolOutcome` with `ToolStatus::error`; `/mcp reconnect`
+  forces a retry).
 
 The exact idle window and whether reconnect is automatic vs operator-triggered is
 finalized in **Phase 12**; the convention above is the contract to build to.
@@ -195,14 +196,31 @@ pub struct McpToolFn {
 }
 
 impl ToolFn for McpToolFn {
-    async fn call(&self, args: serde_json::Value) -> String {
+    async fn call(&self, args: serde_json::Value) -> ToolOutcome {
         match self.client.call_tool(&self.descriptor.name, args).await {
-            Ok(result) => result,
-            Err(e) => format!("ERROR: MCP call failed: {e}"),
+            Ok(result) => ToolOutcome::ok(result),
+            Err(McpError::Timeout) => ToolOutcome::timeout("MCP call timed out"),
+            Err(e) => ToolOutcome::error(format!("MCP call failed: {e}")),
         }
     }
 }
 ```
+
+`McpToolFn::call` returns a structured **`ToolOutcome`**, not a `String` (ADR-0036,
+F15). The MCP adapter was the one place that still hand-rolled the
+`"ERROR: MCP call failed: …"` prefix and returned a bare `String`, which forced the
+`Tracer` back into the prefix-sniffing that **ADR-0022** abolished — and silently
+re-introduced the misclassification (a legitimate MCP result beginning with `ERROR`
+would be counted as a tool failure) across the *whole* MCP surface. Returning
+`ToolOutcome` carries the status **structurally**, so the ADR-0022 contract holds
+unbroken from built-in tools through to MCP-sourced ones: status is never re-parsed
+from a result-string prefix.
+
+An MCP **timeout** maps to **`ToolStatus::timeout`** — the reconciled five-variant
+set `ok / error / blocked / timeout / truncated` (ADR-0036, resolving the prior
+3-vs-5 `ToolStatus` contradiction so an MCP timeout has somewhere to be recorded
+rather than collapsing into a generic `error`). The single
+`ToolOutcome` formatter/parser (ADR-0022) still owns the model-facing rendering.
 
 Tool names are namespaced: `mcp__<server_name>__<tool_name>`.
 This prevents collisions and lets policy address tools by server.
@@ -244,9 +262,10 @@ MCP server's tools in a session.
 | Condition | Behaviour |
 |---|---|
 | Server fails to start | `Session::new()` logs a warning; server skipped |
-| `call_tool` returns error | Returns `"ERROR: MCP call failed: …"` as tool result |
+| `call_tool` returns error | Returns `ToolOutcome` with `ToolStatus::error` (`"MCP call failed: …"`), not a sniffed prefix (ADR-0022/0036) |
+| `call_tool` times out | Returns `ToolOutcome` with `ToolStatus::timeout` (ADR-0036, reconciled 5-variant set) |
 | Server crashes mid-session | `reconnect()` spawns a fresh subprocess |
-| Schema validation fails | Args rejected before call; returns `"ERROR: invalid args"` |
+| Schema validation fails | Args rejected before call; `ToolOutcome` with `ToolStatus::error` (`"invalid args"`) |
 
 ## MCP server
 

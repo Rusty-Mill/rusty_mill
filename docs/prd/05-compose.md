@@ -330,6 +330,7 @@ pub enum EpisodeOutcome {       // snake_case on the wire (ADR-0025)
     /// All checks pass; verification report produced; judge ran; no interventions.
     AutonomousVerifiedSuccess,
     /// Checks pass but interventions were recorded during the turn.
+    /// (D9: kept as-is — any non-`benign` intervention ⇒ the turn was not fully autonomous.)
     AssistedVerifiedSuccess,
     /// Task appears done but no verification report, OR the judge was unavailable
     /// (judge_ran = false) — verification could not be confirmed.
@@ -356,13 +357,52 @@ Classifier rules (rule-based; the back-edge and `judge_ran` gate are load-bearin
   failed check (`H3_LIMITS` records the bound); it does not by itself force
   `Failed`. The classifier reads it as "covered within limits."
 
+### Assembly projector — `EpisodeAssembler` (ADR-0036, F16)
+
+The eight typed traces are **not** stored in their final shape during the turn;
+they are *projected* from the raw evidence at `compose` time. The
+**`EpisodeAssembler`** is the named builder that sits **between the raw evidence
+and the `EpisodePackage`** — it is the only thing that constructs a package:
+
+```rust
+pub struct EpisodeAssembler<'a> {
+    pub episode: &'a Episode,                  // raw tool_events + action_events (PRD 04 Tracer)
+    pub report: &'a VerificationReport,        // checks, attributions, entropy, outcome
+    pub task: &'a TaskState,                   // task_id → episode_id; initial_state baseline
+    pub interventions: &'a [InterventionRecord], // this turn's slice (filtered below)
+}
+
+impl<'a> EpisodeAssembler<'a> {
+    /// Project the raw evidence into the 8 typed traces and emit the package.
+    pub fn assemble(&self) -> EpisodePackage;
+}
+```
+
+`assemble()` is a pure projection — it reads, never re-runs anything:
+
+| Trace | Projected from |
+|---|---|
+| `action_trace` | `Episode.action_events` (the externally-meaningful ops — PRD 04, **not** relabelled `tool_trace`) |
+| `tool_trace` | `Episode.tool_events` (redacted, ADR-0026) |
+| `context_trace` | the recall/orient provenance carried on the episode |
+| `verification_trace` | `report.checks` → `VerifyEntry` (the `CheckResult` mapping below, F14) |
+| `attribution_log` | `report.attributions` (one entry per back-edge pass) |
+| `reproduction_log` | the `attribute_failure`/reproduction tool record, if any |
+| `verification_report` | `report` requirements + `limits` |
+| `intervention_log` | the per-turn intervention slice (filter below, F18) |
+
+This keeps the producing struct (`EpisodePackage`, below) a plain data record:
+`EvidenceJournal` writes what `EpisodeAssembler` projects; it never assembles
+traces itself. The dataflow is `EvidenceJournal` (raw evidence) → `EpisodeAssembler`
+(project) → `EpisodePackage` (typed) → `EvidenceJournal::record_episode()` (write).
+
 ### EpisodePackage (versioned; all eight traces)
 
 The episode package is the paper's central output artifact. It is **versioned**
 and carries **all eight canonical traces** — including `context_trace`, which the
 earlier JSON-only spec omitted. The on-disk JSON shape and serde encoding are
-owned by [`data-model.md`](../architecture/data-model.md) §5; this is the
-producing struct (the compose layer builds and `EvidenceJournal` writes it):
+owned by [`data-model.md`](../architecture/data-model.md) §5; this is the data
+record `EpisodeAssembler` (above) produces and `EvidenceJournal` writes:
 
 ```rust
 #[serde(rename_all = "snake_case")]   // ADR-0025
@@ -376,8 +416,8 @@ pub struct EpisodePackage {
     pub initial_state: InitialState,  // { commit, workspace } — task baseline
 
     // ---- the eight paper traces ----
-    pub action_trace: Vec<ActionEvent>,        // 1: read_file | edit_file | run_tool | write_report | update_task_state | declare_complete
-    pub tool_trace: Vec<ToolEvent>,            // 2: name, ToolOutcome.status, exit_code, duration_ms, timeout, recovered, result
+    pub action_trace: Vec<ActionEvent>,        // 1: read_file | edit_file | run_tool | write_report | update_task_state | inspect_diff | declare_complete (PRD 04 producer; NOT a copy of tool_trace)
+    pub tool_trace: Vec<ToolEvent>,            // 2: name, ToolOutcome.status (5-variant: ok|error|blocked|timeout|truncated), exit_code, duration_ms, timeout, recovered, result
     pub context_trace: Vec<ContextEntry>,      // 3: { artifact, contribution, influenced_decision } — PAPER trace, previously MISSING
     pub verification_trace: Vec<VerifyEntry>,  // 4: { type, method, result, covers[], interpretation }
     pub attribution_log: Vec<Attribution>,     // 5: { observed, expected, failure_type, layer, evidence, alternatives, next_action }
@@ -394,20 +434,85 @@ pub struct ContextEntry {            // the previously-missing context_trace ele
     pub contribution: String,        // primary | supporting | unused
     pub influenced_decision: bool,   // did this artifact change what the agent did?
 }
+
+pub struct VerifyEntry {             // one verification_trace element (the CheckResult projection, F14)
+    pub r#type: VerifyType,          // deterministic | non_deterministic
+    pub method: String,              // controlled vocabulary (below)
+    pub result: VerifyResult,        // pass | fail | unavailable
+    pub covers: Vec<String>,         // requirement IDs this check covers (from checks.toml / criteria)
+    pub interpretation: String,      // what the result means for the verdict (e.g. judge reason, expected-vs-observed)
+}
 ```
+
+#### `CheckResult` → `VerifyEntry` (F14)
+
+The `EpisodeAssembler` maps **every** `CheckResult` (and `CheckRunResult`) into
+one `verification_trace` entry — covering **both** deterministic and
+non-deterministic checks, so the trace is the complete record of *how* the turn
+was verified, not just the deterministic slice:
+
+| Source check | `type` | `method` | `result` | `covers` |
+|---|---|---|---|---|
+| `no_tool_errors`, `clean_termination` | `deterministic` | `deterministic_check` | `passed → pass/fail` | `[]` |
+| `reproduce_before_edit` | `deterministic` | `bug_reproduction` | `passed → pass/fail` | from reproduction_log |
+| `verification_report_required` | `deterministic` | `patch_review` | `passed → pass/fail` | `[]` |
+| registered `checks.toml` (`CheckRunResult`) | `deterministic` | `registered_test` \| `targeted_test` \| `full_regression` \| `lint` (per entry) | `passed → pass/fail` | the entry's `covers[]` |
+| `criteria_judge` (**non-deterministic**) | `non_deterministic` | `manual` | `judge_ran ? (pass/fail) : unavailable` | the task's `success_criteria` ids |
+
+- `method` draws from the controlled vocabulary (`bug_reproduction`,
+  `deterministic_check`, `registered_test`, `targeted_test`, `full_regression`,
+  `lint`, `patch_review`, `manual`) — data-model §5.
+- A `criteria_judge` whose `judge_ran = false` maps to `result = unavailable`
+  (never `pass`), so the trace records the verification path was incomplete — the
+  same `judge_unavailable` signal that bars `AutonomousVerifiedSuccess`.
+- `interpretation` carries the human-readable "why": the judge's per-criterion
+  reason, or a deterministic check's expected-vs-observed gap.
 
 Notes:
 - `attribution_log` is a **`Vec`** (was a single object): the verify→re-attribute
   back-edge appends one entry per loop pass, so multi-pass episodes are recorded.
-- `tool_trace` reads `ToolOutcome.status` (ADR-0022) and is redacted before write
-  (ADR-0026); `verification_trace[].method` is the controlled vocabulary
-  (`bug_reproduction`, `deterministic_check`, `registered_test`, `targeted_test`,
-  `full_regression`, `lint`, `patch_review`, `manual`) — data-model §5.
+- `tool_trace` reads `ToolOutcome.status` — the reconciled five-variant
+  `ToolStatus` `{ ok, error, blocked, timeout, truncated }` (ADR-0022; data-model
+  §7 SSOT) — and is redacted before write (ADR-0026).
 - `failure_type` is the fixed `FailureType` enum (above), not a free string.
 
 `EvidenceJournal::record_episode()` appends a summary line to `evidence.jsonl`
 (carrying `episode_id` so turns regroup into a task) and writes the full package
 to `episodes/<turn_id>.json`. The example record is in data-model §5.
+
+### Per-turn `intervention_log` filter (F18)
+
+The `InterventionLogger` (PRD 04) is append-only and **cross-session** — its file
+holds every intervention ever recorded. The package's `intervention_log` must
+carry only the interventions that belong to **this turn**, so the
+`EpisodeAssembler` filters the log before embedding it. A record belongs to the
+turn when **both** hold:
+
+- its `source_message_id` is the message that opened this `send()` turn (the
+  dedup key already carried on every record — data-model §4.2), **or** it falls
+  within the turn's time window `[turn_start_ts, turn_complete_ts]`; and
+- its `session_id` matches the current session.
+
+`source_message_id` is the primary key (exact, one-action-one-record); the
+time-window is the fallback for interventions with no originating message (e.g. a
+mid-turn `tool_block`, which is keyed to the approval request, not a user
+message). This makes the per-turn slice deterministic and prevents a prior turn's
+interventions from leaking into this package's outcome classification — the
+`AutonomousVerifiedSuccess` "no non-`benign` interventions **during the turn**"
+rule reads exactly this filtered slice.
+
+### R5 — outcome at H0–H2 is evaluator-side adjudicated
+
+The package's `outcome` field at **H3** is the rule-based classification above
+(computed live in the compose layer). At **H0–H2** there is no live H3 package, so
+the episode's outcome label is assigned by the **evaluator-side adjudication
+pass** (ADR-0035, controlled-visibility ablation; the population-level analysis in
+[`eval-plan.md`](../dev/eval-plan.md) §3) — an offline scoring step over the
+recorded evidence, **not** the agent's self-report. The agent's `declare_complete`
+and its own verification report are *evidence*, not the verdict: the evaluator
+re-derives the outcome from `checks.toml` results, the traces, and the
+intervention log so the label cannot be gamed by an over-confident self-claim.
+This keeps the maturity metrics trustworthy across the H0→H3 ladder.
 
 ## EvidenceJournal
 

@@ -75,6 +75,37 @@ Concurrent post-turn:
 Steps 11a–11c run via `tokio::join!` — the criteria judge, idle consolidation,
 and entropy audit overlap while the reply is already in the caller's hands.
 
+### Task and episode identity — `task_id` stability (F19)
+
+RK's episode = one `send()` turn, but task-level metrics regroup a task's turns
+via `episode_id = "ep_<task_id>"` (ADR-0018). For that regrouping key to be
+stable, **`task_id` must stay constant across every turn of the same task** —
+otherwise turns of one task would scatter across distinct `episode_id`s and the
+aggregation would silently undercount.
+
+The mechanism that holds it constant:
+
+- **`task_id` is assigned once, at task creation.** When `/task [goal]` (or the
+  agent's `set_task` tool, PRD 03) opens a task, the `TaskStore` mints a `task_id`
+  and persists it in `task.json` (data-model §8). It is **not** regenerated
+  per turn.
+- **`Session::send()` reads the active `task_id`, never writes a new one.** Each
+  turn reads the current `TaskState` from the `TaskStore` and stamps that same
+  `task_id` (hence the same `episode_id`) onto the turn record / episode package.
+  A turn with no active task carries the session's fallback id, so non-task turns
+  do not collide with task turns.
+- **The id changes only on an explicit task boundary.** `task_id` is replaced
+  only when the active task transitions to `done` and a *new* task is opened, or
+  when `/task` overrides the active task (a `task_override` intervention, PRD 04).
+  An idle→active resume of the *same* task keeps its `task_id`. The session JSON
+  (`sessions/<session_id>.json`, data-model §6) carries `task_id` so `/resume`
+  rehydrates the same task identity, keeping `episode_id` stable even across a
+  session restart.
+
+So `episode_id` is a deterministic function of a `task_id` that is stable for the
+task's whole lifetime — the regrouping key the eval plan aggregates over
+(ADR-0018; [`eval-plan.md`](../dev/eval-plan.md) §3) is reliable by construction.
+
 ### Token budget and compaction
 
 ```rust

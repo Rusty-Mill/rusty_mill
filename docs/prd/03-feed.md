@@ -68,11 +68,13 @@ pub trait ToolFn: Send + Sync {
 ```
 
 `ToolOutcome` (defined in `observe`, ADR-0022) carries the status **structurally**
+as the reconciled 5-member `ToolStatus = {ok, error, blocked, timeout, truncated}`
 (`Ok | Error | Blocked | Timeout | Truncated`) plus the payload, replacing the
 fragile `BLOCKED …`/`ERROR …`/`TIMEOUT …` prefix-sniffing. One formatter renders it
-to the model-facing string; the `Tracer` reads `outcome.status` directly. Status
-encoding and the formatter/parser live in
-[data-model](../architecture/data-model.md) and
+to the model-facing string; the `Tracer` reads `outcome.status` directly. The
+`ToolStatus` enum is owned by
+[data-model §7](../architecture/data-model.md#7-serde-wire-conventions-adr-0025)
+(the SSOT — all five members), and the formatter/parser by
 [error-handling.md](../dev/error-handling.md).
 
 ### Concrete adapter — `#[tool]` fn → `Box<dyn ToolFn>`
@@ -384,6 +386,13 @@ It populates `TaskState.scope` (see [Task State](#task-state)).
 
 ## Memory
 
+> **Deliberate superset of the paper's memory (F20, D6).** The paper's memory is
+> *static, consulted, traced* agent-readable artifacts; RK memory is a deliberate
+> generative **superset** — a 3-tier consolidating graph plus the failure-born
+> skill loop (ADR-0008/0009/0011). This is an extension *in the spirit of* the
+> paper, not a divergence-from it, and is recorded as a superset row in the
+> faithfulness map (ARCH §12).
+
 Memory is the three-tier cognitive architecture:
 
 ```
@@ -458,14 +467,52 @@ Recall assembles the Orient layer: score candidates by relevance + recency +
 importance, take top-k, expand 1-hop via `neighbors()`, and render an output
 block capped at a token slice.
 
+`recall()` returns **both** the rendered prompt block *and* a structured
+`Vec<ContextEntry>` (ADR-0036, F12) — not just a `String`. The string is what
+lands in `extra_context`; the `Vec<ContextEntry>` is what gives the episode
+package's `context_trace` a **real producer**, so the H2 cross-session-recall
+gate (defined on `influenced_decision`, see [`eval-plan`](../dev/eval-plan.md))
+becomes measurable rather than an empty trace:
+
 ```rust
 pub async fn recall(
     &self,
     history: &[Message],
     window: usize,
     k: usize,
-) -> Result<String>
+) -> Result<RecallOutput>
+
+pub struct RecallOutput {
+    pub block: String,                  // the "## Relevant memory" string → extra_context (rendered as before)
+    pub entries: Vec<ContextEntry>,     // one per selected candidate/neighbor → episode-package context_trace
+}
 ```
+
+`ContextEntry` (the `context_trace` element, schema in
+[data-model §5.1](../architecture/data-model.md#51-trace-element-schemas-produced-by-the-assembly-projector--adr-0036))
+is `{ artifact, contribution, influenced_decision }`. Recall populates the first
+two at orient time — `artifact` = the memory title (or read file / static
+artifact), `contribution` = `primary` for a top-k entry, `supporting` for a
+neighbor; `influenced_decision` is filled in **after** the turn (see below).
+
+#### `influenced_decision` — v1 heuristic (ADR-0036)
+
+`influenced_decision` is unknowable at orient time (the agent has not acted yet),
+so it is **not** set by `recall()`. The episode-package assembly projector
+(ADR-0036) backfills it once the turn's actions are known, using a v1 heuristic:
+
+> *v1 intent, revisit after a spike.*
+
+- A recalled `ContextEntry` is marked **`influenced_decision = true`** when its
+  `artifact` is **referenced in the turn's `action_trace` or the turn's report**
+  — e.g. a recalled `src/auth.rs` is edited/read in an `ActionEvent`, or a
+  recalled skill/fact title (or a distinctive token from its body) appears in the
+  agent's reply / `verification_report`.
+- Otherwise it is **`false`** (`contribution` may be downgraded to `unused`).
+
+This is intentionally a *referenced-in-the-turn* proxy, not a causal claim; it is
+the same signal the recall-hit-rate proxy in [`eval-plan`](../dev/eval-plan.md)
+already consumes (`context_trace.influenced_decision = true`).
 
 The query is built from the last `window` turns (`RUSTYKEYS_RECALL_WINDOW`,
 default 6 — not just the latest message): a follow-up like "do that again" has
@@ -766,6 +813,14 @@ pub struct TaskState {
 }
 ```
 
+> **Narrowing vs the paper (D7, F21).** RK's `TaskState = {goal,
+> success_criteria, scope, status}` deliberately **narrows** the paper's task
+> state (hypothesis / inspected-files / open-questions / next-steps); the
+> narrowed facets are not lost but covered **implicitly** by the short-term
+> stream and the episode `action_trace` (inspected-files ← `read_file` actions;
+> next-steps/open-questions ← the running stream + reply), so no mechanism is
+> added (ADR-0036's `action_trace` is what carries them).
+
 `scope: Vec<String>` is **required by the entropy `BoundaryViolation` heuristic**
 (PRD 04), which flags a `write_file`/`edit_file` to a path outside the declared
 scope. The previous struct omitted it while PRD 04 already referenced it; this
@@ -898,19 +953,29 @@ the system prompt is constant for the session (see
 [System-prompt construction](#system-prompt-construction)).
 
 ```rust
-pub async fn orient(&self, history: &[Message]) -> String {
+pub async fn orient(&self, history: &[Message]) -> Oriented {
     let task_prompt = self.task_store.render();              // Task State (working memory)
     let recall = self.recall(history, self.config.recall_window, self.config.recall_k).await?;
-    [task_prompt, recall].iter().filter(|s| !s.is_empty()).join("\n\n")
+    let extra_context = [task_prompt, recall.block]          // the rendered string → kernel
+        .iter().filter(|s| !s.is_empty()).join("\n\n");
+    Oriented { extra_context, context_entries: recall.entries }  // entries → episode context_trace
+}
+
+pub struct Oriented {
+    pub extra_context: String,             // passed to the kernel as extra_context
+    pub context_entries: Vec<ContextEntry>,// handed to compose for the context_trace (ADR-0036)
 }
 ```
 
-This string is passed to the kernel as `extra_context: Option<&str>`
+`extra_context` is passed to the kernel as `extra_context: Option<&str>`
 (PRD 01) and injected **between the system prompt and the first user message**.
 Both per-turn variable layers — Task State (`task_store.render()`) **and** recall
 — live here; **neither is in the static system prompt** (the contradiction noted
 under [Task State](#task-state)). The kernel receives an oriented view without
-knowing where the context came from.
+knowing where the context came from. The `context_entries` travel separately to
+compose, which (via the assembly projector, ADR-0036) backfills
+`influenced_decision` and writes them as the episode package's `context_trace`
+([data-model §5.1](../architecture/data-model.md#51-trace-element-schemas-produced-by-the-assembly-projector--adr-0036)).
 
 > **Token-budget note (v1 intent, revisit after a spike).** `extra_context`
 > competes with `history` and the tool schemas for the context window. The recall

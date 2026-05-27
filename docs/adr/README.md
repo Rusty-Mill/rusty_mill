@@ -11,7 +11,9 @@ from the "Architecture Decision Log" of `../prd/00-overview.md`, which now links
 here instead of inlining them; ADRs **0016-0028** record the new decisions and
 deliberate divergences locked by `../review/00-consolidated-plan.md`; ADRs
 **0029-0034** record the Round 2 decisions locked by
-`../review/round2-consolidated.md`.
+`../review/round2-consolidated.md`; ADRs **0035-0036** record the Round 3
+faithfulness-audit decisions locked by `../review/round3-consolidated.md`, which
+also flips ADRs **0018/0019/0020** to Accepted and broadens **0028**.
 
 | # | Title | Status | Tags |
 |---|-------|--------|------|
@@ -32,9 +34,9 @@ deliberate divergences locked by `../review/00-consolidated-plan.md`; ADRs
 | [0015](0015-evidence-journal-append-only-jsonl.md) | Evidence journal is append-only JSONL | Accepted | compose, storage, audit |
 | [0016](0016-before-tool-becomes-async-fn.md) | `before_tool` becomes `async fn` | Accepted | constrain, async, policy |
 | [0017](0017-subagent-spawning-via-sessionfactory-trait.md) | Subagent spawning via a `SessionFactory` trait | Accepted | architecture, dag, subagents |
-| [0018](0018-episode-equals-turn-with-episode-id-grouping.md) | Episode = turn, with `episode_id` grouping | Proposed | faithfulness, eval, observe |
-| [0019](0019-intervention-model-maps-to-avoidability-harness-gap-burden.md) | Intervention model maps UI actions to avoidability / harness_gap / burden | Proposed | faithfulness, mhir, observe |
-| [0020](0020-entropy-categories-six-reconciled-to-seven.md) | Entropy categories — RK's 6 reconciled to the paper's 7 | Proposed | faithfulness, entropy, observe |
+| [0018](0018-episode-equals-turn-with-episode-id-grouping.md) | Episode = turn, with `episode_id` grouping | Accepted | faithfulness, eval, observe |
+| [0019](0019-intervention-model-maps-to-avoidability-harness-gap-burden.md) | Intervention model maps UI actions to avoidability / harness_gap / burden | Accepted | faithfulness, mhir, observe |
+| [0020](0020-entropy-categories-six-reconciled-to-seven.md) | Entropy categories — RK's 6 reconciled to the paper's 7 | Accepted | faithfulness, entropy, observe |
 | [0021](0021-fixed-failuretype-taxonomy.md) | Fixed `FailureType` taxonomy | Accepted | compose, attribution, faithfulness |
 | [0022](0022-structured-tooloutcome-tool-result-contract.md) | Structured `ToolOutcome` tool-result contract | Accepted | tools, error-model, observe |
 | [0023](0023-error-model-thiserror-per-crate-anyhow-in-app-no-panic.md) | Error model — `thiserror` per library crate, `anyhow` in `app`, no-panic rule | Accepted | error-model, standards, lints |
@@ -42,10 +44,12 @@ deliberate divergences locked by `../review/00-consolidated-plan.md`; ADRs
 | [0025](0025-serde-wire-convention-snake-case.md) | Serde wire convention — `rename_all = "snake_case"` for on-disk/wire enums | Accepted | serde, data-model, standards |
 | [0026](0026-secret-redaction-by-default.md) | Secret redaction by default before logging, journaling, or emitting | Accepted | security, redaction, observe |
 | [0027](0027-on-disk-schema-versioning.md) | On-disk schema versioning | Accepted | data-model, versioning, storage |
-| [0028](0028-h0-selectable-harness-level-or-eval-only.md) | H0 is a selectable harness level or explicitly evaluation-only | Proposed | faithfulness, eval, maturity |
+| [0028](0028-h0-selectable-harness-level-or-eval-only.md) | H0-H3 ladder as a controlled-visibility ablation (and H0 reachability) | Proposed | faithfulness, eval, maturity |
 | [0029](0029-adopt-rmcp-mcp-sdk.md) | Adopt `rmcp` as the foundation of the `mcp` crate | Accepted | mcp, dependencies, integration, licensing |
 | [0030](0030-capability-isolation-toolexecutor.md) | Capability isolation via a `ToolExecutor` seam + `RUSTYKEYS_ISOLATION` | Accepted | constrain, isolation, security, roadmap |
 | [0031](0031-validation-gated-skill-promotion.md) | Validation-gated skill promotion | Accepted | feed, memory, skills, self-improvement |
 | [0032](0032-divergent-converge-subagent-strategy.md) | Divergent→converge subagent strategy | Accepted | feed, subagents, planning, cost |
 | [0033](0033-eval-integrity-anti-gaming.md) | Eval-integrity / anti-gaming guard | Accepted | eval, faithfulness, integrity, security |
 | [0034](0034-kernelevent-unified-observability-stream.md) | `KernelEvent` as the unified observability stream | Accepted | observe, observability, otel, standards |
+| [0035](0035-controlled-visibility-ablation-eval-substrate.md) | Controlled-visibility ablation as the eval substrate | Accepted | faithfulness, eval, maturity, integrity |
+| [0036](0036-episode-package-assembly-projector.md) | Episode-package assembly projector at `compose`-time | Accepted | compose, observe, data-model, faithfulness |

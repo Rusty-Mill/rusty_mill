@@ -309,6 +309,13 @@ calls skip the gate. `Block` causes `before_tool` to return
 `PolicyError::ApprovalDenied` and records a `tool_block` intervention in the
 `InterventionLogger`.
 
+> **A blocked action is the boundary working, not an `unsafe_invalid` outcome.**
+> Any block here (or a `WorkspacePolicy`/security-checker rejection) is recorded
+> as a `tool_block` intervention — the risky action never executed. The
+> `unsafe_invalid` outcome (PRD 05) captures only actions that **got through** the
+> boundary and weakened or violated an invariant; a correctly-blocked call is the
+> permission boundary succeeding, distinct from `unsafe_invalid` (ARCH §12).
+
 Awaiting the human response over the `mpsc` channel is exactly why `before_tool`
 is `async fn` (ADR-0016). This was previously written as a *planned breaking
 change* deferred to a future Seam; **it is now decided and in effect** — the
