@@ -77,6 +77,7 @@ impl ToolFn for AiSdkTool {
 pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn ToolFn>>,
     policy: Arc<dyn Policy>,
+    tracer: Option<Arc<rk_observe::Tracer>>,
 }
 
 impl ToolRegistry {
@@ -85,7 +86,14 @@ impl ToolRegistry {
         Self {
             tools: HashMap::new(),
             policy,
+            tracer: None,
         }
+    }
+
+    /// Attach a tracer so each dispatch is recorded into the turn's `Episode`.
+    pub fn with_tracer(mut self, tracer: Arc<rk_observe::Tracer>) -> Self {
+        self.tracer = Some(tracer);
+        self
     }
 
     /// Register a tool under its own name.
@@ -97,18 +105,27 @@ impl ToolRegistry {
 #[async_trait]
 impl ToolDispatch for ToolRegistry {
     async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
+        // Keep a copy for the tracer before `args` is moved into the tool body.
+        let recorded = self.tracer.as_ref().map(|_| args.clone());
+
         // Policy vets BEFORE the tool body runs (ADR-0007); on a block we never
         // reach `ToolFn::call`. The block reason is the PolicyError's structured
         // Display — feed does not match on specific variants.
-        if let Err(e) = self.policy.before_tool(name, &args).await {
-            return ToolOutcome::blocked(e.to_string());
+        let outcome = if let Err(e) = self.policy.before_tool(name, &args).await {
+            ToolOutcome::blocked(e.to_string())
+        } else {
+            match self.tools.get(name) {
+                Some(tool) => tool.call(args).await,
+                None => crate::error::outcome_from_error(crate::error::ToolError::NotFound(
+                    name.to_string(),
+                )),
+            }
+        };
+
+        if let Some(tracer) = &self.tracer {
+            tracer.record_tool(name, recorded.unwrap_or(Value::Null), &outcome);
         }
-        match self.tools.get(name) {
-            Some(tool) => tool.call(args).await,
-            None => crate::error::outcome_from_error(crate::error::ToolError::NotFound(
-                name.to_string(),
-            )),
-        }
+        outcome
     }
 
     fn schemas(&self) -> Vec<(String, Value)> {

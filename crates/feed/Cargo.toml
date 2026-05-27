@@ -17,6 +17,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
+[features]
+# Ships the FaultyTool fixture for the chaos / resilience eval tier (eval-plan §7).
+chaos = []
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs"] }
 

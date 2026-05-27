@@ -1053,6 +1053,7 @@ dependencies = [
  "aisdk",
  "anyhow",
  "async-trait",
+ "rk-compose",
  "rk-config",
  "rk-constrain",
  "rk-feed",
@@ -1060,6 +1061,17 @@ dependencies = [
  "rk-observe",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rk-compose"
+version = "0.0.0"
+dependencies = [
+ "rk-config",
+ "rk-observe",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1129,6 +1141,7 @@ name = "rk-observe"
 version = "0.0.0"
 dependencies = [
  "rk-config",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]

@@ -7,6 +7,7 @@ members = [
     "crates/feed",
     "crates/kernel",
     "crates/mcp",
+    "crates/compose",
     "crates/app",
 ]
 
@@ -37,3 +38,4 @@ rk-observe = { path = "crates/observe" }
 rk-constrain = { path = "crates/constrain" }
 rk-feed = { path = "crates/feed" }
 rk-kernel = { path = "crates/kernel" }
+rk-compose = { path = "crates/compose" }

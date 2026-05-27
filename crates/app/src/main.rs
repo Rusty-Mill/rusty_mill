@@ -1,10 +1,15 @@
-//! Thin CLI over `Session::send` (BACKLOG Phase 1).
+//! Thin CLI over `Session::send`.
 //!
-//! Usage: `rusty-keys "your prompt"`.
+//! - `rusty-keys "your prompt"` — single-shot: run one turn, print the reply and
+//!   its verification verdict.
+//! - `rusty-keys` (no args) — interactive REPL with `/verify`, `/mhir`, `/help`,
+//!   `/quit`.
 //!
 //! Config: `RUSTYKEYS_MODEL` (required) is the model name sent to an
 //! OpenAI-compatible endpoint. `RUSTYKEYS_BASE_URL` defaults to local ollama
 //! (`http://localhost:11434/v1`); `RUSTYKEYS_API_KEY` defaults to `ollama`.
+
+use std::io::Write;
 
 use aisdk::core::capabilities::DynamicModel;
 use aisdk::providers::OpenAICompatible;
@@ -14,12 +19,6 @@ use rk_config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
-    if prompt.trim().is_empty() {
-        eprintln!("usage: rusty-keys \"your prompt\"");
-        std::process::exit(2);
-    }
-
     let config = Config::from_env().context("resolving configuration")?;
 
     let base_url = std::env::var("RUSTYKEYS_BASE_URL")
@@ -44,7 +43,65 @@ async fn main() -> Result<()> {
         session.tool_names().join(", "),
     );
 
-    let reply = session.send(&prompt).await.context("running turn")?;
-    println!("{reply}");
+    let prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
+    if prompt.trim().is_empty() {
+        repl(&session).await
+    } else {
+        let outcome = session.send(&prompt).await.context("running turn")?;
+        println!("{}", outcome.reply);
+        eprintln!("\n{}", outcome.report.render());
+        Ok(())
+    }
+}
+
+async fn repl<M>(session: &Session<M>) -> Result<()>
+where
+    M: aisdk::core::language_model::LanguageModel
+        + aisdk::core::capabilities::TextInputSupport
+        + aisdk::core::capabilities::ToolCallSupport
+        + Clone,
+{
+    eprintln!("interactive mode — /verify, /mhir, /help, /quit");
+    let stdin = std::io::stdin();
+    loop {
+        eprint!("› ");
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        if stdin.read_line(&mut line)? == 0 {
+            break; // EOF
+        }
+        let line = line.trim();
+        match line {
+            "" => continue,
+            "/quit" | "/exit" => break,
+            "/help" => eprintln!("commands: /verify  /mhir  /help  /quit"),
+            "/verify" => {
+                session.note_manual_verify()?;
+                match session.last_report() {
+                    Some(r) => println!("{}", r.render()),
+                    None => println!("(no turn yet)"),
+                }
+            }
+            "/mhir" => {
+                let m = session.mhir()?;
+                println!(
+                    "M-HIR {:.3} = {} avoidable / {} turns (excluded: {} unavoidable, {} benign)",
+                    m.rate, m.n_interventions, m.n_turns, m.n_unavoidable, m.n_benign,
+                );
+            }
+            prompt => {
+                let outcome = session.send(prompt).await.context("running turn")?;
+                println!("{}", outcome.reply);
+                eprintln!(
+                    "[{}]",
+                    if outcome.report.verified {
+                        "VERIFIED"
+                    } else {
+                        "UNVERIFIED"
+                    }
+                );
+            }
+        }
+    }
     Ok(())
 }

@@ -2,55 +2,93 @@
     not(test),
     deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
 )]
-//! `observe` — the Observe phase: structured tool-result contract and a minimal
-//! tracer. Depends only on `config` (ARCHITECTURE §4-5).
+//! `observe` — the Observe phase: the structured tool-result contract, the
+//! per-turn [`Episode`] evidence, secret redaction, and a [`Tracer`]. Depends
+//! only on `config` (ARCHITECTURE §4-5).
 //!
-//! Phase 1 scope: [`ToolStatus`]/[`ToolOutcome`] and a [`Tracer`] that records
-//! [`ToolEvent`]s. The evidence journal, M-HIR, and entropy auditor land later.
+//! Phase 2 scope: `Episode`/`ToolEvent` evidence consumed by the `compose`
+//! verifier, and redaction-by-default (ADR-0026). The M-HIR `InterventionLogger`
+//! and `EntropyAuditor` are tracked separately within this phase.
 
 mod error;
+mod intervention;
 mod outcome;
+pub mod redact;
 
 pub use error::ObserveError;
+pub use intervention::{
+    Avoidability, InterventionKind, InterventionLogger, InterventionRecord, MhirReport,
+};
 pub use outcome::{ToolOutcome, ToolStatus};
 
 use std::sync::Mutex;
 
-/// One observed tool dispatch.
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// One recorded tool dispatch (PRD 04). `args` are redacted before journaling.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolEvent {
     /// Tool name.
     pub name: String,
-    /// Resulting status (read structurally, not parsed).
-    pub status: ToolStatus,
+    /// The call arguments (redact before persisting — [`redact::redact_value`]).
+    pub args: Value,
+    /// Structured result + status (ADR-0022).
+    pub outcome: ToolOutcome,
 }
 
-/// Collects [`ToolEvent`]s for a turn. Phase-1 minimal: in-memory, thread-safe.
+/// The complete per-turn evidence the verifier consumes (PRD 04). Phase-2
+/// subset: tool events + whether the loop produced a final answer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Episode {
+    /// Every tool call made during the turn, in order.
+    pub tool_events: Vec<ToolEvent>,
+    /// True when the kernel produced a final reply (not cut off at max steps).
+    pub final_reached: bool,
+}
+
+/// Captures the [`Episode`] for one turn. Thread-safe so the dispatch path can
+/// record from the tool bridge while the session holds a handle.
 #[derive(Default)]
 pub struct Tracer {
-    events: Mutex<Vec<ToolEvent>>,
+    episode: Mutex<Episode>,
 }
 
 impl Tracer {
-    /// New empty tracer.
+    /// New tracer with an empty episode.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record the outcome of a tool dispatch.
-    pub fn tool(&self, name: &str, outcome: &ToolOutcome) {
-        self.events
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .push(ToolEvent {
-                name: name.to_string(),
-                status: outcome.status,
-            });
+    /// Reset for a new turn (retains nothing; tokens are out of Phase-2 scope).
+    pub fn start_episode(&self) {
+        let mut ep = self.episode.lock().unwrap_or_else(|p| p.into_inner());
+        ep.tool_events.clear();
+        ep.final_reached = false;
     }
 
-    /// Snapshot the recorded events.
-    pub fn events(&self) -> Vec<ToolEvent> {
-        self.events
+    /// Record one tool dispatch. `args` are stored as given; redaction is applied
+    /// at the journaling boundary, not here, so live attribution sees real values.
+    pub fn record_tool(&self, name: &str, args: Value, outcome: &ToolOutcome) {
+        let mut ep = self.episode.lock().unwrap_or_else(|p| p.into_inner());
+        ep.tool_events.push(ToolEvent {
+            name: name.to_string(),
+            args,
+            outcome: outcome.clone(),
+        });
+    }
+
+    /// Mark whether the turn reached a final reply.
+    pub fn set_final_reached(&self, reached: bool) {
+        self.episode
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .final_reached = reached;
+    }
+
+    /// Snapshot the current episode.
+    pub fn episode(&self) -> Episode {
+        self.episode
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
@@ -62,13 +100,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tracer_records_status_structurally() {
+    fn tracer_collects_episode() {
         let t = Tracer::new();
-        t.tool("read_file", &ToolOutcome::ok("data"));
-        t.tool("read_file", &ToolOutcome::blocked("nope"));
-        let ev = t.events();
-        assert_eq!(ev.len(), 2);
-        assert_eq!(ev[0].status, ToolStatus::Ok);
-        assert_eq!(ev[1].status, ToolStatus::Blocked);
+        t.start_episode();
+        t.record_tool(
+            "read_file",
+            serde_json::json!({"path": "a"}),
+            &ToolOutcome::ok("data"),
+        );
+        t.record_tool(
+            "write",
+            serde_json::json!({}),
+            &ToolOutcome::blocked("nope"),
+        );
+        t.set_final_reached(true);
+
+        let ep = t.episode();
+        assert_eq!(ep.tool_events.len(), 2);
+        assert!(ep.final_reached);
+        assert_eq!(ep.tool_events[0].outcome.status, ToolStatus::Ok);
+        assert_eq!(ep.tool_events[1].outcome.status, ToolStatus::Blocked);
     }
 }
