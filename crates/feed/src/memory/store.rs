@@ -200,6 +200,23 @@ impl Store for SqliteStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    async fn set_validated(&self, title: &str, validated: bool) -> Result<(), ToolError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE memories SET validated = ?2 WHERE title = ?1",
+            rusqlite::params![title, validated as i64],
+        )?;
+        Ok(())
+    }
+
+    async fn skills(&self) -> Result<Vec<Memory>, ToolError> {
+        let conn = self.lock();
+        let sql = format!("SELECT {COLS} FROM memories WHERE mem_type = 'skill'");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_memory)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     async fn prune(&self, older_than: f64, importance_below: f32) -> Result<usize, ToolError> {
         let conn = self.lock();
         // Validated skills are exempt (ADR-0011); candidate skills prune normally.

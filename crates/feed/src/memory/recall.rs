@@ -5,15 +5,15 @@
 //! (ADR-0036).
 //!
 //! v1 weights/τ are PRD 03 starting points, not a frozen contract. The
-//! failure-born skill boost (which needs the turn's attribution context) lands
-//! with the close-the-loop increment; the validated-skill floor is applied here.
+//! validated-skill 0.6 floor and the `+0.15` failure-born boost (reserved for
+//! validated skills, ADR-0031) are applied here.
 
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::{MemType, Memory, Store};
+use super::{AttributionContext, MemType, Memory, Store};
 use crate::error::ToolError;
 
 /// Default top-k (`RUSTYKEYS_RECALL_K`).
@@ -25,6 +25,8 @@ const W_RECENCY: f64 = 0.25;
 const W_IMPORTANCE: f64 = 0.20;
 /// Validated skills are floored here at recall time (ADR-0011/0031).
 const SKILL_FLOOR: f64 = 0.6;
+/// Failure-born boost added to a matching validated skill (PRD 03).
+const FAILURE_BOOST: f64 = 0.15;
 const BODY_CAP: usize = 200;
 
 /// One `context_trace` element (data-model §5.1; ADR-0036). `influenced_decision`
@@ -86,13 +88,26 @@ fn why_fragment(query: &str, m: &Memory) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Does a validated skill's body match the failure context being recovered from?
+/// v1: any `failure_type`/`layer` token (len ≥ 3) appears in the body.
+fn matches_attribution(body: &str, attr: &AttributionContext) -> bool {
+    let hay = body.to_ascii_lowercase();
+    format!("{} {}", attr.failure_type, attr.layer)
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|tok| tok.len() >= 3 && hay.contains(&tok.to_ascii_lowercase()))
+}
+
 /// Assemble the Orient block + context entries for `query`. Lexical via the
-/// store's `candidates` (semantic when a Phase-5 backend is configured).
+/// store's `candidates` (semantic when a Phase-5 backend is configured). When
+/// `boost` carries the failure context being recovered from, a matching
+/// *validated* skill gets a `+0.15` recall boost (PRD 03; reserved for validated
+/// skills per ADR-0031 — candidates surface on raw relevance only).
 pub async fn recall(
     store: &dyn Store,
     query: &str,
     k: usize,
     now: f64,
+    boost: Option<&AttributionContext>,
 ) -> Result<RecallOutput, ToolError> {
     let fetch = (k * 4).max(16);
     let batch = store.candidates(query, None, fetch).await?;
@@ -119,8 +134,14 @@ pub async fn recall(
             };
             let dz = ((now - m.last_used_ts) / 86_400.0).max(0.0);
             let recency = (-dz / TAU_DAYS).exp();
-            let score =
+            let mut score =
                 W_REL * rel_norm + W_RECENCY * recency + W_IMPORTANCE * effective_importance(&m);
+            if let Some(attr) = boost {
+                if m.mem_type == MemType::Skill && m.validated && matches_attribution(&m.body, attr)
+                {
+                    score = (score + FAILURE_BOOST).min(1.0);
+                }
+            }
             (score, m)
         })
         .collect();
@@ -220,7 +241,7 @@ mod tests {
         other.last_used_ts = now - 30.0 * 86_400.0;
         let store = store_with(&[auth, other]).await;
 
-        let out = recall(&store, "login token", DEFAULT_RECALL_K, now)
+        let out = recall(&store, "login token", DEFAULT_RECALL_K, now, None)
             .await
             .unwrap();
         assert!(out.block.starts_with("## Relevant memory"));
@@ -231,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn empty_corpus_yields_empty_block() {
         let store = SqliteStore::in_memory().unwrap();
-        let out = recall(&store, "anything", 6, 1.0).await.unwrap();
+        let out = recall(&store, "anything", 6, 1.0, None).await.unwrap();
         assert!(out.block.is_empty());
         assert!(out.entries.is_empty());
     }
@@ -252,10 +273,61 @@ mod tests {
         fact.last_used_ts = old;
         let store = store_with(&[skill, fact]).await;
 
-        let out = recall(&store, "token", DEFAULT_RECALL_K, now)
+        let out = recall(&store, "token", DEFAULT_RECALL_K, now, None)
             .await
             .unwrap();
         assert_eq!(out.entries[0].artifact, "alpha");
+    }
+
+    // Equal-relevance bodies ("tools" once each) so the boost — not bm25 —
+    // decides. The fact's importance edge (0.9 vs 0.5 ⇒ +0.08 base) is smaller
+    // than the +0.15 boost, so the boost flips the order when it applies.
+    fn boost_pair(now: f64, skill_validated: bool) -> (Memory, Memory) {
+        // Symmetric titles + bodies (each matches "tools" once) ⇒ equal bm25.
+        let mut skill = Memory::new("tools lesson", "tools feed", MemType::Skill, now);
+        skill.validated = skill_validated;
+        skill.importance = 0.5;
+        let mut fact = Memory::new("tools doc", "tools registry", MemType::Fact, now);
+        fact.importance = 0.9;
+        (skill, fact)
+    }
+
+    #[tokio::test]
+    async fn failure_boost_lifts_a_matching_validated_skill() {
+        let now = 1_000_000.0;
+        let attr = AttributionContext {
+            failure_type: "f_tool".into(),
+            layer: "feed/tools".into(),
+            evidence: "bash exited 1".into(),
+        };
+        let (skill, fact) = boost_pair(now, true);
+        let store = store_with(&[skill, fact]).await;
+
+        let no_boost = recall(&store, "tools", DEFAULT_RECALL_K, now, None)
+            .await
+            .unwrap();
+        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr))
+            .await
+            .unwrap();
+        assert_eq!(no_boost.entries[0].artifact, "tools doc");
+        assert_eq!(boosted.entries[0].artifact, "tools lesson");
+    }
+
+    #[tokio::test]
+    async fn boost_skips_unvalidated_candidate_skill() {
+        let now = 1_000_000.0;
+        let attr = AttributionContext {
+            failure_type: "f_tool".into(),
+            layer: "feed/tools".into(),
+            evidence: "x".into(),
+        };
+        let (skill, fact) = boost_pair(now, false); // candidate ⇒ not boosted
+        let store = store_with(&[skill, fact]).await;
+
+        let boosted = recall(&store, "tools", DEFAULT_RECALL_K, now, Some(&attr))
+            .await
+            .unwrap();
+        assert_eq!(boosted.entries[0].artifact, "tools doc");
     }
 
     #[tokio::test]
@@ -274,7 +346,9 @@ mod tests {
         let nbr = Memory::new("nbr", "neighbor body", MemType::Fact, now);
         let store = store_with(&[a, nbr]).await;
 
-        let out = recall(&store, "zzz", DEFAULT_RECALL_K, now).await.unwrap();
+        let out = recall(&store, "zzz", DEFAULT_RECALL_K, now, None)
+            .await
+            .unwrap();
         assert!(out.block.contains("↳ related: nbr"));
         let supporting = out.entries.iter().find(|e| e.artifact == "nbr").unwrap();
         assert_eq!(supporting.contribution, "supporting");

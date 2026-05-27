@@ -4,6 +4,7 @@
 //! and validation-gated skills land in later increments.
 
 mod consolidate;
+mod groom;
 mod recall;
 mod store;
 mod stream;
@@ -12,6 +13,7 @@ pub use consolidate::{
     apply as consolidate_apply, build_prompt as consolidation_prompt, AttributionContext,
     ConsolidationScope, ConsolidationStats,
 };
+pub use groom::{apply as groom_apply, build_prompt as groom_prompt};
 pub use recall::{recall, ContextEntry, RecallOutput, DEFAULT_RECALL_K};
 pub use store::SqliteStore;
 pub use stream::SqliteStream;
@@ -154,6 +156,11 @@ pub trait Store: Send + Sync {
     ) -> Result<Vec<(Memory, f32)>, ToolError>;
     /// 1-hop neighbors of `title` via edges.
     async fn neighbors(&self, title: &str) -> Result<Vec<Memory>, ToolError>;
+    /// Set a memory's `validated` flag — the skill candidate→promoted lifecycle
+    /// (ADR-0031): promote on a matching VERIFIED turn; un-validate on `direct_edit`.
+    async fn set_validated(&self, title: &str, validated: bool) -> Result<(), ToolError>;
+    /// All `skill` memories (for grooming).
+    async fn skills(&self) -> Result<Vec<Memory>, ToolError>;
     /// Prune non-skill memories older than `older_than` below `importance_below`;
     /// returns how many were removed. Validated skills are exempt (ADR-0011).
     async fn prune(&self, older_than: f64, importance_below: f32) -> Result<usize, ToolError>;
