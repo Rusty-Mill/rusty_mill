@@ -1053,6 +1053,7 @@ dependencies = [
  "aisdk",
  "anyhow",
  "async-trait",
+ "rk-compose",
  "rk-config",
  "rk-constrain",
  "rk-feed",

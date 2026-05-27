@@ -44,7 +44,9 @@ async fn main() -> Result<()> {
         session.tool_names().join(", "),
     );
 
-    let reply = session.send(&prompt).await.context("running turn")?;
-    println!("{reply}");
+    let outcome = session.send(&prompt).await.context("running turn")?;
+    println!("{}", outcome.reply);
+    // Verification summary (the `/verify` equivalent for the single-shot CLI).
+    eprintln!("\n{}", outcome.report.render());
     Ok(())
 }

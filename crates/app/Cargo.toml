@@ -12,6 +12,7 @@ rk-observe.workspace = true
 rk-constrain.workspace = true
 rk-feed.workspace = true
 rk-kernel.workspace = true
+rk-compose.workspace = true
 # `openaicompatible` references `providers::openai` internally, so `openai`
 # must be enabled alongside it (aisdk 0.5.2 feature-wiring quirk).
 aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
