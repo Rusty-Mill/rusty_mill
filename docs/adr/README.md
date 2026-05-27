@@ -8,8 +8,10 @@ edited away but superseded by a later ADR that links back. `Status` is one of
 single source of truth for decisions; other docs link here rather than
 restating rationale. ADRs **0001-0015** were extracted verbatim-in-substance
 from the "Architecture Decision Log" of `../prd/00-overview.md`, which now links
-here instead of inlining them; ADRs **0016+** record the new decisions and
-deliberate divergences locked by `../review/00-consolidated-plan.md`.
+here instead of inlining them; ADRs **0016-0028** record the new decisions and
+deliberate divergences locked by `../review/00-consolidated-plan.md`; ADRs
+**0029-0034** record the Round 2 decisions locked by
+`../review/round2-consolidated.md`.
 
 | # | Title | Status | Tags |
 |---|-------|--------|------|
@@ -41,3 +43,9 @@ deliberate divergences locked by `../review/00-consolidated-plan.md`.
 | [0026](0026-secret-redaction-by-default.md) | Secret redaction by default before logging, journaling, or emitting | Accepted | security, redaction, observe |
 | [0027](0027-on-disk-schema-versioning.md) | On-disk schema versioning | Accepted | data-model, versioning, storage |
 | [0028](0028-h0-selectable-harness-level-or-eval-only.md) | H0 is a selectable harness level or explicitly evaluation-only | Proposed | faithfulness, eval, maturity |
+| [0029](0029-adopt-rmcp-mcp-sdk.md) | Adopt `rmcp` as the foundation of the `mcp` crate | Accepted | mcp, dependencies, integration, licensing |
+| [0030](0030-capability-isolation-toolexecutor.md) | Capability isolation via a `ToolExecutor` seam + `RUSTYKEYS_ISOLATION` | Accepted | constrain, isolation, security, roadmap |
+| [0031](0031-validation-gated-skill-promotion.md) | Validation-gated skill promotion | Accepted | feed, memory, skills, self-improvement |
+| [0032](0032-divergent-converge-subagent-strategy.md) | Divergent→converge subagent strategy | Accepted | feed, subagents, planning, cost |
+| [0033](0033-eval-integrity-anti-gaming.md) | Eval-integrity / anti-gaming guard | Accepted | eval, faithfulness, integrity, security |
+| [0034](0034-kernelevent-unified-observability-stream.md) | `KernelEvent` as the unified observability stream | Accepted | observe, observability, otel, standards |

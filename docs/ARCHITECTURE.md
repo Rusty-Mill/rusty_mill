@@ -145,6 +145,7 @@ The three post-turn tasks overlap while the reply is already in the caller's han
 - **Post-turn `tokio::join!`** runs judge + consolidation + entropy concurrently (ADR-0012).
 - **Gateway `single` mode** shares one `Session` via `Arc<Mutex<Session>>`; **`multi` mode** routes by `session_id` to independent sessions.
 - **Subagents** run as child `Session`s (via `SessionFactory`) with a depth cap; cancellation via `CancellationToken`.
+- **One unified event stream (`KernelEvent`, ADR-0034).** The turn cycle's `on_event` hook emits a single fixed **`KernelEvent` enum** at the lifecycle points §6 already implies (turn start/complete, tool dispatch/outcome, intervention, verification). One stream, two consumers: the `!Send` `Tracer` (which owns the episode trace) and a **pull-based OTLP exporter** (an observability seam — the OpenTelemetry wiring is a [BACKLOG](../BACKLOG.md) item) both subscribe to the *same* fixed enum, so adding an observability backend never changes the kernel contract. Pull-based on purpose: a future `sandboxed` profile (§9) must not blind operators.
 
 ## 8. Data architecture
 
@@ -161,6 +162,15 @@ One binary, four modes selected by `RUSTYKEYS_MODE` (+ the desktop app):
 | **MCP server** | `--mcp` / `MODE=mcp` | JSON-RPC over stdio or SSE | IDEs invoke a `chat` tool → `Session::send`. Harness not bypassed. |
 | **Desktop** | Tauri app over the gateway | Tauri IPC (22 commands, canonical `rk://` events) | Reactive rendering layer; OS keychain for keys; no JS-side AI SDK. |
 
+### `ToolExecutor` isolation seam (ADR-0030)
+
+Today's controls — the canonicalized `WorkspacePolicy`, the bash checkers, the SSRF/egress block-set, redaction — are all **in-process** (`constrain`) and therefore bypassable if a checker misses (the deterministic backstop in §10). The isolation seam promotes capability supervision to a first-class, optional layer: a **`ToolExecutor`** trait (a trait object, per ADR-0024) that sits **below `feed`'s tool suite and above the OS** — it is *where* a vetted `bash`/`edit_file` side-effect actually runs. It **does not change the `constrain` vetting contract**: a tool call is still vetted by `Policy::before_tool` *first*; the seam changes only the execution substrate, never whether the call is allowed. Two implementations, selected by the `RUSTYKEYS_ISOLATION` runtime profile (below):
+
+- **`none` (default)** — the v1 in-process executor: today's behaviour, keeping the local-first sub-millisecond hot path untouched.
+- **`sandboxed`** — runs tool side-effects (especially `bash`) inside an **OS sandbox** (Linux-first: landlock / namespaces, or a gVisor-class target — wrap battle-tested primitives, don't hand-roll) with the egress block-set enforced as a **network-deny-by-default policy at the sandbox boundary**, not just an in-process URL check the model could route around via `bash`. Pairs naturally with `PermissionMode::Bypass` (bypass-inside-a-sandbox is the coherent CI story). Adds a subprocess hop + IPC cost per confined call — hence opt-in, off by default.
+
+Capability isolation is sequenced as a **roadmap phase in the [BACKLOG](../BACKLOG.md)** (post-Phase 12 MCP, alongside/after Phase 14 gateway — it matters most when network-exposed); the `none` default is what ships until then.
+
 ### Feature-flag matrix (Cargo `[features]`)
 
 | Feature | Default | Gates | Heavy deps |
@@ -170,8 +180,15 @@ One binary, four modes selected by `RUSTYKEYS_MODE` (+ the desktop app):
 | `mcp` | on | MCP client + server | jsonrpc, `reqwest` (SSE) |
 | `web-tools` | on | `web_fetch`/`web_search` (still runtime-gated by `RUSTYKEYS_ALLOW_WEB`) | `reqwest`, HTML strip |
 | `frontend` | off | builds the Tauri desktop app | tauri toolchain (node/vite) |
+| `sandbox` | off | the `sandboxed` `ToolExecutor` (OS-confined tool side-effects) | `landlock`/`nix` (Linux) |
 
-(Runtime gates like `RUSTYKEYS_ALLOW_WEB` are distinct from compile features; the standards doc pins which is which.)
+### Runtime isolation profile
+
+| Profile var | Default | Values | Effect |
+|---|---|---|---|
+| `RUSTYKEYS_ISOLATION` | `none` | `none` \| `sandboxed` | `none` = today's in-process executor. `sandboxed` = run tool side-effects (esp. `bash`) inside an **OS sandbox** with **network-deny-by-default** + egress enforced at the sandbox boundary (requires the `sandbox` feature; Linux-first). Selects the `ToolExecutor` impl above; does not change the `constrain` vetting contract (ADR-0030). |
+
+(Runtime gates like `RUSTYKEYS_ALLOW_WEB` and `RUSTYKEYS_ISOLATION` are distinct from compile features; the standards doc pins which is which.)
 
 ## 10. Failure modes & resilience
 
@@ -184,6 +201,7 @@ One binary, four modes selected by `RUSTYKEYS_MODE` (+ the desktop app):
 | **Torn JSONL line** (crash mid-append) | Readers skip the unparseable trailing line; cost is at most the last record (data-model §10). |
 | **Criteria judge unavailable** (call/parse failure) | Records `judge_unavailable`; **does not silently pass as verified** — `AutonomousVerifiedSuccess` is barred for that turn (PRD 05). |
 | **MCP server down** | Warn-and-skip at startup; `/mcp reconnect` respawns; per-call failures return `ERROR: MCP call failed`. |
+| **In-process checker miss** (a bash/egress checker fails to catch a malicious or obfuscated call) | In `none`, this is a full-privilege bypass (the honest residual risk). Under `RUSTYKEYS_ISOLATION=sandboxed` the **OS sandbox is the deterministic backstop** (§9, ADR-0030): a regex can be obfuscated, an OS boundary degrades gracefully — the vetted call still runs, but confined, with network-deny-by-default. |
 
 ## 11. Quality attributes (NFRs)
 
@@ -211,6 +229,9 @@ Rusty Keys implements *AI Harness Engineering* (Zhong & Zhu, arXiv 2605.13357v1)
 | Entropy audit | `EntropyAuditor`, 6 categories (PRD 04) | ⚠️ 6 vs the paper's 7; needs a paper→RK map → **ADR-0020** |
 | Reproduce → attribute → fix → verify → report | H3 tools + checks (PRD 03/05) | ⚠️ Missing the **verify → re-attribute back-edge** → fixed in PRD 05 |
 | Deterministic-check dual role; limits-always-carried | PRD 05; ADR-013 | ✅ Faithful |
+| Eval integrity (anti-gaming) | Golden episodes/`checks.toml` resist gaming: answer keys, expected outputs, and benchmark identifiers kept **out of the agent's context** during eval ([eval-plan §8](./dev/eval-plan.md)) | ➕ **Beyond the paper** — a deliberate guard (a model read git history for test answers / decrypted a benchmark's key) → **ADR-0033** |
+| Observability hook points (relates to *observe ≈ observability*, above) | Single `on_event` → fixed **`KernelEvent`** enum, one stream feeding `Tracer` + a pull-based OTLP exporter (§7) | ➕ Refinement of the observe verb (not a paper concept) → **ADR-0034** |
+| Capability isolation (relates to *constrain ≈ permissions*, above) | Optional **`ToolExecutor`** seam below `feed`/above the OS; `RUSTYKEYS_ISOLATION=none\|sandboxed` (§9–§10); does not change the vetting contract | ➕ **Beyond the paper** — a deterministic backstop for in-process checker misses, roadmap-phased (BACKLOG) → **ADR-0030** |
 
 > **PDF verification caveat.** The research PDF is not renderable in this environment (no poppler/pdftotext/pypdf); the faithfulness assessment was grounded in a raw zlib `FlateDecode` text recovery that stripped inter-word spaces and ligatures. Before the P0 faithfulness edits are **frozen**, a human (or a poppler-equipped run) must confirm against the rendered PDF: (a) the exact 7 entropy categories and 0–3 severity; (b) the M-HIR denominator wording ("total episodes"); (c) the intervention-log fields (avoidability / burden / harness-gap).
 

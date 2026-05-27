@@ -91,3 +91,14 @@ A single workflow with parallel jobs; the Rust jobs gate on the build matrix:
 8. **Release** — tag-triggered: build the `app` binary per target, attach artifacts; crate publishing is a later seam (libraries are not published in v1).
 
 Coverage is a future seam (not a v1 gate). The MSRV job (1) is what keeps the [§1](#1-msrv--toolchain) pin honest.
+
+## 9. `KernelEvent` — the unified lifecycle event ([ADR-0034](../adr/0034-kernelevent-unified-observability-stream.md))
+
+> **v1 intent.** Pins the event surface; the exact variant list lands with the `observe` crate (PRD 04/05). Pattern lifted from CloudWeGo Eino's callback aspects — adopted, not its Go code (see [research/references.md](../research/references.md#round-2-references)).
+
+The `on_event` hook emits **exactly one type: `KernelEvent`** — a fixed enum naming the lifecycle points of the turn cycle (e.g. turn start/end, tool call start/return, error). It is the **single event surface** two consumers subscribe to, so neither owns the wire format:
+
+- **`Tracer`** ([ARCHITECTURE §4](../ARCHITECTURE.md#4-logical-view--components), the `observe` crate) — builds the structured `Episode` from the stream; `!Send` and `Session`-owned ([§7 concurrency](../ARCHITECTURE.md#7-concurrency-model)).
+- **A pull-based OTLP exporter** — the observability wiring, bound to the same `KernelEvent` stream and carrying token/cost/latency attributes ([`RUSTYKEYS_OTLP_ENDPOINT`](../reference/configuration.md), v1 intent). **Pull-based** so a future `sandboxed` isolation profile ([ADR-0030](../adr/0030-capability-isolation-toolexecutor.md)) cannot blind operators.
+
+Convention: new lifecycle hooks add a `KernelEvent` variant rather than introducing a second event type or a consumer-specific callback. This keeps `Tracer` and exporter in lockstep over one schema.

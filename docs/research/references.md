@@ -110,7 +110,33 @@ Brave Search API · Serper · DuckDuckGo.
 
 **Voice (seam)** — OpenAI Whisper (`RUSTYKEYS_VOICE`, PRD 08 seam).
 
-## 7. Where references appear in the corpus
+## 7. Round-2 references
+
+The nine external sources the owner asked us to assess in Round 2 (constraint: stay
+Rust + AI-first — adopt patterns, not non-Rust code), plus the one crate that round
+adopted. Per-persona verdicts and the dedup'd recommendation set live in
+[`../review/round2-consolidated.md`](../review/round2-consolidated.md); the source
+briefs (stack/license/maturity) in
+[`../review/round2-sources.md`](../review/round2-sources.md).
+
+| # | Source | License | What we took |
+|---|---|---|---|
+| 1 | [NVIDIA AI-Q](https://github.com/NVIDIA-AI-Blueprints/aiq) | Apache-2.0 | **WATCH.** Config-as-data, eval harnesses, and Phoenix-style token/cost/latency profiling — informs the pull-based OTLP exporter ([ADR-0034](../adr/0034-kernelevent-unified-observability-stream.md)); revisit at the eval/observability work. |
+| 2 | [EvalMonkey](https://github.com/Corbell-AI/evalmonkey) | Apache-2.0 | **ADAPT.** A chaos/resilience eval tier at the `ToolOutcome`/`FakeLanguageModel` seam + failure-trace → golden-episode synthesis; the resilience metric asserts honest degradation, never verified-success-on-fault. |
+| 3 | [Microsoft SkillOpt](https://github.com/microsoft/SkillOpt) | MIT | **ADOPT.** Validation-gated skills: a failure-born skill is a candidate, promoted only after it validates (online VERIFIED turn or offline regression gate); a human `direct_edit` un-validates it. Markdown skill artifacts mirror our `skill` memory type. |
+| 4 | [QMind](https://github.com/Neo-Unknown/QMind-Project-Folder) | MIT | **REJECT** (experimental personal repo). Only its contradiction-handling idea is borrowable as a consolidation-prompt rule; the 5-tier memory is declined (our 3-tier is deliberate). Inspiration, not a dependency. |
+| 5 | [opendocswork-mcp](https://github.com/Aimino-Tech/opendocswork-mcp) | **GPL-3.0** | **Reference layout only — never vendor** (copyleft; enforced by a `cargo deny` license gate). Demonstrates a clean Rust MCP-server tool layout and surfaced **`rmcp`** (below). |
+| 6 | [Rowboat](https://github.com/rowboatlabs/rowboat) | Apache-2.0 | **WATCH / small ADAPT.** Validates local-first + inspectable memory (mostly already in the desktop memory browser); the one new hook — `direct_edit` un-validates a skill — folds into the validation-gated-skills work (row 3). |
+| 7 | [ADHD](https://github.com/UditAkhourii/adhd) ([site](https://adhdstack.github.io/)) | MIT | **ADAPT** (pattern only). Divergent→converge as a plan-mode "explore" subagent strategy on the existing `agent` tool + `SessionFactory` (isolated child `Session`s give no-cross-branch context for free); opt-in given ≈5–10× cost. |
+| 8 | [CloudWeGo Eino](https://github.com/cloudwego/eino) | Apache-2.0 | **ADAPT** (Go — patterns only). Callback-aspects → the fixed `KernelEvent` enum on `on_event` ([ADR-0034](../adr/0034-kernelevent-unified-observability-stream.md), [coding-standards §9](../dev/coding-standards.md#9-kernelevent--the-unified-lifecycle-event-adr-0034)); interrupt/resume state-persistence → plan-mode/subagent suspension. A generic typed node-graph runtime is **rejected** for v1. |
+| 9 | [Anthropic — *How we contain Claude*](https://www.anthropic.com/engineering/how-we-contain-claude) | n/a (article) | **ADOPT** (scope decision). Capability isolation — "supervise what the agent *can* do" — motivates the `ToolExecutor` seam + `RUSTYKEYS_ISOLATION` ([ADR-0030](../adr/0030-capability-isolation-toolexecutor.md)); plus threat-model additions (trust-boundary-before-config-parse, egress-as-capability-grant, symlink-before-path-validation, memory-poisoning provenance, multi-agent trust escalation). |
+
+**Adopted crate:** [`rmcp`](https://github.com/modelcontextprotocol/rust-sdk) — the
+official `modelcontextprotocol/rust-sdk` (**MIT**, tokio-native, v1.7.x). Re-spec PRD
+07's hand-rolled JSON-RPC stdio/SSE transports as **thin adapters over `rmcp`**,
+keeping our namespacing, `McpPolicy`, `ApprovalGate`, and auth/TLS pins above it.
+
+## 8. Where references appear in the corpus
 
 | Document | Primary references it relies on |
 |---|---|

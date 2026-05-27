@@ -233,7 +233,9 @@ pub trait SessionFactory: Send + Sync {
   harness level* (identity + tool-use protocol + H-rules + safety rails are
   inherited), so a subagent is held to the same discipline as its parent. *(v1
   intent, revisit after a spike — a focused "you are a subagent completing one
-  subtask" identity preamble is an additive option.)*
+  subtask" identity preamble is an additive option; the
+  [divergent→converge strategy](#divergent--converge-exploration-opt-in-fan-out-strategy)
+  below reuses this same layer-1 override to seed distinct cognitive frames.)*
 - **Task State:** the child does **not** inherit the parent's `TaskState`. Its
   `task` argument *becomes* the child's goal (the factory seeds a fresh child
   `TaskState { goal: task, scope: <parent scope or narrowed>, … }`), keeping the
@@ -242,6 +244,46 @@ pub trait SessionFactory: Send + Sync {
   (subagents share `.rustykeys/`), so lessons learned anywhere are available.
 - **Authority:** the child inherits the parent's `WorkspacePolicy` but only the
   requested `tools` subset — never broader authority than the parent.
+
+#### Divergent → converge exploration (opt-in fan-out strategy)
+
+> *v1 intent, revisit after a spike.* The cognitive-frame list, the branch count
+> `N`, the deepen-`K`, and the cost cap below track ADR-0032 and are product calls,
+> not a frozen contract. This describes the **pattern** (an MIT-licensed prior
+> art); no third-party code is vendored.
+
+The `agent` tool's default use is **decomposition** — spawn one focused worker for a
+subtask. ADR-0032 adds a second, **opt-in** use — **divergent ideation** on
+open-ended design — that the same `SessionFactory` already supports with **no new
+infra**. The strategy:
+
+1. **Fan out `N` isolated children.** Spawn `N` child `Session`s via
+   `SessionFactory::spawn_child`, each seeded with the **same task** but a different
+   **cognitive-frame** system-prompt preamble (an override of the producer's layer-1
+   "Identity" — the "focused subagent identity preamble" already floated above, here
+   given teeth: e.g. *regulator / speedrunner / $0-budget / infinite-budget /
+   3am-on-call*). The branches share **no context** — separate `Session`s give
+   isolation for free, so the generator/critic split is enforced *mechanically*
+   (distinct Sessions, opposite preambles), not by a single-context promise. Fan-out
+   is `tokio::JoinSet`/`join!` over `spawn_child` under `AgentDepthPolicy`.
+2. **Mechanical critic / converge pass.** A convergence step — the parent, or a
+   dedicated critic child under the *opposite* frame — runs a deterministic
+   **score → cluster → deepen top-`K`** over the `N` results: score every leaf,
+   cluster near-duplicates, prune traps, and deepen only the top-`K` candidates. The
+   critic is one more aisdk call; the scoring/clustering is mechanical.
+3. **Plan-mode "explore" option.** This is offered as a **plan-mode** option (PRD 06,
+   `enter_plan_mode`): the fan-out runs *inside* plan mode (writes/bash already
+   blocked), produces `K` candidate plans, and the user/critic approves one before
+   `exit_plan_mode`. Divergent-explore → converge → approve maps 1:1 onto plan
+   mode's lifecycle.
+
+**Cost-gated.** `N` parallel children cost roughly **5–10× the tokens** of a
+single-shot turn, so this is **opt-in behind an explicit strategy**, never the
+default `agent` path, and is bounded by a **branch-count / cost cap** (`v1 intent` —
+the software/integration architect owns the concurrency + depth + cost guard so the
+fan-out cannot blow the budget). Reuses `SessionFactory`, `AgentDepthPolicy`, and the
+layered system-prompt producer wholesale; the frame preamble is just a layer-1
+override.
 
 ### Task management tools
 
@@ -290,7 +332,11 @@ pub fn enter_plan_mode() -> Result<String, ToolError>
 pub fn exit_plan_mode() -> Result<String, ToolError>
 ```
 
-See PRD 06 for the plan mode lifecycle.
+See PRD 06 for the plan mode lifecycle. Plan mode is also the convergence gate for
+the opt-in
+[divergent→converge "explore" strategy](#divergent--converge-exploration-opt-in-fan-out-strategy)
+(ADR-0032): a divergent fan-out runs inside plan mode and the user approves one of
+the converged candidate plans before `exit_plan_mode`.
 
 ### H3 verification tools
 
@@ -400,8 +446,11 @@ pub trait Store: Send + Sync {
 `candidates()` returns `(memory, relevance)` — each backend uses its best
 strategy (FTS5 lexical for SQLite, `list_cosine_similarity` for DuckDB).
 
-Skills (`type = "skill"`) are exempt from `prune()`. They accumulate until
-grooming (refine / merge / split) consolidates them.
+Skills (`type = "skill"`) are exempt from `prune()` **once `validated=1`** (ADR-0031;
+see [Validation-gated skills](#validation-gated-skills)). A freshly minted *candidate*
+skill (`validated=0`) is not yet exempt and decays/prunes like an ordinary memory
+until it earns promotion. Promoted skills accumulate until grooming (refine / merge
+/ split) consolidates them.
 
 ### Recall
 
@@ -441,7 +490,7 @@ FTS5/cosine score shares a `[0,1]` domain with the other two terms:
 score   = 0.55 * rel_norm + 0.25 * recency + 0.20 * importance
 rel_norm = (relevance - min_batch) / (max_batch - min_batch)   # within the returned candidate batch
 recency  = exp(-Δdays / τ)         # Δdays = (now - last_used_ts)/86400; τ = 14 (≈2-week decay)
-importance = stored 0..1           # from memories.importance; skills floored at 0.6 (ADR-0011)
+importance = stored 0..1           # from memories.importance; *validated* skills floored at 0.6 (ADR-0011, ADR-0031)
 ```
 
 - **Why normalize per batch:** combining a raw `bm25` magnitude (unbounded) or a
@@ -452,15 +501,21 @@ importance = stored 0..1           # from memories.importance; skills floored at
 - **Recency decay** reads `last_used_ts`; decay-at-read keeps the stored value
   stable (the systems-architect owns decay-at-read vs decay-at-write).
 - **Skill importance floor (0.6)** keeps hard-won lessons from sinking below
-  ordinary facts purely on age; skills are also exempt from `prune()` (ADR-0011),
-  so the floor governs *recall priority*, not retention.
+  ordinary facts purely on age; floored skills are also exempt from `prune()`
+  (ADR-0011), so the floor governs *recall priority*, not retention. **The floor
+  applies only to *validated* (`validated=1`) skills** (ADR-0031): a freshly minted
+  *candidate* skill (`validated=0`) is recall-eligible but unfloored — it scores on
+  its emitted importance and decays/prunes like an ordinary memory until it earns
+  promotion (see [Validation-gated skills](#validation-gated-skills)).
 - **Failure-born skill boost (closing the loop — see
   [Self-improvement loop](#self-improvement-loop)):** when the current turn's
   attribution context matches a `type=skill` memory's stored failing condition,
   add `+0.15` to that skill's score (clamped to `1.0`) so the lesson surfaces
   *before* the agent repeats the mistake. Match = lexical/embedding similarity of
   the current `(failure_type, layer)` + recent-turn query against the skill's
-  body above the candidate threshold.
+  body above the candidate threshold. **The boost — like the floor — is reserved
+  for *validated* skills** (ADR-0031); a candidate still surfaces on its own
+  relevance but is not recall-privileged until promoted.
 - **Tie-break:** `type=skill` > `summary` > `fact` > `entity`; then most-recent
   `last_used_ts`.
 
@@ -539,14 +594,18 @@ The emitted `importance ∈ [0,1]` is the *same scale* the recall formula consum
 
 | Signal in the observation window | Emit | Importance |
 |---|---|---|
-| **UNVERIFIED outcome** (a failure/lesson) | one `skill` | **≥ 0.8**; body = *the lesson + the failing condition* (so recall can match it later) |
-| VERIFIED outcome reinforcing a known approach | `update` the skill used (bump `use_count`/importance) | ≥ 0.7 |
+| **UNVERIFIED outcome** (a failure/lesson) | one `skill` **candidate** (`validated=0`) | **≥ 0.8**; body = *the lesson + the failing condition* (so recall can match it later) |
+| VERIFIED outcome reinforcing a known approach | `update` the skill used (bump `use_count`/importance; **promote** it if a candidate — see below) | ≥ 0.7 |
 | Stable project fact (paths, conventions, decisions) | `fact` | 0.4–0.6 |
 | Episode/period recap | `summary` | 0.3–0.5 |
 | Named person/system/component | `entity` | 0.3–0.5 |
 
-Skills are floored at **0.6** at recall time (ADR-0011) regardless of the emitted
-value, so a decayed skill never sinks below an ordinary fact on age alone.
+A failure-born skill is emitted as a **candidate** (`validated=0`): recall-eligible
+but **not** yet floored and **not** yet prune-exempt. Only a *validated* (`validated=1`)
+skill is floored at **0.6** at recall time (ADR-0011, ADR-0031) regardless of its
+emitted value, so a *promoted* skill never sinks below an ordinary fact on age
+alone — while an unproven candidate must still earn that durability (see
+[Validation-gated skills](#validation-gated-skills)).
 
 #### Create-vs-merge (dedup rule)
 
@@ -598,6 +657,56 @@ asks the model to propose `refine`, `merge`, and `split` operations over the ski
 set. Merges and splits supersede originals via `Store::remove()`. Grooming runs
 on `/groom` (forced) and during `sleep`.
 
+Grooming is the self-improvement loop's **optimizer step**, so it is
+**non-regression-gated** (ADR-0031): a `merge`/`refine` that produces a new body is
+emitted as a **candidate** (`validated=0`) unless it preserves the
+`(failure_type, layer)` conditions its *validated* source skills already proved
+against — a groom that would drop a previously-validated condition is rejected or
+downgraded to candidate, so grooming can refine the skill set without silently
+discarding a proven lesson. See [Validation-gated skills](#validation-gated-skills).
+
+### Validation-gated skills
+
+> *v1 intent, revisit after a spike.* The `validated` flag, the promotion trigger,
+> and the non-regression conditions track ADR-0031 and the `memories` table in
+> [data-model §3](../architecture/data-model.md#3-long-term-store--storedb-sqlite--storeduckdb);
+> they are the design to build against, not a frozen contract.
+
+A failure-born skill is **credulous** by default: a single UNVERIFIED turn would
+otherwise mint a high-floor, prune-exempt, recall-privileged lesson that is as
+durable as a proven one — even if it is wrong or over-fit. The `validated`
+(`validated=0|1`) flag on the memory row (ADR-0031) closes that gap with an explicit
+**candidate → promoted** lifecycle, so the self-improvement loop **cannot silently
+un-learn**:
+
+- **Candidate (`validated=0`).** The state a failure-born skill is minted in (the
+  importance-rubric "UNVERIFIED" row). It is **recall-eligible** — the lesson still
+  surfaces on its own relevance next turn — but it does **not** get the 0.6
+  importance floor, the `+0.15` failure-born boost, or `prune()` exemption. It
+  decays and prunes like an ordinary memory until it proves itself.
+- **Promoted (`validated=1`).** A candidate is promoted — gaining the **floor +
+  prune-exemption + recall boost** — only after it **validates**:
+  - **Online:** a later turn whose attribution context *matches* this skill (the
+    same `(failure_type, layer)` + condition match that drives the recall boost)
+    completes **VERIFIED**. The loop's own real outcome on a matching condition is
+    the held-out check — no extra hot-path LLM call. This sharpens step 4 of the
+    [Self-improvement loop](#self-improvement-loop): a VERIFIED turn no longer just
+    bumps `importance`, it *flips `validated=1`* on the matched candidate.
+  - **Offline:** the candidate survives **golden-episode replay** in the regression
+    suite (cross-ref [`eval-plan`](../dev/eval-plan.md) — a golden episode asserts a
+    candidate skill promotes after a matching verified turn and that promotion does
+    not regress).
+- **Un-validation on human edit.** A human `direct_edit` (PRD 04) to a
+  skill-derived `body` resets it to `validated=0` — a corrected lesson must
+  **re-earn** promotion rather than inheriting the old skill's privileges. (The
+  desktop memory browser, PRD 08, edits through the same path.)
+
+Only *validated* skills receive the floor/boost/exemption; everywhere those
+privileges appear — the recall floor and failure-born boost in
+[Recall](#recall), the `prune()` exemption in [Long-term graph](#long-term-graph),
+the importance rubric, and the grooming non-regression gate — they are conditioned
+on `validated=1`.
+
 ### Self-improvement loop
 
 The feed and compose layers together close the paper's learning loop. The prior
@@ -612,30 +721,36 @@ privilege failure-born skills. That broken middle link is now wired. The
                      │  structured, not free text (ADR-0021)
                      ▼
 2. SKILL       consolidation prompt receives that Attribution as structured input
-               (see Consolidation → "attribution feed") and emits a `skill`,
-               importance ≥0.8, body = lesson + failing condition + the
-               (failure_type, layer) context.                          (this PRD)
+               (see Consolidation → "attribution feed") and emits a `skill`
+               *candidate* (validated=0), importance ≥0.8, body = lesson +
+               failing condition + the (failure_type, layer) context.   (this PRD)
                      │  Store::upsert()
                      ▼
-3. RECALL      next similar turn: recall scores candidates; the failure-born
-               skill gets a +0.15 boost when its stored (failure_type, layer)
-               + condition matches the current turn → surfaces in the
-               "## Relevant memory" block of extra_context.            (Recall → boost)
+3. RECALL      next similar turn: recall scores candidates; a *validated*
+               failure-born skill gets a +0.15 boost (+0.6 floor) when its stored
+               (failure_type, layer) + condition matches → surfaces in the
+               "## Relevant memory" block of extra_context. A candidate still
+               surfaces on raw relevance, just unprivileged.            (Recall → boost)
                      │  orient() → extra_context
                      ▼
-4. BEHAVIOR    the model reads the lesson *before* acting, avoids repeating the
-               mistake; the next verification is more likely VERIFIED, which
-               reinforces the skill (importance bump) instead of minting a new one.
+4. BEHAVIOR /  the model reads the lesson *before* acting, avoids repeating the
+   PROMOTE     mistake; the next verification is more likely VERIFIED. A VERIFIED
+               turn on a *matching* condition flips the candidate to validated=1
+               (PROMOTE — floor + boost + prune-exemption) instead of minting a new
+               skill; a repeat failure leaves it a candidate to re-prove. (Validation-gated skills)
                      └────────────────────── loop ──────────────────────┘
 ```
 
 Each hop is owned by a section above: **(1)** PRD 05 (`Attribution`); **(2)**
-[Consolidation](#consolidation) (the attribution feed + importance rubric);
-**(3)** [Recall](#recall) (the failure-born skill boost); **(4)** the
-[system prompt's](#system-prompt-construction) H2/H3 rules tell the model to trust
-recalled lessons. The loop runs every turn via the post-turn `tokio::join!`
-(verify + consolidate observed together before the next turn's recall;
-ARCHITECTURE §6, ADR-0012).
+[Consolidation](#consolidation) (the attribution feed + importance rubric — emits a
+**candidate**); **(3)** [Recall](#recall) (the failure-born skill boost, reserved
+for *validated* skills); **(4)** the [system prompt's](#system-prompt-construction)
+H2/H3 rules tell the model to trust recalled lessons, and a matching VERIFIED turn
+**promotes** the candidate (`validated=1`) per
+[Validation-gated skills](#validation-gated-skills) (ADR-0031) — so a proven lesson,
+not every guess, earns durability. The loop runs every turn via the post-turn
+`tokio::join!` (verify + consolidate observed together before the next turn's
+recall; ARCHITECTURE §6, ADR-0012).
 
 ### Task State
 

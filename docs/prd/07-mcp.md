@@ -13,6 +13,40 @@ The MCP crate has two complementary roles:
 Both roles implement the MCP specification (modelcontextprotocol.io, v1) over
 JSON-RPC 2.0.
 
+### Built on the official `rmcp` SDK (ADR-0029)
+
+The `mcp` crate is built on **`rmcp`**, the official `modelcontextprotocol/rust-sdk`
+(**MIT, tokio-native, v1.7.x**; ADR-0029). `rmcp` owns the MCP wire: the
+JSON-RPC 2.0 framing, the `initialize`/`initialized`/`tools/list`/`tools/call`
+state machine, and the stdio + streamable-HTTP/SSE transports — for **both** the
+client and server roles. Re-implementing that protocol is undifferentiated work
+the harness does not own.
+
+Everything specified below as a transport (`StdioMcpClient`, `SseMcpClient`, and
+the `--mcp` server transports) is therefore a **thin adapter over `rmcp`**, not
+hand-rolled protocol code. Rusty Keys' value-add sits **above** `rmcp` and is the
+clean boundary it owns:
+
+- `mcp__<server>__<tool>` **namespacing** (collision-free, policy-addressable);
+- the `McpToolFn` → `ToolFn` adapter and the `"ERROR: MCP call failed: …"`
+  `ToolOutcome` mapping;
+- `McpPolicy::before_tool` vetting (ADR-0007 still vets before dispatch);
+- `ApprovalGate::McpToolFirstUse`;
+- the **auth header + TLS pins** (the `Authorization: Bearer <token>` convention
+  and the non-loopback-`http://`-with-token rejection), passed *into* `rmcp`'s
+  transport config rather than re-implemented.
+
+`rmcp` owns framing/lifecycle; Rusty Keys owns policy/namespacing/approval/auth.
+The transport structs below become constructors that hand `rmcp` a transport.
+
+> **License note (load-bearing).** `rmcp` is **MIT** → dependency-safe.
+> **opendocswork-mcp**, the Rust MCP server that demonstrated `rmcp` doing both
+> roles at sub-millisecond dispatch, is **GPL-3.0**: its modular per-tool layout
+> is a **reference only — never copy or vendor** it into permissively-licensed
+> Rusty Keys. A **`cargo deny` license gate** enforces this: the dependency tree
+> must clear allowed-license policy (MIT/Apache-class) before any MCP crate is
+> pinned, so a GPL-3.0 dependency cannot enter the build by accident.
+
 ## MCP client
 
 ### `McpClient` trait
@@ -33,36 +67,44 @@ pub struct McpToolDescriptor {
 
 ### Transport implementations
 
+> Both transports are **adapters over `rmcp`** (ADR-0029): the `McpClient` trait
+> survives as the seam above `rmcp`, but the structs below are constructors that
+> hand `rmcp` a transport, not protocol implementations.
+
 #### `StdioMcpClient`
 
-Spawns an MCP server subprocess and speaks JSON-RPC 2.0 over stdin/stdout.
-The standard transport for local MCP servers.
+Wraps `rmcp`'s child-process transport: spawns an MCP server subprocess and lets
+`rmcp` speak JSON-RPC 2.0 over stdin/stdout. The standard transport for local
+MCP servers.
 
 ```rust
 pub struct StdioMcpClient {
     server_name: String,
-    child: tokio::process::Child,
-    stdin: BufWriter<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    // wraps an rmcp child-process transport / client handle (ADR-0029)
+    client: rmcp::Client,
 }
 ```
 
-Startup sequence:
-1. Spawn child: `tokio::process::Command::new(command).args(args)`
-2. Send `initialize` request; receive `initialized` response
-3. Send `tools/list` request; cache descriptors
+Startup sequence (driven by `rmcp`):
+1. Spawn child via `rmcp`'s child-process transport (`command` + `args`)
+2. `rmcp` performs the `initialize` / `initialized` handshake
+3. `rmcp` issues `tools/list`; descriptors are cached
 
 #### `SseMcpClient`
 
-Connects to a remote MCP server over HTTP with Server-Sent Events for
-server→client messages and HTTP POST for client→server calls.
+Wraps `rmcp`'s streamable-HTTP/SSE transport to connect to a remote MCP server:
+Server-Sent Events for server→client messages and HTTP POST for client→server
+calls. The auth token and TLS pins (below) are passed *into* `rmcp`'s transport
+config, not re-implemented.
 
 ```rust
 pub struct SseMcpClient {
     server_name: String,
     base_url: String,
     auth_token: Option<String>,
-    client: reqwest::Client,
+    // wraps an rmcp streamable-HTTP/SSE transport (ADR-0029);
+    // bearer header + TLS pin supplied as transport config
+    client: rmcp::Client,
 }
 ```
 
@@ -77,6 +119,26 @@ remains a future seam.
 `http://127.0.0.1` / `localhost`) URL is accepted; a non-loopback `http://` URL
 with an `auth_token` is rejected at connect time so a bearer token is never sent
 in cleartext over the network.
+
+##### Remote-vs-local MCP trust
+
+The transport a server uses is also a **trust signal**, and the distinction
+matters more than it first appears:
+
+- **Local (stdio) MCP servers are audited host software.** The user chose to run
+  the subprocess; its code is on disk, inspectable, and version-pinnable — trust
+  it the way you trust any installed dependency.
+- **Remote (SSE) MCP servers are untrusted and *mutable after approval*.** A
+  remote server can change its behavior — including its tool *descriptions and
+  schemas* — between sessions, so the install-time trust decision **expires**.
+  `ApprovalGate::McpToolFirstUse` approval does **not** bind the server's future
+  behavior, and re-enumeration on reconnect is **not** re-vetting. Treat a remote
+  SSE server like the open internet: **run it against fake / non-sensitive data
+  first**. (Likewise, a `localhost` listener is not implicitly trusted just
+  because it is local — see [threat-model §6](../architecture/threat-model.md#6-gateway--mcp-authentication).)
+
+See [threat-model §1](../architecture/threat-model.md#1-trust-model) for the
+authoritative trust-boundary statement.
 
 ##### Heartbeat & reconnect (NOW)
 
@@ -200,17 +262,21 @@ Starts the MCP server instead of the CLI REPL.
 
 ### Transports
 
-Two transports, selected via `RUSTYKEYS_MCP_SERVER_TRANSPORT`:
+Two transports, selected via `RUSTYKEYS_MCP_SERVER_TRANSPORT`. Both are
+`rmcp`-backed (ADR-0029): the `chat`-over-`Session::send()` exposure registers as
+an `rmcp` server tool, and `rmcp` owns the transport — the harness layer is still
+not bypassed (`rmcp` is transport only).
 
 #### `stdio` (default)
 
-The IDE spawns `rusty-keys --mcp` as a subprocess and speaks JSON-RPC 2.0 over
+The IDE spawns `rusty-keys --mcp` as a subprocess; `rmcp` speaks JSON-RPC 2.0 over
 stdin/stdout. Zero IDE configuration beyond pointing at the binary path.
 
 #### `sse`
 
-An `axum` HTTP server on `RUSTYKEYS_MCP_SERVER_PORT` (default 3001) with SSE
-for server→client streaming. Enables remote and shared deployments.
+`rmcp`'s streamable-HTTP/SSE server transport (an `axum`-class HTTP server) on
+`RUSTYKEYS_MCP_SERVER_PORT` (default 3001) with SSE for server→client streaming.
+Enables remote and shared deployments.
 
 **Server-side auth.** The SSE server reuses the gateway's bearer-secret pattern:
 a configured token must be presented as `Authorization: Bearer <token>` on
@@ -276,6 +342,17 @@ The harness layer is not bypassed.
 - **Dynamic reconnect**: the heartbeat + reconnect-with-backoff *behavior* is now
   sketched above (*Heartbeat & reconnect*, NOW); the exact idle window and
   auto-vs-manual policy is finalized in Phase 12.
+- **Tool-return inspection** *(v1 intent / seam)*: an optional hook on
+  `McpToolFn::call` results (and `web_fetch`) *before* they enter `history`,
+  where a small/fast classifier can inspect MCP tool **return values** for
+  prompt-injection / poisoned content. This is the **return-path analog of
+  `before_tool`** (which guards the *call* path): the tool result is itself an
+  attack surface, so input scanning applied to fetched web pages must apply to
+  network-enabled tool results with the same rigor. v1 ships the seam plus the
+  existing redaction-on-emit; the classifier is a documented future fill (the
+  inspector does not need to be the reasoning model). Cross-ref
+  [threat-model — tool-return inspection](../architecture/threat-model.md#tool-return-inspection).
+
 - **Individual tool exposure**: expose each `ToolRegistry` tool directly as an
   MCP tool — letting the IDE call `bash` or `edit_file` without a full session.
 - **MCP resources**: the spec supports `resources/list` and `resources/read`;
