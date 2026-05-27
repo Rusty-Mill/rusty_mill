@@ -81,3 +81,37 @@ async fn out_of_workspace_read_is_blocked_and_unverified() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn followup_after_unverified_turn_counts_toward_mhir() {
+    let dir = std::env::temp_dir().join(format!("rk-app-mhir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let config = config_at(&dir);
+    // Turn 1: a blocked read → UNVERIFIED. Turn 2: a clean text reply (the
+    // follow-up) → records an unverified_followup intervention against turn 2.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "read_file".into(),
+            args: json!({"path": "/etc/shadow"}),
+        }],
+        vec![Scripted::Text("blocked".into())],
+        vec![Scripted::Text("ok now".into())],
+    ]);
+
+    let session = Session::new(&config, model);
+    let first = session.send("read it").await.unwrap();
+    assert!(!first.report.verified);
+
+    let second = session.send("never mind, summarize").await.unwrap();
+    assert!(second.report.verified);
+
+    // 2 turns journaled; 1 avoidable (unverified_followup) intervention.
+    let m = session.mhir().unwrap();
+    assert_eq!(m.n_turns, 2);
+    assert_eq!(m.n_interventions, 1);
+    assert!((m.rate - 0.5).abs() < 1e-9);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

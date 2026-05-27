@@ -11,10 +11,14 @@
 //! and `EntropyAuditor` are tracked separately within this phase.
 
 mod error;
+mod intervention;
 mod outcome;
 pub mod redact;
 
 pub use error::ObserveError;
+pub use intervention::{
+    Avoidability, InterventionKind, InterventionLogger, InterventionRecord, MhirReport,
+};
 pub use outcome::{ToolOutcome, ToolStatus};
 
 use std::sync::Mutex;
