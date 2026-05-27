@@ -35,7 +35,7 @@ async fn send_reads_workspace_file_then_replies_verified() {
         vec![Scripted::Text("I read the note.".into())],
     ]);
 
-    let session = Session::new(&config, model);
+    let session = Session::new(&config, model).unwrap();
     assert_eq!(session.tool_names(), vec!["list_directory", "read_file"]);
 
     let outcome = session.send("read note.txt").await.unwrap();
@@ -66,7 +66,7 @@ async fn out_of_workspace_read_is_blocked_and_unverified() {
         vec![Scripted::Text("could not read it".into())],
     ]);
 
-    let session = Session::new(&config, model);
+    let session = Session::new(&config, model).unwrap();
     let outcome = session.send("read /etc/passwd").await.unwrap();
 
     // The blocked tool makes the turn UNVERIFIED with a permission_block attribution.
@@ -100,7 +100,7 @@ async fn followup_after_unverified_turn_counts_toward_mhir() {
         vec![Scripted::Text("ok now".into())],
     ]);
 
-    let session = Session::new(&config, model);
+    let session = Session::new(&config, model).unwrap();
     let first = session.send("read it").await.unwrap();
     assert!(!first.report.verified);
 
@@ -112,6 +112,35 @@ async fn followup_after_unverified_turn_counts_toward_mhir() {
     assert_eq!(m.n_turns, 2);
     assert_eq!(m.n_interventions, 1);
     assert!((m.rate - 0.5).abs() < 1e-9);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fact_taught_in_session_a_is_recalled_in_session_b() {
+    let dir = std::env::temp_dir().join(format!("rk-app-recall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // Session A: /reflect consolidates a planted fact (the fake model "emits"
+    // the consolidation JSON) into the shared long-term store.
+    let emit = r#"{"memories":[{"op":"create","type":"fact","title":"build tool",
+        "body":"the project builds with cargo zzz","importance":0.6}]}"#;
+    let model_a = FakeLanguageModel::new(vec![vec![Scripted::Text(emit.into())]]);
+    let a = Session::new(&config, model_a).unwrap();
+    let stats = a.reflect().await.unwrap();
+    assert_eq!(stats.created, 1);
+    drop(a);
+
+    // Session B: a fresh session over the SAME workspace recalls the fact.
+    let model_b = FakeLanguageModel::new(vec![]);
+    let b = Session::new(&config, model_b).unwrap();
+    let block = b.recall_block("cargo build").await.unwrap();
+    assert!(
+        block.contains("build tool"),
+        "expected recall to surface the planted fact, got: {block:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

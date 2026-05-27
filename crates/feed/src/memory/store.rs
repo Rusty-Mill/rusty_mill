@@ -217,6 +217,16 @@ impl Store for SqliteStore {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    async fn recent(&self, n: usize) -> Result<Vec<Memory>, ToolError> {
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {COLS} FROM memories ORDER BY created_ts DESC, memories.id DESC LIMIT ?1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([n as i64], row_to_memory)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     async fn prune(&self, older_than: f64, importance_below: f32) -> Result<usize, ToolError> {
         let conn = self.lock();
         // Validated skills are exempt (ADR-0011); candidate skills prune normally.

@@ -161,6 +161,8 @@ pub trait Store: Send + Sync {
     async fn set_validated(&self, title: &str, validated: bool) -> Result<(), ToolError>;
     /// All `skill` memories (for grooming).
     async fn skills(&self) -> Result<Vec<Memory>, ToolError>;
+    /// The most-recently-created `n` memories (for `/memory`).
+    async fn recent(&self, n: usize) -> Result<Vec<Memory>, ToolError>;
     /// Prune non-skill memories older than `older_than` below `importance_below`;
     /// returns how many were removed. Validated skills are exempt (ADR-0011).
     async fn prune(&self, older_than: f64, importance_below: f32) -> Result<usize, ToolError>;
