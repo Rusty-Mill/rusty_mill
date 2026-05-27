@@ -15,7 +15,7 @@ use rk_compose::{
     judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
 };
 use rk_config::Config;
-use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
+use rk_constrain::{BashGuard, PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
     register_task_tools, system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats,
@@ -70,8 +70,9 @@ where
     /// evidence journal + the short/long-term memory stores under `.rustykeys/`.
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
-        let policy =
-            PolicyChain::new().with(Arc::new(WorkspacePolicy::new(config.workspace.clone())));
+        let policy = PolicyChain::new()
+            .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
+            .with(Arc::new(BashGuard));
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();

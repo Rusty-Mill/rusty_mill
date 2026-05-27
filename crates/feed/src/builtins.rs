@@ -49,9 +49,17 @@ mod descriptors {
     pub fn grep_descriptor(pattern: String, path: String) -> Tool {
         Ok(format!("{pattern}{path}"))
     }
+
+    #[tool(name = "bash")]
+    /// Run a shell `command` in the workspace (combined stdout+stderr). Vetted by
+    /// BashGuard; default 30s timeout (override with `timeout_ms`).
+    pub fn bash_descriptor(command: String) -> Tool {
+        Ok(command)
+    }
 }
 
 const GREP_CAP: usize = 200;
+const BASH_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 
 fn resolve(root: &Path, args: &Value) -> Result<PathBuf, ToolError> {
     let path = args
@@ -209,6 +217,39 @@ async fn grep_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     Ok(out.join("\n"))
 }
 
+async fn bash_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
+    let command = arg_str(&args, "command")?;
+    let timeout_ms = args
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c").arg(&command).current_dir(&root);
+    let run = cmd.output();
+
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run).await {
+        Err(_) => Err(ToolError::Timeout),
+        Ok(Err(e)) => Err(e.into()),
+        Ok(Ok(output)) => {
+            let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+            combined.push_str(&String::from_utf8_lossy(&output.stderr));
+            let combined = combined.trim_end().to_string();
+            // A non-zero exit is *data*, not a tool error: the agent often runs
+            // commands expecting failure (a failing test). Surface the code but
+            // keep the outcome Ok so it doesn't spuriously fail verification.
+            if output.status.success() {
+                Ok(combined)
+            } else {
+                Ok(format!(
+                    "[exit {}]\n{combined}",
+                    output.status.code().unwrap_or(-1)
+                ))
+            }
+        }
+    }
+}
+
 /// Register the built-in filesystem tools, rooted at `workspace`.
 pub fn register_builtins(registry: &mut ToolRegistry, workspace: PathBuf) {
     macro_rules! reg {
@@ -228,6 +269,7 @@ pub fn register_builtins(registry: &mut ToolRegistry, workspace: PathBuf) {
     reg!(descriptors::edit_file_descriptor(), edit_file_impl);
     reg!(descriptors::glob_descriptor(), glob_impl);
     reg!(descriptors::grep_descriptor(), grep_impl);
+    reg!(descriptors::bash_descriptor(), bash_impl);
 }
 
 #[cfg(test)]
@@ -285,6 +327,21 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, "a Z b X c");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn bash_runs_and_surfaces_nonzero_exit_as_data() {
+        let root = tmp("bash");
+        let ok = bash_impl(root.clone(), json!({"command": "echo hello"}))
+            .await
+            .unwrap();
+        assert_eq!(ok, "hello");
+        // Non-zero exit is surfaced (Ok), not a tool error.
+        let nonzero = bash_impl(root.clone(), json!({"command": "exit 3"}))
+            .await
+            .unwrap();
+        assert!(nonzero.starts_with("[exit 3]"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -39,6 +39,7 @@ async fn send_reads_workspace_file_then_replies_verified() {
     assert_eq!(
         session.tool_names(),
         vec![
+            "bash",
             "complete_task",
             "edit_file",
             "glob",
@@ -59,6 +60,34 @@ async fn send_reads_workspace_file_then_replies_verified() {
     let journal = std::fs::read_to_string(dir.join(".rustykeys/evidence.jsonl")).unwrap();
     assert!(journal.contains("\"kind\":\"turn\""));
     assert!(journal.contains("\"verified\":true"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destructive_bash_is_blocked_by_bashguard() {
+    let dir = std::env::temp_dir().join(format!("rk-app-bash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "bash".into(),
+            args: json!({"command": "rm -rf / --no-preserve-root"}),
+        }],
+        vec![Scripted::Text("could not".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    let outcome = session.send("delete everything").await.unwrap();
+
+    // BashGuard blocks it → UNVERIFIED with a permission_block attribution.
+    assert!(!outcome.report.verified);
+    assert!(outcome
+        .report
+        .attributions
+        .iter()
+        .any(|a| a.category == "permission_block"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
