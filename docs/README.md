@@ -48,6 +48,7 @@ application is the harness built around it).
 ## Research & review
 
 - [research/2605.13357v1.pdf](./research/2605.13357v1.pdf) — *AI Harness Engineering* (the grounding paper).
+- [research/references.md](./research/references.md) — sourced bibliography of every research item, comparative implementation, protocol, concept, and technology used.
 - [review/](./review/) — point-in-time findings from the five-persona refinement
   (systems/software/AI/AI-harness/integration architects) and the consolidated plan.
   These are a **historical audit trail**, superseded by the canonical docs above —
