@@ -1,8 +1,11 @@
 //! The structured tool-result contract (ADR-0022). Status is carried
 //! *structurally* on [`ToolStatus`], never re-parsed from a string prefix.
 
+use serde::{Deserialize, Serialize};
+
 /// The reconciled 5-member tool status (data-model §7; ADR-0036).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolStatus {
     /// Tool ran and produced a usable result.
     Ok,
@@ -34,7 +37,7 @@ impl ToolStatus {
 /// Constructors are deliberately status-specific; the mapping from a tool's own
 /// error enum lives in the crate that owns the tools (`feed`), keeping `observe`
 /// a leaf above `config`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolOutcome {
     /// Authoritative status, read directly by observers.
     pub status: ToolStatus,

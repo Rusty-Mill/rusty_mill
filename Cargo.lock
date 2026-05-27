@@ -1063,6 +1063,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk-compose"
+version = "0.0.0"
+dependencies = [
+ "rk-config",
+ "rk-observe",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rk-config"
 version = "0.0.0"
 dependencies = [
@@ -1129,6 +1140,7 @@ name = "rk-observe"
 version = "0.0.0"
 dependencies = [
  "rk-config",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]
