@@ -155,6 +155,48 @@ async fn out_of_workspace_read_is_blocked_and_unverified() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_only_mode_blocks_a_write_turn() {
+    let dir = std::env::temp_dir().join(format!("rk-app-readonly-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let ws = dir.to_string_lossy().into_owned();
+    let config = Config::resolve(|k| match k {
+        "RUSTYKEYS_MODEL" => Some("fake".into()),
+        "RUSTYKEYS_WORKSPACE" => Some(ws.clone()),
+        "RUSTYKEYS_PERMISSION_MODE" => Some("read_only".into()),
+        _ => None,
+    })
+    .unwrap();
+
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "write_file".into(),
+            args: json!({"path": "out.txt", "content": "nope"}),
+        }],
+        vec![Scripted::Text("could not write".into())],
+    ]);
+
+    let session = Session::new(&config, model).unwrap();
+    assert_eq!(session.permission_mode(), "read_only");
+    let outcome = session.send("write a file").await.unwrap();
+
+    // The mode gate blocks the write → UNVERIFIED with a permission_block attribution.
+    assert!(!outcome.report.verified);
+    let a = outcome
+        .report
+        .attributions
+        .iter()
+        .find(|a| a.category == "permission_block")
+        .expect("permission_block attribution");
+    assert_eq!(a.layer, "constrain/policy");
+    // The write never happened.
+    assert!(!dir.join("out.txt").exists());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn followup_after_unverified_turn_counts_toward_mhir() {
     let dir = std::env::temp_dir().join(format!("rk-app-mhir-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

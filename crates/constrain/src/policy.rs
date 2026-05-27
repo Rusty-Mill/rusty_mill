@@ -26,6 +26,14 @@ pub enum PolicyError {
     /// A `bash` command matched a destructive pattern (BashGuard).
     #[error("blocked dangerous command: matched '{0}'")]
     DangerousCommand(String),
+    /// The active permission mode forbids this tool.
+    #[error("mode {mode} forbids tool {tool}")]
+    ModeForbidden {
+        /// The active mode (snake_case).
+        mode: &'static str,
+        /// The forbidden tool name.
+        tool: String,
+    },
 }
 
 /// Runs an ordered set of policies; the first block wins (fail-closed).
@@ -112,6 +120,119 @@ impl Policy for WorkspacePolicy {
             }
         }
         Ok(())
+    }
+}
+
+/// Named permission modes gating tool classes (PRD 02). The enum lives here
+/// (not `config`) so the DAG stays `constrain → config`; `Config` carries the
+/// raw strings and [`PermissionMode::from_config`] parses them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// Workspace boundary + security checks; everything else allowed.
+    Default,
+    /// Read-only + propose: no writes, no bash.
+    Plan,
+    /// Writes allowed without an approval prompt; bash still checked.
+    AcceptEdits,
+    /// No writes, no bash — safe exploration.
+    ReadOnly,
+    /// Only the explicit allowlist.
+    Restricted(Vec<String>),
+    /// All policy checks disabled — requires `RUSTYKEYS_ALLOW_BYPASS=1`.
+    Bypass,
+}
+
+fn is_write_tool(t: &str) -> bool {
+    matches!(t, "write_file" | "edit_file")
+}
+
+fn is_exec_tool(t: &str) -> bool {
+    t == "bash"
+}
+
+impl PermissionMode {
+    /// Parse from config. `bypass` without `allow_bypass` is refused (downgraded
+    /// to `Default` with a stderr warning) — bypass requires the explicit flag.
+    pub fn from_config(mode: &str, allow_bypass: bool, allowed_tools: &[String]) -> Self {
+        match mode
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str()
+        {
+            "plan" => PermissionMode::Plan,
+            "accept_edits" => PermissionMode::AcceptEdits,
+            "read_only" => PermissionMode::ReadOnly,
+            "restricted" => PermissionMode::Restricted(allowed_tools.to_vec()),
+            "bypass" if allow_bypass => PermissionMode::Bypass,
+            "bypass" => {
+                eprintln!(
+                    "rusty-keys: RUSTYKEYS_PERMISSION_MODE=bypass ignored — set RUSTYKEYS_ALLOW_BYPASS=1 to enable; using default"
+                );
+                PermissionMode::Default
+            }
+            _ => PermissionMode::Default,
+        }
+    }
+
+    /// snake_case label.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionMode::Default => "default",
+            PermissionMode::Plan => "plan",
+            PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::ReadOnly => "read_only",
+            PermissionMode::Restricted(_) => "restricted",
+            PermissionMode::Bypass => "bypass",
+        }
+    }
+
+    /// Is `tool` permitted under this mode?
+    pub fn check(&self, tool: &str) -> Result<(), PolicyError> {
+        let forbid = || {
+            Err(PolicyError::ModeForbidden {
+                mode: self.as_str(),
+                tool: tool.to_string(),
+            })
+        };
+        match self {
+            PermissionMode::Default | PermissionMode::AcceptEdits | PermissionMode::Bypass => {
+                Ok(())
+            }
+            PermissionMode::Plan | PermissionMode::ReadOnly => {
+                if is_write_tool(tool) || is_exec_tool(tool) {
+                    forbid()
+                } else {
+                    Ok(())
+                }
+            }
+            PermissionMode::Restricted(allowed) => {
+                if allowed.iter().any(|t| t == tool) {
+                    Ok(())
+                } else {
+                    forbid()
+                }
+            }
+        }
+    }
+}
+
+/// A policy that gates tools by the active [`PermissionMode`] (PRD 02).
+pub struct ModePolicy {
+    mode: PermissionMode,
+}
+
+impl ModePolicy {
+    /// Gate tools by `mode`.
+    pub fn new(mode: PermissionMode) -> Self {
+        Self { mode }
+    }
+}
+
+#[async_trait]
+impl Policy for ModePolicy {
+    async fn before_tool(&self, name: &str, _args: &Value) -> Result<(), PolicyError> {
+        self.mode.check(name)
     }
 }
 
@@ -204,6 +325,45 @@ mod tests {
             .before_tool("read_file", &json!({"path": "rm -rf /"}))
             .await
             .is_ok());
+    }
+
+    #[test]
+    fn mode_gates_writes_and_exec() {
+        let ro = PermissionMode::ReadOnly;
+        assert!(ro.check("read_file").is_ok());
+        assert!(ro.check("write_file").is_err());
+        assert!(ro.check("edit_file").is_err());
+        assert!(ro.check("bash").is_err());
+
+        let plan = PermissionMode::Plan;
+        assert!(plan.check("grep").is_ok());
+        assert!(plan.check("write_file").is_err());
+
+        let edits = PermissionMode::AcceptEdits;
+        assert!(edits.check("write_file").is_ok());
+        assert!(edits.check("bash").is_ok());
+
+        let restricted = PermissionMode::Restricted(vec!["read_file".into()]);
+        assert!(restricted.check("read_file").is_ok());
+        assert!(restricted.check("grep").is_err());
+    }
+
+    #[test]
+    fn bypass_requires_explicit_flag() {
+        // Without the flag, bypass downgrades to Default.
+        assert_eq!(
+            PermissionMode::from_config("bypass", false, &[]),
+            PermissionMode::Default
+        );
+        assert_eq!(
+            PermissionMode::from_config("bypass", true, &[]),
+            PermissionMode::Bypass
+        );
+        // Hyphen/case normalization.
+        assert_eq!(
+            PermissionMode::from_config("Accept-Edits", false, &[]),
+            PermissionMode::AcceptEdits
+        );
     }
 
     #[tokio::test]

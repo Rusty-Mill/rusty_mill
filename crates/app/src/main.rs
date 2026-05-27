@@ -72,7 +72,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /permissions, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -86,8 +86,11 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /permissions  /reflect  /sleep  /groom  /help  /quit"
             ),
+            "/permissions" => {
+                println!("permission mode: {}", session.permission_mode());
+            }
             "/verify" => {
                 session.note_manual_verify()?;
                 match session.last_report() {

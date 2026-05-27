@@ -15,7 +15,9 @@ use rk_compose::{
     judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
 };
 use rk_config::Config;
-use rk_constrain::{BashGuard, PolicyChain, ToolDispatch, WorkspacePolicy};
+use rk_constrain::{
+    BashGuard, ModePolicy, PermissionMode, PolicyChain, ToolDispatch, WorkspacePolicy,
+};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall,
     register_agent_tool, register_builtins, register_task_management_tools, register_task_tools,
@@ -52,6 +54,7 @@ pub struct Session<M> {
     store: Arc<dyn Store>,
     task: Arc<TaskStore>,
     embedder: Option<Arc<dyn Embedder>>,
+    permission_mode: String,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -77,7 +80,15 @@ where
     /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
     pub fn new_at_depth(config: &Config, model: M, depth: usize) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
+        let mode = PermissionMode::from_config(
+            &config.permission_mode,
+            config.allow_bypass,
+            &config.allowed_tools,
+        );
+        // Mode gate runs first (cheapest, broadest), then the workspace boundary
+        // and BashGuard.
         let policy = PolicyChain::new()
+            .with(Arc::new(ModePolicy::new(mode.clone())))
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
             .with(Arc::new(BashGuard));
         let state_dir = config.workspace.join(".rustykeys");
@@ -126,6 +137,7 @@ where
             task,
             embedder: None,
             system: system_prompt(config.harness_level),
+            permission_mode: mode.as_str().to_string(),
             session_id,
             recall_k: DEFAULT_RECALL_K,
             idle_threshold,
@@ -396,6 +408,11 @@ where
             self.session_id,
             self.msg_counter.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    /// The active permission mode label (snake_case), for `/permissions`.
+    pub fn permission_mode(&self) -> &str {
+        &self.permission_mode
     }
 
     /// The advertised tool names (for the startup banner / diagnostics).
