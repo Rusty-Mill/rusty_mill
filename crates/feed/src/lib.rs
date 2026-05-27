@@ -10,6 +10,7 @@
 //! [`ToolRegistry`] (which implements `constrain::ToolDispatch`), and the
 //! built-in filesystem tools.
 
+mod agent;
 mod builtins;
 #[cfg(feature = "chaos")]
 pub mod chaos;
@@ -19,6 +20,7 @@ mod prompt;
 mod tool;
 mod web;
 
+pub use agent::{register_agent_tool, SessionFactory};
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
 #[cfg(any(test, feature = "fake-embed"))]

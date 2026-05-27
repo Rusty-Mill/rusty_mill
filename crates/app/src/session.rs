@@ -17,10 +17,11 @@ use rk_compose::{
 use rk_config::Config;
 use rk_constrain::{BashGuard, PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
-    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
-    register_task_tools, register_web_tools, system_prompt, AttributionContext, ConsolidationScope,
-    ConsolidationStats, Embedder, Memory, Observation, SqliteStore, SqliteStream, Store, Stream,
-    TaskState, TaskStore, ToolRegistry, DEFAULT_RECALL_K,
+    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall,
+    register_agent_tool, register_builtins, register_task_tools, register_web_tools, system_prompt,
+    AttributionContext, ConsolidationScope, ConsolidationStats, Embedder, Memory, Observation,
+    SessionFactory, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore, ToolError,
+    ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
@@ -66,9 +67,15 @@ impl<M> Session<M>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone,
 {
-    /// Build a session: workspace policy + traced built-in tools + verifier +
-    /// evidence journal + the short/long-term memory stores under `.rustykeys/`.
+    /// Build a top-level session (subagent depth 0).
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
+        Self::new_at_depth(config, model, 0)
+    }
+
+    /// Build a session at subagent `depth` (0 = top-level). The registered
+    /// `agent` tool spawns children at `depth + 1`, bounded by
+    /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
+    pub fn new_at_depth(config: &Config, model: M, depth: usize) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
         let policy = PolicyChain::new()
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
@@ -84,6 +91,19 @@ where
         if config.allow_web {
             register_web_tools(&mut registry);
         }
+        let max_agent_depth = std::env::var("RUSTYKEYS_MAX_AGENT_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
+        register_agent_tool(
+            &mut registry,
+            Arc::new(AgentFactory {
+                config: config.clone(),
+                model: model.clone(),
+                depth: depth + 1,
+                max_depth: max_agent_depth,
+            }),
+        );
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;
@@ -417,4 +437,61 @@ fn now() -> f64 {
 
 fn new_session_id() -> String {
     format!("s_{:x}", now().to_bits())
+}
+
+/// Builds + runs child sessions for the `agent` tool (ADR-0017). Holds the
+/// config + model to reconstruct a child; `depth` is the level children run at,
+/// bounded by `max_depth` (the `AgentDepthPolicy`). v1 ignores the `tools`
+/// subset — a child inherits the full registry.
+struct AgentFactory<M> {
+    config: Config,
+    model: M,
+    depth: usize,
+    max_depth: usize,
+}
+
+#[async_trait::async_trait]
+impl<M> SessionFactory for AgentFactory<M>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone,
+{
+    async fn spawn(&self, task: &str, _tools: Option<Vec<String>>) -> Result<String, ToolError> {
+        if self.depth > self.max_depth {
+            return Err(ToolError::Other(format!(
+                "agent depth {} exceeds RUSTYKEYS_MAX_AGENT_DEPTH={}",
+                self.depth, self.max_depth
+            )));
+        }
+        let child = Session::new_at_depth(&self.config, self.model.clone(), self.depth)
+            .map_err(|e| ToolError::Other(e.to_string()))?;
+        let outcome = child
+            .send(task)
+            .await
+            .map_err(|e| ToolError::Other(e.to_string()))?;
+        Ok(outcome.reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rk_kernel::fake::FakeLanguageModel;
+
+    #[tokio::test]
+    async fn agent_factory_blocks_beyond_max_depth() {
+        let config = Config::resolve(|k| match k {
+            "RUSTYKEYS_MODEL" => Some("fake".into()),
+            "RUSTYKEYS_WORKSPACE" => Some("/tmp".into()),
+            _ => None,
+        })
+        .unwrap();
+        // depth 4 > max 3 ⇒ spawn refuses before building (or running) a child.
+        let factory = AgentFactory {
+            config,
+            model: FakeLanguageModel::new(vec![]),
+            depth: 4,
+            max_depth: 3,
+        };
+        assert!(factory.spawn("task", None).await.is_err());
+    }
 }
