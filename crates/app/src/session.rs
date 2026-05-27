@@ -16,8 +16,9 @@ use rk_config::Config;
 use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
-    system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats, Memory, Observation,
-    SqliteStore, SqliteStream, Store, Stream, ToolRegistry, DEFAULT_RECALL_K,
+    register_task_tools, system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats,
+    Memory, Observation, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
+    ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
@@ -44,6 +45,7 @@ pub struct Session<M> {
     verifier: Verifier,
     stream: Arc<dyn Stream>,
     store: Arc<dyn Store>,
+    task: Arc<TaskStore>,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -65,12 +67,14 @@ where
         let tracer = Arc::new(Tracer::new());
         let policy =
             PolicyChain::new().with(Arc::new(WorkspacePolicy::new(config.workspace.clone())));
-        let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
-        register_builtins(&mut registry, config.workspace.clone());
-
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();
+
+        let task = Arc::new(TaskStore::open(&state_dir));
+        let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
+        register_builtins(&mut registry, config.workspace.clone());
+        register_task_tools(&mut registry, task.clone());
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;
@@ -89,6 +93,7 @@ where
             verifier: Verifier::deterministic(),
             stream: Arc::new(stream),
             store: Arc::new(store),
+            task,
             system: system_prompt(config.harness_level),
             session_id,
             recall_k: DEFAULT_RECALL_K,
@@ -111,25 +116,39 @@ where
                 .record(InterventionKind::UnverifiedFollowup, "", &msg_id)?;
         }
 
-        // Orient: recall long-term memory (boosted by the failure being recovered
-        // from), prepend it to the turn as oriented context.
+        // Orient: render the active Task State + recall long-term memory (the
+        // recall query is anchored on the goal; the boost is the failure being
+        // recovered from). Both land in the oriented context, NOT the static
+        // system prompt (PRD 03).
         let boost = self
             .last_attribution
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        let task_block = self.task.render();
+        let goal = self.task.goal();
+        let query = if goal.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{goal} {prompt}")
+        };
         let oriented = recall(
             self.store.as_ref(),
-            prompt,
+            &query,
             self.recall_k,
             now(),
             boost.as_ref(),
         )
         .await?;
-        let prompt_with_context = if oriented.block.is_empty() {
+        let extra: String = [task_block, oriented.block.clone()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let prompt_with_context = if extra.is_empty() {
             prompt.to_string()
         } else {
-            format!("{}\n\n{prompt}", oriented.block)
+            format!("{extra}\n\n{prompt}")
         };
 
         self.stream.append(&obs("user", "message", prompt)).await?;
@@ -239,6 +258,16 @@ where
     /// The most-recently-created `n` memories (`/memory`).
     pub async fn memory_recent(&self, n: usize) -> anyhow::Result<Vec<Memory>> {
         Ok(self.store.recent(n).await?)
+    }
+
+    /// Set the active task from the CLI (`/task`).
+    pub fn set_task(&self, goal: &str, criteria: Vec<String>, scope: Vec<String>) {
+        self.task.set_task(goal, criteria, scope);
+    }
+
+    /// A snapshot of the current Task State (`/task` with no args).
+    pub fn task_state(&self) -> TaskState {
+        self.task.snapshot()
     }
 
     async fn consolidate(&self, scope: ConsolidationScope) -> anyhow::Result<ConsolidationStats> {

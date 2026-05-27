@@ -8,6 +8,7 @@ mod groom;
 mod recall;
 mod store;
 mod stream;
+mod task;
 
 pub use consolidate::{
     apply as consolidate_apply, build_prompt as consolidation_prompt, AttributionContext,
@@ -17,6 +18,7 @@ pub use groom::{apply as groom_apply, build_prompt as groom_prompt};
 pub use recall::{recall, ContextEntry, RecallOutput, DEFAULT_RECALL_K};
 pub use store::SqliteStore;
 pub use stream::SqliteStream;
+pub use task::{register_task_tools, TaskState, TaskStatus, TaskStore};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
