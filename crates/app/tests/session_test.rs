@@ -38,7 +38,16 @@ async fn send_reads_workspace_file_then_replies_verified() {
     let session = Session::new(&config, model).unwrap();
     assert_eq!(
         session.tool_names(),
-        vec!["complete_task", "list_directory", "read_file", "set_task"]
+        vec![
+            "complete_task",
+            "edit_file",
+            "glob",
+            "grep",
+            "list_directory",
+            "read_file",
+            "set_task",
+            "write_file"
+        ]
     );
 
     let outcome = session.send("read note.txt").await.unwrap();

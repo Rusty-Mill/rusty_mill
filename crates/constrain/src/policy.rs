@@ -93,8 +93,17 @@ impl WorkspacePolicy {
 #[async_trait]
 impl Policy for WorkspacePolicy {
     async fn before_tool(&self, name: &str, args: &Value) -> Result<(), PolicyError> {
-        if matches!(name, "read_file" | "list_directory") {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        // Path-bearing tools are confined to the workspace. `glob`'s pattern and
+        // `grep`'s optional path are checked under the `pattern`/`path` keys.
+        let candidate = match name {
+            "read_file" | "list_directory" | "write_file" | "edit_file" => {
+                args.get("path").and_then(Value::as_str)
+            }
+            "glob" => args.get("pattern").and_then(Value::as_str),
+            "grep" => args.get("path").and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(path) = candidate {
             if !self.within_root(path) {
                 return Err(PolicyError::OutsideWorkspace(PathBuf::from(path)));
             }
