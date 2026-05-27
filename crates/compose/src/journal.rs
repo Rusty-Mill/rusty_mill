@@ -64,6 +64,30 @@ impl EvidenceJournal {
         self.append(&record)
     }
 
+    /// Append a consolidation changelog record (data-model §4.1).
+    pub fn record_improvement(
+        &self,
+        session_id: &str,
+        scope: &str,
+        created: usize,
+        updated: usize,
+        pruned: usize,
+        groomed: usize,
+    ) -> Result<(), ComposeError> {
+        let record = json!({
+            "v": SCHEMA_VERSION,
+            "kind": "improvement",
+            "ts": now_secs(),
+            "session_id": session_id,
+            "scope": scope,
+            "created": created,
+            "updated": updated,
+            "pruned": pruned,
+            "groomed": groomed,
+        });
+        self.append(&record)
+    }
+
     fn append(&self, record: &Value) -> Result<(), ComposeError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;

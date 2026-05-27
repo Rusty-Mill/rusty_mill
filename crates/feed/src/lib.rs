@@ -21,8 +21,9 @@ mod tool;
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
 pub use memory::{
-    recall, ContextEntry, Edge, MemType, Memory, Observation, RecallOutput, SqliteStore,
-    SqliteStream, Store, Stream, DEFAULT_RECALL_K,
+    consolidate_apply, consolidation_prompt, recall, AttributionContext, ConsolidationScope,
+    ConsolidationStats, ContextEntry, Edge, MemType, Memory, Observation, RecallOutput,
+    SqliteStore, SqliteStream, Store, Stream, DEFAULT_RECALL_K,
 };
 pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};
