@@ -12,6 +12,7 @@ rk-observe.workspace = true
 async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio.workspace = true

@@ -35,6 +35,7 @@
 | Variable | Default | Description |
 |---|---|---|
 | `RUSTYKEYS_PERMISSION_MODE` | `default` | `default` \| `plan` \| `accept_edits` \| `read_only` \| `restricted` \| `bypass` (PRD 02). |
+| `RUSTYKEYS_ALLOWED_TOOLS` | *(unset)* | CSV allowlist consulted only in `restricted` mode (PRD 02). |
 | `RUSTYKEYS_ALLOW_BYPASS` † | `0` | Required to be `1` before `bypass` mode disables policy checks (referenced by PRD 02 but previously absent from the table). |
 | `RUSTYKEYS_REDACT` † | `1` | Secret redaction of tool args/results before logging/journaling/IPC (ADR-0026). Disabling is strongly discouraged. |
 | `RUSTYKEYS_ISOLATION` † | `none` | `none` \| `sandboxed` (ADR-0030; roadmap-phase capability isolation). `none` keeps today's in-process behaviour. `sandboxed` runs tool side-effects (esp. `bash`) inside an OS sandbox with **network-deny-by-default**, egress enforced at the sandbox boundary; selects the `ToolExecutor` isolation seam below `feed` (does not change the `constrain` vetting contract). **Restart-only.** |

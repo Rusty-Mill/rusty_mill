@@ -197,11 +197,11 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** full permission modes + security checkers + interactive approval.
 **Depends on:** 6 · **Size:** M
 
-- [ ] `PermissionMode`: Default/Plan/AcceptEdits/ReadOnly/Restricted/Bypass `M` · #14
-- [ ] Security checkers: CommandInjection/PrivilegeEscalation/PathTraversal/NetworkExfil/DestructiveCommand `M`
-- [ ] `SecurityEvent` log `.rustykeys/security.jsonl` (structured `checker`) `S`
-- [ ] `ApprovalGate`: channel-based approval (uses the `async before_tool` from Phase 1) `M`
-- [ ] `/permissions` CLI `S`
+- [x] `PermissionMode`: Default/Plan/AcceptEdits/ReadOnly/Restricted/Bypass `M` · #14
+- [x] Security checkers: CommandInjection/PrivilegeEscalation/PathTraversal/NetworkExfil/DestructiveCommand `M`
+- [x] `SecurityEvent` log `.rustykeys/security.jsonl` (structured `checker`) `S`
+- [x] `ApprovalGate`: channel-based approval (uses the `async before_tool` from Phase 1) `M`
+- [x] `/permissions` CLI `S`
 
 **Definition of Done:** modes gate tool classes exhaustively; `Bypass` requires `RUSTYKEYS_ALLOW_BYPASS=1`; blocked approvals log a `tool_block` intervention.
 **Acceptance:** `ReadOnly` blocks writes/bash; an approval prompt round-trips Allow/AllowAlways/Block.
@@ -215,10 +215,10 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 (ADR-0030; threat-model.)
 **Depends on:** 6, 7 · **Size:** L
 
-- [ ] `ToolExecutor` seam below `feed` / above the OS — does NOT change the `constrain` vetting contract `M`
-- [ ] `RUSTYKEYS_ISOLATION = none | sandboxed`; default `none` (today's in-process behaviour) `S`
-- [ ] `sandboxed`: run tool side-effects (esp. `bash`) in an OS sandbox — Linux-first (landlock / namespaces, or a gVisor-class target), wrapping battle-tested primitives `L`
-- [ ] **Network-deny-by-default** inside the sandbox; egress enforced at the boundary (allowlist = capability grant, not destination filter) `M`
+- [x] `ToolExecutor` seam below `feed` / above the OS — does NOT change the `constrain` vetting contract `M`
+- [x] `RUSTYKEYS_ISOLATION = none | sandboxed`; default `none` (today's in-process behaviour) `S`
+- [x] `sandboxed`: run tool side-effects (esp. `bash`) in an OS sandbox — Linux-first (bubblewrap/firejail), wrapping battle-tested primitives; fails closed if none present `L`
+- [x] **Network-deny-by-default** inside the sandbox; egress enforced at the boundary (allowlist = capability grant, not destination filter) `M`
 - [ ] Pull-based OTLP export so isolation doesn't blind operators (the VM-blocked-EDR lesson) `S`
 
 **Definition of Done:** under `sandboxed`, a `bash` attempt to read `~/.aws/credentials` or POST to an external host fails closed at the boundary regardless of the in-process checkers; `none` is byte-for-byte today's behaviour.

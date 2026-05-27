@@ -15,6 +15,7 @@ mod builtins;
 #[cfg(feature = "chaos")]
 pub mod chaos;
 mod error;
+mod exec;
 pub mod memory;
 mod prompt;
 mod taskmgmt;
@@ -22,8 +23,11 @@ mod tool;
 mod web;
 
 pub use agent::{register_agent_tool, SessionFactory};
-pub use builtins::register_builtins;
+pub use builtins::{register_builtins, register_builtins_with_executor};
 pub use error::{outcome_from_error, ToolError};
+pub use exec::{
+    executor_for, Isolation, LocalExecutor, SandboxLauncher, SandboxedExecutor, ToolExecutor,
+};
 #[cfg(any(test, feature = "fake-embed"))]
 pub use memory::HashEmbedder;
 pub use memory::{

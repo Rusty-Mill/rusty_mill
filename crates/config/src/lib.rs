@@ -51,6 +51,16 @@ pub struct Config {
     /// Whether web tools are enabled, from `RUSTYKEYS_ALLOW_WEB` (`1`/`true`).
     /// Off by default (PRD 03; the SSRF guard still applies when on).
     pub allow_web: bool,
+    /// Raw permission mode, from `RUSTYKEYS_PERMISSION_MODE` (default `default`).
+    /// Parsed by `constrain::PermissionMode` (PRD 02).
+    pub permission_mode: String,
+    /// Whether `bypass` mode is permitted, from `RUSTYKEYS_ALLOW_BYPASS` (`1`).
+    pub allow_bypass: bool,
+    /// Allowed tools for `restricted` mode, from `RUSTYKEYS_ALLOWED_TOOLS` (CSV).
+    pub allowed_tools: Vec<String>,
+    /// Raw isolation profile, from `RUSTYKEYS_ISOLATION` (default `none`).
+    /// Parsed by `feed::Isolation` (ADR-0030 / Phase 7B).
+    pub isolation: String,
 }
 
 impl Config {
@@ -80,10 +90,24 @@ impl Config {
 
         let embed_model = get("RUSTYKEYS_EMBED_MODEL").filter(|s| !s.trim().is_empty());
 
-        let allow_web = matches!(
-            get("RUSTYKEYS_ALLOW_WEB").as_deref(),
-            Some("1") | Some("true") | Some("TRUE")
-        );
+        let truthy =
+            |v: Option<String>| matches!(v.as_deref(), Some("1") | Some("true") | Some("TRUE"));
+        let allow_web = truthy(get("RUSTYKEYS_ALLOW_WEB"));
+        let allow_bypass = truthy(get("RUSTYKEYS_ALLOW_BYPASS"));
+        let permission_mode = get("RUSTYKEYS_PERMISSION_MODE")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string());
+        let allowed_tools = get("RUSTYKEYS_ALLOWED_TOOLS")
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let isolation = get("RUSTYKEYS_ISOLATION")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "none".to_string());
 
         Ok(Self {
             model,
@@ -91,6 +115,10 @@ impl Config {
             harness_level,
             embed_model,
             allow_web,
+            permission_mode,
+            allow_bypass,
+            allowed_tools,
+            isolation,
         })
     }
 }
@@ -151,6 +179,17 @@ mod tests {
         assert_eq!(cfg.model, "ollama/llama3");
         assert_eq!(cfg.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(cfg.harness_level, HarnessLevel::H3);
+        assert_eq!(cfg.isolation, "none"); // default
+    }
+
+    #[test]
+    fn resolves_isolation_profile() {
+        let cfg = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_ISOLATION", "sandboxed"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.isolation, "sandboxed");
     }
 
     #[test]

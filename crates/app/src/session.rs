@@ -15,16 +15,19 @@ use rk_compose::{
     judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
 };
 use rk_config::Config;
-use rk_constrain::{BashGuard, PolicyChain, ToolDispatch, WorkspacePolicy};
+use rk_constrain::{
+    BashGuard, ModePolicy, PermissionMode, PolicyChain, SecurityLog, ToolDispatch, WorkspacePolicy,
+};
 use rk_feed::{
-    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall,
-    register_agent_tool, register_builtins, register_task_management_tools, register_task_tools,
-    register_web_tools, system_prompt, AttributionContext, BackgroundTaskStore, ConsolidationScope,
-    ConsolidationStats, Embedder, Memory, Observation, SessionFactory, SqliteStore, SqliteStream,
-    Store, Stream, TaskState, TaskStore, ToolError, ToolRegistry, DEFAULT_RECALL_K,
+    consolidate_apply, consolidation_prompt, executor_for, groom_apply, groom_prompt, recall,
+    register_agent_tool, register_builtins_with_executor, register_task_management_tools,
+    register_task_tools, register_web_tools, system_prompt, AttributionContext,
+    BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, Isolation, Memory,
+    Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
+    ToolError, ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
-use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
+use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
 
 const CONSOLIDATE_SYSTEM: &str =
     "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
@@ -52,6 +55,8 @@ pub struct Session<M> {
     store: Arc<dyn Store>,
     task: Arc<TaskStore>,
     embedder: Option<Arc<dyn Embedder>>,
+    permission_mode: String,
+    isolation: String,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -77,16 +82,33 @@ where
     /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
     pub fn new_at_depth(config: &Config, model: M, depth: usize) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
-        let policy = PolicyChain::new()
-            .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
-            .with(Arc::new(BashGuard));
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();
 
+        let mode = PermissionMode::from_config(
+            &config.permission_mode,
+            config.allow_bypass,
+            &config.allowed_tools,
+        );
+        // Mode gate runs first (cheapest, broadest), then the workspace boundary
+        // and the bash security checkers (which log blocks to security.jsonl).
+        let security_log = Arc::new(SecurityLog::new(
+            state_dir.join("security.jsonl"),
+            session_id.clone(),
+        ));
+        let policy = PolicyChain::new()
+            .with(Arc::new(ModePolicy::new(mode.clone())))
+            .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
+            .with(Arc::new(BashGuard::new().with_log(security_log)));
+
         let task = Arc::new(TaskStore::open(&state_dir));
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
-        register_builtins(&mut registry, config.workspace.clone());
+        // Isolation seam (ADR-0030): `none` runs bash in-process; `sandboxed`
+        // wraps it in an OS sandbox (network-deny + workspace-only FS).
+        let executor = executor_for(Isolation::from_config(&config.isolation));
+        let isolation = executor.profile().to_string();
+        register_builtins_with_executor(&mut registry, config.workspace.clone(), executor);
         register_task_tools(&mut registry, task.clone());
         register_task_management_tools(&mut registry, Arc::new(BackgroundTaskStore::new()));
         if config.allow_web {
@@ -126,6 +148,8 @@ where
             task,
             embedder: None,
             system: system_prompt(config.harness_level),
+            permission_mode: mode.as_str().to_string(),
+            isolation,
             session_id,
             recall_k: DEFAULT_RECALL_K,
             idle_threshold,
@@ -224,6 +248,21 @@ where
         let turn_id = format!("{}_turn_{n}", self.session_id);
         self.journal
             .record_turn(&self.session_id, &turn_id, &reply, &episode, &report)?;
+
+        // A policy block (workspace boundary, security checker, mode gate, or
+        // approval denial) is the permission boundary working — recorded as a
+        // `tool_block` intervention, never an `unsafe_invalid` outcome (PRD 02/05).
+        if episode
+            .tool_events
+            .iter()
+            .any(|e| e.outcome.status == ToolStatus::Blocked)
+        {
+            self.interventions.record(
+                InterventionKind::ToolBlock,
+                "policy blocked a tool call",
+                &format!("{turn_id}_block"),
+            )?;
+        }
 
         // Capture the turn into the short-term stream.
         self.stream
@@ -396,6 +435,16 @@ where
             self.session_id,
             self.msg_counter.fetch_add(1, Ordering::Relaxed)
         )
+    }
+
+    /// The active permission mode label (snake_case), for `/permissions`.
+    pub fn permission_mode(&self) -> &str {
+        &self.permission_mode
+    }
+
+    /// The active isolation profile (`none`/`sandboxed`), for `/permissions`.
+    pub fn isolation(&self) -> &str {
+        &self.isolation
     }
 
     /// The advertised tool names (for the startup banner / diagnostics).

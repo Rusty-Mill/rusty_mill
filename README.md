@@ -50,12 +50,16 @@ The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 | `RUSTYKEYS_HARNESS_LEVEL` | `h1` | Maturity level `h0`–`h3` |
 | `RUSTYKEYS_EMBED_MODEL` | *(unset)* | Embedding model ⇒ semantic recall (else lexical) |
 | `RUSTYKEYS_ALLOW_WEB` | *(off)* | `1` enables the web tools (SSRF-guarded) |
+| `RUSTYKEYS_PERMISSION_MODE` | `default` | `default`/`plan`/`accept_edits`/`read_only`/`restricted`/`bypass` |
+| `RUSTYKEYS_ALLOWED_TOOLS` | *(unset)* | CSV allowlist for `restricted` mode |
+| `RUSTYKEYS_ALLOW_BYPASS` | *(off)* | `1` required to enable `bypass` mode |
+| `RUSTYKEYS_ISOLATION` | `none` | `none` (in-process) or `sandboxed` (OS sandbox for `bash`; Linux) |
 | `RUSTYKEYS_MAX_AGENT_DEPTH` | `3` | Subagent recursion bound |
 | `RUSTYKEYS_IDLE_THRESHOLD` | `8` | Observations before idle consolidation |
 
 ### REPL commands
 
-`/verify` · `/mhir` · `/memory` · `/task` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
+`/verify` · `/mhir` · `/memory` · `/task` · `/permissions` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
 
 ## Architecture
 
@@ -102,7 +106,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–6 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–7B of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -112,10 +116,12 @@ testable in CI without a live provider.
 - **4 · Task State + judge** — working-memory task + the semantic `CriteriaJudge` (`judge_unavailable` is never a silent pass).
 - **5 · Embeddings** — semantic recall on SQLite (cosine + lexical fallback) via any OpenAI-compatible embed endpoint. *(DuckDB is a deferred at-scale backend.)*
 - **6 · Tool suite** — the filesystem/shell/web/subagent/task tools above.
+- **7 · Permission system** — permission modes (`ModePolicy`), the `SecurityCheck` suite + `security.jsonl`, and the channel-based `ApprovalGate`; blocks log a `tool_block` intervention.
+- **7B · Capability isolation** — the `ToolExecutor` seam (`RUSTYKEYS_ISOLATION=none|sandboxed`); `sandboxed` runs `bash` inside an OS sandbox (bubblewrap/firejail) with network-deny + workspace-only FS, failing closed if no launcher is present.
 
-Remaining: permission modes (7), capability isolation (7B), token/context
-management (8), plan mode (9), H3 episode packages (10), entropy auditor (11),
-MCP (12), extended CLI (13), web gateway (14), desktop frontend (15).
+Remaining: token/context management (8), plan mode (9), H3 episode packages
+(10), entropy auditor (11), MCP (12), extended CLI (13), web gateway (14),
+desktop frontend (15).
 
 ## Building & testing
 

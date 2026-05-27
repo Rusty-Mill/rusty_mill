@@ -5,9 +5,18 @@
 //! `constrain` — the gate: vet every tool call before dispatch (ADR-0007).
 //! Owns the [`Policy`] and [`ToolDispatch`] traits (ARCHITECTURE §4).
 
+mod approval;
 mod policy;
+mod security;
 
-pub use policy::{BashGuard, Policy, PolicyChain, PolicyError, WorkspacePolicy};
+pub use approval::{ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger};
+pub use policy::{
+    BashGuard, ModePolicy, PermissionMode, Policy, PolicyChain, PolicyError, WorkspacePolicy,
+};
+pub use security::{
+    default_checkers, CommandInjectionCheck, DestructiveCommandCheck, NetworkExfilCheck,
+    PathTraversalCheck, PrivilegeEscalationCheck, SecurityCheck, SecurityLog,
+};
 
 use async_trait::async_trait;
 use rk_observe::ToolOutcome;
