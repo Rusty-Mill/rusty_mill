@@ -1047,16 +1047,90 @@ dependencies = [
 ]
 
 [[package]]
-name = "rk-spike"
+name = "rk-app"
+version = "0.0.0"
+dependencies = [
+ "aisdk",
+ "anyhow",
+ "async-trait",
+ "rk-config",
+ "rk-constrain",
+ "rk-feed",
+ "rk-kernel",
+ "rk-observe",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rk-config"
+version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rk-constrain"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "rk-config",
+ "rk-observe",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "rk-feed"
 version = "0.0.0"
 dependencies = [
  "aisdk",
  "async-trait",
+ "rk-config",
+ "rk-constrain",
+ "rk-observe",
  "schemars",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+]
+
+[[package]]
+name = "rk-kernel"
+version = "0.0.0"
+dependencies = [
+ "aisdk",
+ "async-trait",
+ "futures",
+ "rk-config",
+ "rk-constrain",
+ "rk-kernel",
+ "rk-observe",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "rk-mcp"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "rk-config",
+ "rk-constrain",
+ "rk-feed",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rk-observe"
+version = "0.0.0"
+dependencies = [
+ "rk-config",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

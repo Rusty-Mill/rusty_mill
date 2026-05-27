@@ -92,7 +92,11 @@ the wrap doesn't already deliver.
 
 ## Disposition
 
-`crates/spike` is a throwaway. Keep it as a reference until Phase 1 lands the real
-7-crate workspace, then delete it. Carry forward: the `ToolFn`/`AiSdkTool` shape,
-the `ToolDispatch` seam, the structural `ToolOutcome`, and the Strategy-B-with-
-upstream-PR decision.
+`crates/spike` was the throwaway. It has been **deleted** now that Phase 1 landed
+the real crates (`config`, `observe`, `constrain`, `feed`, `kernel`, `app`), which
+carry forward its lessons: the `ToolFn`/`AiSdkTool` shape (`feed`), the
+`ToolDispatch` seam (`constrain`), the structural `ToolOutcome` (`observe`), and
+the **Strategy A** kernel bridge (`kernel`) — aisdk's high-level loop with policy
+enforced inside the tool closure. The optional upstream PR (public `TaggedMessage`
+/ `Vec<Message>` options ctor) remains the path to Strategy B if we later want the
+kernel to own the loop; it blocks nothing today.

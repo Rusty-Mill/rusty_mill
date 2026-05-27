@@ -1,10 +1,5 @@
-//! Structured tool result contract (ADR-0022).
-//!
-//! Status is carried *structurally* on [`ToolStatus`], never re-parsed from a
-//! magic string prefix. One [`ToolOutcome::render`] is the single place the
-//! model-facing string is produced.
-
-use crate::error::ToolError;
+//! The structured tool-result contract (ADR-0022). Status is carried
+//! *structurally* on [`ToolStatus`], never re-parsed from a string prefix.
 
 /// The reconciled 5-member tool status (data-model §7; ADR-0036).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,33 +30,45 @@ impl ToolStatus {
 }
 
 /// A structured tool result: status + payload. Replaces prefix-sniffing.
+///
+/// Constructors are deliberately status-specific; the mapping from a tool's own
+/// error enum lives in the crate that owns the tools (`feed`), keeping `observe`
+/// a leaf above `config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolOutcome {
-    /// Authoritative status, read directly by the tracer/observe layer.
+    /// Authoritative status, read directly by observers.
     pub status: ToolStatus,
-    /// The tool's textual payload (result, error message, or block reason).
+    /// Textual payload (result, error message, or block reason).
     pub payload: String,
 }
 
 impl ToolOutcome {
+    /// Construct with an explicit status.
+    pub fn new(status: ToolStatus, payload: impl Into<String>) -> Self {
+        Self {
+            status,
+            payload: payload.into(),
+        }
+    }
+
     /// A successful result.
     pub fn ok(payload: impl Into<String>) -> Self {
-        Self { status: ToolStatus::Ok, payload: payload.into() }
+        Self::new(ToolStatus::Ok, payload)
     }
 
     /// A policy block (the tool body never ran).
     pub fn blocked(reason: impl Into<String>) -> Self {
-        Self { status: ToolStatus::Blocked, payload: reason.into() }
+        Self::new(ToolStatus::Blocked, reason)
     }
 
     /// An execution error.
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { status: ToolStatus::Error, payload: msg.into() }
+        Self::new(ToolStatus::Error, msg)
     }
 
-    /// The single model-facing renderer. The status is a structural prefix the
-    /// model can read, but observe reads [`ToolOutcome::status`] directly — the
-    /// string is never parsed back.
+    /// The single model-facing renderer. Non-`Ok` statuses get a structural
+    /// prefix the model can read; observers read [`ToolOutcome::status`]
+    /// directly, so the string is never parsed back.
     pub fn render(&self) -> String {
         match self.status {
             ToolStatus::Ok => self.payload.clone(),
@@ -70,12 +77,14 @@ impl ToolOutcome {
     }
 }
 
-impl From<ToolError> for ToolOutcome {
-    fn from(e: ToolError) -> Self {
-        match e {
-            ToolError::Timeout => Self { status: ToolStatus::Timeout, payload: e.to_string() },
-            ToolError::Truncated(s) => Self { status: ToolStatus::Truncated, payload: s },
-            other => Self::error(other.to_string()),
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_carries_status_structurally() {
+        assert_eq!(ToolOutcome::ok("p").render(), "p");
+        assert_eq!(ToolOutcome::blocked("no").render(), "[blocked] no");
+        assert_eq!(ToolOutcome::error("boom").render(), "[error] boom");
     }
 }
