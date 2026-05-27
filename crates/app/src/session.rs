@@ -19,11 +19,12 @@ use rk_constrain::{
     BashGuard, ModePolicy, PermissionMode, PolicyChain, SecurityLog, ToolDispatch, WorkspacePolicy,
 };
 use rk_feed::{
-    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall,
-    register_agent_tool, register_builtins, register_task_management_tools, register_task_tools,
-    register_web_tools, system_prompt, AttributionContext, BackgroundTaskStore, ConsolidationScope,
-    ConsolidationStats, Embedder, Memory, Observation, SessionFactory, SqliteStore, SqliteStream,
-    Store, Stream, TaskState, TaskStore, ToolError, ToolRegistry, DEFAULT_RECALL_K,
+    consolidate_apply, consolidation_prompt, executor_for, groom_apply, groom_prompt, recall,
+    register_agent_tool, register_builtins_with_executor, register_task_management_tools,
+    register_task_tools, register_web_tools, system_prompt, AttributionContext,
+    BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, Isolation, Memory,
+    Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
+    ToolError, ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
@@ -55,6 +56,7 @@ pub struct Session<M> {
     task: Arc<TaskStore>,
     embedder: Option<Arc<dyn Embedder>>,
     permission_mode: String,
+    isolation: String,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -102,7 +104,11 @@ where
 
         let task = Arc::new(TaskStore::open(&state_dir));
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
-        register_builtins(&mut registry, config.workspace.clone());
+        // Isolation seam (ADR-0030): `none` runs bash in-process; `sandboxed`
+        // wraps it in an OS sandbox (network-deny + workspace-only FS).
+        let executor = executor_for(Isolation::from_config(&config.isolation));
+        let isolation = executor.profile().to_string();
+        register_builtins_with_executor(&mut registry, config.workspace.clone(), executor);
         register_task_tools(&mut registry, task.clone());
         register_task_management_tools(&mut registry, Arc::new(BackgroundTaskStore::new()));
         if config.allow_web {
@@ -143,6 +149,7 @@ where
             embedder: None,
             system: system_prompt(config.harness_level),
             permission_mode: mode.as_str().to_string(),
+            isolation,
             session_id,
             recall_k: DEFAULT_RECALL_K,
             idle_threshold,
@@ -433,6 +440,11 @@ where
     /// The active permission mode label (snake_case), for `/permissions`.
     pub fn permission_mode(&self) -> &str {
         &self.permission_mode
+    }
+
+    /// The active isolation profile (`none`/`sandboxed`), for `/permissions`.
+    pub fn isolation(&self) -> &str {
+        &self.isolation
     }
 
     /// The advertised tool names (for the startup banner / diagnostics).

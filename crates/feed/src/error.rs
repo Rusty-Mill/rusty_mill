@@ -22,6 +22,10 @@ pub enum ToolError {
     /// The tool exceeded its time budget.
     #[error("tool timed out")]
     Timeout,
+    /// `sandboxed` isolation was requested but could not be established
+    /// (e.g. no sandbox launcher present) — the call fails closed (ADR-0030).
+    #[error("sandbox unavailable: {0}")]
+    Sandbox(String),
     /// The result was produced but capped; the payload is the truncated text.
     #[error("result truncated")]
     Truncated(String),

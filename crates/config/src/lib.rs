@@ -58,6 +58,9 @@ pub struct Config {
     pub allow_bypass: bool,
     /// Allowed tools for `restricted` mode, from `RUSTYKEYS_ALLOWED_TOOLS` (CSV).
     pub allowed_tools: Vec<String>,
+    /// Raw isolation profile, from `RUSTYKEYS_ISOLATION` (default `none`).
+    /// Parsed by `feed::Isolation` (ADR-0030 / Phase 7B).
+    pub isolation: String,
 }
 
 impl Config {
@@ -102,6 +105,9 @@ impl Config {
                     .collect()
             })
             .unwrap_or_default();
+        let isolation = get("RUSTYKEYS_ISOLATION")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "none".to_string());
 
         Ok(Self {
             model,
@@ -112,6 +118,7 @@ impl Config {
             permission_mode,
             allow_bypass,
             allowed_tools,
+            isolation,
         })
     }
 }
@@ -172,6 +179,17 @@ mod tests {
         assert_eq!(cfg.model, "ollama/llama3");
         assert_eq!(cfg.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(cfg.harness_level, HarnessLevel::H3);
+        assert_eq!(cfg.isolation, "none"); // default
+    }
+
+    #[test]
+    fn resolves_isolation_profile() {
+        let cfg = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_ISOLATION", "sandboxed"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.isolation, "sandboxed");
     }
 
     #[test]

@@ -5,8 +5,10 @@
 //! the workspace root so policy and execution agree on what a path means.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::ToolError;
+use crate::exec::{LocalExecutor, ToolExecutor};
 use crate::tool::{AiSdkTool, ToolRegistry};
 use serde_json::Value;
 
@@ -217,15 +219,20 @@ async fn grep_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     Ok(out.join("\n"))
 }
 
-async fn bash_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
+async fn bash_impl(
+    executor: Arc<dyn ToolExecutor>,
+    root: PathBuf,
+    args: Value,
+) -> Result<String, ToolError> {
     let command = arg_str(&args, "command")?;
     let timeout_ms = args
         .get("timeout_ms")
         .and_then(Value::as_u64)
         .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
 
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c").arg(&command).current_dir(&root);
+    // The executor applies the isolation profile (ADR-0030). Vetting already
+    // ran in `constrain`; this governs *how* the vetted command runs.
+    let mut cmd = executor.build(&command, &root)?;
     let run = cmd.output();
 
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run).await {
@@ -250,8 +257,19 @@ async fn bash_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     }
 }
 
-/// Register the built-in filesystem tools, rooted at `workspace`.
+/// Register the built-in filesystem/shell tools, rooted at `workspace`, running
+/// `bash` under the default (no-isolation) executor.
 pub fn register_builtins(registry: &mut ToolRegistry, workspace: PathBuf) {
+    register_builtins_with_executor(registry, workspace, Arc::new(LocalExecutor));
+}
+
+/// Like [`register_builtins`] but with an explicit [`ToolExecutor`] for `bash`,
+/// so the caller can select the isolation profile (ADR-0030 / Phase 7B).
+pub fn register_builtins_with_executor(
+    registry: &mut ToolRegistry,
+    workspace: PathBuf,
+    executor: Arc<dyn ToolExecutor>,
+) {
     macro_rules! reg {
         ($desc:expr, $imp:ident) => {{
             let root = workspace.clone();
@@ -269,7 +287,14 @@ pub fn register_builtins(registry: &mut ToolRegistry, workspace: PathBuf) {
     reg!(descriptors::edit_file_descriptor(), edit_file_impl);
     reg!(descriptors::glob_descriptor(), glob_impl);
     reg!(descriptors::grep_descriptor(), grep_impl);
-    reg!(descriptors::bash_descriptor(), bash_impl);
+    {
+        let root = workspace.clone();
+        let exec = executor.clone();
+        registry.insert(Box::new(AiSdkTool::new(
+            descriptors::bash_descriptor(),
+            move |args| bash_impl(exec.clone(), root.clone(), args),
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -333,15 +358,38 @@ mod tests {
     #[tokio::test]
     async fn bash_runs_and_surfaces_nonzero_exit_as_data() {
         let root = tmp("bash");
-        let ok = bash_impl(root.clone(), json!({"command": "echo hello"}))
+        let exec: Arc<dyn ToolExecutor> = Arc::new(LocalExecutor);
+        let ok = bash_impl(exec.clone(), root.clone(), json!({"command": "echo hello"}))
             .await
             .unwrap();
         assert_eq!(ok, "hello");
         // Non-zero exit is surfaced (Ok), not a tool error.
-        let nonzero = bash_impl(root.clone(), json!({"command": "exit 3"}))
+        let nonzero = bash_impl(exec, root.clone(), json!({"command": "exit 3"}))
             .await
             .unwrap();
         assert!(nonzero.starts_with("[exit 3]"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn bash_propagates_executor_failure_closed() {
+        // A `ToolExecutor` that can't establish isolation makes `bash` fail
+        // closed — the command body never runs (ADR-0030).
+        struct FailClosed;
+        impl ToolExecutor for FailClosed {
+            fn build(&self, _cmd: &str, _ws: &Path) -> Result<tokio::process::Command, ToolError> {
+                Err(ToolError::Sandbox("no launcher".into()))
+            }
+            fn profile(&self) -> &'static str {
+                "sandboxed"
+            }
+        }
+        let root = tmp("bash-sandbox");
+        let exec: Arc<dyn ToolExecutor> = Arc::new(FailClosed);
+        let err = bash_impl(exec, root.clone(), json!({"command": "echo hi"}))
+            .await
+            .expect_err("must fail closed");
+        assert!(matches!(err, ToolError::Sandbox(_)));
         let _ = std::fs::remove_dir_all(&root);
     }
 

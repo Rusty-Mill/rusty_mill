@@ -89,7 +89,11 @@ where
                 "commands: /verify  /mhir  /memory  /task  /permissions  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
-                println!("permission mode: {}", session.permission_mode());
+                println!(
+                    "permission mode: {}  ·  isolation: {}",
+                    session.permission_mode(),
+                    session.isolation()
+                );
             }
             "/verify" => {
                 session.note_manual_verify()?;
