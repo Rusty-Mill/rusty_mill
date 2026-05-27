@@ -40,8 +40,177 @@ pub struct ToolRegistry {
 }
 ```
 
-Built-in tools: `read_file`, `list_directory`. Agent-facing tools: `set_task`,
-`complete_task` (registered from the memory module — same pattern as Keystone).
+MCP server tools are registered alongside built-ins with namespaced names
+(`mcp__<server>__<tool>`) — see PRD 07.
+
+## Built-in tool suite
+
+The full set of tools registered at `Session::new()`. All are policy-vetted
+before dispatch.
+
+### Filesystem tools
+
+| Tool | Description |
+|---|---|
+| `read_file(path)` | Read a file; returns content as string |
+| `write_file(path, content)` | Create or overwrite a file; creates parent dirs |
+| `edit_file(path, old_string, new_string)` | Targeted replacement; fails if 0 or 2+ matches |
+| `list_directory(path)` | List directory contents |
+| `glob(pattern)` | Pattern-matched file listing; workspace-relative paths |
+| `grep(pattern, path?, recursive?)` | Content search; returns `path:line: content`, capped at 200 |
+
+`edit_file` enforces a read-before-edit invariant in AcceptEdits mode: the policy
+checks that `read_file` was called on the same path in the current episode.
+
+### Shell tool
+
+```rust
+#[tool]
+/// Execute a shell command in the workspace.
+pub async fn bash(command: String, timeout_ms: Option<u64>) -> Result<String, ToolError>
+```
+
+- Runs via `tokio::process::Command`; captures stdout + stderr combined
+- Default timeout: 30s; returns `"TIMEOUT: …"` on expiry
+- Non-zero exit code: `"ERROR (exit {code}): …"`
+- Vetted by `BashGuard` (see PRD 02) before execution
+
+Background variant:
+
+```rust
+#[tool]
+/// Spawn a long-running process; returns a handle for logs/stop.
+pub async fn bash_background(command: String) -> Result<String, ToolError>
+
+#[tool]
+/// Get accumulated output from a background process by handle.
+pub async fn bash_logs(handle: String) -> Result<String, ToolError>
+
+#[tool]
+/// List all running background processes.
+pub async fn bash_list() -> Result<String, ToolError>
+
+#[tool]
+/// Stop a background process by handle.
+pub async fn bash_kill(handle: String) -> Result<String, ToolError>
+```
+
+### Web tools
+
+Blocked by default; enabled by `RUSTYKEYS_ALLOW_WEB=1`.
+
+```rust
+#[tool]
+/// Fetch a URL and return its content as plain text (HTML stripped).
+pub async fn web_fetch(url: String, prompt: Option<String>) -> Result<String, ToolError>
+
+#[tool]
+/// Search the web and return structured results (title, URL, snippet).
+pub async fn web_search(query: String, num_results: Option<usize>) -> Result<String, ToolError>
+```
+
+`web_fetch` uses `reqwest` + HTML stripping; content capped at ~50k chars.
+`web_search` backend configured via `RUSTYKEYS_SEARCH_PROVIDER`
+(`brave` | `serper` | `duckduckgo`).
+
+### Agent tool (subagent spawning)
+
+```rust
+#[tool]
+/// Spawn a subagent Session to complete a focused subtask.
+pub async fn agent(task: String, tools: Option<Vec<String>>) -> Result<String, ToolError>
+```
+
+Creates a child `Session` with an isolated history and the specified tool subset.
+Inherits `Config` and `WorkspacePolicy` from the parent. `AgentDepthPolicy`
+prevents recursion beyond `RUSTYKEYS_MAX_AGENT_DEPTH` (default 3).
+The child's episode is recorded as a nested entry in `EvidenceJournal`.
+
+### Task management tools
+
+Manage background operations the agent initiates (subagent runs, long bash
+processes). Distinct from `TaskState` (the goal/criteria working memory).
+
+```rust
+#[tool]
+/// Create a background task; returns its ID.
+pub async fn task_create(description: String) -> Result<String, ToolError>
+
+#[tool]
+/// Get status and recent output of a task by ID.
+pub async fn task_get(id: String) -> Result<String, ToolError>
+
+#[tool]
+/// List all tasks with their current status.
+pub async fn task_list() -> Result<String, ToolError>
+
+#[tool]
+/// Append a note or status update to a task.
+pub async fn task_update(id: String, note: String) -> Result<String, ToolError>
+
+#[tool]
+/// Stop a running task by ID.
+pub async fn task_stop(id: String) -> Result<String, ToolError>
+
+#[tool]
+/// Retrieve the full output of a completed task.
+pub async fn task_output(id: String) -> Result<String, ToolError>
+```
+
+`TaskStore` holds an in-session registry; tasks persist for the session lifetime
+but not across sessions. `task_stop` sends a `CancellationToken` to the task's
+`tokio` handle.
+
+### Plan mode tools
+
+```rust
+#[tool]
+/// Enter plan mode: writes and bash are blocked until the user approves.
+pub fn enter_plan_mode() -> Result<String, ToolError>
+
+#[tool]
+/// Exit plan mode and request user approval before execution resumes.
+pub fn exit_plan_mode() -> Result<String, ToolError>
+```
+
+See PRD 06 for the plan mode lifecycle.
+
+### H3 verification tools
+
+Active only when `RUSTYKEYS_HARNESS_LEVEL=h3`. See PRD 05 for full design.
+
+```rust
+#[tool]
+/// Run a deterministic check and record observed vs expected output.
+pub async fn reproduce(check_name: String) -> Result<String, ToolError>
+
+#[tool]
+/// Record a structured failure attribution before making any edit.
+pub async fn attribute_failure(
+    observed: String, expected: String,
+    failure_type: String, layer: String,
+    evidence: String, next_action: String,
+) -> Result<String, ToolError>
+
+#[tool]
+/// Generate and record a verification report linking requirements to evidence.
+pub async fn verification_report(
+    requirements: Vec<RequirementEvidence>,
+    limits: String,
+) -> Result<String, ToolError>
+```
+
+### Memory tools (registered from memory module)
+
+```rust
+#[tool]
+/// Set the active task goal and success criteria.
+pub async fn set_task(goal: String, success_criteria: Vec<String>) -> Result<String, ToolError>
+
+#[tool]
+/// Mark the active task as complete.
+pub async fn complete_task(summary: String) -> Result<String, ToolError>
+```
 
 ## Memory
 
@@ -184,7 +353,12 @@ the context came from.
   semantic recall. Absent → lexical fallback.
 - **DuckDB backend**: `RUSTYKEYS_LONG_TERM_BACKEND=duckdb` for native vector
   search at scale (Phase 5).
+- **MCP tools**: external MCP server tools registered in `ToolRegistry` with
+  `mcp__<server>__<tool>` namespacing — see PRD 07.
 - **Hierarchical rollups**: multi-cadence temporal consolidation (hourly/daily/
   weekly summaries-of-summaries). Tracked in BACKLOG.
 - **Auto-maintained focus**: infer/refresh Task State automatically for turns
   where the agent doesn't call `set_task`. Additive to agent-driven approach.
+- **Tool result classification**: explicit `ToolResultClassifier` (ok / blocked /
+  error / truncated / timeout) for richer attribution — currently inferred from
+  result string prefix.

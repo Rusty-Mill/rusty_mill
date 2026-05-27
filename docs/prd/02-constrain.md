@@ -44,13 +44,26 @@ files must operate within the configured workspace root.
 ```rust
 pub struct WorkspacePolicy {
     workspace_root: PathBuf,
+    web_allowed: bool,
+    mode: PermissionMode,
 }
 
 impl Policy for WorkspacePolicy {
     fn before_tool(&self, name: &str, args: &serde_json::Value) -> Result<(), PolicyError> {
+        // Mode-level gate first
+        self.mode.check(name)?;
+        // Filesystem boundary
         if is_filesystem_tool(name) {
             let path = args["path"].as_str().unwrap_or("");
             self.check_within_workspace(path)?;
+        }
+        // Web access gate
+        if is_web_tool(name) && !self.web_allowed {
+            return Err(PolicyError { reason: "web access disabled; set RUSTYKEYS_ALLOW_WEB=1".into() });
+        }
+        // Security checkers (bash only)
+        if name == "bash" {
+            BashGuard::check(args)?;
         }
         Ok(())
     }
@@ -59,6 +72,130 @@ impl Policy for WorkspacePolicy {
 
 Rust's `Path::canonicalize()` and prefix checking make the boundary check
 correct by construction — no string-prefix tricks that could be fooled by `../`.
+
+### `PermissionMode`
+
+Named permission modes control which tool classes are allowed. Set via
+`RUSTYKEYS_PERMISSION_MODE` or the `/permissions` CLI command.
+
+```rust
+pub enum PermissionMode {
+    /// Default: workspace boundary enforced; bash allowed with security checks.
+    Default,
+    /// Plan: no filesystem writes or bash; read-only + propose only.
+    Plan,
+    /// AcceptEdits: writes allowed without approval prompt; bash still checked.
+    AcceptEdits,
+    /// ReadOnly: no writes, no bash; read_file, list_directory, glob, grep, web_fetch only.
+    ReadOnly,
+    /// Restricted: only tools in the explicit allowlist.
+    Restricted { allowed_tools: Vec<String> },
+    /// Bypass: all policy checks disabled. Requires RUSTYKEYS_ALLOW_BYPASS=1.
+    Bypass,
+}
+
+impl PermissionMode {
+    pub fn check(&self, tool_name: &str) -> Result<(), PolicyError> { ... }
+}
+```
+
+| Mode | Writes | Bash | Web | Notes |
+|---|---|---|---|---|
+| Default | ✓ (approval) | ✓ (checked) | opt-in | Standard operation |
+| Plan | ✗ | ✗ | ✓ | Agent proposes; human approves before switch |
+| AcceptEdits | ✓ (no prompt) | ✓ (checked) | opt-in | CI / non-interactive use |
+| ReadOnly | ✗ | ✗ | ✓ | Safe exploration |
+| Restricted | allowlist | allowlist | allowlist | Custom per-session |
+| Bypass | ✓ | ✓ | ✓ | Explicit opt-in only |
+
+### Security checkers
+
+A registry of synchronous checks run inside `WorkspacePolicy::before_tool()`
+for `bash` calls. Each implements `SecurityCheck`:
+
+```rust
+pub trait SecurityCheck: Send + Sync {
+    fn name(&self) -> &str;
+    fn check(&self, args: &serde_json::Value) -> Result<(), PolicyError>;
+}
+```
+
+Built-in checkers:
+
+| Checker | What it blocks |
+|---|---|
+| `CommandInjectionCheck` | `;`, `&&`, `\|\|` followed by network/delete; pipe-to-shell (`curl … \| sh`) |
+| `PrivilegeEscalationCheck` | `sudo`, `su -`, `chmod 777`, `chown root` |
+| `PathTraversalCheck` | `../../`, absolute paths outside workspace in bash args |
+| `NetworkExfilCheck` | `curl`/`wget`/`nc` piped to external IPs inside bash |
+| `DestructiveCommandCheck` | `rm -rf /`, `git reset --hard`, SQL `DROP TABLE` |
+
+Each blocked call writes a `SecurityEvent` to `.rustykeys/security.jsonl`
+(append-only, separate from `interventions.jsonl`):
+
+```json
+{"ts": 1234567890.5, "tool": "bash", "checker": "CommandInjectionCheck",
+ "pattern": "curl … | sh", "args": {"command": "…"}}
+```
+
+### `BashGuard`
+
+Aggregates all `SecurityCheck` implementations into a single synchronous call:
+
+```rust
+pub struct BashGuard {
+    checkers: Vec<Box<dyn SecurityCheck>>,
+    security_log: PathBuf,
+}
+
+impl BashGuard {
+    pub fn check(&self, args: &serde_json::Value) -> Result<(), PolicyError>;
+}
+```
+
+`BashGuard` is constructed once at `Session::new()` and held by `WorkspacePolicy`.
+
+### `ApprovalGate`
+
+For tool calls that pass all automated checks but still warrant human attention
+(first bash use, writing to a new path, first MCP tool use), the policy sends
+an approval request through a channel pair:
+
+```rust
+pub struct ApprovalGate {
+    pub triggers: Vec<ApprovalTrigger>,
+    pub tx: mpsc::Sender<ApprovalRequest>,
+    pub rx: mpsc::Receiver<ApprovalResponse>,
+}
+
+pub enum ApprovalTrigger {
+    BashFirstUse,
+    WriteOutsideGitRepo,
+    NewFilePath,
+    McpToolFirstUse { server: String },
+}
+
+pub struct ApprovalRequest {
+    pub tool: String,
+    pub args: serde_json::Value,
+    pub trigger: ApprovalTrigger,
+}
+
+pub enum ApprovalResponse {
+    Allow,
+    AllowAlways,  // adds tool to session auto-approve list
+    Block,
+}
+```
+
+The CLI / desktop adapter listens on the channel and renders the approval prompt.
+`AllowAlways` adds the tool name to an in-session `HashSet<String>`; subsequent
+calls skip the gate. `Block` causes `before_tool` to return `PolicyError` and
+records a `tool_block` intervention in the `InterventionLogger`.
+
+The `ApprovalGate` requires `before_tool` to become `async fn` — this is the
+planned breaking change described in the original Seams. It is accepted here
+as the use case is now concrete.
 
 ### Composition
 
@@ -116,17 +253,18 @@ pub async fn dispatch(&self, name: &str, args: Value, policy: &dyn Policy,
   making the workspace boundary airtight at the type level.
 - **No runtime cost**: `PolicyChain` iterates a `Vec` of trait objects — the
   hot path is a handful of pointer dereferences, not Python interpreter overhead.
+- **Enum-based modes**: `PermissionMode` is exhaustively checked at compile time;
+  adding a new mode requires handling it everywhere.
 
 ## Seams
 
-- **Interactive approval**: `before_tool` could `await` a channel send to the
-  CLI for a y/n prompt before high-risk tool calls. Requires the trait to become
-  `async fn`, which is a breaking change — deferred until there's a use case.
+- **Async policy**: `before_tool` is now `async fn` via `ApprovalGate`. Remote
+  ACL lookup is a natural extension of the same pattern.
 - **Rate limiting**: a `RateLimitPolicy` tracking call counts per tool per
   sliding window.
 - **Argument redaction**: a `RedactPolicy` that scrubs secrets from `args`
   before the Tracer records them.
-- **Capability gating**: deny specific tools entirely for a given session
-  (e.g. no filesystem writes in read-only mode).
-- **Audit logging**: the `Tracer` already records blocked calls; a dedicated
-  policy audit log is a future seam here.
+- **Audit log rotation**: `security.jsonl` grows unbounded; a rotation/retention
+  policy is a future seam.
+- **MCP policy**: an `McpPolicy` allowlists/blocklists MCP server names and tool
+  names — implemented in PRD 07.
