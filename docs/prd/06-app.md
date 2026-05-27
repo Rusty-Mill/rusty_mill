@@ -54,9 +54,9 @@ Full turn cycle:
 3.  memory.observe(user message)
 4.  history.push(user message)
 5.  token_budget.check_and_compact(&mut history).await  → micro/session/full compact if needed
-6.  context = memory.orient(&history).await
-7.  tracer.start_episode(); emit Tauri event rk://turn_start (desktop only)
-8.  reply = kernel.run(&history, &registry, &policy, context, &mut tracer).await
+6.  oriented = memory.orient(&history).await   // Oriented { extra_context, context_entries } (PRD 03)
+7.  tracer.start_episode(); record oriented.context_entries → context_trace (ADR-0036); emit rk://turn_start (desktop only)
+8.  reply = kernel.run(&history, &registry, &policy, oriented.extra_context, &mut tracer).await
 9.  history.push(assistant reply)
 10. memory.observe(reply)
 
