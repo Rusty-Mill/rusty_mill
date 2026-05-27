@@ -7,6 +7,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::security::{default_checkers, SecurityCheck, SecurityLog};
+
 /// Vets a tool call. `Ok(())` allows dispatch; `Err` blocks it.
 #[async_trait]
 pub trait Policy: Send + Sync {
@@ -23,9 +25,6 @@ pub enum PolicyError {
     /// A path argument escaped the workspace root.
     #[error("path {0} escapes the workspace root")]
     OutsideWorkspace(PathBuf),
-    /// A `bash` command matched a destructive pattern (BashGuard).
-    #[error("blocked dangerous command: matched '{0}'")]
-    DangerousCommand(String),
     /// The active permission mode forbids this tool.
     #[error("mode {mode} forbids tool {tool}")]
     ModeForbidden {
@@ -33,6 +32,15 @@ pub enum PolicyError {
         mode: &'static str,
         /// The forbidden tool name.
         tool: String,
+    },
+    /// A security checker blocked the call (`bash`). The `checker` variant name
+    /// is the structured `security.jsonl` field (ADR-0023).
+    #[error("blocked by {checker}: matched '{pattern}'")]
+    SecurityCheck {
+        /// The checker that blocked (e.g. `CommandInjectionCheck`).
+        checker: &'static str,
+        /// The matched pattern.
+        pattern: String,
     },
 }
 
@@ -236,27 +244,36 @@ impl Policy for ModePolicy {
     }
 }
 
-/// Blocks `bash` commands matching destructive patterns (PRD 02). A deny-list,
+/// Runs the [`SecurityCheck`] suite over `bash` commands (PRD 02). A deny-list,
 /// not a sandbox — the OS-level `ToolExecutor` isolation is Phase 7B (ADR-0030).
-pub struct BashGuard;
+/// A block writes a redacted `SecurityEvent` to `security.jsonl` when a log is
+/// attached.
+pub struct BashGuard {
+    checkers: Vec<Box<dyn SecurityCheck>>,
+    log: Option<Arc<SecurityLog>>,
+}
 
-/// Destructive substrings (matched case-insensitively, whitespace-collapsed).
-const DANGEROUS: &[&str] = &[
-    "rm -rf /",
-    "rm -rf /*",
-    "rm -rf ~",
-    "rm -rf .",
-    ":(){", // fork bomb
-    "mkfs",
-    "dd if=",
-    "> /dev/sd",
-    "of=/dev/sd",
-    "chmod -r 777 /",
-    "chown -r",
-    "shutdown",
-    "reboot",
-    "halt",
-];
+impl Default for BashGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BashGuard {
+    /// Build with the default checker suite and no security log.
+    pub fn new() -> Self {
+        Self {
+            checkers: default_checkers(),
+            log: None,
+        }
+    }
+
+    /// Attach an append-only security log; blocked calls are recorded to it.
+    pub fn with_log(mut self, log: Arc<SecurityLog>) -> Self {
+        self.log = Some(log);
+        self
+    }
+}
 
 #[async_trait]
 impl Policy for BashGuard {
@@ -265,14 +282,14 @@ impl Policy for BashGuard {
             return Ok(());
         }
         let command = args.get("command").and_then(Value::as_str).unwrap_or("");
-        let normalized = command
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_ascii_lowercase();
-        for pat in DANGEROUS {
-            if normalized.contains(pat) {
-                return Err(PolicyError::DangerousCommand((*pat).to_string()));
+        for checker in &self.checkers {
+            if let Err(e) = checker.check(command) {
+                if let (Some(log), PolicyError::SecurityCheck { checker, pattern }) =
+                    (&self.log, &e)
+                {
+                    log.record(name, checker, pattern, args);
+                }
+                return Err(e);
             }
         }
         Ok(())
@@ -307,7 +324,7 @@ mod tests {
 
     #[tokio::test]
     async fn bashguard_blocks_destructive_allows_safe() {
-        let g = BashGuard;
+        let g = BashGuard::new();
         assert!(g
             .before_tool("bash", &json!({"command": "rm -rf / --no-preserve-root"}))
             .await

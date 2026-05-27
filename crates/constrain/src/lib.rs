@@ -6,9 +6,14 @@
 //! Owns the [`Policy`] and [`ToolDispatch`] traits (ARCHITECTURE §4).
 
 mod policy;
+mod security;
 
 pub use policy::{
     BashGuard, ModePolicy, PermissionMode, Policy, PolicyChain, PolicyError, WorkspacePolicy,
+};
+pub use security::{
+    default_checkers, CommandInjectionCheck, DestructiveCommandCheck, NetworkExfilCheck,
+    PathTraversalCheck, PrivilegeEscalationCheck, SecurityCheck, SecurityLog,
 };
 
 use async_trait::async_trait;

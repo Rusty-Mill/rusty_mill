@@ -16,7 +16,7 @@ use rk_compose::{
 };
 use rk_config::Config;
 use rk_constrain::{
-    BashGuard, ModePolicy, PermissionMode, PolicyChain, ToolDispatch, WorkspacePolicy,
+    BashGuard, ModePolicy, PermissionMode, PolicyChain, SecurityLog, ToolDispatch, WorkspacePolicy,
 };
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall,
@@ -80,20 +80,25 @@ where
     /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
     pub fn new_at_depth(config: &Config, model: M, depth: usize) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
+        let state_dir = config.workspace.join(".rustykeys");
+        std::fs::create_dir_all(&state_dir)?;
+        let session_id = new_session_id();
+
         let mode = PermissionMode::from_config(
             &config.permission_mode,
             config.allow_bypass,
             &config.allowed_tools,
         );
         // Mode gate runs first (cheapest, broadest), then the workspace boundary
-        // and BashGuard.
+        // and the bash security checkers (which log blocks to security.jsonl).
+        let security_log = Arc::new(SecurityLog::new(
+            state_dir.join("security.jsonl"),
+            session_id.clone(),
+        ));
         let policy = PolicyChain::new()
             .with(Arc::new(ModePolicy::new(mode.clone())))
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
-            .with(Arc::new(BashGuard));
-        let state_dir = config.workspace.join(".rustykeys");
-        std::fs::create_dir_all(&state_dir)?;
-        let session_id = new_session_id();
+            .with(Arc::new(BashGuard::new().with_log(security_log)));
 
         let task = Arc::new(TaskStore::open(&state_dir));
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
