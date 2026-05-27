@@ -31,6 +31,9 @@ pub enum ToolError {
     /// A storage/observe failure surfaced through a tool.
     #[error(transparent)]
     Storage(#[from] rk_observe::ObserveError),
+    /// A memory database (SQLite) failure.
+    #[error("db error: {0}")]
+    Db(#[from] rusqlite::Error),
     /// Anything else.
     #[error("{0}")]
     Other(String),

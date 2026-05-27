@@ -14,10 +14,12 @@ mod builtins;
 #[cfg(feature = "chaos")]
 pub mod chaos;
 mod error;
+pub mod memory;
 mod prompt;
 mod tool;
 
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
+pub use memory::{Edge, MemType, Memory, Observation, SqliteStore, SqliteStream, Store, Stream};
 pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};
