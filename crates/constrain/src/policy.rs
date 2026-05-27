@@ -16,13 +16,16 @@ pub trait Policy: Send + Sync {
 
 /// Policy veto (ADR-0023; error-handling §3). Structured so the compose layer
 /// and `security.jsonl` derive the block reason from the *variant*, never by
-/// parsing prose. Additional variants (mode gates, security checkers, the
-/// approval gate) land with Phase 7.
+/// parsing prose. Additional variants (mode gates, the approval gate) land with
+/// Phase 7.
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
     /// A path argument escaped the workspace root.
     #[error("path {0} escapes the workspace root")]
     OutsideWorkspace(PathBuf),
+    /// A `bash` command matched a destructive pattern (BashGuard).
+    #[error("blocked dangerous command: matched '{0}'")]
+    DangerousCommand(String),
 }
 
 /// Runs an ordered set of policies; the first block wins (fail-closed).
@@ -93,10 +96,62 @@ impl WorkspacePolicy {
 #[async_trait]
 impl Policy for WorkspacePolicy {
     async fn before_tool(&self, name: &str, args: &Value) -> Result<(), PolicyError> {
-        if matches!(name, "read_file" | "list_directory") {
-            let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
+        // Path-bearing tools are confined to the workspace. `glob`'s pattern and
+        // `grep`'s optional path are checked under the `pattern`/`path` keys.
+        let candidate = match name {
+            "read_file" | "list_directory" | "write_file" | "edit_file" => {
+                args.get("path").and_then(Value::as_str)
+            }
+            "glob" => args.get("pattern").and_then(Value::as_str),
+            "grep" => args.get("path").and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(path) = candidate {
             if !self.within_root(path) {
                 return Err(PolicyError::OutsideWorkspace(PathBuf::from(path)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Blocks `bash` commands matching destructive patterns (PRD 02). A deny-list,
+/// not a sandbox — the OS-level `ToolExecutor` isolation is Phase 7B (ADR-0030).
+pub struct BashGuard;
+
+/// Destructive substrings (matched case-insensitively, whitespace-collapsed).
+const DANGEROUS: &[&str] = &[
+    "rm -rf /",
+    "rm -rf /*",
+    "rm -rf ~",
+    "rm -rf .",
+    ":(){", // fork bomb
+    "mkfs",
+    "dd if=",
+    "> /dev/sd",
+    "of=/dev/sd",
+    "chmod -r 777 /",
+    "chown -r",
+    "shutdown",
+    "reboot",
+    "halt",
+];
+
+#[async_trait]
+impl Policy for BashGuard {
+    async fn before_tool(&self, name: &str, args: &Value) -> Result<(), PolicyError> {
+        if name != "bash" {
+            return Ok(());
+        }
+        let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+        let normalized = command
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        for pat in DANGEROUS {
+            if normalized.contains(pat) {
+                return Err(PolicyError::DangerousCommand((*pat).to_string()));
             }
         }
         Ok(())
@@ -127,6 +182,28 @@ mod tests {
             .before_tool("read_file", &json!({"path": "/etc/passwd"}))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn bashguard_blocks_destructive_allows_safe() {
+        let g = BashGuard;
+        assert!(g
+            .before_tool("bash", &json!({"command": "rm -rf / --no-preserve-root"}))
+            .await
+            .is_err());
+        assert!(g
+            .before_tool("bash", &json!({"command": "RM  -RF  /"}))
+            .await
+            .is_err()); // normalized
+        assert!(g
+            .before_tool("bash", &json!({"command": "cargo test"}))
+            .await
+            .is_ok());
+        // Non-bash tools are unaffected.
+        assert!(g
+            .before_tool("read_file", &json!({"path": "rm -rf /"}))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

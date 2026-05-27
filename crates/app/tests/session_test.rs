@@ -38,7 +38,24 @@ async fn send_reads_workspace_file_then_replies_verified() {
     let session = Session::new(&config, model).unwrap();
     assert_eq!(
         session.tool_names(),
-        vec!["complete_task", "list_directory", "read_file", "set_task"]
+        vec![
+            "agent",
+            "bash",
+            "complete_task",
+            "edit_file",
+            "glob",
+            "grep",
+            "list_directory",
+            "read_file",
+            "set_task",
+            "task_create",
+            "task_get",
+            "task_list",
+            "task_output",
+            "task_stop",
+            "task_update",
+            "write_file"
+        ]
     );
 
     let outcome = session.send("read note.txt").await.unwrap();
@@ -50,6 +67,58 @@ async fn send_reads_workspace_file_then_replies_verified() {
     let journal = std::fs::read_to_string(dir.join(".rustykeys/evidence.jsonl")).unwrap();
     assert!(journal.contains("\"kind\":\"turn\""));
     assert!(journal.contains("\"verified\":true"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agent_tool_spawns_a_child_session() {
+    let dir = std::env::temp_dir().join(format!("rk-app-agent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // Shared script (FakeLanguageModel clones share the queue): parent calls the
+    // agent tool; the child turn pops "child result"; the parent then finishes.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "agent".into(),
+            args: json!({"task": "do the subtask"}),
+        }],
+        vec![Scripted::Text("child result".into())],
+        vec![Scripted::Text("parent done".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    let outcome = session.send("delegate this").await.unwrap();
+    assert_eq!(outcome.reply, "parent done");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn destructive_bash_is_blocked_by_bashguard() {
+    let dir = std::env::temp_dir().join(format!("rk-app-bash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "bash".into(),
+            args: json!({"command": "rm -rf / --no-preserve-root"}),
+        }],
+        vec![Scripted::Text("could not".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    let outcome = session.send("delete everything").await.unwrap();
+
+    // BashGuard blocks it → UNVERIFIED with a permission_block attribution.
+    assert!(!outcome.report.verified);
+    assert!(outcome
+        .report
+        .attributions
+        .iter()
+        .any(|a| a.category == "permission_block"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

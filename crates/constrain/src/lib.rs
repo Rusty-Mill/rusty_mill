@@ -7,7 +7,7 @@
 
 mod policy;
 
-pub use policy::{Policy, PolicyChain, PolicyError, WorkspacePolicy};
+pub use policy::{BashGuard, Policy, PolicyChain, PolicyError, WorkspacePolicy};
 
 use async_trait::async_trait;
 use rk_observe::ToolOutcome;

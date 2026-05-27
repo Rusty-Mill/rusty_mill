@@ -48,6 +48,9 @@ pub struct Config {
     /// Optional embedding model, from `RUSTYKEYS_EMBED_MODEL`. Set ⇒ semantic
     /// recall; unset ⇒ lexical fallback (PRD 03 / Phase 5).
     pub embed_model: Option<String>,
+    /// Whether web tools are enabled, from `RUSTYKEYS_ALLOW_WEB` (`1`/`true`).
+    /// Off by default (PRD 03; the SSRF guard still applies when on).
+    pub allow_web: bool,
 }
 
 impl Config {
@@ -77,11 +80,17 @@ impl Config {
 
         let embed_model = get("RUSTYKEYS_EMBED_MODEL").filter(|s| !s.trim().is_empty());
 
+        let allow_web = matches!(
+            get("RUSTYKEYS_ALLOW_WEB").as_deref(),
+            Some("1") | Some("true") | Some("TRUE")
+        );
+
         Ok(Self {
             model,
             workspace,
             harness_level,
             embed_model,
+            allow_web,
         })
     }
 }
