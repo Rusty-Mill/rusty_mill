@@ -88,6 +88,41 @@ impl EvidenceJournal {
         self.append(&record)
     }
 
+    /// Append a compaction record (PRD 06 / Phase 8). `tier` is `micro`,
+    /// `session`, or `full`; `dropped`/`summarized` count the affected messages;
+    /// `used`/`limit` are the token line-item snapshot that triggered it.
+    pub fn record_compaction(
+        &self,
+        session_id: &str,
+        tier: &str,
+        dropped: usize,
+        summarized: usize,
+        used: usize,
+        limit: usize,
+    ) -> Result<(), ComposeError> {
+        let record = json!({
+            "v": SCHEMA_VERSION,
+            "kind": "compaction",
+            "ts": now_secs(),
+            "session_id": session_id,
+            "tier": tier,
+            "dropped": dropped,
+            "summarized": summarized,
+            "used_tokens": used,
+            "context_limit": limit,
+        });
+        self.append(&record)
+    }
+
+    /// Count well-formed `kind == "compaction"` records (torn-line tolerant).
+    pub fn count_compactions(&self) -> Result<usize, ComposeError> {
+        Ok(self
+            .parsed_lines()?
+            .iter()
+            .filter(|v| v.get("kind").and_then(Value::as_str) == Some("compaction"))
+            .count())
+    }
+
     fn append(&self, record: &Value) -> Result<(), ComposeError> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;

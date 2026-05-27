@@ -19,21 +19,34 @@ use rk_constrain::{
     BashGuard, ModePolicy, PermissionMode, PolicyChain, SecurityLog, ToolDispatch, WorkspacePolicy,
 };
 use rk_feed::{
-    consolidate_apply, consolidation_prompt, executor_for, groom_apply, groom_prompt, recall,
-    register_agent_tool, register_builtins_with_executor, register_task_management_tools,
-    register_task_tools, register_web_tools, system_prompt, AttributionContext,
-    BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, Isolation, Memory,
-    Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
-    ToolError, ToolRegistry, DEFAULT_RECALL_K,
+    compaction_prompt, consolidate_apply, consolidation_prompt, executor_for, groom_apply,
+    groom_prompt, recall, register_agent_tool, register_builtins_with_executor,
+    register_task_management_tools, register_task_tools, register_web_tools, system_prompt,
+    AttributionContext, BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder,
+    Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
+    TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
+
+use crate::budget::{dedup_recall_block, flatten, micro_compact, Msg, Tier, TokenBudget};
 
 const CONSOLIDATE_SYSTEM: &str =
     "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
 const JUDGE_SYSTEM: &str =
     "You are a strict success-criteria judge. Output ONLY the requested JSON.";
 const CONSOLIDATE_WINDOW: usize = 20;
+/// Turn-pairs micro-compaction retains (drops everything older).
+const MICRO_KEEP_PAIRS: usize = 3;
+
+fn tier_label(tier: Tier) -> &'static str {
+    match tier {
+        Tier::None => "none",
+        Tier::Micro => "micro",
+        Tier::Session => "session",
+        Tier::Full => "full",
+    }
+}
 
 /// The result of one turn: the reply plus its verification verdict.
 pub struct TurnOutcome {
@@ -57,6 +70,8 @@ pub struct Session<M> {
     embedder: Option<Arc<dyn Embedder>>,
     permission_mode: String,
     isolation: String,
+    budget: Mutex<TokenBudget>,
+    history: Mutex<Vec<Msg>>,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -150,6 +165,13 @@ where
             system: system_prompt(config.harness_level),
             permission_mode: mode.as_str().to_string(),
             isolation,
+            budget: Mutex::new(TokenBudget::new(
+                config.context_limit,
+                config.compact_micro,
+                config.compact_session,
+                config.compact_full,
+            )),
+            history: Mutex::new(Vec::new()),
             session_id,
             recall_k: DEFAULT_RECALL_K,
             idle_threshold,
@@ -206,15 +228,28 @@ where
             self.embedder.as_deref(),
         )
         .await?;
-        let extra: String = [task_block, oriented.block.clone()]
+        // Push the user turn onto the in-session transcript, then run the
+        // line-item token budget: compact (micro/session/full) before building
+        // the prompt so a long session stays within the window (PRD 06).
+        self.push_history(Msg::user(prompt));
+        let schemas_text = self.schemas_text();
+        self.check_and_compact(&task_block, &oriented.block, &schemas_text)
+            .await?;
+
+        // History takes precedence over recall: drop recalled memories already
+        // present verbatim in the live transcript (de-dup precedence rule).
+        let history_text = flatten(&self.history_snapshot());
+        let recall_block = dedup_recall_block(&oriented.block, &history_text);
+        let extra: String = [task_block.clone(), recall_block]
             .into_iter()
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
+        // The transcript already ends with this turn's user message.
         let prompt_with_context = if extra.is_empty() {
-            prompt.to_string()
+            history_text.clone()
         } else {
-            format!("{extra}\n\n{prompt}")
+            format!("{extra}\n\n{history_text}")
         };
 
         self.stream.append(&obs("user", "message", prompt)).await?;
@@ -228,6 +263,10 @@ where
         )
         .await?;
         self.tracer.set_final_reached(true);
+
+        // Record the assistant turn and refresh the line-item usage for `/cost`.
+        self.push_history(Msg::assistant(&reply));
+        self.record_usage(&task_block, &oriented.block, &schemas_text);
 
         let episode = self.tracer.episode();
         let mut report = self.verifier.verify(&reply, &episode);
@@ -445,6 +484,151 @@ where
     /// The active isolation profile (`none`/`sandboxed`), for `/permissions`.
     pub fn isolation(&self) -> &str {
         &self.isolation
+    }
+
+    fn push_history(&self, msg: Msg) {
+        self.history
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(msg);
+    }
+
+    fn history_snapshot(&self) -> Vec<Msg> {
+        self.history
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// The advertised tool schemas, flattened to text for the line-item budget.
+    fn schemas_text(&self) -> String {
+        self.dispatch
+            .schemas()
+            .iter()
+            .map(|(n, s)| format!("{n}{s}"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn record_usage(&self, task: &str, recall: &str, schemas: &str) {
+        let history = self.history_snapshot();
+        let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+        let used = budget.line_items(&self.system, recall, task, schemas, &history);
+        budget.record_usage(used);
+    }
+
+    /// Token usage snapshot for `/cost` (used, limit, fraction, session total,
+    /// compactions).
+    pub fn cost(&self) -> (usize, usize, f64, u64, usize) {
+        let b = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+        (
+            b.used_tokens,
+            b.context_limit,
+            b.fraction(),
+            b.session_total_tokens,
+            b.compaction_count,
+        )
+    }
+
+    /// Run the line-item token budget and compact the transcript if a threshold
+    /// is crossed (PRD 06). `session`/`full` tiers summarise via the model;
+    /// `micro` drops oldest turn-pairs with no LLM call. Every compaction is
+    /// journaled (`kind: "compaction"`). The active task lives in the
+    /// `TaskStore`, never the transcript, so it is never lost to compaction.
+    async fn check_and_compact(
+        &self,
+        task: &str,
+        recall: &str,
+        schemas: &str,
+    ) -> anyhow::Result<()> {
+        let (tier, used, limit) = {
+            let history = self.history_snapshot();
+            let budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+            let used = budget.line_items(&self.system, recall, task, schemas, &history);
+            (budget.tier_for(used), used, budget.context_limit)
+        };
+
+        let (dropped, summarized) = match tier {
+            Tier::None => return Ok(()),
+            Tier::Micro => {
+                let mut history = self.history.lock().unwrap_or_else(|p| p.into_inner());
+                let dropped = micro_compact(&mut history, MICRO_KEEP_PAIRS);
+                (dropped, 0)
+            }
+            Tier::Session => {
+                // Summarise the oldest half; replace it with one summary message.
+                let history = self.history_snapshot();
+                let half = history.len() / 2;
+                if half == 0 {
+                    return Ok(());
+                }
+                let oldest = flatten(&history[..half]);
+                let summary = self.summarize(&oldest).await?;
+                let mut h = self.history.lock().unwrap_or_else(|p| p.into_inner());
+                let mut rebuilt = vec![Msg::summary(summary)];
+                rebuilt.extend(h.drain(half..));
+                *h = rebuilt;
+                (0, half)
+            }
+            Tier::Full => {
+                let history = self.history_snapshot();
+                let n = history.len();
+                let all = flatten(&history);
+                let summary = self.summarize(&all).await?;
+                let mut h = self.history.lock().unwrap_or_else(|p| p.into_inner());
+                *h = vec![Msg::summary(summary)];
+                (0, n)
+            }
+        };
+
+        // A tier can be selected yet change nothing (e.g. micro with too little
+        // history to drop) — that is not a compaction event.
+        if dropped == 0 && summarized == 0 {
+            return Ok(());
+        }
+
+        self.budget
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .compaction_count += 1;
+        self.journal.record_compaction(
+            &self.session_id,
+            tier_label(tier),
+            dropped,
+            summarized,
+            used,
+            limit,
+        )?;
+        Ok(())
+    }
+
+    /// Force a full compaction now (`/compact`): summarise the whole transcript
+    /// into a single message. Returns the number of messages summarised.
+    pub async fn compact_now(&self) -> anyhow::Result<usize> {
+        let history = self.history_snapshot();
+        let n = history.len();
+        if n == 0 {
+            return Ok(0);
+        }
+        let summary = self.summarize(&flatten(&history)).await?;
+        *self.history.lock().unwrap_or_else(|p| p.into_inner()) = vec![Msg::summary(summary)];
+        let (used, limit) = {
+            let b = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+            (b.used_tokens, b.context_limit)
+        };
+        self.budget
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .compaction_count += 1;
+        self.journal
+            .record_compaction(&self.session_id, "full", 0, n, used, limit)?;
+        Ok(n)
+    }
+
+    /// Summarise transcript text via the model (compaction tiers).
+    async fn summarize(&self, transcript: &str) -> anyhow::Result<String> {
+        let prompt = compaction_prompt(transcript);
+        Ok(complete(self.model.clone(), COMPACTION_SYSTEM, &prompt).await?)
     }
 
     /// The advertised tool names (for the startup banner / diagnostics).

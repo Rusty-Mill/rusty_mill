@@ -72,7 +72,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /permissions, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -86,7 +86,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /permissions  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
                 println!(
@@ -94,6 +94,17 @@ where
                     session.permission_mode(),
                     session.isolation()
                 );
+            }
+            "/cost" => {
+                let (used, limit, frac, total, compactions) = session.cost();
+                println!(
+                    "tokens :: {used} / {limit} ({:.0}%) :: session_total={total} compactions={compactions}",
+                    frac * 100.0
+                );
+            }
+            "/compact" => {
+                let n = session.compact_now().await?;
+                println!("compacted {n} messages into a summary");
             }
             "/verify" => {
                 session.note_manual_verify()?;
