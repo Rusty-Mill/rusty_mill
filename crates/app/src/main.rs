@@ -28,11 +28,22 @@ async fn main() -> Result<()> {
     let model = OpenAICompatible::<DynamicModel>::builder()
         .model_name(config.model.clone())
         .base_url(base_url.clone())
-        .api_key(api_key)
+        .api_key(api_key.clone())
         .build()
         .context("building model provider")?;
 
-    let session = Session::new(&config, model).context("building session")?;
+    let mut session = Session::new(&config, model).context("building session")?;
+
+    // Semantic recall when RUSTYKEYS_EMBED_MODEL is set; lexical otherwise.
+    if let Some(embed_model) = &config.embed_model {
+        let em = OpenAICompatible::<DynamicModel>::builder()
+            .model_name(embed_model.clone())
+            .base_url(base_url.clone())
+            .api_key(api_key)
+            .build()
+            .context("building embedding provider")?;
+        session = session.with_embedder(std::sync::Arc::new(rk_app::AiSdkEmbedder::new(em)));
+    }
 
     eprintln!(
         "rusty-keys · model={} · endpoint={} · workspace={} · level={:?} · tools=[{}]",
@@ -75,7 +86,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/verify" => {
                 session.note_manual_verify()?;
@@ -115,6 +126,25 @@ where
             "/groom" => {
                 let s = session.groom().await?;
                 println!("groomed: {} ops", s.groomed);
+            }
+            "/task" => {
+                let t = session.task_state();
+                println!("task [{:?}]: {}", t.status, t.goal);
+                for c in &t.success_criteria {
+                    println!("  - {c}");
+                }
+            }
+            line if line.starts_with("/task ") => {
+                // `/task <goal> | <criterion> | <criterion>` — `|`-separated.
+                let rest = line.trim_start_matches("/task ").trim();
+                let mut parts = rest.split('|').map(str::trim);
+                let goal = parts.next().unwrap_or("").to_string();
+                let criteria: Vec<String> = parts
+                    .filter(|c| !c.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                session.set_task(&goal, criteria, Vec::new());
+                println!("task set: {goal}");
             }
             prompt => {
                 let outcome = session.send(prompt).await.context("running turn")?;

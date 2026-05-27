@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use super::{Edge, MemType, Memory, Observation, Store};
+use super::{Edge, Embedder, MemType, Memory, Observation, Store};
 use crate::error::ToolError;
 
 /// Consolidation tempo (PRD 03). Idle is cheap/additive; sleep adds decay/prune;
@@ -159,6 +159,7 @@ pub async fn apply(
     store: &dyn Store,
     emit_json: &str,
     now: f64,
+    embedder: Option<&dyn Embedder>,
 ) -> Result<ConsolidationStats, ToolError> {
     let mut stats = ConsolidationStats::default();
     for e in parse_emit(emit_json) {
@@ -166,6 +167,10 @@ pub async fn apply(
         m.importance = e.importance.clamp(0.0, 1.0);
         m.edges = e.edges;
         m.source_ts = e.source_ts_range.map(|r| (r[0], r[1]));
+        if let Some(emb) = embedder {
+            // Embed title + body so semantic recall can match this memory.
+            m.embedding = Some(emb.embed(&format!("{} {}", m.title, m.body)).await?);
+        }
         store.upsert(&m).await?;
         if e.op == "update" {
             stats.updated += 1;
@@ -210,7 +215,7 @@ mod tests {
             {"op":"create","type":"skill","title":"reproduce","body":"reproduce before editing","importance":0.9},
             {"op":"create","type":"fact","title":"paths","body":"workspace is the root","importance":0.5}
         ]}"#;
-        let stats = apply(&store, json, 100.0).await.unwrap();
+        let stats = apply(&store, json, 100.0, None).await.unwrap();
         assert_eq!(stats.created, 2);
         assert!(!store
             .candidates("reproduce", None, 5)
@@ -220,7 +225,7 @@ mod tests {
 
         // An update by the same title overwrites the body in place.
         let upd = r#"{"memories":[{"op":"update","type":"fact","title":"paths","body":"the workspace boundary changed token","importance":0.6}]}"#;
-        let s2 = apply(&store, upd, 200.0).await.unwrap();
+        let s2 = apply(&store, upd, 200.0, None).await.unwrap();
         assert_eq!(s2.updated, 1);
         assert!(!store.candidates("token", None, 5).await.unwrap().is_empty());
     }
@@ -228,7 +233,7 @@ mod tests {
     #[tokio::test]
     async fn wholesale_parse_failure_is_empty_not_fatal() {
         let store = SqliteStore::in_memory().unwrap();
-        let stats = apply(&store, "not json at all", 1.0).await.unwrap();
+        let stats = apply(&store, "not json at all", 1.0, None).await.unwrap();
         assert_eq!(stats, ConsolidationStats::default());
     }
 }

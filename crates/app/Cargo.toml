@@ -17,6 +17,7 @@ rk-compose.workspace = true
 # must be enabled alongside it (aisdk 0.5.2 feature-wiring quirk).
 aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
 anyhow = "1"
+async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
@@ -26,7 +27,7 @@ path = "src/main.rs"
 
 [dev-dependencies]
 rk-kernel = { workspace = true, features = ["fake"] }
-rk-feed = { workspace = true, features = ["chaos"] }
+rk-feed = { workspace = true, features = ["chaos", "fake-embed"] }
 serde_json.workspace = true
 async-trait.workspace = true
 

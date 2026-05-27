@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 use rusqlite::Connection;
 
+use super::embed::{cosine, pack, unpack};
 use super::{MemType, Memory, Store};
 use crate::error::ToolError;
 
@@ -104,6 +105,7 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         last_used_ts: row.get(6)?,
         use_count: row.get::<_, i64>(7)? as u32,
         source_ts: lo.zip(hi),
+        embedding: None,
         edges: Vec::new(),
     })
 }
@@ -122,14 +124,97 @@ fn match_expr(query: &str) -> Option<String> {
     }
 }
 
+impl SqliteStore {
+    /// FTS5 lexical candidates (raw `-bm25`, higher = more relevant). The recall
+    /// layer min-max normalizes the batch.
+    fn lexical_candidates(&self, query: &str, k: usize) -> Result<Vec<(Memory, f32)>, ToolError> {
+        let Some(expr) = match_expr(query) else {
+            return Ok(Vec::new());
+        };
+        let conn = self.lock();
+        let sql = format!(
+            "SELECT {COLS}, bm25(memories_fts) AS score
+             FROM memories_fts JOIN memories ON memories.id = memories_fts.rowid
+             WHERE memories_fts MATCH ?1 ORDER BY score ASC LIMIT ?2"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params![expr, k as i64], |row| {
+            let score: f64 = row.get(10)?;
+            Ok((row_to_memory(row)?, -score as f32))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Semantic candidates: cosine over embedded memories (mapped to `[0,1]`),
+    /// plus an FTS5 lexical fallback over the *non-embedded* memories
+    /// (min-max'd to `[0,1]`) so a mixed corpus is fully reachable (PRD 03).
+    fn semantic_candidates(
+        &self,
+        query: &str,
+        q: &[f32],
+        k: usize,
+    ) -> Result<Vec<(Memory, f32)>, ToolError> {
+        let conn = self.lock();
+        let mut out: Vec<(Memory, f32)> = Vec::new();
+
+        let sql = format!("SELECT {COLS}, embedding FROM memories WHERE embedding IS NOT NULL");
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let blob: Vec<u8> = row.get(10)?;
+            Ok((row_to_memory(row)?, blob))
+        })?;
+        for r in rows {
+            let (mem, blob) = r?;
+            let c = cosine(q, &unpack(&blob));
+            out.push((mem, (c + 1.0) / 2.0));
+        }
+
+        if let Some(expr) = match_expr(query) {
+            let sql = format!(
+                "SELECT {COLS}, bm25(memories_fts) AS score
+                 FROM memories_fts JOIN memories ON memories.id = memories_fts.rowid
+                 WHERE memories_fts MATCH ?1 AND memories.embedding IS NULL
+                 ORDER BY score ASC LIMIT ?2"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(rusqlite::params![expr, k as i64], |row| {
+                let score: f64 = row.get(10)?;
+                Ok((row_to_memory(row)?, -score as f32))
+            })?;
+            let mut lex: Vec<(Memory, f32)> = rows.collect::<rusqlite::Result<_>>()?;
+            if !lex.is_empty() {
+                let min = lex.iter().map(|(_, r)| *r).fold(f32::INFINITY, f32::min);
+                let max = lex
+                    .iter()
+                    .map(|(_, r)| *r)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                let span = max - min;
+                for (_, r) in &mut lex {
+                    *r = if span.abs() < f32::EPSILON {
+                        1.0
+                    } else {
+                        (*r - min) / span
+                    };
+                }
+                out.extend(lex);
+            }
+        }
+
+        out.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(k);
+        Ok(out)
+    }
+}
+
 #[async_trait]
 impl Store for SqliteStore {
     async fn upsert(&self, memory: &Memory) -> Result<(), ToolError> {
         let conn = self.lock();
+        let embedding = memory.embedding.as_ref().map(|v| pack(v));
         conn.execute(
             "INSERT INTO memories
-                 (title, body, mem_type, importance, validated, created_ts, last_used_ts, use_count, source_ts_lo, source_ts_hi)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                 (title, body, mem_type, importance, validated, created_ts, last_used_ts, use_count, source_ts_lo, source_ts_hi, embedding)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(title) DO UPDATE SET
                  body = excluded.body,
                  mem_type = excluded.mem_type,
@@ -138,7 +223,8 @@ impl Store for SqliteStore {
                  last_used_ts = excluded.last_used_ts,
                  use_count = excluded.use_count,
                  source_ts_lo = excluded.source_ts_lo,
-                 source_ts_hi = excluded.source_ts_hi",
+                 source_ts_hi = excluded.source_ts_hi,
+                 embedding = excluded.embedding",
             rusqlite::params![
                 memory.title,
                 memory.body,
@@ -150,6 +236,7 @@ impl Store for SqliteStore {
                 memory.use_count as i64,
                 memory.source_ts.map(|(lo, _)| lo),
                 memory.source_ts.map(|(_, hi)| hi),
+                embedding,
             ],
         )?;
         conn.execute(
@@ -168,25 +255,13 @@ impl Store for SqliteStore {
     async fn candidates(
         &self,
         query: &str,
-        _embed: Option<&[f32]>,
+        embed: Option<&[f32]>,
         k: usize,
     ) -> Result<Vec<(Memory, f32)>, ToolError> {
-        let Some(expr) = match_expr(query) else {
-            return Ok(Vec::new());
-        };
-        let conn = self.lock();
-        let sql = format!(
-            "SELECT {COLS}, bm25(memories_fts) AS score
-             FROM memories_fts JOIN memories ON memories.id = memories_fts.rowid
-             WHERE memories_fts MATCH ?1 ORDER BY score ASC LIMIT ?2"
-        );
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(rusqlite::params![expr, k as i64], |row| {
-            // bm25 is lower-is-better; negate so higher = more relevant.
-            let score: f64 = row.get(10)?;
-            Ok((row_to_memory(row)?, -score as f32))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        match embed {
+            None => self.lexical_candidates(query, k),
+            Some(q) => self.semantic_candidates(query, q, k),
+        }
     }
 
     async fn neighbors(&self, title: &str) -> Result<Vec<Memory>, ToolError> {

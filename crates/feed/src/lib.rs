@@ -20,10 +20,13 @@ mod tool;
 
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
+#[cfg(any(test, feature = "fake-embed"))]
+pub use memory::HashEmbedder;
 pub use memory::{
-    consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, AttributionContext,
-    ConsolidationScope, ConsolidationStats, ContextEntry, Edge, MemType, Memory, Observation,
-    RecallOutput, SqliteStore, SqliteStream, Store, Stream, DEFAULT_RECALL_K,
+    consolidate_apply, consolidation_prompt, cosine, groom_apply, groom_prompt, recall,
+    register_task_tools, AttributionContext, ConsolidationScope, ConsolidationStats, ContextEntry,
+    Edge, Embedder, MemType, Memory, Observation, RecallOutput, SqliteStore, SqliteStream, Store,
+    Stream, TaskState, TaskStatus, TaskStore, DEFAULT_RECALL_K,
 };
 pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};

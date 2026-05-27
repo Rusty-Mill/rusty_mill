@@ -36,7 +36,10 @@ async fn send_reads_workspace_file_then_replies_verified() {
     ]);
 
     let session = Session::new(&config, model).unwrap();
-    assert_eq!(session.tool_names(), vec!["list_directory", "read_file"]);
+    assert_eq!(
+        session.tool_names(),
+        vec!["complete_task", "list_directory", "read_file", "set_task"]
+    );
 
     let outcome = session.send("read note.txt").await.unwrap();
     assert_eq!(outcome.reply, "I read the note.");
@@ -112,6 +115,141 @@ async fn followup_after_unverified_turn_counts_toward_mhir() {
     assert_eq!(m.n_turns, 2);
     assert_eq!(m.n_interventions, 1);
     assert!((m.rate - 0.5).abs() < 1e-9);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_task_tool_updates_task_state_and_persists() {
+    let dir = std::env::temp_dir().join(format!("rk-app-task-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // The model drives set_task, then replies.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "set_task".into(),
+            args: json!({"goal": "add empty-password validation", "success_criteria": ["rejects empty password"]}),
+        }],
+        vec![Scripted::Text("task noted".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    session.send("please set up the task").await.unwrap();
+
+    let t = session.task_state();
+    assert_eq!(t.goal, "add empty-password validation");
+    assert_eq!(
+        t.success_criteria,
+        vec!["rejects empty password".to_string()]
+    );
+    // Persisted to task.json.
+    let json = std::fs::read_to_string(dir.join(".rustykeys/task.json")).unwrap();
+    assert!(json.contains("add empty-password validation"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+async fn judged_turn(dir_tag: &str, judge_emit: &str) -> rk_compose::VerificationReport {
+    let dir = std::env::temp_dir().join(format!("rk-app-judge-{dir_tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // The reply turn (1 entry), then the judge call consumes the next entry.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::Text("I added the validation.".into())],
+        vec![Scripted::Text(judge_emit.into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    session.set_task(
+        "add validation",
+        vec!["adds a unit test".into()],
+        Vec::new(),
+    );
+
+    let outcome = session.send("do it").await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.report
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn criteria_judge_pass_verifies_and_fail_attributes_criteria_unmet() {
+    // Judge passes → verified, judge_ran.
+    let pass = judged_turn("pass", r#"{"verdict":"pass","criteria":[{"criterion":"adds a unit test","met":true,"reason":"test added"}]}"#).await;
+    assert!(pass.verified);
+    assert!(pass.judge_ran);
+    assert!(pass
+        .checks
+        .iter()
+        .any(|c| c.name == "criteria_judge" && c.passed));
+
+    // Judge fails → unverified with criteria_unmet → f_model @ compose/semantic.
+    let fail = judged_turn("fail", r#"{"verdict":"fail","criteria":[{"criterion":"adds a unit test","met":false,"reason":"no test"}]}"#).await;
+    assert!(!fail.verified);
+    let a = fail
+        .attributions
+        .iter()
+        .find(|a| a.category == "criteria_unmet")
+        .unwrap();
+    assert_eq!(a.layer, "compose/semantic");
+    assert_eq!(
+        serde_json::to_value(a.failure_type).unwrap(),
+        json!("f_model")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unparseable_judge_is_unavailable_not_a_pass() {
+    let report = judged_turn("unavail", "the criteria look fine to me").await;
+    assert!(
+        !report.verified,
+        "an unavailable judge must never read as verified"
+    );
+    assert!(!report.judge_ran);
+    let a = report
+        .attributions
+        .iter()
+        .find(|a| a.category == "judge_unavailable")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(a.failure_type).unwrap(),
+        json!("f_verify")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn semantic_recall_matches_a_paraphrase() {
+    use std::sync::Arc;
+    let dir = std::env::temp_dir().join(format!("rk-app-sem-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+    let embedder = Arc::new(rk_feed::HashEmbedder::new(128));
+
+    // Plant a fact via /reflect — it is embedded on the way into the store.
+    let emit = r#"{"memories":[{"op":"create","type":"fact","title":"build system",
+        "body":"compile the project using cargo","importance":0.6}]}"#;
+    let model_a = FakeLanguageModel::new(vec![vec![Scripted::Text(emit.into())]]);
+    let a = Session::new(&config, model_a)
+        .unwrap()
+        .with_embedder(embedder.clone());
+    assert_eq!(a.reflect().await.unwrap().created, 1);
+    drop(a);
+
+    // A paraphrase that shares no distinctive keyword with the title is recalled
+    // via embedding cosine.
+    let b = Session::new(&config, FakeLanguageModel::new(vec![]))
+        .unwrap()
+        .with_embedder(embedder);
+    let block = b
+        .recall_block("how do I compile this project with cargo")
+        .await
+        .unwrap();
+    assert!(
+        block.contains("build system"),
+        "semantic recall missed the paraphrase: {block:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -11,19 +11,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
-use rk_compose::{EvidenceJournal, VerificationReport, Verifier};
+use rk_compose::{
+    judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
+};
 use rk_config::Config;
 use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
-    system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats, Memory, Observation,
-    SqliteStore, SqliteStream, Store, Stream, ToolRegistry, DEFAULT_RECALL_K,
+    register_task_tools, system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats,
+    Embedder, Memory, Observation, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
+    ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
 
 const CONSOLIDATE_SYSTEM: &str =
     "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
+const JUDGE_SYSTEM: &str =
+    "You are a strict success-criteria judge. Output ONLY the requested JSON.";
 const CONSOLIDATE_WINDOW: usize = 20;
 
 /// The result of one turn: the reply plus its verification verdict.
@@ -44,6 +49,8 @@ pub struct Session<M> {
     verifier: Verifier,
     stream: Arc<dyn Stream>,
     store: Arc<dyn Store>,
+    task: Arc<TaskStore>,
+    embedder: Option<Arc<dyn Embedder>>,
     system: String,
     session_id: String,
     recall_k: usize,
@@ -65,12 +72,14 @@ where
         let tracer = Arc::new(Tracer::new());
         let policy =
             PolicyChain::new().with(Arc::new(WorkspacePolicy::new(config.workspace.clone())));
-        let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
-        register_builtins(&mut registry, config.workspace.clone());
-
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();
+
+        let task = Arc::new(TaskStore::open(&state_dir));
+        let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
+        register_builtins(&mut registry, config.workspace.clone());
+        register_task_tools(&mut registry, task.clone());
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;
@@ -89,6 +98,8 @@ where
             verifier: Verifier::deterministic(),
             stream: Arc::new(stream),
             store: Arc::new(store),
+            task,
+            embedder: None,
             system: system_prompt(config.harness_level),
             session_id,
             recall_k: DEFAULT_RECALL_K,
@@ -101,6 +112,13 @@ where
         })
     }
 
+    /// Attach an embedder to enable semantic recall (Phase 5). Without one,
+    /// recall falls back to FTS5 lexical.
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
     /// Run one user turn: orient → dispatch (traced) → verify → journal → capture
     /// → promote/consolidate. Records `unverified_followup` if the prior turn was
     /// unverified.
@@ -111,25 +129,43 @@ where
                 .record(InterventionKind::UnverifiedFollowup, "", &msg_id)?;
         }
 
-        // Orient: recall long-term memory (boosted by the failure being recovered
-        // from), prepend it to the turn as oriented context.
+        // Orient: render the active Task State + recall long-term memory (the
+        // recall query is anchored on the goal; the boost is the failure being
+        // recovered from). Both land in the oriented context, NOT the static
+        // system prompt (PRD 03).
         let boost = self
             .last_attribution
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        let task_block = self.task.render();
+        let goal = self.task.goal();
+        // Criteria captured *at orient* — a turn that sets the task is not judged
+        // against the criteria it just created.
+        let criteria = self.task.success_criteria();
+        let query = if goal.is_empty() {
+            prompt.to_string()
+        } else {
+            format!("{goal} {prompt}")
+        };
         let oriented = recall(
             self.store.as_ref(),
-            prompt,
+            &query,
             self.recall_k,
             now(),
             boost.as_ref(),
+            self.embedder.as_deref(),
         )
         .await?;
-        let prompt_with_context = if oriented.block.is_empty() {
+        let extra: String = [task_block, oriented.block.clone()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let prompt_with_context = if extra.is_empty() {
             prompt.to_string()
         } else {
-            format!("{}\n\n{prompt}", oriented.block)
+            format!("{extra}\n\n{prompt}")
         };
 
         self.stream.append(&obs("user", "message", prompt)).await?;
@@ -145,7 +181,19 @@ where
         self.tracer.set_final_reached(true);
 
         let episode = self.tracer.episode();
-        let report = self.verifier.verify(&reply, &episode);
+        let mut report = self.verifier.verify(&reply, &episode);
+
+        // Semantic verification: when the task has success criteria, the judge
+        // evaluates the reply against them. A call/parse failure is
+        // judge_unavailable — never a silent pass (PRD 05).
+        if !criteria.is_empty() {
+            let prompt = judge_prompt(&reply, &goal, &criteria);
+            let jr = match complete(self.model.clone(), JUDGE_SYSTEM, &prompt).await {
+                Ok(emit) => parse_judge(&emit),
+                Err(e) => JudgeResult::unavailable(format!("judge call failed: {e}")),
+            };
+            report = report.with_judge(jr);
+        }
 
         let n = self.turn_counter.fetch_add(1, Ordering::Relaxed);
         let turn_id = format!("{}_turn_{n}", self.session_id);
@@ -191,11 +239,16 @@ where
     /// Recall block for `query` (the `/memory`-style preview; also what `send`
     /// prepends). Exposed so cross-session recall is observable.
     pub async fn recall_block(&self, query: &str) -> anyhow::Result<String> {
-        Ok(
-            recall(self.store.as_ref(), query, self.recall_k, now(), None)
-                .await?
-                .block,
+        Ok(recall(
+            self.store.as_ref(),
+            query,
+            self.recall_k,
+            now(),
+            None,
+            self.embedder.as_deref(),
         )
+        .await?
+        .block)
     }
 
     /// Explicit idle-style consolidation (`/reflect`).
@@ -241,6 +294,16 @@ where
         Ok(self.store.recent(n).await?)
     }
 
+    /// Set the active task from the CLI (`/task`).
+    pub fn set_task(&self, goal: &str, criteria: Vec<String>, scope: Vec<String>) {
+        self.task.set_task(goal, criteria, scope);
+    }
+
+    /// A snapshot of the current Task State (`/task` with no args).
+    pub fn task_state(&self) -> TaskState {
+        self.task.snapshot()
+    }
+
     async fn consolidate(&self, scope: ConsolidationScope) -> anyhow::Result<ConsolidationStats> {
         let observations = self.stream.recent(CONSOLIDATE_WINDOW).await?;
         let attribution = self
@@ -250,7 +313,8 @@ where
             .clone();
         let prompt = consolidation_prompt(&observations, scope, attribution.as_ref());
         let emit = complete(self.model.clone(), CONSOLIDATE_SYSTEM, &prompt).await?;
-        let stats = consolidate_apply(self.store.as_ref(), &emit, now()).await?;
+        let stats =
+            consolidate_apply(self.store.as_ref(), &emit, now(), self.embedder.as_deref()).await?;
         self.journal.record_improvement(
             &self.session_id,
             scope.as_str(),
