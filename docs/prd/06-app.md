@@ -55,7 +55,7 @@ Full turn cycle:
 4.  history.push(user message)
 5.  token_budget.check_and_compact(&mut history).await  → micro/session/full compact if needed
 6.  context = memory.orient(&history).await
-7.  tracer.start_episode()
+7.  tracer.start_episode(); emit Tauri event rk://turn_start (desktop only)
 8.  reply = kernel.run(&history, &registry, &policy, context, &mut tracer).await
 9.  history.push(assistant reply)
 10. memory.observe(reply)
@@ -171,6 +171,22 @@ impl Session {
 Called on exit. Runs sleep-tempo consolidation, skill grooming, flushes the
 evidence journal, and records any final entropy audit.
 
+### Subagent spawning — `SessionFactory`
+
+The `agent` subagent tool lives in the `feed` crate but must construct a
+`Session` (in `app`). To keep the crate DAG acyclic, `app` does not get imported
+by `feed`; instead a **`SessionFactory`** (spawn) trait lives in a low crate, the
+`agent` tool depends on the trait, and `app` injects the concrete implementation
+at startup (**[ADR-0017](../adr/0017-subagent-spawning-via-sessionfactory-trait.md)**).
+The factory implementation also handles subagent system-prompt inheritance and
+the `RUSTYKEYS_MAX_AGENT_DEPTH` recursion bound. A spawned subagent turn is
+linked to its parent via `parent_turn_id` in the evidence journal (data-model
+§4.1).
+
+> **Hot-reload vs restart:** a subagent inherits the parent's resolved `Config`.
+> Workspace and model are restart-only (see Config below), so a subagent cannot
+> be spawned into a different workspace or model than its parent.
+
 ## CLI adapter
 
 The CLI is a `tokio::main` binary. All AI logic lives in `Session`.
@@ -242,7 +258,7 @@ RUSTYKEYS_MODE=gateway rusty-keys
 | Method | Path | Description |
 |---|---|---|
 | `POST` | `/chat` | `session.send(message)` → `{ reply, verified, checks, outcome }` |
-| `GET` | `/stream` | SSE stream of token chunks (`rk://token` events) |
+| `GET` | `/stream` | SSE stream mirroring the canonical `rk://` events (framing below; DEFER → Phase 14) |
 | `GET` | `/health` | `{ status: "ok", model, mode, tokens_used, tokens_limit }` |
 | `GET` | `/verify` | Last `VerificationReport` as JSON |
 | `GET` | `/evidence` | Recent `EvidenceJournal` entries as JSON array |
@@ -253,6 +269,51 @@ RUSTYKEYS_MODE=gateway rusty-keys
 | `POST` | `/command` | Send a slash command (e.g. `{ "command": "/compact" }`) |
 | `POST` | `/approval` | Respond to an approval request: `{ "approved": true, "always": false }` |
 
+### SSE `/stream` framing (DEFER → Phase 14)
+
+> The full framing, `/chat`↔`/stream` correlation model, and backpressure /
+> cancellation policy are **deferred to Phase 14**. The protocol *shape* is
+> sketched here so the frontend's web-adapter seam (PRD 08) is real.
+
+`GET /stream` is one SSE channel that mirrors the canonical `rk://` event table
+above — the gateway does not collapse the turn to bare token chunks. Each SSE
+frame's `event:` name is the `rk://` event with the scheme stripped:
+
+```
+event: turn_start
+id: turn_20260527_143022_abc123
+data: {"turn_id":"turn_20260527_143022_abc123"}
+
+event: token
+data: "Fixed"
+
+event: tool_event
+data: {"name":"edit_file","status":"ok", ...}
+
+event: turn_complete
+id: turn_20260527_143022_abc123
+data: { ...TurnResult... }
+
+event: done
+data: {"turn_id":"turn_20260527_143022_abc123"}
+```
+
+- **Named events** mirror `rk://token`, `rk://tool_event`, `rk://turn_complete`,
+  `rk://approval_request`, `rk://entropy`, `rk://bash_output`, etc.
+- **`id:`** carries the `turn_id` so a client can resume with `Last-Event-ID`.
+- **Terminal sentinels:** a turn ends with either `event: done` (success) or
+  `event: error` (a boundary-error-taxonomy frame: `data` is
+  `{ "error": <kind>, "message": … }`). The terminating frame is how a streaming
+  client learns the turn finished, since SSE has no per-turn close.
+
+### `/health` liveness vs readiness (DEFER → Phase 14)
+
+The Phase-1 `/health` returns `{ status: "ok", model, mode, tokens_used,
+tokens_limit }` — a flat liveness probe. A gateway behind a load balancer needs
+**readiness** too (provider reachable, MCP servers up, token budget headroom).
+Splitting liveness from readiness and expressing degraded states is **deferred
+to Phase 14**; the Phase-1 shape stays as-is until then.
+
 ### Session model
 
 - **Single-session** (`RUSTYKEYS_GATEWAY_MODE=single`): one `Session` per server
@@ -260,19 +321,57 @@ RUSTYKEYS_MODE=gateway rusty-keys
 - **Multi-session** (`RUSTYKEYS_GATEWAY_MODE=multi`): `session_id` header routes
   to a `HashMap<String, Session>`. For hosted / shared deployments.
 
+### Multi-session lifecycle
+
+> **DEFER → Phase 14** for the full implementation; the contract is pinned here
+> so the data model and auth design account for it now.
+
+In `multi` mode each `Session` holds a kernel, SQLite handles, and history, so it
+cannot live forever. The lifecycle contract:
+
+- **Idle TTL** — a session with no activity for `RUSTYKEYS_SESSION_TTL_SECS`
+  (default `3600`) is evicted: `Session::shutdown()` runs (consolidation,
+  journal flush) and the entry is dropped.
+- **Max sessions** — at most `RUSTYKEYS_MAX_SESSIONS` (default `64`) concurrent
+  sessions; a new `session_id` beyond the cap is rejected (or evicts the
+  least-recently-used, decided in Phase 14). This bounds memory and DB handles.
+- **Eviction on disconnect / shutdown** — closing the underlying connection (and
+  process shutdown) drains every live session through `shutdown()` so no journal
+  write is lost. MCP applies the same rule on client disconnect (PRD 07).
+- **`session_id` ↔ auth binding** — when `RUSTYKEYS_GATEWAY_SECRET` is set, the
+  bearer token scopes which `session_id`s a caller may reach; a caller cannot
+  attach to or guess another tenant's session. Without a secret, `multi` mode is
+  for trusted local use only.
+
+The on-disk shape of a persisted/named session (`sessions/<session_id>.json` —
+`session_id`, timestamps, model, harness level, history, `task_id`) is defined in
+**[data-model §6](../architecture/data-model.md#6-sessions--sessionssession_idjson)**;
+that file is what `/resume [id]` rehydrates and what a gateway/MCP `session_id`
+maps to. TTL/eviction parameters live in
+[configuration.md](../reference/configuration.md#gateway-rustykeys_modegateway).
+
 ### Auth and CORS
 
 - Bearer token auth: `RUSTYKEYS_GATEWAY_SECRET` — if set, all requests require
   `Authorization: Bearer <secret>`.
 - CORS: `RUSTYKEYS_GATEWAY_CORS_ORIGIN` (default `*` for local use).
 
-### Tauri event bridge
+### Tauri event bridge — canonical `rk://` event table
 
 When the desktop frontend is active, `Session` emits Tauri events in addition
-to returning HTTP responses:
+to returning HTTP responses.
+
+**This table is the single canonical `rk://` event catalog.** PRD 08 (frontend)
+and the SSE `/stream` sketch below both cite it rather than redefining their own
+lists; the gateway SSE channel mirrors these named events one-for-one. Earlier
+drafts disagreed on the count (BACKLOG listed 6, this PRD listed 8, PRD 08 used
+a 9th — `rk://turn_start` — in its Composer lock logic without ever listing it).
+The reconciled set is the **nine** events below; `rk://turn_start` is now
+included.
 
 | Event | Payload | Trigger |
 |---|---|---|
+| `rk://turn_start` | `{ turn_id }` | Turn begins (kernel about to run); UI locks the composer |
 | `rk://token` | `string` (token chunk) | Each token during streaming |
 | `rk://tool_event` | `ToolEvent` | Each tool call fires |
 | `rk://turn_complete` | `TurnResult` | After post-turn work completes |
@@ -282,45 +381,92 @@ to returning HTTP responses:
 | `rk://bash_output` | `string` | Bash tool stdout/stderr chunk |
 | `rk://consolidation` | `ConsolidationStats` | Idle consolidation complete |
 
+`rk://turn_start` is emitted just before step 8 of the turn cycle (kernel run);
+`rk://turn_complete` is step 15. `ToolEvent` payloads are redaction-scrubbed
+before emission (data-model §11, ADR-0026), so `rk://tool_event` never carries a
+raw secret.
+
+## Boundary error taxonomy
+
+`Session::send()` returns `Result<(String, VerificationReport)>`; tool *failures*
+are values inside the reply (the `ToolOutcome` contract — they don't surface as
+`Err`), but a turn can still fail at the boundary (provider down, timeout, auth,
+a hard policy block, an internal bug). Each adapter — CLI, HTTP gateway, Tauri —
+must render the same failure consistently, so the boundary speaks one small,
+closed taxonomy rather than letting every surface invent its own strings.
+
+The internal error model (the per-crate `thiserror` enums — `KernelError`,
+`ToolError`, `PolicyError`, `ComposeError`, …, and the `ToolOutcome` tool-result
+contract) is owned by **[`docs/dev/error-handling.md`](../dev/error-handling.md)**
+(forward-ref — lands with Phase 1). The taxonomy below is the *boundary
+projection* of those internal errors: `app` collapses the typed error from any
+layer into one of six surface kinds.
+
+| Kind | Maps from (internal) | Meaning |
+|---|---|---|
+| `ProviderError` | `KernelError::Provider { retryable: false }` | Provider returned a non-retryable error (e.g. 4xx, bad request) |
+| `Timeout` | `KernelError::Timeout`, `ToolError::Timeout` | Per-call / tool timeout after retries exhausted |
+| `RateLimited` | `KernelError::Provider` from a `429` after `RUSTYKEYS_RETRY_MAX` | Provider rate limit; `Retry-After` already honored internally |
+| `AuthError` | provider 401/403; gateway/MCP bearer-token mismatch | Caller or provider credential rejected |
+| `PolicyBlock` | `PolicyError::*` that aborts the turn (not a single recoverable tool block) | A policy decision the caller must act on |
+| `Internal` | `<Crate>Error::Internal`, escaped panic caught at `Session::send` | Bug / unexpected state; turn recorded as aborted (ARCHITECTURE §10) |
+
+Note the distinction from a *recoverable* tool block: a single `before_tool`
+denial is returned to the model as a `BLOCKED …` `ToolOutcome` and the loop
+continues (the turn just verifies UNVERIFIED). `PolicyBlock` here is the boundary
+kind for a policy failure that *ends* the turn.
+
+### Per-surface mapping
+
+| Kind | CLI (text to stderr) | HTTP (`/chat` status + body) | Tauri (`invoke` rejection) |
+|---|---|---|---|
+| `ProviderError` | `error: provider: <msg>` | `502 Bad Gateway` · `{ "error": "provider_error", "message": … }` | reject with `{ kind: "provider_error", message }` |
+| `Timeout` | `error: timed out after <ms>ms` | `504 Gateway Timeout` · `{ "error": "timeout", … }` | reject with `{ kind: "timeout", … }` |
+| `RateLimited` | `error: rate limited, retry later` | `429 Too Many Requests` (+ `Retry-After` if known) · `{ "error": "rate_limited", … }` | reject with `{ kind: "rate_limited", … }` |
+| `AuthError` | `error: auth failed: <msg>` | `401 Unauthorized` · `{ "error": "auth_error", … }` | reject with `{ kind: "auth_error", … }` |
+| `PolicyBlock` | `blocked: <policy reason>` | `403 Forbidden` · `{ "error": "policy_block", "message": … }` | reject with `{ kind: "policy_block", message }` |
+| `Internal` | `error: internal error (see trace)` | `500 Internal Server Error` · `{ "error": "internal", … }` | reject with `{ kind: "internal", … }` |
+
+The HTTP `error` field and the Tauri `kind` field both use the snake_case kind
+name (serde convention, data-model §7). On the SSE `/stream` channel a boundary
+error is delivered as a terminal `event: error` frame (see the sketch below), not
+an HTTP status — the HTTP status applies to the non-streaming `POST /chat`. PRD
+08 cites this taxonomy for its `invoke`-error handling.
+
 ## Config
 
-All configuration resolved from environment variables at startup.
+All configuration resolves from environment variables at startup (the `config`
+crate). The **full, authoritative `RUSTYKEYS_*` table — every variable, default,
+and the hot-reload-vs-restart-only rules — lives in
+[`docs/reference/configuration.md`](../reference/configuration.md)** (the SSOT).
+This PRD does not duplicate it; `/config` and `/config set KEY VALUE` operate on
+the same set.
 
-| Variable | Default | Description |
-|---|---|---|
-| `RUSTYKEYS_MODEL` | `anthropic/claude-opus-4-7` | Any aisdk model string |
-| `RUSTYKEYS_WORKSPACE` | `.` | Workspace root (policy boundary) |
-| `RUSTYKEYS_TRACE` | `1` | Enable trace logging to stderr |
-| `RUSTYKEYS_VERIFY` | `1` | Enable verification + evidence journal |
-| `RUSTYKEYS_MAX_STEPS` | `10` | Kernel loop step limit |
-| `RUSTYKEYS_PERMISSION_MODE` | `default` | Permission mode (see PRD 02) |
-| `RUSTYKEYS_ALLOW_WEB` | `0` | Enable web_fetch / web_search tools |
-| `RUSTYKEYS_HARNESS_LEVEL` | `h1` | `h1` / `h2` / `h3` |
-| `RUSTYKEYS_SHORT_TERM_BACKEND` | `sqlite` | `sqlite` |
-| `RUSTYKEYS_LONG_TERM_BACKEND` | `sqlite` | `sqlite` or `duckdb` |
-| `RUSTYKEYS_EMBED_MODEL` | _(none)_ | aisdk embed string; absent = lexical recall |
-| `RUSTYKEYS_RECALL_K` | `6` | Top-k memories to retrieve |
-| `RUSTYKEYS_RECALL_WINDOW` | `6` | Recent turns used as recall query |
-| `RUSTYKEYS_IDLE_THRESHOLD` | `8` | Observations before idle consolidation fires |
-| `RUSTYKEYS_SKILL_GROOM_THRESHOLD` | `12` | Skills before grooming fires on sleep |
-| `RUSTYKEYS_CONTEXT_LIMIT` | `200000` | Token limit for context management |
-| `RUSTYKEYS_COMPACT_MICRO` | `0.80` | Micro-compact threshold |
-| `RUSTYKEYS_COMPACT_SESSION` | `0.90` | Session summary threshold |
-| `RUSTYKEYS_COMPACT_FULL` | `0.95` | Full compact threshold |
-| `RUSTYKEYS_MAX_AGENT_DEPTH` | `3` | Max subagent recursion depth |
-| `RUSTYKEYS_SEARCH_PROVIDER` | `brave` | Web search backend |
-| `RUSTYKEYS_SEARCH_API_KEY` | _(none)_ | API key for search provider |
-| `RUSTYKEYS_MCP_CONFIG` | `.rustykeys/mcp.toml` | MCP server config file |
-| `RUSTYKEYS_EVIDENCE_LOG` | `.rustykeys/evidence.jsonl` | Evidence journal path |
-| `RUSTYKEYS_INTERVENTIONS_LOG` | `.rustykeys/interventions.jsonl` | Intervention log path |
-| `RUSTYKEYS_ENTROPY_LOG` | `.rustykeys/entropy.jsonl` | Entropy audit log path |
-| `RUSTYKEYS_SECURITY_LOG` | `.rustykeys/security.jsonl` | Security event log path |
-| `RUSTYKEYS_TASK_FILE` | `.rustykeys/task.json` | Task State persistence path |
-| `RUSTYKEYS_GATEWAY_MODE` | `single` | `single` or `multi` session |
-| `RUSTYKEYS_GATEWAY_PORT` | `3000` | HTTP gateway port |
-| `RUSTYKEYS_GATEWAY_SECRET` | _(none)_ | Bearer token for gateway auth |
-| `RUSTYKEYS_GATEWAY_CORS_ORIGIN` | `*` | CORS origin header |
-| `RUSTYKEYS_MODE` | `cli` | `cli` / `gateway` / `mcp` (binary mode) |
+Key vars an operator of the app layer touches most often (see the reference for
+the rest):
+
+- `RUSTYKEYS_MODE` (`cli` | `gateway` | `mcp`) — which adapter this binary runs;
+  restart-only.
+- `RUSTYKEYS_MODEL` — the kernel model; rebinding it is restart-only.
+- `RUSTYKEYS_WORKSPACE` — the policy boundary; restart-only (changing it
+  mid-session would void the canonicalized `WorkspacePolicy`).
+- `RUSTYKEYS_GATEWAY_MODE` / `_PORT` / `_SECRET` / `_CORS_ORIGIN` — gateway
+  transport + auth.
+- `RUSTYKEYS_SESSION_TTL_SECS` / `_MAX_SESSIONS` — multi-session lifecycle
+  bounds (see below).
+- `RUSTYKEYS_PERMISSION_MODE`, `RUSTYKEYS_HARNESS_LEVEL`, `RUSTYKEYS_VERIFY` —
+  safety / maturity / verification toggles.
+
+### Hot-reload vs restart-only
+
+`/config set` (and the `config_set` IPC command) applies for the current
+session. **Restart-only** keys are rejected mid-session because mutating them
+would invalidate live state: `RUSTYKEYS_WORKSPACE` (canonicalized policy
+boundary), `RUSTYKEYS_MODEL` (rebinds the kernel), `RUSTYKEYS_MODE`, the
+backend selectors, and the gateway/MCP transport+port. Recall/compaction
+tunables, per-role models, harness level (within a level that doesn't change the
+tool registry), and the redaction toggle are hot-reloadable. The authoritative
+list is in [configuration.md](../reference/configuration.md#hot-reload-vs-restart-only).
 
 ## Cargo workspace layout
 
@@ -356,5 +502,7 @@ The dependency graph is a DAG.
 - **Streaming CLI**: `stream_text()` from aisdk emitted to the terminal token
   by token; also sent as `rk://token` Tauri events. Tracked in BACKLOG.
 - **Per-request sessions**: for multi-user gateway, `Session::new()` is called
-  per connection; `Config` is shared, session state is not.
+  per connection; `Config` is shared, session state is not. The TTL / max-session
+  / eviction / auth-binding contract is in *Multi-session lifecycle* above
+  (DEFER → Phase 14).
 - **MCP server mode**: `RUSTYKEYS_MODE=mcp` starts the MCP server — see PRD 07.

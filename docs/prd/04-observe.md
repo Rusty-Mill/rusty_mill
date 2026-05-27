@@ -30,15 +30,33 @@ pub struct Episode {
 
 pub struct ToolEvent {
     pub name: String,
-    pub args: serde_json::Value,
-    pub status: ToolStatus,   // Ok | Error | Blocked
-    pub result: String,
+    pub args: serde_json::Value,   // redacted before logging (see below)
+    pub outcome: ToolOutcome,      // structured status + result (ADR-0022)
     pub duration_ms: u64,
 }
 ```
 
-`ToolStatus` is inferred from the result string: `BLOCKED …` → `Blocked`,
-`ERROR …` → `Error`, `TIMEOUT …` → `Error`, anything else → `Ok`.
+**Status is structural, not sniffed.** The tracer reads `ToolOutcome.status`
+directly — it does *not* re-parse the result string. The earlier design inferred
+`ToolStatus` from magic prefixes (`BLOCKED …` → `Blocked`, `ERROR …`/`TIMEOUT …`
+→ `Error`, else `Ok`); any tool whose legitimate output began with one of those
+words was misclassified. Per **ADR-0022**, `ToolOutcome` carries the status
+(`ok | error | blocked`, snake_case per ADR-0025) as a field, produced once by
+the dispatch boundary and consumed unchanged by observe and compose. The single
+formatter/parser that renders `ToolOutcome` to/from the model-facing string is
+the authoritative `ToolResultClassifier`; its contract lives in
+[`docs/dev/error-handling.md`](../dev/error-handling.md) and the type's serde
+encoding in [`data-model.md`](../architecture/data-model.md). `NoToolErrors`
+(PRD 05) reads `outcome.status` rather than scanning text.
+
+**Tool args are redacted before logging (ADR-0026).** `ToolEvent.args` and the
+result may contain secrets (auth tokens, API keys, anything the model passes as
+an argument). A redaction pass scrubs deny-listed argument keys and high-entropy
+values **before** a `ToolEvent` reaches `evidence.jsonl`, an episode package, or
+any `/evidence` / `rk://tool_event` emission. Redaction scrubs *values, not
+structure*, so the attribution and verification traces that depend on tool
+events stay intact. The deny-list and value patterns are owned by
+[`threat-model.md`](../architecture/threat-model.md); see data-model §11.
 
 ### Episode lifecycle
 
@@ -70,7 +88,8 @@ a complete episode.
 
 ### Rust advantages
 
-- `ToolEvent` is a value type; no heap allocation per field beyond the strings.
+- `ToolEvent` is a value type; status lives in `ToolOutcome` as data, so there is
+  no per-event string re-parse — no heap allocation per field beyond the strings.
 - `start_episode()` replaces the `Vec` in place — `Vec::clear()` retains
   allocated capacity, so steady-state operation does not allocate.
 - The tracer is `!Send` by design (owned by the `Session`, never shared) —
@@ -81,33 +100,89 @@ a complete episode.
 ### What is an intervention
 
 An intervention is any human action that compensates for a missing or insufficient
-harness capability. The M-HIR metric measures how often this happens:
+harness capability. The metric is **M**-HIR — *Missing-Harness* Human Intervention
+Rate — not raw HIR: only interventions that reflect a harness gap enter the
+numerator. The paper characterises an intervention by its **avoidability**, the
+**harness gap** it corresponds to, and the **burden** it imposed; RK's seven
+UI-observable kinds are mapped onto those three attributes (ADR-0019).
+
+#### M-HIR computation (v1 intent)
 
 ```
-M-HIR = interventions / total_turns
+M-HIR(window) = count(interventions where avoidability != "benign") / denom
+denom         = count(turns)        # RK unit = turn (one Session::send())
 ```
 
-A rising rate signals harness gaps; a falling rate signals improvement over time.
-The raw data is persisted across sessions so the trend is visible.
+- **Numerator — only non-`benign` records count.** A `benign` intervention (e.g.
+  the user types a normal follow-up the agent had already handled correctly) is
+  *excluded*. This exclusion is exactly what makes the metric *M*-HIR rather than
+  raw HIR; without `avoidability`, the log would count every human action.
+- **Denominator = turns, not episodes (DIVERGENCE).** The paper defines
+  M-HIR per *episode* (one full task attempt). RK's denominator is *turns*
+  (`count(turns)` from `EvidenceJournal::count_turns()`), because RK's unit of
+  evaluation is the turn, not the task. This is a deliberate, documented
+  faithfulness divergence — see **ADR-0018** (episode = turn, with `episode_id`
+  grouping); task-level M-HIR is recovered by aggregating over `episode_id` in
+  the eval plan, not in the hot path.
+- **Session-boundary rule.** `count_turns()` spans every session under
+  `.rustykeys/`, so the all-time rate is cross-session. The per-session rate
+  uses the `session_id` carried on each `turn` and `intervention` record
+  (data-model §4.1/§4.2); `trend` (below) is rate *per session* for the
+  sparkline, while the headline `rate` is all-time cumulative. Both are surfaced
+  explicitly so neither is over-read.
+- **Double-count rule — one user action → at most one record.** If a single
+  message would trigger more than one kind (e.g. a `/task` override *and* an
+  `unverified_followup`), record only the most specific (`task_override`). Dedup
+  is by `source_message_id` (data-model §4.2): a record is dropped if one with
+  the same `source_message_id` already exists for the message.
+- **Reset rule.** The denominator **never auto-resets**; the log is append-only
+  and persisted across sessions, so the cumulative trend is always visible. There
+  is no decay or windowing applied to the stored records — windowing (if any) is
+  a read-time concern of the consumer.
 
-### Intervention kinds
+The record schema (with `avoidability` / `harness_gap` / `burden` /
+`source_message_id`) is owned by [`data-model.md`](../architecture/data-model.md)
+§4.2.
 
-| Kind | Trigger | What it signals |
-|---|---|---|
-| `task_override` | User sets `/task` when one is already active | Agent drifted or misunderstood |
-| `manual_reflect` | User runs `/reflect` or `/sleep` | Idle consolidation didn't fire |
-| `manual_groom` | User runs `/groom` | Skills accumulated without auto-grooming |
-| `manual_verify` | User inspects `/verify` | User didn't trust the agent's reply |
-| `unverified_followup` | User sends a message after an unverified turn | Agent produced a bad answer |
-| `tool_block` | User blocks a tool approval request | Agent tried a disallowed action |
-| `direct_edit` | User edits a file directly in the editor (desktop only) | Agent output not trusted |
+### Intervention kinds → avoidability / harness_gap / burden
+
+The seven kinds are RK's UI-facing taxonomy; each carries the three paper-aligned
+attributes that drive the M-HIR numerator (ADR-0019). `avoidability` and `burden`
+below are the **v1 intent** defaults — they are the recorded-at-capture
+classification and may be re-tuned after a spike; a kind marked `benign` here can
+still be recorded as `avoidable` when context warrants (e.g. a `manual_verify`
+that catches a real miss). `harness_gap` names which of the eleven harness
+responsibilities the intervention points at.
+
+| Kind | Trigger | Signals | `avoidability` | `harness_gap` | `burden` |
+|---|---|---|---|---|---|
+| `task_override` | User sets `/task` when one is already active | Agent drifted or misunderstood | `avoidable` | `task_interface` | 1 |
+| `manual_reflect` | User runs `/reflect` or `/sleep` | Idle consolidation didn't fire | `avoidable` | `memory` | 1 |
+| `manual_groom` | User runs `/groom` | Skills accumulated without auto-grooming | `avoidable` | `memory` | 1 |
+| `manual_verify` | User inspects `/verify` | User didn't trust the agent's reply | `benign`¹ | `verification` | 0 |
+| `unverified_followup` | User sends a message after an unverified turn | Agent produced a bad answer | `avoidable` | `verification` | 2 |
+| `tool_block` | User blocks a tool approval request | Agent tried a disallowed action | `unavoidable`² | `permissions` | 1 |
+| `direct_edit` | User edits a file directly in the editor (desktop only) | Agent output not trusted | `avoidable` | `tools` | 3 |
+
+¹ `manual_verify` is `benign` by default (inspecting evidence is healthy, not a
+harness failure) and so does **not** enter the numerator; promote to `avoidable`
+only if the inspection surfaces a missed defect. ² `tool_block` is
+`unavoidable` (the policy working as intended is *not* a missing-harness signal),
+but a *recurring* block on the same legitimate action indicates a policy gap and
+may be reclassified `avoidable`. Both `avoidable` and `unavoidable` count toward
+M-HIR; only `benign` is excluded.
 
 ### Storage
 
-Append-only JSONL at `.rustykeys/interventions.jsonl`:
+Append-only JSONL at `.rustykeys/interventions.jsonl`. The record schema is owned
+by [`data-model.md`](../architecture/data-model.md) §4.2 — shown here for context,
+not re-specified:
 
 ```json
-{"ts": 1234567890.5, "kind": "task_override", "note": "fix the parser not the formatter"}
+{"v":1,"ts":1234567890.5,"session_id":"s_abc","kind":"task_override",
+ "note":"fix the parser not the formatter",
+ "avoidability":"avoidable","harness_gap":"task_interface","burden":1,
+ "source_message_id":"m_42"}
 ```
 
 ```rust
@@ -115,30 +190,49 @@ pub struct InterventionLogger {
     path: PathBuf,
 }
 
+pub struct InterventionRecord {
+    pub kind: InterventionKind,
+    pub note: String,
+    pub avoidability: Avoidability,   // Avoidable | Unavoidable | Benign (ADR-0019)
+    pub harness_gap: String,          // which of the 11 responsibilities
+    pub burden: u8,                   // 0–3
+    pub source_message_id: String,    // dedup key (one action → one record)
+}
+
+pub enum Avoidability { Avoidable, Unavoidable, Benign }  // snake_case on the wire
+
 impl InterventionLogger {
-    pub fn record(&self, kind: InterventionKind, note: &str) -> Result<()>;
+    /// De-dupes by `source_message_id`; classifies kind → avoidability/harness_gap/burden.
+    pub fn record(&self, kind: InterventionKind, note: &str,
+                  source_message_id: &str) -> Result<()>;
     pub fn recent(&self, n: usize) -> Result<Vec<InterventionRecord>>;
+    /// Numerator counts only records where `avoidability != Benign` (M-HIR, not raw HIR).
     pub fn mhir(&self, total_turns: usize) -> MhirReport;
 }
 
 pub struct MhirReport {
-    pub n_interventions: usize,
-    pub n_turns: usize,
-    pub rate: f64,
+    pub n_interventions: usize,   // non-benign only (the M-HIR numerator)
+    pub n_benign: usize,          // recorded but excluded — surfaced for transparency
+    pub n_turns: usize,           // denominator = turns (ADR-0018 divergence)
+    pub rate: f64,                // all-time cumulative
     pub breakdown: HashMap<InterventionKind, usize>,
-    pub trend: Vec<f64>,  // rate per last-N sessions for sparkline
+    pub trend: Vec<f64>,          // rate per session for sparkline (not cumulative)
 }
 ```
 
 `total_turns` comes from `EvidenceJournal::count_turns()` — the observe layer
 has no coupling to the compose layer's journal; `Session` passes the count in.
+`count_turns()` is torn-line tolerant (data-model §10), so the denominator never
+chokes on a partial final line.
 
 ### Detecting `unverified_followup`
 
 `Session` tracks `last_report: Option<VerificationReport>`. Before processing
 a regular user message, if `last_report.is_some_and(|r| !r.verified)`, the
-logger records `unverified_followup`. This is a one-field state check — no LLM
-call, no file I/O in the hot path.
+logger records `unverified_followup` against that message's `source_message_id`.
+This is a one-field state check — no LLM call, no file I/O in the hot path. Per
+the double-count rule above, if the same message also triggers a `task_override`,
+only the more specific `task_override` is kept (deduped by `source_message_id`).
 
 ## EntropyAuditor
 
@@ -169,8 +263,8 @@ pub struct EntropyFinding {
     pub evidence: String,      // file path + line or tool call reference
 }
 
-pub enum EntropyCategory {
-    Residue,           // debug scripts, temp files, dead code left behind
+pub enum EntropyCategory {       // snake_case on the wire (ADR-0025)
+    Residue,           // debug scripts, temp files, dead/redundant code left behind
     TestWeakening,     // test removed, assertion loosened, #[ignore] added
     StaleDocs,         // doc comment removed or contradicted by code change
     DependencyChurn,   // dep added then removed same turn, or unused dep added
@@ -179,19 +273,60 @@ pub enum EntropyCategory {
 }
 ```
 
-### Detection heuristics
+#### Paper → RK category map (ADR-0020)
 
-`EntropyAuditor::audit(episode)` inspects `ToolEvent` records synchronously
-after the kernel run:
+The AI Harness Engineering paper enumerates **seven** entropy categories; RK has
+**six**. The two sets do not line up one-to-one, so entropy-delta comparisons
+against the paper go through this reconciliation. RK merges the paper's *code*
+(redundant/dead code) into `Residue` alongside *file-residue*, and renames the
+paper's *workflow* category to `TaskContradiction`. The RK enum is unchanged; a
+finding is translated to the paper's vocabulary only for cross-paper comparison.
 
-| Category | Detection method |
-|---|---|
-| `Residue` | `write_file` to paths matching `debug_*`, `tmp_*`, `*.bak`, `test_scratch.*`; or files written but never referenced in subsequent tool calls |
-| `TestWeakening` | `edit_file` on `*_test.*` / `*spec*` that removes `assert`, adds `#[ignore]` / `.skip()`, or reduces assertion count (line-diff heuristic) |
-| `StaleDocs` | `edit_file` that modifies a function signature without touching its adjacent doc comment block |
-| `DependencyChurn` | `edit_file` on `Cargo.toml`/`package.json`/`pyproject.toml` that adds then removes a dependency within the same turn |
-| `BoundaryViolation` | `write_file` or `edit_file` to a path outside the active `TaskState`'s declared scope (if `scope` field set) |
-| `TaskContradiction` | `write_file` / `edit_file` that introduces a comment directly contradicting the active task goal string |
+| Paper category | RK `EntropyCategory` | Note |
+|---|---|---|
+| code | `Residue` | dead/redundant code folded in with file-residue |
+| file-residue | `Residue` | debug scripts, temp files, `.bak`/`.orig` |
+| test | `TestWeakening` | 1:1 |
+| documentation | `StaleDocs` | 1:1 |
+| dependency | `DependencyChurn` | 1:1 |
+| architecture | `BoundaryViolation` | 1:1 |
+| workflow | `TaskContradiction` | renamed |
+
+(The exact seven paper categories and the 0–3 severity scale are pending human
+confirmation against the rendered PDF — see the PDF verification caveat in
+ARCHITECTURE.md §12.)
+
+### Detection heuristics + severity thresholds (v1 intent)
+
+`EntropyAuditor::audit(episode, task_scope)` inspects `ToolEvent` records
+synchronously after the kernel run — **no LLM call**. Severity is **0–3**
+(0 = informational, 1 = minor, 2 = notable, 3 = significant burden). These are
+*syntactic* heuristics over `edit_file`/`write_file` args; the semantic cases
+(`StaleDocs`, `TaskContradiction`) are best-effort until the LLM-assisted seam
+(see Seams) lands. Globs and thresholds are **v1 intent** — the design to build
+against, revisit after a spike.
+
+| Category (paper map) | Heuristic | Severity |
+|---|---|---|
+| `Residue` (code + file-residue) | `write_file` to glob `{debug_*, tmp_*, *.bak, *.orig, scratch*, test_scratch.*}` → **2**; file written but never re-read/edited/referenced by a later `tool_event` in the same turn → **1**; commented-out block ≥10 lines added via `edit_file` → **1** | 1–2 |
+| `TestWeakening` (test) | `edit_file` on path matching `{*_test.*, *spec*, test_*, tests/*}` whose new content removes ≥1 `assert*` / `expect(` / `#[test]`, **or** adds `#[ignore]` / `.skip(` / `xit(` / `@pytest.mark.skip` → **3**; net assertion-token count decreases (count `assert`/`expect` tokens old vs new) → **2** | 2–3 |
+| `StaleDocs` (documentation) | `edit_file` whose new content changes a `fn` / `def` / `function` signature line but leaves the immediately-preceding doc block (`///`, `/**`, `"""`, `#`) unchanged → **1**; doc comment deleted with no replacement → **2** | 1–2 |
+| `DependencyChurn` (dependency) | within one turn, a dep added then removed across `{Cargo.toml, package.json, pyproject.toml}` edits → **2**; dep added but no source file in the turn references it (import/`use` scan) → **1** | 1–2 |
+| `BoundaryViolation` (architecture) | `write_file` / `edit_file` to a path outside `TaskState.scope` (the `scope: Vec<String>` field — data-model §8) → **3**; write crossing a declared crate/layer boundary not named in the task → **2** | 2–3 |
+| `TaskContradiction` (workflow) | an added comment/string literal contains a negation of an active `TaskState.goal` keyword (lexical overlap + negation token) → **1** (raised to **2** only under the LLM-assisted seam) | 1 |
+
+**Score and gate.** The net entropy score is
+
+```
+delta = -Σ severity        # over all findings; negative = burden introduced
+```
+
+Entropy is **non-blocking/informational** — findings are surfaced but do not flip
+`verified` (see Lifecycle). They do, however, feed the H3 outcome classifier:
+`UnsafeInvalid` is triggered by any `TestWeakening` **or** `BoundaryViolation`
+finding with `severity >= 2` (consistent with the paper's `unsafe_invalid`
+definition — "tests are weakened, unrelated destructive edits occur, or the task
+is bypassed"). This trigger is owned by the `EpisodeOutcome` classifier in PRD 05.
 
 ### Lifecycle
 
@@ -202,7 +337,7 @@ after the kernel run:
 let (judge_result, consolidation_result, entropy_audit) = tokio::join!(
     criteria_judge.run(&reply),
     memory.consolidate(ConsolidationScope::Idle),
-    entropy_auditor.audit(tracer.episode()),
+    entropy_auditor.audit(tracer.episode(), task.scope()),  // scope for BoundaryViolation
 );
 ```
 
@@ -214,11 +349,15 @@ The audit result is:
 
 ### Storage
 
+Schema owned by [`data-model.md`](../architecture/data-model.md) §4.4; `category`
+is snake_case (ADR-0025), `delta = -Σ severity`:
+
 ```json
-{"ts": 1234567890.5, "kind": "entropy", "delta": -2,
- "findings": [{"category": "TestWeakening", "severity": 2,
-               "description": "Removed assertion in auth_test.rs",
-               "evidence": "src/auth_test.rs:47"}]}
+{"v":1,"ts":1234567890.5,"session_id":"s_abc","kind":"entropy","turn_id":"turn_…",
+ "delta":-2,
+ "findings":[{"category":"test_weakening","severity":2,
+              "description":"Removed assertion in auth_test.rs",
+              "evidence":"src/auth_test.rs:47"}]}
 ```
 
 ```rust
@@ -227,7 +366,9 @@ pub struct EntropyAuditor {
 }
 
 impl EntropyAuditor {
-    pub async fn audit(&self, episode: &Episode) -> Result<EntropyAudit>;
+    /// `task_scope` is `TaskState.scope` (data-model §8); empty ⇒ BoundaryViolation skipped.
+    pub async fn audit(&self, episode: &Episode, task_scope: &[String])
+        -> Result<EntropyAudit>;
     pub fn recent(&self, n: usize) -> Result<Vec<EntropyAudit>>;
     pub fn cumulative_delta(&self) -> Result<i32>;
 }
