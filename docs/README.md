@@ -6,6 +6,9 @@ application is the harness built around it).
 
 ## Read first
 
+- **[overview.md](./overview.md)** — the diagram-first synthesis of architecture + plan
+  (system context, components, runtime & data-flow, on-disk state, deployment, H0–H3,
+  and the phase→crate→issue map). The fastest way in.
 - **[ARCHITECTURE.md](./ARCHITECTURE.md)** — the system view: component map, crate DAG,
   concurrency and runtime model, deployment topologies, quality attributes, failure
   modes, and the faithfulness map to the research paper. *Authoritative for structure.*
@@ -34,7 +37,7 @@ application is the harness built around it).
 | [reference/configuration.md](./reference/configuration.md) | Every `RUSTYKEYS_*` environment variable |
 | [architecture/threat-model.md](./architecture/threat-model.md) | Trust boundaries, secret redaction, web egress, auth |
 | [reference/glossary.md](./reference/glossary.md) | The harness vocabulary |
-| [adr/](./adr/) | Architecture Decision Records (0001–0028) |
+| [adr/](./adr/) | Architecture Decision Records (0001–0036) |
 
 ## Engineering substrate (dev)
 
