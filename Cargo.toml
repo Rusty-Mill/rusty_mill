@@ -5,7 +5,8 @@ members = [
     "crates/observe",
     "crates/constrain",
     "crates/feed",
-    "crates/spike",
+    "crates/kernel",
+    "crates/app",
 ]
 
 [workspace.package]
@@ -28,3 +29,4 @@ rk-config = { path = "crates/config" }
 rk-observe = { path = "crates/observe" }
 rk-constrain = { path = "crates/constrain" }
 rk-feed = { path = "crates/feed" }
+rk-kernel = { path = "crates/kernel" }

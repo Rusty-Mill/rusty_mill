@@ -1,0 +1,28 @@
+[package]
+name = "rk-app"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rk-config.workspace = true
+rk-observe.workspace = true
+rk-constrain.workspace = true
+rk-feed.workspace = true
+rk-kernel.workspace = true
+# `openaicompatible` references `providers::openai` internally, so `openai`
+# must be enabled alongside it (aisdk 0.5.2 feature-wiring quirk).
+aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
+anyhow = "1"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[bin]]
+name = "rusty-keys"
+path = "src/main.rs"
+
+[dev-dependencies]
+rk-kernel = { workspace = true, features = ["fake"] }
+serde_json.workspace = true
+async-trait.workspace = true

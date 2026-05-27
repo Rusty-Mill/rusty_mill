@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 /// Maturity level of the harness (ARCHITECTURE §3). Phase 1 ships H1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum HarnessLevel {
     /// Task + repo files, no tool registry.
     H0,
