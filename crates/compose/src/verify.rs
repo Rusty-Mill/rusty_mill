@@ -127,36 +127,33 @@ impl Verifier {
 fn attribute(check: &str, episode: &Episode) -> Vec<Attribution> {
     match check {
         "no_tool_errors" => {
+            // One attribution per distinct failing status (frozen matrix; the
+            // timeout/truncated rows extend it for the chaos fault classes).
+            let names = |status: ToolStatus| -> Vec<&str> {
+                episode
+                    .tool_events
+                    .iter()
+                    .filter(|e| e.outcome.status == status)
+                    .map(|e| e.name.as_str())
+                    .collect()
+            };
             let mut out = Vec::new();
-            let blocked: Vec<&str> = episode
-                .tool_events
-                .iter()
-                .filter(|e| e.outcome.status == ToolStatus::Blocked)
-                .map(|e| e.name.as_str())
-                .collect();
-            let errored: Vec<&str> = episode
-                .tool_events
-                .iter()
-                .filter(|e| e.outcome.status == ToolStatus::Error)
-                .map(|e| e.name.as_str())
-                .collect();
-            if !blocked.is_empty() {
-                out.push(Attribution {
-                    check: check.to_string(),
-                    failure_type: FailureType::FTool,
-                    category: "permission_block".to_string(),
-                    layer: "constrain/policy".to_string(),
-                    evidence: format!("blocked: {}", blocked.join(", ")),
-                });
-            }
-            if !errored.is_empty() {
-                out.push(Attribution {
-                    check: check.to_string(),
-                    failure_type: FailureType::FTool,
-                    category: "tool_error".to_string(),
-                    layer: "feed/tools".to_string(),
-                    evidence: format!("errored: {}", errored.join(", ")),
-                });
+            for (status, category, layer) in [
+                (ToolStatus::Blocked, "permission_block", "constrain/policy"),
+                (ToolStatus::Error, "tool_error", "feed/tools"),
+                (ToolStatus::Timeout, "tool_timeout", "feed/tools"),
+                (ToolStatus::Truncated, "tool_truncated", "feed/tools"),
+            ] {
+                let hits = names(status);
+                if !hits.is_empty() {
+                    out.push(Attribution {
+                        check: check.to_string(),
+                        failure_type: FailureType::FTool,
+                        category: category.to_string(),
+                        layer: layer.to_string(),
+                        evidence: format!("{}: {}", status.as_str(), hits.join(", ")),
+                    });
+                }
             }
             out
         }

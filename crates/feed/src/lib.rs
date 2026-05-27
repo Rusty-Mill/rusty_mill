@@ -11,6 +11,8 @@
 //! built-in filesystem tools.
 
 mod builtins;
+#[cfg(feature = "chaos")]
+pub mod chaos;
 mod error;
 mod prompt;
 mod tool;

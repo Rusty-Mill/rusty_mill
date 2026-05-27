@@ -23,9 +23,11 @@ pub trait Check: Send + Sync {
     fn run(&self, reply: &str, episode: &Episode) -> CheckResult;
 }
 
-/// Fails if any tool event ended `error` or `blocked` (read structurally from
-/// `ToolOutcome`, ADR-0022 — never sniffed from the result string). Guards
-/// against asserting success on top of a failed action.
+/// Fails if any tool event ended in a non-`ok` status (read structurally from
+/// `ToolOutcome`, ADR-0022 — never sniffed from the result string). Covers
+/// `error`/`blocked` plus the `timeout`/`truncated` fault classes (eval-plan §7:
+/// the resilience invariant requires this check to fire under every injected
+/// fault), so the harness can never report verified-success on top of one.
 pub struct NoToolErrors;
 
 impl Check for NoToolErrors {
@@ -37,7 +39,7 @@ impl Check for NoToolErrors {
         let bad: Vec<&str> = episode
             .tool_events
             .iter()
-            .filter(|e| matches!(e.outcome.status, ToolStatus::Error | ToolStatus::Blocked))
+            .filter(|e| e.outcome.status != ToolStatus::Ok)
             .map(|e| e.name.as_str())
             .collect();
         CheckResult {
