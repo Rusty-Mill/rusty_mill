@@ -10,17 +10,24 @@ Related: [`../ARCHITECTURE.md`](../ARCHITECTURE.md) §9 (feature matrix, topolog
 
 ## 1. MSRV & toolchain
 
-- **MSRV: pin ≥ 1.82**, well above the 1.75 async-fn-in-trait floor, in a committed `rust-toolchain.toml` at the workspace root, so every contributor and CI job use the same compiler:
+> **Updated after the Phase 1 spike (was 1.82).** aisdk 0.5.2 — and its
+> `aisdk-macros` crate — use **let-chains** (`if let … && let …`), stabilized in
+> **Rust 1.88**. So the dependency floor, not our own code, sets the MSRV: it is
+> **1.88**, superseding the original 1.82 intent.
+
+- **MSRV: pin = 1.88** (the aisdk let-chains floor), restated as
+  `rust-version = "1.88"` in the workspace `Cargo.toml` `[workspace.package]` so
+  `cargo` enforces it on publish/build. The committed `rust-toolchain.toml` pins
+  `channel = "stable"` so contributors and CI share a compiler:
 
 ```toml
 # rust-toolchain.toml (workspace root)
 [toolchain]
-channel = "1.82"          # MSRV; CI also runs `stable`
+channel = "stable"
 components = ["rustfmt", "clippy"]
 ```
 
-- The MSRV is restated as `rust-version = "1.82"` in the workspace `Cargo.toml` `[workspace.package]` so `cargo` enforces it on publish/build.
-- CI's build matrix runs **both** `1.82` (MSRV) and `stable` (§7).
+- CI's build matrix runs **both** `1.88` (MSRV) and `stable` (§7).
 
 ## 2. rustfmt
 

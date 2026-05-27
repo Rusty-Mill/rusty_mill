@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! `kernel` — the aisdk `LanguageModelRequest` loop, dispatching through the
 //! abstract `constrain::ToolDispatch` seam (ARCHITECTURE §4-5, §54).
 //!
@@ -18,8 +22,8 @@ use std::sync::Arc;
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
-use aisdk::core::LanguageModelRequest;
 use aisdk::core::tools::{Tool, ToolExecute};
+use aisdk::core::LanguageModelRequest;
 use rk_constrain::ToolDispatch;
 
 /// Kernel errors (ADR-0023).

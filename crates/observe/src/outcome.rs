@@ -45,7 +45,10 @@ pub struct ToolOutcome {
 impl ToolOutcome {
     /// Construct with an explicit status.
     pub fn new(status: ToolStatus, payload: impl Into<String>) -> Self {
-        Self { status, payload: payload.into() }
+        Self {
+            status,
+            payload: payload.into(),
+        }
     }
 
     /// A successful result.

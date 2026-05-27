@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! `config` — resolve all `RUSTYKEYS_*` settings at startup. Leaf crate
 //! (ARCHITECTURE §4). No I/O beyond reading environment variables.
 
@@ -54,7 +58,9 @@ impl Config {
     pub fn resolve(get: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
         let model = get("RUSTYKEYS_MODEL")
             .filter(|s| !s.trim().is_empty())
-            .ok_or(ConfigError::Missing { key: "RUSTYKEYS_MODEL" })?;
+            .ok_or(ConfigError::Missing {
+                key: "RUSTYKEYS_MODEL",
+            })?;
 
         let workspace = match get("RUSTYKEYS_WORKSPACE") {
             Some(p) if !p.trim().is_empty() => PathBuf::from(p),
@@ -66,7 +72,11 @@ impl Config {
             _ => HarnessLevel::default(),
         };
 
-        Ok(Self { model, workspace, harness_level })
+        Ok(Self {
+            model,
+            workspace,
+            harness_level,
+        })
     }
 }
 
@@ -98,8 +108,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |k: &str| map.get(k).cloned()
     }
 
@@ -107,7 +119,9 @@ mod tests {
     fn missing_model_is_an_error() {
         assert!(matches!(
             Config::resolve(env(&[])),
-            Err(ConfigError::Missing { key: "RUSTYKEYS_MODEL" })
+            Err(ConfigError::Missing {
+                key: "RUSTYKEYS_MODEL"
+            })
         ));
     }
 
@@ -131,7 +145,10 @@ mod tests {
                 ("RUSTYKEYS_MODEL", "m"),
                 ("RUSTYKEYS_HARNESS_LEVEL", "h9"),
             ])),
-            Err(ConfigError::Invalid { key: "RUSTYKEYS_HARNESS_LEVEL", .. })
+            Err(ConfigError::Invalid {
+                key: "RUSTYKEYS_HARNESS_LEVEL",
+                ..
+            })
         ));
     }
 }

@@ -26,3 +26,6 @@ path = "src/main.rs"
 rk-kernel = { workspace = true, features = ["fake"] }
 serde_json.workspace = true
 async-trait.workspace = true
+
+[lints]
+workspace = true

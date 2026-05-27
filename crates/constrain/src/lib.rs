@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! `constrain` — the gate: vet every tool call before dispatch (ADR-0007).
 //! Owns the [`Policy`] and [`ToolDispatch`] traits (ARCHITECTURE §4).
 

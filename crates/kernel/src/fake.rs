@@ -7,13 +7,13 @@ use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use aisdk::Result as AiResult;
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::{
     LanguageModel, LanguageModelOptions, LanguageModelResponse, LanguageModelResponseContentType,
     LanguageModelStreamChunk,
 };
 use aisdk::core::tools::ToolCallInfo;
+use aisdk::Result as AiResult;
 use async_trait::async_trait;
 use futures::Stream;
 use serde_json::Value;
@@ -41,7 +41,9 @@ pub struct FakeLanguageModel {
 impl FakeLanguageModel {
     /// Build from an ordered list of per-call response batches.
     pub fn new(turns: Vec<Vec<Scripted>>) -> Self {
-        Self { script: Arc::new(Mutex::new(turns.into_iter().collect())) }
+        Self {
+            script: Arc::new(Mutex::new(turns.into_iter().collect())),
+        }
     }
 }
 
@@ -77,7 +79,10 @@ impl LanguageModel for FakeLanguageModel {
             })
             .collect();
 
-        Ok(LanguageModelResponse { contents, usage: None })
+        Ok(LanguageModelResponse {
+            contents,
+            usage: None,
+        })
     }
 
     async fn stream_text(

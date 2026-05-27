@@ -110,16 +110,31 @@ mod tests {
     #[tokio::test]
     async fn blocks_escape_allows_inside() {
         let p = WorkspacePolicy::new("/ws");
-        assert!(p.before_tool("read_file", &json!({"path": "src/a.rs"})).await.is_ok());
-        assert!(p.before_tool("read_file", &json!({"path": "/ws/x"})).await.is_ok());
-        assert!(p.before_tool("read_file", &json!({"path": "../etc"})).await.is_err());
-        assert!(p.before_tool("read_file", &json!({"path": "/etc/passwd"})).await.is_err());
+        assert!(p
+            .before_tool("read_file", &json!({"path": "src/a.rs"}))
+            .await
+            .is_ok());
+        assert!(p
+            .before_tool("read_file", &json!({"path": "/ws/x"}))
+            .await
+            .is_ok());
+        assert!(p
+            .before_tool("read_file", &json!({"path": "../etc"}))
+            .await
+            .is_err());
+        assert!(p
+            .before_tool("read_file", &json!({"path": "/etc/passwd"}))
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn chain_first_block_wins() {
         let chain = PolicyChain::new().with(Arc::new(WorkspacePolicy::new("/ws")));
-        assert!(chain.before_tool("read_file", &json!({"path": "/etc/x"})).await.is_err());
+        assert!(chain
+            .before_tool("read_file", &json!({"path": "/etc/x"}))
+            .await
+            .is_err());
         // A non-path tool is unconstrained by WorkspacePolicy.
         assert!(chain.before_tool("other", &json!({})).await.is_ok());
     }

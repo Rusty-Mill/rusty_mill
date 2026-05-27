@@ -82,7 +82,10 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     /// New empty registry guarded by `policy`.
     pub fn new(policy: Arc<dyn Policy>) -> Self {
-        Self { tools: HashMap::new(), policy }
+        Self {
+            tools: HashMap::new(),
+            policy,
+        }
     }
 
     /// Register a tool under its own name.
@@ -108,8 +111,11 @@ impl ToolDispatch for ToolRegistry {
     }
 
     fn schemas(&self) -> Vec<(String, Value)> {
-        let mut out: Vec<_> =
-            self.tools.values().map(|t| (t.name().to_string(), t.schema())).collect();
+        let mut out: Vec<_> = self
+            .tools
+            .values()
+            .map(|t| (t.name().to_string(), t.schema()))
+            .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }

@@ -21,11 +21,16 @@ fn config_at(workspace: &std::path::Path) -> Config {
 async fn send_reads_workspace_file_then_replies() {
     let dir = std::env::temp_dir().join(format!("rk-app-{}", std::process::id()));
     tokio::fs::create_dir_all(&dir).await.unwrap();
-    tokio::fs::write(dir.join("note.txt"), "hello from the workspace").await.unwrap();
+    tokio::fs::write(dir.join("note.txt"), "hello from the workspace")
+        .await
+        .unwrap();
 
     let config = config_at(&dir);
     let model = FakeLanguageModel::new(vec![
-        vec![Scripted::ToolCall { name: "read_file".into(), args: json!({"path": "note.txt"}) }],
+        vec![Scripted::ToolCall {
+            name: "read_file".into(),
+            args: json!({"path": "note.txt"}),
+        }],
         vec![Scripted::Text("I read the note.".into())],
     ]);
 

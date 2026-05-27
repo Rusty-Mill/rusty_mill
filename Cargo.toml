@@ -11,8 +11,14 @@ members = [
 
 [workspace.package]
 edition = "2021"
-rust-version = "1.85"
+# MSRV. The coding-standards doc pins 1.82, but aisdk 0.5.2 (and its macro crate)
+# use let-chains, stabilized in Rust 1.88 — so 1.88 is the true floor. See
+# docs/dev/coding-standards.md §1.
+rust-version = "1.88"
 license = "MIT"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [workspace.dependencies]
 # External

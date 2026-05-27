@@ -33,21 +33,30 @@ fn resolve(root: &Path, args: &Value) -> Result<PathBuf, ToolError> {
         .and_then(Value::as_str)
         .ok_or_else(|| ToolError::InvalidArgs("missing string field 'path'".into()))?;
     let p = Path::new(path);
-    Ok(if p.is_absolute() { p.to_path_buf() } else { root.join(p) })
+    Ok(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        root.join(p)
+    })
 }
 
 async fn read_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    tokio::fs::read_to_string(&path).await.map_err(|e| ToolError::Io(e.to_string()))
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))
 }
 
 async fn list_directory_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    let mut entries =
-        tokio::fs::read_dir(&path).await.map_err(|e| ToolError::Io(e.to_string()))?;
+    let mut entries = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))?;
     let mut names = Vec::new();
-    while let Some(entry) =
-        entries.next_entry().await.map_err(|e| ToolError::Io(e.to_string()))?
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| ToolError::Io(e.to_string()))?
     {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }

@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
-use rk_config::{Config, HarnessLevel};
+use rk_config::Config;
 use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
-use rk_feed::{register_builtins, ToolRegistry};
+use rk_feed::{register_builtins, system_prompt, ToolRegistry};
 use rk_kernel::run_turn;
 
 /// A live conversation against a model, bound to one workspace + policy.
@@ -39,29 +39,21 @@ where
 
     /// Run one user turn to completion; returns the model's final reply.
     pub async fn send(&self, prompt: &str) -> Result<String, rk_kernel::KernelError> {
-        run_turn(self.model.clone(), &self.system, prompt, self.dispatch.clone()).await
+        run_turn(
+            self.model.clone(),
+            &self.system,
+            prompt,
+            self.dispatch.clone(),
+        )
+        .await
     }
 
     /// The advertised tool names (for the startup banner / diagnostics).
     pub fn tool_names(&self) -> Vec<String> {
-        self.dispatch.schemas().into_iter().map(|(n, _)| n).collect()
+        self.dispatch
+            .schemas()
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect()
     }
-}
-
-/// The static, per-session system prompt. Belongs in `feed` long-term; kept
-/// minimal here for the Phase-1 skeleton (H1 layer only).
-fn system_prompt(level: HarnessLevel) -> String {
-    let mut s = String::from(
-        "You are Rusty Keys, an autonomous engineering agent operating inside a \
-         workspace. Use the provided tools to inspect and act. Prefer minimal, \
-         reversible actions and report what you did.",
-    );
-    if level >= HarnessLevel::H1 {
-        s.push_str(
-            "\n\nTool-use: call tools by name with JSON arguments. A blocked or \
-             errored tool returns a structured result to observe and recover from, \
-             not a hard stop. The workspace is the policy boundary.",
-        );
-    }
-    s
 }

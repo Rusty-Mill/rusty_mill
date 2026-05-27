@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! `feed` — the Observe + Orient half of OODA: the tool registry and (later)
 //! memory + context assembly. Depends on `config`, `observe`, `constrain`
 //! (ARCHITECTURE §4-5).
@@ -8,8 +12,10 @@
 
 mod builtins;
 mod error;
+mod prompt;
 mod tool;
 
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
+pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};

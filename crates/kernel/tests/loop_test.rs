@@ -34,16 +34,26 @@ impl ToolDispatch for RecordingDispatch {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn aisdk_loop_dispatches_through_our_bridge() {
-    let dispatch = Arc::new(RecordingDispatch { calls: Default::default() });
+    let dispatch = Arc::new(RecordingDispatch {
+        calls: Default::default(),
+    });
     let model = FakeLanguageModel::new(vec![
-        vec![Scripted::ToolCall { name: "read_file".into(), args: json!({"path": "x"}) }],
+        vec![Scripted::ToolCall {
+            name: "read_file".into(),
+            args: json!({"path": "x"}),
+        }],
         vec![Scripted::Text("all done".into())],
     ]);
 
-    let reply = run_turn(model, "sys", "read x", dispatch.clone()).await.unwrap();
+    let reply = run_turn(model, "sys", "read x", dispatch.clone())
+        .await
+        .unwrap();
 
     assert_eq!(reply, "all done");
-    assert_eq!(dispatch.calls.lock().unwrap().as_slice(), &["read_file".to_string()]);
+    assert_eq!(
+        dispatch.calls.lock().unwrap().as_slice(),
+        &["read_file".to_string()]
+    );
 }
 
 /// A standalone policy unit-check that a chain blocks before dispatch — the

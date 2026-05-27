@@ -1,3 +1,7 @@
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
 //! `observe` — the Observe phase: structured tool-result contract and a minimal
 //! tracer. Depends only on `config` (ARCHITECTURE §4-5).
 //!
@@ -36,12 +40,18 @@ impl Tracer {
         self.events
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .push(ToolEvent { name: name.to_string(), status: outcome.status });
+            .push(ToolEvent {
+                name: name.to_string(),
+                status: outcome.status,
+            });
     }
 
     /// Snapshot the recorded events.
     pub fn events(&self) -> Vec<ToolEvent> {
-        self.events.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.events
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
