@@ -45,6 +45,9 @@ pub struct Config {
     pub workspace: PathBuf,
     /// Harness maturity level, from `RUSTYKEYS_HARNESS_LEVEL` (default: H1).
     pub harness_level: HarnessLevel,
+    /// Optional embedding model, from `RUSTYKEYS_EMBED_MODEL`. Set ⇒ semantic
+    /// recall; unset ⇒ lexical fallback (PRD 03 / Phase 5).
+    pub embed_model: Option<String>,
 }
 
 impl Config {
@@ -72,10 +75,13 @@ impl Config {
             _ => HarnessLevel::default(),
         };
 
+        let embed_model = get("RUSTYKEYS_EMBED_MODEL").filter(|s| !s.trim().is_empty());
+
         Ok(Self {
             model,
             workspace,
             harness_level,
+            embed_model,
         })
     }
 }

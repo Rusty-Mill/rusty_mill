@@ -28,11 +28,22 @@ async fn main() -> Result<()> {
     let model = OpenAICompatible::<DynamicModel>::builder()
         .model_name(config.model.clone())
         .base_url(base_url.clone())
-        .api_key(api_key)
+        .api_key(api_key.clone())
         .build()
         .context("building model provider")?;
 
-    let session = Session::new(&config, model).context("building session")?;
+    let mut session = Session::new(&config, model).context("building session")?;
+
+    // Semantic recall when RUSTYKEYS_EMBED_MODEL is set; lexical otherwise.
+    if let Some(embed_model) = &config.embed_model {
+        let em = OpenAICompatible::<DynamicModel>::builder()
+            .model_name(embed_model.clone())
+            .base_url(base_url.clone())
+            .api_key(api_key)
+            .build()
+            .context("building embedding provider")?;
+        session = session.with_embedder(std::sync::Arc::new(rk_app::AiSdkEmbedder::new(em)));
+    }
 
     eprintln!(
         "rusty-keys · model={} · endpoint={} · workspace={} · level={:?} · tools=[{}]",
