@@ -77,7 +77,8 @@ CREATE TABLE memories (
     title        TEXT    NOT NULL UNIQUE,          -- stable identity; edges reference this
     body         TEXT    NOT NULL,
     mem_type     TEXT    NOT NULL,                 -- fact | summary | skill | entity  (snake_case)
-    importance   REAL    NOT NULL DEFAULT 0.5,     -- 0.0..1.0 (skills floored, see PRD 03 / ADR-0011)
+    importance   REAL    NOT NULL DEFAULT 0.5,     -- 0.0..1.0 (skills floored only once validated=1, see PRD 03 / ADR-0011)
+    validated    INTEGER NOT NULL DEFAULT 0,       -- 0/1 bool; skill candidate→promoted lifecycle (ADR-0031)
     created_ts   REAL    NOT NULL,
     last_used_ts REAL    NOT NULL,                 -- recall recency input
     use_count    INTEGER NOT NULL DEFAULT 0,
@@ -101,7 +102,8 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(title, body, content='memories', co
 ```
 
 - `candidates(query, embed, k)` → top-k by FTS5 `bm25` (lexical) **or** `embedding` cosine (semantic); the returned raw relevance score is **normalized within the batch** before blending (PRD 03 — FTS5 and cosine live in different domains).
-- `prune(older_than, importance_below)` **must exclude `mem_type='skill'`** (ADR-0011).
+- `validated` is the skill **candidate→promoted** lifecycle (ADR-0031): a failure-born skill is minted with `validated=0` (a *candidate* — recall-eligible but neither importance-floored nor prune-exempt) and flipped to `validated=1` (*promoted*) only after it validates (online: a later matching turn goes VERIFIED; offline: it survives golden-episode replay — PRD 03 / [`eval-plan`](../dev/eval-plan.md)). A human `direct_edit` to a skill-derived body resets it to `0`. `validated` is `v1 intent`.
+- `prune(older_than, importance_below)` **must exclude `mem_type='skill'`** — but **only skills with `validated=1`** are prune-exempt + importance-floored (ADR-0011, ADR-0031); a `validated=0` candidate skill decays and prunes like an ordinary memory until it earns promotion.
 - **DuckDB backend** (`store.duckdb`, Phase 5): same logical columns; vector search via `list_cosine_similarity`; `embedding` stored as a `FLOAT[]` column. Embedding dims/threshold are pinned in PRD 03.
 
 ---

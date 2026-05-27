@@ -29,6 +29,7 @@ graph TD
     P3 --> P5[5 DuckDB+Embeddings]
     P1 --> P6[6 Full tool suite]
     P6 --> P7[7 Permission system]
+    P7 --> P7B[7B Capability isolation]
     P1 --> P8[8 Token+context mgmt]
     P7 --> P9[9 Plan mode]
     P2 --> P10[10 H3 episode packages]
@@ -59,6 +60,10 @@ These are not a phase; they are the floor every phase builds on (see the dev doc
   matrix, and `.github/workflows/ci.yml` land with Phase 1.
 - **On-disk versioning** (ADR-0027): every persisted record carries `schema_version`/`v`
   from the moment it is introduced.
+- **`KernelEvent`** (ADR-0034): the `on_event` hook emits one fixed event enum, consumed
+  by the `Tracer` and a pull-based OTLP exporter — observability wires in here, not scattered.
+- **Trust boundary before config parse** (threat-model): defer parsing untrusted workspace
+  config (`.rustykeys/`, `checks.toml`, `mcp.toml`, `AGENT_GUIDE.md`) until trust is established.
 
 ## Risk register (cross-phase)
 
@@ -70,6 +75,8 @@ These are not a phase; they are the floor every phase builds on (see the dev doc
 | SQLite contention across multi-session/subagents | 3, 12, 14 | WAL + `busy_timeout` + single-writer (ARCHITECTURE §10). |
 | Faithfulness drift from the paper (M-HIR, entropy, episode unit) | 10, 11 | ADR-0018/0019/0020; verify exact paper defs on a poppler machine before freezing. |
 | Doc/spec drift across many files | all | SSOT ownership (consolidated plan); cross-link, never restate. |
+| Tool side-effects escape in-process checks | 7B | Opt-in OS-sandbox `ToolExecutor` (`RUSTYKEYS_ISOLATION=sandboxed`), network-deny-by-default (ADR-0030). |
+| Agent games its own eval (reads answers / benchmark) | 2, 10 | Eval-integrity guard: answer keys / expected outputs / benchmark IDs kept out of agent context (ADR-0033). |
 
 ---
 
@@ -106,6 +113,7 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 - [ ] `VerificationReport`: `render()`, `as_observation()`, `limits` `S`
 - [ ] Failure attribution → fixed `FailureType` enum + frozen `(category, layer)` matrix `M`
 - [ ] `/verify`, `/mhir` CLI commands `S`
+- [ ] **Chaos / resilience eval tier** (v1): fault-inject at the `FakeLanguageModel`/`ToolOutcome` seam; resilience metric — honest degradation, never verified-success-on-fault (eval-plan) `M`
 
 **Definition of Done:** every turn writes a versioned, redacted evidence record; failed checks produce a `FailureType` attribution; torn-line recovery tested.
 **Acceptance:** a turn with a failing tool call is marked UNVERIFIED with `(tool_error, feed/tools)`; `/verify` renders the report with its `limits`.
@@ -124,6 +132,7 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 - [ ] Tiered consolidation idle/sleep/explicit + **JSON emit contract** `L`
 - [ ] Skill grooming (refine/merge/split); skills exempt from pruning `M`
 - [ ] **Close the loop:** feed `Attribution` into consolidation; boost failure-born skills at recall `M`
+- [ ] **Validation-gated skills** (ADR-0031): failure-born skills are candidates (no floor/exemption) until validated — online VERIFIED match / offline golden replay; `direct_edit` un-validates `M`
 - [ ] `/memory`, `/reflect`, `/sleep`, `/groom` `S`
 
 **Definition of Done:** facts/skills persist across sessions; recall surfaces a planted fact next session; consolidation output validates against the contract.
@@ -197,6 +206,25 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Test gate:** unit (mode gates) + integration (approval channel with a scripted responder).
 **Demo:** `/permissions read_only`, attempt a write.
 
+## Phase 7B — Capability isolation (ToolExecutor) · security backstop
+
+**Goal:** an opt-in OS-level isolation seam so tool side-effects can't exceed their grant
+even when an in-process checker misses — Anthropic's "supervise what the agent *can* do."
+(ADR-0030; threat-model.)
+**Depends on:** 6, 7 · **Size:** L
+
+- [ ] `ToolExecutor` seam below `feed` / above the OS — does NOT change the `constrain` vetting contract `M`
+- [ ] `RUSTYKEYS_ISOLATION = none | sandboxed`; default `none` (today's in-process behaviour) `S`
+- [ ] `sandboxed`: run tool side-effects (esp. `bash`) in an OS sandbox — Linux-first (landlock / namespaces, or a gVisor-class target), wrapping battle-tested primitives `L`
+- [ ] **Network-deny-by-default** inside the sandbox; egress enforced at the boundary (allowlist = capability grant, not destination filter) `M`
+- [ ] Pull-based OTLP export so isolation doesn't blind operators (the VM-blocked-EDR lesson) `S`
+
+**Definition of Done:** under `sandboxed`, a `bash` attempt to read `~/.aws/credentials` or POST to an external host fails closed at the boundary regardless of the in-process checkers; `none` is byte-for-byte today's behaviour.
+**Acceptance:** the credential-exfil and approved-domain exfil cases from the threat model fail closed under `sandboxed`.
+**Test gate:** integration — sandboxed `bash` escape/exfil attempts (Linux).
+**Risks:** custom sandbox glue is the weakest layer → wrap mature primitives; macOS/Windows parity is a follow-on.
+**Demo:** `RUSTYKEYS_ISOLATION=sandboxed`, ask the agent to exfiltrate a secret; watch it fail closed.
+
 ## Phase 8 — Token & context management
 
 **Goal:** keep the kernel within the context window indefinitely.
@@ -223,6 +251,7 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 - [ ] `Plan` permission mode enforced at policy `S`
 - [ ] CLI approval on `exit_plan_mode` (Proceed/Reject/Annotate) `S`
 - [ ] `/plan` shortcut `S`
+- [ ] **Divergent "explore" option** (ADR-0032, opt-in): fan out N isolated subagents under cognitive frames via `SessionFactory`, then critic/converge top-K; cost-gated `M`
 
 **Definition of Done:** writes/bash blocked in plan mode; approval transitions mode; plan approval is not an intervention.
 **Acceptance:** in plan mode an `edit_file` is blocked; on Proceed the next turn may write.
@@ -269,7 +298,8 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** consume external MCP servers; expose `Session::send()` to IDEs.
 **Depends on:** 6, 7 · **Size:** L
 
-- [ ] MCP client: stdio + SSE, `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12
+- [ ] MCP client on **`rmcp`** (official Rust MCP SDK, ADR-0029): stdio + SSE as thin adapters, `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12
+- [ ] Tool-return inspection seam: small-classifier check on MCP/web returns before context (threat-model) `M`
 - [ ] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M`
 - [ ] MCP server mode: expose `Session::send()` over JSON-RPC 2.0 `M` · #13
 - [ ] Integration-test seam: fake stdio MCP server + reconnect test `M`
@@ -372,3 +402,4 @@ Age/size-based rotation for the append-only logs (the schema already carries `sc
 | nousresearch/hermes-agent | Skill/memory consolidation, background fork pattern, tool guardrails |
 | crynta/terax-ai | Frontend UI: xterm.js, CM6 diff, Tauri 2, plan mode, approval gates |
 | harness/harness-ai | Future MCP client use case (CI/CD tools via MCP server) |
+| docs/review/round2-*.md | Round-2 external-source applicability review; basis for ADR-0029…0034 |

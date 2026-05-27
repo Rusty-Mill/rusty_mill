@@ -37,6 +37,7 @@
 | `RUSTYKEYS_PERMISSION_MODE` | `default` | `default` \| `plan` \| `accept_edits` \| `read_only` \| `restricted` \| `bypass` (PRD 02). |
 | `RUSTYKEYS_ALLOW_BYPASS` † | `0` | Required to be `1` before `bypass` mode disables policy checks (referenced by PRD 02 but previously absent from the table). |
 | `RUSTYKEYS_REDACT` † | `1` | Secret redaction of tool args/results before logging/journaling/IPC (ADR-0026). Disabling is strongly discouraged. |
+| `RUSTYKEYS_ISOLATION` † | `none` | `none` \| `sandboxed` (ADR-0030; roadmap-phase capability isolation). `none` keeps today's in-process behaviour. `sandboxed` runs tool side-effects (esp. `bash`) inside an OS sandbox with **network-deny-by-default**, egress enforced at the sandbox boundary; selects the `ToolExecutor` isolation seam below `feed` (does not change the `constrain` vetting contract). **Restart-only.** |
 
 ## Tools
 | Variable | Default | Description |
@@ -54,6 +55,11 @@
 | `RUSTYKEYS_HARNESS_LEVEL` | `h1` | `h0` † \| `h1` \| `h2` \| `h3`. `h0` (no tool registry) is the paper's ablation floor — selectable or eval-only per ADR-0028. |
 | `RUSTYKEYS_VERIFY` | `1` | Enable verification + evidence journal. |
 | `RUSTYKEYS_MAX_STEPS` | `10` | Kernel loop step limit. |
+
+## Observability
+| Variable | Default | Description |
+|---|---|---|
+| `RUSTYKEYS_OTLP_ENDPOINT` † | _(none)_ | OTLP collector endpoint for the pull-based OTLP exporter bound to the `KernelEvent` stream (token/cost/latency attributes; ADR-0034). Absent ⇒ exporter inert; `RUSTYKEYS_TRACE` stderr logging is unaffected. **v1 intent** (the exporter is a seam; see [coding-standards §9](../dev/coding-standards.md#9-kernelevent--the-unified-lifecycle-event-adr-0034)). |
 
 ## Memory
 | Variable | Default | Description |
@@ -106,4 +112,4 @@
 | `RUSTYKEYS_VOICE` † | `0` | Enable Whisper voice input in the desktop Composer (PRD 08 seam). |
 
 ## Hot-reload vs restart-only
-`/config set` applies for the session. **Restart-only** keys (changing them mid-session is rejected or requires a new session): `RUSTYKEYS_WORKSPACE`, `RUSTYKEYS_MODE`, `RUSTYKEYS_MODEL` (rebinds the kernel), backend selectors, gateway/MCP transport+port. Everything else (recall/compaction tunables, harness level within a level that doesn't change tool registry, per-role models, redaction toggle) is hot-reloadable.
+`/config set` applies for the session. **Restart-only** keys (changing them mid-session is rejected or requires a new session): `RUSTYKEYS_WORKSPACE`, `RUSTYKEYS_MODE`, `RUSTYKEYS_MODEL` (rebinds the kernel), `RUSTYKEYS_ISOLATION` † (the `ToolExecutor` isolation seam is bound at startup), backend selectors, gateway/MCP transport+port. Everything else (recall/compaction tunables, harness level within a level that doesn't change tool registry, per-role models, redaction toggle, `RUSTYKEYS_OTLP_ENDPOINT`) is hot-reloadable.
