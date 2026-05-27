@@ -23,13 +23,15 @@ verify → report* workflow. The faithfulness map in
 tracks where each concept is realized and where Rusty Keys deliberately diverges
 (ADR-0018/0019/0020/0028).
 
-> **Caveat (carried from the refinement).** The PDF is not renderable in the build
-> environment (no poppler/pdftotext/pypdf). The faithfulness assessment relied on a
-> raw zlib `FlateDecode` text recovery that stripped inter-word spaces and ligatures.
-> Three details must be confirmed against the rendered PDF before the `Proposed` ADRs
-> are frozen: the exact 7 entropy categories (and 0–3 severity), the M-HIR denominator
-> wording ("total episodes"), and the intervention-log fields (avoidability / burden /
-> harness-gap).
+> **Source now machine-readable (Round 3).** The original build environment lacked PDF
+> tooling, so the first-pass faithfulness assessment relied on a degraded zlib
+> `FlateDecode` recovery (stripped spaces/ligatures). The paper now extracts cleanly with
+> PyMuPDF to [`2605.13357v1.txt`](./2605.13357v1.txt), and the three previously-unconfirmed
+> details are **confirmed verbatim**: the 7 entropy categories + 0–3 severity (p.10),
+> `M-HIR = missing-harness interventions / total episodes` (p.4), and the intervention-log
+> fields avoidability / burden / harness-gap (p.10). ADR-0018/0019/0020 are accordingly
+> **Accepted** (0028 kept Proposed but broadened to the ladder's R1/R5 question); see the
+> Round-3 audit in [`../review/round3-consolidated.md`](../review/round3-consolidated.md).
 
 ## 2. Lineage & LLM provider
 
