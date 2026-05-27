@@ -1,5 +1,18 @@
 # PRD 00 — System overview
 
+> **What this document is.** A product brief and index. It states *why* Rusty Keys
+> exists (the conceptual grounding, the bet on Rust, goals/non-goals, the
+> relationship to Keystone) and points at the authoritative docs for everything
+> else. It is the entry point, not the system reference.
+>
+> **Where the details live:**
+> - System structure — component map, crate DAG, concurrency, topologies, faithfulness map: [`../ARCHITECTURE.md`](../ARCHITECTURE.md)
+> - On-disk state — `.rustykeys/` tree, SQLite DDL, all schemas, versioning: [`../architecture/data-model.md`](../architecture/data-model.md)
+> - Decisions and trade-offs: [`../adr/`](../adr/) (ADR-0001 … ADR-0028)
+> - Runtime configuration — every `RUSTYKEYS_*` var: [`../reference/configuration.md`](../reference/configuration.md)
+> - Per-component depth: the sibling PRDs [`01-kernel`](01-kernel.md) · [`02-constrain`](02-constrain.md) · [`03-feed`](03-feed.md) · [`04-observe`](04-observe.md) · [`05-compose`](05-compose.md) · [`06-app`](06-app.md) · [`07-mcp`](07-mcp.md) · [`08-frontend`](08-frontend.md)
+> - Phasing / roadmap: [`../../BACKLOG.md`](../../BACKLOG.md)
+
 ## Product summary
 
 **Rusty Keys** is an AI-native application skeleton in Rust. It carries forward
@@ -88,125 +101,42 @@ is a different adapter over the same `Session`. The kernel thread architecture
 that was aspirational in Keystone is the default here: `Session` runs on a
 `tokio` task; the CLI communicates via `mpsc` channels.
 
-## Component map
+## Component map (summary)
 
-| # | Component | Crate/Module | One-liner |
-|---|-----------|-------------|-----------|
-| 01 | kernel | `kernel` | aisdk agent loop: Decide + Act. |
-| 02 | constrain | `constrain` | Policy that vets every tool call before dispatch. |
-| 03 | feed | `feed` | Context, tools (`#[tool]`), memory, Task State. |
-| 04 | observe | `observe` | Structured episode trace + intervention logger. |
-| 05 | compose | `compose` | Verification, failure attribution, evidence journal. |
-| 06 | app | `app` | Session struct + CLI adapter. |
-| 07 | config | `config` | Runtime config from environment. |
+The harness is a Cargo workspace of **eight crates** plus a (non-crate) desktop
+`frontend/`. At a glance: `config` (settings) · `observe` (trace, interventions,
+entropy) · `constrain` (policy, security, approval) · `feed` (tools, memory, Task
+State) · `kernel` (the aisdk agent loop) · `mcp` (MCP client + server) · `compose`
+(verification, attribution, evidence) · `app` (the `Session` and its CLI / gateway /
+MCP / Tauri adapters).
 
-## Architecture Decision Log
+> The original overview listed seven crates and omitted `mcp`; it is a real crate
+> (PRD 07). **[ARCHITECTURE.md §4](../ARCHITECTURE.md#4-logical-view--components)
+> is the authoritative component map**, with §5 the crate dependency DAG and import
+> rules and §3 the H0–H3 maturity model. The per-crate PRDs (01–08) carry the depth.
 
-### ADR-001 — Rust as implementation language
-The harness is execution-bound, not LLM-bound. Rust's ownership model enforces
-correct resource handling at compile time; tokio gives native async I/O for the
-LLM calls; zero-cost abstractions mean the substrate adds no overhead. **Trade-off:**
-higher barrier to entry and longer compile times than Python; justified by
-correctness guarantees and the performance headroom for future scale.
+## Architecture decision log
 
-### ADR-002 — aisdk as LLM provider abstraction
-aisdk gives 73+ providers, native async, streaming, and a `#[tool]` proc macro
-— a complete replacement for LiteLLM + the manual `Tool` struct from Keystone.
-Model identity remains a config string. **Trade-off:** aisdk is newer than LiteLLM
-and has not accumulated the same production edge-case coverage; watch for rough
-edges in provider normalization.
+The 15 decisions that were inlined here have been extracted to [`../adr/`](../adr/)
+as **ADR-0001 … ADR-0015** (Rust, aisdk, tokio, Session-first, the four-verb
+decomposition, `#[tool]`, policy-before-dispatch, memory-as-OODA, tiered
+consolidation, pluggable storage, skill-exemption, concurrent compose,
+verification-carries-limits, intervention logger + M-HIR, append-only evidence).
+The five-persona review added **ADR-0016 … ADR-0028** (async `before_tool`,
+`SessionFactory`, faithfulness divergences, error model, serde and versioning
+conventions, redaction, H0 selectability). The ADR directory is the single source
+of truth for rationale and trade-offs; this PRD no longer restates them.
 
-### ADR-003 — tokio as async runtime
-aisdk is tokio-native; the rest of the harness (SQLite, file I/O) uses tokio's
-`spawn_blocking` where needed. All LLM calls are `await`; post-turn work
-(criteria judge + consolidation) runs concurrently via `tokio::join!`. **Trade-off:**
-async propagates through the call stack — every layer that touches an LLM call
-must be `async fn`. Accepted as the correct default for a network-I/O-heavy system.
+## Maturity model (summary)
 
-### ADR-004 — Session-first, not REPL-first
-`Session::send()` owns the full turn cycle and is transport-agnostic. CLI,
-web, and other gateways are thin adapters. **Why:** in Keystone the UI loop and
-AI loop were interleaved in `main()`; the split was aspirational. Here it is the
-starting point. **Trade-off:** slightly more structure upfront; justified by the
-gateway reuse the comment in Keystone's `build_kernel()` already promised.
-
-### ADR-005 — Harness decomposed into constrain / feed / observe / compose
-Same four-verb decomposition as Keystone. Each verb has one obvious module; every
-cross-cutting concern has a stable home. **Trade-off:** modules are thin at phase 1;
-accepted as intentional placeholders with documented seams.
-
-### ADR-006 — `#[tool]` proc macro for tool registration
-Tools are Rust functions annotated with `#[tool]`; aisdk generates the JSON
-schema from the function signature. **Why:** eliminates the manual schema
-authorship that Keystone's `Tool` dataclass required and makes tool signatures
-type-safe at compile time. **Trade-off:** proc macros add compile-time complexity;
-aisdk owns this cost, not the harness.
-
-### ADR-007 — Policy vets tool calls before dispatch; errors returned, not panicked
-`Policy::before_tool()` runs synchronously before the aisdk dispatcher.
-Violations are returned as `Err(PolicyError)` and surfaced to the model as a
-`BLOCKED` string — the model can recover rather than the process crashing.
-**Trade-off:** the model sees error text (prompt surface); acceptable.
-
-### ADR-008 — Memory is the Observe + Orient half of the OODA loop
-Same OODA framing as Keystone. Short-term stream captures every event (Observe);
-recall assembles working memory each turn (Orient); kernel is Decide + Act;
-outputs feed back as observations. **Trade-off:** couples memory's mental model
-to OODA — embraced deliberately.
-
-### ADR-009 — Tiered consolidation: idle / sleep / explicit
-Distillation of short-term → long-term at three tempos: micro (idle), sleep
-(session end), explicit (user command). **Trade-off:** consolidation quality
-depends on an async aisdk call; token cost per consolidation.
-
-### ADR-010 — Pluggable storage via Rust traits
-`Stream` and `Store` are traits; SQLite (`rusqlite`) is the default
-implementation. DuckDB (`duckdb-rs`) is an optional feature for vector search.
-**Trade-off:** trait objects add a vtable; negligible compared to LLM latency.
-
-### ADR-011 — Skills exempt from pruning
-Lessons learned from mistakes are stored as `skill` memories and are not subject
-to decay-based pruning. Importance decay still reduces recall priority; skills
-are never deleted. Skill grooming (refine / merge / split) is the release valve.
-
-### ADR-012 — Post-turn compose runs concurrently
-After the kernel returns a reply, the criteria judge and idle consolidation are
-independent. They run via `tokio::join!` while the reply is already in the
-caller's hands. **Why:** in Keystone, the sequential post-turn LLM calls added
-visible latency. With async, both calls overlap with the user reading the reply.
-**Trade-off:** if consolidation fires before the criteria judge completes, it may
-miss the judge's learning signal — mitigated by joining both before observing.
-
-### ADR-013 — Verification carries its limits
-`VerificationReport` always includes a `limits` field describing what the checks
-did *not* verify. A "verified" result is never read as more than it is. The
-`CriteriaJudge` check, when active, upgrades `limits` from "deterministic only"
-to "LLM-judge on active task criteria included".
-
-### ADR-014 — Intervention Logger + M-HIR in observe layer
-Human interventions (task overrides, manual consolidations, unverified followups)
-are recorded to `.rustykeys/interventions.jsonl`. M-HIR (Missing-Harness Human
-Intervention Rate) is computed as `interventions / total_turns`. A rising rate
-signals harness gaps; a falling rate signals improvement.
-
-### ADR-015 — Evidence journal is append-only JSONL
-Every turn's verification package and every consolidation changelog are appended
-to `.rustykeys/evidence.jsonl`. Completion is an auditable record, not a claim.
-Rotation/retention is a future seam.
-
-## Maturity self-assessment (H0–H3)
-
-| Level | Definition | Rusty Keys target |
-|---|---|---|
-| H0 | Task description, repository files | Phase 1 baseline |
-| H1 | Tool registry, tool-usage protocol | Phase 1 ✓ |
-| H2 | Project memory, Task State, context-selection | Phase 3–4 |
-| H3 | Deterministic checks, attribution, verification protocol | Phase 2 |
-
-Phase 1 targets H1. Phases 2–4 complete H3 (including semantic criteria judge)
-and H2 (Task State). The full H3 self-improvement loop — Reproduce → Attribute →
-Fix → Verify → Report — is the same loop as Keystone, realised natively in async
-Rust.
+Rusty Keys climbs the paper's H0–H3 ladder across the roadmap: **H1** (tool
+registry) at Phase 1, **H3** deterministic checks at Phase 2, **H2** (project
+memory, Task State, context selection) at Phases 3–4, and the semantic + episode-
+package layers of H3 later still. H0 (no tool registry) is the ablation floor and
+is **selectable-or-eval-only** (ADR-0028). The full H3 self-improvement loop —
+Reproduce → Attribute → Fix → Verify → Report — is the same loop as Keystone,
+realised natively in async Rust. The authoritative ladder, with what each level
+sees, is **[ARCHITECTURE.md §3](../ARCHITECTURE.md#3-maturity-model-h0h3)**.
 
 ## Relationship to Keystone
 

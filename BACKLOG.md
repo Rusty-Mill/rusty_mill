@@ -1,227 +1,363 @@
-# Rusty Keys — development roadmap
+# Rusty Keys — implementation roadmap
 
-Kanban for the full system. Items are sequenced by dependency; each phase
-is a working, runnable system — not a milestone toward one.
+The full system as a dependency-sequenced plan. **Each phase is a working, runnable
+system — not a milestone toward one.** Issues are tracked on GitHub; each item links
+to its issue and carries a size tag.
 
-Issues are tracked on GitHub. Each item below links to its issue.
+## How to read this
+
+Each phase states its **goal + maturity target**, what it **depends on**, a rough
+**size**, the **items** (with size tags `S`/`M`/`L`/`XL` and issue refs), a binary
+**Definition of Done**, observable **Acceptance criteria**, the **Test gate** that
+must pass, top **Risks**, and a one-command **Demo**. DoD = "what's finished
+(incl. tests/docs)"; AC = "what it observably does".
+
+Authoritative companions: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+[`docs/architecture/data-model.md`](docs/architecture/data-model.md),
+[`docs/reference/configuration.md`](docs/reference/configuration.md),
+[`docs/dev/`](docs/dev) (error-handling, testing-strategy, eval-plan, coding-standards),
+[`docs/adr/`](docs/adr).
+
+## Phase dependency graph
+
+```mermaid
+graph TD
+    P1[1 Skeleton · H1] --> P2[2 Observe+Compose · H3-det]
+    P1 --> P3[3 Memory · H2]
+    P2 --> P4[4 TaskState+Semantic · H2/H3]
+    P3 --> P4
+    P3 --> P5[5 DuckDB+Embeddings]
+    P1 --> P6[6 Full tool suite]
+    P6 --> P7[7 Permission system]
+    P1 --> P8[8 Token+context mgmt]
+    P7 --> P9[9 Plan mode]
+    P2 --> P10[10 H3 episode packages]
+    P4 --> P10
+    P2 --> P11[11 Entropy auditor]
+    P4 --> P11
+    P6 --> P12[12 MCP]
+    P7 --> P12
+    P1 --> P13[13 Extended CLI]
+    P1 --> P14[14 Web gateway]
+    P14 --> P15[15 Desktop frontend]
+```
+
+## Engineering substrate — lands WITH Phase 1, not after
+
+These are not a phase; they are the floor every phase builds on (see the dev docs):
+
+- **Error model** (`docs/dev/error-handling.md`, ADR-0023): one `thiserror` enum per
+  library crate, `anyhow` only in `app`, the no-panic rule enforced by clippy lints.
+- **`ToolOutcome` contract** (ADR-0022): status carried structurally — never re-parsed
+  from a result-string prefix. Lands with the first tool.
+- **`async before_tool`** (ADR-0016): the policy hook is `async` from Phase 1 so the
+  ApprovalGate (Phase 7) is **not** a breaking change later.
+- **Testing** (`docs/dev/testing-strategy.md`): the `FakeLanguageModel` scripted-turn
+  fixture ships with Phase 1's `Session`, so every LLM-dependent path is testable in CI
+  without a live provider.
+- **Coding standards + CI** (`docs/dev/coding-standards.md`): MSRV, lints, the feature
+  matrix, and `.github/workflows/ci.yml` land with Phase 1.
+- **On-disk versioning** (ADR-0027): every persisted record carries `schema_version`/`v`
+  from the moment it is introduced.
+
+## Risk register (cross-phase)
+
+| Risk | Phase(s) | Mitigation |
+|---|---|---|
+| aisdk is young; provider normalization rough edges | all | Shared aisdk-client wrapper with retry/timeout (PRD 01); pin via lockfile; `FakeLanguageModel` isolates CI. |
+| `async before_tool` retrofitted late = churn | 1, 7 | Make it `async` at Phase 1 (ADR-0016). |
+| Secrets leak into append-only evidence journal | 2 | Redaction-by-default before any write (ADR-0026, threat-model). |
+| SQLite contention across multi-session/subagents | 3, 12, 14 | WAL + `busy_timeout` + single-writer (ARCHITECTURE §10). |
+| Faithfulness drift from the paper (M-HIR, entropy, episode unit) | 10, 11 | ADR-0018/0019/0020; verify exact paper defs on a poppler machine before freezing. |
+| Doc/spec drift across many files | all | SSOT ownership (consolidated plan); cross-link, never restate. |
 
 ---
 
 ## Phase 1 — Runnable skeleton (MVP) · H1
 
-The smallest complete system: aisdk kernel + policy + core tools + CLI.
-No memory, no verification. Proves the Session architecture and the
-`#[tool]` macro integration.
+**Goal:** the smallest complete system — aisdk kernel + policy + core tools + CLI —
+proving the Session architecture and `#[tool]` integration. No memory, no verification.
+**Depends on:** — · **Size:** L
 
-- [ ] Cargo workspace layout — `kernel`, `constrain`, `feed`, `observe`, `compose`, `app`, `config` · #1
-- [ ] `Config` crate: env-var resolution, `RUSTYKEYS_MODEL`, `RUSTYKEYS_WORKSPACE` · #2
-- [ ] `Constrain` crate: `Policy` trait + `WorkspacePolicy` + `PolicyChain` · #3
-- [ ] `Feed` crate: `ToolRegistry`, `#[tool]` dispatch, built-in `read_file` / `list_directory` · #4
-- [ ] `Observe` crate: `Tracer`, `Episode`, `ToolEvent`, structured trace logging · #5
-- [ ] `Kernel` crate: aisdk `LanguageModelRequest` loop, tool dispatch, error handling · #6
-- [ ] `App` crate: `Session::send()`, thin CLI REPL, startup banner · #7
+- [ ] Cargo workspace — `kernel`, `constrain`, `feed`, `observe`, `compose`, `app`, `config` (+`mcp` stub) `M` · #1
+- [ ] `Config`: env resolution, `RUSTYKEYS_MODEL`, `RUSTYKEYS_WORKSPACE` `S` · #2
+- [ ] `Constrain`: `Policy` (**`async before_tool`**) + `ToolDispatch` trait + `WorkspacePolicy` + `PolicyChain`; `PolicyError` **enum** `M` · #3
+- [ ] `Feed`: `ToolRegistry`, `ToolFn` trait + aisdk `#[tool]` adapter, `ToolOutcome`, built-in `read_file`/`list_directory` `M` · #4
+- [ ] `Observe`: `Tracer`, `Episode`, `ToolEvent`, structured trace logging `S` · #5
+- [ ] `Kernel`: aisdk loop over `&dyn ToolDispatch`/`&dyn Policy` (kernel does not import feed) `M` · #6
+- [ ] `App`: `Session::send()`, thin CLI REPL, startup banner `M` · #7
+- [ ] **Substrate:** error taxonomy, `FakeLanguageModel` fixture, clippy lints, `rust-toolchain.toml`, CI `L`
 
----
+**Definition of Done:** workspace builds on stable + MSRV; `clippy -D warnings` clean; CI green; `FakeLanguageModel` integration test drives a full `send()`; error enums + `ToolOutcome` in place.
+**Acceptance:** `cargo run -- "read Cargo.toml and summarize it"` returns a reply after a vetted `read_file`; a path outside the workspace returns a `BLOCKED` string, not a panic.
+**Test gate:** unit (policy boundary, ToolOutcome round-trip) + one fake-LLM integration test.
+**Risks:** aisdk `#[tool]`→`ToolFn` adapter is the riskiest seam → spike it first.
+**Demo:** `cargo run -- "list the files in src/ and read main.rs"`.
 
 ## Phase 2 — Observe + Compose · H3 (deterministic)
 
-Structured visibility and deterministic verification.
+**Goal:** structured visibility + deterministic verification + the evidence journal.
+**Depends on:** 1 · **Size:** M
 
-- [ ] `EvidenceJournal`: append-only JSONL at `.rustykeys/evidence.jsonl`
-- [ ] `InterventionLogger`: M-HIR metric, `.rustykeys/interventions.jsonl`
-- [ ] `Verifier`: `Check` trait, `NoToolErrors`, `CleanTermination`
-- [ ] `VerificationReport`: `render()`, `as_observation()`, `limits` field
-- [ ] Failure attribution: `(category, layer)` diagnosis on failed checks
-- [ ] `/verify` and `/mhir` CLI commands
+- [ ] `EvidenceJournal`: append-only JSONL at `.rustykeys/evidence.jsonl`, `schema_version` `M`
+- [ ] **Redaction-by-default** before any journal/log write (ADR-0026) `S`
+- [ ] `InterventionLogger`: M-HIR, `interventions.jsonl` (+ `avoidability`/`harness_gap`/`burden`) `M`
+- [ ] `Verifier`: `Check` trait, `NoToolErrors`, `CleanTermination` `S`
+- [ ] `VerificationReport`: `render()`, `as_observation()`, `limits` `S`
+- [ ] Failure attribution → fixed `FailureType` enum + frozen `(category, layer)` matrix `M`
+- [ ] `/verify`, `/mhir` CLI commands `S`
 
----
+**Definition of Done:** every turn writes a versioned, redacted evidence record; failed checks produce a `FailureType` attribution; torn-line recovery tested.
+**Acceptance:** a turn with a failing tool call is marked UNVERIFIED with `(tool_error, feed/tools)`; `/verify` renders the report with its `limits`.
+**Test gate:** property test (JSONL round-trip, torn-line skip) + snapshot (`VerificationReport::render`).
+**Risks:** redaction stripping evidence attribution needs → scrub values, not structure.
+**Demo:** induce a tool error, then `/verify` and `/mhir`.
 
 ## Phase 3 — Memory (Observe + Orient) · H2
 
-Short-term stream → long-term graph. Completes the OODA loop.
+**Goal:** short-term stream → long-term graph; completes the OODA loop.
+**Depends on:** 1 · **Size:** L
 
-- [ ] Short-term `Stream` trait + SQLite implementation (`rusqlite`)
-- [ ] Long-term `Store` trait + SQLite implementation (FTS5 lexical recall)
-- [ ] Recall: relevance + recency + importance scoring, 1-hop graph expansion
-- [ ] Tiered consolidation: idle / sleep / explicit (aisdk LLM call)
-- [ ] Skill grooming: refine / merge / split operations
-- [ ] Skills exempt from pruning
-- [ ] `/memory`, `/reflect`, `/sleep`, `/groom` CLI commands
+- [ ] Short-term `Stream` trait + `SqliteStream` (`stream.db`, WAL) `M`
+- [ ] Long-term `Store` trait + SQLite impl (FTS5 lexical recall, edges) `L`
+- [ ] **Recall scoring** — pinned formula (weights, decay, batch normalization, neighbor rule, output-block format) `M`
+- [ ] Tiered consolidation idle/sleep/explicit + **JSON emit contract** `L`
+- [ ] Skill grooming (refine/merge/split); skills exempt from pruning `M`
+- [ ] **Close the loop:** feed `Attribution` into consolidation; boost failure-born skills at recall `M`
+- [ ] `/memory`, `/reflect`, `/sleep`, `/groom` `S`
 
----
+**Definition of Done:** facts/skills persist across sessions; recall surfaces a planted fact next session; consolidation output validates against the contract.
+**Acceptance:** teach a fact in session A; in session B it is recalled and used; an UNVERIFIED turn produces a high-importance skill.
+**Test gate:** unit (recall math) + integration (two fake-LLM sessions, cross-session recall).
+**Risks:** SQLite contention if multi-session → WAL + busy_timeout.
+**Demo:** `/reflect`, then `/memory`.
 
-## Phase 4 — Task State + Semantic Verification · H2 + H3 (semantic)
+## Phase 4 — Task State + Semantic verification · H2 + H3 (semantic)
 
-Working-memory tier and LLM-judge criteria check.
+**Goal:** working-memory tier + LLM-judge criteria check.
+**Depends on:** 2, 3 · **Size:** M
 
-- [ ] `TaskState`: goal + success criteria, persisted to `.rustykeys/task.json`
-- [ ] `set_task` / `complete_task` as `#[tool]`-registered agent tools
-- [ ] Task prompt injection (drift prevention) + recall anchoring
-- [ ] `CriteriaJudge`: async aisdk call, per-criterion pass/fail, `CheckResult`
-- [ ] `criteria_unmet@compose/semantic` attribution branch
-- [ ] `/task` CLI command
+- [ ] `TaskState` (`goal`, `success_criteria`, **`scope`**, `status`) → `task.json` `S`
+- [ ] `set_task`/`complete_task` tools `S`
+- [ ] Task prompt injection (into orient/`extra_context`, not the static system prompt) + recall anchoring `S`
+- [ ] `CriteriaJudge`: async aisdk call, per-criterion verdict; **no silent pass-as-verified** (`judge_unavailable`) `M`
+- [ ] `criteria_unmet@compose/semantic` attribution `S`
+- [ ] `/task` CLI `S`
 
----
+**Definition of Done:** judge runs in the post-turn join; parse failure records `judge_unavailable` and bars `AutonomousVerifiedSuccess`.
+**Acceptance:** with criteria set, a reply that ignores a criterion is judged `fail`; a provider error during judging does not inflate "verified".
+**Test gate:** integration (fake judge returning pass/fail/garbage).
+**Risks:** judge nondeterminism → optional self-consistency; thresholds are a product call.
+**Demo:** `/task "add validation" criteria...`, then a reply, then `/verify`.
 
-## Phase 5 — DuckDB + Embeddings
+## Phase 5 — DuckDB + embeddings
 
-Optional backend for semantic recall at scale.
+**Goal:** optional semantic recall at scale.
+**Depends on:** 3 · **Size:** M
 
-- [ ] `Store` implementation over `duckdb-rs`
-- [ ] Native vector search via `list_cosine_similarity`
-- [ ] Embedding model support via aisdk embed API
-- [ ] `RUSTYKEYS_LONG_TERM_BACKEND=duckdb` env var
-- [ ] Lexical fallback when no embed model configured
+- [ ] `Store` over `duckdb-rs` (`store.duckdb`), `list_cosine_similarity` `M`
+- [ ] Embedding via aisdk embed API; dims/chunking/threshold pinned `M`
+- [ ] `RUSTYKEYS_LONG_TERM_BACKEND=duckdb` `S`
+- [ ] Lexical fallback + mixed-corpus blend when some memories lack embeddings `S`
 
----
+**Definition of Done:** semantic recall outperforms lexical on a planted-paraphrase fixture; lexical fallback still works with no embed model.
+**Acceptance:** a paraphrased query recalls the right memory under duckdb; unset embed model → lexical, no error.
+**Test gate:** integration behind the `duckdb` feature.
+**Demo:** set `RUSTYKEYS_EMBED_MODEL` + `=duckdb`, recall a paraphrase.
 
 ## Phase 6 — Full tool suite (Claude Code parity)
 
-Expand from 2 built-in tools to the core set a coding agent requires.
+**Goal:** expand to the core coding-agent tool set.
+**Depends on:** 1 · **Size:** L
 
-- [ ] `bash`, `edit_file`, `write_file`, `glob`, `grep` — with `BashGuard` security checkers · #8
-- [ ] `web_fetch`, `web_search` — opt-in via `RUSTYKEYS_ALLOW_WEB` · #9
-- [ ] `agent` tool — subagent spawning with `AgentDepthPolicy` · #10
-- [ ] Task management tools: `task_create`, `task_get`, `task_list`, `task_update`, `task_stop`, `task_output` · #11
+- [ ] `bash`, `edit_file`, `write_file`, `glob`, `grep` with `BashGuard` checkers `L` · #8
+- [ ] `web_fetch`, `web_search` — opt-in `RUSTYKEYS_ALLOW_WEB` + **SSRF/egress guard** `M` · #9
+- [ ] `agent` subagent via **`SessionFactory`** + `AgentDepthPolicy` `M` · #10
+- [ ] Task-management tools: `task_create/get/list/update/stop/output` `M` · #11
 
----
+**Definition of Done:** each tool policy-vetted; `edit_file` read-before-edit invariant; web tools blocked from loopback/metadata IPs.
+**Acceptance:** `bash("rm -rf /")` is blocked + logged; `web_fetch("http://169.254.169.254/…")` is denied.
+**Test gate:** unit per security checker + egress unit tests.
+**Risks:** subagent feed→app cycle → `SessionFactory` (ADR-0017).
+**Demo:** ask the agent to edit a file and run a test via `bash`.
 
 ## Phase 7 — Permission system
 
-Full permission mode system with security checkers and interactive approval.
+**Goal:** full permission modes + security checkers + interactive approval.
+**Depends on:** 6 · **Size:** M
 
-- [ ] `PermissionMode` enum: Default / Plan / AcceptEdits / ReadOnly / Restricted / Bypass · #14
-- [ ] Security checkers: `CommandInjectionCheck`, `PrivilegeEscalationCheck`, `PathTraversalCheck`, `NetworkExfilCheck`, `DestructiveCommandCheck`
-- [ ] `SecurityEvent` log at `.rustykeys/security.jsonl`
-- [ ] `ApprovalGate`: channel-based interactive approval for high-risk calls
-- [ ] `/permissions` CLI command
+- [ ] `PermissionMode`: Default/Plan/AcceptEdits/ReadOnly/Restricted/Bypass `M` · #14
+- [ ] Security checkers: CommandInjection/PrivilegeEscalation/PathTraversal/NetworkExfil/DestructiveCommand `M`
+- [ ] `SecurityEvent` log `.rustykeys/security.jsonl` (structured `checker`) `S`
+- [ ] `ApprovalGate`: channel-based approval (uses the `async before_tool` from Phase 1) `M`
+- [ ] `/permissions` CLI `S`
 
----
+**Definition of Done:** modes gate tool classes exhaustively; `Bypass` requires `RUSTYKEYS_ALLOW_BYPASS=1`; blocked approvals log a `tool_block` intervention.
+**Acceptance:** `ReadOnly` blocks writes/bash; an approval prompt round-trips Allow/AllowAlways/Block.
+**Test gate:** unit (mode gates) + integration (approval channel with a scripted responder).
+**Demo:** `/permissions read_only`, attempt a write.
 
-## Phase 8 — Token and context management
+## Phase 8 — Token & context management
 
-Keep the kernel within the model's context window indefinitely.
+**Goal:** keep the kernel within the context window indefinitely.
+**Depends on:** 1 · **Size:** M
 
-- [ ] `TokenBudget`: per-turn tracking, session totals · #15
-- [ ] Micro-compact (Tier 1): drop oldest turn-pairs at 80% context
-- [ ] Session summary (Tier 2): aisdk summarisation at 90% context
-- [ ] Full compact (Tier 3): `/compact` command or 95% threshold
-- [ ] `/cost` CLI command
+- [ ] `TokenBudget`: per-turn line items (system + recall + task + tool schemas + history) + session totals `M` · #15
+- [ ] Micro-compact (drop oldest turn-pairs at 80%) `S`
+- [ ] Session summary (aisdk summarisation at 90%) `M`
+- [ ] Full compact (`/compact` or 95%) `S`
+- [ ] Recall+history de-dup precedence rule `S`
+- [ ] `/cost` CLI `S`
 
----
+**Definition of Done:** compaction events journaled; line-item budget feeds the thresholds (not history alone).
+**Acceptance:** a long session triggers micro→session→full in order without losing the active task.
+**Test gate:** integration (scripted long history hits each tier).
+**Demo:** drive a long conversation, watch `/cost` + compaction.
 
 ## Phase 9 — Plan mode
 
-Read-only proposal phase before destructive execution.
+**Goal:** read-only proposal phase before destructive execution.
+**Depends on:** 7 · **Size:** S
 
-- [ ] `enter_plan_mode` / `exit_plan_mode` agent tools · #16
-- [ ] `Plan` permission mode enforced at policy layer
-- [ ] CLI approval prompt on `exit_plan_mode`
-- [ ] `/plan` CLI shortcut
+- [ ] `enter_plan_mode`/`exit_plan_mode` tools `S` · #16
+- [ ] `Plan` permission mode enforced at policy `S`
+- [ ] CLI approval on `exit_plan_mode` (Proceed/Reject/Annotate) `S`
+- [ ] `/plan` shortcut `S`
 
----
+**Definition of Done:** writes/bash blocked in plan mode; approval transitions mode; plan approval is not an intervention.
+**Acceptance:** in plan mode an `edit_file` is blocked; on Proceed the next turn may write.
+**Test gate:** integration (plan→approve→write).
+**Demo:** `/plan "refactor X"`.
 
 ## Phase 10 — H3 episode packages
 
-Formal reproduce → attribute → fix → verify → report workflow.
+**Goal:** the formal reproduce → attribute → fix → verify → report workflow (+ back-edge).
+**Depends on:** 2, 4 · **Size:** L
 
-- [ ] `DeterministicCheck` registry, `checks.toml` loading · #21
-- [ ] `reproduce` agent tool — records observed vs expected
-- [ ] `attribute_failure` agent tool — structured pre-edit attribution
-- [ ] `verification_report` agent tool — requirement-evidence links
-- [ ] `ReproduceBeforeEdit` and `VerificationReportRequired` verifier checks (H3 mode)
-- [ ] Five-label outcome classifier: `autonomous_verified_success` / `assisted_verified_success` / `unverified_success` / `failed` / `unsafe_invalid`
-- [ ] Episode package written to `.rustykeys/episodes/`
+- [ ] `DeterministicCheck` registry + `checks.toml` (project + local precedence) `M` · #21
+- [ ] `reproduce`, `attribute_failure` (fixed `FailureType`), `verification_report` tools `M`
+- [ ] `ReproduceBeforeEdit`, `VerificationReportRequired` checks (H3) `S`
+- [ ] **Versioned `EpisodePackage`** with all 8 traces incl. `context_trace` → `episodes/` `M`
+- [ ] Five-label outcome classifier `S`
+- [ ] verify → re-attribute back-edge `S`
 
----
+**Definition of Done:** every H3 turn writes a complete 8-trace package; outcome classifier covers all five labels; golden-episode replay green.
+**Acceptance:** a bug-fix turn produces a package with reproduction + attribution + verification linked to requirement IDs.
+**Test gate:** golden-episode replay (deterministic) + eval-plan H3 gate.
+**Risks:** episode=turn vs paper's episode=task → `episode_id` grouping (ADR-0018).
+**Demo:** `RUSTYKEYS_HARNESS_LEVEL=h3`, fix a failing check, inspect `episodes/`.
 
 ## Phase 11 — Entropy auditor ⭐
 
-Detect and record maintenance burden introduced by the agent. No equivalent
-in Claude Code or hermes-agent.
+**Goal:** detect & record maintenance burden the agent introduces. No equivalent in Claude Code/hermes-agent.
+**Depends on:** 2, 4 · **Size:** M
 
-- [ ] `EntropyAudit`, `EntropyFinding`, `EntropyCategory` types · #19
-- [ ] Heuristics: Residue, TestWeakening, StaleDocs, DependencyChurn, BoundaryViolation
-- [ ] Runs in post-turn `tokio::join!` alongside criteria judge
-- [ ] `.rustykeys/entropy.jsonl` append-only log
-- [ ] `/entropy` CLI command
+- [ ] `EntropyAudit`/`EntropyFinding`/`EntropyCategory` + **concrete heuristics & 0–3 severity** `M` · #19
+- [ ] Paper→RK 6↔7 category map (ADR-0020) `S`
+- [ ] Runs in the post-turn `tokio::join!` `S`
+- [ ] `.rustykeys/entropy.jsonl` (versioned) `S`
+- [ ] `/entropy` CLI `S`
 
----
+**Definition of Done:** each heuristic has a unit test; `UnsafeInvalid` triggers on TestWeakening/BoundaryViolation severity ≥2.
+**Acceptance:** removing an assertion in a `*_test.rs` produces a severity-2+ `test_weakening` finding and `delta<0`.
+**Test gate:** unit per heuristic.
+**Risks:** semantic heuristics (StaleDocs/TaskContradiction) are best-effort → mark v1, LLM-assist is a seam.
+**Demo:** weaken a test, see `/entropy`.
 
 ## Phase 12 — MCP integration
 
-- [ ] MCP client: consume external MCP servers (stdio + SSE transports), `mcp.toml` config · #12
-- [ ] MCP server mode: expose `Session::send()` as an MCP server for IDE consumption · #13
+**Goal:** consume external MCP servers; expose `Session::send()` to IDEs.
+**Depends on:** 6, 7 · **Size:** L
 
----
+- [ ] MCP client: stdio + SSE, `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12
+- [ ] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M`
+- [ ] MCP server mode: expose `Session::send()` over JSON-RPC 2.0 `M` · #13
+- [ ] Integration-test seam: fake stdio MCP server + reconnect test `M`
+
+**Definition of Done:** an external server's tools register + dispatch through policy; server crash → `/mcp reconnect` recovers.
+**Acceptance:** a filesystem MCP server's tool is callable as `mcp__filesystem__read_file` and is policy-vetted.
+**Test gate:** integration vs a fake MCP server.
+**Demo:** configure a server in `mcp.toml`, call its tool.
 
 ## Phase 13 — Extended CLI commands
 
-- [ ] `/compact`, `/model`, `/cost`, `/stats` — session management · #20
-- [ ] `/init` — generate `AGENT_GUIDE.md` workspace context artifact
-- [ ] `/commit`, `/diff`, `/branch`, `/review` — git integration
-- [ ] `/config`, `/env`, `/help` — configuration and diagnostics
-- [ ] `/doctor` — environment health check
+**Goal:** session management, git integration, diagnostics.
+**Depends on:** 1 · **Size:** M
 
----
+- [ ] `/compact`, `/model`, `/cost`, `/stats` `S` · #20
+- [ ] `/init` → `AGENT_GUIDE.md` `S`
+- [ ] `/commit`, `/diff`, `/branch`, `/review` (git via agent) `M`
+- [ ] `/config`, `/env`, `/help` `S`
+- [ ] `/doctor` env health check `S`
+
+**Definition of Done:** `/doctor` validates model/workspace/SQLite/MCP; `/config` reads from the configuration SSOT.
+**Acceptance:** `/doctor` reports a clear pass/fail per subsystem.
+**Test gate:** snapshot (`/help`, `/stats`, banner).
+**Demo:** `/doctor`.
 
 ## Phase 14 — Web gateway
 
-- [ ] `axum` HTTP server over `Session::send()` · #18
-- [ ] `POST /chat`, `GET /stream` (SSE), `GET /health`, `GET /verify`, `GET /evidence`, `GET /mhir`
-- [ ] Single-session and multi-session modes
-- [ ] Bearer token auth, CORS config
-- [ ] `--gateway` binary flag
+**Goal:** `axum` HTTP over `Session::send()` for web/desktop clients.
+**Depends on:** 1 · **Size:** M
 
----
+- [ ] axum server `L` · #18
+- [ ] `POST /chat`, `GET /stream` (SSE), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy` `M`
+- [ ] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M`
+- [ ] Single + multi-session (TTL, max-sessions, eviction, `session_id`↔auth binding) `M`
+- [ ] Bearer auth, CORS; `/health` liveness vs readiness `S`
+- [ ] Gateway contract / SSE-framing test `M`
+
+**Definition of Done:** redaction applies on `/evidence`; multi-session evicts on TTL; auth scopes reachable `session_id`s.
+**Acceptance:** two clients in `multi` mode get isolated sessions; an unauthorized `session_id` is unreachable.
+**Test gate:** gateway contract test (status codes, SSE frames).
+**Demo:** `rusty-keys --gateway`, `curl POST /chat`.
 
 ## Phase 15 — Desktop frontend
 
-**Stack: Tauri 2 + SolidJS + CodeMirror 6 + xterm.js. All AI SDK calls on
-the Rust side. Frontend is a pure reactive rendering layer over Tauri IPC.**
+**Goal:** the primary interactive surface. **Stack: Tauri 2 + SolidJS + CodeMirror 6 + xterm.js.** All AI SDK calls on the Rust side; the frontend is a reactive rendering layer over Tauri IPC.
+**Depends on:** 14 · **Size:** XL
 
-Tauri IPC events: `rk://token`, `rk://tool_event`, `rk://turn_complete`,
-`rk://approval_request`, `rk://entropy`, `rk://bash_output`.
+- [ ] Tauri 2 shell: SolidJS + Tailwind v4 + Vite, resizable panels `L` · #22
+- [ ] Session panel: `TurnCard`, `ToolEventRow`, `VerificationBadge`, `TaskStateBanner`, streaming `L` · #23
+- [ ] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview `L` · #24
+- [ ] Composer: `@file`/`#memory`/`/command`, approval gate, plan confirmation `M` · #25
+- [ ] Harness dashboard: verification stream, evidence journal, entropy chart, M-HIR trend, token budget `L` · #26 ⭐
+- [ ] Settings: provider/model, OS-keychain keys, permissions, MCP, harness tuning, themes `M` · #27
+- [ ] Tauri IPC smoke test; events from the **canonical `rk://` table** (PRD 06) incl. `rk://turn_start` `M`
 
-- [ ] Tauri 2 shell: SolidJS + Tailwind v4 + Vite, resizable panel layout · #22
-- [ ] Session panel: `TurnCard`, `ToolEventRow`, `VerificationBadge`, `TaskStateBanner`, streaming · #23
-- [ ] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview · #24
-- [ ] Composer: multi-line input, `@file` / `#memory` attachment, `/command` palette, approval gate, plan confirmation · #25
-- [ ] Harness dashboard: verification stream, evidence journal, entropy chart, M-HIR trend, token budget · #26 ⭐
-- [ ] Settings: provider/model, OS keychain API keys, permissions, MCP servers, harness tuning, themes · #27
+**Definition of Done:** IPC commands/events match PRD 06's canonical table; keys live only in the OS keychain; `invoke` errors surface via the boundary error taxonomy.
+**Acceptance:** a turn streams tokens, auto-focuses the right context tab, and the dashboard reflects the verification + entropy + M-HIR.
+**Test gate:** Tauri IPC smoke test + frontend build in CI.
+**Risks:** event-contract drift between Rust and JS → single canonical `rk://` table.
+**Demo:** launch the desktop app, run a bug-fix turn, open the harness dashboard.
 
 ---
 
 ## Backlog (post-phase)
 
 ### Streaming output to CLI
-Surface `stream_text()` from aisdk so tokens appear in the terminal REPL
-as they arrive. The desktop frontend already streams via `rk://token` events;
-this brings the same behaviour to the TUI.
+Surface `stream_text()` so tokens appear in the terminal REPL as they arrive (desktop already streams via `rk://token`).
 
 ### Rich terminal UI (ratatui)
-`ratatui`-based TUI for the CLI: streaming token display, syntax highlighting,
-status bar (model / mode / tokens / M-HIR), vim keybindings. · #17
+`ratatui` TUI: streaming display, syntax highlighting, status bar (model/mode/tokens/M-HIR), vim keys. · #17
+
+### Controlled-visibility H0–H3 ablation
+Make H0 a real selectable level (no tool registry) and enforce per-level artifact visibility (paper R1), so the maturity self-assessment is a valid ablation (ADR-0028).
 
 ### Hierarchical temporal consolidation
-Multi-cadence rollup summaries: idle / hourly / daily / weekly. Each level
-summarises the tier below.
+Multi-cadence rollups: idle/hourly/daily/weekly summaries-of-summaries.
 
 ### OpenTelemetry observability
-Wire aisdk's OTel support (when available) to the observe layer: spans per
-kernel turn, tool call attributes, token counters.
+Wire aisdk OTel (when available) to the observe layer: spans per turn, tool-call attributes, token counters.
 
 ### Multi-agent orchestration
-`Session` as a unit of composition: one session calling another via the
-`agent` tool. `AgentCoordinator` for parallel subagent execution.
+`Session` as a unit of composition via the `agent` tool / `SessionFactory`; `AgentCoordinator` for parallel subagents.
 
-### Instruction boundaries + bounded retry
-JSON-schema instruction boundaries and bounded-retry-then-escalate rather
-than unlimited retries.
+### LLM-assisted entropy + outcome classification
+Second-opinion aisdk calls for semantic entropy (TaskContradiction/StaleDocs) and ambiguous outcome labels.
 
-### Entropy dashboard in CLI
-`/entropy history` and cumulative entropy score surfaced in the terminal
-alongside `/mhir`.
+### Journal rotation / retention
+Age/size-based rotation for the append-only logs (the schema already carries `schema_version`).
 
 ---
 
@@ -230,8 +366,9 @@ alongside `/mhir`.
 | Source | What it informs |
 |---|---|
 | `docs/prd/` | Component design for all harness crates |
+| `docs/ARCHITECTURE.md`, `docs/architecture/`, `docs/adr/`, `docs/dev/` | System view, on-disk model, decisions, engineering substrate |
 | `docs/research/2605.13357v1.pdf` | H0–H3 ladder, episode packages, M-HIR, entropy audit, outcome taxonomy |
 | baileyrd/claude-code | Tool suite (53 tools), permission modes, 3-tier compaction, 5-tier memory |
 | nousresearch/hermes-agent | Skill/memory consolidation, background fork pattern, tool guardrails |
-| crynta/terax-ai | Frontend UI capabilities: xterm.js, CM6 diff, Tauri 2, plan mode, approval gates |
+| crynta/terax-ai | Frontend UI: xterm.js, CM6 diff, Tauri 2, plan mode, approval gates |
 | harness/harness-ai | Future MCP client use case (CI/CD tools via MCP server) |

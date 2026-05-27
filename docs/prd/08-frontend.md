@@ -59,7 +59,13 @@ invoke<string[]>('session_commands_list')            // for /command palette
 
 ### Events (Rust → frontend, pushed)
 
+The `rk://` event set is **canonical in [PRD 06's event table](06-app.md#tauri-event-bridge--canonical-rk-event-table)** — this list mirrors it
+(the gateway SSE channel mirrors the same names). The earlier draft of this PRD
+used `rk://turn_start` in the Composer lock logic below without listing it among
+the events; it is now in the canonical table and listed here:
+
 ```ts
+listen<{ turn_id: string }>('rk://turn_start', handler) // turn began; lock composer
 listen<string>('rk://token', handler)                // streaming token chunk
 listen<ToolEvent>('rk://tool_event', handler)        // tool call fired
 listen<TurnResult>('rk://turn_complete', handler)    // full turn result
@@ -69,6 +75,29 @@ listen<EntropyAudit>('rk://entropy', handler)        // post-turn entropy
 listen<string>('rk://bash_output', handler)          // bash stdout/stderr chunk
 listen<ConsolidationStats>('rk://consolidation', handler) // consolidation done
 ```
+
+### Errors (`invoke` rejection handling)
+
+A failing turn does not arrive as an `rk://` event — it surfaces as a **rejected
+`invoke` promise**. The rejection payload is the boundary error taxonomy from
+[PRD 06](06-app.md#boundary-error-taxonomy): `{ kind, message }` where `kind` ∈
+`provider_error | timeout | rate_limited | auth_error | policy_block | internal`.
+The frontend catches the rejection, renders it uniformly (e.g. a dismissible
+banner over the composer), and unlocks the composer — because a failed turn never
+fires `rk://turn_complete`, the `catch` is the only path that clears the lock on
+failure:
+
+```ts
+invoke('session_send', { message, attachments }).catch(err => {
+  // err = { kind, message } from the boundary error taxonomy (PRD 06)
+  showError(err)
+  setLocked(false)   // failed turns don't emit rk://turn_complete
+})
+```
+
+A `policy_block` rejection is distinct from the per-tool approval-gate flow
+(`rk://approval_request`): the gate is an in-turn interaction, whereas a
+`policy_block` rejection ends the turn.
 
 ## AI-first layout
 

@@ -66,6 +66,36 @@ pub struct SseMcpClient {
 }
 ```
 
+##### Auth-header convention
+
+The token resolved from `auth_token_env` (see the config file below) is sent as
+a **`Authorization: Bearer <token>`** header on the SSE `GET` and on every
+client→server HTTP `POST`. This is the pinned convention; per-server OAuth
+remains a future seam.
+
+**TLS is required for any non-loopback `base_url`.** A `https://` (or loopback
+`http://127.0.0.1` / `localhost`) URL is accepted; a non-loopback `http://` URL
+with an `auth_token` is rejected at connect time so a bearer token is never sent
+in cleartext over the network.
+
+##### Heartbeat & reconnect (NOW)
+
+Previously listed only as a seam; the client behavior is sketched here because it
+governs whether a long-lived SSE connection survives a transient drop:
+
+- **Heartbeat:** the client treats the SSE stream as live only while frames (or
+  SSE comment `:` keep-alives) arrive within an idle window; a stall past that
+  window is treated as a dropped connection.
+- **Reconnect with backoff:** on drop, the client reconnects with bounded
+  exponential backoff + jitter (mirroring the aisdk-client retry policy —
+  `RUSTYKEYS_RETRY_BASE_MS` / `RUSTYKEYS_RETRY_MAX`), re-sending the bearer
+  header and the last event id where the server supports resume. Repeated
+  failure surfaces the same way a crashed stdio server does (warn; tools from
+  that server return `ERROR: MCP call failed`; `/mcp reconnect` forces a retry).
+
+The exact idle window and whether reconnect is automatic vs operator-triggered is
+finalized in **Phase 12**; the convention above is the contract to build to.
+
 ### Config file
 
 Servers declared in `.rustykeys/mcp.toml` (path overridden by
@@ -182,6 +212,14 @@ stdin/stdout. Zero IDE configuration beyond pointing at the binary path.
 An `axum` HTTP server on `RUSTYKEYS_MCP_SERVER_PORT` (default 3001) with SSE
 for server→client streaming. Enables remote and shared deployments.
 
+**Server-side auth.** The SSE server reuses the gateway's bearer-secret pattern:
+a configured token must be presented as `Authorization: Bearer <token>` on
+connect (the same `auth_token_env` convention the client sends), and TLS is
+required for non-loopback binds. This mirrors `RUSTYKEYS_GATEWAY_SECRET` for the
+HTTP gateway (PRD 06) so the two surfaces share one auth model. The `stdio`
+transport needs no token (the IDE owns the subprocess); auth applies only to the
+network-exposed `sse` transport.
+
 ### Wire protocol (MCP v1)
 
 ```
@@ -231,10 +269,13 @@ The harness layer is not bypassed.
 
 ## Seams
 
-- **MCP auth**: today env-var token for SSE transport. OAuth per-server is a
-  future seam (MCP spec supports it).
-- **Dynamic reconnect**: server crash detection via heartbeat; automatic
-  reconnect with backoff.
+- **MCP auth**: the env-var bearer-token convention for the SSE transport (both
+  client and server) is now pinned above (*Auth-header convention* /
+  *Server-side auth*). **OAuth per-server** remains the future seam (the MCP spec
+  supports it).
+- **Dynamic reconnect**: the heartbeat + reconnect-with-backoff *behavior* is now
+  sketched above (*Heartbeat & reconnect*, NOW); the exact idle window and
+  auto-vs-manual policy is finalized in Phase 12.
 - **Individual tool exposure**: expose each `ToolRegistry` tool directly as an
   MCP tool — letting the IDE call `bash` or `edit_file` without a full session.
 - **MCP resources**: the spec supports `resources/list` and `resources/read`;
