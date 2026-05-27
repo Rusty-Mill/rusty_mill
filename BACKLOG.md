@@ -232,12 +232,12 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** keep the kernel within the context window indefinitely.
 **Depends on:** 1 · **Size:** M
 
-- [ ] `TokenBudget`: per-turn line items (system + recall + task + tool schemas + history) + session totals `M` · #15
-- [ ] Micro-compact (drop oldest turn-pairs at 80%) `S`
-- [ ] Session summary (aisdk summarisation at 90%) `M`
-- [ ] Full compact (`/compact` or 95%) `S`
-- [ ] Recall+history de-dup precedence rule `S`
-- [ ] `/cost` CLI `S`
+- [x] `TokenBudget`: per-turn line items (system + recall + task + tool schemas + history) + session totals `M` · #15
+- [x] Micro-compact (drop oldest turn-pairs at 80%) `S`
+- [x] Session summary (aisdk summarisation at 90%) `M`
+- [x] Full compact (`/compact` or 95%) `S`
+- [x] Recall+history de-dup precedence rule `S`
+- [x] `/cost` CLI `S`
 
 **Definition of Done:** compaction events journaled; line-item budget feeds the thresholds (not history alone).
 **Acceptance:** a long session triggers micro→session→full in order without losing the active task.

@@ -25,9 +25,31 @@ pub fn system_prompt(level: HarnessLevel) -> String {
     s
 }
 
+/// System prompt for the compaction summariser (PRD 06 / Phase 8).
+pub const COMPACTION_SYSTEM: &str =
+    "You compress an agent's conversation history. Produce a dense, factual \
+     summary that preserves decisions, open questions, file paths, and the \
+     current task state. Output ONLY the summary prose — no preamble.";
+
+/// Build the summarisation prompt over a flattened `transcript`. Used for the
+/// `session` (oldest half) and `full` (all) compaction tiers.
+pub fn compaction_prompt(transcript: &str) -> String {
+    format!(
+        "Summarise the following conversation history so a future turn can \
+         continue without it. Keep it under ~200 words.\n\n{transcript}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_prompt_embeds_transcript() {
+        let p = compaction_prompt("user: hi\nassistant: hello");
+        assert!(p.contains("user: hi"));
+        assert!(p.contains("Summarise"));
+    }
 
     #[test]
     fn h1_includes_tool_use_layer() {

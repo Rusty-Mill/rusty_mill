@@ -61,6 +61,14 @@ pub struct Config {
     /// Raw isolation profile, from `RUSTYKEYS_ISOLATION` (default `none`).
     /// Parsed by `feed::Isolation` (ADR-0030 / Phase 7B).
     pub isolation: String,
+    /// Model context window in tokens, from `RUSTYKEYS_CONTEXT_LIMIT` (PRD 06).
+    pub context_limit: usize,
+    /// Micro-compaction threshold (fraction of `context_limit`), default 0.80.
+    pub compact_micro: f64,
+    /// Session-summary threshold, default 0.90.
+    pub compact_session: f64,
+    /// Full-compaction threshold, default 0.95.
+    pub compact_full: f64,
 }
 
 impl Config {
@@ -109,6 +117,28 @@ impl Config {
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "none".to_string());
 
+        let num = |key: &'static str, default: f64| -> Result<f64, ConfigError> {
+            match get(key) {
+                Some(s) if !s.trim().is_empty() => s
+                    .trim()
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid { key, value: s }),
+                _ => Ok(default),
+            }
+        };
+        let context_limit = match get("RUSTYKEYS_CONTEXT_LIMIT") {
+            Some(s) if !s.trim().is_empty() => {
+                s.trim().parse().map_err(|_| ConfigError::Invalid {
+                    key: "RUSTYKEYS_CONTEXT_LIMIT",
+                    value: s,
+                })?
+            }
+            _ => 200_000,
+        };
+        let compact_micro = num("RUSTYKEYS_COMPACT_MICRO", 0.80)?;
+        let compact_session = num("RUSTYKEYS_COMPACT_SESSION", 0.90)?;
+        let compact_full = num("RUSTYKEYS_COMPACT_FULL", 0.95)?;
+
         Ok(Self {
             model,
             workspace,
@@ -119,6 +149,10 @@ impl Config {
             allow_bypass,
             allowed_tools,
             isolation,
+            context_limit,
+            compact_micro,
+            compact_session,
+            compact_full,
         })
     }
 }
@@ -190,6 +224,37 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(cfg.isolation, "sandboxed");
+    }
+
+    #[test]
+    fn token_budget_defaults_and_overrides() {
+        let def = Config::resolve(env(&[("RUSTYKEYS_MODEL", "m")])).unwrap();
+        assert_eq!(def.context_limit, 200_000);
+        assert_eq!(def.compact_micro, 0.80);
+        assert_eq!(def.compact_full, 0.95);
+
+        let cfg = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_CONTEXT_LIMIT", "8000"),
+            ("RUSTYKEYS_COMPACT_MICRO", "0.5"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.context_limit, 8000);
+        assert_eq!(cfg.compact_micro, 0.5);
+    }
+
+    #[test]
+    fn invalid_context_limit_is_rejected() {
+        assert!(matches!(
+            Config::resolve(env(&[
+                ("RUSTYKEYS_MODEL", "m"),
+                ("RUSTYKEYS_CONTEXT_LIMIT", "lots"),
+            ])),
+            Err(ConfigError::Invalid {
+                key: "RUSTYKEYS_CONTEXT_LIMIT",
+                ..
+            })
+        ));
     }
 
     #[test]
