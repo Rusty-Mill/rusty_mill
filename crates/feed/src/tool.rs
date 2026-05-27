@@ -98,15 +98,16 @@ impl ToolRegistry {
 impl ToolDispatch for ToolRegistry {
     async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
         // Policy vets BEFORE the tool body runs (ADR-0007); on a block we never
-        // reach `ToolFn::call`.
-        if let Err(rk_constrain::PolicyError::Blocked(reason)) =
-            self.policy.before_tool(name, &args).await
-        {
-            return ToolOutcome::blocked(reason);
+        // reach `ToolFn::call`. The block reason is the PolicyError's structured
+        // Display — feed does not match on specific variants.
+        if let Err(e) = self.policy.before_tool(name, &args).await {
+            return ToolOutcome::blocked(e.to_string());
         }
         match self.tools.get(name) {
             Some(tool) => tool.call(args).await,
-            None => ToolOutcome::error(format!("unknown tool '{name}'")),
+            None => crate::error::outcome_from_error(crate::error::ToolError::NotFound(
+                name.to_string(),
+            )),
         }
     }
 

@@ -14,12 +14,15 @@ pub trait Policy: Send + Sync {
     async fn before_tool(&self, name: &str, args: &Value) -> Result<(), PolicyError>;
 }
 
-/// Policy veto (ADR-0023: one enum per library crate).
+/// Policy veto (ADR-0023; error-handling §3). Structured so the compose layer
+/// and `security.jsonl` derive the block reason from the *variant*, never by
+/// parsing prose. Additional variants (mode gates, security checkers, the
+/// approval gate) land with Phase 7.
 #[derive(Debug, thiserror::Error)]
 pub enum PolicyError {
-    /// The call was blocked; the string is a model-facing reason.
-    #[error("{0}")]
-    Blocked(String),
+    /// A path argument escaped the workspace root.
+    #[error("path {0} escapes the workspace root")]
+    OutsideWorkspace(PathBuf),
 }
 
 /// Runs an ordered set of policies; the first block wins (fail-closed).
@@ -93,9 +96,7 @@ impl Policy for WorkspacePolicy {
         if matches!(name, "read_file" | "list_directory") {
             let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
             if !self.within_root(path) {
-                return Err(PolicyError::Blocked(format!(
-                    "path '{path}' is outside the workspace root"
-                )));
+                return Err(PolicyError::OutsideWorkspace(PathBuf::from(path)));
             }
         }
         Ok(())

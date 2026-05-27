@@ -15,12 +15,12 @@ async-trait.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-futures = { version = "0.3", optional = true }
+futures = "0.3"
 
 [features]
 # Ships the scripted FakeLanguageModel fixture (testing-strategy.md). Enabled in
 # dev/tests; downstream test crates turn it on too.
-fake = ["dep:futures"]
+fake = []
 
 [dev-dependencies]
 rk-kernel = { path = ".", features = ["fake"] }

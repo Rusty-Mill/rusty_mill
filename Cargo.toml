@@ -6,6 +6,7 @@ members = [
     "crates/constrain",
     "crates/feed",
     "crates/kernel",
+    "crates/mcp",
     "crates/app",
 ]
 

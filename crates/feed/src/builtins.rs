@@ -42,22 +42,14 @@ fn resolve(root: &Path, args: &Value) -> Result<PathBuf, ToolError> {
 
 async fn read_file_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| ToolError::Io(e.to_string()))
+    Ok(tokio::fs::read_to_string(&path).await?)
 }
 
 async fn list_directory_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     let path = resolve(&root, &args)?;
-    let mut entries = tokio::fs::read_dir(&path)
-        .await
-        .map_err(|e| ToolError::Io(e.to_string()))?;
+    let mut entries = tokio::fs::read_dir(&path).await?;
     let mut names = Vec::new();
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| ToolError::Io(e.to_string()))?
-    {
+    while let Some(entry) = entries.next_entry().await? {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
     names.sort();

@@ -8,8 +8,10 @@
 //! Phase 1 scope: [`ToolStatus`]/[`ToolOutcome`] and a [`Tracer`] that records
 //! [`ToolEvent`]s. The evidence journal, M-HIR, and entropy auditor land later.
 
+mod error;
 mod outcome;
 
+pub use error::ObserveError;
 pub use outcome::{ToolOutcome, ToolStatus};
 
 use std::sync::Mutex;

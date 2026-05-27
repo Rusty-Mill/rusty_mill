@@ -1113,10 +1113,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rk-mcp"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "rk-config",
+ "rk-constrain",
+ "rk-feed",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rk-observe"
 version = "0.0.0"
 dependencies = [
  "rk-config",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

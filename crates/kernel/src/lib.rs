@@ -58,14 +58,14 @@ fn bridge_tool(name: String, schema: serde_json::Value, dispatch: Arc<dyn ToolDi
     }
 }
 
-/// Run one user turn to completion. aisdk's loop drives multi-step tool calling;
-/// each tool call is vetted + executed via `dispatch`. Returns the final text.
-pub async fn run_turn<M>(
+/// Build the aisdk request with the system prompt, user turn, and the
+/// policy-vetting bridge tools advertised from `dispatch`.
+fn build_request<M>(
     model: M,
     system: &str,
     user_prompt: &str,
-    dispatch: Arc<dyn ToolDispatch>,
-) -> Result<String, KernelError>
+    dispatch: &Arc<dyn ToolDispatch>,
+) -> aisdk::core::LanguageModelRequest<M>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport,
 {
@@ -77,12 +77,58 @@ where
     for (name, schema) in dispatch.schemas() {
         builder = builder.with_tool(bridge_tool(name, schema, dispatch.clone()));
     }
+    builder.build()
+}
 
-    let mut request = builder.build();
+/// Run one user turn to completion. aisdk's loop drives multi-step tool calling;
+/// each tool call is vetted + executed via `dispatch`. Returns the final text.
+pub async fn run_turn<M>(
+    model: M,
+    system: &str,
+    user_prompt: &str,
+    dispatch: Arc<dyn ToolDispatch>,
+) -> Result<String, KernelError>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport,
+{
+    let mut request = build_request(model, system, user_prompt, &dispatch);
     let response = request
         .generate_text()
         .await
         .map_err(|e| KernelError::Model(e.to_string()))?;
 
     Ok(response.text().unwrap_or_default())
+}
+
+/// Run one user turn with streaming. Identical dispatch semantics to
+/// [`run_turn`], but each text delta is handed to `on_token` as it arrives;
+/// returns the accumulated final text. (CLI wiring is post-phase per the
+/// BACKLOG; this is the kernel-side seam, exercised offline by the fake.)
+pub async fn stream_turn<M>(
+    model: M,
+    system: &str,
+    user_prompt: &str,
+    dispatch: Arc<dyn ToolDispatch>,
+    mut on_token: impl FnMut(&str) + Send,
+) -> Result<String, KernelError>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport,
+{
+    use aisdk::core::language_model::LanguageModelStreamChunkType;
+    use futures::StreamExt;
+
+    let mut request = build_request(model, system, user_prompt, &dispatch);
+    let mut response = request
+        .stream_text()
+        .await
+        .map_err(|e| KernelError::Model(e.to_string()))?;
+
+    let mut text = String::new();
+    while let Some(chunk) = response.stream.next().await {
+        if let LanguageModelStreamChunkType::Text(delta) = chunk {
+            on_token(&delta);
+            text.push_str(&delta);
+        }
+    }
+    Ok(text)
 }
