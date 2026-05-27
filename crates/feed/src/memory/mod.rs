@@ -3,9 +3,11 @@
 //! the trait seams and their SQLite backends. Recall scoring, consolidation,
 //! and validation-gated skills land in later increments.
 
+mod recall;
 mod store;
 mod stream;
 
+pub use recall::{recall, ContextEntry, RecallOutput, DEFAULT_RECALL_K};
 pub use store::SqliteStore;
 pub use stream::SqliteStream;
 
