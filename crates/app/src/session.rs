@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
-use rk_compose::{EvidenceJournal, VerificationReport, Verifier};
+use rk_compose::{
+    judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
+};
 use rk_config::Config;
 use rk_constrain::{PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
@@ -25,6 +27,8 @@ use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
 
 const CONSOLIDATE_SYSTEM: &str =
     "You are a memory consolidation engine for an AI agent. Output ONLY the requested JSON.";
+const JUDGE_SYSTEM: &str =
+    "You are a strict success-criteria judge. Output ONLY the requested JSON.";
 const CONSOLIDATE_WINDOW: usize = 20;
 
 /// The result of one turn: the reply plus its verification verdict.
@@ -127,6 +131,9 @@ where
             .clone();
         let task_block = self.task.render();
         let goal = self.task.goal();
+        // Criteria captured *at orient* — a turn that sets the task is not judged
+        // against the criteria it just created.
+        let criteria = self.task.success_criteria();
         let query = if goal.is_empty() {
             prompt.to_string()
         } else {
@@ -164,7 +171,19 @@ where
         self.tracer.set_final_reached(true);
 
         let episode = self.tracer.episode();
-        let report = self.verifier.verify(&reply, &episode);
+        let mut report = self.verifier.verify(&reply, &episode);
+
+        // Semantic verification: when the task has success criteria, the judge
+        // evaluates the reply against them. A call/parse failure is
+        // judge_unavailable — never a silent pass (PRD 05).
+        if !criteria.is_empty() {
+            let prompt = judge_prompt(&reply, &goal, &criteria);
+            let jr = match complete(self.model.clone(), JUDGE_SYSTEM, &prompt).await {
+                Ok(emit) => parse_judge(&emit),
+                Err(e) => JudgeResult::unavailable(format!("judge call failed: {e}")),
+            };
+            report = report.with_judge(jr);
+        }
 
         let n = self.turn_counter.fetch_add(1, Ordering::Relaxed);
         let turn_id = format!("{}_turn_{n}", self.session_id);

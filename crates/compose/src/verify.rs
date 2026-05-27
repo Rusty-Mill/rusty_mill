@@ -13,16 +13,23 @@ use crate::failure::{Attribution, FailureType};
 pub const DETERMINISTIC_LIMITS: &str =
     "deterministic checks only; semantic correctness and task success not verified";
 
-/// The evidentiary verdict for a turn (PRD 05). Phase-2 subset: the criteria
-/// judge, entropy, and H3 outcome fields are added in later phases.
+/// Limits once the criteria judge has run (PRD 05).
+pub const SEMANTIC_LIMITS: &str =
+    "LLM-judge on active task criteria included; output quality beyond stated goals not evaluated";
+
+/// The evidentiary verdict for a turn (PRD 05). Phase-2/4 subset: the H3
+/// episode package + entropy/outcome fields are added in later phases.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerificationReport {
-    /// True iff every check passed.
+    /// True iff every check passed (incl. the criteria judge, when it ran).
     pub verified: bool,
     /// Each check's verdict.
     pub checks: Vec<CheckResult>,
     /// One or more attributions per failed check (empty when verified).
     pub attributions: Vec<Attribution>,
+    /// Whether the criteria judge ran; `false` ⇒ `judge_unavailable` (it never
+    /// reads as a silent pass, and it bars `AutonomousVerifiedSuccess`).
+    pub judge_ran: bool,
     /// What was not verified.
     pub limits: &'static str,
 }
@@ -84,6 +91,40 @@ impl VerificationReport {
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
+
+    /// Fold a criteria-judge result into the report (PRD 05). Adds a
+    /// `criteria_judge` check, the matching semantic attribution
+    /// (`criteria_unmet`→`f_model` / `judge_unavailable`→`f_verify`), threads
+    /// `judge_ran`, and gates `verified` on the judge passing *and* running — an
+    /// unavailable judge is never read as verified.
+    pub fn with_judge(mut self, jr: crate::judge::JudgeResult) -> Self {
+        self.judge_ran = jr.judge_ran;
+        self.limits = SEMANTIC_LIMITS;
+        self.checks.push(CheckResult {
+            name: "criteria_judge".to_string(),
+            passed: jr.judge_ran && jr.passed,
+            detail: jr.detail.clone(),
+        });
+        if !jr.judge_ran {
+            self.attributions.push(Attribution {
+                check: "criteria_judge".to_string(),
+                failure_type: FailureType::FVerify,
+                category: "judge_unavailable".to_string(),
+                layer: "compose/semantic".to_string(),
+                evidence: jr.detail,
+            });
+        } else if !jr.passed {
+            self.attributions.push(Attribution {
+                check: "criteria_judge".to_string(),
+                failure_type: FailureType::FModel,
+                category: "criteria_unmet".to_string(),
+                layer: "compose/semantic".to_string(),
+                evidence: jr.detail,
+            });
+        }
+        self.verified = self.verified && jr.judge_ran && jr.passed;
+        self
+    }
 }
 
 /// Runs an ordered set of [`Check`]s and assembles a [`VerificationReport`],
@@ -117,6 +158,7 @@ impl Verifier {
             verified,
             checks,
             attributions,
+            judge_ran: true, // no judge ran ⇒ not blocked by an unavailable one
             limits: self.limits,
         }
     }

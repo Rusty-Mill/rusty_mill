@@ -13,12 +13,14 @@
 mod check;
 mod failure;
 mod journal;
+mod judge;
 mod verify;
 
 pub use check::{Check, CheckResult, CleanTermination, NoToolErrors};
 pub use failure::{Attribution, FailureType};
 pub use journal::EvidenceJournal;
-pub use verify::{VerificationReport, Verifier, DETERMINISTIC_LIMITS};
+pub use judge::{judge_prompt, parse_judge, JudgeResult};
+pub use verify::{VerificationReport, Verifier, DETERMINISTIC_LIMITS, SEMANTIC_LIMITS};
 
 /// `compose` error taxonomy (ADR-0023; error-handling §2), composing downhill.
 #[derive(Debug, thiserror::Error)]

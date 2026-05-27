@@ -150,6 +150,74 @@ async fn set_task_tool_updates_task_state_and_persists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+async fn judged_turn(dir_tag: &str, judge_emit: &str) -> rk_compose::VerificationReport {
+    let dir = std::env::temp_dir().join(format!("rk-app-judge-{dir_tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // The reply turn (1 entry), then the judge call consumes the next entry.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::Text("I added the validation.".into())],
+        vec![Scripted::Text(judge_emit.into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    session.set_task(
+        "add validation",
+        vec!["adds a unit test".into()],
+        Vec::new(),
+    );
+
+    let outcome = session.send("do it").await.unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    outcome.report
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn criteria_judge_pass_verifies_and_fail_attributes_criteria_unmet() {
+    // Judge passes → verified, judge_ran.
+    let pass = judged_turn("pass", r#"{"verdict":"pass","criteria":[{"criterion":"adds a unit test","met":true,"reason":"test added"}]}"#).await;
+    assert!(pass.verified);
+    assert!(pass.judge_ran);
+    assert!(pass
+        .checks
+        .iter()
+        .any(|c| c.name == "criteria_judge" && c.passed));
+
+    // Judge fails → unverified with criteria_unmet → f_model @ compose/semantic.
+    let fail = judged_turn("fail", r#"{"verdict":"fail","criteria":[{"criterion":"adds a unit test","met":false,"reason":"no test"}]}"#).await;
+    assert!(!fail.verified);
+    let a = fail
+        .attributions
+        .iter()
+        .find(|a| a.category == "criteria_unmet")
+        .unwrap();
+    assert_eq!(a.layer, "compose/semantic");
+    assert_eq!(
+        serde_json::to_value(a.failure_type).unwrap(),
+        json!("f_model")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unparseable_judge_is_unavailable_not_a_pass() {
+    let report = judged_turn("unavail", "the criteria look fine to me").await;
+    assert!(
+        !report.verified,
+        "an unavailable judge must never read as verified"
+    );
+    assert!(!report.judge_ran);
+    let a = report
+        .attributions
+        .iter()
+        .find(|a| a.category == "judge_unavailable")
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(a.failure_type).unwrap(),
+        json!("f_verify")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fact_taught_in_session_a_is_recalled_in_session_b() {
     let dir = std::env::temp_dir().join(format!("rk-app-recall-{}", std::process::id()));
