@@ -18,9 +18,9 @@ use rk_config::Config;
 use rk_constrain::{BashGuard, PolicyChain, ToolDispatch, WorkspacePolicy};
 use rk_feed::{
     consolidate_apply, consolidation_prompt, groom_apply, groom_prompt, recall, register_builtins,
-    register_task_tools, system_prompt, AttributionContext, ConsolidationScope, ConsolidationStats,
-    Embedder, Memory, Observation, SqliteStore, SqliteStream, Store, Stream, TaskState, TaskStore,
-    ToolRegistry, DEFAULT_RECALL_K,
+    register_task_tools, register_web_tools, system_prompt, AttributionContext, ConsolidationScope,
+    ConsolidationStats, Embedder, Memory, Observation, SqliteStore, SqliteStream, Store, Stream,
+    TaskState, TaskStore, ToolRegistry, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, Tracer};
@@ -81,6 +81,9 @@ where
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
         register_builtins(&mut registry, config.workspace.clone());
         register_task_tools(&mut registry, task.clone());
+        if config.allow_web {
+            register_web_tools(&mut registry);
+        }
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;

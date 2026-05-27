@@ -17,6 +17,7 @@ mod error;
 pub mod memory;
 mod prompt;
 mod tool;
+mod web;
 
 pub use builtins::register_builtins;
 pub use error::{outcome_from_error, ToolError};
@@ -30,3 +31,4 @@ pub use memory::{
 };
 pub use prompt::system_prompt;
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};
+pub use web::register_web_tools;
