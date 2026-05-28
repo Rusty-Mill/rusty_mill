@@ -89,7 +89,7 @@ fn catalogs_match_contract_ssot() {
         "command catalog drifted from contract"
     );
     assert_eq!(EVENTS, event::ALL, "event catalog drifted from contract");
-    assert_eq!(COMMANDS.len(), 21);
+    assert_eq!(COMMANDS.len(), 23);
     assert_eq!(EVENTS.len(), 9);
 }
 

@@ -281,6 +281,86 @@ fn session_commands_list() -> Vec<String> {
     .collect()
 }
 
+/// Run `git` read-only in `workspace`; returns `(success, stdout)`, or `None` if
+/// git can't be spawned.
+async fn run_git(workspace: &std::path::Path, args: &[&str]) -> Option<(bool, String)> {
+    let out = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .output()
+        .await
+        .ok()?;
+    Some((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
+}
+
+/// `git_status` — branch, ahead/behind, and the changed-file list (porcelain).
+/// `{ repo: false }` when the workspace is not a git repo.
+#[tauri::command]
+async fn git_status(state: State<'_, AppState>) -> Result<Value, BoundaryErrorPayload> {
+    let ws = state.workspace.clone();
+    let branch = match run_git(&ws, &["rev-parse", "--abbrev-ref", "HEAD"]).await {
+        Some((true, s)) => s.trim().to_string(),
+        _ => return Ok(json!({ "repo": false })),
+    };
+    let (mut ahead, mut behind) = (0i64, 0i64);
+    if let Some((true, s)) = run_git(
+        &ws,
+        &["rev-list", "--left-right", "--count", "@{upstream}...HEAD"],
+    )
+    .await
+    {
+        let mut it = s.split_whitespace();
+        behind = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        ahead = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    }
+    let mut files = Vec::new();
+    if let Some((true, s)) = run_git(&ws, &["status", "--porcelain=v1"]).await {
+        for line in s.lines() {
+            if line.len() < 4 {
+                continue;
+            }
+            let x = &line[0..1];
+            let y = &line[1..2];
+            files.push(json!({
+                "path": line[3..].to_string(),
+                "x": x,
+                "y": y,
+                "staged": x != " " && x != "?",
+                "unstaged": y != " " && y != "?",
+                "untracked": x == "?",
+            }));
+        }
+    }
+    Ok(json!({ "repo": true, "branch": branch, "ahead": ahead, "behind": behind, "files": files }))
+}
+
+/// `git_diff` — the unified diff for an optional `path` and `staged` scope.
+#[tauri::command]
+async fn git_diff(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    staged: Option<bool>,
+) -> Result<Value, BoundaryErrorPayload> {
+    let ws = state.workspace.clone();
+    let mut args: Vec<&str> = vec!["diff"];
+    if staged.unwrap_or(false) {
+        args.push("--cached");
+    }
+    let p = path.unwrap_or_default();
+    if !p.is_empty() {
+        args.push("--");
+        args.push(&p);
+    }
+    let diff = match run_git(&ws, &args).await {
+        Some((_, s)) => s,
+        None => String::new(),
+    };
+    Ok(json!({ "diff": diff }))
+}
+
 /// Park an approval responder and emit `rk://approval_request` — called from the
 /// setup task that drains the gate's channel.
 pub fn emit_approval_request<R: Runtime>(
@@ -335,6 +415,8 @@ pub fn invoke_handler<R: Runtime>() -> impl Fn(tauri::ipc::Invoke<R>) -> bool + 
         fs_list_workspace,
         session_memory_search,
         session_commands_list,
+        git_status,
+        git_diff,
     ]
 }
 

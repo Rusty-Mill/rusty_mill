@@ -357,7 +357,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 
 - [x] Tauri 2 shell: SolidJS + Tailwind v4 + Vite, resizable panels `L` · #22 *(in `desktop/`, its own workspace outside the core one)*
 - [x] Session panel: `TurnCard`, `ToolEventRow`, `VerificationBadge`, `TaskStateBanner`, streaming `L` · #23 *(token-level `rk://token` streaming wired via the kernel's `stream_turn`; `rk://bash_output` surfaced to the terminal — gateway/ACP remain turn-boundary)*
-- [x] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview `L` · #24 *(terminal + editor/diff + memory done; git status + web preview are basic stubs)*
+- [x] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview `L` · #24 *(terminal + editor/diff + memory + git tab (`git_status`/`git_diff`) done; web preview is a basic stub)*
 - [x] Composer: `@file`/`#memory`/`/command`, approval gate, plan confirmation `M` · #25
 - [x] Harness dashboard: verification stream, evidence journal, entropy chart, M-HIR trend, token budget `L` · #26 ⭐ *(incl. the cross-session M-HIR trend sparkline, from journaled turns + interventions grouped by session)*
 - [x] Settings: provider/model, OS-keychain keys, permissions, MCP, harness tuning, themes `M` · #27 *(keychain keys, MCP list, tuning overrides, themes done; model switching stays restart-only)*

@@ -101,9 +101,13 @@ pub mod command {
     pub const SESSION_MEMORY_SEARCH: &str = "session_memory_search";
     /// Slash-command list (for the `/command` palette).
     pub const SESSION_COMMANDS_LIST: &str = "session_commands_list";
+    /// Working-tree status (branch, ahead/behind, changed files) for the Git tab.
+    pub const GIT_STATUS: &str = "git_status";
+    /// Unified diff for a path / staged scope (the Git tab's CM6 view).
+    pub const GIT_DIFF: &str = "git_diff";
 
     /// Every command name, in catalog order.
-    pub const ALL: [&str; 21] = [
+    pub const ALL: [&str; 23] = [
         SESSION_SEND,
         SESSION_COMMAND,
         SESSION_LAST_REPORT,
@@ -125,6 +129,8 @@ pub mod command {
         FS_LIST_WORKSPACE,
         SESSION_MEMORY_SEARCH,
         SESSION_COMMANDS_LIST,
+        GIT_STATUS,
+        GIT_DIFF,
     ];
 }
 
@@ -217,7 +223,7 @@ mod tests {
         for name in command::ALL {
             assert_eq!(command::ALL.iter().filter(|n| **n == name).count(), 1);
         }
-        assert_eq!(command::ALL.len(), 21);
+        assert_eq!(command::ALL.len(), 23);
     }
 
     #[test]

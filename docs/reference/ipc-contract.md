@@ -84,6 +84,8 @@ read endpoints as `GET` routes and `POST /command` for slash commands.
 | `fs_list_workspace` | — | `string[]` | `@file` picker |
 | `session_memory_search` | `{ q }` | `MemoryEntry[]` | `#memory` picker |
 | `session_commands_list` | — | `string[]` | `/command` palette |
+| `git_status` | — | `GitStatus` | working tree (branch, ahead/behind, changed files) |
+| `git_diff` | `{ path?, staged? }` | `{ diff }` | unified diff for the Git tab |
 
 Secrets never leave the Rust side longer than the `invoke` call that passes them
 (PRD 08): they are stored in the OS keychain, never in JS memory.

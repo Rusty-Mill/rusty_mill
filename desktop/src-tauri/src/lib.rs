@@ -17,7 +17,7 @@ use tauri::{Builder, Manager, Runtime};
 use state::{AppState, ApprovalRx};
 
 /// The Tauri `invoke` command names this bridge registers — the contract SSOT.
-pub const COMMANDS: [&str; 21] = rk_app::contract::command::ALL;
+pub const COMMANDS: [&str; 23] = rk_app::contract::command::ALL;
 /// The `rk://` events this bridge emits — the contract SSOT.
 pub const EVENTS: [&str; 9] = rk_app::contract::event::ALL;
 
