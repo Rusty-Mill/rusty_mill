@@ -16,7 +16,9 @@ mod builtins;
 pub mod chaos;
 mod error;
 mod exec;
+mod explore;
 pub mod memory;
+mod plan;
 mod prompt;
 mod taskmgmt;
 mod tool;
@@ -28,6 +30,7 @@ pub use error::{outcome_from_error, ToolError};
 pub use exec::{
     executor_for, Isolation, LocalExecutor, SandboxLauncher, SandboxedExecutor, ToolExecutor,
 };
+pub use explore::{register_explore_tool, report_text, ExploreReport, ExploreStrategy};
 #[cfg(any(test, feature = "fake-embed"))]
 pub use memory::HashEmbedder;
 pub use memory::{
@@ -36,6 +39,7 @@ pub use memory::{
     Edge, Embedder, MemType, Memory, Observation, RecallOutput, SqliteStore, SqliteStream, Store,
     Stream, TaskState, TaskStatus, TaskStore, DEFAULT_RECALL_K,
 };
+pub use plan::register_plan_tools;
 pub use prompt::{compaction_prompt, system_prompt, COMPACTION_SYSTEM};
 pub use taskmgmt::{register_task_management_tools, BackgroundTaskStore};
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};

@@ -228,22 +228,32 @@ impl PermissionMode {
     }
 }
 
-/// A policy that gates tools by the active [`PermissionMode`] (PRD 02).
+/// A policy that gates tools by the active [`PermissionMode`] (PRD 02). The mode
+/// is read live from a shared [`PlanController`] so plan mode (PRD 06) can flip
+/// it at runtime.
 pub struct ModePolicy {
-    mode: PermissionMode,
+    controller: Arc<crate::PlanController>,
 }
 
 impl ModePolicy {
-    /// Gate tools by `mode`.
+    /// Gate tools by a fixed `mode` (its own controller; no runtime transitions).
     pub fn new(mode: PermissionMode) -> Self {
-        Self { mode }
+        Self {
+            controller: Arc::new(crate::PlanController::new(mode)),
+        }
+    }
+
+    /// Gate tools by a shared [`PlanController`] (lets plan-mode tools and the
+    /// session drive transitions).
+    pub fn shared(controller: Arc<crate::PlanController>) -> Self {
+        Self { controller }
     }
 }
 
 #[async_trait]
 impl Policy for ModePolicy {
     async fn before_tool(&self, name: &str, _args: &Value) -> Result<(), PolicyError> {
-        self.mode.check(name)
+        self.controller.mode().check(name)
     }
 }
 

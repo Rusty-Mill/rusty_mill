@@ -43,6 +43,8 @@ async fn send_reads_workspace_file_then_replies_verified() {
             "bash",
             "complete_task",
             "edit_file",
+            "enter_plan_mode",
+            "exit_plan_mode",
             "glob",
             "grep",
             "list_directory",
@@ -194,6 +196,101 @@ async fn read_only_mode_blocks_a_write_turn() {
     assert!(!dir.join("out.txt").exists());
     // The block is recorded as an (unavoidable) tool_block intervention.
     assert_eq!(session.mhir().unwrap().n_unavoidable, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_blocks_write_then_proceed_allows_it() {
+    use rk_constrain::PlanDecision;
+
+    let dir = std::env::temp_dir().join(format!("rk-app-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let config = config_at(&dir);
+    // Turn 1: enter plan mode, attempt a write (blocked), submit the plan.
+    // Turn 2 (after Proceed): the write now succeeds.
+    let model = FakeLanguageModel::new(vec![
+        vec![
+            Scripted::ToolCall {
+                name: "enter_plan_mode".into(),
+                args: json!({}),
+            },
+            Scripted::ToolCall {
+                name: "write_file".into(),
+                args: json!({"path": "out.txt", "content": "blocked in plan"}),
+            },
+            Scripted::ToolCall {
+                name: "exit_plan_mode".into(),
+                args: json!({"plan": "write out.txt"}),
+            },
+            Scripted::Text("proposed".into()),
+        ],
+        vec![
+            Scripted::ToolCall {
+                name: "write_file".into(),
+                args: json!({"path": "out.txt", "content": "written after approval"}),
+            },
+            Scripted::Text("done".into()),
+        ],
+    ]);
+
+    let session = Session::new(&config, model).unwrap();
+    session.send("please change out.txt").await.unwrap();
+
+    // The write was blocked while planning; the plan-exit is pending approval.
+    assert!(!dir.join("out.txt").exists());
+    assert!(session.is_planning());
+    assert_eq!(
+        session.plan_exit_pending().as_deref(),
+        Some("write out.txt")
+    );
+
+    // Approve → next turn may write.
+    assert_eq!(session.resolve_plan_exit(PlanDecision::Proceed), None);
+    assert!(!session.is_planning());
+    assert!(session.plan_exit_pending().is_none());
+
+    session.send("now do it").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "written after approval"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explore_fans_out_converges_and_synthesises() {
+    let dir = std::env::temp_dir().join(format!("rk-app-explore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let ws = dir.to_string_lossy().into_owned();
+    // Opt-in explore: 3 divergent branches, keep top-1.
+    let config = Config::resolve(move |k| match k {
+        "RUSTYKEYS_MODEL" => Some("fake".into()),
+        "RUSTYKEYS_WORKSPACE" => Some(ws.clone()),
+        "RUSTYKEYS_EXPLORE" => Some("1".into()),
+        "RUSTYKEYS_EXPLORE_BRANCHES" => Some("3".into()),
+        "RUSTYKEYS_EXPLORE_TOP_K" => Some("1".into()),
+        _ => None,
+    })
+    .unwrap();
+
+    // Every child returns the same structured plan (deterministic regardless of
+    // the parallel pop order): the 3 branches cluster to one, then the critic
+    // call synthesises. 3 fan-out + 1 critic = 4 model calls.
+    let plan = "1. analyse inputs\n2. design the cache\n3. validate";
+    let turns: Vec<Vec<Scripted>> = (0..6).map(|_| vec![Scripted::Text(plan.into())]).collect();
+    let session = Session::new(&config, FakeLanguageModel::new(turns)).unwrap();
+    assert!(session.explore_enabled());
+
+    let report = session.explore("design a cache layer").await.unwrap();
+    assert!(report.contains("Explored 3 branches"));
+    assert!(report.contains("candidate plan"));
+    assert!(report.contains("Recommendation:"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
