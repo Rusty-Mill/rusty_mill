@@ -20,7 +20,7 @@ aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
 anyhow = "1"
 async-trait.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
 rmcp = { version = "0.9", features = ["server", "transport-io"], optional = true }
 axum = { version = "0.7", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }

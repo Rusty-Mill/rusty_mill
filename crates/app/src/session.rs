@@ -17,8 +17,8 @@ use rk_compose::{
 };
 use rk_config::{Config, HarnessLevel};
 use rk_constrain::{
-    BashGuard, ModePolicy, PermissionMode, PlanController, PlanDecision, PolicyChain, SecurityLog,
-    ToolDispatch, WorkspacePolicy,
+    BashGuard, ModePolicy, PermissionMode, PlanController, PlanDecision, Policy, PolicyChain,
+    SecurityLog, ToolDispatch, WorkspacePolicy,
 };
 use rk_feed::{
     compaction_prompt, consolidate_apply, consolidation_prompt, executor_for, groom_apply,
@@ -104,14 +104,25 @@ where
 {
     /// Build a top-level session (subagent depth 0).
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None, None)
+        Self::new_at_depth(config, model, 0, None, None, None)
     }
 
     /// Build a top-level session with an already-connected MCP manager (PRD 07).
     /// The caller connects the servers (async) before construction; this
     /// registers their namespaced tools + the `McpPolicy` synchronously.
     pub fn new_with_mcp(config: &Config, model: M, mcp: McpManager) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None, Some(mcp))
+        Self::new_at_depth(config, model, 0, None, Some(mcp), None)
+    }
+
+    /// Build a top-level session with an extra policy appended to the chain —
+    /// e.g. an `ApprovalGate` whose requests the ACP/IDE adapter answers
+    /// (Phase 7 / Phase 16). The gate runs last (after mode/workspace/bash/mcp).
+    pub fn new_with_policy(
+        config: &Config,
+        model: M,
+        policy: Arc<dyn Policy>,
+    ) -> anyhow::Result<Self> {
+        Self::new_at_depth(config, model, 0, None, None, Some(policy))
     }
 
     /// Build a session at subagent `depth` (0 = top-level), optionally seeded
@@ -124,6 +135,7 @@ where
         depth: usize,
         frame: Option<&str>,
         mcp: Option<McpManager>,
+        extra_policy: Option<Arc<dyn Policy>>,
     ) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
         let state_dir = config.workspace.join(".rustykeys");
@@ -146,11 +158,16 @@ where
         ));
         // `McpPolicy` is a no-op for non-`mcp__` tools, so it composes harmlessly
         // even when no MCP servers are connected (PRD 07).
-        let policy = PolicyChain::new()
+        let mut policy = PolicyChain::new()
             .with(Arc::new(ModePolicy::shared(plan.clone())))
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
             .with(Arc::new(BashGuard::new().with_log(security_log)))
             .with(Arc::new(McpPolicy::allow_all()));
+        // An injected gate (e.g. ACP's ApprovalGate) runs last — after the
+        // automated checks pass, it can still await a human decision (ADR-0016).
+        if let Some(extra) = extra_policy {
+            policy = policy.with(extra);
+        }
 
         let task = Arc::new(TaskStore::open(&state_dir));
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
@@ -1032,9 +1049,15 @@ where
                 self.depth, self.max_depth
             )));
         }
-        let child =
-            Session::new_at_depth(&self.config, self.model.clone(), self.depth, frame, None)
-                .map_err(|e| ToolError::Other(e.to_string()))?;
+        let child = Session::new_at_depth(
+            &self.config,
+            self.model.clone(),
+            self.depth,
+            frame,
+            None,
+            None,
+        )
+        .map_err(|e| ToolError::Other(e.to_string()))?;
         let outcome = child
             .send(task)
             .await

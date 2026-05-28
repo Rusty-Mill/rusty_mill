@@ -1,6 +1,7 @@
 //! `app` — the `Session` centre and its adapters (CLI today; gateway/Tauri
 //! later). Implements `SessionFactory` in later phases.
 
+pub mod acp;
 mod budget;
 pub mod cli;
 mod embedder;

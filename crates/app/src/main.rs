@@ -54,6 +54,15 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ACP mode: `rusty-keys --acp` (or RUSTYKEYS_MODE=acp) exposes the Session
+    // as an Agent Client Protocol agent over stdio for editors (PRD 07 / Phase 16).
+    let acp_mode = std::env::args().any(|a| a == "--acp")
+        || std::env::var("RUSTYKEYS_MODE").as_deref() == Ok("acp");
+    if acp_mode {
+        let reader = tokio::io::BufReader::new(tokio::io::stdin());
+        return rk_app::acp::run(config, model, reader, tokio::io::stdout()).await;
+    }
+
     // MCP server mode: `rusty-keys --mcp` (or RUSTYKEYS_MODE=mcp) exposes
     // Session::send() over JSON-RPC instead of the CLI (PRD 07 / ADR-0029).
     let mcp_mode = std::env::args().any(|a| a == "--mcp")

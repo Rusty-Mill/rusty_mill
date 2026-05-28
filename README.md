@@ -110,7 +110,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–14 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–14 + 16 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -132,9 +132,10 @@ testable in CI without a live provider.
 
 - **13 · Extended CLI** — `/stats` (turns/tool-calls/tokens/M-HIR/entropy), `/model`, `/config`, `/env`, `/doctor` (model/workspace/SQLite/MCP health), `/init` (`AGENT_GUIDE.md`), and git commands (`/diff`/`/branch` direct, `/commit`/`/review` via the agent).
 - **14 · Web gateway** — an `axum` HTTP/SSE surface over `Session::send()` (`rusty-keys --gateway`, behind the `gateway` feature): `POST /chat`, `GET /stream` (named SSE frames), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy`; single + multi-session (idle-TTL + max-session eviction, `session_id`↔auth binding), bearer auth, and CORS.
+- **16 · ACP** — an Agent Client Protocol server (`rusty-keys --acp`): newline-delimited JSON-RPC 2.0 over stdio exposing the `Session` to editors. Handshake (`initialize`/`authenticate`), `session/new`/`prompt`/`cancel` → `Session::send()` with `session/update` notifications, and a `session/request_permission` round-trip bound to the Phase-7 `ApprovalGate` (a denied write holds the boundary). Client fs/terminal capability shims are a documented follow-on.
 
-Remaining: desktop frontend (15), ACP (16); plus the MCP SSE transport
-(+auth/TLS) and gateway token-level streaming / readiness probe.
+Remaining: desktop frontend (15); plus the MCP SSE transport (+auth/TLS),
+gateway token-level streaming / readiness probe, and ACP fs/terminal shims.
 
 ## Building & testing
 
