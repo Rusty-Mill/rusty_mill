@@ -232,6 +232,22 @@ pub fn classify_outcome(
     }
 }
 
+/// Evaluator-side outcome (ADR-0035 R5): assign the `EpisodeOutcome` from the
+/// **evaluator's own** deterministic checks, independent of any agent
+/// self-report. Runs at every level H0–H3 (paper Table 5), so "the agent
+/// produced evidence" is never conflated with "the evaluator verified behaviour".
+/// An empty registry means there is no evaluator evidence ⇒ `UnverifiedSuccess`.
+pub fn evaluator_outcome(results: &[crate::registry::CheckRunResult]) -> EpisodeOutcome {
+    if results.is_empty() {
+        return EpisodeOutcome::UnverifiedSuccess;
+    }
+    if results.iter().all(|r| r.passed) {
+        EpisodeOutcome::AutonomousVerifiedSuccess
+    } else {
+        EpisodeOutcome::Failed
+    }
+}
+
 /// Metadata the assembler needs that is not in the evidence (ids, baseline).
 pub struct EpisodeMeta {
     /// The task id (stable across a task's turns; `episode_id = ep_<task_id>`).

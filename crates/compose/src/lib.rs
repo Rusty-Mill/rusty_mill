@@ -23,9 +23,9 @@ pub use check::{
     VerificationReportRequired,
 };
 pub use episode::{
-    classify_outcome, ActionEvent, ContextEntry, EntropyAudit, EpisodeAssembler, EpisodeMeta,
-    EpisodeOutcome, EpisodePackage, InitialState, PackageAttribution, ReportBlock, ToolTraceEntry,
-    VerifyEntry, VerifyResult, VerifyType,
+    classify_outcome, evaluator_outcome, ActionEvent, ContextEntry, EntropyAudit, EpisodeAssembler,
+    EpisodeMeta, EpisodeOutcome, EpisodePackage, InitialState, PackageAttribution, ReportBlock,
+    ToolTraceEntry, VerifyEntry, VerifyResult, VerifyType,
 };
 pub use failure::{Attribution, FailureType};
 pub use journal::EvidenceJournal;
