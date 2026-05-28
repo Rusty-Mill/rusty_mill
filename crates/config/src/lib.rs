@@ -8,7 +8,19 @@
 use std::path::PathBuf;
 
 /// Maturity level of the harness (ARCHITECTURE §3). Phase 1 ships H1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
 pub enum HarnessLevel {
     /// Task + repo files, no tool registry.
     H0,

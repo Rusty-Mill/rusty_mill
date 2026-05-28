@@ -92,6 +92,35 @@ impl VerificationReport {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 
+    /// Fold registered `checks.toml` results into the report (PRD 05 / Phase 10):
+    /// each failing check pushes an `f_verify` attribution and ANDs `verified`.
+    /// The per-entry `verification_trace` is projected by the assembler from the
+    /// same results (which carry `method`/`covers`).
+    pub fn and_registered(mut self, results: &[crate::registry::CheckRunResult]) -> Self {
+        for r in results {
+            self.checks.push(CheckResult {
+                name: format!("registered:{}", r.check),
+                passed: r.passed,
+                detail: if r.passed {
+                    format!("{} passed", r.method)
+                } else {
+                    format!("{}: expected '{}' in output", r.method, r.expected)
+                },
+            });
+            if !r.passed {
+                self.attributions.push(Attribution {
+                    check: r.check.clone(),
+                    failure_type: FailureType::FVerify,
+                    category: "registered_check_failed".to_string(),
+                    layer: "compose/checks".to_string(),
+                    evidence: format!("{}: {}", r.check, r.observed),
+                });
+            }
+        }
+        self.verified = self.verified && results.iter().all(|r| r.passed);
+        self
+    }
+
     /// Fold a criteria-judge result into the report (PRD 05). Adds a
     /// `criteria_judge` check, the matching semantic attribution
     /// (`criteria_unmet`→`f_model` / `judge_unavailable`→`f_verify`), threads
@@ -143,6 +172,20 @@ impl Verifier {
             checks: vec![Box::new(NoToolErrors), Box::new(CleanTermination)],
             limits: DETERMINISTIC_LIMITS,
         }
+    }
+
+    /// Append the H3 process checks (`reproduce_before_edit`,
+    /// `verification_report_required`) backed by this turn's scratch (PRD 05).
+    pub fn with_h3(mut self, scratch: std::sync::Arc<rk_observe::H3Scratch>) -> Self {
+        self.checks
+            .push(Box::new(crate::check::ReproduceBeforeEdit::new(
+                scratch.clone(),
+            )));
+        self.checks
+            .push(Box::new(crate::check::VerificationReportRequired::new(
+                scratch,
+            )));
+        self
     }
 
     /// Run every check and build the report.
@@ -205,6 +248,20 @@ fn attribute(check: &str, episode: &Episode) -> Vec<Attribution> {
             category: "non_termination".to_string(),
             layer: "kernel/loop".to_string(),
             evidence: "loop ended without a final reply".to_string(),
+        }],
+        "reproduce_before_edit" => vec![Attribution {
+            check: check.to_string(),
+            failure_type: FailureType::FVerify,
+            category: "reproduction_skipped".to_string(),
+            layer: "compose/h3".to_string(),
+            evidence: "edited a file without first reproducing the failure".to_string(),
+        }],
+        "verification_report_required" => vec![Attribution {
+            check: check.to_string(),
+            failure_type: FailureType::FVerify,
+            category: "report_missing".to_string(),
+            layer: "compose/h3".to_string(),
+            evidence: "no verification report produced this turn".to_string(),
         }],
         other => vec![Attribution {
             check: other.to_string(),

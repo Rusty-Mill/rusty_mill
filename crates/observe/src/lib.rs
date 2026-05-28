@@ -11,11 +11,13 @@
 //! and `EntropyAuditor` are tracked separately within this phase.
 
 mod error;
+mod h3;
 mod intervention;
 mod outcome;
 pub mod redact;
 
 pub use error::ObserveError;
+pub use h3::{AgentAttribution, H3Scratch, ReproductionLog, Requirement};
 pub use intervention::{
     Avoidability, InterventionKind, InterventionLogger, InterventionRecord, MhirReport,
 };

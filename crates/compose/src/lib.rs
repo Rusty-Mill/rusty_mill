@@ -11,15 +11,26 @@
 //! the H3 episode package + evidence journal land in their phases.
 
 mod check;
+mod episode;
 mod failure;
 mod journal;
 mod judge;
+mod registry;
 mod verify;
 
-pub use check::{Check, CheckResult, CleanTermination, NoToolErrors};
+pub use check::{
+    Check, CheckResult, CleanTermination, NoToolErrors, ReproduceBeforeEdit,
+    VerificationReportRequired,
+};
+pub use episode::{
+    classify_outcome, evaluator_outcome, ActionEvent, ContextEntry, EntropyAudit, EpisodeAssembler,
+    EpisodeMeta, EpisodeOutcome, EpisodePackage, InitialState, PackageAttribution, ReportBlock,
+    ToolTraceEntry, VerifyEntry, VerifyResult, VerifyType,
+};
 pub use failure::{Attribution, FailureType};
 pub use journal::EvidenceJournal;
 pub use judge::{judge_prompt, parse_judge, JudgeResult};
+pub use registry::{CheckRegistry, CheckRunResult, DeterministicCheck};
 pub use verify::{VerificationReport, Verifier, DETERMINISTIC_LIMITS, SEMANTIC_LIMITS};
 
 /// `compose` error taxonomy (ADR-0023; error-handling §2), composing downhill.
@@ -40,6 +51,9 @@ pub enum ComposeError {
     /// An observe-layer error surfaced through compose.
     #[error(transparent)]
     Observe(#[from] rk_observe::ObserveError),
+    /// A `checks.toml` could not be parsed (PRD 05 / Phase 10).
+    #[error("checks.toml error: {0}")]
+    Checks(String),
 }
 
 #[cfg(test)]

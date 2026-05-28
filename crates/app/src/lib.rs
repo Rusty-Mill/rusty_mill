@@ -3,8 +3,10 @@
 
 mod budget;
 mod embedder;
+pub mod eval;
 mod session;
 
 pub use budget::{Msg, Tier, TokenBudget};
 pub use embedder::AiSdkEmbedder;
+pub use eval::{run_episode, EvalOutcome, GoldenEpisode};
 pub use session::{Session, TurnOutcome};

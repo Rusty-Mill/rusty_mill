@@ -12,9 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use rk_compose::{
-    judge_prompt, parse_judge, EvidenceJournal, JudgeResult, VerificationReport, Verifier,
+    judge_prompt, parse_judge, CheckRegistry, ContextEntry as PkgContextEntry, EpisodeAssembler,
+    EpisodeMeta, EvidenceJournal, InitialState, JudgeResult, VerificationReport, Verifier,
 };
-use rk_config::Config;
+use rk_config::{Config, HarnessLevel};
 use rk_constrain::{
     BashGuard, ModePolicy, PermissionMode, PlanController, PlanDecision, PolicyChain, SecurityLog,
     ToolDispatch, WorkspacePolicy,
@@ -22,14 +23,14 @@ use rk_constrain::{
 use rk_feed::{
     compaction_prompt, consolidate_apply, consolidation_prompt, executor_for, groom_apply,
     groom_prompt, recall, register_agent_tool, register_builtins_with_executor,
-    register_explore_tool, register_plan_tools, register_task_management_tools,
+    register_explore_tool, register_h3_tools, register_plan_tools, register_task_management_tools,
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
     BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, ExploreStrategy,
     Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
     TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
-use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
+use rk_observe::{H3Scratch, InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
 
 use crate::budget::{dedup_recall_block, flatten, micro_compact, Msg, Tier, TokenBudget};
 
@@ -74,6 +75,9 @@ pub struct Session<M> {
     isolation: String,
     plan: Arc<PlanController>,
     explore: Option<Arc<ExploreStrategy>>,
+    h3: Option<Arc<H3Scratch>>,
+    harness_level: HarnessLevel,
+    workspace: std::path::PathBuf,
     budget: Mutex<TokenBudget>,
     history: Mutex<Vec<Msg>>,
     system: String,
@@ -140,6 +144,19 @@ where
         register_task_tools(&mut registry, task.clone());
         register_task_management_tools(&mut registry, Arc::new(BackgroundTaskStore::new()));
         register_plan_tools(&mut registry, plan.clone());
+        // H3: the reproduce → attribute → verify workflow tools + scratch, and
+        // the H3 process checks on the verifier (PRD 05 / Phase 10).
+        let h3 = if config.harness_level >= HarnessLevel::H3 {
+            let scratch = Arc::new(H3Scratch::new());
+            register_h3_tools(&mut registry, scratch.clone());
+            Some(scratch)
+        } else {
+            None
+        };
+        let verifier = match &h3 {
+            Some(scratch) => Verifier::deterministic().with_h3(scratch.clone()),
+            None => Verifier::deterministic(),
+        };
         if config.allow_web {
             register_web_tools(&mut registry);
         }
@@ -183,7 +200,7 @@ where
             tracer,
             journal: EvidenceJournal::new(&state_dir),
             interventions: InterventionLogger::new(&state_dir, session_id.clone()),
-            verifier: Verifier::deterministic(),
+            verifier,
             stream: Arc::new(stream),
             store: Arc::new(store),
             task,
@@ -196,6 +213,9 @@ where
             isolation,
             plan,
             explore,
+            h3,
+            harness_level: config.harness_level,
+            workspace: config.workspace.clone(),
             budget: Mutex::new(TokenBudget::new(
                 config.context_limit,
                 config.compact_micro,
@@ -226,6 +246,10 @@ where
     /// unverified.
     pub async fn send(&self, prompt: &str) -> anyhow::Result<TurnOutcome> {
         let msg_id = self.next_msg_id();
+        // H3 scratch is per-turn — clear last turn's reproduction/report/attributions.
+        if let Some(scratch) = &self.h3 {
+            scratch.reset();
+        }
         if self.last_unverified.load(Ordering::Relaxed) {
             self.interventions
                 .record(InterventionKind::UnverifiedFollowup, "", &msg_id)?;
@@ -314,6 +338,21 @@ where
             report = report.with_judge(jr);
         }
 
+        // H3: run the registered `checks.toml` checks and fold their verdicts
+        // into the report (PRD 05 / Phase 10). Their per-entry coverage lands in
+        // the episode's verification_trace.
+        let registered = match &self.h3 {
+            Some(_) => match CheckRegistry::load(&self.workspace) {
+                Ok(reg) if !reg.is_empty() => {
+                    let r = reg.run_all().await;
+                    report = report.and_registered(&r);
+                    r
+                }
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+
         let n = self.turn_counter.fetch_add(1, Ordering::Relaxed);
         let turn_id = format!("{}_turn_{n}", self.session_id);
         self.journal
@@ -331,6 +370,20 @@ where
                 InterventionKind::ToolBlock,
                 "policy blocked a tool call",
                 &format!("{turn_id}_block"),
+            )?;
+        }
+
+        // H3: assemble the eight-trace episode package from the raw evidence and
+        // write it to `episodes/<turn_id>.json` (PRD 05 / Phase 10).
+        if let Some(scratch) = &self.h3 {
+            self.write_episode(
+                &turn_id,
+                &msg_id,
+                &episode,
+                &report,
+                &oriented.entries,
+                scratch,
+                &registered,
             )?;
         }
 
@@ -520,6 +573,72 @@ where
     /// Whether the opt-in `explore` strategy is enabled (ADR-0032).
     pub fn explore_enabled(&self) -> bool {
         self.explore.is_some()
+    }
+
+    /// Assemble and write this turn's H3 episode package (PRD 05 / Phase 10).
+    #[allow(clippy::too_many_arguments)]
+    fn write_episode(
+        &self,
+        turn_id: &str,
+        msg_id: &str,
+        episode: &rk_observe::Episode,
+        report: &VerificationReport,
+        context: &[rk_feed::ContextEntry],
+        scratch: &Arc<H3Scratch>,
+        registered: &[rk_compose::CheckRunResult],
+    ) -> anyhow::Result<()> {
+        // context_trace: project recall provenance; the v1 `influenced_decision`
+        // heuristic marks primary (top-k) artifacts as decision-influencing.
+        let ctx: Vec<PkgContextEntry> = context
+            .iter()
+            .map(|c| PkgContextEntry {
+                artifact: c.artifact.clone(),
+                contribution: c.contribution.clone(),
+                influenced_decision: c.contribution == "primary",
+            })
+            .collect();
+
+        // Per-turn intervention slice (F18): records keyed to this turn.
+        let block_id = format!("{turn_id}_block");
+        let interventions: Vec<_> = self
+            .interventions
+            .recent(64)?
+            .into_iter()
+            .filter(|r| r.source_message_id == msg_id || r.source_message_id == block_id)
+            .collect();
+
+        let goal = self.task.goal();
+        let task_id = if goal.trim().is_empty() {
+            self.session_id.clone()
+        } else {
+            format!("t_{:x}", fnv1a(&goal))
+        };
+
+        let assembler = EpisodeAssembler {
+            episode,
+            report,
+            context: &ctx,
+            interventions: &interventions,
+            scratch,
+            registered,
+            meta: EpisodeMeta {
+                task_id,
+                turn_id: turn_id.to_string(),
+                harness_level: self.harness_level,
+                initial_state: self.initial_state(),
+            },
+        };
+        self.journal.record_episode(&assembler.assemble())?;
+        Ok(())
+    }
+
+    /// Best-effort task baseline: the workspace path and current git commit.
+    fn initial_state(&self) -> InitialState {
+        let commit = resolve_head(&self.workspace).unwrap_or_else(|| "unknown".to_string());
+        InitialState {
+            commit,
+            workspace: self.workspace.to_string_lossy().into_owned(),
+        }
     }
 
     /// Run a divergent→converge exploration for `task` (`/explore`): fan out N
@@ -745,6 +864,32 @@ fn now() -> f64 {
 
 fn new_session_id() -> String {
     format!("s_{:x}", now().to_bits())
+}
+
+/// FNV-1a hash of a string — a stable, dependency-free `task_id` source so
+/// `episode_id = ep_<task_id>` stays constant across a task's turns (ADR-0018).
+fn fnv1a(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Best-effort current git commit for the episode baseline. Reads `.git/HEAD`
+/// (and the referenced ref) without spawning git; returns `None` if unresolved.
+fn resolve_head(workspace: &std::path::Path) -> Option<String> {
+    let git = workspace.join(".git");
+    let head = std::fs::read_to_string(git.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref: ") {
+        std::fs::read_to_string(git.join(reference))
+            .ok()
+            .map(|s| s.trim().to_string())
+    } else {
+        Some(head.to_string())
+    }
 }
 
 /// Builds + runs child sessions for the `agent` tool (ADR-0017). Holds the

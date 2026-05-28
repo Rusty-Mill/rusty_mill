@@ -15,9 +15,11 @@ use crate::ComposeError;
 /// Schema version for journal records (ADR-0027).
 const SCHEMA_VERSION: u32 = 1;
 
-/// Append-only JSONL evidence journal at `<dir>/evidence.jsonl`.
+/// Append-only JSONL evidence journal at `<dir>/evidence.jsonl`, plus the H3
+/// episode packages under `<dir>/episodes/`.
 pub struct EvidenceJournal {
     path: PathBuf,
+    dir: PathBuf,
 }
 
 impl EvidenceJournal {
@@ -25,7 +27,29 @@ impl EvidenceJournal {
     pub fn new(dir: &Path) -> Self {
         Self {
             path: dir.join("evidence.jsonl"),
+            dir: dir.to_path_buf(),
         }
+    }
+
+    /// Write a full H3 episode package to `episodes/<turn_id>.json` and append a
+    /// one-line `kind: "episode"` summary to `evidence.jsonl` (data-model §5).
+    pub fn record_episode(&self, pkg: &crate::EpisodePackage) -> Result<(), ComposeError> {
+        let dir = self.dir.join("episodes");
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join(format!("{}.json", pkg.turn_id));
+        let json = serde_json::to_string_pretty(pkg)?;
+        std::fs::write(&file, json)?;
+
+        let summary = json!({
+            "v": SCHEMA_VERSION,
+            "kind": "episode",
+            "ts": now_secs(),
+            "session_id": Value::Null,
+            "turn_id": pkg.turn_id,
+            "episode_id": pkg.episode_id,
+            "outcome": serde_json::to_value(pkg.outcome)?,
+        });
+        self.append(&summary)
     }
 
     /// Append a non-H3 turn record. The `evidence` summary carries each tool's
