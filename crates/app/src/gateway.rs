@@ -192,6 +192,7 @@ where
             );
         Router::new()
             .route("/health", get(health::<M>))
+            .route("/ready", get(ready::<M>))
             .route("/chat", post(chat::<M>))
             .route("/stream", get(stream::<M>))
             .route("/verify", get(verify::<M>))
@@ -214,10 +215,47 @@ where
     }
     Json(json!({
         "status": "ok",
+        "check": "liveness",
         "model": gw.config.model,
         "mode": gw.mode.as_str(),
     }))
     .into_response()
+}
+
+/// Readiness (vs `/health`'s liveness): the gateway can actually serve a turn —
+/// the model is configured, the workspace is a writable dir, and (single mode)
+/// the shared session's SQLite store/stream round-trip. Returns `503` until
+/// ready. Multi mode is per-tenant, so its data layer is checked at first use,
+/// not here. `200` ⇒ ready.
+async fn ready<M>(State(gw): Gw<M>, headers: HeaderMap) -> impl IntoResponse
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
+{
+    if let Err(code) = gw.authorize(&headers) {
+        return code.into_response();
+    }
+    let model_ok = !gw.config.model.trim().is_empty();
+    let workspace_ok = gw.config.workspace.is_dir();
+    let sqlite_ok = match gw.mode {
+        // Reuse the lazily-built, cached shared session so the probe stays cheap.
+        Mode::Single => match gw.session_for(&headers).await {
+            Ok(s) => s.recall_block("ready").await.is_ok(),
+            Err(_) => false,
+        },
+        Mode::Multi => true,
+    };
+    let ready = model_ok && workspace_ok && sqlite_ok;
+    let body = Json(json!({
+        "ready": ready,
+        "check": "readiness",
+        "checks": { "model": model_ok, "workspace": workspace_ok, "sqlite": sqlite_ok },
+    }));
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, body).into_response()
 }
 
 async fn chat<M>(State(gw): Gw<M>, headers: HeaderMap, Json(body): Json<Value>) -> impl IntoResponse

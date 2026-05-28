@@ -51,6 +51,16 @@ async fn chat_and_health_round_trip() {
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(body_string(resp).await.contains("\"status\":\"ok\""));
 
+    // /ready — readiness probe: model + workspace + SQLite round-trip.
+    let resp = app
+        .clone()
+        .oneshot(Request::get("/ready").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let rb = body_string(resp).await;
+    assert!(rb.contains("\"ready\":true"), "expected ready: {rb}");
+
     // /chat
     let resp = app
         .oneshot(

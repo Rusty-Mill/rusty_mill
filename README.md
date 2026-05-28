@@ -154,12 +154,12 @@ testable in CI without a live provider.
 - **12 · MCP** — MCP client manager over the `McpClient` seam (`mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy`, `McpToolFn`→`ToolOutcome`, tool-return inspection, reconnect; `/mcp`), the `rmcp`-backed stdio transport adapter + cargo-deny license gate (behind the `rmcp` feature), and MCP server mode exposing `Session::send()` as a `chat` tool (`rusty-keys --mcp`, behind the `mcp-server` feature). The SSE transport + auth/TLS is a documented follow-on on the same seam.
 
 - **13 · Extended CLI** — `/stats` (turns/tool-calls/tokens/M-HIR/entropy), `/model`, `/config`, `/env`, `/doctor` (model/workspace/SQLite/MCP health), `/init` (`AGENT_GUIDE.md`), and git commands (`/diff`/`/branch` direct, `/commit`/`/review` via the agent).
-- **14 · Web gateway** — an `axum` HTTP/SSE surface over `Session::send()` (`rusty-keys --gateway`, behind the `gateway` feature): `POST /chat`, `GET /stream` (named SSE frames), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy`; single + multi-session (idle-TTL + max-session eviction, `session_id`↔auth binding), bearer auth, and CORS.
+- **14 · Web gateway** — an `axum` HTTP/SSE surface over `Session::send()` (`rusty-keys --gateway`, behind the `gateway` feature): `POST /chat`, `GET /stream` (live token-level SSE frames), `/health` (liveness) + `/ready` (readiness), `/verify`, `/evidence`, `/mhir`, `/entropy`; single + multi-session (idle-TTL + max-session eviction, `session_id`↔auth binding), bearer auth, and CORS.
 - **15 · Desktop frontend** — a Tauri 2 + SolidJS + CodeMirror 6 + xterm.js desktop app ([`desktop/`](desktop), its own cargo workspace) that is a reactive rendering layer over `Session`. The Rust bridge registers one `#[tauri::command]` per name in the canonical IPC contract (`app::contract`) and emits the nine `rk://` events — including **live `rk://token` streaming** via the kernel's `stream_turn` and `rk://bash_output` to the terminal — with turn failures rendered through the boundary-error taxonomy; provider keys live only in the OS keychain. The UI is an AI-first layout (streaming session panel, xterm.js terminal, CM6 diff editor, composer with `@file`/`#memory`/`/command` + approval/plan gates, harness dashboard, settings/themes). A headless Tauri IPC smoke test (mock runtime) plus the frontend build gate it in CI.
 - **16 · ACP** — an Agent Client Protocol server (`rusty-keys --acp`): newline-delimited JSON-RPC 2.0 over stdio exposing the `Session` to editors. Handshake (`initialize`/`authenticate`), `session/new`/`prompt`/`cancel` → `Session::send()` with `session/update` notifications, and a `session/request_permission` round-trip bound to the Phase-7 `ApprovalGate` (a denied write holds the boundary). Client fs/terminal capability shims are a documented follow-on.
 
-Remaining follow-ons: the MCP SSE transport (+auth/TLS), the gateway readiness
-probe, ACP fs/terminal shims, and a desktop git-status tab.
+Remaining follow-ons: the MCP SSE transport (+auth/TLS), ACP fs/terminal shims,
+and a desktop git-status tab.
 
 ## Building & testing
 
