@@ -41,6 +41,8 @@ graph TD
     P1 --> P13[13 Extended CLI]
     P1 --> P14[14 Web gateway]
     P14 --> P15[15 Desktop frontend]
+    P12 --> P16[16 ACP]
+    P14 --> P16
 ```
 
 ## Engineering substrate — lands WITH Phase 1, not after
@@ -367,6 +369,37 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Risks:** event-contract drift between Rust and JS → single canonical `rk://` table.
 **Demo:** launch the desktop app, run a bug-fix turn, open the harness dashboard.
 
+## Phase 16 — Agent Client Protocol (ACP)
+
+**Goal:** expose the `Session` as a standards-compliant **ACP agent** so external editor
+clients (Zed, and other ACP-speaking IDEs) can drive it over the Agent Client Protocol —
+the editor↔agent inverse of Phase 12's MCP tool seam. ACP and MCP are complementary: MCP
+lets the agent *consume* external tools; ACP lets an external *editor* consume the agent.
+Both ride the same JSON-RPC server plumbing, so this phase reuses Phase 12's transport and
+tool-return inspection seam rather than introducing a parallel stack.
+
+> **Disambiguation (both senses checked):** "ACP" most often means the **Agent _Client_
+> Protocol** (editor↔agent), which is the scope of this phase. The distinct **Agent
+> _Communication_ Protocol** (agent↔agent, IBM/BeeAI) maps instead onto the post-phase
+> *Multi-agent orchestration* item — it is intentionally **not** in scope here; see the
+> cross-reference in the post-phase backlog.
+
+**Depends on:** 12 (JSON-RPC server mode + tool-return inspection), 14 (`Session::send()` over a transport) · **Size:** L
+
+- [ ] ACP server: `initialize`/`authenticate` handshake + capability advertisement over stdio (newline-delimited JSON-RPC 2.0) `M`
+- [ ] `session/new`, `session/load`, `session/prompt`, `session/cancel` mapped onto `Session::send()` + the existing session lifecycle `L`
+- [ ] `session/update` streaming notifications mirroring the canonical `rk://` event table (PRD 06) — tokens, tool calls, plan, verification `M`
+- [ ] Client-driven `session/request_permission` bound to the Phase 7 `ApprovalGate` (Allow/AllowAlways/Reject round-trip), so editor approval reuses the existing gate `M`
+- [ ] Client filesystem/terminal capability shims (`fs/read_text_file`, `fs/write_text_file`, terminal ops) routed through `constrain` policy + `ToolExecutor` isolation — ACP-supplied I/O is still policy-vetted, never a bypass `M`
+- [ ] `AcpPolicy` + tool-return inspection on ACP-sourced content before it enters context (reuse the Phase 12 classifier seam) `S`
+- [ ] Integration-test seam: fake ACP client driving a scripted `FakeLanguageModel` session (handshake → prompt → streamed updates → permission round-trip → cancel) `M`
+
+**Definition of Done:** an ACP client completes the handshake, opens a session, sends a prompt, and receives streamed `session/update`s; a write requested mid-turn round-trips the `ApprovalGate`; ACP-supplied fs/terminal access is policy-vetted identically to in-process tools; cancellation tears the turn down cleanly.
+**Acceptance:** connecting from an ACP-speaking editor (or the fake client) drives a full turn end-to-end; a denied permission blocks the action and logs a `tool_block` intervention; an out-of-workspace `fs/write_text_file` is `BLOCKED`, not honored.
+**Test gate:** integration vs a fake ACP client (handshake, streaming, permission round-trip, cancel) — no live editor required in CI.
+**Risks:** event-contract drift between ACP `session/update` and the `rk://` table → drive both from the single canonical table (PRD 06). ACP-supplied client capabilities are an untrusted I/O surface → they MUST pass through `constrain`/`ToolExecutor`, never around them.
+**Demo:** point an ACP-compatible editor (or `RUSTYKEYS_*` + the fake client) at `rusty-keys --acp`, run a bug-fix turn from the editor, approve a write inline.
+
 ---
 
 ## Backlog (post-phase)
@@ -387,7 +420,7 @@ Multi-cadence rollups: idle/hourly/daily/weekly summaries-of-summaries.
 Wire aisdk OTel (when available) to the observe layer: spans per turn, tool-call attributes, token counters.
 
 ### Multi-agent orchestration
-`Session` as a unit of composition via the `agent` tool / `SessionFactory`; `AgentCoordinator` for parallel subagents.
+`Session` as a unit of composition via the `agent` tool / `SessionFactory`; `AgentCoordinator` for parallel subagents. A standard agent↔agent wire protocol — the **Agent _Communication_ Protocol** (IBM/BeeAI), distinct from Phase 16's Agent _Client_ Protocol — would land here as the inter-agent transport, not in Phase 16.
 
 ### LLM-assisted entropy + outcome classification
 Second-opinion aisdk calls for semantic entropy (TaskContradiction/StaleDocs) and ambiguous outcome labels.
