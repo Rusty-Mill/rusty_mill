@@ -22,10 +22,11 @@ use rk_constrain::{
 use rk_feed::{
     compaction_prompt, consolidate_apply, consolidation_prompt, executor_for, groom_apply,
     groom_prompt, recall, register_agent_tool, register_builtins_with_executor,
-    register_plan_tools, register_task_management_tools, register_task_tools, register_web_tools,
-    system_prompt, AttributionContext, BackgroundTaskStore, ConsolidationScope, ConsolidationStats,
-    Embedder, Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store,
-    Stream, TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
+    register_explore_tool, register_plan_tools, register_task_management_tools,
+    register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
+    BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, ExploreStrategy,
+    Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
+    TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
@@ -72,6 +73,7 @@ pub struct Session<M> {
     permission_mode: String,
     isolation: String,
     plan: Arc<PlanController>,
+    explore: Option<Arc<ExploreStrategy>>,
     budget: Mutex<TokenBudget>,
     history: Mutex<Vec<Msg>>,
     system: String,
@@ -91,13 +93,19 @@ where
 {
     /// Build a top-level session (subagent depth 0).
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0)
+        Self::new_at_depth(config, model, 0, None)
     }
 
-    /// Build a session at subagent `depth` (0 = top-level). The registered
+    /// Build a session at subagent `depth` (0 = top-level), optionally seeded
+    /// with a cognitive-frame system-prompt preamble (ADR-0032). The registered
     /// `agent` tool spawns children at `depth + 1`, bounded by
     /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
-    pub fn new_at_depth(config: &Config, model: M, depth: usize) -> anyhow::Result<Self> {
+    pub fn new_at_depth(
+        config: &Config,
+        model: M,
+        depth: usize,
+        frame: Option<&str>,
+    ) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
@@ -139,15 +147,27 @@ where
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
-        register_agent_tool(
-            &mut registry,
-            Arc::new(AgentFactory {
-                config: config.clone(),
-                model: model.clone(),
-                depth: depth + 1,
-                max_depth: max_agent_depth,
-            }),
-        );
+        let factory: Arc<dyn SessionFactory> = Arc::new(AgentFactory {
+            config: config.clone(),
+            model: model.clone(),
+            depth: depth + 1,
+            max_depth: max_agent_depth,
+        });
+        register_agent_tool(&mut registry, factory.clone());
+
+        // Opt-in divergent→converge exploration (ADR-0032): cost-gated, so the
+        // tool is only advertised when explicitly enabled.
+        let explore = if config.explore {
+            let strategy = Arc::new(ExploreStrategy::new(
+                factory.clone(),
+                config.explore_branches,
+                config.explore_top_k,
+            ));
+            register_explore_tool(&mut registry, strategy.clone());
+            Some(strategy)
+        } else {
+            None
+        };
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;
@@ -168,10 +188,14 @@ where
             store: Arc::new(store),
             task,
             embedder: None,
-            system: system_prompt(config.harness_level),
+            system: match frame {
+                Some(f) => format!("{f}\n\n{}", system_prompt(config.harness_level)),
+                None => system_prompt(config.harness_level),
+            },
             permission_mode: mode.as_str().to_string(),
             isolation,
             plan,
+            explore,
             budget: Mutex::new(TokenBudget::new(
                 config.context_limit,
                 config.compact_micro,
@@ -493,6 +517,24 @@ where
         &self.isolation
     }
 
+    /// Whether the opt-in `explore` strategy is enabled (ADR-0032).
+    pub fn explore_enabled(&self) -> bool {
+        self.explore.is_some()
+    }
+
+    /// Run a divergent→converge exploration for `task` (`/explore`): fan out N
+    /// framed children, mechanically converge to top-K, and synthesise a
+    /// recommendation. Returns the rendered report. Errors if explore is not
+    /// enabled (`RUSTYKEYS_EXPLORE=1`).
+    pub async fn explore(&self, task: &str) -> anyhow::Result<String> {
+        let strategy = self
+            .explore
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("explore is disabled; set RUSTYKEYS_EXPLORE=1"))?;
+        let report = strategy.run(task).await?;
+        Ok(report_text(&report))
+    }
+
     /// Enter plan mode (`/plan`): writes and bash are blocked until an approved
     /// `exit_plan_mode` (PRD 06 / Phase 9).
     pub fn enter_plan_mode(&self) {
@@ -722,13 +764,26 @@ where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone,
 {
     async fn spawn(&self, task: &str, _tools: Option<Vec<String>>) -> Result<String, ToolError> {
+        self.run_child(task, None).await
+    }
+
+    async fn spawn_framed(&self, task: &str, frame: &str) -> Result<String, ToolError> {
+        self.run_child(task, Some(frame)).await
+    }
+}
+
+impl<M> AgentFactory<M>
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone,
+{
+    async fn run_child(&self, task: &str, frame: Option<&str>) -> Result<String, ToolError> {
         if self.depth > self.max_depth {
             return Err(ToolError::Other(format!(
                 "agent depth {} exceeds RUSTYKEYS_MAX_AGENT_DEPTH={}",
                 self.depth, self.max_depth
             )));
         }
-        let child = Session::new_at_depth(&self.config, self.model.clone(), self.depth)
+        let child = Session::new_at_depth(&self.config, self.model.clone(), self.depth, frame)
             .map_err(|e| ToolError::Other(e.to_string()))?;
         let outcome = child
             .send(task)

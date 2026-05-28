@@ -16,6 +16,7 @@ mod builtins;
 pub mod chaos;
 mod error;
 mod exec;
+mod explore;
 pub mod memory;
 mod plan;
 mod prompt;
@@ -29,6 +30,7 @@ pub use error::{outcome_from_error, ToolError};
 pub use exec::{
     executor_for, Isolation, LocalExecutor, SandboxLauncher, SandboxedExecutor, ToolExecutor,
 };
+pub use explore::{register_explore_tool, report_text, ExploreReport, ExploreStrategy};
 #[cfg(any(test, feature = "fake-embed"))]
 pub use memory::HashEmbedder;
 pub use memory::{

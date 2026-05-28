@@ -20,6 +20,13 @@ pub trait SessionFactory: Send + Sync {
     /// Run `task` in a child session (optionally restricted to `tools`),
     /// returning its final reply. Enforces the depth bound internally.
     async fn spawn(&self, task: &str, tools: Option<Vec<String>>) -> Result<String, ToolError>;
+
+    /// Run `task` in a child session seeded with a cognitive-frame system-prompt
+    /// preamble (ADR-0032 divergent→converge). The default ignores the frame and
+    /// delegates to [`Self::spawn`]; `app` overrides it to inject the preamble.
+    async fn spawn_framed(&self, task: &str, _frame: &str) -> Result<String, ToolError> {
+        self.spawn(task, None).await
+    }
 }
 
 struct AgentTool {

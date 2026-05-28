@@ -69,6 +69,14 @@ pub struct Config {
     pub compact_session: f64,
     /// Full-compaction threshold, default 0.95.
     pub compact_full: f64,
+    /// Whether the opt-in divergent→converge `explore` tool is enabled, from
+    /// `RUSTYKEYS_EXPLORE` (`1`/`true`). Off by default — it is cost-gated
+    /// (≈N+1 model calls per use; ADR-0032).
+    pub explore: bool,
+    /// Divergent branch count `N`, from `RUSTYKEYS_EXPLORE_BRANCHES` (default 5).
+    pub explore_branches: usize,
+    /// Converge top-`K`, from `RUSTYKEYS_EXPLORE_TOP_K` (default 2).
+    pub explore_top_k: usize,
 }
 
 impl Config {
@@ -139,6 +147,19 @@ impl Config {
         let compact_session = num("RUSTYKEYS_COMPACT_SESSION", 0.90)?;
         let compact_full = num("RUSTYKEYS_COMPACT_FULL", 0.95)?;
 
+        let explore = truthy(get("RUSTYKEYS_EXPLORE"));
+        let usize_or = |key: &'static str, default: usize| -> Result<usize, ConfigError> {
+            match get(key) {
+                Some(s) if !s.trim().is_empty() => s
+                    .trim()
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid { key, value: s }),
+                _ => Ok(default),
+            }
+        };
+        let explore_branches = usize_or("RUSTYKEYS_EXPLORE_BRANCHES", 5)?;
+        let explore_top_k = usize_or("RUSTYKEYS_EXPLORE_TOP_K", 2)?;
+
         Ok(Self {
             model,
             workspace,
@@ -153,6 +174,9 @@ impl Config {
             compact_micro,
             compact_session,
             compact_full,
+            explore,
+            explore_branches,
+            explore_top_k,
         })
     }
 }
@@ -241,6 +265,25 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.context_limit, 8000);
         assert_eq!(cfg.compact_micro, 0.5);
+    }
+
+    #[test]
+    fn explore_is_off_by_default_and_opt_in() {
+        let def = Config::resolve(env(&[("RUSTYKEYS_MODEL", "m")])).unwrap();
+        assert!(!def.explore);
+        assert_eq!(def.explore_branches, 5);
+        assert_eq!(def.explore_top_k, 2);
+
+        let on = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_EXPLORE", "1"),
+            ("RUSTYKEYS_EXPLORE_BRANCHES", "3"),
+            ("RUSTYKEYS_EXPLORE_TOP_K", "1"),
+        ]))
+        .unwrap();
+        assert!(on.explore);
+        assert_eq!(on.explore_branches, 3);
+        assert_eq!(on.explore_top_k, 1);
     }
 
     #[test]

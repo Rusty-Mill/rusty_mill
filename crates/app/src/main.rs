@@ -73,7 +73,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -87,7 +87,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /plan  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
                 println!(
@@ -164,6 +164,17 @@ where
                     .collect();
                 session.set_task(&goal, criteria, Vec::new());
                 println!("task set: {goal}");
+            }
+            line if line.starts_with("/explore ") => {
+                let task = line.trim_start_matches("/explore ").trim();
+                if !session.explore_enabled() {
+                    eprintln!("explore is disabled — set RUSTYKEYS_EXPLORE=1 (cost: ~N+1 turns)");
+                } else {
+                    match session.explore(task).await {
+                        Ok(report) => println!("{report}"),
+                        Err(e) => eprintln!("explore failed: {e}"),
+                    }
+                }
             }
             line if line.starts_with("/plan ") => {
                 // Enter plan mode, then run the proposal turn (read-only).

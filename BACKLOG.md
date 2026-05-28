@@ -253,7 +253,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 - [x] `Plan` permission mode enforced at policy `S`
 - [x] CLI approval on `exit_plan_mode` (Proceed/Reject/Annotate) `S`
 - [x] `/plan` shortcut `S`
-- [ ] **Divergent "explore" option** (ADR-0032, opt-in): fan out N isolated subagents under cognitive frames via `SessionFactory`, then critic/converge top-K; cost-gated `M`
+- [x] **Divergent "explore" option** (ADR-0032, opt-in): fan out N isolated subagents under cognitive frames via `SessionFactory`, then critic/converge top-K; cost-gated `M`
 
 **Definition of Done:** writes/bash blocked in plan mode; approval transitions mode; plan approval is not an intervention.
 **Acceptance:** in plan mode an `edit_file` is blocked; on Proceed the next turn may write.

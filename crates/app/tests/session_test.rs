@@ -261,6 +261,40 @@ async fn plan_mode_blocks_write_then_proceed_allows_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explore_fans_out_converges_and_synthesises() {
+    let dir = std::env::temp_dir().join(format!("rk-app-explore-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let ws = dir.to_string_lossy().into_owned();
+    // Opt-in explore: 3 divergent branches, keep top-1.
+    let config = Config::resolve(move |k| match k {
+        "RUSTYKEYS_MODEL" => Some("fake".into()),
+        "RUSTYKEYS_WORKSPACE" => Some(ws.clone()),
+        "RUSTYKEYS_EXPLORE" => Some("1".into()),
+        "RUSTYKEYS_EXPLORE_BRANCHES" => Some("3".into()),
+        "RUSTYKEYS_EXPLORE_TOP_K" => Some("1".into()),
+        _ => None,
+    })
+    .unwrap();
+
+    // Every child returns the same structured plan (deterministic regardless of
+    // the parallel pop order): the 3 branches cluster to one, then the critic
+    // call synthesises. 3 fan-out + 1 critic = 4 model calls.
+    let plan = "1. analyse inputs\n2. design the cache\n3. validate";
+    let turns: Vec<Vec<Scripted>> = (0..6).map(|_| vec![Scripted::Text(plan.into())]).collect();
+    let session = Session::new(&config, FakeLanguageModel::new(turns)).unwrap();
+    assert!(session.explore_enabled());
+
+    let report = session.explore("design a cache layer").await.unwrap();
+    assert!(report.contains("Explored 3 branches"));
+    assert!(report.contains("candidate plan"));
+    assert!(report.contains("Recommendation:"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn followup_after_unverified_turn_counts_toward_mhir() {
     let dir = std::env::temp_dir().join(format!("rk-app-mhir-{}", std::process::id()));

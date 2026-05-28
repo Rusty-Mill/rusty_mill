@@ -58,10 +58,12 @@ The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 | `RUSTYKEYS_COMPACT_MICRO` / `_SESSION` / `_FULL` | `0.80` / `0.90` / `0.95` | Compaction thresholds (fraction of the window) |
 | `RUSTYKEYS_MAX_AGENT_DEPTH` | `3` | Subagent recursion bound |
 | `RUSTYKEYS_IDLE_THRESHOLD` | `8` | Observations before idle consolidation |
+| `RUSTYKEYS_EXPLORE` | *(off)* | `1` enables the opt-in divergent→converge `explore` tool (cost-gated) |
+| `RUSTYKEYS_EXPLORE_BRANCHES` / `_TOP_K` | `5` / `2` | Divergent branch count `N` / converge top-`K` |
 
 ### REPL commands
 
-`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/permissions` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
+`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/explore` · `/permissions` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
 
 ## Architecture
 
@@ -121,7 +123,7 @@ testable in CI without a live provider.
 - **7 · Permission system** — permission modes (`ModePolicy`), the `SecurityCheck` suite + `security.jsonl`, and the channel-based `ApprovalGate`; blocks log a `tool_block` intervention.
 - **7B · Capability isolation** — the `ToolExecutor` seam (`RUSTYKEYS_ISOLATION=none|sandboxed`); `sandboxed` runs `bash` inside an OS sandbox (bubblewrap/firejail) with network-deny + workspace-only FS, failing closed if no launcher is present.
 - **8 · Token & context** — a line-item `TokenBudget` (system + recall + task + tool schemas + history) driving 3-tier compaction (micro drop / session summary / full reset), recall↔history de-dup, journaled `compaction` events, and `/cost` + `/compact`.
-- **9 · Plan mode** — `enter_plan_mode`/`exit_plan_mode` tools over a shared `PlanController`; plan mode blocks writes/bash live, and an `exit_plan_mode` request awaits a human Proceed/Reject/Annotate (`/plan`) before the next turn may write. Plan approval is not an intervention.
+- **9 · Plan mode** — `enter_plan_mode`/`exit_plan_mode` tools over a shared `PlanController`; plan mode blocks writes/bash live, and an `exit_plan_mode` request awaits a human Proceed/Reject/Annotate (`/plan`) before the next turn may write. Plan approval is not an intervention. Includes the opt-in divergent→converge `explore` strategy (`RUSTYKEYS_EXPLORE=1`, `/explore`): fan out N framed children, mechanically score→cluster→top-K, then one critic synthesis (ADR-0032).
 
 Remaining: H3 episode packages (10), entropy auditor (11), MCP (12), extended
 CLI (13), web gateway (14), desktop frontend (15).

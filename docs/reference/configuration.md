@@ -49,6 +49,9 @@
 | `RUSTYKEYS_SEARCH_PROVIDER` | `brave` | `brave` \| `serper` \| `duckduckgo`. |
 | `RUSTYKEYS_SEARCH_API_KEY` | _(none)_ | API key for the search provider. |
 | `RUSTYKEYS_MAX_AGENT_DEPTH` | `3` | Max subagent recursion depth. |
+| `RUSTYKEYS_EXPLORE` | `0` | Enable the opt-in divergent→converge `explore` tool (ADR-0032). Cost-gated (≈N+1 model calls). |
+| `RUSTYKEYS_EXPLORE_BRANCHES` | `5` | Divergent branch count `N`. |
+| `RUSTYKEYS_EXPLORE_TOP_K` | `2` | Converge top-`K`. |
 
 ## Harness & verification
 | Variable | Default | Description |
