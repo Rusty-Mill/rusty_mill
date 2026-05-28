@@ -191,6 +191,36 @@ impl InterventionLogger {
         })
     }
 
+    /// Avoidable-intervention count per session, in first-seen order — the
+    /// numerator source for the cross-session M-HIR trend (the denominator,
+    /// turns-per-session, lives in the evidence journal).
+    pub fn avoidable_by_session(&self) -> Result<Vec<(String, usize)>, crate::ObserveError> {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for v in self.raw_lines()? {
+            let Some(sid) = v.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let sid = sid.to_string();
+            if !counts.contains_key(&sid) {
+                order.push(sid.clone());
+                counts.insert(sid.clone(), 0);
+            }
+            if v.get("avoidability").and_then(Value::as_str) == Some("avoidable") {
+                if let Some(c) = counts.get_mut(&sid) {
+                    *c += 1;
+                }
+            }
+        }
+        Ok(order
+            .into_iter()
+            .map(|s| {
+                let c = counts.get(&s).copied().unwrap_or(0);
+                (s, c)
+            })
+            .collect())
+    }
+
     fn existing_ids(&self) -> Result<Vec<String>, crate::ObserveError> {
         Ok(self
             .raw_lines()?

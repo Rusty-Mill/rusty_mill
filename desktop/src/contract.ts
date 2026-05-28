@@ -119,6 +119,8 @@ export interface MhirReport {
   n_unavoidable: number;
   n_benign: number;
   breakdown?: Record<string, number>;
+  /// Per-session M-HIR rate, oldest→newest (the current session is last).
+  trend?: number[];
 }
 
 export interface SessionConfig {
