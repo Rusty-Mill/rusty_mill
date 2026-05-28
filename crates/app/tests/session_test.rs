@@ -492,3 +492,46 @@ async fn fact_taught_in_session_a_is_recalled_in_session_b() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn send_streaming_emits_deltas_and_matches_send() {
+    let dir = std::env::temp_dir().join(format!("rk-app-stream-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // A tool call then a final text reply: streaming must deliver the reply text
+    // as deltas while still driving the same dispatch + verification as send().
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "list_directory".into(),
+            args: json!({ "path": "." }),
+        }],
+        vec![Scripted::Text("all done".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+
+    let mut tokens = Vec::new();
+    let outcome = session
+        .send_streaming("what is here?", |delta| tokens.push(delta.to_string()))
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.reply, "all done");
+    assert_eq!(
+        tokens.concat(),
+        "all done",
+        "streamed deltas reconstruct the reply"
+    );
+    assert!(!tokens.is_empty(), "at least one delta was streamed");
+    // The tool call still ran through the registry (captured on the tracer).
+    assert!(
+        session
+            .last_tool_events()
+            .iter()
+            .any(|e| e.name == "list_directory"),
+        "streaming drives the same tool dispatch as send()"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

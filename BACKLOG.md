@@ -404,8 +404,8 @@ tool-return inspection seam rather than introducing a parallel stack.
 
 ## Backlog (post-phase)
 
-### Streaming output to CLI
-Surface `stream_text()` so tokens appear in the terminal REPL as they arrive (desktop already streams via `rk://token`).
+### Streaming output to CLI ✅
+~~Surface `stream_text()` so tokens appear in the terminal REPL as they arrive (desktop already streams via `rk://token`).~~ Done: `rusty-keys` (single-shot + REPL) streams the reply token-by-token via `Session::send_streaming` → the kernel's `stream_turn`.
 
 ### Rich terminal UI (ratatui)
 `ratatui` TUI: streaming display, syntax highlighting, status bar (model/mode/tokens/M-HIR), vim keys. · #17
