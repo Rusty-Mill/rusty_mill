@@ -39,6 +39,22 @@ RUSTYKEYS_MODEL=llama3.1 cargo run -p rk-app
 The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 `.rustykeys/` in the workspace root.
 
+### Desktop app (Tauri 2)
+
+The desktop frontend lives in [`desktop/`](desktop) (its own workspace). It needs
+the [Tauri 2 system prerequisites](https://tauri.app/start/prerequisites/)
+(WebKitGTK on Linux), Node, and the Tauri CLI (`cargo install tauri-cli --version "^2"`):
+
+```bash
+cd desktop
+npm install
+cargo tauri dev      # builds the SolidJS frontend + launches the webview
+# cargo tauri build  # produce a release bundle
+```
+
+All model calls stay on the Rust side; API keys live in the OS keychain, never in
+the frontend.
+
 ### Configuration (environment)
 
 | Variable | Default | Purpose |
@@ -99,6 +115,13 @@ Four harness verbs wrap the aisdk agent kernel:
 The authoritative component map and crate DAG live in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) §4-5.
 
+The **desktop frontend** (Phase 15) lives in [`desktop/`](desktop) as its own
+cargo workspace (Tauri 2 + SolidJS), deliberately excluded from the core
+workspace so `cargo build --workspace` stays lean and WebKit-free. It never
+calls a model directly — it talks to `Session` only through the canonical IPC
+contract ([`docs/reference/ipc-contract.md`](docs/reference/ipc-contract.md)),
+the same `rk://` event + `invoke` surface the gateway and ACP adapters mirror.
+
 ## Tool suite
 
 Filesystem (`read_file`, `list_directory`, `write_file`, `edit_file`, `glob`,
@@ -110,7 +133,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–14 + 16 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–16 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -132,10 +155,12 @@ testable in CI without a live provider.
 
 - **13 · Extended CLI** — `/stats` (turns/tool-calls/tokens/M-HIR/entropy), `/model`, `/config`, `/env`, `/doctor` (model/workspace/SQLite/MCP health), `/init` (`AGENT_GUIDE.md`), and git commands (`/diff`/`/branch` direct, `/commit`/`/review` via the agent).
 - **14 · Web gateway** — an `axum` HTTP/SSE surface over `Session::send()` (`rusty-keys --gateway`, behind the `gateway` feature): `POST /chat`, `GET /stream` (named SSE frames), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy`; single + multi-session (idle-TTL + max-session eviction, `session_id`↔auth binding), bearer auth, and CORS.
+- **15 · Desktop frontend** — a Tauri 2 + SolidJS + CodeMirror 6 + xterm.js desktop app ([`desktop/`](desktop), its own cargo workspace) that is a reactive rendering layer over `Session`. The Rust bridge registers one `#[tauri::command]` per name in the canonical IPC contract (`app::contract`) and emits the nine `rk://` events — including **live `rk://token` streaming** via the kernel's `stream_turn` and `rk://bash_output` to the terminal — with turn failures rendered through the boundary-error taxonomy; provider keys live only in the OS keychain. The UI is an AI-first layout (streaming session panel, xterm.js terminal, CM6 diff editor, composer with `@file`/`#memory`/`/command` + approval/plan gates, harness dashboard, settings/themes). A headless Tauri IPC smoke test (mock runtime) plus the frontend build gate it in CI.
 - **16 · ACP** — an Agent Client Protocol server (`rusty-keys --acp`): newline-delimited JSON-RPC 2.0 over stdio exposing the `Session` to editors. Handshake (`initialize`/`authenticate`), `session/new`/`prompt`/`cancel` → `Session::send()` with `session/update` notifications, and a `session/request_permission` round-trip bound to the Phase-7 `ApprovalGate` (a denied write holds the boundary). Client fs/terminal capability shims are a documented follow-on.
 
-Remaining: desktop frontend (15); plus the MCP SSE transport (+auth/TLS),
-gateway token-level streaming / readiness probe, and ACP fs/terminal shims.
+Remaining follow-ons: the MCP SSE transport (+auth/TLS), gateway token-level
+streaming / readiness probe, ACP fs/terminal shims, and desktop polish
+(live per-chunk bash streaming, a git-status tab, the cross-session M-HIR trend).
 
 ## Building & testing
 
@@ -147,12 +172,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 MSRV **1.88** (aisdk 0.5.2 uses let-chains). CI runs `{stable, 1.88}` ×
 build + fmt + clippy + test + feature builds — see
-[`docs/dev/coding-standards.md`](docs/dev/coding-standards.md).
+[`docs/dev/coding-standards.md`](docs/dev/coding-standards.md). The desktop
+workspace is gated by a dedicated CI job (frontend build + `fmt`/`clippy` +
+the Tauri IPC smoke test).
 
 ## Documentation
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the system view: component map, crate DAG, concurrency, topologies, faithfulness map. **Read this first.**
 - [`docs/`](docs) — PRDs ([`prd/`](docs/prd)), decision records ([`adr/`](docs/adr)), the on-disk [data model](docs/architecture/data-model.md), and the [configuration reference](docs/reference/configuration.md).
 - [`BACKLOG.md`](BACKLOG.md) — the development roadmap.
-</content>
-</invoke>
