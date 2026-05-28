@@ -664,6 +664,32 @@ where
         Ok(self.interventions.mhir(turns)?)
     }
 
+    /// Per-session M-HIR rate for the most recent `n` sessions (oldest→newest) —
+    /// the dashboard trend sparkline. Joins journaled turns-per-session with
+    /// avoidable interventions-per-session; the current session is the last point.
+    pub fn mhir_trend(&self, n: usize) -> Vec<f64> {
+        let avoidable: std::collections::HashMap<String, usize> = self
+            .interventions
+            .avoidable_by_session()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let turns = self.journal.turns_by_session().unwrap_or_default();
+        let mut rates: Vec<f64> = turns
+            .into_iter()
+            .map(|(sid, t)| {
+                let a = avoidable.get(&sid).copied().unwrap_or(0);
+                if t == 0 {
+                    0.0
+                } else {
+                    a as f64 / t as f64
+                }
+            })
+            .collect();
+        let start = rates.len().saturating_sub(n);
+        rates.split_off(start)
+    }
+
     fn next_msg_id(&self) -> String {
         format!(
             "{}_msg_{}",

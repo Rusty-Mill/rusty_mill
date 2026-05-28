@@ -69,6 +69,56 @@ export function EntropyBars(props: { values: number[]; height?: number }) {
   );
 }
 
+/// A compact line sparkline (e.g. M-HIR rate across the last N sessions).
+export function Sparkline(props: {
+  values: number[];
+  width?: number;
+  height?: number;
+}) {
+  const w = () => props.width ?? 160;
+  const h = () => props.height ?? 32;
+  const points = () => {
+    const vs = props.values;
+    if (vs.length === 0) return "";
+    const max = Math.max(...vs, 0.0001);
+    const step = vs.length > 1 ? w() / (vs.length - 1) : 0;
+    return vs
+      .map((v, i) => {
+        const x = i * step;
+        const y = h() - (v / max) * (h() - 2) - 1;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+  };
+  // Direction of the last step: down = improving (green), up = worse (red).
+  const dir = () => {
+    const vs = props.values;
+    if (vs.length < 2) return "→";
+    const d = vs[vs.length - 1] - vs[vs.length - 2];
+    return d < -1e-9 ? "↓ improving" : d > 1e-9 ? "↑ rising" : "→ flat";
+  };
+  return (
+    <Show
+      when={props.values.length > 0}
+      fallback={<span class="text-xs text-rk-muted">(no trend yet)</span>}
+    >
+      <div class="flex items-center gap-2">
+        <svg width={w()} height={h()} viewBox={`0 0 ${w()} ${h()}`} class="overflow-visible">
+          <polyline
+            points={points()}
+            fill="none"
+            stroke="var(--color-rk-gold)"
+            stroke-width="1.5"
+            stroke-linejoin="round"
+            stroke-linecap="round"
+          />
+        </svg>
+        <span class="mono text-xs text-rk-muted">{dir()}</span>
+      </div>
+    </Show>
+  );
+}
+
 /// Horizontal bars for the M-HIR intervention breakdown.
 export function HBars(props: { data: [string, number][] }) {
   const max = () => Math.max(1, ...props.data.map(([, v]) => v));

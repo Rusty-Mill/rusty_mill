@@ -142,6 +142,7 @@ where
                     "n_unavoidable": m.n_unavoidable,
                     "n_benign": m.n_benign,
                     "breakdown": breakdown,
+                    "trend": Session::mhir_trend(self, 10),
                 })
             }
             Err(e) => json!({ "error": e.to_string() }),

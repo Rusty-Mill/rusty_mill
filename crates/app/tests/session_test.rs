@@ -535,3 +535,25 @@ async fn send_streaming_emits_deltas_and_matches_send() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mhir_trend_reports_one_point_per_session() {
+    let dir = std::env::temp_dir().join(format!("rk-app-trend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::Text("one".into())],
+        vec![Scripted::Text("two".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    session.send("first").await.unwrap();
+    session.send("second").await.unwrap();
+
+    // Two turns in one session ⇒ exactly one trend point, a rate in [0, 1].
+    let trend = session.mhir_trend(10);
+    assert_eq!(trend.len(), 1, "one session ran: {trend:?}");
+    assert!((0.0..=1.0).contains(&trend[0]), "rate in [0,1]: {trend:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

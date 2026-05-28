@@ -1,7 +1,7 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import { store } from "../store";
 import { ipc } from "../ipc";
-import { EntropyBars, HBars, TokenDonut } from "./charts";
+import { EntropyBars, HBars, Sparkline, TokenDonut } from "./charts";
 
 /// Harness dashboard (Cmd/Ctrl+Shift+H): verification stream, evidence journal,
 /// entropy, M-HIR, token budget. All data via `invoke`; refreshes on open.
@@ -45,6 +45,10 @@ export default function Dashboard(props: { onClose: () => void }) {
                     <span class="ml-1 text-rk-muted">
                       (excl. {m().n_unavoidable} unavoidable, {m().n_benign} benign)
                     </span>
+                  </div>
+                  <div class="mb-2">
+                    <div class="mb-1 text-xs text-rk-muted">Trend (last sessions)</div>
+                    <Sparkline values={m().trend ?? []} />
                   </div>
                   <HBars data={Object.entries(m().breakdown ?? {})} />
                 </div>

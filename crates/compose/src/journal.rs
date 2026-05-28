@@ -1,6 +1,7 @@
 //! The append-only evidence journal (PRD 05; data-model §4.1). One JSONL line
 //! per turn, versioned (ADR-0027), torn-line tolerant on read (§10).
 
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -176,6 +177,36 @@ impl EvidenceJournal {
             .iter()
             .filter(|v| v.get("kind").and_then(Value::as_str) == Some("turn"))
             .count())
+    }
+
+    /// Turn count per session, in first-seen order — the denominator source for
+    /// the cross-session M-HIR trend.
+    pub fn turns_by_session(&self) -> Result<Vec<(String, usize)>, ComposeError> {
+        let mut order: Vec<String> = Vec::new();
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for v in self.parsed_lines()? {
+            if v.get("kind").and_then(Value::as_str) != Some("turn") {
+                continue;
+            }
+            let Some(sid) = v.get("session_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let sid = sid.to_string();
+            if !counts.contains_key(&sid) {
+                order.push(sid.clone());
+                counts.insert(sid.clone(), 0);
+            }
+            if let Some(c) = counts.get_mut(&sid) {
+                *c += 1;
+            }
+        }
+        Ok(order
+            .into_iter()
+            .map(|s| {
+                let c = counts.get(&s).copied().unwrap_or(0);
+                (s, c)
+            })
+            .collect())
     }
 
     fn parsed_lines(&self) -> Result<Vec<Value>, ComposeError> {

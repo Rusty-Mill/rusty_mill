@@ -159,8 +159,7 @@ testable in CI without a live provider.
 - **16 · ACP** — an Agent Client Protocol server (`rusty-keys --acp`): newline-delimited JSON-RPC 2.0 over stdio exposing the `Session` to editors. Handshake (`initialize`/`authenticate`), `session/new`/`prompt`/`cancel` → `Session::send()` with `session/update` notifications, and a `session/request_permission` round-trip bound to the Phase-7 `ApprovalGate` (a denied write holds the boundary). Client fs/terminal capability shims are a documented follow-on.
 
 Remaining follow-ons: the MCP SSE transport (+auth/TLS), gateway token-level
-streaming / readiness probe, ACP fs/terminal shims, and desktop polish
-(live per-chunk bash streaming, a git-status tab, the cross-session M-HIR trend).
+streaming / readiness probe, ACP fs/terminal shims, and a desktop git-status tab.
 
 ## Building & testing
 
