@@ -13,6 +13,7 @@ rk-constrain.workspace = true
 rk-feed.workspace = true
 rk-kernel.workspace = true
 rk-compose.workspace = true
+rk-mcp.workspace = true
 # `openaicompatible` references `providers::openai` internally, so `openai`
 # must be enabled alongside it (aisdk 0.5.2 feature-wiring quirk).
 aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
@@ -20,6 +21,12 @@ anyhow = "1"
 async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+rmcp = { version = "0.9", features = ["server", "transport-io"], optional = true }
+
+[features]
+# MCP server mode (`rusty-keys --mcp`): expose Session::send() over JSON-RPC
+# (ADR-0029). Off by default (pulls rmcp); enable for IDE integration.
+mcp-server = ["dep:rmcp", "rk-mcp/rmcp"]
 
 [[bin]]
 name = "rusty-keys"
@@ -28,6 +35,7 @@ path = "src/main.rs"
 [dev-dependencies]
 rk-kernel = { workspace = true, features = ["fake"] }
 rk-feed = { workspace = true, features = ["chaos", "fake-embed"] }
+rk-mcp = { workspace = true, features = ["fake"] }
 serde_json.workspace = true
 async-trait.workspace = true
 

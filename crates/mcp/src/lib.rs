@@ -4,12 +4,30 @@
 )]
 //! `mcp` — Model Context Protocol integration (ARCHITECTURE §4; PRD 07).
 //!
-//! **Phase-1 stub.** This crate declares the seam — the [`McpClient`] trait, the
-//! [`McpError`] taxonomy, the `mcp__server__tool` namespacing convention, and the
-//! [`McpServerConfig`] shape — so the DAG slot (`mcp → config, constrain, feed`)
-//! and error composition exist from day one. The actual client/server land in
-//! Phase 12 on the official `rmcp` SDK (ADR-0029); no transport is implemented
-//! here yet.
+//! Phase 12: the MCP **client** (manager + namespacing + `McpPolicy` +
+//! `McpToolFn`→`ToolOutcome` + tool-return inspection + reconnect) over the
+//! object-safe [`McpClient`] seam, with a deterministic in-process fake for
+//! offline tests. The `rmcp`-backed transport adapters and the MCP **server**
+//! mode (ADR-0029) sit behind the `rmcp` feature.
+
+mod config;
+mod inspect;
+mod manager;
+mod policy;
+mod tool;
+
+#[cfg(any(test, feature = "fake"))]
+pub mod fake;
+#[cfg(feature = "rmcp")]
+mod transport;
+
+pub use config::{load_mcp_config, McpConfig, ServerSpec, Transport};
+pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
+pub use manager::McpManager;
+pub use policy::McpPolicy;
+pub use tool::{McpToolDescriptor, McpToolFn};
+#[cfg(feature = "rmcp")]
+pub use transport::StdioMcpClient;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -36,6 +54,9 @@ pub enum McpError {
         /// The (un-namespaced) tool name.
         tool: String,
     },
+    /// The call exceeded its deadline.
+    #[error("mcp call timed out")]
+    Timeout,
     /// A policy blocked the call.
     #[error(transparent)]
     Policy(#[from] rk_constrain::PolicyError),
@@ -59,20 +80,26 @@ pub struct McpServerConfig {
 /// A tool exposed by an external MCP server.
 #[derive(Debug, Clone)]
 pub struct McpToolInfo {
-    /// Namespaced tool id (`mcp__<server>__<tool>`).
+    /// The server's own (un-namespaced) tool name. The manager namespaces it.
     pub name: String,
     /// JSON schema advertised to the model.
     pub schema: Value,
 }
 
 /// Client over one external MCP server. Object-safe seam (ADR-0024); stored as
-/// `Arc<dyn McpClient>`. Phase 12 implements it on `rmcp`.
+/// `Arc<dyn McpClient>`. The `rmcp`-backed adapters implement it (ADR-0029); a
+/// `FakeMcpClient` drives offline tests.
 #[async_trait]
 pub trait McpClient: Send + Sync {
-    /// Enumerate the server's tools (namespaced).
+    /// Enumerate the server's tools (un-namespaced names).
     async fn list_tools(&self) -> Result<Vec<McpToolInfo>, McpError>;
-    /// Invoke a namespaced tool; returns the model-facing result string.
+    /// Invoke a tool by its un-namespaced name; returns the result string.
     async fn call_tool(&self, name: &str, args: Value) -> Result<String, McpError>;
+    /// Re-establish the transport after a crash. Default is a no-op (a fresh
+    /// client needs no reconnect); transports override it.
+    async fn reconnect(&self) -> Result<(), McpError> {
+        Ok(())
+    }
 }
 
 /// The `mcp__<server>__<tool>` namespacing convention (coding-standards §3).

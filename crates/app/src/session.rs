@@ -30,6 +30,7 @@ use rk_feed::{
     TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
+use rk_mcp::{McpManager, McpPolicy};
 use rk_observe::{
     EntropyAudit, EntropyAuditor, EntropyLog, H3Scratch, InterventionKind, InterventionLogger,
     MhirReport, ToolStatus, Tracer,
@@ -79,6 +80,7 @@ pub struct Session<M> {
     isolation: String,
     plan: Arc<PlanController>,
     explore: Option<Arc<ExploreStrategy>>,
+    mcp: Option<tokio::sync::Mutex<McpManager>>,
     h3: Option<Arc<H3Scratch>>,
     harness_level: HarnessLevel,
     workspace: std::path::PathBuf,
@@ -101,18 +103,26 @@ where
 {
     /// Build a top-level session (subagent depth 0).
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None)
+        Self::new_at_depth(config, model, 0, None, None)
+    }
+
+    /// Build a top-level session with an already-connected MCP manager (PRD 07).
+    /// The caller connects the servers (async) before construction; this
+    /// registers their namespaced tools + the `McpPolicy` synchronously.
+    pub fn new_with_mcp(config: &Config, model: M, mcp: McpManager) -> anyhow::Result<Self> {
+        Self::new_at_depth(config, model, 0, None, Some(mcp))
     }
 
     /// Build a session at subagent `depth` (0 = top-level), optionally seeded
-    /// with a cognitive-frame system-prompt preamble (ADR-0032). The registered
-    /// `agent` tool spawns children at `depth + 1`, bounded by
-    /// `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
+    /// with a cognitive-frame system-prompt preamble (ADR-0032) and an MCP
+    /// manager. The registered `agent` tool spawns children at `depth + 1`,
+    /// bounded by `RUSTYKEYS_MAX_AGENT_DEPTH` (ADR-0017).
     pub fn new_at_depth(
         config: &Config,
         model: M,
         depth: usize,
         frame: Option<&str>,
+        mcp: Option<McpManager>,
     ) -> anyhow::Result<Self> {
         let tracer = Arc::new(Tracer::new());
         let state_dir = config.workspace.join(".rustykeys");
@@ -133,10 +143,13 @@ where
             state_dir.join("security.jsonl"),
             session_id.clone(),
         ));
+        // `McpPolicy` is a no-op for non-`mcp__` tools, so it composes harmlessly
+        // even when no MCP servers are connected (PRD 07).
         let policy = PolicyChain::new()
             .with(Arc::new(ModePolicy::shared(plan.clone())))
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
-            .with(Arc::new(BashGuard::new().with_log(security_log)));
+            .with(Arc::new(BashGuard::new().with_log(security_log)))
+            .with(Arc::new(McpPolicy::allow_all()));
 
         let task = Arc::new(TaskStore::open(&state_dir));
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
@@ -190,6 +203,13 @@ where
             None
         };
 
+        // MCP: register each connected server's namespaced tools (PRD 07). The
+        // manager is connected by the caller; registration here is synchronous
+        // (cached descriptors). Subagents do not inherit MCP in v1.
+        if let Some(manager) = &mcp {
+            manager.register(&mut registry);
+        }
+
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
         let store = SqliteStore::open(&state_dir.join("store.db"))?;
 
@@ -218,6 +238,7 @@ where
             isolation,
             plan,
             explore,
+            mcp: mcp.map(tokio::sync::Mutex::new),
             h3,
             harness_level: config.harness_level,
             workspace: config.workspace.clone(),
@@ -592,6 +613,31 @@ where
         self.explore.is_some()
     }
 
+    /// `(server, tool_count)` pairs for the connected MCP servers (`/mcp`).
+    pub async fn mcp_summary(&self) -> Vec<(String, usize)> {
+        match &self.mcp {
+            Some(m) => m.lock().await.summary(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The namespaced tool names for one MCP server (`/mcp <server>`).
+    pub async fn mcp_server_tools(&self, server: &str) -> Vec<String> {
+        match &self.mcp {
+            Some(m) => m.lock().await.server_tools(server),
+            None => Vec::new(),
+        }
+    }
+
+    /// Reconnect all MCP servers after a crash (`/mcp reconnect`). The registered
+    /// tools share the same client `Arc`s, so they recover without re-registration.
+    pub async fn reconnect_mcp(&self) -> anyhow::Result<()> {
+        if let Some(m) = &self.mcp {
+            m.lock().await.reconnect().await?;
+        }
+        Ok(())
+    }
+
     /// The most recent `n` entropy audit records (`/entropy`).
     pub fn entropy_recent(&self, n: usize) -> anyhow::Result<Vec<serde_json::Value>> {
         Ok(self.entropy_log.recent(n)?)
@@ -952,8 +998,9 @@ where
                 self.depth, self.max_depth
             )));
         }
-        let child = Session::new_at_depth(&self.config, self.model.clone(), self.depth, frame)
-            .map_err(|e| ToolError::Other(e.to_string()))?;
+        let child =
+            Session::new_at_depth(&self.config, self.model.clone(), self.depth, frame, None)
+                .map_err(|e| ToolError::Other(e.to_string()))?;
         let outcome = child
             .send(task)
             .await

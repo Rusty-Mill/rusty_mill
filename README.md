@@ -92,7 +92,7 @@ Four harness verbs wrap the aisdk agent kernel:
 | `constrain` | `Policy` + `ToolDispatch`, `WorkspacePolicy`, `BashGuard` |
 | `feed` | tool registry + suite, memory (`Stream`/`Store`/recall/consolidation), `TaskStore`, `SessionFactory` |
 | `kernel` | the aisdk loop + the policy-vetting bridge |
-| `mcp` | MCP seam (stub; rmcp client/server land in Phase 12) |
+| `mcp` | MCP client (manager/policy/namespacing/inspection) + `rmcp` transport (feature-gated) + server mode |
 | `compose` | `Verifier`/`Check`, `FailureType` attribution, `CriteriaJudge`, evidence journal |
 | `app` | `Session` (the centre) + the CLI |
 
@@ -110,7 +110,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–11 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–12 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -128,7 +128,10 @@ testable in CI without a live provider.
 
 - **11 · Entropy auditor** — per-turn syntactic heuristics over `edit_file`/`write_file` (Residue, TestWeakening, StaleDocs, DependencyChurn, BoundaryViolation, TaskContradiction) with 0–3 severity; informational (doesn't flip `verified`), but sev≥2 TestWeakening/BoundaryViolation forces the H3 outcome to `unsafe_invalid`. Written to `.rustykeys/entropy.jsonl`; `/entropy` shows recent findings.
 
-Remaining: MCP (12), extended CLI (13), web gateway (14), desktop frontend (15), ACP (16).
+- **12 · MCP** — MCP client manager over the `McpClient` seam (`mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy`, `McpToolFn`→`ToolOutcome`, tool-return inspection, reconnect; `/mcp`), the `rmcp`-backed stdio transport adapter + cargo-deny license gate (behind the `rmcp` feature), and MCP server mode exposing `Session::send()` as a `chat` tool (`rusty-keys --mcp`, behind the `mcp-server` feature). The SSE transport + auth/TLS is a documented follow-on on the same seam.
+
+Remaining: extended CLI (13), web gateway (14), desktop frontend (15), ACP (16);
+plus the MCP SSE transport (+auth/TLS).
 
 ## Building & testing
 
