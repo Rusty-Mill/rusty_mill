@@ -105,11 +105,31 @@ async fn main() -> Result<()> {
     if prompt.trim().is_empty() {
         repl(&session, &config).await
     } else {
-        let outcome = session.send(&prompt).await.context("running turn")?;
-        println!("{}", outcome.reply);
+        let outcome = run_streaming(&session, &prompt).await?;
         eprintln!("\n{}", outcome.report.render());
         Ok(())
     }
+}
+
+/// Run a turn, streaming the model's reply to stdout token-by-token as it
+/// arrives (the kernel's `stream_turn` seam). Returns the completed outcome; the
+/// reply is already printed, so callers only render the verdict (to stderr).
+async fn run_streaming<M>(session: &Session<M>, prompt: &str) -> Result<rk_app::TurnOutcome>
+where
+    M: aisdk::core::language_model::LanguageModel
+        + aisdk::core::capabilities::TextInputSupport
+        + aisdk::core::capabilities::ToolCallSupport
+        + Clone,
+{
+    let outcome = session
+        .send_streaming(prompt, |delta| {
+            print!("{delta}");
+            let _ = std::io::stdout().flush();
+        })
+        .await
+        .context("running turn")?;
+    println!(); // terminate the streamed line
+    Ok(outcome)
 }
 
 async fn repl<M>(session: &Session<M>, config: &Config) -> Result<()>
@@ -353,8 +373,7 @@ where
 {
     let mut next = Some(prompt.to_string());
     while let Some(p) = next.take() {
-        let outcome = session.send(&p).await.context("running turn")?;
-        println!("{}", outcome.reply);
+        let outcome = run_streaming(session, &p).await?;
         eprintln!(
             "[{}]",
             if outcome.report.verified {
