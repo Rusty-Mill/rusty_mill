@@ -63,7 +63,7 @@ The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 
 ### REPL commands
 
-`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/explore` · `/permissions` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
+`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/explore` · `/permissions` · `/entropy` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
 
 ## Architecture
 
@@ -110,7 +110,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–10 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–11 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -126,8 +126,9 @@ testable in CI without a live provider.
 - **9 · Plan mode** — `enter_plan_mode`/`exit_plan_mode` tools over a shared `PlanController`; plan mode blocks writes/bash live, and an `exit_plan_mode` request awaits a human Proceed/Reject/Annotate (`/plan`) before the next turn may write. Plan approval is not an intervention. Includes the opt-in divergent→converge `explore` strategy (`RUSTYKEYS_EXPLORE=1`, `/explore`): fan out N framed children, mechanically score→cluster→top-K, then one critic synthesis (ADR-0032).
 - **10 · H3 episode packages** — at `RUSTYKEYS_HARNESS_LEVEL=h3`, every turn writes a versioned 8-trace `EpisodePackage` to `episodes/<turn_id>.json`, projected from raw evidence by the `EpisodeAssembler` (ADR-0036); the 5-label outcome classifier, the `reproduce`/`attribute_failure`/`verification_report` tools + `reproduce_before_edit`/`verification_report_required` checks, the `CheckRegistry` running `checks.toml` (project + local precedence) into the verdict + `verification_trace`, and the controlled-visibility ablation eval-substrate (`app::eval`, ADR-0035): per-episode isolated workspaces, level-visibility, and evaluator-side adjudication at every level.
 
-Remaining: entropy auditor (11), MCP (12), extended CLI (13), web gateway (14),
-desktop frontend (15).
+- **11 · Entropy auditor** — per-turn syntactic heuristics over `edit_file`/`write_file` (Residue, TestWeakening, StaleDocs, DependencyChurn, BoundaryViolation, TaskContradiction) with 0–3 severity; informational (doesn't flip `verified`), but sev≥2 TestWeakening/BoundaryViolation forces the H3 outcome to `unsafe_invalid`. Written to `.rustykeys/entropy.jsonl`; `/entropy` shows recent findings.
+
+Remaining: MCP (12), extended CLI (13), web gateway (14), desktop frontend (15).
 
 ## Building & testing
 
