@@ -265,44 +265,56 @@ where
     };
     let message = params.get("message").cloned().unwrap_or_default();
 
-    // Run the turn, then mirror the canonical rk:// events as named SSE frames
-    // (names come from the single contract SSOT). `done`/`error` are the
-    // SSE-specific terminal sentinels. Token-level streaming is a follow-on.
+    // Drive the turn on a task and mirror the canonical rk:// events as named SSE
+    // frames *live*: `turn_start`, each `token` as it streams (via the kernel's
+    // stream_turn), then `turn_complete` + the SSE-specific `done`/`error`
+    // sentinel. Names come from the single contract SSOT.
     use crate::contract::event;
     let turn_id = format!("turn_{}", now_tag());
-    let mut frames: Vec<Event> = vec![Event::default()
-        .event(event::TURN_START)
-        .id(turn_id.clone())
-        .data(json!({ "turn_id": turn_id }).to_string())];
+    let (tx, rx) = futures::channel::mpsc::unbounded::<Result<Event, std::convert::Infallible>>();
 
-    let terminal = match session.send(&message).await {
-        Ok(outcome) => {
-            let result = crate::contract::TurnResult::from_outcome(&outcome);
-            frames.push(
-                Event::default()
+    tokio::spawn(async move {
+        let _ = tx.unbounded_send(Ok(Event::default()
+            .event(event::TURN_START)
+            .id(turn_id.clone())
+            .data(json!({ "turn_id": turn_id }).to_string())));
+
+        let token_tx = tx.clone();
+        let result = session
+            .send_streaming(&message, move |delta| {
+                let _ =
+                    token_tx.unbounded_send(Ok(Event::default().event(event::TOKEN).data(delta)));
+            })
+            .await;
+
+        match result {
+            Ok(outcome) => {
+                let r = crate::contract::TurnResult::from_outcome(&outcome);
+                let _ = tx.unbounded_send(Ok(Event::default()
                     .event(event::TURN_COMPLETE)
                     .id(turn_id.clone())
                     .data(
                         json!({
                             "turn_id": turn_id,
-                            "reply": result.reply,
-                            "verified": result.verified,
+                            "reply": r.reply,
+                            "verified": r.verified,
                         })
                         .to_string(),
-                    ),
-            );
-            Event::default()
-                .event("done")
-                .data(json!({ "turn_id": turn_id }).to_string())
+                    )));
+                let _ = tx.unbounded_send(Ok(Event::default()
+                    .event("done")
+                    .data(json!({ "turn_id": turn_id }).to_string())));
+            }
+            Err(e) => {
+                let _ = tx.unbounded_send(Ok(Event::default().event("error").data(
+                    json!({ "error": "turn_failed", "message": e.to_string() }).to_string(),
+                )));
+            }
         }
-        Err(e) => Event::default()
-            .event("error")
-            .data(json!({ "error": "turn_failed", "message": e.to_string() }).to_string()),
-    };
-    frames.push(terminal);
+        // `tx` and the token sender drop here, terminating the SSE stream.
+    });
 
-    let stream = futures::stream::iter(frames.into_iter().map(Ok::<_, std::convert::Infallible>));
-    Sse::new(stream).into_response()
+    Sse::new(rx).into_response()
 }
 
 async fn verify<M>(State(gw): Gw<M>, headers: HeaderMap) -> impl IntoResponse

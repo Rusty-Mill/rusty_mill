@@ -117,6 +117,12 @@ async fn stream_emits_named_sse_frames() {
     assert_eq!(resp.status(), StatusCode::OK);
     let b = body_string(resp).await;
     assert!(b.contains("event: turn_start"));
+    // Token-level streaming: the reply arrives as a live `token` frame.
+    assert!(b.contains("event: token"), "expected token frames:\n{b}");
+    assert!(
+        b.contains("streamed"),
+        "expected the streamed reply text:\n{b}"
+    );
     assert!(b.contains("event: turn_complete"));
     assert!(b.contains("event: done"));
 

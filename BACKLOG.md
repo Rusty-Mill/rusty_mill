@@ -340,7 +340,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 
 - [x] axum server `L` · #18 *(behind the `gateway` feature)*
 - [x] `POST /chat`, `GET /stream` (SSE), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy` `M`
-- [x] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M` *(turn-boundary frames; token-level streaming via `stream_turn` is a follow-on)*
+- [x] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M` *(incl. live token-level `token` frames via the kernel's `stream_turn`)*
 - [x] Single + multi-session (TTL, max-sessions, eviction, `session_id`↔auth binding) `M`
 - [x] Bearer auth, CORS; `/health` liveness vs readiness `S` *(flat liveness; readiness split deferred)*
 - [x] Gateway contract / SSE-framing test `M`
