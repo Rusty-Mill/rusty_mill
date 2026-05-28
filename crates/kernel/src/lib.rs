@@ -34,6 +34,17 @@ pub enum KernelError {
     Model(String),
 }
 
+/// Real provider token usage for a turn (P4). `None` fields mean the provider
+/// did not report usage (e.g. the offline fake); callers fall back to their
+/// heuristic estimate so compaction still works.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TurnUsage {
+    /// Prompt/input tokens the provider billed — the real context-window pressure.
+    pub input_tokens: Option<usize>,
+    /// Completion/output tokens generated.
+    pub output_tokens: Option<usize>,
+}
+
 /// Build an aisdk [`Tool`] that advertises `(name, schema)` and, when invoked by
 /// aisdk's loop, bridges to our policy-vetted async dispatcher.
 fn bridge_tool(name: String, schema: serde_json::Value, dispatch: Arc<dyn ToolDispatch>) -> Tool {
@@ -90,14 +101,15 @@ where
 
 /// Run one user turn to completion. aisdk's loop drives multi-step tool calling;
 /// each tool call is vetted + executed via `dispatch`. The loop is bounded by
-/// `max_steps` (the P0 safety floor); returns the final text.
+/// `max_steps` (the P0 safety floor); returns the final text and the provider's
+/// real token usage (P4).
 pub async fn run_turn<M>(
     model: M,
     system: &str,
     user_prompt: &str,
     dispatch: Arc<dyn ToolDispatch>,
     max_steps: usize,
-) -> Result<String, KernelError>
+) -> Result<(String, TurnUsage), KernelError>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport,
 {
@@ -107,7 +119,14 @@ where
         .await
         .map_err(|e| KernelError::Model(e.to_string()))?;
 
-    Ok(response.text().unwrap_or_default())
+    let usage = response.options.usage();
+    Ok((
+        response.text().unwrap_or_default(),
+        TurnUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        },
+    ))
 }
 
 /// A single no-tools completion (system + prompt → text). Used for the post-turn
@@ -131,8 +150,7 @@ where
 
 /// Run one user turn with streaming. Identical dispatch semantics to
 /// [`run_turn`], but each text delta is handed to `on_token` as it arrives;
-/// returns the accumulated final text. (CLI wiring is post-phase per the
-/// BACKLOG; this is the kernel-side seam, exercised offline by the fake.)
+/// returns the accumulated final text and the provider's real token usage (P4).
 pub async fn stream_turn<M>(
     model: M,
     system: &str,
@@ -140,7 +158,7 @@ pub async fn stream_turn<M>(
     dispatch: Arc<dyn ToolDispatch>,
     max_steps: usize,
     mut on_token: impl FnMut(&str) + Send,
-) -> Result<String, KernelError>
+) -> Result<(String, TurnUsage), KernelError>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport,
 {
@@ -160,5 +178,13 @@ where
             text.push_str(&delta);
         }
     }
-    Ok(text)
+    // Usage is aggregated only after the stream is fully drained.
+    let usage = response.usage().await;
+    Ok((
+        text,
+        TurnUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+        },
+    ))
 }

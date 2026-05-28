@@ -40,8 +40,11 @@ impl Msg {
 /// The compaction tier a usage level triggers (escalating).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
-    /// Below the micro threshold — no action.
+    /// Below the warn threshold — no action.
     None,
+    /// Early pressure: trim only the very oldest turn-pairs (a light micro that
+    /// keeps more recent context); no LLM call. The finer tier added in P4.
+    Warn,
     /// Drop oldest turn-pairs; no LLM call.
     Micro,
     /// Summarise the oldest half via the model.
@@ -49,6 +52,10 @@ pub enum Tier {
     /// Summarise everything; reset history to one summary.
     Full,
 }
+
+/// How far below the `micro` threshold the `Warn` tier opens (fraction of the
+/// context window). With the default `micro = 0.80`, `Warn` covers `[0.70, 0.80)`.
+pub const WARN_BAND: f64 = 0.10;
 
 /// Heuristic token estimate (~4 chars/token). Cheap and provider-agnostic; the
 /// real provider usage refines `session_total_tokens` when available.
@@ -80,6 +87,11 @@ pub struct TokenBudget {
     pub session_total_tokens: u64,
     /// How many compactions have fired this session.
     pub compaction_count: usize,
+    /// Calibration factor `real / estimate` learned from provider usage (P4):
+    /// the char/4 heuristic is corrected toward the provider's real token counts
+    /// so tiers fire on real tokens, not raw length. `1.0` until the first turn
+    /// with reported usage (e.g. the offline fake never reports any).
+    pub calibration: f64,
 }
 
 impl TokenBudget {
@@ -93,6 +105,7 @@ impl TokenBudget {
             used_tokens: 0,
             session_total_tokens: 0,
             compaction_count: 0,
+            calibration: 1.0,
         }
     }
 
@@ -113,7 +126,9 @@ impl TokenBudget {
             + estimate_tokens(&flatten(history))
     }
 
-    /// Which tier `used` tokens triggers.
+    /// Which tier `used` tokens triggers. `used` should already be
+    /// calibration-corrected ([`Self::calibrated`]) so the bands fire on real
+    /// tokens. The `Warn` band sits just below `micro` (see [`WARN_BAND`]).
     pub fn tier_for(&self, used: usize) -> Tier {
         let frac = used as f64 / (self.context_limit.max(1) as f64);
         if frac >= self.full {
@@ -122,15 +137,39 @@ impl TokenBudget {
             Tier::Session
         } else if frac >= self.micro {
             Tier::Micro
+        } else if frac >= (self.micro - WARN_BAND).max(0.0) {
+            Tier::Warn
         } else {
             Tier::None
         }
     }
 
-    /// Record the resolved per-turn usage.
+    /// Correct a raw line-item estimate by the learned calibration factor (P4).
+    pub fn calibrated(&self, estimate: usize) -> usize {
+        ((estimate as f64) * self.calibration).round() as usize
+    }
+
+    /// Record a turn's usage and, when the provider reported real input tokens,
+    /// nudge the calibration factor toward `real / estimate` (P4). `used_tokens`
+    /// becomes the real count when known, else the calibrated estimate, so
+    /// `/cost` and the next turn's decision both reflect real tokens.
+    pub fn observe_turn(&mut self, estimate: usize, real_input: Option<usize>) {
+        if let Some(real) = real_input {
+            if estimate > 0 && real > 0 {
+                // Exponential moving average, clamped so one outlier can't make
+                // the heuristic wildly over- or under-count.
+                let ratio = real as f64 / estimate as f64;
+                self.calibration = (0.5 * self.calibration + 0.5 * ratio).clamp(0.25, 4.0);
+            }
+        }
+        let resolved = real_input.unwrap_or_else(|| self.calibrated(estimate));
+        self.used_tokens = resolved;
+        self.session_total_tokens += resolved as u64;
+    }
+
+    /// Record the resolved per-turn usage (estimate path; no provider usage).
     pub fn record_usage(&mut self, used: usize) {
-        self.used_tokens = used;
-        self.session_total_tokens += used as u64;
+        self.observe_turn(used, None);
     }
 
     /// Fraction of the window currently used (for `/cost`).
@@ -226,11 +265,42 @@ mod tests {
     #[test]
     fn tiers_escalate_with_usage() {
         let b = TokenBudget::new(1000, 0.80, 0.90, 0.95);
-        assert_eq!(b.tier_for(700), Tier::None);
+        assert_eq!(b.tier_for(690), Tier::None);
+        // Warn band: ≈[micro - WARN_BAND, micro) = ≈[0.70, 0.80). Assert inside the
+        // band, not on the float-fragile lower edge.
+        assert_eq!(b.tier_for(750), Tier::Warn);
+        assert_eq!(b.tier_for(790), Tier::Warn);
         assert_eq!(b.tier_for(800), Tier::Micro);
         assert_eq!(b.tier_for(900), Tier::Session);
         assert_eq!(b.tier_for(950), Tier::Full);
         assert_eq!(b.tier_for(1200), Tier::Full);
+    }
+
+    #[test]
+    fn real_usage_calibrates_the_estimate() {
+        let mut b = TokenBudget::new(1000, 0.80, 0.90, 0.95);
+        assert_eq!(b.calibration, 1.0);
+        // Provider reports 2× our estimate → calibration rises toward 2.0.
+        b.observe_turn(100, Some(200));
+        assert!(b.calibration > 1.0, "calibration should rise: {}", b.calibration);
+        // used_tokens is the real count when known.
+        assert_eq!(b.used_tokens, 200);
+        // A subsequent estimate is scaled up by the learned factor.
+        assert!(b.calibrated(100) > 100);
+    }
+
+    #[test]
+    fn calibration_is_clamped_and_ignores_missing_usage() {
+        let mut b = TokenBudget::new(1000, 0.80, 0.90, 0.95);
+        // No provider usage (the fake): calibration stays 1.0, estimate is used.
+        b.observe_turn(120, None);
+        assert_eq!(b.calibration, 1.0);
+        assert_eq!(b.used_tokens, 120);
+        // Absurd ratios are clamped so one outlier can't blow up the estimate.
+        for _ in 0..20 {
+            b.observe_turn(1, Some(1_000_000));
+        }
+        assert!(b.calibration <= 4.0);
     }
 
     #[test]

@@ -45,7 +45,7 @@ async fn aisdk_loop_dispatches_through_our_bridge() {
         vec![Scripted::Text("all done".into())],
     ]);
 
-    let reply = run_turn(model, "sys", "read x", dispatch.clone(), 10)
+    let (reply, _usage) = run_turn(model, "sys", "read x", dispatch.clone(), 10)
         .await
         .unwrap();
 
@@ -70,7 +70,7 @@ async fn stream_turn_emits_tokens_after_a_tool_call() {
     ]);
 
     let mut tokens = Vec::new();
-    let reply = stream_turn(model, "sys", "go", dispatch.clone(), 10, |t| {
+    let (reply, _usage) = stream_turn(model, "sys", "go", dispatch.clone(), 10, |t| {
         tokens.push(t.to_string())
     })
     .await
@@ -104,7 +104,7 @@ async fn run_turn_is_bounded_by_max_steps() {
     let model = FakeLanguageModel::new(script);
 
     let max_steps = 3;
-    let reply = run_turn(model, "sys", "loop forever", dispatch.clone(), max_steps)
+    let (reply, _usage) = run_turn(model, "sys", "loop forever", dispatch.clone(), max_steps)
         .await
         .unwrap();
 
@@ -117,6 +117,34 @@ async fn run_turn_is_bounded_by_max_steps() {
         "expected ≤ {max_steps} dispatches, got {calls}"
     );
     assert!(calls > 0, "expected the loop to run at least once");
+}
+
+/// P4: `run_turn` surfaces the provider's real token usage so the harness can
+/// calibrate its compaction budget against real tokens.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_turn_surfaces_provider_usage() {
+    let dispatch = Arc::new(RecordingDispatch {
+        calls: Default::default(),
+    });
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]])
+        .with_usage(1234, 56);
+
+    let (reply, usage) = run_turn(model, "sys", "hi", dispatch, 10).await.unwrap();
+    assert_eq!(reply, "done");
+    assert_eq!(usage.input_tokens, Some(1234));
+    assert_eq!(usage.output_tokens, Some(56));
+}
+
+/// A model that does not report usage yields `None` (the budget falls back to
+/// its char/4 estimate).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_turn_usage_is_none_without_provider_usage() {
+    let dispatch = Arc::new(RecordingDispatch {
+        calls: Default::default(),
+    });
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]]);
+    let (_reply, usage) = run_turn(model, "sys", "hi", dispatch, 10).await.unwrap();
+    assert_eq!(usage.input_tokens, None);
 }
 
 /// A standalone policy unit-check that a chain blocks before dispatch — the

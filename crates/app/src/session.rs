@@ -52,11 +52,16 @@ const MICRO_KEEP_PAIRS: usize = 3;
 fn tier_label(tier: Tier) -> &'static str {
     match tier {
         Tier::None => "none",
+        Tier::Warn => "warn",
         Tier::Micro => "micro",
         Tier::Session => "session",
         Tier::Full => "full",
     }
 }
+
+/// `Warn` keeps twice as many recent turn-pairs as `Micro` — a gentle trim of
+/// only the very oldest history (P4 finer tier).
+const WARN_KEEP_PAIRS: usize = MICRO_KEEP_PAIRS * 2;
 
 /// The result of one turn: the reply plus its verification verdict.
 pub struct TurnOutcome {
@@ -481,7 +486,7 @@ where
                 .await
             }
         };
-        let reply = match reply {
+        let (reply, usage) = match reply {
             Ok(r) => r,
             Err(e) => {
                 self.tracer.record_error(e.to_string());
@@ -490,9 +495,16 @@ where
         };
         self.tracer.set_final_reached(true);
 
-        // Record the assistant turn and refresh the line-item usage for `/cost`.
+        // Record the assistant turn and refresh usage for `/cost` — feeding the
+        // provider's real input-token count into the budget so compaction
+        // calibrates against real tokens, not the char/4 estimate (P4).
         self.push_history(Msg::assistant(&reply));
-        self.record_usage(&task_block, &oriented.block, &schemas_text);
+        self.record_usage(
+            &task_block,
+            &oriented.block,
+            &schemas_text,
+            usage.input_tokens,
+        );
 
         // Emit the turn-end telemetry (token/cost/latency) to the OTLP exporter
         // (ADR-0034). Cost is 0 until a pricing table lands.
@@ -1004,11 +1016,13 @@ where
             .join("")
     }
 
-    fn record_usage(&self, task: &str, recall: &str, schemas: &str) {
+    fn record_usage(&self, task: &str, recall: &str, schemas: &str, real_input: Option<usize>) {
         let history = self.history_snapshot();
         let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
-        let used = budget.line_items(&self.system, recall, task, schemas, &history);
-        budget.record_usage(used);
+        let estimate = budget.line_items(&self.system, recall, task, schemas, &history);
+        // Real provider usage (when reported) calibrates the heuristic and becomes
+        // the recorded `used_tokens`; otherwise the calibrated estimate is used.
+        budget.observe_turn(estimate, real_input);
     }
 
     /// Pull the accumulated OTLP telemetry for this session (ADR-0034 / Phase
@@ -1046,12 +1060,19 @@ where
         let (tier, used, limit) = {
             let history = self.history_snapshot();
             let budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
-            let used = budget.line_items(&self.system, recall, task, schemas, &history);
+            // Decide on calibration-corrected tokens (P4): the raw char/4 estimate
+            // is scaled by the factor learned from real provider usage.
+            let used = budget.calibrated(budget.line_items(&self.system, recall, task, schemas, &history));
             (budget.tier_for(used), used, budget.context_limit)
         };
 
         let (dropped, summarized) = match tier {
             Tier::None => return Ok(()),
+            Tier::Warn => {
+                let mut history = self.history.lock().unwrap_or_else(|p| p.into_inner());
+                let dropped = micro_compact(&mut history, WARN_KEEP_PAIRS);
+                (dropped, 0)
+            }
             Tier::Micro => {
                 let mut history = self.history.lock().unwrap_or_else(|p| p.into_inner());
                 let dropped = micro_compact(&mut history, MICRO_KEEP_PAIRS);

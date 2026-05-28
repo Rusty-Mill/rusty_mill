@@ -134,6 +134,28 @@ async fn failed_turns_feed_the_ratchet_and_recurrence_proposes_a_check() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn real_provider_usage_drives_the_cost_budget() {
+    let dir = std::env::temp_dir().join(format!("rk-app-usage-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // A provider that reports 4242 real input tokens (P4) — far from any char/4
+    // estimate of this tiny turn, so we can tell which one the budget recorded.
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("done".into())]])
+        .with_usage(4242, 17);
+    let session = Session::new(&config, model).unwrap();
+    session.send("hello").await.unwrap();
+
+    // /cost's `used` reflects the provider's real input tokens, not the estimate.
+    let (used, _limit, _frac, total, _compactions) = session.cost();
+    assert_eq!(used, 4242);
+    assert_eq!(total, 4242);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_tool_spawns_a_child_session() {
     let dir = std::env::temp_dir().join(format!("rk-app-agent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
