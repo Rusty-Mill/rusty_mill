@@ -4,6 +4,7 @@
 pub mod acp;
 mod budget;
 pub mod cli;
+pub mod contract;
 mod embedder;
 pub mod eval;
 #[cfg(feature = "gateway")]

@@ -19,6 +19,7 @@ rk-mcp.workspace = true
 aisdk = { workspace = true, features = ["openaicompatible", "openai"] }
 anyhow = "1"
 async-trait.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "io-std"] }
 rmcp = { version = "0.9", features = ["server", "transport-io"], optional = true }
