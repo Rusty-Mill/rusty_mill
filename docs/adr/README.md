@@ -53,3 +53,6 @@ also flips ADRs **0018/0019/0020** to Accepted and broadens **0028**.
 | [0034](0034-kernelevent-unified-observability-stream.md) | `KernelEvent` as the unified observability stream | Accepted | observe, observability, otel, standards |
 | [0035](0035-controlled-visibility-ablation-eval-substrate.md) | Controlled-visibility ablation as the eval substrate | Accepted | faithfulness, eval, maturity, integrity |
 | [0036](0036-episode-package-assembly-projector.md) | Episode-package assembly projector at `compose`-time | Accepted | compose, observe, data-model, faithfulness |
+| [0037](0037-guides-loaded-into-cached-system-prefix.md) | Layered guides loaded at session start into the cached system prefix | Proposed | feed, guides, prompt, context, roadmap |
+| [0038](0038-stratified-declarative-extension-model.md) | Stratified declarative extension model — skills, hooks-as-policy, plugins | Proposed | feed, constrain, config, extensibility, integration, roadmap |
+| [0039](0039-defer-loop-ownership-behind-contextcontroller.md) | Defer loop ownership; revisit behind a `ContextController` seam | Proposed | kernel, constrain, loop, context, roadmap |
