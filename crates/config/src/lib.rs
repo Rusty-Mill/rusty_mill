@@ -57,6 +57,11 @@ pub struct Config {
     pub workspace: PathBuf,
     /// Harness maturity level, from `RUSTYKEYS_HARNESS_LEVEL` (default: H1).
     pub harness_level: HarnessLevel,
+    /// Kernel agent-loop step cap, from `RUSTYKEYS_MAX_STEPS` (default: 10).
+    /// Wired into the aisdk loop via `stop_when` so a runaway tool-calling loop
+    /// terminates; `compose::CleanTermination` then classifies the cap hit
+    /// (ADR-0039, the P0 safety floor).
+    pub max_steps: usize,
     /// Optional embedding model, from `RUSTYKEYS_EMBED_MODEL`. Set ⇒ semantic
     /// recall; unset ⇒ lexical fallback (PRD 03 / Phase 5).
     pub embed_model: Option<String>,
@@ -175,6 +180,7 @@ impl Config {
         };
         let explore_branches = usize_or("RUSTYKEYS_EXPLORE_BRANCHES", 5)?;
         let explore_top_k = usize_or("RUSTYKEYS_EXPLORE_TOP_K", 2)?;
+        let max_steps = usize_or("RUSTYKEYS_MAX_STEPS", 10)?;
 
         let otlp_endpoint = get("RUSTYKEYS_OTLP_ENDPOINT").filter(|s| !s.trim().is_empty());
 
@@ -182,6 +188,7 @@ impl Config {
             model,
             workspace,
             harness_level,
+            max_steps,
             embed_model,
             allow_web,
             permission_mode,
@@ -324,6 +331,33 @@ mod tests {
         assert!(on.explore);
         assert_eq!(on.explore_branches, 3);
         assert_eq!(on.explore_top_k, 1);
+    }
+
+    #[test]
+    fn max_steps_defaults_and_overrides() {
+        let def = Config::resolve(env(&[("RUSTYKEYS_MODEL", "m")])).unwrap();
+        assert_eq!(def.max_steps, 10);
+
+        let cfg = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_MAX_STEPS", "25"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.max_steps, 25);
+    }
+
+    #[test]
+    fn invalid_max_steps_is_rejected() {
+        assert!(matches!(
+            Config::resolve(env(&[
+                ("RUSTYKEYS_MODEL", "m"),
+                ("RUSTYKEYS_MAX_STEPS", "many"),
+            ])),
+            Err(ConfigError::Invalid {
+                key: "RUSTYKEYS_MAX_STEPS",
+                ..
+            })
+        ));
     }
 
     #[test]

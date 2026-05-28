@@ -45,7 +45,7 @@ async fn aisdk_loop_dispatches_through_our_bridge() {
         vec![Scripted::Text("all done".into())],
     ]);
 
-    let reply = run_turn(model, "sys", "read x", dispatch.clone())
+    let reply = run_turn(model, "sys", "read x", dispatch.clone(), 10)
         .await
         .unwrap();
 
@@ -70,7 +70,7 @@ async fn stream_turn_emits_tokens_after_a_tool_call() {
     ]);
 
     let mut tokens = Vec::new();
-    let reply = stream_turn(model, "sys", "go", dispatch.clone(), |t| {
+    let reply = stream_turn(model, "sys", "go", dispatch.clone(), 10, |t| {
         tokens.push(t.to_string())
     })
     .await
@@ -82,6 +82,41 @@ async fn stream_turn_emits_tokens_after_a_tool_call() {
         dispatch.calls.lock().unwrap().as_slice(),
         &["read_file".to_string()]
     );
+}
+
+/// The P0 safety floor: a model that calls a tool every step (and never emits a
+/// final answer) must still terminate at `max_steps` rather than loop forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_turn_is_bounded_by_max_steps() {
+    let dispatch = Arc::new(RecordingDispatch {
+        calls: Default::default(),
+    });
+    // Far more tool-call rounds than the cap allows; without `stop_when` this
+    // would run until the script (or the window) is exhausted.
+    let script: Vec<Vec<Scripted>> = (0..50)
+        .map(|_| {
+            vec![Scripted::ToolCall {
+                name: "read_file".into(),
+                args: json!({"path": "x"}),
+            }]
+        })
+        .collect();
+    let model = FakeLanguageModel::new(script);
+
+    let max_steps = 3;
+    let reply = run_turn(model, "sys", "loop forever", dispatch.clone(), max_steps)
+        .await
+        .unwrap();
+
+    // The loop hit the cap with no final answer (CleanTermination's failed case).
+    assert!(reply.is_empty());
+    // The cap bounded dispatch well short of the 50 scripted rounds.
+    let calls = dispatch.calls.lock().unwrap().len();
+    assert!(
+        calls <= max_steps,
+        "expected ≤ {max_steps} dispatches, got {calls}"
+    );
+    assert!(calls > 0, "expected the loop to run at least once");
 }
 
 /// A standalone policy unit-check that a chain blocks before dispatch — the

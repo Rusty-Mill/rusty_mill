@@ -60,11 +60,18 @@ fn bridge_tool(name: String, schema: serde_json::Value, dispatch: Arc<dyn ToolDi
 
 /// Build the aisdk request with the system prompt, user turn, and the
 /// policy-vetting bridge tools advertised from `dispatch`.
+///
+/// `max_steps` caps the agent loop via aisdk's `stop_when`/`step_count_is`
+/// (ADR-0039, the P0 safety floor): without it the loop only terminates when the
+/// model stops emitting tool calls, so a model that calls tools indefinitely
+/// would never return. When the cap is hit the loop exits without a final
+/// answer, which `compose::CleanTermination` then classifies as a failed turn.
 fn build_request<M>(
     model: M,
     system: &str,
     user_prompt: &str,
     dispatch: &Arc<dyn ToolDispatch>,
+    max_steps: usize,
 ) -> aisdk::core::LanguageModelRequest<M>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport,
@@ -72,7 +79,8 @@ where
     let mut builder = LanguageModelRequest::builder()
         .model(model)
         .system(system.to_string())
-        .prompt(user_prompt.to_string());
+        .prompt(user_prompt.to_string())
+        .stop_when(aisdk::core::utils::step_count_is(max_steps));
 
     for (name, schema) in dispatch.schemas() {
         builder = builder.with_tool(bridge_tool(name, schema, dispatch.clone()));
@@ -81,17 +89,19 @@ where
 }
 
 /// Run one user turn to completion. aisdk's loop drives multi-step tool calling;
-/// each tool call is vetted + executed via `dispatch`. Returns the final text.
+/// each tool call is vetted + executed via `dispatch`. The loop is bounded by
+/// `max_steps` (the P0 safety floor); returns the final text.
 pub async fn run_turn<M>(
     model: M,
     system: &str,
     user_prompt: &str,
     dispatch: Arc<dyn ToolDispatch>,
+    max_steps: usize,
 ) -> Result<String, KernelError>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport,
 {
-    let mut request = build_request(model, system, user_prompt, &dispatch);
+    let mut request = build_request(model, system, user_prompt, &dispatch, max_steps);
     let response = request
         .generate_text()
         .await
@@ -128,6 +138,7 @@ pub async fn stream_turn<M>(
     system: &str,
     user_prompt: &str,
     dispatch: Arc<dyn ToolDispatch>,
+    max_steps: usize,
     mut on_token: impl FnMut(&str) + Send,
 ) -> Result<String, KernelError>
 where
@@ -136,7 +147,7 @@ where
     use aisdk::core::language_model::LanguageModelStreamChunkType;
     use futures::StreamExt;
 
-    let mut request = build_request(model, system, user_prompt, &dispatch);
+    let mut request = build_request(model, system, user_prompt, &dispatch, max_steps);
     let mut response = request
         .stream_text()
         .await

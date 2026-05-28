@@ -26,7 +26,8 @@ use rk_feed::{
     register_explore_tool, register_h3_tools, register_plan_tools, register_task_management_tools,
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
     BackgroundTaskStore, BashStream, ConsolidationScope, ConsolidationStats, Embedder,
-    ExploreStrategy, Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream,
+    ExploreStrategy, Isolation, Memory, Observation, SandboxLauncher, SessionFactory, SqliteStore,
+    SqliteStream,
     Store, Stream, TaskState, TaskStore, ToolError, ToolFn, ToolRegistry, COMPACTION_SYSTEM,
     DEFAULT_RECALL_K,
 };
@@ -80,6 +81,7 @@ pub struct Session<M> {
     embedder: Option<Arc<dyn Embedder>>,
     permission_mode: String,
     isolation: String,
+    max_steps: usize,
     plan: Arc<PlanController>,
     explore: Option<Arc<ExploreStrategy>>,
     mcp: Option<tokio::sync::Mutex<McpManager>>,
@@ -192,7 +194,23 @@ where
         let mut registry = ToolRegistry::new(Arc::new(policy)).with_tracer(tracer.clone());
         // Isolation seam (ADR-0030): `none` runs bash in-process; `sandboxed`
         // wraps it in an OS sandbox (network-deny + workspace-only FS).
-        let executor = executor_for(Isolation::from_config(&config.isolation));
+        let resolved_isolation = Isolation::from_config(&config.isolation);
+        // Phased sandbox-by-default (P0 safety floor): while the default is still
+        // `none`, warn — once, at the top level — when an OS sandbox launcher is
+        // present but unused, so the available protection is surfaced rather than
+        // silently skipped. The later phase flips the default to `sandboxed` when
+        // a launcher is found (falling back to `none` when none is).
+        if depth == 0
+            && resolved_isolation == Isolation::None
+            && SandboxLauncher::detect().is_some()
+        {
+            eprintln!(
+                "warning: a sandbox launcher (bwrap/firejail) is available but \
+                 RUSTYKEYS_ISOLATION=none — tool side-effects run unsandboxed; \
+                 set RUSTYKEYS_ISOLATION=sandboxed to confine them"
+            );
+        }
+        let executor = executor_for(resolved_isolation);
         let isolation = executor.profile().to_string();
         let bash_stream = Arc::new(BashStream::default());
         register_builtins_with_executor(
@@ -286,6 +304,7 @@ where
             },
             permission_mode: mode.as_str().to_string(),
             isolation,
+            max_steps: config.max_steps,
             plan,
             explore,
             mcp: mcp.map(tokio::sync::Mutex::new),
@@ -426,6 +445,7 @@ where
                     &self.system,
                     &prompt_with_context,
                     self.dispatch.clone(),
+                    self.max_steps,
                     cb,
                 )
                 .await
@@ -436,6 +456,7 @@ where
                     &self.system,
                     &prompt_with_context,
                     self.dispatch.clone(),
+                    self.max_steps,
                 )
                 .await
             }

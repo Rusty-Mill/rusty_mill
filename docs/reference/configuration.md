@@ -58,7 +58,7 @@
 |---|---|---|
 | `RUSTYKEYS_HARNESS_LEVEL` | `h1` | `h0` † \| `h1` \| `h2` \| `h3`. `h0` (no tool registry) is the paper's ablation floor — selectable or eval-only per ADR-0028. |
 | `RUSTYKEYS_VERIFY` | `1` | Enable verification + evidence journal. |
-| `RUSTYKEYS_MAX_STEPS` | `10` | Kernel loop step limit. |
+| `RUSTYKEYS_MAX_STEPS` | `10` | Kernel agent-loop step cap. Enforced via aisdk's `stop_when`/`step_count_is` (ADR-0039); hitting it exits the loop with no final answer, which `compose::CleanTermination` classifies as a failed turn. |
 
 ## Observability
 | Variable | Default | Description |

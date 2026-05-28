@@ -41,7 +41,7 @@ async fn run_with_fault(fault: Fault) -> (bool, Vec<String>) {
     ]);
 
     tracer.start_episode();
-    let reply = run_turn(model, "sys", "use the tool", dispatch)
+    let reply = run_turn(model, "sys", "use the tool", dispatch, 10)
         .await
         .unwrap();
     tracer.set_final_reached(true);
@@ -98,7 +98,7 @@ async fn baseline_clean_tool_verifies() {
     ]);
 
     tracer.start_episode();
-    let reply = run_turn(model, "sys", "list", dispatch).await.unwrap();
+    let reply = run_turn(model, "sys", "list", dispatch, 10).await.unwrap();
     tracer.set_final_reached(true);
 
     let report = Verifier::deterministic().verify(&reply, &tracer.episode());
