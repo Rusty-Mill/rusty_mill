@@ -287,11 +287,11 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** detect & record maintenance burden the agent introduces. No equivalent in Claude Code/hermes-agent.
 **Depends on:** 2, 4 · **Size:** M
 
-- [ ] `EntropyAudit`/`EntropyFinding`/`EntropyCategory` + **concrete heuristics & 0–3 severity** `M` · #19
-- [ ] Paper→RK 6↔7 category map (ADR-0020) `S`
-- [ ] Runs in the post-turn `tokio::join!` `S`
-- [ ] `.rustykeys/entropy.jsonl` (versioned) `S`
-- [ ] `/entropy` CLI `S`
+- [x] `EntropyAudit`/`EntropyFinding`/`EntropyCategory` + **concrete heuristics & 0–3 severity** `M` · #19
+- [x] Paper→RK 6↔7 category map (ADR-0020) `S`
+- [x] Runs in the post-turn `tokio::join!` `S` *(serially after verification in v1; trivially join-able)*
+- [x] `.rustykeys/entropy.jsonl` (versioned) `S`
+- [x] `/entropy` CLI `S`
 
 **Definition of Done:** each heuristic has a unit test; `UnsafeInvalid` triggers on TestWeakening/BoundaryViolation severity ≥2.
 **Acceptance:** removing an assertion in a `*_test.rs` produces a severity-2+ `test_weakening` finding and `delta<0`.

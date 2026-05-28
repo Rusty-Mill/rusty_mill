@@ -10,12 +10,14 @@
 //! verifier, and redaction-by-default (ADR-0026). The M-HIR `InterventionLogger`
 //! and `EntropyAuditor` are tracked separately within this phase.
 
+mod entropy;
 mod error;
 mod h3;
 mod intervention;
 mod outcome;
 pub mod redact;
 
+pub use entropy::{EntropyAudit, EntropyAuditor, EntropyCategory, EntropyFinding, EntropyLog};
 pub use error::ObserveError;
 pub use h3::{AgentAttribution, H3Scratch, ReproductionLog, Requirement};
 pub use intervention::{

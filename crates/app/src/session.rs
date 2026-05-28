@@ -30,7 +30,10 @@ use rk_feed::{
     TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
-use rk_observe::{H3Scratch, InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
+use rk_observe::{
+    EntropyAudit, EntropyAuditor, EntropyLog, H3Scratch, InterventionKind, InterventionLogger,
+    MhirReport, ToolStatus, Tracer,
+};
 
 use crate::budget::{dedup_recall_block, flatten, micro_compact, Msg, Tier, TokenBudget};
 
@@ -65,6 +68,7 @@ pub struct Session<M> {
     dispatch: Arc<dyn ToolDispatch>,
     tracer: Arc<Tracer>,
     journal: EvidenceJournal,
+    entropy_log: EntropyLog,
     interventions: InterventionLogger,
     verifier: Verifier,
     stream: Arc<dyn Stream>,
@@ -199,6 +203,7 @@ where
             dispatch: Arc::new(registry),
             tracer,
             journal: EvidenceJournal::new(&state_dir),
+            entropy_log: EntropyLog::new(&state_dir, session_id.clone()),
             interventions: InterventionLogger::new(&state_dir, session_id.clone()),
             verifier,
             stream: Arc::new(stream),
@@ -353,6 +358,12 @@ where
             None => Vec::new(),
         };
 
+        // Entropy auditor (PRD 04 / Phase 11) — non-blocking syntactic
+        // heuristics over the turn's tool events; feeds the H3 outcome
+        // classifier (sev≥2 TestWeakening/BoundaryViolation ⇒ UnsafeInvalid).
+        let scope = self.task.snapshot().scope;
+        let entropy = EntropyAuditor::new().audit(&episode, &scope);
+
         let n = self.turn_counter.fetch_add(1, Ordering::Relaxed);
         let turn_id = format!("{}_turn_{n}", self.session_id);
         self.journal
@@ -373,6 +384,11 @@ where
             )?;
         }
 
+        // Entropy: log every turn's audit (informational, all levels).
+        if !entropy.findings.is_empty() {
+            self.entropy_log.record(&turn_id, &entropy)?;
+        }
+
         // H3: assemble the eight-trace episode package from the raw evidence and
         // write it to `episodes/<turn_id>.json` (PRD 05 / Phase 10).
         if let Some(scratch) = &self.h3 {
@@ -384,6 +400,7 @@ where
                 &oriented.entries,
                 scratch,
                 &registered,
+                &entropy,
             )?;
         }
 
@@ -575,6 +592,11 @@ where
         self.explore.is_some()
     }
 
+    /// The most recent `n` entropy audit records (`/entropy`).
+    pub fn entropy_recent(&self, n: usize) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(self.entropy_log.recent(n)?)
+    }
+
     /// Assemble and write this turn's H3 episode package (PRD 05 / Phase 10).
     #[allow(clippy::too_many_arguments)]
     fn write_episode(
@@ -586,6 +608,7 @@ where
         context: &[rk_feed::ContextEntry],
         scratch: &Arc<H3Scratch>,
         registered: &[rk_compose::CheckRunResult],
+        entropy: &EntropyAudit,
     ) -> anyhow::Result<()> {
         // context_trace: project recall provenance; the v1 `influenced_decision`
         // heuristic marks primary (top-k) artifacts as decision-influencing.
@@ -621,6 +644,7 @@ where
             interventions: &interventions,
             scratch,
             registered,
+            entropy,
             meta: EpisodeMeta {
                 task_id,
                 turn_id: turn_id.to_string(),

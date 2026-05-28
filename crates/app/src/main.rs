@@ -73,7 +73,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /permissions, /entropy, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -87,7 +87,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /permissions  /entropy  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
                 println!(
@@ -95,6 +95,28 @@ where
                     session.permission_mode(),
                     session.isolation()
                 );
+            }
+            "/entropy" => {
+                let recs = session.entropy_recent(10)?;
+                if recs.is_empty() {
+                    println!("(no entropy findings yet)");
+                }
+                for r in recs {
+                    let delta = r["delta"].as_i64().unwrap_or(0);
+                    let n = r["findings"].as_array().map(|a| a.len()).unwrap_or(0);
+                    println!(
+                        "turn {} :: delta={delta}  ({n} findings)",
+                        r["turn_id"].as_str().unwrap_or("?")
+                    );
+                    for f in r["findings"].as_array().into_iter().flatten() {
+                        println!(
+                            "  [sev {}] {} — {}",
+                            f["severity"].as_u64().unwrap_or(0),
+                            f["category"].as_str().unwrap_or("?"),
+                            f["description"].as_str().unwrap_or("")
+                        );
+                    }
+                }
             }
             "/cost" => {
                 let (used, limit, frac, total, compactions) = session.cost();

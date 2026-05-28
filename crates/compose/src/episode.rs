@@ -275,6 +275,8 @@ pub struct EpisodeAssembler<'a> {
     pub scratch: &'a H3Scratch,
     /// Registered `checks.toml` results (carry method + covers for the trace).
     pub registered: &'a [crate::registry::CheckRunResult],
+    /// The turn's entropy audit (Phase 11).
+    pub entropy: &'a rk_observe::EntropyAudit,
     /// Ids + baseline.
     pub meta: EpisodeMeta,
 }
@@ -363,7 +365,24 @@ impl EpisodeAssembler<'_> {
             requirements: self.scratch.requirements(),
             limits: self.report.limits.to_string(),
         };
-        let entropy = EntropyAudit::default();
+        // Project the audit into the package's wire shape and feed the
+        // entropy-unsafe trigger to the classifier (Phase 11).
+        let entropy = EntropyAudit {
+            delta: self.entropy.delta as i64,
+            findings: self
+                .entropy
+                .findings
+                .iter()
+                .map(|f| {
+                    serde_json::json!({
+                        "category": f.category.as_str(),
+                        "severity": f.severity,
+                        "description": f.description,
+                        "evidence": f.evidence,
+                    })
+                })
+                .collect(),
+        };
         let outcome = classify_outcome(
             self.report,
             self.interventions
@@ -371,7 +390,7 @@ impl EpisodeAssembler<'_> {
                 .filter(|r| r.avoidability != rk_observe::Avoidability::Benign)
                 .count(),
             self.scratch.has_report(),
-            false, // entropy auditor lands in Phase 11
+            self.entropy.is_unsafe(),
         );
 
         EpisodePackage {
