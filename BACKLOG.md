@@ -265,7 +265,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** the formal reproduce → attribute → fix → verify → report workflow (+ back-edge).
 **Depends on:** 2, 4 · **Size:** L
 
-- [ ] `DeterministicCheck` registry + `checks.toml` (project + local precedence) `M` · #21 *(deferred with the eval-substrate)*
+- [x] `DeterministicCheck` registry + `checks.toml` (project + local precedence) `M` · #21
 - [x] `reproduce`, `attribute_failure` (fixed `FailureType`), `verification_report` tools `M`
 - [x] `ReproduceBeforeEdit`, `VerificationReportRequired` checks (H3) `S`
 - [x] **Versioned `EpisodePackage`** with all 8 traces incl. `context_trace` → `episodes/` `M`

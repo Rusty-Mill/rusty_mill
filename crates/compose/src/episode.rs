@@ -257,6 +257,8 @@ pub struct EpisodeAssembler<'a> {
     pub interventions: &'a [InterventionRecord],
     /// H3 scratch (reproduction, requirements, agent attributions).
     pub scratch: &'a H3Scratch,
+    /// Registered `checks.toml` results (carry method + covers for the trace).
+    pub registered: &'a [crate::registry::CheckRunResult],
     /// Ids + baseline.
     pub meta: EpisodeMeta,
 }
@@ -329,7 +331,17 @@ impl EpisodeAssembler<'_> {
             })
             .collect();
 
-        let verification_trace = self.report.checks.iter().map(verify_entry).collect();
+        // verification_trace: the built-in checks (excluding the registered
+        // summaries, which we project from the richer CheckRunResult) + each
+        // registered result with its real method + requirement coverage.
+        let mut verification_trace: Vec<VerifyEntry> = self
+            .report
+            .checks
+            .iter()
+            .filter(|c| !c.name.starts_with("registered:"))
+            .map(verify_entry)
+            .collect();
+        verification_trace.extend(self.registered.iter().map(registered_verify_entry));
         let attribution_log = self.attribution_log();
         let verification_report = ReportBlock {
             requirements: self.scratch.requirements(),
@@ -429,6 +441,26 @@ fn verify_entry(c: &crate::check::CheckResult) -> VerifyEntry {
         result,
         covers: Vec::new(),
         interpretation: c.detail.clone(),
+    }
+}
+
+/// Project a registered `checks.toml` result into a `verification_trace` entry,
+/// carrying its declared method + requirement coverage (F14).
+fn registered_verify_entry(r: &crate::registry::CheckRunResult) -> VerifyEntry {
+    VerifyEntry {
+        r#type: VerifyType::Deterministic,
+        method: r.method.clone(),
+        result: if r.passed {
+            VerifyResult::Pass
+        } else {
+            VerifyResult::Fail
+        },
+        covers: r.covers.clone(),
+        interpretation: if r.passed {
+            format!("{} passed", r.check)
+        } else {
+            format!("{}: expected '{}'", r.check, r.expected)
+        },
     }
 }
 

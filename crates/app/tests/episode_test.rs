@@ -95,6 +95,63 @@ async fn h3_bug_fix_turn_writes_complete_episode_package() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_checks_drive_verification_trace_and_verdict() {
+    let dir = std::env::temp_dir().join(format!("rk-app-h3-checks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(dir.join(".rustykeys"))
+        .await
+        .unwrap();
+    // A registered check that fails (output won't contain the expected string).
+    std::fs::write(
+        dir.join(".rustykeys/checks.toml"),
+        "[[check]]\nname = \"unit\"\ncommand = \"echo broken\"\nexpected_substring = \"all green\"\ncovers = [\"req-9\"]\nmethod = \"registered_test\"\n",
+    )
+    .unwrap();
+
+    let config = h3_config(&dir);
+    // reproduce → write_file → verification_report → reply: the H3 spine passes,
+    // but the registered check fails, so the turn is UNVERIFIED.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "reproduce".into(),
+            args: json!({"check": "probe", "observed": "x", "expected": "y"}),
+        }],
+        vec![Scripted::ToolCall {
+            name: "write_file".into(),
+            args: json!({"path": "a.rs", "content": "fn f() {}"}),
+        }],
+        vec![Scripted::ToolCall {
+            name: "verification_report".into(),
+            args: json!({"requirements": [{"requirement": "req-9", "met": true, "evidence": "e"}]}),
+        }],
+        vec![Scripted::Text("done".into())],
+    ]);
+    let session = Session::new(&config, model).unwrap();
+    let outcome = session.send("fix it").await.unwrap();
+
+    // The failing registered check makes the turn unverified + attributed.
+    assert!(!outcome.report.verified);
+    assert!(outcome
+        .report
+        .attributions
+        .iter()
+        .any(|a| a.category == "registered_check_failed"));
+
+    let pkg = read_only_package(&dir);
+    assert_eq!(pkg["outcome"], "failed");
+    // The registered check appears in verification_trace with its method + covers.
+    let vt = pkg["verification_trace"].as_array().unwrap();
+    let reg = vt
+        .iter()
+        .find(|v| v["method"] == "registered_test")
+        .expect("registered check in verification_trace");
+    assert_eq!(reg["result"], "fail");
+    assert_eq!(reg["covers"][0], "req-9");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn h3_edit_without_reproduce_is_unverified_and_attributed() {
     let dir = std::env::temp_dir().join(format!("rk-app-h3-fail-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

@@ -92,6 +92,35 @@ impl VerificationReport {
         serde_json::to_value(self).unwrap_or(serde_json::Value::Null)
     }
 
+    /// Fold registered `checks.toml` results into the report (PRD 05 / Phase 10):
+    /// each failing check pushes an `f_verify` attribution and ANDs `verified`.
+    /// The per-entry `verification_trace` is projected by the assembler from the
+    /// same results (which carry `method`/`covers`).
+    pub fn and_registered(mut self, results: &[crate::registry::CheckRunResult]) -> Self {
+        for r in results {
+            self.checks.push(CheckResult {
+                name: format!("registered:{}", r.check),
+                passed: r.passed,
+                detail: if r.passed {
+                    format!("{} passed", r.method)
+                } else {
+                    format!("{}: expected '{}' in output", r.method, r.expected)
+                },
+            });
+            if !r.passed {
+                self.attributions.push(Attribution {
+                    check: r.check.clone(),
+                    failure_type: FailureType::FVerify,
+                    category: "registered_check_failed".to_string(),
+                    layer: "compose/checks".to_string(),
+                    evidence: format!("{}: {}", r.check, r.observed),
+                });
+            }
+        }
+        self.verified = self.verified && results.iter().all(|r| r.passed);
+        self
+    }
+
     /// Fold a criteria-judge result into the report (PRD 05). Adds a
     /// `criteria_judge` check, the matching semantic attribution
     /// (`criteria_unmet`→`f_model` / `judge_unavailable`→`f_verify`), threads

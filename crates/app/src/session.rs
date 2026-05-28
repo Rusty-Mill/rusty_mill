@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use rk_compose::{
-    judge_prompt, parse_judge, ContextEntry as PkgContextEntry, EpisodeAssembler, EpisodeMeta,
-    EvidenceJournal, InitialState, JudgeResult, VerificationReport, Verifier,
+    judge_prompt, parse_judge, CheckRegistry, ContextEntry as PkgContextEntry, EpisodeAssembler,
+    EpisodeMeta, EvidenceJournal, InitialState, JudgeResult, VerificationReport, Verifier,
 };
 use rk_config::{Config, HarnessLevel};
 use rk_constrain::{
@@ -338,6 +338,21 @@ where
             report = report.with_judge(jr);
         }
 
+        // H3: run the registered `checks.toml` checks and fold their verdicts
+        // into the report (PRD 05 / Phase 10). Their per-entry coverage lands in
+        // the episode's verification_trace.
+        let registered = match &self.h3 {
+            Some(_) => match CheckRegistry::load(&self.workspace) {
+                Ok(reg) if !reg.is_empty() => {
+                    let r = reg.run_all().await;
+                    report = report.and_registered(&r);
+                    r
+                }
+                _ => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+
         let n = self.turn_counter.fetch_add(1, Ordering::Relaxed);
         let turn_id = format!("{}_turn_{n}", self.session_id);
         self.journal
@@ -368,6 +383,7 @@ where
                 &report,
                 &oriented.entries,
                 scratch,
+                &registered,
             )?;
         }
 
@@ -569,6 +585,7 @@ where
         report: &VerificationReport,
         context: &[rk_feed::ContextEntry],
         scratch: &Arc<H3Scratch>,
+        registered: &[rk_compose::CheckRunResult],
     ) -> anyhow::Result<()> {
         // context_trace: project recall provenance; the v1 `influenced_decision`
         // heuristic marks primary (top-k) artifacts as decision-influencing.
@@ -603,6 +620,7 @@ where
             context: &ctx,
             interventions: &interventions,
             scratch,
+            registered,
             meta: EpisodeMeta {
                 task_id,
                 turn_id: turn_id.to_string(),
