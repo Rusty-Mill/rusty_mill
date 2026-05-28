@@ -306,9 +306,9 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** consume external MCP servers; expose `Session::send()` to IDEs.
 **Depends on:** 6, 7 · **Size:** L
 
-- [x] MCP client on **`rmcp`** (official Rust MCP SDK, ADR-0029): stdio adapter (behind the `rmcp` feature), `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12 *(SSE adapter is the documented follow-on on the same seam)*
+- [x] MCP client on **`rmcp`** (official Rust MCP SDK, ADR-0029): stdio + Streamable-HTTP/SSE adapters (behind the `rmcp` feature), `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12
 - [x] Tool-return inspection seam: small-classifier check on MCP/web returns before context (threat-model) `M`
-- [ ] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M` *(reconnect done; SSE transport + auth/TLS deferred)*
+- [x] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M` *(remote `HttpMcpClient` over rmcp Streamable HTTP — the HTTP+SSE successor — sends the bearer token from `auth_token_env` as `Authorization: Bearer`, refuses plaintext `http` to non-loopback hosts (`require_tls_for_non_loopback`), and rmcp's worker handles SSE keep-alive + auto-reconnect; `client_from_spec` builds either transport from an `mcp.toml` entry)*
 - [x] MCP server mode: expose `Session::send()` over JSON-RPC 2.0 `M` · #13 *(stdio `chat` tool behind the `mcp-server` feature)*
 - [x] Integration-test seam: fake stdio MCP server + reconnect test `M`
 

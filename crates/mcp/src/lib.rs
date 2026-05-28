@@ -11,6 +11,7 @@
 //! mode (ADR-0029) sit behind the `rmcp` feature.
 
 mod config;
+mod endpoint;
 mod inspect;
 mod manager;
 mod policy;
@@ -22,12 +23,13 @@ pub mod fake;
 mod transport;
 
 pub use config::{load_mcp_config, McpConfig, ServerSpec, Transport};
+pub use endpoint::{require_tls_for_non_loopback, resolve_bearer_token};
 pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
 pub use manager::McpManager;
 pub use policy::McpPolicy;
 pub use tool::{McpToolDescriptor, McpToolFn};
 #[cfg(feature = "rmcp")]
-pub use transport::StdioMcpClient;
+pub use transport::{client_from_spec, HttpMcpClient, StdioMcpClient};
 
 use async_trait::async_trait;
 use serde_json::Value;
