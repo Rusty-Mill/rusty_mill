@@ -265,16 +265,16 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** the formal reproduce → attribute → fix → verify → report workflow (+ back-edge).
 **Depends on:** 2, 4 · **Size:** L
 
-- [ ] `DeterministicCheck` registry + `checks.toml` (project + local precedence) `M` · #21
-- [ ] `reproduce`, `attribute_failure` (fixed `FailureType`), `verification_report` tools `M`
-- [ ] `ReproduceBeforeEdit`, `VerificationReportRequired` checks (H3) `S`
-- [ ] **Versioned `EpisodePackage`** with all 8 traces incl. `context_trace` → `episodes/` `M`
-- [ ] **Episode-package assembly projector** (ADR-0036; D5): the `compose`-time builder between raw evidence and the 8 typed traces — define `ActionEvent` and project `action_trace` (read_file/edit_file/run_tool/write_report/update_task_state/inspect_diff/declare_complete, distinct from `tool_trace`), the `tool_trace` `recovered`/`exit_code`/`timeout` fields, and the `CheckResult`→`VerifyEntry` (`method`/`covers[]`/`interpretation`) producers `M`
-- [ ] **Per-turn intervention filter** (ADR-0036): pin which `intervention_log` records (by `source_message_id`/time-window) belong to *this* turn's package `S`
-- [ ] **`ToolStatus` reconcile** (ADR-0036): one 5-variant set `ok/error/blocked/timeout/truncated` (resolves the 3-vs-5 data-model §7 contradiction); `McpToolFn`→`ToolOutcome` (F15, see PRD 07) `S`
-- [ ] Five-label outcome classifier `S`
-- [ ] verify → re-attribute back-edge `S`
-- [ ] **Controlled-visibility ablation eval-substrate** (ADR-0035; D3) — make the H0–H3 ladder a true ablation, not just additive capability. One workstream sequenced isolation→visibility→adjudication, landing in the golden-episode replay: (a) per-episode **isolated workspace at a fixed commit** with a per-episode `.rustykeys/` (R2/Methods); (b) **R1 artifact-hiding at the feed/context-read seam** — lower levels do not see higher-level artifacts (H2 memory/`AGENT_GUIDE`/`TASK_STATE`/`checks.toml`); (c) **R5 evaluator-side checks at ALL levels** — `CheckRegistry::run_all()` as an independent adjudication pass that assigns `EpisodeOutcome` at H0–H3 (not from the agent's self-report). **Gate before reporting any Hn-vs-Hm lift.** `L`
+- [ ] `DeterministicCheck` registry + `checks.toml` (project + local precedence) `M` · #21 *(deferred with the eval-substrate)*
+- [x] `reproduce`, `attribute_failure` (fixed `FailureType`), `verification_report` tools `M`
+- [x] `ReproduceBeforeEdit`, `VerificationReportRequired` checks (H3) `S`
+- [x] **Versioned `EpisodePackage`** with all 8 traces incl. `context_trace` → `episodes/` `M`
+- [x] **Episode-package assembly projector** (ADR-0036; D5): the `compose`-time builder between raw evidence and the 8 typed traces — define `ActionEvent` and project `action_trace` (read_file/edit_file/run_tool/write_report/update_task_state/inspect_diff/declare_complete, distinct from `tool_trace`), the `tool_trace` `recovered`/`exit_code`/`timeout` fields, and the `CheckResult`→`VerifyEntry` (`method`/`covers[]`/`interpretation`) producers `M`
+- [x] **Per-turn intervention filter** (ADR-0036): pin which `intervention_log` records (by `source_message_id`/time-window) belong to *this* turn's package `S`
+- [x] **`ToolStatus` reconcile** (ADR-0036): one 5-variant set `ok/error/blocked/timeout/truncated` (resolves the 3-vs-5 data-model §7 contradiction); `McpToolFn`→`ToolOutcome` (F15, see PRD 07 — MCP surface lands in Phase 12) `S`
+- [x] Five-label outcome classifier `S`
+- [x] verify → re-attribute back-edge `S`
+- [ ] **Controlled-visibility ablation eval-substrate** (ADR-0035; D3) *(deferred to a follow-up — see scope note)* — make the H0–H3 ladder a true ablation, not just additive capability. One workstream sequenced isolation→visibility→adjudication, landing in the golden-episode replay: (a) per-episode **isolated workspace at a fixed commit** with a per-episode `.rustykeys/` (R2/Methods); (b) **R1 artifact-hiding at the feed/context-read seam** — lower levels do not see higher-level artifacts (H2 memory/`AGENT_GUIDE`/`TASK_STATE`/`checks.toml`); (c) **R5 evaluator-side checks at ALL levels** — `CheckRegistry::run_all()` as an independent adjudication pass that assigns `EpisodeOutcome` at H0–H3 (not from the agent's self-report). **Gate before reporting any Hn-vs-Hm lift.** `L`
 
 **Definition of Done:** every H3 turn writes a complete 8-trace package (every trace has a named producer via the assembly projector, none ships empty); outcome classifier covers all five labels; golden-episode replay green; the eval substrate isolates per-episode, hides higher-level artifacts (R1), and adjudicates every level evaluator-side (R5) — no Hn-vs-Hm lift is reported before that substrate lands.
 **Acceptance:** a bug-fix turn produces a package with reproduction + attribution + verification linked to requirement IDs; `action_trace` is populated and distinct from `tool_trace`.

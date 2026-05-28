@@ -11,12 +11,21 @@
 //! the H3 episode package + evidence journal land in their phases.
 
 mod check;
+mod episode;
 mod failure;
 mod journal;
 mod judge;
 mod verify;
 
-pub use check::{Check, CheckResult, CleanTermination, NoToolErrors};
+pub use check::{
+    Check, CheckResult, CleanTermination, NoToolErrors, ReproduceBeforeEdit,
+    VerificationReportRequired,
+};
+pub use episode::{
+    classify_outcome, ActionEvent, ContextEntry, EntropyAudit, EpisodeAssembler, EpisodeMeta,
+    EpisodeOutcome, EpisodePackage, InitialState, PackageAttribution, ReportBlock, ToolTraceEntry,
+    VerifyEntry, VerifyResult, VerifyType,
+};
 pub use failure::{Attribution, FailureType};
 pub use journal::EvidenceJournal;
 pub use judge::{judge_prompt, parse_judge, JudgeResult};

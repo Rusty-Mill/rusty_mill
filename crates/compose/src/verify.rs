@@ -145,6 +145,20 @@ impl Verifier {
         }
     }
 
+    /// Append the H3 process checks (`reproduce_before_edit`,
+    /// `verification_report_required`) backed by this turn's scratch (PRD 05).
+    pub fn with_h3(mut self, scratch: std::sync::Arc<rk_observe::H3Scratch>) -> Self {
+        self.checks
+            .push(Box::new(crate::check::ReproduceBeforeEdit::new(
+                scratch.clone(),
+            )));
+        self.checks
+            .push(Box::new(crate::check::VerificationReportRequired::new(
+                scratch,
+            )));
+        self
+    }
+
     /// Run every check and build the report.
     pub fn verify(&self, reply: &str, episode: &Episode) -> VerificationReport {
         let checks: Vec<CheckResult> = self.checks.iter().map(|c| c.run(reply, episode)).collect();
@@ -205,6 +219,20 @@ fn attribute(check: &str, episode: &Episode) -> Vec<Attribution> {
             category: "non_termination".to_string(),
             layer: "kernel/loop".to_string(),
             evidence: "loop ended without a final reply".to_string(),
+        }],
+        "reproduce_before_edit" => vec![Attribution {
+            check: check.to_string(),
+            failure_type: FailureType::FVerify,
+            category: "reproduction_skipped".to_string(),
+            layer: "compose/h3".to_string(),
+            evidence: "edited a file without first reproducing the failure".to_string(),
+        }],
+        "verification_report_required" => vec![Attribution {
+            check: check.to_string(),
+            failure_type: FailureType::FVerify,
+            category: "report_missing".to_string(),
+            layer: "compose/h3".to_string(),
+            evidence: "no verification report produced this turn".to_string(),
         }],
         other => vec![Attribution {
             check: other.to_string(),
