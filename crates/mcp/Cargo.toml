@@ -16,7 +16,8 @@ serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "process"] }
+rmcp = { version = "0.9", features = ["client", "transport-child-process"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
@@ -24,6 +25,9 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [features]
 # Expose the in-process FakeMcpClient for downstream offline tests.
 fake = []
+# The rmcp-backed transport adapters (ADR-0029). Off by default so the offline
+# core builds without the external SDK; CI/release builds enable it.
+rmcp = ["dep:rmcp"]
 
 [lints]
 workspace = true

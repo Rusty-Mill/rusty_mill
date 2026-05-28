@@ -18,12 +18,16 @@ mod tool;
 
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
+#[cfg(feature = "rmcp")]
+mod transport;
 
 pub use config::{load_mcp_config, McpConfig, ServerSpec, Transport};
 pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
 pub use manager::McpManager;
 pub use policy::McpPolicy;
 pub use tool::{McpToolDescriptor, McpToolFn};
+#[cfg(feature = "rmcp")]
+pub use transport::StdioMcpClient;
 
 use async_trait::async_trait;
 use serde_json::Value;
