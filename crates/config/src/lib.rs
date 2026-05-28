@@ -89,6 +89,10 @@ pub struct Config {
     pub explore_branches: usize,
     /// Converge top-`K`, from `RUSTYKEYS_EXPLORE_TOP_K` (default 2).
     pub explore_top_k: usize,
+    /// OTLP collector endpoint for the pull-based exporter bound to the
+    /// `KernelEvent` stream, from `RUSTYKEYS_OTLP_ENDPOINT` (ADR-0034). Absent ⇒
+    /// the exporter is inert; stderr trace logging is unaffected.
+    pub otlp_endpoint: Option<String>,
 }
 
 impl Config {
@@ -172,6 +176,8 @@ impl Config {
         let explore_branches = usize_or("RUSTYKEYS_EXPLORE_BRANCHES", 5)?;
         let explore_top_k = usize_or("RUSTYKEYS_EXPLORE_TOP_K", 2)?;
 
+        let otlp_endpoint = get("RUSTYKEYS_OTLP_ENDPOINT").filter(|s| !s.trim().is_empty());
+
         Ok(Self {
             model,
             workspace,
@@ -189,6 +195,7 @@ impl Config {
             explore,
             explore_branches,
             explore_top_k,
+            otlp_endpoint,
         })
     }
 }
@@ -260,6 +267,27 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(cfg.isolation, "sandboxed");
+    }
+
+    #[test]
+    fn otlp_endpoint_absent_by_default_and_parsed_when_set() {
+        let def = Config::resolve(env(&[("RUSTYKEYS_MODEL", "m")])).unwrap();
+        assert_eq!(def.otlp_endpoint, None);
+
+        let cfg = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_OTLP_ENDPOINT", "http://localhost:4317"),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.otlp_endpoint.as_deref(), Some("http://localhost:4317"));
+
+        // Whitespace-only ⇒ treated as absent.
+        let blank = Config::resolve(env(&[
+            ("RUSTYKEYS_MODEL", "m"),
+            ("RUSTYKEYS_OTLP_ENDPOINT", "  "),
+        ]))
+        .unwrap();
+        assert_eq!(blank.otlp_endpoint, None);
     }
 
     #[test]

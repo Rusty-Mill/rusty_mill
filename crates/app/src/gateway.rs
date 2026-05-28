@@ -199,6 +199,7 @@ where
             .route("/evidence", get(evidence::<M>))
             .route("/mhir", get(mhir::<M>))
             .route("/entropy", get(entropy::<M>))
+            .route("/metrics", get(metrics::<M>))
             .layer(cors)
             .with_state(self)
     }
@@ -431,6 +432,25 @@ where
         "cumulative_delta": session.entropy_total_delta(),
     }))
     .into_response()
+}
+
+/// Pull-based OTLP telemetry scrape (ADR-0034 / Phase 7B). Returns the
+/// session's accumulated token/cost/latency + tool-status counters. The
+/// exporter reports `enabled: false` with zero counters unless
+/// `RUSTYKEYS_OTLP_ENDPOINT` is set. This is a host-boundary pull, so an
+/// isolated `ToolExecutor` cannot blind operators.
+async fn metrics<M>(State(gw): Gw<M>, headers: HeaderMap) -> impl IntoResponse
+where
+    M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
+{
+    if let Err(code) = gw.authorize(&headers) {
+        return code.into_response();
+    }
+    let session = match gw.session_for(&headers).await {
+        Ok(s) => s,
+        Err(code) => return code.into_response(),
+    };
+    Json(json!(session.metrics_snapshot())).into_response()
 }
 
 fn now_tag() -> u128 {

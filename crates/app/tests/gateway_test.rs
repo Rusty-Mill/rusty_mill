@@ -80,6 +80,47 @@ async fn chat_and_health_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metrics_pull_reflects_turn_telemetry() {
+    let dir = tmp("metrics");
+    let s = dir.to_string_lossy().into_owned();
+    let config = Config::resolve(move |k| match k {
+        "RUSTYKEYS_MODEL" => Some("fake".into()),
+        "RUSTYKEYS_WORKSPACE" => Some(s.clone()),
+        "RUSTYKEYS_OTLP_ENDPOINT" => Some("http://localhost:4317".into()),
+        _ => None,
+    })
+    .unwrap();
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("hi back".into())]]);
+    let gw = Arc::new(Gateway::new(config, model));
+    let app = gw.router();
+
+    // Drive one turn so the exporter accumulates.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"message":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Pull telemetry: a host-boundary scrape, no push from inside the turn.
+    let resp = app
+        .oneshot(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let b = body_string(resp).await;
+    assert!(b.contains("\"enabled\":true"), "expected enabled: {b}");
+    assert!(b.contains("\"turns\":1"), "expected one turn: {b}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bearer_auth_gates_requests() {
     let dir = tmp("auth");
     let model = FakeLanguageModel::new(vec![]);

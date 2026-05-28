@@ -34,7 +34,7 @@ use rk_kernel::{complete, run_turn, stream_turn};
 use rk_mcp::{McpManager, McpPolicy};
 use rk_observe::{
     EntropyAudit, EntropyAuditor, EntropyLog, H3Scratch, InterventionKind, InterventionLogger,
-    MhirReport, ToolStatus, Tracer,
+    MetricsSnapshot, MhirReport, OtlpExporter, ToolStatus, Tracer,
 };
 
 use crate::budget::{dedup_recall_block, flatten, micro_compact, Msg, Tier, TokenBudget};
@@ -69,6 +69,7 @@ pub struct Session<M> {
     model: M,
     dispatch: Arc<dyn ToolDispatch>,
     tracer: Arc<Tracer>,
+    exporter: Arc<OtlpExporter>,
     journal: EvidenceJournal,
     entropy_log: EntropyLog,
     interventions: InterventionLogger,
@@ -139,7 +140,8 @@ where
         mcp: Option<McpManager>,
         extra_policy: Option<Arc<dyn Policy>>,
     ) -> anyhow::Result<Self> {
-        let tracer = Arc::new(Tracer::new());
+        let exporter = Arc::new(OtlpExporter::new(config.otlp_endpoint.clone()));
+        let tracer = Arc::new(Tracer::new().with_exporter(exporter.clone()));
         let state_dir = config.workspace.join(".rustykeys");
         std::fs::create_dir_all(&state_dir)?;
         let session_id = new_session_id();
@@ -248,6 +250,7 @@ where
             model,
             dispatch: Arc::new(registry),
             tracer,
+            exporter,
             journal: EvidenceJournal::new(&state_dir),
             entropy_log: EntropyLog::new(&state_dir, session_id.clone()),
             interventions: InterventionLogger::new(&state_dir, session_id.clone()),
@@ -394,6 +397,7 @@ where
         self.stream.append(&obs("user", "message", prompt)).await?;
 
         self.tracer.start_episode();
+        let turn_started = std::time::Instant::now();
         let reply = match on_token {
             Some(cb) => {
                 stream_turn(
@@ -403,7 +407,7 @@ where
                     self.dispatch.clone(),
                     cb,
                 )
-                .await?
+                .await
             }
             None => {
                 run_turn(
@@ -412,7 +416,14 @@ where
                     &prompt_with_context,
                     self.dispatch.clone(),
                 )
-                .await?
+                .await
+            }
+        };
+        let reply = match reply {
+            Ok(r) => r,
+            Err(e) => {
+                self.tracer.record_error(e.to_string());
+                return Err(e.into());
             }
         };
         self.tracer.set_final_reached(true);
@@ -420,6 +431,15 @@ where
         // Record the assistant turn and refresh the line-item usage for `/cost`.
         self.push_history(Msg::assistant(&reply));
         self.record_usage(&task_block, &oriented.block, &schemas_text);
+
+        // Emit the turn-end telemetry (token/cost/latency) to the OTLP exporter
+        // (ADR-0034). Cost is 0 until a pricing table lands.
+        let latency_ms = turn_started.elapsed().as_millis() as u64;
+        let turn_tokens = {
+            let b = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+            b.used_tokens as u64
+        };
+        self.tracer.record_turn_end(turn_tokens, 0.0, latency_ms);
 
         let episode = self.tracer.episode();
         self.tool_call_counter
@@ -908,6 +928,14 @@ where
         let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
         let used = budget.line_items(&self.system, recall, task, schemas, &history);
         budget.record_usage(used);
+    }
+
+    /// Pull the accumulated OTLP telemetry for this session (ADR-0034 / Phase
+    /// 7B). The exporter is inert (zero counters, `enabled: false`) unless
+    /// `RUSTYKEYS_OTLP_ENDPOINT` is set; reading it never pushes, so an isolated
+    /// `ToolExecutor` cannot blind operators.
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.exporter.snapshot()
     }
 
     /// Token usage snapshot for `/cost` (used, limit, fraction, session total,

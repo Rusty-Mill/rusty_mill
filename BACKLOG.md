@@ -221,7 +221,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 - [x] `RUSTYKEYS_ISOLATION = none | sandboxed`; default `none` (today's in-process behaviour) `S`
 - [x] `sandboxed`: run tool side-effects (esp. `bash`) in an OS sandbox — Linux-first (bubblewrap/firejail), wrapping battle-tested primitives; fails closed if none present `L`
 - [x] **Network-deny-by-default** inside the sandbox; egress enforced at the boundary (allowlist = capability grant, not destination filter) `M`
-- [ ] Pull-based OTLP export so isolation doesn't blind operators (the VM-blocked-EDR lesson) `S`
+- [x] Pull-based OTLP export so isolation doesn't blind operators (the VM-blocked-EDR lesson) `S` *(the unified `KernelEvent` stream + `OtlpExporter`: token/cost/latency + tool-status counters; `RUSTYKEYS_OTLP_ENDPOINT`, inert when unset; pulled at the host boundary via the gateway `/metrics` route. Cost stays 0 until a pricing table lands.)*
 
 **Definition of Done:** under `sandboxed`, a `bash` attempt to read `~/.aws/credentials` or POST to an external host fails closed at the boundary regardless of the in-process checkers; `none` is byte-for-byte today's behaviour.
 **Acceptance:** the credential-exfil and approved-domain exfil cases from the threat model fail closed under `sandboxed`.
