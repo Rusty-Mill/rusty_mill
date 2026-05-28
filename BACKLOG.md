@@ -386,13 +386,13 @@ tool-return inspection seam rather than introducing a parallel stack.
 
 **Depends on:** 12 (JSON-RPC server mode + tool-return inspection), 14 (`Session::send()` over a transport) · **Size:** L
 
-- [ ] ACP server: `initialize`/`authenticate` handshake + capability advertisement over stdio (newline-delimited JSON-RPC 2.0) `M`
-- [ ] `session/new`, `session/load`, `session/prompt`, `session/cancel` mapped onto `Session::send()` + the existing session lifecycle `L`
-- [ ] `session/update` streaming notifications mirroring the canonical `rk://` event table (PRD 06) — tokens, tool calls, plan, verification `M`
-- [ ] Client-driven `session/request_permission` bound to the Phase 7 `ApprovalGate` (Allow/AllowAlways/Reject round-trip), so editor approval reuses the existing gate `M`
-- [ ] Client filesystem/terminal capability shims (`fs/read_text_file`, `fs/write_text_file`, terminal ops) routed through `constrain` policy + `ToolExecutor` isolation — ACP-supplied I/O is still policy-vetted, never a bypass `M`
-- [ ] `AcpPolicy` + tool-return inspection on ACP-sourced content before it enters context (reuse the Phase 12 classifier seam) `S`
-- [ ] Integration-test seam: fake ACP client driving a scripted `FakeLanguageModel` session (handshake → prompt → streamed updates → permission round-trip → cancel) `M`
+- [x] ACP server: `initialize`/`authenticate` handshake + capability advertisement over stdio (newline-delimited JSON-RPC 2.0) `M`
+- [x] `session/new`, `session/prompt`, `session/cancel` mapped onto `Session::send()` + the existing session lifecycle `L` *(`session/load` resume is a follow-on)*
+- [x] `session/update` streaming notifications mirroring the canonical `rk://` event table (PRD 06) `M` *(turn-boundary frames; token-level streaming is a follow-on)*
+- [x] Client-driven `session/request_permission` bound to the Phase 7 `ApprovalGate` (Allow/AllowAlways/Reject round-trip), so editor approval reuses the existing gate `M`
+- [ ] Client filesystem/terminal capability shims (`fs/read_text_file`, `fs/write_text_file`, terminal ops) routed through `constrain` policy + `ToolExecutor` isolation `M` *(deferred — needs the server→client I/O flow + `AcpPolicy`/inspection below)*
+- [ ] `AcpPolicy` + tool-return inspection on ACP-sourced content before it enters context (reuse the Phase 12 classifier seam) `S` *(deferred with the fs/terminal shims it gates)*
+- [x] Integration-test seam: fake ACP client driving a scripted `FakeLanguageModel` session (handshake → prompt → streamed updates → permission round-trip → cancel) `M`
 
 **Definition of Done:** an ACP client completes the handshake, opens a session, sends a prompt, and receives streamed `session/update`s; a write requested mid-turn round-trips the `ApprovalGate`; ACP-supplied fs/terminal access is policy-vetted identically to in-process tools; cancellation tears the turn down cleanly.
 **Acceptance:** connecting from an ACP-speaking editor (or the fake client) drives a full turn end-to-end; a denied permission blocks the action and logs a `tool_block` intervention; an out-of-workspace `fs/write_text_file` is `BLOCKED`, not honored.
