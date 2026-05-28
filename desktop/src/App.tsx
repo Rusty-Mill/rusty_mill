@@ -1,5 +1,6 @@
 import { onCleanup, onMount, Show, createSignal } from "solid-js";
 import { store, wireEvents } from "./store";
+import { applyTheme, loadTheme } from "./theme";
 import Header from "./components/Header";
 import SessionPanel from "./components/SessionPanel";
 import ContextPanel from "./components/ContextPanel";
@@ -14,6 +15,7 @@ export default function App() {
   const [showSettings, setShowSettings] = createSignal(false);
 
   onMount(async () => {
+    applyTheme(loadTheme());
     const unlisten = await wireEvents();
     void store.refreshHeader();
     const onKey = (e: KeyboardEvent) => {
