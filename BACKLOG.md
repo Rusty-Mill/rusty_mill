@@ -304,11 +304,11 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** consume external MCP servers; expose `Session::send()` to IDEs.
 **Depends on:** 6, 7 · **Size:** L
 
-- [ ] MCP client on **`rmcp`** (official Rust MCP SDK, ADR-0029): stdio + SSE as thin adapters, `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12
-- [ ] Tool-return inspection seam: small-classifier check on MCP/web returns before context (threat-model) `M`
-- [ ] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M`
-- [ ] MCP server mode: expose `Session::send()` over JSON-RPC 2.0 `M` · #13
-- [ ] Integration-test seam: fake stdio MCP server + reconnect test `M`
+- [x] MCP client on **`rmcp`** (official Rust MCP SDK, ADR-0029): stdio adapter (behind the `rmcp` feature), `mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy` `L` · #12 *(SSE adapter is the documented follow-on on the same seam)*
+- [x] Tool-return inspection seam: small-classifier check on MCP/web returns before context (threat-model) `M`
+- [ ] SSE auth-header convention + TLS for non-loopback + reconnect/heartbeat `M` *(reconnect done; SSE transport + auth/TLS deferred)*
+- [x] MCP server mode: expose `Session::send()` over JSON-RPC 2.0 `M` · #13 *(stdio `chat` tool behind the `mcp-server` feature)*
+- [x] Integration-test seam: fake stdio MCP server + reconnect test `M`
 
 **Definition of Done:** an external server's tools register + dispatch through policy; server crash → `/mcp reconnect` recovers.
 **Acceptance:** a filesystem MCP server's tool is callable as `mcp__filesystem__read_file` and is policy-vetted.

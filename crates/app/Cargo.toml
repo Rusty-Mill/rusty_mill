@@ -21,6 +21,12 @@ anyhow = "1"
 async-trait.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+rmcp = { version = "0.9", features = ["server", "transport-io"], optional = true }
+
+[features]
+# MCP server mode (`rusty-keys --mcp`): expose Session::send() over JSON-RPC
+# (ADR-0029). Off by default (pulls rmcp); enable for IDE integration.
+mcp-server = ["dep:rmcp", "rk-mcp/rmcp"]
 
 [[bin]]
 name = "rusty-keys"

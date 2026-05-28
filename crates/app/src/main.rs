@@ -18,6 +18,9 @@ use rk_app::Session;
 use rk_config::Config;
 use rk_constrain::PlanDecision;
 
+#[cfg(feature = "mcp-server")]
+mod mcp_server;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::from_env().context("resolving configuration")?;
@@ -32,6 +35,22 @@ async fn main() -> Result<()> {
         .api_key(api_key.clone())
         .build()
         .context("building model provider")?;
+
+    // MCP server mode: `rusty-keys --mcp` (or RUSTYKEYS_MODE=mcp) exposes
+    // Session::send() over JSON-RPC instead of the CLI (PRD 07 / ADR-0029).
+    let mcp_mode = std::env::args().any(|a| a == "--mcp")
+        || std::env::var("RUSTYKEYS_MODE").as_deref() == Ok("mcp");
+    if mcp_mode {
+        #[cfg(feature = "mcp-server")]
+        {
+            let session = Session::new(&config, model).context("building session")?;
+            return mcp_server::serve(session).await;
+        }
+        #[cfg(not(feature = "mcp-server"))]
+        {
+            anyhow::bail!("MCP server mode requires building with `--features mcp-server`");
+        }
+    }
 
     let mut session = Session::new(&config, model).context("building session")?;
 

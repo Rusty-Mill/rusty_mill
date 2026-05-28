@@ -1418,6 +1418,7 @@ dependencies = [
  "rk-kernel",
  "rk-mcp",
  "rk-observe",
+ "rmcp",
  "serde_json",
  "tokio",
 ]
