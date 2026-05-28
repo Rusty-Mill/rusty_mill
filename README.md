@@ -61,7 +61,7 @@ The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 
 ### REPL commands
 
-`/verify` · `/mhir` · `/memory` · `/task` · `/permissions` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
+`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/permissions` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
 
 ## Architecture
 
@@ -108,7 +108,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–8 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–9 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -121,9 +121,10 @@ testable in CI without a live provider.
 - **7 · Permission system** — permission modes (`ModePolicy`), the `SecurityCheck` suite + `security.jsonl`, and the channel-based `ApprovalGate`; blocks log a `tool_block` intervention.
 - **7B · Capability isolation** — the `ToolExecutor` seam (`RUSTYKEYS_ISOLATION=none|sandboxed`); `sandboxed` runs `bash` inside an OS sandbox (bubblewrap/firejail) with network-deny + workspace-only FS, failing closed if no launcher is present.
 - **8 · Token & context** — a line-item `TokenBudget` (system + recall + task + tool schemas + history) driving 3-tier compaction (micro drop / session summary / full reset), recall↔history de-dup, journaled `compaction` events, and `/cost` + `/compact`.
+- **9 · Plan mode** — `enter_plan_mode`/`exit_plan_mode` tools over a shared `PlanController`; plan mode blocks writes/bash live, and an `exit_plan_mode` request awaits a human Proceed/Reject/Annotate (`/plan`) before the next turn may write. Plan approval is not an intervention.
 
-Remaining: plan mode (9), H3 episode packages (10), entropy auditor (11), MCP
-(12), extended CLI (13), web gateway (14), desktop frontend (15).
+Remaining: H3 episode packages (10), entropy auditor (11), MCP (12), extended
+CLI (13), web gateway (14), desktop frontend (15).
 
 ## Building & testing
 

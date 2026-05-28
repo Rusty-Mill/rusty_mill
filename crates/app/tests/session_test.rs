@@ -43,6 +43,8 @@ async fn send_reads_workspace_file_then_replies_verified() {
             "bash",
             "complete_task",
             "edit_file",
+            "enter_plan_mode",
+            "exit_plan_mode",
             "glob",
             "grep",
             "list_directory",
@@ -194,6 +196,67 @@ async fn read_only_mode_blocks_a_write_turn() {
     assert!(!dir.join("out.txt").exists());
     // The block is recorded as an (unavoidable) tool_block intervention.
     assert_eq!(session.mhir().unwrap().n_unavoidable, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plan_mode_blocks_write_then_proceed_allows_it() {
+    use rk_constrain::PlanDecision;
+
+    let dir = std::env::temp_dir().join(format!("rk-app-plan-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+
+    let config = config_at(&dir);
+    // Turn 1: enter plan mode, attempt a write (blocked), submit the plan.
+    // Turn 2 (after Proceed): the write now succeeds.
+    let model = FakeLanguageModel::new(vec![
+        vec![
+            Scripted::ToolCall {
+                name: "enter_plan_mode".into(),
+                args: json!({}),
+            },
+            Scripted::ToolCall {
+                name: "write_file".into(),
+                args: json!({"path": "out.txt", "content": "blocked in plan"}),
+            },
+            Scripted::ToolCall {
+                name: "exit_plan_mode".into(),
+                args: json!({"plan": "write out.txt"}),
+            },
+            Scripted::Text("proposed".into()),
+        ],
+        vec![
+            Scripted::ToolCall {
+                name: "write_file".into(),
+                args: json!({"path": "out.txt", "content": "written after approval"}),
+            },
+            Scripted::Text("done".into()),
+        ],
+    ]);
+
+    let session = Session::new(&config, model).unwrap();
+    session.send("please change out.txt").await.unwrap();
+
+    // The write was blocked while planning; the plan-exit is pending approval.
+    assert!(!dir.join("out.txt").exists());
+    assert!(session.is_planning());
+    assert_eq!(
+        session.plan_exit_pending().as_deref(),
+        Some("write out.txt")
+    );
+
+    // Approve → next turn may write.
+    assert_eq!(session.resolve_plan_exit(PlanDecision::Proceed), None);
+    assert!(!session.is_planning());
+    assert!(session.plan_exit_pending().is_none());
+
+    session.send("now do it").await.unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("out.txt")).unwrap(),
+        "written after approval"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

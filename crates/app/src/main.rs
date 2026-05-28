@@ -16,6 +16,7 @@ use aisdk::providers::OpenAICompatible;
 use anyhow::{Context, Result};
 use rk_app::Session;
 use rk_config::Config;
+use rk_constrain::PlanDecision;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,7 +73,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /permissions, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -86,7 +87,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /plan  /permissions  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
                 println!(
@@ -164,17 +165,72 @@ where
                 session.set_task(&goal, criteria, Vec::new());
                 println!("task set: {goal}");
             }
+            line if line.starts_with("/plan ") => {
+                // Enter plan mode, then run the proposal turn (read-only).
+                let text = line.trim_start_matches("/plan ").trim().to_string();
+                session.enter_plan_mode();
+                eprintln!("[plan mode — writes and bash blocked until approval]");
+                run_turn_and_handle(session, &stdin, &text).await?;
+            }
             prompt => {
-                let outcome = session.send(prompt).await.context("running turn")?;
-                println!("{}", outcome.reply);
-                eprintln!(
-                    "[{}]",
-                    if outcome.report.verified {
-                        "VERIFIED"
+                run_turn_and_handle(session, &stdin, prompt).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Run a turn, print the result, and — if the agent requested `exit_plan_mode`
+/// — render the plan and collect a Proceed/Reject/Annotate decision. An
+/// annotation is re-sent to the agent as a follow-up turn.
+async fn run_turn_and_handle<M>(
+    session: &Session<M>,
+    stdin: &std::io::Stdin,
+    prompt: &str,
+) -> Result<()>
+where
+    M: aisdk::core::language_model::LanguageModel
+        + aisdk::core::capabilities::TextInputSupport
+        + aisdk::core::capabilities::ToolCallSupport
+        + Clone,
+{
+    let mut next = Some(prompt.to_string());
+    while let Some(p) = next.take() {
+        let outcome = session.send(&p).await.context("running turn")?;
+        println!("{}", outcome.reply);
+        eprintln!(
+            "[{}]",
+            if outcome.report.verified {
+                "VERIFIED"
+            } else {
+                "UNVERIFIED"
+            }
+        );
+
+        if let Some(plan) = session.plan_exit_pending() {
+            println!("--- proposed plan ---\n{plan}\n---------------------");
+            eprint!("approve? [proceed/reject/annotate <text>]: ");
+            let _ = std::io::stderr().flush();
+            let mut ans = String::new();
+            stdin.read_line(&mut ans)?;
+            let ans = ans.trim();
+            let decision = if ans.is_empty() || ans.eq_ignore_ascii_case("proceed") {
+                PlanDecision::Proceed
+            } else if let Some(note) = ans.strip_prefix("annotate ") {
+                PlanDecision::Annotate(note.trim().to_string())
+            } else {
+                PlanDecision::Reject
+            };
+            match session.resolve_plan_exit(decision) {
+                Some(feedback) => next = Some(feedback), // re-propose with feedback
+                None => eprintln!(
+                    "[plan {}]",
+                    if session.is_planning() {
+                        "pending"
                     } else {
-                        "UNVERIFIED"
+                        "resolved"
                     }
-                );
+                ),
             }
         }
     }

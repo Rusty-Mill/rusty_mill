@@ -249,10 +249,10 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** read-only proposal phase before destructive execution.
 **Depends on:** 7 · **Size:** S
 
-- [ ] `enter_plan_mode`/`exit_plan_mode` tools `S` · #16
-- [ ] `Plan` permission mode enforced at policy `S`
-- [ ] CLI approval on `exit_plan_mode` (Proceed/Reject/Annotate) `S`
-- [ ] `/plan` shortcut `S`
+- [x] `enter_plan_mode`/`exit_plan_mode` tools `S` · #16
+- [x] `Plan` permission mode enforced at policy `S`
+- [x] CLI approval on `exit_plan_mode` (Proceed/Reject/Annotate) `S`
+- [x] `/plan` shortcut `S`
 - [ ] **Divergent "explore" option** (ADR-0032, opt-in): fan out N isolated subagents under cognitive frames via `SessionFactory`, then critic/converge top-K; cost-gated `M`
 
 **Definition of Done:** writes/bash blocked in plan mode; approval transitions mode; plan approval is not an intervention.

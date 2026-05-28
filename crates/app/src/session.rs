@@ -16,15 +16,16 @@ use rk_compose::{
 };
 use rk_config::Config;
 use rk_constrain::{
-    BashGuard, ModePolicy, PermissionMode, PolicyChain, SecurityLog, ToolDispatch, WorkspacePolicy,
+    BashGuard, ModePolicy, PermissionMode, PlanController, PlanDecision, PolicyChain, SecurityLog,
+    ToolDispatch, WorkspacePolicy,
 };
 use rk_feed::{
     compaction_prompt, consolidate_apply, consolidation_prompt, executor_for, groom_apply,
     groom_prompt, recall, register_agent_tool, register_builtins_with_executor,
-    register_task_management_tools, register_task_tools, register_web_tools, system_prompt,
-    AttributionContext, BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder,
-    Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
-    TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
+    register_plan_tools, register_task_management_tools, register_task_tools, register_web_tools,
+    system_prompt, AttributionContext, BackgroundTaskStore, ConsolidationScope, ConsolidationStats,
+    Embedder, Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store,
+    Stream, TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn};
 use rk_observe::{InterventionKind, InterventionLogger, MhirReport, ToolStatus, Tracer};
@@ -70,6 +71,7 @@ pub struct Session<M> {
     embedder: Option<Arc<dyn Embedder>>,
     permission_mode: String,
     isolation: String,
+    plan: Arc<PlanController>,
     budget: Mutex<TokenBudget>,
     history: Mutex<Vec<Msg>>,
     system: String,
@@ -108,12 +110,15 @@ where
         );
         // Mode gate runs first (cheapest, broadest), then the workspace boundary
         // and the bash security checkers (which log blocks to security.jsonl).
+        // The mode is shared via the PlanController so plan mode can flip it at
+        // runtime (PRD 06).
+        let plan = Arc::new(PlanController::new(mode.clone()));
         let security_log = Arc::new(SecurityLog::new(
             state_dir.join("security.jsonl"),
             session_id.clone(),
         ));
         let policy = PolicyChain::new()
-            .with(Arc::new(ModePolicy::new(mode.clone())))
+            .with(Arc::new(ModePolicy::shared(plan.clone())))
             .with(Arc::new(WorkspacePolicy::new(config.workspace.clone())))
             .with(Arc::new(BashGuard::new().with_log(security_log)));
 
@@ -126,6 +131,7 @@ where
         register_builtins_with_executor(&mut registry, config.workspace.clone(), executor);
         register_task_tools(&mut registry, task.clone());
         register_task_management_tools(&mut registry, Arc::new(BackgroundTaskStore::new()));
+        register_plan_tools(&mut registry, plan.clone());
         if config.allow_web {
             register_web_tools(&mut registry);
         }
@@ -165,6 +171,7 @@ where
             system: system_prompt(config.harness_level),
             permission_mode: mode.as_str().to_string(),
             isolation,
+            plan,
             budget: Mutex::new(TokenBudget::new(
                 config.context_limit,
                 config.compact_micro,
@@ -484,6 +491,31 @@ where
     /// The active isolation profile (`none`/`sandboxed`), for `/permissions`.
     pub fn isolation(&self) -> &str {
         &self.isolation
+    }
+
+    /// Enter plan mode (`/plan`): writes and bash are blocked until an approved
+    /// `exit_plan_mode` (PRD 06 / Phase 9).
+    pub fn enter_plan_mode(&self) {
+        self.plan.enter_plan();
+    }
+
+    /// Whether the session is currently in plan mode.
+    pub fn is_planning(&self) -> bool {
+        self.plan.is_planning()
+    }
+
+    /// The pending plan summary if the agent called `exit_plan_mode` and it has
+    /// not yet been resolved. The adapter renders this and collects a decision.
+    pub fn plan_exit_pending(&self) -> Option<String> {
+        self.plan.pending_exit()
+    }
+
+    /// Resolve a pending plan-exit. `Proceed` enables writes next turn; `Reject`
+    /// restores the base mode; `Annotate` restores it and returns the feedback to
+    /// re-send to the agent. Plan approval is expected behaviour — not an
+    /// intervention (PRD 06).
+    pub fn resolve_plan_exit(&self, decision: PlanDecision) -> Option<String> {
+        self.plan.resolve(decision)
     }
 
     fn push_history(&self, msg: Msg) {

@@ -17,6 +17,7 @@ pub mod chaos;
 mod error;
 mod exec;
 pub mod memory;
+mod plan;
 mod prompt;
 mod taskmgmt;
 mod tool;
@@ -36,6 +37,7 @@ pub use memory::{
     Edge, Embedder, MemType, Memory, Observation, RecallOutput, SqliteStore, SqliteStream, Store,
     Stream, TaskState, TaskStatus, TaskStore, DEFAULT_RECALL_K,
 };
+pub use plan::register_plan_tools;
 pub use prompt::{compaction_prompt, system_prompt, COMPACTION_SYSTEM};
 pub use taskmgmt::{register_task_management_tools, BackgroundTaskStore};
 pub use tool::{AiSdkTool, ToolFn, ToolRegistry};
