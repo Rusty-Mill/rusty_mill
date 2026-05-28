@@ -17,7 +17,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "process"] }
-rmcp = { version = "0.9", features = ["client", "transport-child-process"], optional = true }
+rmcp = { version = "0.9", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
