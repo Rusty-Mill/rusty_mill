@@ -63,7 +63,7 @@
 ## Observability
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYKEYS_OTLP_ENDPOINT` † | _(none)_ | OTLP collector endpoint for the pull-based OTLP exporter bound to the `KernelEvent` stream (token/cost/latency attributes; ADR-0034). Absent ⇒ exporter inert; `RUSTYKEYS_TRACE` stderr logging is unaffected. **v1 intent** (the exporter is a seam; see [coding-standards §9](../dev/coding-standards.md#9-kernelevent--the-unified-lifecycle-event-adr-0034)). |
+| `RUSTYKEYS_OTLP_ENDPOINT` † | _(none)_ | OTLP collector endpoint for the pull-based OTLP exporter bound to the `KernelEvent` stream (token/latency attributes + tool-status counters; cost is 0 until a pricing table lands; ADR-0034). Absent ⇒ exporter inert (`enabled: false`, zero counters); `RUSTYKEYS_TRACE` stderr logging is unaffected. Pulled at the host boundary via the gateway `GET /metrics` route (see [coding-standards §9](../dev/coding-standards.md#9-kernelevent--the-unified-lifecycle-event-adr-0034)). |
 
 ## Memory
 | Variable | Default | Description |
