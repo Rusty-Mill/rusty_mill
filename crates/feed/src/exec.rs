@@ -12,11 +12,36 @@
 //!   if none is present it **fails closed** (never silently runs unsandboxed).
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::ToolError;
+
+/// A per-turn sink for live `bash` stdout/stderr chunks. An adapter (the desktop
+/// terminal, the CLI) installs a sender before a turn via `Session::set_bash_sink`
+/// and drains it; `bash_impl` forwards each chunk as it is read off the process.
+/// `None` ⇒ no live streaming (the default), and the call still returns the full
+/// captured output as its `ToolOutcome`.
+#[derive(Default)]
+pub struct BashStream {
+    tx: Mutex<Option<UnboundedSender<String>>>,
+}
+
+impl BashStream {
+    /// Install (or clear, with `None`) the chunk sink for the next turn.
+    pub fn set(&self, tx: Option<UnboundedSender<String>>) {
+        *self.tx.lock().unwrap_or_else(|p| p.into_inner()) = tx;
+    }
+
+    /// Forward one output chunk to the installed sink, if any (best-effort).
+    pub(crate) fn emit(&self, chunk: &str) {
+        if let Some(tx) = self.tx.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            let _ = tx.send(chunk.to_string());
+        }
+    }
+}
 
 /// The runtime isolation profile, from `RUSTYKEYS_ISOLATION`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

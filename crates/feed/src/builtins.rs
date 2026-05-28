@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::error::ToolError;
-use crate::exec::{LocalExecutor, ToolExecutor};
+use crate::exec::{BashStream, LocalExecutor, ToolExecutor};
 use crate::tool::{AiSdkTool, ToolRegistry};
 use serde_json::Value;
 
@@ -219,11 +219,37 @@ async fn grep_impl(root: PathBuf, args: Value) -> Result<String, ToolError> {
     Ok(out.join("\n"))
 }
 
+/// Drain a child pipe to a buffer, forwarding each chunk to the live sink as it
+/// is read. Returns the full captured bytes (so the `ToolOutcome` is unchanged).
+async fn drain_pipe<R>(reader: Option<R>, stream: Arc<BashStream>) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    if let Some(mut r) = reader {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stream.emit(&String::from_utf8_lossy(&chunk[..n]));
+                    buf.extend_from_slice(&chunk[..n]);
+                }
+            }
+        }
+    }
+    buf
+}
+
 async fn bash_impl(
     executor: Arc<dyn ToolExecutor>,
     root: PathBuf,
+    stream: Arc<BashStream>,
     args: Value,
 ) -> Result<String, ToolError> {
+    use std::process::Stdio;
+
     let command = arg_str(&args, "command")?;
     let timeout_ms = args
         .get("timeout_ms")
@@ -231,44 +257,69 @@ async fn bash_impl(
         .unwrap_or(BASH_DEFAULT_TIMEOUT_MS);
 
     // The executor applies the isolation profile (ADR-0030). Vetting already
-    // ran in `constrain`; this governs *how* the vetted command runs.
+    // ran in `constrain`; this governs *how* the vetted command runs. We spawn
+    // with piped stdio and drain incrementally so output streams to the sink as
+    // it is produced, while still capturing the full text for the outcome.
     let mut cmd = executor.build(&command, &root)?;
-    let run = cmd.output();
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
 
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), run).await {
-        Err(_) => Err(ToolError::Timeout),
-        Ok(Err(e)) => Err(e.into()),
-        Ok(Ok(output)) => {
-            let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&output.stderr));
-            let combined = combined.trim_end().to_string();
-            // A non-zero exit is *data*, not a tool error: the agent often runs
-            // commands expecting failure (a failing test). Surface the code but
-            // keep the outcome Ok so it doesn't spuriously fail verification.
-            if output.status.success() {
-                Ok(combined)
-            } else {
-                Ok(format!(
-                    "[exit {}]\n{combined}",
-                    output.status.code().unwrap_or(-1)
-                ))
-            }
+    let out_reader = child.stdout.take();
+    let err_reader = child.stderr.take();
+    let out_task = tokio::spawn(drain_pipe(out_reader, stream.clone()));
+    let err_task = tokio::spawn(drain_pipe(err_reader, stream.clone()));
+
+    let status = match tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        child.wait(),
+    )
+    .await
+    {
+        Err(_) => {
+            // Kill the process; the detached drains end when its pipes close.
+            let _ = child.kill().await;
+            return Err(ToolError::Timeout);
         }
+        Ok(Err(e)) => return Err(e.into()),
+        Ok(Ok(status)) => status,
+    };
+
+    // Preserve the historical outcome shape: stdout then stderr, trimmed, with a
+    // `[exit N]` prefix on failure. A non-zero exit is *data*, not a tool error.
+    let out_buf = out_task.await.unwrap_or_default();
+    let err_buf = err_task.await.unwrap_or_default();
+    let mut combined = String::from_utf8_lossy(&out_buf).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&err_buf));
+    let combined = combined.trim_end().to_string();
+    if status.success() {
+        Ok(combined)
+    } else {
+        Ok(format!(
+            "[exit {}]\n{combined}",
+            status.code().unwrap_or(-1)
+        ))
     }
 }
 
 /// Register the built-in filesystem/shell tools, rooted at `workspace`, running
-/// `bash` under the default (no-isolation) executor.
+/// `bash` under the default (no-isolation) executor with no live output sink.
 pub fn register_builtins(registry: &mut ToolRegistry, workspace: PathBuf) {
-    register_builtins_with_executor(registry, workspace, Arc::new(LocalExecutor));
+    register_builtins_with_executor(
+        registry,
+        workspace,
+        Arc::new(LocalExecutor),
+        Arc::new(BashStream::default()),
+    );
 }
 
-/// Like [`register_builtins`] but with an explicit [`ToolExecutor`] for `bash`,
-/// so the caller can select the isolation profile (ADR-0030 / Phase 7B).
+/// Like [`register_builtins`] but with an explicit [`ToolExecutor`] for `bash`
+/// (the isolation profile, ADR-0030 / Phase 7B) and a [`BashStream`] the caller
+/// can later wire to an adapter to stream live `bash` output.
 pub fn register_builtins_with_executor(
     registry: &mut ToolRegistry,
     workspace: PathBuf,
     executor: Arc<dyn ToolExecutor>,
+    bash_stream: Arc<BashStream>,
 ) {
     macro_rules! reg {
         ($desc:expr, $imp:ident) => {{
@@ -290,9 +341,10 @@ pub fn register_builtins_with_executor(
     {
         let root = workspace.clone();
         let exec = executor.clone();
+        let stream = bash_stream.clone();
         registry.insert(Box::new(AiSdkTool::new(
             descriptors::bash_descriptor(),
-            move |args| bash_impl(exec.clone(), root.clone(), args),
+            move |args| bash_impl(exec.clone(), root.clone(), stream.clone(), args),
         )));
     }
 }
@@ -359,15 +411,49 @@ mod tests {
     async fn bash_runs_and_surfaces_nonzero_exit_as_data() {
         let root = tmp("bash");
         let exec: Arc<dyn ToolExecutor> = Arc::new(LocalExecutor);
-        let ok = bash_impl(exec.clone(), root.clone(), json!({"command": "echo hello"}))
-            .await
-            .unwrap();
+        let stream = Arc::new(BashStream::default());
+        let ok = bash_impl(
+            exec.clone(),
+            root.clone(),
+            stream.clone(),
+            json!({"command": "echo hello"}),
+        )
+        .await
+        .unwrap();
         assert_eq!(ok, "hello");
         // Non-zero exit is surfaced (Ok), not a tool error.
-        let nonzero = bash_impl(exec, root.clone(), json!({"command": "exit 3"}))
+        let nonzero = bash_impl(exec, root.clone(), stream, json!({"command": "exit 3"}))
             .await
             .unwrap();
         assert!(nonzero.starts_with("[exit 3]"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn bash_streams_chunks_to_the_sink() {
+        let root = tmp("bash-stream");
+        let exec: Arc<dyn ToolExecutor> = Arc::new(LocalExecutor);
+        let stream = Arc::new(BashStream::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        stream.set(Some(tx));
+
+        let out = bash_impl(
+            exec,
+            root.clone(),
+            stream.clone(),
+            json!({"command": "echo streamed"}),
+        )
+        .await
+        .unwrap();
+        // The full output is still returned for the ToolOutcome…
+        assert_eq!(out, "streamed");
+        // …and the same text was streamed live to the sink.
+        stream.set(None); // drop the sender so the channel closes
+        let mut live = String::new();
+        while let Some(chunk) = rx.recv().await {
+            live.push_str(&chunk);
+        }
+        assert!(live.contains("streamed"), "live chunks: {live:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -386,7 +472,8 @@ mod tests {
         }
         let root = tmp("bash-sandbox");
         let exec: Arc<dyn ToolExecutor> = Arc::new(FailClosed);
-        let err = bash_impl(exec, root.clone(), json!({"command": "echo hi"}))
+        let stream = Arc::new(BashStream::default());
+        let err = bash_impl(exec, root.clone(), stream, json!({"command": "echo hi"}))
             .await
             .expect_err("must fail closed");
         assert!(matches!(err, ToolError::Sandbox(_)));

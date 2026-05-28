@@ -42,6 +42,9 @@ pub trait SessionApi: Send + Sync {
         message: &str,
         tokens: mpsc::UnboundedSender<String>,
     ) -> Result<TurnResult, BoundaryErrorPayload>;
+    /// Install (or clear) the live `bash` output sink for the next turn — the
+    /// bridge mirrors chunks as `rk://bash_output`.
+    fn set_bash_sink(&self, tx: Option<mpsc::UnboundedSender<String>>);
     /// The tool events from the most recent turn, redacted, as `rk://tool_event`
     /// payloads.
     fn last_tool_events(&self) -> Vec<Value>;
@@ -102,6 +105,10 @@ where
             Ok(outcome) => Ok(TurnResult::from_outcome(&outcome)),
             Err(e) => Err(classify(&e)),
         }
+    }
+
+    fn set_bash_sink(&self, tx: Option<mpsc::UnboundedSender<String>>) {
+        Session::set_bash_sink(self, tx);
     }
 
     fn last_tool_events(&self) -> Vec<Value> {
