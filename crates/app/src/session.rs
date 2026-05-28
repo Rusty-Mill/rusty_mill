@@ -25,9 +25,10 @@ use rk_feed::{
     groom_prompt, recall, register_agent_tool, register_builtins_with_executor,
     register_explore_tool, register_h3_tools, register_plan_tools, register_task_management_tools,
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
-    BackgroundTaskStore, ConsolidationScope, ConsolidationStats, Embedder, ExploreStrategy,
-    Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
-    TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
+    BackgroundTaskStore, BashStream, ConsolidationScope, ConsolidationStats, Embedder,
+    ExploreStrategy, Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream,
+    Store, Stream, TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM,
+    DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn, stream_turn};
 use rk_mcp::{McpManager, McpPolicy};
@@ -84,6 +85,7 @@ pub struct Session<M> {
     h3: Option<Arc<H3Scratch>>,
     harness_level: HarnessLevel,
     workspace: std::path::PathBuf,
+    bash_stream: Arc<BashStream>,
     budget: Mutex<TokenBudget>,
     history: Mutex<Vec<Msg>>,
     system: String,
@@ -175,7 +177,13 @@ where
         // wraps it in an OS sandbox (network-deny + workspace-only FS).
         let executor = executor_for(Isolation::from_config(&config.isolation));
         let isolation = executor.profile().to_string();
-        register_builtins_with_executor(&mut registry, config.workspace.clone(), executor);
+        let bash_stream = Arc::new(BashStream::default());
+        register_builtins_with_executor(
+            &mut registry,
+            config.workspace.clone(),
+            executor,
+            bash_stream.clone(),
+        );
         register_task_tools(&mut registry, task.clone());
         register_task_management_tools(&mut registry, Arc::new(BackgroundTaskStore::new()));
         register_plan_tools(&mut registry, plan.clone());
@@ -260,6 +268,7 @@ where
             h3,
             harness_level: config.harness_level,
             workspace: config.workspace.clone(),
+            bash_stream,
             budget: Mutex::new(TokenBudget::new(
                 config.context_limit,
                 config.compact_micro,
@@ -291,6 +300,14 @@ where
     /// unverified.
     pub async fn send(&self, prompt: &str) -> anyhow::Result<TurnOutcome> {
         self.send_inner(prompt, None).await
+    }
+
+    /// Install (or clear, with `None`) a live sink for `bash` stdout/stderr
+    /// chunks for subsequent turns. An adapter sets this before a turn so the
+    /// `bash` tool streams output (the desktop mirrors it as `rk://bash_output`),
+    /// then clears it afterwards.
+    pub fn set_bash_sink(&self, tx: Option<tokio::sync::mpsc::UnboundedSender<String>>) {
+        self.bash_stream.set(tx);
     }
 
     /// Like [`Session::send`], but each streamed text delta is handed to

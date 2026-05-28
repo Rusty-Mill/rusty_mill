@@ -29,7 +29,8 @@ pub use agent::{register_agent_tool, SessionFactory};
 pub use builtins::{register_builtins, register_builtins_with_executor};
 pub use error::{outcome_from_error, ToolError};
 pub use exec::{
-    executor_for, Isolation, LocalExecutor, SandboxLauncher, SandboxedExecutor, ToolExecutor,
+    executor_for, BashStream, Isolation, LocalExecutor, SandboxLauncher, SandboxedExecutor,
+    ToolExecutor,
 };
 pub use explore::{register_explore_tool, report_text, ExploreReport, ExploreStrategy};
 pub use h3::register_h3_tools;
