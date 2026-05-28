@@ -151,7 +151,7 @@ The `record_episode` (H3) step assembles the episode package's eight typed trace
 
 ## 8. Data architecture
 
-Full schemas, DDL, serde, versioning, and durability are in [`architecture/data-model.md`](./architecture/data-model.md). At a glance: state is local under `.rustykeys/` — two SQLite DBs (`stream.db` short-term, `store.db` long-term, or `store.duckdb` at Phase 5), four append-only JSONL logs (evidence, interventions, security, entropy), `task.json`, `episodes/`, `sessions/`, and the `config.toml`/`checks.toml` configs (the latter consolidating the legacy standalone `mcp.toml` under its `[mcp]` table). Storage is abstracted behind the `Stream` and `Store` traits (ADR-010). **Multi-session safety:** SQLite runs in **WAL mode with a `busy_timeout`** because gateway/MCP `multi` mode and subagents share the same DBs and `task.json` (single-writer-friendly; see §10).
+Full schemas, DDL, serde, versioning, and durability are in [`architecture/data-model.md`](./architecture/data-model.md). At a glance: state is local under `.rustykeys/` — two SQLite DBs (`stream.db` short-term, `store.db` long-term, or `store.duckdb` at Phase 5), five append-only JSONL logs (evidence, interventions, security, entropy, ratchet), `task.json`, `episodes/`, `sessions/`, and the `config.toml`/`checks.toml` configs (the former also consolidating the legacy standalone `mcp.toml` under its `[mcp]` table). Storage is abstracted behind the `Stream` and `Store` traits (ADR-010). **Multi-session safety:** SQLite runs in **WAL mode with a `busy_timeout`** because gateway/MCP `multi` mode and subagents share the same DBs and `task.json` (single-writer-friendly; see §10).
 
 ## 9. Deployment & runtime topologies
 

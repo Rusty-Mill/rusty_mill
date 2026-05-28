@@ -74,6 +74,66 @@ async fn send_reads_workspace_file_then_replies_verified() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_guide_is_folded_into_the_system_prompt() {
+    let dir = std::env::temp_dir().join(format!("rk-app-guide-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    // A project AGENT_GUIDE.md (ADR-0037, P2) should reach the cached prefix.
+    tokio::fs::write(dir.join("AGENT_GUIDE.md"), "Always run `cargo test` first.")
+        .await
+        .unwrap();
+
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("ok".into())]]);
+    let session = Session::new(&config, model).unwrap();
+
+    let sys = session.system_prompt();
+    assert!(sys.contains("## Project guidance"));
+    assert!(sys.contains("Always run `cargo test` first."));
+    // The managed baseline is always present too.
+    assert!(sys.contains("Operating guidance"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_turns_feed_the_ratchet_and_recurrence_proposes_a_check() {
+    let dir = std::env::temp_dir().join(format!("rk-app-ratchet-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    tokio::fs::create_dir_all(&dir).await.unwrap();
+    let config = config_at(&dir);
+
+    // Two failed turns with the same blocked-bash attribution → it recurs.
+    for _ in 0..2 {
+        let model = FakeLanguageModel::new(vec![
+            vec![Scripted::ToolCall {
+                name: "bash".into(),
+                args: json!({"command": "rm -rf / --no-preserve-root"}),
+            }],
+            vec![Scripted::Text("could not".into())],
+        ]);
+        let session = Session::new(&config, model).unwrap();
+        let outcome = session.send("delete everything").await.unwrap();
+        assert!(!outcome.report.verified);
+    }
+
+    // The log persists across sessions under the shared workspace.
+    let log = std::fs::read_to_string(dir.join(".rustykeys/ratchet.jsonl")).unwrap();
+    assert!(log.contains("\"kind\":\"ratchet\""));
+    assert!(log.contains("permission_block"));
+
+    // /ratchet aggregates and proposes a stanza for the recurring failure.
+    let model = FakeLanguageModel::new(vec![vec![Scripted::Text("ok".into())]]);
+    let session = Session::new(&config, model).unwrap();
+    let report = session.ratchet_report().unwrap();
+    assert!(report.contains("recurring failures"));
+    assert!(report.contains("permission_block"));
+    assert!(report.contains("[[check]]"), "a recurring failure proposes a check");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_tool_spawns_a_child_session() {
     let dir = std::env::temp_dir().join(format!("rk-app-agent-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);

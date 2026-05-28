@@ -15,6 +15,7 @@ mod episode;
 mod failure;
 mod journal;
 mod judge;
+mod ratchet;
 mod registry;
 mod verify;
 
@@ -30,6 +31,10 @@ pub use episode::{
 pub use failure::{Attribution, FailureType};
 pub use journal::EvidenceJournal;
 pub use judge::{judge_prompt, parse_judge, JudgeResult};
+pub use ratchet::{
+    propose_checks, render_ratchet, ProposedCheck, RatchetAggregate, RatchetLog,
+    RATCHET_MIN_OCCURRENCES,
+};
 pub use registry::{CheckRegistry, CheckRunResult, DeterministicCheck};
 pub use verify::{VerificationReport, Verifier, DETERMINISTIC_LIMITS, SEMANTIC_LIMITS};
 

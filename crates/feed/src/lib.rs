@@ -17,6 +17,7 @@ pub mod chaos;
 mod error;
 mod exec;
 mod explore;
+mod guide;
 mod h3;
 pub mod memory;
 mod plan;
@@ -33,6 +34,7 @@ pub use exec::{
     ToolExecutor,
 };
 pub use explore::{register_explore_tool, report_text, ExploreReport, ExploreStrategy};
+pub use guide::{GuideLoader, LoadedGuides, GUIDE_CONTRIBUTION, MANAGED_GUIDE};
 pub use h3::register_h3_tools;
 #[cfg(any(test, feature = "fake-embed"))]
 pub use memory::HashEmbedder;

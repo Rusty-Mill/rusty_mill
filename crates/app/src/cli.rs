@@ -8,7 +8,7 @@ use rk_config::Config;
 pub fn help_text() -> &'static str {
     "commands:\n\
      turn:     <text> to send · /plan [goal] · /explore <task>\n\
-     verify:   /verify · /mhir · /entropy · /evidence\n\
+     verify:   /verify · /mhir · /entropy · /evidence · /ratchet\n\
      memory:   /memory · /reflect · /sleep · /groom · /task [goal | criteria]\n\
      context:  /cost · /compact · /stats · /model [name]\n\
      git:      /diff · /commit [msg] · /branch [name] · /review\n\

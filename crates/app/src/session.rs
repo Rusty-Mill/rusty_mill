@@ -12,8 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use rk_compose::{
-    judge_prompt, parse_judge, CheckRegistry, ContextEntry as PkgContextEntry, EpisodeAssembler,
-    EpisodeMeta, EvidenceJournal, InitialState, JudgeResult, VerificationReport, Verifier,
+    judge_prompt, parse_judge, propose_checks, render_ratchet, CheckRegistry,
+    ContextEntry as PkgContextEntry, EpisodeAssembler, EpisodeMeta, EvidenceJournal, InitialState,
+    JudgeResult, RatchetLog, VerificationReport, Verifier, RATCHET_MIN_OCCURRENCES,
 };
 use rk_config::{Config, HarnessLevel};
 use rk_constrain::{
@@ -26,8 +27,8 @@ use rk_feed::{
     register_explore_tool, register_h3_tools, register_plan_tools, register_task_management_tools,
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
     BackgroundTaskStore, BashStream, ConsolidationScope, ConsolidationStats, Embedder,
-    ExploreStrategy, Isolation, Memory, Observation, SandboxLauncher, SessionFactory, SqliteStore,
-    SqliteStream,
+    ExploreStrategy, GuideLoader, Isolation, Memory, Observation, SandboxLauncher, SessionFactory,
+    SqliteStore, SqliteStream,
     Store, Stream, TaskState, TaskStore, ToolError, ToolFn, ToolRegistry, COMPACTION_SYSTEM,
     DEFAULT_RECALL_K,
 };
@@ -72,6 +73,8 @@ pub struct Session<M> {
     tracer: Arc<Tracer>,
     exporter: Arc<OtlpExporter>,
     journal: EvidenceJournal,
+    /// Append-only failed-turn attribution log feeding `/ratchet` (P3 feedback).
+    ratchet: RatchetLog,
     entropy_log: EntropyLog,
     interventions: InterventionLogger,
     verifier: Verifier,
@@ -82,6 +85,9 @@ pub struct Session<M> {
     permission_mode: String,
     isolation: String,
     max_steps: usize,
+    /// Guide-hierarchy `context_trace` entries (ADR-0037); session-stable, folded
+    /// into the cached `system` prefix and recorded on every episode.
+    guide_entries: Vec<rk_feed::ContextEntry>,
     plan: Arc<PlanController>,
     explore: Option<Arc<ExploreStrategy>>,
     mcp: Option<tokio::sync::Mutex<McpManager>>,
@@ -285,12 +291,28 @@ where
             .and_then(|v| v.parse().ok())
             .unwrap_or(8);
 
+        // Feedforward guides (ADR-0037): merge the AGENT_GUIDE.md hierarchy into
+        // the cached system prefix once per session (session-stable, so above the
+        // prompt-cache breakpoint). The frame preamble (subagent cognitive frame)
+        // stays first; guides follow the base identity/tool-use prompt.
+        let guides = GuideLoader::load(&config.workspace);
+        let base_system = match frame {
+            Some(f) => format!("{f}\n\n{}", system_prompt(config.harness_level)),
+            None => system_prompt(config.harness_level),
+        };
+        let system = if guides.block.is_empty() {
+            base_system
+        } else {
+            format!("{base_system}\n\n{}", guides.block)
+        };
+
         Ok(Self {
             model,
             dispatch: Arc::new(registry),
             tracer,
             exporter,
             journal: EvidenceJournal::new(&state_dir),
+            ratchet: RatchetLog::new(&state_dir),
             entropy_log: EntropyLog::new(&state_dir, session_id.clone()),
             interventions: InterventionLogger::new(&state_dir, session_id.clone()),
             verifier,
@@ -298,13 +320,11 @@ where
             store: Arc::new(store),
             task,
             embedder: None,
-            system: match frame {
-                Some(f) => format!("{f}\n\n{}", system_prompt(config.harness_level)),
-                None => system_prompt(config.harness_level),
-            },
+            system,
             permission_mode: mode.as_str().to_string(),
             isolation,
             max_steps: config.max_steps,
+            guide_entries: guides.entries,
             plan,
             explore,
             mcp: mcp.map(tokio::sync::Mutex::new),
@@ -549,12 +569,16 @@ where
         // H3: assemble the eight-trace episode package from the raw evidence and
         // write it to `episodes/<turn_id>.json` (PRD 05 / Phase 10).
         if let Some(scratch) = &self.h3 {
+            // context_trace records both the consulted guides (feedforward, ADR-0037)
+            // and the recalled memories for this turn.
+            let mut context_entries = self.guide_entries.clone();
+            context_entries.extend(oriented.entries.iter().cloned());
             self.write_episode(
                 &turn_id,
                 &msg_id,
                 &episode,
                 &report,
-                &oriented.entries,
+                &context_entries,
                 scratch,
                 &registered,
                 &entropy,
@@ -583,6 +607,12 @@ where
                 .last_attribution
                 .lock()
                 .unwrap_or_else(|p| p.into_inner()) = attribution_context(&report);
+            // Feed the ratchet (P3): log every attribution so recurring
+            // (failure_type, category) pairs can later propose a checks.toml
+            // stanza. Best-effort — a log write must never fail the turn.
+            for a in &report.attributions {
+                let _ = self.ratchet.record(&turn_id, a);
+            }
         }
 
         self.last_unverified
@@ -803,6 +833,15 @@ where
     /// The most recent `n` entropy audit records (`/entropy`).
     pub fn entropy_recent(&self, n: usize) -> anyhow::Result<Vec<serde_json::Value>> {
         Ok(self.entropy_log.recent(n)?)
+    }
+
+    /// The ratchet report (`/ratchet`): recurring failed-turn attributions and
+    /// the `checks.toml` stanzas they propose. Read-only — proposals are for the
+    /// human to review and commit; the harness never writes `checks.toml` itself.
+    pub fn ratchet_report(&self) -> anyhow::Result<String> {
+        let aggregates = self.ratchet.aggregate()?;
+        let proposals = propose_checks(&aggregates, RATCHET_MIN_OCCURRENCES);
+        Ok(render_ratchet(&aggregates, &proposals))
     }
 
     /// The most recent `n` evidence-journal records (`/evidence`).
@@ -1108,6 +1147,12 @@ where
             .into_iter()
             .map(|(n, _)| n)
             .collect()
+    }
+
+    /// The cached system prefix (identity + tool-use + folded-in guides, ADR-0037).
+    /// Built once per session; exposed for diagnostics and tests.
+    pub fn system_prompt(&self) -> &str {
+        &self.system
     }
 }
 
