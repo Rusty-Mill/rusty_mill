@@ -342,7 +342,7 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 - [x] `POST /chat`, `GET /stream` (SSE), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy` `M`
 - [x] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M` *(incl. live token-level `token` frames via the kernel's `stream_turn`)*
 - [x] Single + multi-session (TTL, max-sessions, eviction, `session_id`↔auth binding) `M`
-- [x] Bearer auth, CORS; `/health` liveness vs readiness `S` *(flat liveness; readiness split deferred)*
+- [x] Bearer auth, CORS; `/health` liveness vs `/ready` readiness `S` *(readiness checks model + workspace + SQLite round-trip; 503 until ready)*
 - [x] Gateway contract / SSE-framing test `M`
 
 **Definition of Done:** redaction applies on `/evidence`; multi-session evicts on TTL; auth scopes reachable `session_id`s.
