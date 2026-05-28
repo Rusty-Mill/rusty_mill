@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     let prompt = std::env::args().skip(1).collect::<Vec<_>>().join(" ");
     if prompt.trim().is_empty() {
-        repl(&session).await
+        repl(&session, &config).await
     } else {
         let outcome = session.send(&prompt).await.context("running turn")?;
         println!("{}", outcome.reply);
@@ -85,14 +85,14 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn repl<M>(session: &Session<M>) -> Result<()>
+async fn repl<M>(session: &Session<M>, config: &Config) -> Result<()>
 where
     M: aisdk::core::language_model::LanguageModel
         + aisdk::core::capabilities::TextInputSupport
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /mcp, /permissions, /entropy, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — type /help for the full command list, /quit to exit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -105,9 +105,64 @@ where
         match line {
             "" => continue,
             "/quit" | "/exit" => break,
-            "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /mcp  /permissions  /entropy  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
+            "/help" => println!("{}", rk_app::cli::help_text()),
+            "/stats" => println!("{}", rk_app::cli::render_stats(&session.stats())),
+            "/config" => println!("{}", rk_app::cli::render_config(config)),
+            "/model" => println!(
+                "model: {} (switching is restart-only — set RUSTYKEYS_MODEL)",
+                config.model
             ),
+            "/env" => {
+                let mut any = false;
+                for (k, v) in std::env::vars() {
+                    if k.starts_with("RUSTYKEYS_") {
+                        println!("{k}={v}");
+                        any = true;
+                    }
+                }
+                if !any {
+                    println!("(no RUSTYKEYS_* env vars set)");
+                }
+            }
+            "/doctor" => {
+                let checks = doctor(session, config).await;
+                println!("{}", rk_app::cli::render_doctor(&checks));
+            }
+            "/init" => match init_agent_guide(config) {
+                Ok(path) => println!("wrote {}", path.display()),
+                Err(e) => eprintln!("/init failed: {e}"),
+            },
+            "/diff" => print_git(config, &["diff"]),
+            "/branch" => print_git(config, &["branch", "--show-current"]),
+            line if line.starts_with("/branch ") => {
+                let name = line.trim_start_matches("/branch ").trim();
+                print_git(config, &["checkout", "-b", name]);
+            }
+            "/commit" => {
+                run_turn_and_handle(
+                    session,
+                    &stdin,
+                    "Stage all changes and commit them with a clear message.",
+                )
+                .await?;
+            }
+            line if line.starts_with("/commit ") => {
+                let msg = line.trim_start_matches("/commit ").trim();
+                run_turn_and_handle(
+                    session,
+                    &stdin,
+                    &format!("Stage all changes and commit them with the message: {msg}"),
+                )
+                .await?;
+            }
+            "/review" => {
+                run_turn_and_handle(
+                    session,
+                    &stdin,
+                    "Review the current `git diff` and report correctness issues and risks.",
+                )
+                .await?;
+            }
             "/permissions" => {
                 println!(
                     "permission mode: {}  ·  isolation: {}",
@@ -124,12 +179,10 @@ where
                     println!("{name}: {count} tools");
                 }
             }
-            "/mcp reconnect" => {
-                match session.reconnect_mcp().await {
-                    Ok(()) => println!("reconnected MCP servers"),
-                    Err(e) => eprintln!("reconnect failed: {e}"),
-                }
-            }
+            "/mcp reconnect" => match session.reconnect_mcp().await {
+                Ok(()) => println!("reconnected MCP servers"),
+                Err(e) => eprintln!("reconnect failed: {e}"),
+            },
             line if line.starts_with("/mcp ") => {
                 let server = line.trim_start_matches("/mcp ").trim();
                 let tools = session.mcp_server_tools(server).await;
@@ -312,4 +365,93 @@ where
         }
     }
     Ok(())
+}
+
+/// `/doctor`: validate model, workspace, SQLite, and MCP subsystems (PRD 06).
+async fn doctor<M>(session: &Session<M>, config: &Config) -> Vec<rk_app::cli::Subsystem>
+where
+    M: aisdk::core::language_model::LanguageModel
+        + aisdk::core::capabilities::TextInputSupport
+        + aisdk::core::capabilities::ToolCallSupport
+        + Clone,
+{
+    use rk_app::cli::Subsystem;
+    let mut checks = Vec::new();
+
+    checks.push(Subsystem {
+        name: "model".into(),
+        ok: !config.model.trim().is_empty(),
+        detail: config.model.clone(),
+    });
+
+    let ws = &config.workspace;
+    let writable =
+        ws.join(".rustykeys").exists() || std::fs::create_dir_all(ws.join(".rustykeys")).is_ok();
+    checks.push(Subsystem {
+        name: "workspace".into(),
+        ok: ws.is_dir() && writable,
+        detail: ws.display().to_string(),
+    });
+
+    // SQLite: the stream/store opened at construction; a recall round-trips it.
+    let sqlite_ok = session.recall_block("doctor").await.is_ok();
+    checks.push(Subsystem {
+        name: "sqlite".into(),
+        ok: sqlite_ok,
+        detail: if sqlite_ok {
+            "stream + store reachable".into()
+        } else {
+            "query failed".into()
+        },
+    });
+
+    let servers = session.mcp_summary().await;
+    checks.push(Subsystem {
+        name: "mcp".into(),
+        ok: true,
+        detail: if servers.is_empty() {
+            "no servers configured".into()
+        } else {
+            format!("{} server(s) connected", servers.len())
+        },
+    });
+
+    checks
+}
+
+/// `/init`: write a starter `AGENT_GUIDE.md` to the workspace root.
+fn init_agent_guide(config: &Config) -> std::io::Result<std::path::PathBuf> {
+    let path = config.workspace.join("AGENT_GUIDE.md");
+    let body = "# Agent Guide\n\n\
+        Project-specific guidance for the Rusty Keys agent.\n\n\
+        ## Conventions\n\
+        - (describe build/test commands, e.g. `cargo test`)\n\
+        - (coding standards, directory layout)\n\n\
+        ## Known failures\n\
+        - (recurring pitfalls the agent should avoid)\n\n\
+        ## Verification\n\
+        - (how to confirm a change is correct — registered checks live in `.rustykeys/checks.toml`)\n";
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
+/// Run a git subcommand in the workspace and print its output (`/diff`, `/branch`).
+fn print_git(config: &Config, args: &[&str]) {
+    match std::process::Command::new("git")
+        .args(args)
+        .current_dir(&config.workspace)
+        .output()
+    {
+        Ok(out) => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let e = String::from_utf8_lossy(&out.stderr);
+            if !s.trim().is_empty() {
+                println!("{}", s.trim_end());
+            }
+            if !out.status.success() && !e.trim().is_empty() {
+                eprintln!("{}", e.trim_end());
+            }
+        }
+        Err(e) => eprintln!("git failed: {e}"),
+    }
 }

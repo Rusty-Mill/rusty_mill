@@ -91,6 +91,7 @@ pub struct Session<M> {
     recall_k: usize,
     idle_threshold: usize,
     turn_counter: AtomicUsize,
+    tool_call_counter: AtomicUsize,
     msg_counter: AtomicUsize,
     last_report: Mutex<Option<VerificationReport>>,
     last_unverified: AtomicBool,
@@ -253,6 +254,7 @@ where
             recall_k: DEFAULT_RECALL_K,
             idle_threshold,
             turn_counter: AtomicUsize::new(0),
+            tool_call_counter: AtomicUsize::new(0),
             msg_counter: AtomicUsize::new(0),
             last_report: Mutex::new(None),
             last_unverified: AtomicBool::new(false),
@@ -350,6 +352,8 @@ where
         self.record_usage(&task_block, &oriented.block, &schemas_text);
 
         let episode = self.tracer.episode();
+        self.tool_call_counter
+            .fetch_add(episode.tool_events.len(), Ordering::Relaxed);
         let mut report = self.verifier.verify(&reply, &episode);
 
         // Semantic verification: when the task has success criteria, the judge
@@ -641,6 +645,31 @@ where
     /// The most recent `n` entropy audit records (`/entropy`).
     pub fn entropy_recent(&self, n: usize) -> anyhow::Result<Vec<serde_json::Value>> {
         Ok(self.entropy_log.recent(n)?)
+    }
+
+    /// Cumulative entropy delta across the session (`/stats`).
+    pub fn entropy_total_delta(&self) -> i64 {
+        self.entropy_log
+            .recent(usize::MAX)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|r| r.get("delta").and_then(|d| d.as_i64()))
+            .sum()
+    }
+
+    /// Combined diagnostics for `/stats`.
+    pub fn stats(&self) -> crate::cli::Stats {
+        let (used, limit, _frac, _total, compactions) = self.cost();
+        let mhir_rate = self.mhir().map(|m| m.rate).unwrap_or(0.0);
+        crate::cli::Stats {
+            tokens_used: used,
+            tokens_limit: limit,
+            turns: self.turn_counter.load(Ordering::Relaxed),
+            tool_calls: self.tool_call_counter.load(Ordering::Relaxed),
+            mhir_rate,
+            entropy_delta: self.entropy_total_delta(),
+            compactions,
+        }
     }
 
     /// Assemble and write this turn's H3 episode package (PRD 05 / Phase 10).
