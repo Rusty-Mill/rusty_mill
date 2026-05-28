@@ -265,25 +265,28 @@ where
     };
     let message = params.get("message").cloned().unwrap_or_default();
 
-    // Run the turn, then mirror the canonical rk:// events as named SSE frames.
-    // (Token-level streaming via the kernel's stream_turn is a follow-on.)
+    // Run the turn, then mirror the canonical rk:// events as named SSE frames
+    // (names come from the single contract SSOT). `done`/`error` are the
+    // SSE-specific terminal sentinels. Token-level streaming is a follow-on.
+    use crate::contract::event;
     let turn_id = format!("turn_{}", now_tag());
     let mut frames: Vec<Event> = vec![Event::default()
-        .event("turn_start")
+        .event(event::TURN_START)
         .id(turn_id.clone())
         .data(json!({ "turn_id": turn_id }).to_string())];
 
     let terminal = match session.send(&message).await {
         Ok(outcome) => {
+            let result = crate::contract::TurnResult::from_outcome(&outcome);
             frames.push(
                 Event::default()
-                    .event("turn_complete")
+                    .event(event::TURN_COMPLETE)
                     .id(turn_id.clone())
                     .data(
                         json!({
                             "turn_id": turn_id,
-                            "reply": outcome.reply,
-                            "verified": outcome.report.verified,
+                            "reply": result.reply,
+                            "verified": result.verified,
                         })
                         .to_string(),
                     ),
