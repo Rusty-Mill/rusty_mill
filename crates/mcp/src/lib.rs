@@ -22,7 +22,9 @@ pub mod fake;
 #[cfg(feature = "rmcp")]
 mod transport;
 
-pub use config::{load_mcp_config, McpConfig, ServerSpec, Transport};
+pub use config::{
+    load_mcp_config, load_mcp_config_for_workspace, McpConfig, ServerSpec, Transport,
+};
 pub use endpoint::{require_tls_for_non_loopback, resolve_bearer_token};
 pub use inspect::{DefaultInspector, Inspection, ReturnInspector};
 pub use manager::McpManager;

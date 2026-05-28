@@ -47,7 +47,7 @@ The ladder is meant to be a **controlled-visibility ablation**: each level sees 
 
 | # | Crate | Responsibility |
 |---|---|---|
-| 1 | `config` | Resolve all `RUSTYKEYS_*` settings at startup. Leaf crate. |
+| 1 | `config` | Resolve settings at startup: env (`RUSTYKEYS_*`) over the project file `.rustykeys/config.toml` over defaults. Leaf crate. |
 | 2 | `observe` | `Tracer`, `Episode`, `ToolEvent`/`ToolStatus`/`ToolOutcome`, `InterventionLogger` (M-HIR), `EntropyAuditor`. |
 | 3 | `constrain` | `Policy` + `ToolDispatch` traits, `WorkspacePolicy`, `PermissionMode`, security checkers, `ApprovalGate`, `McpPolicy`. |
 | 4 | `feed` | `ToolRegistry` + `ToolFn`, the tool suite, `Memory` (`Stream`/`Store`), `TaskStore`, context assembly, H3 tools, `SessionFactory` trait. |
@@ -97,7 +97,7 @@ graph TD
 ```
 
 **Import rules (the contract):**
-- `config` imports nothing.
+- `config` imports nothing (beyond `serde`/`toml` for parsing). It reads only the environment and the optional `.rustykeys/config.toml`; it never depends on another `rk-*` crate, so other crates (e.g. `mcp`) parse their own sections of that file.
 - `kernel` **does not import `feed` or `compose`.** It receives the tool registry as a **`&dyn ToolDispatch`** and policy as **`&dyn Policy`** (both traits defined in `constrain`). *This resolves the PRD 01↔06 `kernel.run` signature drift: the parameter is an abstract dispatcher, not the concrete `ToolRegistry`* — preserving the "kernel knows nothing about feed" intent.
 - `compose` **legitimately depends on `observe` and `feed`** (two edges the prose DAG omitted): `VerificationReport` embeds `Option<EntropyAudit>` (observe) and consumes `Episode` (observe); `CriteriaJudge` holds `Arc<TaskStore>` (feed).
 - `observe` **does not import `feed`.** The `EntropyAuditor`'s `BoundaryViolation` heuristic needs `TaskState.scope`, but receives those scope strings as **data** passed by `Session`, not by importing `feed`.
@@ -151,7 +151,7 @@ The `record_episode` (H3) step assembles the episode package's eight typed trace
 
 ## 8. Data architecture
 
-Full schemas, DDL, serde, versioning, and durability are in [`architecture/data-model.md`](./architecture/data-model.md). At a glance: state is local under `.rustykeys/` — two SQLite DBs (`stream.db` short-term, `store.db` long-term, or `store.duckdb` at Phase 5), four append-only JSONL logs (evidence, interventions, security, entropy), `task.json`, `episodes/`, `sessions/`, and the `checks.toml`/`mcp.toml` configs. Storage is abstracted behind the `Stream` and `Store` traits (ADR-010). **Multi-session safety:** SQLite runs in **WAL mode with a `busy_timeout`** because gateway/MCP `multi` mode and subagents share the same DBs and `task.json` (single-writer-friendly; see §10).
+Full schemas, DDL, serde, versioning, and durability are in [`architecture/data-model.md`](./architecture/data-model.md). At a glance: state is local under `.rustykeys/` — two SQLite DBs (`stream.db` short-term, `store.db` long-term, or `store.duckdb` at Phase 5), four append-only JSONL logs (evidence, interventions, security, entropy), `task.json`, `episodes/`, `sessions/`, and the `config.toml`/`checks.toml` configs (the latter consolidating the legacy standalone `mcp.toml` under its `[mcp]` table). Storage is abstracted behind the `Stream` and `Store` traits (ADR-010). **Multi-session safety:** SQLite runs in **WAL mode with a `busy_timeout`** because gateway/MCP `multi` mode and subagents share the same DBs and `task.json` (single-writer-friendly; see §10).
 
 ## 9. Deployment & runtime topologies
 

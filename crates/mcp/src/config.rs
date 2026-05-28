@@ -1,5 +1,21 @@
-//! `mcp.toml` parsing (PRD 07). Servers are declared with a transport and its
-//! endpoint; the file is optional (a missing file means "no MCP servers").
+//! MCP server config parsing (PRD 07). Servers are declared with a transport
+//! and its endpoint; configuration is optional (no config means "no MCP
+//! servers").
+//!
+//! Servers are declared under the `[mcp]` table of the unified project config
+//! file `<workspace>/.rustykeys/config.toml` (the P1 consolidation — see
+//! `docs/assessment/RECOMMENDATIONS.md`):
+//!
+//! ```toml
+//! [[mcp.servers]]
+//! name = "filesystem"
+//! transport = "stdio"
+//! command = "npx"
+//! args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+//! ```
+//!
+//! A legacy standalone `<workspace>/.rustykeys/mcp.toml` (top-level
+//! `[[servers]]`) is still honored as a fallback for back-compat.
 
 use std::path::Path;
 
@@ -46,7 +62,8 @@ pub struct McpConfig {
     pub servers: Vec<ServerSpec>,
 }
 
-/// Load `mcp.toml` from `path`. A missing file yields an empty config (no MCP).
+/// Load `mcp.toml` from `path` (legacy standalone file, top-level
+/// `[[servers]]`). A missing file yields an empty config (no MCP).
 pub fn load_mcp_config(path: &Path) -> Result<McpConfig, McpError> {
     let body = match std::fs::read_to_string(path) {
         Ok(b) => b,
@@ -54,6 +71,37 @@ pub fn load_mcp_config(path: &Path) -> Result<McpConfig, McpError> {
         Err(e) => return Err(McpError::Transport(e.to_string())),
     };
     toml::from_str(&body).map_err(|e| McpError::Transport(format!("mcp.toml: {e}")))
+}
+
+/// The `[mcp]` table of the unified project config file; other tables (e.g.
+/// `[settings]`, owned by `rk-config`) are ignored so each crate parses only the
+/// section it owns.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct UnifiedFile {
+    #[serde(default)]
+    mcp: McpConfig,
+}
+
+/// Resolve MCP servers for a workspace (P1 consolidation). Reads the `[mcp]`
+/// table of `<workspace>/.rustykeys/config.toml`; if it declares no servers,
+/// falls back to a legacy standalone `<workspace>/.rustykeys/mcp.toml`. A
+/// workspace with neither yields an empty config (no MCP).
+pub fn load_mcp_config_for_workspace(workspace: &Path) -> Result<McpConfig, McpError> {
+    let state_dir = workspace.join(".rustykeys");
+    let unified_path = state_dir.join("config.toml");
+    match std::fs::read_to_string(&unified_path) {
+        Ok(body) => {
+            let parsed: UnifiedFile = toml::from_str(&body)
+                .map_err(|e| McpError::Transport(format!("config.toml: {e}")))?;
+            if !parsed.mcp.servers.is_empty() {
+                return Ok(parsed.mcp);
+            }
+            // Unified file present but declares no servers → try legacy file.
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(McpError::Transport(format!("config.toml: {e}"))),
+    }
+    load_mcp_config(&state_dir.join("mcp.toml"))
 }
 
 #[cfg(test)]
@@ -98,5 +146,82 @@ auth_token_env = "HARNESS_API_KEY"
             Some("HARNESS_API_KEY")
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn workspace(tag: &str) -> std::path::PathBuf {
+        let ws = std::env::temp_dir().join(format!("rk-mcpws-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(ws.join(".rustykeys")).unwrap();
+        ws
+    }
+
+    #[test]
+    fn reads_mcp_section_from_unified_config() {
+        let ws = workspace("unified");
+        std::fs::write(
+            ws.join(".rustykeys").join("config.toml"),
+            r#"
+[settings]
+model = "m"
+
+[[mcp.servers]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+"#,
+        )
+        .unwrap();
+        let cfg = load_mcp_config_for_workspace(&ws).unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].name, "filesystem");
+        assert_eq!(cfg.servers[0].transport, Transport::Stdio);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn falls_back_to_legacy_mcp_toml() {
+        let ws = workspace("legacy");
+        // A unified file with no [mcp] table…
+        std::fs::write(
+            ws.join(".rustykeys").join("config.toml"),
+            "[settings]\nmodel = \"m\"\n",
+        )
+        .unwrap();
+        // …and a legacy standalone mcp.toml is still honored.
+        std::fs::write(
+            ws.join(".rustykeys").join("mcp.toml"),
+            "[[servers]]\nname = \"legacy\"\ntransport = \"stdio\"\ncommand = \"cat\"\n",
+        )
+        .unwrap();
+        let cfg = load_mcp_config_for_workspace(&ws).unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].name, "legacy");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn unified_servers_win_over_legacy() {
+        let ws = workspace("both");
+        std::fs::write(
+            ws.join(".rustykeys").join("config.toml"),
+            "[[mcp.servers]]\nname = \"unified\"\ntransport = \"stdio\"\ncommand = \"cat\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join(".rustykeys").join("mcp.toml"),
+            "[[servers]]\nname = \"legacy\"\ntransport = \"stdio\"\ncommand = \"cat\"\n",
+        )
+        .unwrap();
+        let cfg = load_mcp_config_for_workspace(&ws).unwrap();
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].name, "unified");
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn no_config_yields_empty() {
+        let ws = workspace("empty");
+        let cfg = load_mcp_config_for_workspace(&ws).unwrap();
+        assert!(cfg.servers.is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

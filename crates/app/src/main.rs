@@ -79,6 +79,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // MCP: servers may be declared under `[mcp]` in `.rustykeys/config.toml`
+    // (folded in from the legacy `mcp.toml` — P1). Connecting them through the
+    // real stdio/SSE transports needs the `rmcp` feature; the default CLI build
+    // does not bundle it, so surface a hint rather than silently ignoring them.
+    let mcp_config = rk_mcp::load_mcp_config_for_workspace(&config.workspace)
+        .context("loading MCP config")?;
+    if !mcp_config.servers.is_empty() {
+        eprintln!(
+            "note: {} MCP server(s) declared in .rustykeys/config.toml, but this \
+             build has no MCP transport (rebuild with the `rmcp` feature to connect them)",
+            mcp_config.servers.len()
+        );
+    }
     let mut session = Session::new(&config, model).context("building session")?;
 
     // Semantic recall when RUSTYKEYS_EMBED_MODEL is set; lexical otherwise.
