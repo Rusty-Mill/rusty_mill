@@ -128,7 +128,7 @@ testable in CI without a live provider.
 
 - **11 · Entropy auditor** — per-turn syntactic heuristics over `edit_file`/`write_file` (Residue, TestWeakening, StaleDocs, DependencyChurn, BoundaryViolation, TaskContradiction) with 0–3 severity; informational (doesn't flip `verified`), but sev≥2 TestWeakening/BoundaryViolation forces the H3 outcome to `unsafe_invalid`. Written to `.rustykeys/entropy.jsonl`; `/entropy` shows recent findings.
 
-Remaining: MCP (12), extended CLI (13), web gateway (14), desktop frontend (15).
+Remaining: MCP (12), extended CLI (13), web gateway (14), desktop frontend (15), ACP (16).
 
 ## Building & testing
 
