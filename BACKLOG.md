@@ -322,11 +322,11 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** session management, git integration, diagnostics.
 **Depends on:** 1 · **Size:** M
 
-- [ ] `/compact`, `/model`, `/cost`, `/stats` `S` · #20
-- [ ] `/init` → `AGENT_GUIDE.md` `S`
-- [ ] `/commit`, `/diff`, `/branch`, `/review` (git via agent) `M`
-- [ ] `/config`, `/env`, `/help` `S`
-- [ ] `/doctor` env health check `S`
+- [x] `/compact`, `/model`, `/cost`, `/stats` `S` · #20
+- [x] `/init` → `AGENT_GUIDE.md` `S`
+- [x] `/commit`, `/diff`, `/branch`, `/review` (git: diff/branch direct, commit/review via agent) `M`
+- [x] `/config`, `/env`, `/help` `S` *(`/config set` is restart-only; show implemented)*
+- [x] `/doctor` env health check `S`
 
 **Definition of Done:** `/doctor` validates model/workspace/SQLite/MCP; `/config` reads from the configuration SSOT.
 **Acceptance:** `/doctor` reports a clear pass/fail per subsystem.

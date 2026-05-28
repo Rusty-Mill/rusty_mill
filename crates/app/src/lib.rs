@@ -2,11 +2,13 @@
 //! later). Implements `SessionFactory` in later phases.
 
 mod budget;
+pub mod cli;
 mod embedder;
 pub mod eval;
 mod session;
 
 pub use budget::{Msg, Tier, TokenBudget};
+pub use cli::Stats;
 pub use embedder::AiSdkEmbedder;
 pub use eval::{run_episode, EvalOutcome, GoldenEpisode};
 pub use session::{Session, TurnOutcome};

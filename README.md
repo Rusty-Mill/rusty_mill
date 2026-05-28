@@ -63,7 +63,7 @@ The binary is `rusty-keys` (the `rk-app` crate). All state is local under
 
 ### REPL commands
 
-`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/explore` · `/permissions` · `/entropy` · `/cost` · `/compact` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
+`/verify` · `/mhir` · `/memory` · `/task` · `/plan` · `/explore` · `/mcp` · `/permissions` · `/entropy` · `/cost` · `/compact` · `/stats` · `/model` · `/config` · `/env` · `/doctor` · `/init` · `/diff` · `/commit` · `/branch` · `/review` · `/reflect` · `/sleep` · `/groom` · `/help` · `/quit`
 
 ## Architecture
 
@@ -110,7 +110,7 @@ policy-vetted before dispatch; results carry a structured `ToolOutcome`.
 
 ## Implementation status
 
-Phases 1–12 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
+Phases 1–13 of the [roadmap](BACKLOG.md) are implemented. Every LLM-dependent
 path is covered by a scripted `FakeLanguageModel`, so the whole system is
 testable in CI without a live provider.
 
@@ -130,8 +130,10 @@ testable in CI without a live provider.
 
 - **12 · MCP** — MCP client manager over the `McpClient` seam (`mcp.toml`, `mcp__server__tool` namespacing, `McpPolicy`, `McpToolFn`→`ToolOutcome`, tool-return inspection, reconnect; `/mcp`), the `rmcp`-backed stdio transport adapter + cargo-deny license gate (behind the `rmcp` feature), and MCP server mode exposing `Session::send()` as a `chat` tool (`rusty-keys --mcp`, behind the `mcp-server` feature). The SSE transport + auth/TLS is a documented follow-on on the same seam.
 
-Remaining: extended CLI (13), web gateway (14), desktop frontend (15), ACP (16);
-plus the MCP SSE transport (+auth/TLS).
+- **13 · Extended CLI** — `/stats` (turns/tool-calls/tokens/M-HIR/entropy), `/model`, `/config`, `/env`, `/doctor` (model/workspace/SQLite/MCP health), `/init` (`AGENT_GUIDE.md`), and git commands (`/diff`/`/branch` direct, `/commit`/`/review` via the agent).
+
+Remaining: web gateway (14), desktop frontend (15), ACP (16); plus the MCP SSE
+transport (+auth/TLS).
 
 ## Building & testing
 
