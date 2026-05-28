@@ -12,6 +12,7 @@ import {
   type ConsolidationStats,
   type EntropyAudit,
   type EventName,
+  type GitStatus,
   type MemoryEntry,
   type MhirReport,
   type SessionConfig,
@@ -68,6 +69,9 @@ export const ipc = {
   memorySearch: (q: string) =>
     invoke<MemoryEntry[]>(COMMAND.SESSION_MEMORY_SEARCH, { q }),
   commandsList: () => invoke<string[]>(COMMAND.SESSION_COMMANDS_LIST),
+  gitStatus: () => invoke<GitStatus>(COMMAND.GIT_STATUS),
+  gitDiff: (path?: string, staged?: boolean) =>
+    invoke<{ diff: string }>(COMMAND.GIT_DIFF, { path, staged }),
 };
 
 export type { ConsolidationStats };

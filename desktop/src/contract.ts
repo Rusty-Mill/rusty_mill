@@ -44,6 +44,8 @@ export const COMMAND = {
   FS_LIST_WORKSPACE: "fs_list_workspace",
   SESSION_MEMORY_SEARCH: "session_memory_search",
   SESSION_COMMANDS_LIST: "session_commands_list",
+  GIT_STATUS: "git_status",
+  GIT_DIFF: "git_diff",
 } as const;
 
 export type CommandName = (typeof COMMAND)[keyof typeof COMMAND];
@@ -143,4 +145,21 @@ export interface ConsolidationStats {
   updated: number;
   pruned: number;
   groomed: number;
+}
+
+export interface GitFile {
+  path: string;
+  x: string;
+  y: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface GitStatus {
+  repo: boolean;
+  branch?: string;
+  ahead?: number;
+  behind?: number;
+  files?: GitFile[];
 }
