@@ -5,6 +5,8 @@ mod budget;
 pub mod cli;
 mod embedder;
 pub mod eval;
+#[cfg(feature = "gateway")]
+pub mod gateway;
 mod session;
 
 pub use budget::{Msg, Tier, TokenBudget};
