@@ -10,6 +10,7 @@ pub mod eval;
 #[cfg(feature = "gateway")]
 pub mod gateway;
 mod session;
+mod shims;
 
 pub use budget::{Msg, Tier, TokenBudget};
 pub use cli::Stats;

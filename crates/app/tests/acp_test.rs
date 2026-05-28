@@ -166,6 +166,221 @@ async fn write_mid_turn_round_trips_request_permission() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fs_write_out_of_workspace_is_blocked_before_reaching_client() {
+    let dir = tmp("fsblock");
+    let config = config_at(&dir);
+    // The agent attempts an out-of-workspace fs write, then replies.
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "fs_write_text_file".into(),
+            args: json!({"path": "/etc/evil", "content": "x"}),
+        }],
+        vec![Scripted::Text("done".into())],
+    ]);
+
+    let (client, server) = tokio::io::duplex(8192);
+    let (srv_read, srv_write) = tokio::io::split(server);
+    let task =
+        tokio::spawn(
+            async move { acp::run(config, model, BufReader::new(srv_read), srv_write).await },
+        );
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut cr = BufReader::new(cr).lines();
+
+    // Advertise fs read+write capability so the shims register.
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"clientCapabilities":{"fs":{"readTextFile":true,"writeTextFile":true}}}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":3,"method":"session/prompt",
+        "params":{"prompt":[{"type":"text","text":"write /etc/evil"}]}}),
+    )
+    .await;
+
+    // The boundary must hold: no fs/write_text_file request ever reaches us.
+    let mut completed = false;
+    for _ in 0..20 {
+        let m = next(&mut cr).await;
+        assert_ne!(
+            m.get("method").and_then(Value::as_str),
+            Some("fs/write_text_file"),
+            "out-of-workspace write must be blocked before reaching the client"
+        );
+        if m.get("id") == Some(&json!(3)) {
+            completed = true;
+            break;
+        }
+    }
+    assert!(completed, "expected the prompt to complete");
+
+    drop(cw);
+    task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fs_read_bridges_to_client_capability() {
+    let dir = tmp("fsread");
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "fs_read_text_file".into(),
+            args: json!({"path": "src/a.rs"}),
+        }],
+        vec![Scripted::Text("read it".into())],
+    ]);
+
+    let (client, server) = tokio::io::duplex(8192);
+    let (srv_read, srv_write) = tokio::io::split(server);
+    let task =
+        tokio::spawn(
+            async move { acp::run(config, model, BufReader::new(srv_read), srv_write).await },
+        );
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut cr = BufReader::new(cr).lines();
+
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"clientCapabilities":{"fs":{"readTextFile":true}}}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":3,"method":"session/prompt",
+        "params":{"prompt":[{"type":"text","text":"read src/a.rs"}]}}),
+    )
+    .await;
+
+    // The agent calls back to the editor to read the file; answer it.
+    let mut bridged = false;
+    for _ in 0..20 {
+        let m = next(&mut cr).await;
+        if m.get("method").and_then(Value::as_str) == Some("fs/read_text_file") {
+            assert_eq!(m["params"]["path"], "src/a.rs");
+            bridged = true;
+            send(
+                &mut cw,
+                json!({"jsonrpc":"2.0","id":m["id"].clone(),
+                "result":{"content":"fn main() {}"}}),
+            )
+            .await;
+        } else if m.get("id") == Some(&json!(3)) {
+            break;
+        }
+    }
+    assert!(bridged, "expected an fs/read_text_file request to the client");
+
+    drop(cw);
+    task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn terminal_lifecycle_round_trips() {
+    let dir = tmp("term");
+    let config = config_at(&dir);
+    let model = FakeLanguageModel::new(vec![
+        vec![Scripted::ToolCall {
+            name: "acp_terminal".into(),
+            args: json!({"command": "ls"}),
+        }],
+        vec![Scripted::Text("ran it".into())],
+    ]);
+
+    let (client, server) = tokio::io::duplex(8192);
+    let (srv_read, srv_write) = tokio::io::split(server);
+    let task =
+        tokio::spawn(
+            async move { acp::run(config, model, BufReader::new(srv_read), srv_write).await },
+        );
+    let (cr, mut cw) = tokio::io::split(client);
+    let mut cr = BufReader::new(cr).lines();
+
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"clientCapabilities":{"terminal":true}}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}),
+    )
+    .await;
+    let _ = next(&mut cr).await;
+    send(
+        &mut cw,
+        json!({"jsonrpc":"2.0","id":3,"method":"session/prompt",
+        "params":{"prompt":[{"type":"text","text":"run ls"}]}}),
+    )
+    .await;
+
+    // Answer the terminal lifecycle methods the shim drives.
+    let mut saw_create = false;
+    let mut saw_output = false;
+    for _ in 0..30 {
+        let m = next(&mut cr).await;
+        match m.get("method").and_then(Value::as_str) {
+            Some("terminal/create") => {
+                saw_create = true;
+                send(
+                    &mut cw,
+                    json!({"jsonrpc":"2.0","id":m["id"].clone(),"result":{"terminalId":"t1"}}),
+                )
+                .await;
+            }
+            Some("terminal/output") => {
+                saw_output = true;
+                send(
+                    &mut cw,
+                    json!({"jsonrpc":"2.0","id":m["id"].clone(),
+                    "result":{"output":"a.rs\nb.rs","exitCode":0}}),
+                )
+                .await;
+            }
+            Some("terminal/wait_for_exit") | Some("terminal/release") => {
+                send(
+                    &mut cw,
+                    json!({"jsonrpc":"2.0","id":m["id"].clone(),"result":{}}),
+                )
+                .await;
+            }
+            _ => {
+                if m.get("id") == Some(&json!(3)) {
+                    break;
+                }
+            }
+        }
+    }
+    assert!(saw_create, "expected terminal/create");
+    assert!(saw_output, "expected terminal/output");
+
+    drop(cw);
+    task.abort();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 async fn send<W: AsyncWriteExt + Unpin>(w: &mut W, v: Value) {
     w.write_all(v.to_string().as_bytes()).await.unwrap();
     w.write_all(b"\n").await.unwrap();

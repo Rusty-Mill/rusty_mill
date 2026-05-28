@@ -27,7 +27,7 @@ use rk_feed::{
     register_task_tools, register_web_tools, report_text, system_prompt, AttributionContext,
     BackgroundTaskStore, BashStream, ConsolidationScope, ConsolidationStats, Embedder,
     ExploreStrategy, Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream,
-    Store, Stream, TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM,
+    Store, Stream, TaskState, TaskStore, ToolError, ToolFn, ToolRegistry, COMPACTION_SYSTEM,
     DEFAULT_RECALL_K,
 };
 use rk_kernel::{complete, run_turn, stream_turn};
@@ -107,14 +107,14 @@ where
 {
     /// Build a top-level session (subagent depth 0).
     pub fn new(config: &Config, model: M) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None, None, None)
+        Self::new_at_depth(config, model, 0, None, None, None, Vec::new())
     }
 
     /// Build a top-level session with an already-connected MCP manager (PRD 07).
     /// The caller connects the servers (async) before construction; this
     /// registers their namespaced tools + the `McpPolicy` synchronously.
     pub fn new_with_mcp(config: &Config, model: M, mcp: McpManager) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None, Some(mcp), None)
+        Self::new_at_depth(config, model, 0, None, Some(mcp), None, Vec::new())
     }
 
     /// Build a top-level session with an extra policy appended to the chain —
@@ -125,7 +125,21 @@ where
         model: M,
         policy: Arc<dyn Policy>,
     ) -> anyhow::Result<Self> {
-        Self::new_at_depth(config, model, 0, None, None, Some(policy))
+        Self::new_at_depth(config, model, 0, None, None, Some(policy), Vec::new())
+    }
+
+    /// Build a top-level session with both an extra policy and extra tools —
+    /// the ACP adapter (Phase 16) uses this to register client-capability shims
+    /// (`fs_read_text_file`/`fs_write_text_file`/`acp_terminal`) gated by an
+    /// `AcpPolicy`, so ACP-supplied I/O is policy-vetted identically to
+    /// in-process tools.
+    pub fn new_with_policy_and_tools(
+        config: &Config,
+        model: M,
+        policy: Arc<dyn Policy>,
+        extra_tools: Vec<Box<dyn ToolFn>>,
+    ) -> anyhow::Result<Self> {
+        Self::new_at_depth(config, model, 0, None, None, Some(policy), extra_tools)
     }
 
     /// Build a session at subagent `depth` (0 = top-level), optionally seeded
@@ -139,6 +153,7 @@ where
         frame: Option<&str>,
         mcp: Option<McpManager>,
         extra_policy: Option<Arc<dyn Policy>>,
+        extra_tools: Vec<Box<dyn ToolFn>>,
     ) -> anyhow::Result<Self> {
         let exporter = Arc::new(OtlpExporter::new(config.otlp_endpoint.clone()));
         let tracer = Arc::new(Tracer::new().with_exporter(exporter.clone()));
@@ -236,6 +251,12 @@ where
         // (cached descriptors). Subagents do not inherit MCP in v1.
         if let Some(manager) = &mcp {
             manager.register(&mut registry);
+        }
+
+        // Caller-supplied tools (e.g. the ACP client-capability shims, Phase 16).
+        // They dispatch through the same policy chain as every other tool.
+        for tool in extra_tools {
+            registry.insert(tool);
         }
 
         let stream = SqliteStream::open(&state_dir.join("stream.db"), session_id.clone())?;
@@ -1170,6 +1191,7 @@ where
             frame,
             None,
             None,
+            Vec::new(),
         )
         .map_err(|e| ToolError::Other(e.to_string()))?;
         let outcome = child

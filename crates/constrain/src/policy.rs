@@ -76,6 +76,32 @@ impl Policy for PolicyChain {
     }
 }
 
+/// Lexical containment: normalize `candidate` against `root` (rejecting `..`
+/// escapes) without touching disk. Shared by every path-bearing policy
+/// ([`WorkspacePolicy`], [`AcpPolicy`]) so the workspace boundary is enforced
+/// identically wherever a path enters from outside.
+pub fn within_workspace(root: &Path, candidate: &str) -> bool {
+    let joined = if Path::new(candidate).is_absolute() {
+        PathBuf::from(candidate)
+    } else {
+        root.join(candidate)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        use std::path::Component::*;
+        match component {
+            ParentDir => {
+                if !normalized.pop() {
+                    return false;
+                }
+            }
+            CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.starts_with(root)
+}
+
 /// Confines path-bearing filesystem tools to a workspace root.
 pub struct WorkspacePolicy {
     root: PathBuf,
@@ -85,30 +111,6 @@ impl WorkspacePolicy {
     /// Build a policy rooted at `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
-    }
-
-    /// Lexical containment: normalize `candidate` against the root (rejecting
-    /// `..` escapes) without touching disk.
-    fn within_root(&self, candidate: &str) -> bool {
-        let joined = if Path::new(candidate).is_absolute() {
-            PathBuf::from(candidate)
-        } else {
-            self.root.join(candidate)
-        };
-        let mut normalized = PathBuf::new();
-        for component in joined.components() {
-            use std::path::Component::*;
-            match component {
-                ParentDir => {
-                    if !normalized.pop() {
-                        return false;
-                    }
-                }
-                CurDir => {}
-                other => normalized.push(other.as_os_str()),
-            }
-        }
-        normalized.starts_with(&self.root)
     }
 }
 
@@ -126,7 +128,41 @@ impl Policy for WorkspacePolicy {
             _ => None,
         };
         if let Some(path) = candidate {
-            if !self.within_root(path) {
+            if !within_workspace(&self.root, path) {
+                return Err(PolicyError::OutsideWorkspace(PathBuf::from(path)));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Confines ACP client-capability shims (`fs_read_text_file`,
+/// `fs_write_text_file`, `acp_terminal`) to the workspace root (Phase 16).
+/// ACP-supplied filesystem/terminal access is an untrusted I/O surface, so it
+/// must clear the same boundary as in-process tools *before* any server→client
+/// request leaves the agent — an out-of-workspace path is blocked, never sent.
+pub struct AcpPolicy {
+    root: PathBuf,
+}
+
+impl AcpPolicy {
+    /// Build a policy rooted at `root`.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+}
+
+#[async_trait]
+impl Policy for AcpPolicy {
+    async fn before_tool(&self, name: &str, args: &Value) -> Result<(), PolicyError> {
+        let candidate = match name {
+            "fs_read_text_file" | "fs_write_text_file" => args.get("path").and_then(Value::as_str),
+            // The terminal shim's working directory, when supplied, is confined too.
+            "acp_terminal" => args.get("cwd").and_then(Value::as_str),
+            _ => None,
+        };
+        if let Some(path) = candidate {
+            if !within_workspace(&self.root, path) {
                 return Err(PolicyError::OutsideWorkspace(PathBuf::from(path)));
             }
         }
@@ -333,6 +369,44 @@ mod tests {
             .before_tool("read_file", &json!({"path": "/etc/passwd"}))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn acp_policy_confines_fs_and_terminal_to_workspace() {
+        let p = AcpPolicy::new("/ws");
+        // In-workspace fs paths pass.
+        assert!(p
+            .before_tool("fs_read_text_file", &json!({"path": "src/a.rs"}))
+            .await
+            .is_ok());
+        assert!(p
+            .before_tool("fs_write_text_file", &json!({"path": "/ws/out.txt"}))
+            .await
+            .is_ok());
+        // Out-of-workspace fs write is blocked before any client request.
+        assert!(matches!(
+            p.before_tool("fs_write_text_file", &json!({"path": "/etc/passwd"}))
+                .await,
+            Err(PolicyError::OutsideWorkspace(_))
+        ));
+        assert!(p
+            .before_tool("fs_read_text_file", &json!({"path": "../secrets"}))
+            .await
+            .is_err());
+        // The terminal shim's cwd is confined too.
+        assert!(p
+            .before_tool("acp_terminal", &json!({"command": "ls", "cwd": "/tmp"}))
+            .await
+            .is_err());
+        assert!(p
+            .before_tool("acp_terminal", &json!({"command": "ls"}))
+            .await
+            .is_ok());
+        // Unrelated tools are untouched.
+        assert!(p
+            .before_tool("read_file", &json!({"path": "/etc/passwd"}))
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
