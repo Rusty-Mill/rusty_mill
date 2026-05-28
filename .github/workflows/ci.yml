@@ -80,3 +80,50 @@ jobs:
           tool: cargo-audit,cargo-deny
       - run: cargo audit
       - run: cargo deny check
+
+  desktop:
+    name: desktop (Tauri IPC + frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      # The WebKitGTK system libraries the Tauri webview links against — the same
+      # set the SessionStart hook provisions for web sessions.
+      - name: Install WebKitGTK system libraries
+        run: |
+          sudo apt-get update || echo "apt-get update reported errors; continuing"
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            libxdo-dev \
+            libssl-dev
+      # The frontend build is the test gate's other half: `generate_context!`
+      # embeds the Vite `dist/` output, so it must exist before the Rust build.
+      - name: Build frontend
+        working-directory: desktop
+        run: |
+          npm ci
+          npm run build
+      - name: rustfmt (desktop)
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+      - name: clippy (desktop)
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Tauri IPC smoke test
+        working-directory: desktop/src-tauri
+        run: cargo test

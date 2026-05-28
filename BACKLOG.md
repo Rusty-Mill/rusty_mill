@@ -355,13 +355,13 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** the primary interactive surface. **Stack: Tauri 2 + SolidJS + CodeMirror 6 + xterm.js.** All AI SDK calls on the Rust side; the frontend is a reactive rendering layer over Tauri IPC.
 **Depends on:** 14 · **Size:** XL
 
-- [ ] Tauri 2 shell: SolidJS + Tailwind v4 + Vite, resizable panels `L` · #22
-- [ ] Session panel: `TurnCard`, `ToolEventRow`, `VerificationBadge`, `TaskStateBanner`, streaming `L` · #23
-- [ ] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview `L` · #24
-- [ ] Composer: `@file`/`#memory`/`/command`, approval gate, plan confirmation `M` · #25
-- [ ] Harness dashboard: verification stream, evidence journal, entropy chart, M-HIR trend, token budget `L` · #26 ⭐
-- [ ] Settings: provider/model, OS-keychain keys, permissions, MCP, harness tuning, themes `M` · #27
-- [ ] Tauri IPC smoke test; events from the **canonical `rk://` table** (PRD 06) incl. `rk://turn_start` `M`
+- [x] Tauri 2 shell: SolidJS + Tailwind v4 + Vite, resizable panels `L` · #22 *(in `desktop/`, its own workspace outside the core one)*
+- [x] Session panel: `TurnCard`, `ToolEventRow`, `VerificationBadge`, `TaskStateBanner`, streaming `L` · #23 *(turn-boundary frames; token-level `rk://token` streaming is a follow-on with the kernel's `stream_turn`)*
+- [x] Context panel: xterm.js terminal, CM6 diff editor, git, memory browser, web preview `L` · #24 *(terminal + editor/diff + memory done; git status + web preview are basic stubs)*
+- [x] Composer: `@file`/`#memory`/`/command`, approval gate, plan confirmation `M` · #25
+- [x] Harness dashboard: verification stream, evidence journal, entropy chart, M-HIR trend, token budget `L` · #26 ⭐ *(per-session charts; the cross-session M-HIR sparkline is a follow-on)*
+- [x] Settings: provider/model, OS-keychain keys, permissions, MCP, harness tuning, themes `M` · #27 *(keychain keys, MCP list, tuning overrides, themes done; model switching stays restart-only)*
+- [x] Tauri IPC smoke test; events from the **canonical `rk://` table** (PRD 06) incl. `rk://turn_start` `M`
 
 **Definition of Done:** IPC commands/events match PRD 06's canonical table; keys live only in the OS keychain; `invoke` errors surface via the boundary error taxonomy.
 **Acceptance:** a turn streams tokens, auto-focuses the right context tab, and the dashboard reflects the verification + entropy + M-HIR.

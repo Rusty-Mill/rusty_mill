@@ -945,6 +945,13 @@ where
         Ok(complete(self.model.clone(), COMPACTION_SYSTEM, &prompt).await?)
     }
 
+    /// The tool events captured during the most recent turn — the desktop
+    /// bridge mirrors these as `rk://tool_event` (the tracer retains the last
+    /// episode until the next turn starts). Empty before the first turn.
+    pub fn last_tool_events(&self) -> Vec<rk_observe::ToolEvent> {
+        self.tracer.episode().tool_events
+    }
+
     /// The advertised tool names (for the startup banner / diagnostics).
     pub fn tool_names(&self) -> Vec<String> {
         self.dispatch
