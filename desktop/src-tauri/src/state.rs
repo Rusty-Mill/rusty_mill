@@ -34,8 +34,14 @@ pub type ApprovalRx = mpsc::Receiver<ApprovalRequest>;
 /// JSON (or a [`BoundaryErrorPayload`]); nothing here names the concrete model.
 #[async_trait::async_trait]
 pub trait SessionApi: Send + Sync {
-    /// Run one turn (`session_send`).
-    async fn send(&self, message: &str) -> Result<TurnResult, BoundaryErrorPayload>;
+    /// Run one turn (`session_send`), pushing each streamed text delta onto
+    /// `tokens` so the bridge can mirror them as `rk://token`. An owned `'static`
+    /// channel (not a borrowed closure) keeps this object-safe across async-trait.
+    async fn send(
+        &self,
+        message: &str,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<TurnResult, BoundaryErrorPayload>;
     /// The tool events from the most recent turn, redacted, as `rk://tool_event`
     /// payloads.
     fn last_tool_events(&self) -> Vec<Value>;
@@ -82,8 +88,17 @@ impl<M> SessionApi for Session<M>
 where
     M: LanguageModel + TextInputSupport + ToolCallSupport + Clone + Send + Sync + 'static,
 {
-    async fn send(&self, message: &str) -> Result<TurnResult, BoundaryErrorPayload> {
-        match Session::send(self, message).await {
+    async fn send(
+        &self,
+        message: &str,
+        tokens: mpsc::UnboundedSender<String>,
+    ) -> Result<TurnResult, BoundaryErrorPayload> {
+        // A concrete, owned `'static` closure — no trait object or borrow crosses
+        // the async-trait boundary, so the HRTB lifetime checks resolve cleanly.
+        let on_token = move |delta: &str| {
+            let _ = tokens.send(delta.to_string());
+        };
+        match Session::send_streaming(self, message, on_token).await {
             Ok(outcome) => Ok(TurnResult::from_outcome(&outcome)),
             Err(e) => Err(classify(&e)),
         }

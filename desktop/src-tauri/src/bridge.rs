@@ -42,9 +42,36 @@ async fn session_send<R: Runtime>(
     let turn_id = format!("turn_{}", now_tag());
     emit(&app, event::TURN_START, json!({ "turn_id": turn_id }));
 
-    let result = state.session.send(&message).await?;
+    // Mirror each streamed text delta as `rk://token` (the composer's live reply).
+    // The session pushes deltas onto an unbounded channel; a pump task emits them
+    // until the sender drops (turn done), then we drain it before `turn_complete`.
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let token_app = app.clone();
+    let pump = tauri::async_runtime::spawn(async move {
+        while let Some(delta) = token_rx.recv().await {
+            let _ = token_app.emit(&event::uri(event::TOKEN), delta);
+        }
+    });
+    let send_result = state.session.send(&message, token_tx).await;
+    let _ = pump.await;
+    let result = send_result?;
 
     for ev in state.session.last_tool_events() {
+        // Surface bash stdout/stderr to the terminal tab. Live per-chunk
+        // streaming needs the bash tool to stream; v1 emits the captured output
+        // once the turn settles.
+        if matches!(
+            ev.get("name").and_then(|v| v.as_str()),
+            Some("bash") | Some("bash_background")
+        ) {
+            if let Some(payload) = ev
+                .get("outcome")
+                .and_then(|o| o.get("payload"))
+                .and_then(|p| p.as_str())
+            {
+                emit(&app, event::BASH_OUTPUT, format!("{payload}\n"));
+            }
+        }
         emit(&app, event::TOOL_EVENT, ev);
     }
     if let Some(audit) = state.session.entropy_recent(1).into_iter().next_back() {

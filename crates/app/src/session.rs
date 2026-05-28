@@ -29,7 +29,7 @@ use rk_feed::{
     Isolation, Memory, Observation, SessionFactory, SqliteStore, SqliteStream, Store, Stream,
     TaskState, TaskStore, ToolError, ToolRegistry, COMPACTION_SYSTEM, DEFAULT_RECALL_K,
 };
-use rk_kernel::{complete, run_turn};
+use rk_kernel::{complete, run_turn, stream_turn};
 use rk_mcp::{McpManager, McpPolicy};
 use rk_observe::{
     EntropyAudit, EntropyAuditor, EntropyLog, H3Scratch, InterventionKind, InterventionLogger,
@@ -290,6 +290,28 @@ where
     /// → promote/consolidate. Records `unverified_followup` if the prior turn was
     /// unverified.
     pub async fn send(&self, prompt: &str) -> anyhow::Result<TurnOutcome> {
+        self.send_inner(prompt, None).await
+    }
+
+    /// Like [`Session::send`], but each streamed text delta is handed to
+    /// `on_token` as it arrives (the desktop bridge mirrors these as `rk://token`).
+    /// Dispatch, verification, journaling, and memory are identical to `send`.
+    pub async fn send_streaming<F: FnMut(&str) + Send>(
+        &self,
+        prompt: &str,
+        mut on_token: F,
+    ) -> anyhow::Result<TurnOutcome> {
+        // Bind via an annotated reborrow so the trait-object lifetime is inferred
+        // from the borrow (not defaulted to `'static`, which an `as` cast would do).
+        let sink: &mut (dyn FnMut(&str) + Send) = &mut on_token;
+        self.send_inner(prompt, Some(sink)).await
+    }
+
+    async fn send_inner(
+        &self,
+        prompt: &str,
+        on_token: Option<&mut (dyn FnMut(&str) + Send)>,
+    ) -> anyhow::Result<TurnOutcome> {
         let msg_id = self.next_msg_id();
         // H3 scratch is per-turn — clear last turn's reproduction/report/attributions.
         if let Some(scratch) = &self.h3 {
@@ -355,13 +377,27 @@ where
         self.stream.append(&obs("user", "message", prompt)).await?;
 
         self.tracer.start_episode();
-        let reply = run_turn(
-            self.model.clone(),
-            &self.system,
-            &prompt_with_context,
-            self.dispatch.clone(),
-        )
-        .await?;
+        let reply = match on_token {
+            Some(cb) => {
+                stream_turn(
+                    self.model.clone(),
+                    &self.system,
+                    &prompt_with_context,
+                    self.dispatch.clone(),
+                    cb,
+                )
+                .await?
+            }
+            None => {
+                run_turn(
+                    self.model.clone(),
+                    &self.system,
+                    &prompt_with_context,
+                    self.dispatch.clone(),
+                )
+                .await?
+            }
+        };
         self.tracer.set_final_reached(true);
 
         // Record the assistant turn and refresh the line-item usage for `/cost`.
