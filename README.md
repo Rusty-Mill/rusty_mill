@@ -158,8 +158,8 @@ testable in CI without a live provider.
 - **15 · Desktop frontend** — a Tauri 2 + SolidJS + CodeMirror 6 + xterm.js desktop app ([`desktop/`](desktop), its own cargo workspace) that is a reactive rendering layer over `Session`. The Rust bridge registers one `#[tauri::command]` per name in the canonical IPC contract (`app::contract`) and emits the nine `rk://` events — including **live `rk://token` streaming** via the kernel's `stream_turn` and `rk://bash_output` to the terminal — with turn failures rendered through the boundary-error taxonomy; provider keys live only in the OS keychain. The UI is an AI-first layout (streaming session panel, xterm.js terminal, CM6 diff editor, composer with `@file`/`#memory`/`/command` + approval/plan gates, harness dashboard, settings/themes). A headless Tauri IPC smoke test (mock runtime) plus the frontend build gate it in CI.
 - **16 · ACP** — an Agent Client Protocol server (`rusty-keys --acp`): newline-delimited JSON-RPC 2.0 over stdio exposing the `Session` to editors. Handshake (`initialize`/`authenticate`), `session/new`/`prompt`/`cancel` → `Session::send()` with `session/update` notifications, and a `session/request_permission` round-trip bound to the Phase-7 `ApprovalGate` (a denied write holds the boundary). Client fs/terminal capability shims are a documented follow-on.
 
-Remaining follow-ons: the MCP SSE transport (+auth/TLS), gateway token-level
-streaming / readiness probe, ACP fs/terminal shims, and a desktop git-status tab.
+Remaining follow-ons: the MCP SSE transport (+auth/TLS), the gateway readiness
+probe, ACP fs/terminal shims, and a desktop git-status tab.
 
 ## Building & testing
 
