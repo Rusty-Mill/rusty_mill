@@ -121,10 +121,11 @@ impl TokenBudget {
 }
 ```
 
-Three compaction tiers triggered in step 5:
+Four compaction tiers triggered in step 5:
 
 | Tier | Threshold | Behaviour |
 |---|---|---|
+| Warn | ≈10pp below micro (e.g. 70%) | Light micro: trim only the very oldest turn-pairs (keeps 2× as many as micro); no LLM call (P4 finer tier) |
 | Micro-compact | 80% of context limit | Drop oldest turn-pairs; prepend `"[compacted N turns]"`; no LLM call |
 | Session summary | 90% | aisdk summarisation call over oldest half of history; insert `[SUMMARY]` message |
 | Full compact | 95% (or `/compact` command) | Full summary of all history; history reset to single summary message |
@@ -132,6 +133,13 @@ Three compaction tiers triggered in step 5:
 All compaction events recorded in `EvidenceJournal` as `kind: "compaction"`.
 Configured via `RUSTYKEYS_COMPACT_MICRO` (0.80), `RUSTYKEYS_COMPACT_SESSION`
 (0.90), `RUSTYKEYS_COMPACT_FULL` (0.95).
+
+**Real-token calibration (P4).** The thresholds fire on a token *estimate*
+(≈4 chars/token), corrected by a calibration factor `real / estimate` learned
+from the provider's reported usage each turn (`run_turn`/`stream_turn` surface
+`TurnUsage`). So compaction fires on real tokens, not raw length; a provider
+that omits usage (e.g. the offline fake) leaves the factor at `1.0`. `used_tokens`
+(shown by `/cost`) is the provider's real input-token count when reported.
 
 ### Plan mode lifecycle
 

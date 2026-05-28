@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::{
     LanguageModel, LanguageModelOptions, LanguageModelResponse, LanguageModelResponseContentType,
-    LanguageModelStreamChunk, LanguageModelStreamChunkType,
+    LanguageModelStreamChunk, LanguageModelStreamChunkType, Usage,
 };
 use aisdk::core::messages::AssistantMessage;
 use aisdk::core::tools::ToolCallInfo;
@@ -37,6 +37,9 @@ pub enum Scripted {
 #[derive(Debug, Clone)]
 pub struct FakeLanguageModel {
     script: Arc<Mutex<VecDeque<Vec<Scripted>>>>,
+    /// Optional per-call provider usage (P4). `None` ⇒ no usage reported, like a
+    /// provider that omits it; the budget then falls back to its estimate.
+    usage: Option<(usize, usize)>,
 }
 
 impl FakeLanguageModel {
@@ -44,7 +47,25 @@ impl FakeLanguageModel {
     pub fn new(turns: Vec<Vec<Scripted>>) -> Self {
         Self {
             script: Arc::new(Mutex::new(turns.into_iter().collect())),
+            usage: None,
         }
+    }
+
+    /// Report `(input_tokens, output_tokens)` on every response, simulating a
+    /// provider that returns real usage (P4).
+    pub fn with_usage(mut self, input_tokens: usize, output_tokens: usize) -> Self {
+        self.usage = Some((input_tokens, output_tokens));
+        self
+    }
+
+    /// The configured provider usage as an aisdk `Usage`, if any.
+    fn usage_value(&self) -> Option<Usage> {
+        self.usage.map(|(input, output)| Usage {
+            input_tokens: Some(input),
+            output_tokens: Some(output),
+            reasoning_tokens: None,
+            cached_tokens: None,
+        })
     }
 
     /// Pop the next scripted batch (empty when the script is exhausted).
@@ -84,7 +105,7 @@ impl LanguageModel for FakeLanguageModel {
         let contents = self.next_batch().into_iter().map(to_content).collect();
         Ok(LanguageModelResponse {
             contents,
-            usage: None,
+            usage: self.usage_value(),
         })
     }
 
@@ -96,6 +117,7 @@ impl LanguageModel for FakeLanguageModel {
         // a Delta (surfaced to the consumer) then a Done(Text) (finishes the
         // step); a tool call emits a Done(ToolCall) (drives handle_tool_call).
         let mut chunks: Vec<LanguageModelStreamChunk> = Vec::new();
+        let usage = self.usage_value();
         for s in self.next_batch() {
             match to_content(s) {
                 LanguageModelResponseContentType::Text(t) => {
@@ -104,12 +126,13 @@ impl LanguageModel for FakeLanguageModel {
                     ));
                     chunks.push(LanguageModelStreamChunk::Done(AssistantMessage::new(
                         LanguageModelResponseContentType::Text(t),
-                        None,
+                        usage.clone(),
                     )));
                 }
                 content => {
                     chunks.push(LanguageModelStreamChunk::Done(AssistantMessage::new(
-                        content, None,
+                        content,
+                        usage.clone(),
                     )));
                 }
             }

@@ -1,8 +1,35 @@
 # Configuration reference — `RUSTYKEYS_*`
 
-> **Authoritative source** for runtime configuration. All settings resolve from environment variables at startup (PRD 07 `config` crate); `/config` shows current values and `/config set KEY VALUE` overrides for the session (hot-reload rules below). PRD 06 links here instead of carrying its own copy.
+> **Authoritative source** for runtime configuration. Settings resolve from three layers (highest precedence first): the environment (`RUSTYKEYS_*`), the project config file `<workspace>/.rustykeys/config.toml`, then built-in defaults (PRD 07 `config` crate). `/config` shows current values and `/config set KEY VALUE` overrides for the session (hot-reload rules below). PRD 06 links here instead of carrying its own copy.
 
 **Legend:** † = added by the five-persona refinement (not in the original PRD 06 table). Defaults in `code`.
+
+## Project config file — `.rustykeys/config.toml`
+
+Declarative settings that env vars can't express comfortably (lists, nested tables) live in `<workspace>/.rustykeys/config.toml`. **Environment variables always win** over the file, and the file always wins over the built-in default, so the file is a per-project base layer, not a lock.
+
+The `[settings]` table mirrors the env vars below (snake_case keys, no `RUSTYKEYS_` prefix). `workspace` is intentionally **not** a file key — the file lives *inside* the workspace, so it cannot relocate it; set `RUSTYKEYS_WORKSPACE` for that. Unknown tables are ignored by the `config` crate, so other crates parse their own sections (e.g. `[mcp]`, below).
+
+```toml
+[settings]
+model = "anthropic/claude-opus-4-7"
+harness_level = "h3"
+max_steps = 20
+isolation = "sandboxed"
+allow_web = true
+allowed_tools = ["read_file", "bash"]
+context_limit = 200000
+
+# MCP servers (folded in from the legacy standalone mcp.toml). Connecting them
+# requires a build with the `rmcp` transport feature.
+[[mcp.servers]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+A legacy standalone `<workspace>/.rustykeys/mcp.toml` (top-level `[[servers]]`) is still honored as a fallback when `config.toml` declares no `[mcp]` servers.
 
 ## Core
 | Variable | Default | Description |
@@ -58,7 +85,7 @@
 |---|---|---|
 | `RUSTYKEYS_HARNESS_LEVEL` | `h1` | `h0` † \| `h1` \| `h2` \| `h3`. `h0` (no tool registry) is the paper's ablation floor — selectable or eval-only per ADR-0028. |
 | `RUSTYKEYS_VERIFY` | `1` | Enable verification + evidence journal. |
-| `RUSTYKEYS_MAX_STEPS` | `10` | Kernel loop step limit. |
+| `RUSTYKEYS_MAX_STEPS` | `10` | Kernel agent-loop step cap. Enforced via aisdk's `stop_when`/`step_count_is` (ADR-0039); hitting it exits the loop with no final answer, which `compose::CleanTermination` classifies as a failed turn. |
 
 ## Observability
 | Variable | Default | Description |

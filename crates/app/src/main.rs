@@ -79,6 +79,19 @@ async fn main() -> Result<()> {
         }
     }
 
+    // MCP: servers may be declared under `[mcp]` in `.rustykeys/config.toml`
+    // (folded in from the legacy `mcp.toml` — P1). Connecting them through the
+    // real stdio/SSE transports needs the `rmcp` feature; the default CLI build
+    // does not bundle it, so surface a hint rather than silently ignoring them.
+    let mcp_config = rk_mcp::load_mcp_config_for_workspace(&config.workspace)
+        .context("loading MCP config")?;
+    if !mcp_config.servers.is_empty() {
+        eprintln!(
+            "note: {} MCP server(s) declared in .rustykeys/config.toml, but this \
+             build has no MCP transport (rebuild with the `rmcp` feature to connect them)",
+            mcp_config.servers.len()
+        );
+    }
     let mut session = Session::new(&config, model).context("building session")?;
 
     // Semantic recall when RUSTYKEYS_EMBED_MODEL is set; lexical otherwise.
@@ -262,6 +275,10 @@ where
                     }
                 }
             }
+            "/ratchet" => match session.ratchet_report() {
+                Ok(report) => println!("{report}"),
+                Err(e) => eprintln!("/ratchet failed: {e}"),
+            },
             "/cost" => {
                 let (used, limit, frac, total, compactions) = session.cost();
                 println!(
@@ -466,15 +483,21 @@ where
 }
 
 /// `/init`: write a starter `AGENT_GUIDE.md` to the workspace root.
+///
+/// The `GuideLoader` (ADR-0037) merges this into the cached system prefix at
+/// session start, layered managed → user (`~/.rustykeys/AGENT_GUIDE.md`) →
+/// project (this file) → local (`.rustykeys/AGENT_GUIDE.md`, highest precedence).
 fn init_agent_guide(config: &Config) -> std::io::Result<std::path::PathBuf> {
     let path = config.workspace.join("AGENT_GUIDE.md");
     let body = "# Agent Guide\n\n\
-        Project-specific guidance for the Rusty Keys agent.\n\n\
+        Project-specific guidance for the Rusty Keys agent. Loaded into the \
+        system prompt at session start; a `.rustykeys/AGENT_GUIDE.md` overrides \
+        this file.\n\n\
         ## Conventions\n\
         - (describe build/test commands, e.g. `cargo test`)\n\
         - (coding standards, directory layout)\n\n\
         ## Known failures\n\
-        - (recurring pitfalls the agent should avoid)\n\n\
+        - (recurring pitfalls the agent should avoid — `/ratchet` proposes checks for repeats)\n\n\
         ## Verification\n\
         - (how to confirm a change is correct — registered checks live in `.rustykeys/checks.toml`)\n";
     std::fs::write(&path, body)?;

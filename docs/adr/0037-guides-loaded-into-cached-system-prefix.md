@@ -1,6 +1,6 @@
 # ADR-0037: Layered guides loaded at session start into the cached system prefix
 
-- Status: Proposed
+- Status: Accepted (implemented — `feed::GuideLoader`, wired in `app::Session`)
 - Date: 2026-05-28
 - Tags: feed, guides, prompt, context, roadmap
 

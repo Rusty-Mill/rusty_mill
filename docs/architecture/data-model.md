@@ -21,9 +21,11 @@ All state is local to the workspace root, under `.rustykeys/`. Every path is ove
 ├── interventions.jsonl    # append-only — human interventions (drives M-HIR)
 ├── security.jsonl         # append-only — blocked tool calls (security checkers)
 ├── entropy.jsonl          # append-only — per-turn entropy audits
+├── ratchet.jsonl          # append-only — failed-turn attributions feeding /ratchet (P3); see §8
 ├── task.json              # current TaskState (working memory: goal + criteria + scope)
+├── config.toml            # project settings ([settings]) + MCP servers ([mcp]); env overrides it
 ├── checks.toml            # local deterministic-check registry (H3); see §8
-├── mcp.toml               # MCP server declarations; see §8
+├── mcp.toml               # legacy standalone MCP declarations (fallback); see §8
 ├── episodes/              # H3 episode packages, one JSON file per turn
 │   └── <turn_id>.json
 └── sessions/              # persisted/named sessions for /resume and gateway session_id
@@ -320,8 +322,11 @@ expected_substring = "Password is required"
 covers = ["req-1"]
 ```
 
-### `mcp.toml` — MCP servers (PRD 07)
-Schema unchanged from PRD 07; see that PRD. (Reminder: rename the example's `memory.db` to avoid colliding with the harness's `store.db`/`stream.db`.)
+### `ratchet.jsonl` — failed-turn attributions (P3)
+One record per attribution on a failed turn: `{v, kind: "ratchet", ts, turn_id, failure_type, category, layer, check, evidence}`. `/ratchet` aggregates these by `(failure_type, category)` and *proposes* `checks.toml` stanzas for pairs that recur ≥ `RATCHET_MIN_OCCURRENCES` (2) times. Proposals are advisory: the harness never writes `checks.toml` itself (ADR-0040, "zero aspirational rules" — a check is only proposable from a logged attribution).
+
+### MCP servers (PRD 07)
+Servers are declared under the `[mcp]` table of the unified `config.toml` (`[[mcp.servers]]`); per-server fields are unchanged from PRD 07. The legacy standalone `mcp.toml` (top-level `[[servers]]`) is still read as a fallback when `config.toml` declares none. (Reminder: rename the example's `memory.db` to avoid colliding with the harness's `store.db`/`stream.db`.)
 
 ---
 

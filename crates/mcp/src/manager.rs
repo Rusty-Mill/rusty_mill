@@ -38,6 +38,35 @@ impl McpManager {
         self
     }
 
+    /// Connect every server declared in `config`, returning a populated manager.
+    /// Per the PRD trust note, a server that fails to start or enumerate is
+    /// logged to stderr and skipped — never fatal — so one bad server does not
+    /// block the session. An empty config yields an empty manager.
+    ///
+    /// Requires the `rmcp` transport feature (the real stdio/SSE clients);
+    /// without it there is no transport to connect through.
+    #[cfg(feature = "rmcp")]
+    pub async fn from_config(config: &crate::McpConfig) -> Self {
+        let mut manager = Self::new();
+        for spec in &config.servers {
+            match crate::transport::client_from_spec(spec).await {
+                Ok(client) => {
+                    if let Err(e) = manager.connect(&spec.name, client).await {
+                        eprintln!(
+                            "warning: MCP server '{}' tool enumeration failed, skipping: {e}",
+                            spec.name
+                        );
+                    }
+                }
+                Err(e) => eprintln!(
+                    "warning: MCP server '{}' failed to start, skipping: {e}",
+                    spec.name
+                ),
+            }
+        }
+        manager
+    }
+
     /// Connect `client` as server `name`: enumerate + cache its (namespaced)
     /// tools. A failure to enumerate skips the server (PRD: a server that fails
     /// to start is logged + skipped, never fatal).

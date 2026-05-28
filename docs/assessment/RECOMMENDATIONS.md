@@ -98,6 +98,7 @@ See `4_roadmap.svg` for the dependency view.
 
 | ADR | Decision | Status |
 |---|---|---|
-| [0037](../adr/0037-guides-loaded-into-cached-system-prefix.md) | Layered guides loaded at session start into the cached system prefix | Proposed |
+| [0037](../adr/0037-guides-loaded-into-cached-system-prefix.md) | Layered guides loaded at session start into the cached system prefix | Accepted (P2 implemented) |
 | [0038](../adr/0038-stratified-declarative-extension-model.md) | Stratified declarative extension model — skills, hooks-as-policy, plugins | Proposed |
-| [0039](../adr/0039-defer-loop-ownership-behind-contextcontroller.md) | Defer loop ownership; revisit behind a `ContextController` seam | Proposed |
+| [0039](../adr/0039-defer-loop-ownership-behind-contextcontroller.md) | Defer loop ownership; revisit behind a `ContextController` seam | Proposed (P0 `max_steps` portion done) |
+| [0040](../adr/0040-verification-ratchet-proposes-checks-from-logged-failures.md) | Verification ratchet proposes `checks.toml` stanzas only from logged failures | Accepted (P3 implemented) |
