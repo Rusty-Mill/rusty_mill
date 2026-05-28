@@ -647,6 +647,11 @@ where
         Ok(self.entropy_log.recent(n)?)
     }
 
+    /// The most recent `n` evidence-journal records (`/evidence`).
+    pub fn evidence_recent(&self, n: usize) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(self.journal.recent(n)?)
+    }
+
     /// Cumulative entropy delta across the session (`/stats`).
     pub fn entropy_total_delta(&self) -> i64 {
         self.entropy_log

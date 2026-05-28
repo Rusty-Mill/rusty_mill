@@ -338,12 +338,12 @@ even when an in-process checker misses — Anthropic's "supervise what the agent
 **Goal:** `axum` HTTP over `Session::send()` for web/desktop clients.
 **Depends on:** 1 · **Size:** M
 
-- [ ] axum server `L` · #18
-- [ ] `POST /chat`, `GET /stream` (SSE), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy` `M`
-- [ ] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M`
-- [ ] Single + multi-session (TTL, max-sessions, eviction, `session_id`↔auth binding) `M`
-- [ ] Bearer auth, CORS; `/health` liveness vs readiness `S`
-- [ ] Gateway contract / SSE-framing test `M`
+- [x] axum server `L` · #18 *(behind the `gateway` feature)*
+- [x] `POST /chat`, `GET /stream` (SSE), `/health`, `/verify`, `/evidence`, `/mhir`, `/entropy` `M`
+- [x] **SSE framing** (named events mirroring `rk://`, `id:`, terminal `done`/`error`) `M` *(turn-boundary frames; token-level streaming via `stream_turn` is a follow-on)*
+- [x] Single + multi-session (TTL, max-sessions, eviction, `session_id`↔auth binding) `M`
+- [x] Bearer auth, CORS; `/health` liveness vs readiness `S` *(flat liveness; readiness split deferred)*
+- [x] Gateway contract / SSE-framing test `M`
 
 **Definition of Done:** redaction applies on `/evidence`; multi-session evicts on TTL; auth scopes reachable `session_id`s.
 **Acceptance:** two clients in `multi` mode get isolated sessions; an unauthorized `session_id` is unreachable.

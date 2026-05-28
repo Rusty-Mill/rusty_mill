@@ -36,6 +36,24 @@ async fn main() -> Result<()> {
         .build()
         .context("building model provider")?;
 
+    // Web gateway mode: `rusty-keys --gateway` (or RUSTYKEYS_MODE=gateway)
+    // serves axum HTTP/SSE over Session::send() instead of the CLI (PRD 06).
+    let gateway_mode = std::env::args().any(|a| a == "--gateway")
+        || std::env::var("RUSTYKEYS_MODE").as_deref() == Ok("gateway");
+    if gateway_mode {
+        #[cfg(feature = "gateway")]
+        {
+            let port = std::env::var("RUSTYKEYS_GATEWAY_PORT").unwrap_or_else(|_| "3000".into());
+            let addr = format!("0.0.0.0:{port}");
+            eprintln!("rusty-keys gateway listening on {addr}");
+            return rk_app::gateway::serve(config, model, &addr).await;
+        }
+        #[cfg(not(feature = "gateway"))]
+        {
+            anyhow::bail!("gateway mode requires building with `--features gateway`");
+        }
+    }
+
     // MCP server mode: `rusty-keys --mcp` (or RUSTYKEYS_MODE=mcp) exposes
     // Session::send() over JSON-RPC instead of the CLI (PRD 07 / ADR-0029).
     let mcp_mode = std::env::args().any(|a| a == "--mcp")
