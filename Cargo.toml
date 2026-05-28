@@ -10,6 +10,10 @@ members = [
     "crates/compose",
     "crates/app",
 ]
+# The Tauri desktop shell (Phase 15) is its own workspace under `desktop/` — it
+# pulls Tauri + WebKitGTK, so it is intentionally kept out of the core workspace
+# to keep `cargo build --workspace` lean. It builds in a dedicated CI job.
+exclude = ["desktop"]
 
 [workspace.package]
 edition = "2021"
