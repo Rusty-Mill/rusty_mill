@@ -73,7 +73,7 @@ where
         + aisdk::core::capabilities::ToolCallSupport
         + Clone,
 {
-    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /permissions, /entropy, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
+    eprintln!("interactive mode — /verify, /mhir, /memory, /task, /plan, /explore, /mcp, /permissions, /entropy, /cost, /compact, /reflect, /sleep, /groom, /help, /quit");
     let stdin = std::io::stdin();
     loop {
         eprint!("› ");
@@ -87,7 +87,7 @@ where
             "" => continue,
             "/quit" | "/exit" => break,
             "/help" => eprintln!(
-                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /permissions  /entropy  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
+                "commands: /verify  /mhir  /memory  /task  /plan  /explore  /mcp  /permissions  /entropy  /cost  /compact  /reflect  /sleep  /groom  /help  /quit"
             ),
             "/permissions" => {
                 println!(
@@ -95,6 +95,31 @@ where
                     session.permission_mode(),
                     session.isolation()
                 );
+            }
+            "/mcp" => {
+                let servers = session.mcp_summary().await;
+                if servers.is_empty() {
+                    println!("(no MCP servers connected)");
+                }
+                for (name, count) in servers {
+                    println!("{name}: {count} tools");
+                }
+            }
+            "/mcp reconnect" => {
+                match session.reconnect_mcp().await {
+                    Ok(()) => println!("reconnected MCP servers"),
+                    Err(e) => eprintln!("reconnect failed: {e}"),
+                }
+            }
+            line if line.starts_with("/mcp ") => {
+                let server = line.trim_start_matches("/mcp ").trim();
+                let tools = session.mcp_server_tools(server).await;
+                if tools.is_empty() {
+                    println!("(no such server, or it has no tools)");
+                }
+                for t in tools {
+                    println!("  {t}");
+                }
             }
             "/entropy" => {
                 let recs = session.entropy_recent(10)?;

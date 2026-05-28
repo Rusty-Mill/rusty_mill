@@ -1287,6 +1287,7 @@ dependencies = [
  "rk-constrain",
  "rk-feed",
  "rk-kernel",
+ "rk-mcp",
  "rk-observe",
  "serde_json",
  "tokio",
@@ -1370,8 +1371,12 @@ dependencies = [
  "rk-config",
  "rk-constrain",
  "rk-feed",
+ "rk-observe",
+ "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

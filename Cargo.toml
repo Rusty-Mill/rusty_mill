@@ -39,4 +39,5 @@ rk-observe = { path = "crates/observe" }
 rk-constrain = { path = "crates/constrain" }
 rk-feed = { path = "crates/feed" }
 rk-kernel = { path = "crates/kernel" }
+rk-mcp = { path = "crates/mcp" }
 rk-compose = { path = "crates/compose" }
