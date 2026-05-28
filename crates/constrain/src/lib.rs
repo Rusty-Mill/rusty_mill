@@ -13,7 +13,8 @@ mod security;
 pub use approval::{ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger};
 pub use plan::{PlanController, PlanDecision};
 pub use policy::{
-    BashGuard, ModePolicy, PermissionMode, Policy, PolicyChain, PolicyError, WorkspacePolicy,
+    within_workspace, AcpPolicy, BashGuard, ModePolicy, PermissionMode, Policy, PolicyChain,
+    PolicyError, WorkspacePolicy,
 };
 pub use security::{
     default_checkers, CommandInjectionCheck, DestructiveCommandCheck, NetworkExfilCheck,

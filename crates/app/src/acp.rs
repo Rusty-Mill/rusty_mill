@@ -10,21 +10,27 @@
 //! action becomes a `Blocked` outcome (and a `tool_block` intervention) — the
 //! harness boundary is never bypassed.
 //!
-//! Deferred (flagged): client fs/terminal capability shims (`fs/read_text_file`
-//! etc.) + their `AcpPolicy`/inspection — they need the server→client I/O flow.
+//! Client capability shims: when the editor advertises fs/terminal capabilities
+//! at `initialize`, `session/new` registers the matching tools
+//! (`fs_read_text_file`/`fs_write_text_file`/`acp_terminal`, see [`crate::shims`])
+//! gated by an `AcpPolicy`. Each shim issues a server→client request over the
+//! bridge; its return passes the Phase 12 inspector before entering context.
 
 use std::collections::HashMap;
 
 use aisdk::core::capabilities::{TextInputSupport, ToolCallSupport};
 use aisdk::core::language_model::LanguageModel;
 use rk_config::Config;
-use rk_constrain::{ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger};
+use rk_constrain::{
+    AcpPolicy, ApprovalGate, ApprovalRequest, ApprovalResponse, ApprovalTrigger, PolicyChain,
+};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::shims::{AcpClientBridge, ClientCall, ClientCaps};
 use crate::Session;
 
 /// The protocol version advertised in `initialize`.
@@ -63,10 +69,14 @@ where
 
     // Per-connection state.
     let mut session: Option<Arc<Session<M>>> = None;
+    let mut client_caps = ClientCaps::default();
     let (approval_tx, mut approval_rx) = mpsc::channel::<ApprovalRequest>(8);
-    let mut pending_perms: HashMap<u64, tokio::sync::oneshot::Sender<ApprovalResponse>> =
-        HashMap::new();
-    let mut next_perm_id: u64 = 1;
+    // Shims (fs/terminal) call back to the editor over this channel.
+    let (client_tx, mut client_rx) = mpsc::channel::<ClientCall>(8);
+    let mut pending_perms: HashMap<u64, oneshot::Sender<ApprovalResponse>> = HashMap::new();
+    let mut pending_client: HashMap<u64, oneshot::Sender<Result<Value, String>>> = HashMap::new();
+    // Server→client request ids (shared across permission + capability requests).
+    let mut next_req_id: u64 = 1;
     // The in-flight prompt: (request id, the send() task).
     let mut inflight: Option<(Value, JoinHandle<(String, bool)>)> = None;
 
@@ -84,11 +94,14 @@ where
                     continue;
                 };
 
-                // A response to our `session/request_permission` request.
+                // A response to one of our server→client requests: either a
+                // permission decision or a capability (fs/terminal) call result.
                 if msg.get("method").is_none() {
                     if let Some(id) = msg.get("id").and_then(Value::as_u64) {
                         if let Some(respond) = pending_perms.remove(&id) {
                             let _ = respond.send(parse_permission(&msg));
+                        } else if let Some(respond) = pending_client.remove(&id) {
+                            let _ = respond.send(parse_client_result(&msg));
                         }
                     }
                     continue;
@@ -100,6 +113,9 @@ where
 
                 match method {
                     "initialize" => {
+                        // Record which fs/terminal capabilities the editor offers;
+                        // the matching shims are registered at session/new.
+                        client_caps = ClientCaps::parse(&params);
                         let out = result_line(&id, json!({
                             "protocolVersion": ACP_VERSION,
                             "agentCapabilities": { "promptCapabilities": { "image": false } },
@@ -115,9 +131,22 @@ where
                             vec![ApprovalTrigger::NewFilePath, ApprovalTrigger::BashFirstUse],
                             approval_tx.clone(),
                         );
-                        match Session::new_with_policy(&config, model.clone(), Arc::new(gate)) {
+                        // ACP-supplied fs/terminal access is untrusted I/O: the
+                        // AcpPolicy enforces the workspace boundary before any
+                        // request reaches the editor; the gate still runs after.
+                        let policy = PolicyChain::new()
+                            .with(Arc::new(AcpPolicy::new(config.workspace.clone())))
+                            .with(Arc::new(gate));
+                        let bridge = AcpClientBridge::new(client_tx.clone());
+                        let tools = client_caps.tools(bridge, Arc::new(rk_mcp::DefaultInspector));
+                        match Session::new_with_policy_and_tools(
+                            &config,
+                            model.clone(),
+                            Arc::new(policy),
+                            tools,
+                        ) {
                             Ok(s) => {
-                                let sid = format!("acp_{next_perm_id}");
+                                let sid = format!("acp_{next_req_id}");
                                 session = Some(Arc::new(s));
                                 write_line(&mut writer, &result_line(&id, json!({"sessionId": sid}))).await?;
                             }
@@ -163,8 +192,8 @@ where
 
             // ---- a tool is awaiting approval mid-turn ----
             Some(req) = approval_rx.recv() => {
-                let pid = next_perm_id;
-                next_perm_id += 1;
+                let pid = next_req_id;
+                next_req_id += 1;
                 pending_perms.insert(pid, req.respond);
                 let out = request_line(pid, "session/request_permission", json!({
                     "toolCall": { "name": req.tool, "input": req.args },
@@ -175,6 +204,14 @@ where
                     ],
                 }));
                 write_line(&mut writer, &out).await?;
+            }
+
+            // ---- a capability shim (fs/terminal) is calling back to the editor ----
+            Some(call) = client_rx.recv() => {
+                let rid = next_req_id;
+                next_req_id += 1;
+                pending_client.insert(rid, call.respond);
+                write_line(&mut writer, &request_line(rid, &call.method, call.params)).await?;
             }
 
             // ---- the in-flight prompt finished ----
@@ -246,6 +283,19 @@ fn parse_permission(msg: &Value) -> ApprovalResponse {
         "allow_always" => ApprovalResponse::AllowAlways,
         _ => ApprovalResponse::Block,
     }
+}
+
+/// Turn a client's JSON-RPC response to a capability request into `Ok(result)`
+/// or `Err(message)`.
+fn parse_client_result(msg: &Value) -> Result<Value, String> {
+    if let Some(err) = msg.get("error") {
+        let m = err
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("client error");
+        return Err(m.to_string());
+    }
+    Ok(msg.get("result").cloned().unwrap_or(Value::Null))
 }
 
 async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> std::io::Result<()> {

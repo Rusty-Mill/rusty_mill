@@ -89,14 +89,14 @@ These are not a phase; they are the floor every phase builds on (see the dev doc
 proving the Session architecture and `#[tool]` integration. No memory, no verification.
 **Depends on:** — · **Size:** L
 
-- [ ] Cargo workspace — `kernel`, `constrain`, `feed`, `observe`, `compose`, `app`, `config` (+`mcp` stub) `M` · #1
-- [ ] `Config`: env resolution, `RUSTYKEYS_MODEL`, `RUSTYKEYS_WORKSPACE` `S` · #2
-- [ ] `Constrain`: `Policy` (**`async before_tool`**) + `ToolDispatch` trait + `WorkspacePolicy` + `PolicyChain`; `PolicyError` **enum** `M` · #3
-- [ ] `Feed`: `ToolRegistry`, `ToolFn` trait + aisdk `#[tool]` adapter, `ToolOutcome`, built-in `read_file`/`list_directory` `M` · #4
-- [ ] `Observe`: `Tracer`, `Episode`, `ToolEvent`, structured trace logging `S` · #5
-- [ ] `Kernel`: aisdk loop over `&dyn ToolDispatch`/`&dyn Policy` (kernel does not import feed) `M` · #6
-- [ ] `App`: `Session::send()`, thin CLI REPL, startup banner `M` · #7
-- [ ] **Substrate:** error taxonomy, `FakeLanguageModel` fixture, clippy lints, `rust-toolchain.toml`, CI `L`
+- [x] Cargo workspace — `kernel`, `constrain`, `feed`, `observe`, `compose`, `app`, `config` (+`mcp` stub) `M` · #1
+- [x] `Config`: env resolution, `RUSTYKEYS_MODEL`, `RUSTYKEYS_WORKSPACE` `S` · #2
+- [x] `Constrain`: `Policy` (**`async before_tool`**) + `ToolDispatch` trait + `WorkspacePolicy` + `PolicyChain`; `PolicyError` **enum** `M` · #3
+- [x] `Feed`: `ToolRegistry`, `ToolFn` trait + aisdk `#[tool]` adapter, `ToolOutcome`, built-in `read_file`/`list_directory` `M` · #4
+- [x] `Observe`: `Tracer`, `Episode`, `ToolEvent`, structured trace logging `S` · #5
+- [x] `Kernel`: aisdk loop over `&dyn ToolDispatch`/`&dyn Policy` (kernel does not import feed) `M` · #6
+- [x] `App`: `Session::send()`, thin CLI REPL, startup banner `M` · #7
+- [x] **Substrate:** error taxonomy, `FakeLanguageModel` fixture, clippy lints, `rust-toolchain.toml`, CI `L`
 
 **Definition of Done:** workspace builds on stable + MSRV; `clippy -D warnings` clean; CI green; `FakeLanguageModel` integration test drives a full `send()`; error enums + `ToolOutcome` in place.
 **Acceptance:** `cargo run -- "read Cargo.toml and summarize it"` returns a reply after a vetted `read_file`; a path outside the workspace returns a `BLOCKED` string, not a panic.
@@ -109,14 +109,14 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** structured visibility + deterministic verification + the evidence journal.
 **Depends on:** 1 · **Size:** M
 
-- [ ] `EvidenceJournal`: append-only JSONL at `.rustykeys/evidence.jsonl`, `schema_version` `M`
-- [ ] **Redaction-by-default** before any journal/log write (ADR-0026) `S`
-- [ ] `InterventionLogger`: M-HIR, `interventions.jsonl` (+ `avoidability`/`harness_gap`/`burden`) `M`
-- [ ] `Verifier`: `Check` trait, `NoToolErrors`, `CleanTermination` `S`
-- [ ] `VerificationReport`: `render()`, `as_observation()`, `limits` `S`
-- [ ] Failure attribution → fixed `FailureType` enum + frozen `(category, layer)` matrix `M`
-- [ ] `/verify`, `/mhir` CLI commands `S`
-- [ ] **Chaos / resilience eval tier** (v1): fault-inject at the `FakeLanguageModel`/`ToolOutcome` seam; resilience metric — honest degradation, never verified-success-on-fault (eval-plan) `M`
+- [x] `EvidenceJournal`: append-only JSONL at `.rustykeys/evidence.jsonl`, `schema_version` `M`
+- [x] **Redaction-by-default** before any journal/log write (ADR-0026) `S`
+- [x] `InterventionLogger`: M-HIR, `interventions.jsonl` (+ `avoidability`/`harness_gap`/`burden`) `M`
+- [x] `Verifier`: `Check` trait, `NoToolErrors`, `CleanTermination` `S`
+- [x] `VerificationReport`: `render()`, `as_observation()`, `limits` `S`
+- [x] Failure attribution → fixed `FailureType` enum + frozen `(category, layer)` matrix `M`
+- [x] `/verify`, `/mhir` CLI commands `S`
+- [x] **Chaos / resilience eval tier** (v1): fault-inject at the `FakeLanguageModel`/`ToolOutcome` seam; resilience metric — honest degradation, never verified-success-on-fault (eval-plan) `M`
 
 **Definition of Done:** every turn writes a versioned, redacted evidence record; failed checks produce a `FailureType` attribution; torn-line recovery tested.
 **Acceptance:** a turn with a failing tool call is marked UNVERIFIED with `(tool_error, feed/tools)`; `/verify` renders the report with its `limits`.
@@ -129,15 +129,15 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** short-term stream → long-term graph; completes the OODA loop.
 **Depends on:** 1 · **Size:** L
 
-- [ ] Short-term `Stream` trait + `SqliteStream` (`stream.db`, WAL) `M`
-- [ ] Long-term `Store` trait + SQLite impl (FTS5 lexical recall, edges) `L`
-- [ ] **Recall scoring** — pinned formula (weights, decay, batch normalization, neighbor rule, output-block format) `M`
-- [ ] **`recall()` → `Vec<ContextEntry>`** (ADR-0036; D5): recall/orient emit structured entries (with a v1 `influenced_decision` heuristic), not a bare `String`, so the `context_trace` producer exists and the H2 cross-session-recall gate is measurable `M`
-- [ ] Tiered consolidation idle/sleep/explicit + **JSON emit contract** `L`
-- [ ] Skill grooming (refine/merge/split); skills exempt from pruning `M`
-- [ ] **Close the loop:** feed `Attribution` into consolidation; boost failure-born skills at recall `M`
-- [ ] **Validation-gated skills** (ADR-0031): failure-born skills are candidates (no floor/exemption) until validated — online VERIFIED match / offline golden replay; `direct_edit` un-validates `M`
-- [ ] `/memory`, `/reflect`, `/sleep`, `/groom` `S`
+- [x] Short-term `Stream` trait + `SqliteStream` (`stream.db`, WAL) `M`
+- [x] Long-term `Store` trait + SQLite impl (FTS5 lexical recall, edges) `L`
+- [x] **Recall scoring** — pinned formula (weights, decay, batch normalization, neighbor rule, output-block format) `M`
+- [x] **`recall()` → `Vec<ContextEntry>`** (ADR-0036; D5): recall/orient emit structured entries (with a v1 `influenced_decision` heuristic), not a bare `String`, so the `context_trace` producer exists and the H2 cross-session-recall gate is measurable `M`
+- [x] Tiered consolidation idle/sleep/explicit + **JSON emit contract** `L`
+- [x] Skill grooming (refine/merge/split); skills exempt from pruning `M`
+- [x] **Close the loop:** feed `Attribution` into consolidation; boost failure-born skills at recall `M`
+- [x] **Validation-gated skills** (ADR-0031): failure-born skills are candidates (no floor/exemption) until validated — online VERIFIED match / offline golden replay; `direct_edit` un-validates `M`
+- [x] `/memory`, `/reflect`, `/sleep`, `/groom` `S`
 
 **Definition of Done:** facts/skills persist across sessions; recall surfaces a planted fact next session; consolidation output validates against the contract.
 **Acceptance:** teach a fact in session A; in session B it is recalled and used; an UNVERIFIED turn produces a high-importance skill.
@@ -150,12 +150,12 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** working-memory tier + LLM-judge criteria check.
 **Depends on:** 2, 3 · **Size:** M
 
-- [ ] `TaskState` (`goal`, `success_criteria`, **`scope`**, `status`) → `task.json` `S`
-- [ ] `set_task`/`complete_task` tools `S`
-- [ ] Task prompt injection (into orient/`extra_context`, not the static system prompt) + recall anchoring `S`
-- [ ] `CriteriaJudge`: async aisdk call, per-criterion verdict; **no silent pass-as-verified** (`judge_unavailable`) `M`
-- [ ] `criteria_unmet@compose/semantic` attribution `S`
-- [ ] `/task` CLI `S`
+- [x] `TaskState` (`goal`, `success_criteria`, **`scope`**, `status`) → `task.json` `S`
+- [x] `set_task`/`complete_task` tools `S`
+- [x] Task prompt injection (into orient/`extra_context`, not the static system prompt) + recall anchoring `S`
+- [x] `CriteriaJudge`: async aisdk call, per-criterion verdict; **no silent pass-as-verified** (`judge_unavailable`) `M`
+- [x] `criteria_unmet@compose/semantic` attribution `S`
+- [x] `/task` CLI `S`
 
 **Definition of Done:** judge runs in the post-turn join; parse failure records `judge_unavailable` and bars `AutonomousVerifiedSuccess`.
 **Acceptance:** with criteria set, a reply that ignores a criterion is judged `fail`; a provider error during judging does not inflate "verified".
@@ -168,10 +168,10 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** optional semantic recall at scale.
 **Depends on:** 3 · **Size:** M
 
-- [ ] `Store` over `duckdb-rs` (`store.duckdb`), `list_cosine_similarity` `M`
-- [ ] Embedding via aisdk embed API; dims/chunking/threshold pinned `M`
-- [ ] `RUSTYKEYS_LONG_TERM_BACKEND=duckdb` `S`
-- [ ] Lexical fallback + mixed-corpus blend when some memories lack embeddings `S`
+- [x] `Store` over `duckdb-rs` (`store.duckdb`), `list_cosine_similarity` `M`
+- [x] Embedding via aisdk embed API; dims/chunking/threshold pinned `M`
+- [x] `RUSTYKEYS_LONG_TERM_BACKEND=duckdb` `S`
+- [x] Lexical fallback + mixed-corpus blend when some memories lack embeddings `S`
 
 **Definition of Done:** semantic recall outperforms lexical on a planted-paraphrase fixture; lexical fallback still works with no embed model.
 **Acceptance:** a paraphrased query recalls the right memory under duckdb; unset embed model → lexical, no error.
@@ -183,10 +183,10 @@ proving the Session architecture and `#[tool]` integration. No memory, no verifi
 **Goal:** expand to the core coding-agent tool set.
 **Depends on:** 1 · **Size:** L
 
-- [ ] `bash`, `edit_file`, `write_file`, `glob`, `grep` with `BashGuard` checkers `L` · #8
-- [ ] `web_fetch`, `web_search` — opt-in `RUSTYKEYS_ALLOW_WEB` + **SSRF/egress guard** `M` · #9
-- [ ] `agent` subagent via **`SessionFactory`** + `AgentDepthPolicy` `M` · #10
-- [ ] Task-management tools: `task_create/get/list/update/stop/output` `M` · #11
+- [x] `bash`, `edit_file`, `write_file`, `glob`, `grep` with `BashGuard` checkers `L` · #8
+- [x] `web_fetch`, `web_search` — opt-in `RUSTYKEYS_ALLOW_WEB` + **SSRF/egress guard** `M` · #9
+- [x] `agent` subagent via **`SessionFactory`** + `AgentDepthPolicy` `M` · #10
+- [x] Task-management tools: `task_create/get/list/update/stop/output` `M` · #11
 
 **Definition of Done:** each tool policy-vetted; `edit_file` read-before-edit invariant; web tools blocked from loopback/metadata IPs.
 **Acceptance:** `bash("rm -rf /")` is blocked + logged; `web_fetch("http://169.254.169.254/…")` is denied.
@@ -390,8 +390,8 @@ tool-return inspection seam rather than introducing a parallel stack.
 - [x] `session/new`, `session/prompt`, `session/cancel` mapped onto `Session::send()` + the existing session lifecycle `L` *(`session/load` resume is a follow-on)*
 - [x] `session/update` streaming notifications mirroring the canonical `rk://` event table (PRD 06) `M` *(turn-boundary frames; token-level streaming is a follow-on)*
 - [x] Client-driven `session/request_permission` bound to the Phase 7 `ApprovalGate` (Allow/AllowAlways/Reject round-trip), so editor approval reuses the existing gate `M`
-- [ ] Client filesystem/terminal capability shims (`fs/read_text_file`, `fs/write_text_file`, terminal ops) routed through `constrain` policy + `ToolExecutor` isolation `M` *(deferred — needs the server→client I/O flow + `AcpPolicy`/inspection below)*
-- [ ] `AcpPolicy` + tool-return inspection on ACP-sourced content before it enters context (reuse the Phase 12 classifier seam) `S` *(deferred with the fs/terminal shims it gates)*
+- [x] Client filesystem/terminal capability shims (`fs/read_text_file`, `fs/write_text_file`, terminal ops) routed through `constrain` policy + `ToolExecutor` isolation `M` *(when the editor advertises fs/terminal at `initialize`, `session/new` registers `fs_read_text_file`/`fs_write_text_file`/`acp_terminal` shims that call back over a server→client bridge; they dispatch through the session's policy chain like every in-process tool)*
+- [x] `AcpPolicy` + tool-return inspection on ACP-sourced content before it enters context (reuse the Phase 12 classifier seam) `S` *(`AcpPolicy` enforces the workspace boundary on fs `path`/terminal `cwd` before any request leaves the agent — an out-of-workspace write is blocked, never sent; returns pass the Phase 12 `ReturnInspector` before entering context)*
 - [x] Integration-test seam: fake ACP client driving a scripted `FakeLanguageModel` session (handshake → prompt → streamed updates → permission round-trip → cancel) `M`
 
 **Definition of Done:** an ACP client completes the handshake, opens a session, sends a prompt, and receives streamed `session/update`s; a write requested mid-turn round-trips the `ApprovalGate`; ACP-supplied fs/terminal access is policy-vetted identically to in-process tools; cancellation tears the turn down cleanly.
