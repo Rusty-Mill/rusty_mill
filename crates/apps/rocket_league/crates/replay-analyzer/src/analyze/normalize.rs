@@ -111,6 +111,7 @@ pub fn attacking_frame(
                 team: c.team,
                 p: flip_xy(c.p, sign),
                 v: flip_xy(c.v, sign),
+                boost: c.boost,
             })
             .collect(),
     }

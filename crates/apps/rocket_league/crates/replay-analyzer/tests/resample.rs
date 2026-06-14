@@ -11,6 +11,8 @@ fn s(t: f32, x: f32) -> TrackSample {
         actor_id: 1,
         p: Vec3 { x, y: 0.0, z: 17.0 },
         v: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
+        // Distinct per-sample boost so we can assert carry-forward (not interp).
+        boost: Some((t * 10.0).round() as u8),
     }
 }
 
@@ -35,12 +37,14 @@ fn recon() -> Reconstruction {
             actor_id: 99,
             p: Vec3 { x: 0.0, y: 0.0, z: 93.0 },
             v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
+            boost: None,
         },
         TrackSample {
             t: 1.0,
             actor_id: 99,
             p: Vec3 { x: 0.0, y: 1000.0, z: 93.0 },
             v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
+            boost: None,
         },
     ];
     Reconstruction {
@@ -80,6 +84,9 @@ fn positions_are_linearly_interpolated() {
     assert!(near(f.t, 0.5), "located t={}", f.t);
     let car = f.cars.iter().find(|c| c.pri == 1).expect("car live at 0.5");
     assert!(near(car.p.x, 150.0), "interp x = {}", car.p.x);
+    // Boost is carried from the sample at/before t (step), not interpolated:
+    // at t=0.5 that is the t=0 sample (boost 0), not 5.
+    assert_eq!(car.boost, Some(0), "boost carried from t=0 sample");
 
     // Ball moving +Y: at t=0.5, y halfway to 1000.
     let ball = f.ball.expect("ball at 0.5");

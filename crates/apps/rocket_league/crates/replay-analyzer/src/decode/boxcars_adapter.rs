@@ -21,6 +21,11 @@ const OBJ_RB_STATE: &str = "TAGame.RBActor_TA:ReplicatedRBState";
 const OBJ_CAR_PRI: &str = "Engine.Pawn:PlayerReplicationInfo";
 /// Object string carrying a PRI's player name.
 const OBJ_PRI_NAME: &str = "Engine.PlayerReplicationInfo:PlayerName";
+/// Object string linking a car component to its car.
+const OBJ_COMP_VEHICLE: &str = "TAGame.CarComponent_TA:Vehicle";
+/// Object strings carrying a boost amount (byte) — two encodings exist.
+const OBJ_BOOST_AMOUNT: &str = "TAGame.CarComponent_Boost_TA:ReplicatedBoostAmount";
+const OBJ_BOOST_REPL: &str = "TAGame.CarComponent_Boost_TA:ReplicatedBoost";
 
 /// The real, resolved `boxcars` version (injected by `build.rs`).
 pub const BOXCARS_VERSION: &str = env!("BOXCARS_VERSION");
@@ -157,6 +162,9 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
     let rb_state_id = object_id(replay, OBJ_RB_STATE);
     let car_pri_id = object_id(replay, OBJ_CAR_PRI);
     let pri_name_id = object_id(replay, OBJ_PRI_NAME);
+    let comp_vehicle_id = object_id(replay, OBJ_COMP_VEHICLE);
+    let boost_amount_id = object_id(replay, OBJ_BOOST_AMOUNT);
+    let boost_repl_id = object_id(replay, OBJ_BOOST_REPL);
 
     let classify = |obj: ObjectId| -> ActorClass {
         let n = replay
@@ -220,6 +228,29 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
                         p,
                         v,
                         sleeping: rb.sleeping,
+                    });
+                }
+            } else if oid == comp_vehicle_id {
+                if let Attribute::ActiveActor(ActiveActor { actor, .. }) = &ua.attribute {
+                    if actor.0 >= 0 {
+                        raw.updates.push(ActorUpdate::CompVehicle {
+                            comp: ua.actor_id.0,
+                            car: actor.0,
+                        });
+                    }
+                }
+            } else if oid == boost_amount_id {
+                if let Attribute::Byte(amount) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::BoostAmount {
+                        comp: ua.actor_id.0,
+                        amount: *amount,
+                    });
+                }
+            } else if oid == boost_repl_id {
+                if let Attribute::ReplicatedBoost(rb) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::BoostAmount {
+                        comp: ua.actor_id.0,
+                        amount: rb.boost_amount,
                     });
                 }
             }

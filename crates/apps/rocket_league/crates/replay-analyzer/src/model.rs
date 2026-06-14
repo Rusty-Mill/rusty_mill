@@ -50,6 +50,9 @@ pub struct CarState {
     pub player: Option<String>,
     pub p: Vec3,
     pub v: Vec3,
+    /// Boost amount, raw replicated byte (0..=255; ~`/2.55` for percent).
+    /// `None` until the car's boost component reports.
+    pub boost: Option<u8>,
 }
 
 /// One reconstructed frame of world state (carry-forward of last-known actor
@@ -69,6 +72,9 @@ pub struct TrackSample {
     pub actor_id: i32,
     pub p: Vec3,
     pub v: Vec3,
+    /// Boost amount at this sample, raw replicated byte (0..=255). `None` for the
+    /// ball and for cars whose boost has not yet been observed.
+    pub boost: Option<u8>,
 }
 
 /// Why a player's track has a discontinuity. Reconstruction marks the boundary
@@ -141,6 +147,9 @@ pub struct GridCar {
     pub team: Option<i32>,
     pub p: Vec3,
     pub v: Vec3,
+    /// Boost amount, raw replicated byte (0..=255), carried from the most recent
+    /// observation at or before this grid time.
+    pub boost: Option<u8>,
 }
 
 /// One frame of the fixed-rate resample grid. Every live actor is present

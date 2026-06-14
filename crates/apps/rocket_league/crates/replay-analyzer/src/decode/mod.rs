@@ -51,6 +51,12 @@ pub enum ActorUpdate {
     CarPri { car: i32, pri: i32 },
     /// A PRI actor was assigned a player name.
     PriName { pri: i32, name: String },
+    /// A car-component actor was linked to its car (`TAGame.CarComponent_TA:Vehicle`).
+    /// Only boost components are queried downstream, but all links are emitted.
+    CompVehicle { comp: i32, car: i32 },
+    /// A boost component reported its boost amount (raw byte, 0..=255; ~`/2.55`
+    /// for percent). Sourced from `ReplicatedBoostAmount` or `ReplicatedBoost`.
+    BoostAmount { comp: i32, amount: u8 },
 }
 
 /// A new actor appearing in a frame, with its classification.

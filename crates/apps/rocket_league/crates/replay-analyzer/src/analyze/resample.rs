@@ -37,19 +37,20 @@ pub fn resample(recon: &Reconstruction, hz: f32) -> Vec<GridFrame> {
         let t = t0 + (k as f32) * dt;
         let mut frame_cars = Vec::new();
         for (pri, team, cur) in &mut cars {
-            if let Some(kin) = cur.at(t) {
+            if let Some((kin, boost)) = cur.at(t) {
                 frame_cars.push(GridCar {
                     pri: *pri,
                     team: *team,
                     p: kin.p,
                     v: kin.v,
+                    boost,
                 });
             }
         }
         frame_cars.sort_by_key(|c| c.pri);
         frames.push(GridFrame {
             t,
-            ball: ball.at(t),
+            ball: ball.at(t).map(|(kin, _)| kin),
             cars: frame_cars,
         });
     }
@@ -93,9 +94,11 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Interpolated kinematics at time `t`, or `None` if the actor is not live
-    /// then (before its first / after its last sample, or inside a gap).
-    fn at(&mut self, t: f32) -> Option<Kin> {
+    /// Interpolated kinematics plus carried boost at time `t`, or `None` if the
+    /// actor is not live then (before its first / after its last sample, or
+    /// inside a gap). Position/velocity are interpolated; boost is carried from
+    /// the most recent sample at or before `t` (boost is step-like, not linear).
+    fn at(&mut self, t: f32) -> Option<(Kin, Option<u8>)> {
         let first = self.samples.first()?;
         let last = self.samples.last()?;
         if t < first.t || t > last.t {
@@ -110,10 +113,11 @@ impl<'a> Cursor<'a> {
             self.idx += 1;
         }
         let a = &self.samples[self.idx];
-        match self.samples.get(self.idx + 1) {
-            Some(b) => Some(lerp_kin(a, b, t)),
-            None => Some(Kin { p: a.p, v: a.v }), // t == last sample
-        }
+        let kin = match self.samples.get(self.idx + 1) {
+            Some(b) => lerp_kin(a, b, t),
+            None => Kin { p: a.p, v: a.v }, // t == last sample
+        };
+        Some((kin, a.boost))
     }
 }
 

@@ -20,6 +20,14 @@ pub const BALL_RADIUS: f32 = 92.75;
 /// Depth the ball can travel past the back-wall plane into the goal (uu).
 pub const GOAL_DEPTH_Y: f32 = 880.0;
 
+/// Maximum raw replicated boost value; full boost.
+pub const BOOST_MAX_BYTE: u8 = 255;
+
+/// Convert a raw replicated boost byte (`0..=255`) to a percentage (`0..=100`).
+pub fn boost_percent(byte: u8) -> f32 {
+    byte as f32 / (BOOST_MAX_BYTE as f32) * 100.0
+}
+
 /// Canonical kickoff spawn locations, as `(|x|, |y|)` magnitude pairs. The five
 /// standard kickoff positions (two diagonal corners, two back, one far-back
 /// center) collapse to these three magnitudes by side/team symmetry. Every car

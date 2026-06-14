@@ -118,15 +118,22 @@ fn print_summary(c: &CanonicalMatch) {
             .zip(t.samples.last())
             .map(|(a, b)| b.t - a.t)
             .unwrap_or(0.0);
+        let boosts: Vec<u8> = t.samples.iter().filter_map(|s| s.boost).collect();
+        let mean_boost = if boosts.is_empty() {
+            f32::NAN
+        } else {
+            boosts.iter().map(|&b| b as f32).sum::<f32>() / boosts.len() as f32
+        };
         eprintln!(
-            "  - {:<20} pri={:<3} team={:?} segments={:<3} samples={:<6} gaps={:<3} span={:.1}s",
+            "  - {:<20} pri={:<3} team={:?} segments={:<3} samples={:<6} gaps={:<3} span={:.1}s mean_boost={:.0}%",
             t.player,
             t.pri,
             t.team,
             t.num_segments,
             t.samples.len(),
             t.gaps.len(),
-            span
+            span,
+            replay_analyzer::field::boost_percent(mean_boost as u8),
         );
     }
 }

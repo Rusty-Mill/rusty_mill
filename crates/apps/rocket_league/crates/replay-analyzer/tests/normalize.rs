@@ -22,6 +22,7 @@ fn track(pri: i32, team: i32) -> PlayerTrack {
             actor_id: pri,
             p: v(0.0, 0.0, 17.0),
             v: v(0.0, 0.0, 0.0),
+            boost: None,
         }],
         gaps: Vec::<TrackGap>::new(),
     }
@@ -34,6 +35,7 @@ fn car(pri: i32, p: Vec3) -> CarState {
         player: Some(format!("p{pri}")),
         p,
         v: v(0.0, 0.0, 0.0),
+        boost: None,
     }
 }
 
@@ -89,8 +91,8 @@ fn attacking_frame_makes_both_teams_attack_plus_y() {
             v: v(0.0, 500.0, 0.0),
         }),
         cars: vec![
-            GridCar { pri: 10, team: Some(0), p: v(0.0, -4608.0, 17.0), v: v(0.0, 0.0, 0.0) },
-            GridCar { pri: 20, team: Some(1), p: v(0.0, 4608.0, 17.0), v: v(0.0, 0.0, 0.0) },
+            GridCar { pri: 10, team: Some(0), p: v(0.0, -4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33) },
+            GridCar { pri: 20, team: Some(1), p: v(0.0, 4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33) },
         ],
     };
 
@@ -106,6 +108,7 @@ fn attacking_frame_makes_both_teams_attack_plus_y() {
     assert_eq!(f1.cars[1].p, v(0.0, -4608.0, 17.0));
     assert_eq!(f1.ball.unwrap().p, v(0.0, -1000.0, 93.0));
     assert_eq!(f1.ball.unwrap().v, v(0.0, -500.0, 0.0));
+    assert_eq!(f1.cars[1].boost, Some(33), "boost is invariant under rotation");
 
     // Comparability: each team's own kickoff car is on the -Y half in its own
     // attacking frame.

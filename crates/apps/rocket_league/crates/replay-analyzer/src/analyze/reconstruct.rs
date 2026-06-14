@@ -38,6 +38,9 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut actor_kind: HashMap<i32, ActorClass> = HashMap::new();
     let mut ball_pv: Option<([f32; 3], [f32; 3])> = None;
     let mut car_pv: HashMap<i32, ([f32; 3], [f32; 3])> = HashMap::new();
+    // Boost (T3): boost component actor -> its car, and car -> last boost byte.
+    let mut comp_to_car: HashMap<i32, i32> = HashMap::new();
+    let mut car_boost: HashMap<i32, u8> = HashMap::new();
     let mut ball_samples: Vec<TrackSample> = Vec::new();
     let mut resolver = IdentityResolver::new();
 
@@ -52,6 +55,14 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
             match upd {
                 ActorUpdate::CarPri { car, pri } => resolver.on_car_pri(*car, *pri),
                 ActorUpdate::PriName { pri, name } => resolver.on_pri_name(*pri, name.clone()),
+                ActorUpdate::CompVehicle { comp, car } => {
+                    comp_to_car.insert(*comp, *car);
+                }
+                ActorUpdate::BoostAmount { comp, amount } => {
+                    if let Some(car) = comp_to_car.get(comp) {
+                        car_boost.insert(*car, *amount);
+                    }
+                }
                 ActorUpdate::RigidBody { actor, p, v, .. } => {
                     match actor_kind.get(actor).copied() {
                         // Single-ball model: the latest ball-classified rigid
@@ -67,6 +78,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                                 actor_id: *actor,
                                 p: Vec3::from_arr(*p),
                                 v: Vec3::from_arr(*v),
+                                boost: None,
                             });
                         }
                         Some(ActorClass::Car) => {
@@ -78,6 +90,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                                     actor_id: *actor,
                                     p: Vec3::from_arr(*p),
                                     v: Vec3::from_arr(*v),
+                                    boost: car_boost.get(actor).copied(),
                                 },
                             );
                         }
@@ -89,6 +102,8 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
 
         for da in &frame.deleted {
             car_pv.remove(da);
+            car_boost.remove(da);
+            comp_to_car.remove(da);
             resolver.on_delete(*da);
             actor_kind.remove(da);
         }
@@ -102,6 +117,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                 player: None, // resolved after the walk, once names are final
                 p: Vec3::from_arr(*p),
                 v: Vec3::from_arr(*v),
+                boost: car_boost.get(aid).copied(),
             })
             .collect();
         cars.sort_by_key(|c| c.actor_id);
