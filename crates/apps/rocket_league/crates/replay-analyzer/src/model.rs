@@ -227,6 +227,27 @@ impl Event {
     }
 }
 
+/// Per-player derived aggregate features (T5). Sample, scoring-agnostic stats
+/// computed from the reconstructed/resampled data — a first consumer-facing
+/// summary, not the scoring rubric.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlayerFeatures {
+    pub pri: i32,
+    pub player: String,
+    pub team: Option<i32>,
+    /// Number of touches attributed to this player.
+    pub touches: usize,
+    /// Total boost consumed over the match, in boost units (0–100 scale; sums
+    /// only decreases within a car's life, so it can exceed 100 across refills).
+    pub boost_used: f32,
+    /// Seconds spent at or above supersonic speed.
+    pub time_supersonic_s: f32,
+    /// Mean car-to-ball distance (uu) over grid frames where both are present.
+    pub mean_dist_to_ball: f32,
+    /// Possession time (s) of this player's team (team-shared).
+    pub possession_time_s: f32,
+}
+
 /// The canonical match model emitted by the analyzer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalMatch {
@@ -251,4 +272,6 @@ pub struct CanonicalMatch {
     pub resampled: Resampled,
     /// Derived match events (T4), sorted by time.
     pub events: Vec<Event>,
+    /// Per-player derived aggregate features (T5).
+    pub features: Vec<PlayerFeatures>,
 }

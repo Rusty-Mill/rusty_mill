@@ -5,6 +5,7 @@
 //! fixture tests exercise without ever touching a `.replay` file.
 
 pub mod events;
+pub mod features;
 pub mod identity;
 pub mod normalize;
 pub mod reconstruct;
@@ -62,6 +63,9 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
     }
     evs.sort_by(|a, b| a.time().total_cmp(&b.time()));
 
+    // T5: per-player feature aggregates over the resampled grid + events.
+    let features = features::player_features(&resampled, &recon.tracks, &evs);
+
     CanonicalMatch {
         replay_id: replay_id.into(),
         parser_version: decoded.meta.parser_version.clone(),
@@ -77,5 +81,6 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
         frames: recon.frames,
         resampled,
         events: evs,
+        features,
     }
 }

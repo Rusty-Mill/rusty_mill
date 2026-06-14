@@ -158,6 +158,40 @@ fn derived_goal_events_match_header_truth() {
     assert_eq!(by_team, m.team_scores, "team goal tallies vs team scores");
 }
 
+#[test]
+fn derived_features_are_internally_consistent() {
+    let m = &*MATCH;
+    let dur = m.duration_s;
+    assert!(!m.features.is_empty(), "expected per-player features");
+
+    // Independent re-derivation: feature touch counts must sum to the number of
+    // touch events (two code paths, same total).
+    let touch_total: usize = m.features.iter().map(|f| f.touches).sum();
+    let touch_events = m
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Touch { .. }))
+        .count();
+    assert_eq!(touch_total, touch_events, "feature touches re-derive touch events");
+
+    for f in &m.features {
+        assert!(
+            (0.0..=dur + 1.0).contains(&f.time_supersonic_s),
+            "{} supersonic {} out of [0,{dur}]",
+            f.player,
+            f.time_supersonic_s
+        );
+        assert!((0.0..=dur + 1.0).contains(&f.possession_time_s), "{} possession", f.player);
+        assert!(f.boost_used >= 0.0, "{} boost_used negative", f.player);
+        assert!(
+            f.mean_dist_to_ball > 0.0 && f.mean_dist_to_ball < 12_000.0,
+            "{} mean_dist {} implausible",
+            f.player,
+            f.mean_dist_to_ball
+        );
+    }
+}
+
 // ---- Golden digest ----------------------------------------------------------
 
 /// Compact, deterministic fingerprint of the canonical model. Floats are
@@ -179,6 +213,18 @@ struct Digest {
     /// Event counts by type, plus the goal list (authoritative, stable).
     events_by_type: BTreeMap<String, usize>,
     goals: Vec<GoalDigest>,
+    features: Vec<FeatureDigest>,
+}
+
+#[derive(Serialize)]
+struct FeatureDigest {
+    player: String,
+    team: Option<i32>,
+    touches: usize,
+    boost_used: i64,
+    supersonic_cs: i64,
+    mean_dist: i64,
+    possession_cs: i64,
 }
 
 #[derive(Serialize)]
@@ -251,6 +297,19 @@ fn digest(m: &CanonicalMatch) -> Digest {
         };
         *events_by_type.entry(key.to_string()).or_default() += 1;
     }
+    let features = m
+        .features
+        .iter()
+        .map(|f| FeatureDigest {
+            player: f.player.clone(),
+            team: f.team,
+            touches: f.touches,
+            boost_used: f.boost_used.round() as i64,
+            supersonic_cs: cs(f.time_supersonic_s),
+            mean_dist: f.mean_dist_to_ball.round() as i64,
+            possession_cs: cs(f.possession_time_s),
+        })
+        .collect();
 
     Digest {
         replay_id: m.replay_id.clone(),
@@ -266,6 +325,7 @@ fn digest(m: &CanonicalMatch) -> Digest {
         tracks,
         events_by_type,
         goals,
+        features,
     }
 }
 

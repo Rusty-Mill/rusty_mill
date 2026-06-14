@@ -149,4 +149,18 @@ fn print_summary(c: &CanonicalMatch) {
         *counts.entry(k).or_default() += 1;
     }
     eprintln!("events (T4)    : {counts:?}");
+
+    eprintln!("features (T5):");
+    for f in &c.features {
+        eprintln!(
+            "  - {:<20} team={:?} touches={:<3} boost_used={:<6.0} supersonic={:>5.1}s mean_dist={:>5.0} poss={:>5.1}s",
+            f.player,
+            f.team,
+            f.touches,
+            f.boost_used,
+            f.time_supersonic_s,
+            f.mean_dist_to_ball,
+            f.possession_time_s,
+        );
+    }
 }

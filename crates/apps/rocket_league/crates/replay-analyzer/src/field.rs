@@ -20,6 +20,10 @@ pub const BALL_RADIUS: f32 = 92.75;
 /// Depth the ball can travel past the back-wall plane into the goal (uu).
 pub const GOAL_DEPTH_Y: f32 = 880.0;
 
+/// Supersonic speed threshold (uu/s): at or above this, a car is "supersonic"
+/// (max ground speed is ~2300 uu/s).
+pub const SUPERSONIC_SPEED: f32 = 2200.0;
+
 /// Maximum raw replicated boost value; full boost.
 pub const BOOST_MAX_BYTE: u8 = 255;
 
