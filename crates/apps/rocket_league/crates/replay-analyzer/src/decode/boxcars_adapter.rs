@@ -57,6 +57,29 @@ impl ReplayParser for BoxcarsParser {
     }
 }
 
+/// Convert a rotation quaternion to Euler `[pitch, yaw, roll]` (radians),
+/// standard ZYX (yaw-pitch-roll) extraction, with pitch clamped at the poles.
+fn quat_to_euler(q: &boxcars::Quaternion) -> [f32; 3] {
+    let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+
+    let sinr_cosp = 2.0 * (w * x + y * z);
+    let cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
+    let roll = sinr_cosp.atan2(cosr_cosp);
+
+    let sinp = 2.0 * (w * y - z * x);
+    let pitch = if sinp.abs() >= 1.0 {
+        (std::f32::consts::FRAC_PI_2).copysign(sinp)
+    } else {
+        sinp.asin()
+    };
+
+    let siny_cosp = 2.0 * (w * z + x * y);
+    let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+    let yaw = siny_cosp.atan2(cosy_cosp);
+
+    [pitch, yaw, roll]
+}
+
 /// Resolve an object name to its [`ObjectId`], if present in this replay.
 fn object_id(replay: &Replay, name: &str) -> Option<ObjectId> {
     replay
@@ -260,6 +283,7 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
                         actor: ua.actor_id.0,
                         p,
                         v,
+                        rot: quat_to_euler(&rb.rotation),
                         sleeping: rb.sleeping,
                     });
                 }

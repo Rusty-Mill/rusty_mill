@@ -13,7 +13,7 @@ fn v(x: f32, y: f32, z: f32) -> Vec3 {
 }
 
 fn car(pri: i32, team: i32, p: Vec3) -> GridCar {
-    GridCar { pri, team: Some(team), p, v: v(0.0, 0.0, 0.0), boost: Some(50) }
+    GridCar { pri, team: Some(team), p, v: v(0.0, 0.0, 0.0), boost: Some(50), rot: None }
 }
 
 fn track(pri: i32, team: i32) -> PlayerTrack {
@@ -28,6 +28,7 @@ fn track(pri: i32, team: i32) -> PlayerTrack {
             p: v(0.0, 0.0, 0.0),
             v: v(0.0, 0.0, 0.0),
             boost: None,
+            rot: None,
         }],
         gaps: vec![],
     }

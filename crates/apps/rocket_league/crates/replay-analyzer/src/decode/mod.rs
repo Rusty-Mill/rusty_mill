@@ -55,6 +55,8 @@ pub enum ActorUpdate {
         actor: i32,
         p: [f32; 3],
         v: [f32; 3],
+        /// Orientation `[pitch, yaw, roll]` in radians.
+        rot: [f32; 3],
         /// Sleeping bodies report no velocity (treated as zero).
         sleeping: bool,
     },

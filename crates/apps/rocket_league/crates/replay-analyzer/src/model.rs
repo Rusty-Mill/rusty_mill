@@ -25,6 +25,22 @@ impl Vec3 {
     }
 }
 
+/// Car orientation in radians (Euler), matching the canonical-model `rot`
+/// `[pitch, yaw, roll]` ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Rot3 {
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll: f32,
+}
+
+impl Rot3 {
+    /// Construct from a raw `[pitch, yaw, roll]` array.
+    pub fn from_arr(a: [f32; 3]) -> Self {
+        Rot3 { pitch: a[0], yaw: a[1], roll: a[2] }
+    }
+}
+
 /// Header-sourced per-player metadata (from the replay's `PlayerStats` array).
 /// This is end-of-match summary truth, independent of frame reconstruction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -53,6 +69,8 @@ pub struct CarState {
     /// Boost amount, raw replicated byte (0..=255; ~`/2.55` for percent).
     /// `None` until the car's boost component reports.
     pub boost: Option<u8>,
+    /// Car orientation `[pitch, yaw, roll]` (radians); `None` until observed.
+    pub rot: Option<Rot3>,
 }
 
 /// One reconstructed frame of world state (carry-forward of last-known actor
@@ -75,6 +93,8 @@ pub struct TrackSample {
     /// Boost amount at this sample, raw replicated byte (0..=255). `None` for the
     /// ball and for cars whose boost has not yet been observed.
     pub boost: Option<u8>,
+    /// Car orientation at this sample; `None` for the ball / before observed.
+    pub rot: Option<Rot3>,
 }
 
 /// Why a player's track has a discontinuity. Reconstruction marks the boundary
@@ -150,6 +170,8 @@ pub struct GridCar {
     /// Boost amount, raw replicated byte (0..=255), carried from the most recent
     /// observation at or before this grid time.
     pub boost: Option<u8>,
+    /// Car orientation, carried from the most recent observation at/before `t`.
+    pub rot: Option<Rot3>,
 }
 
 /// One frame of the fixed-rate resample grid. Every live actor is present

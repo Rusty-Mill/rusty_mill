@@ -11,8 +11,8 @@ fn s(t: f32, x: f32) -> TrackSample {
         actor_id: 1,
         p: Vec3 { x, y: 0.0, z: 17.0 },
         v: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
-        // Distinct per-sample boost so we can assert carry-forward (not interp).
         boost: Some((t * 10.0).round() as u8),
+        rot: None,
     }
 }
 
@@ -38,6 +38,7 @@ fn recon() -> Reconstruction {
             p: Vec3 { x: 0.0, y: 0.0, z: 93.0 },
             v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
             boost: None,
+            rot: None,
         },
         TrackSample {
             t: 1.0,
@@ -45,6 +46,7 @@ fn recon() -> Reconstruction {
             p: Vec3 { x: 0.0, y: 1000.0, z: 93.0 },
             v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
             boost: None,
+            rot: None,
         },
     ];
     Reconstruction {

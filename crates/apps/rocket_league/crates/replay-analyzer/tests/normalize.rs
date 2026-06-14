@@ -23,6 +23,7 @@ fn track(pri: i32, team: i32) -> PlayerTrack {
             p: v(0.0, 0.0, 17.0),
             v: v(0.0, 0.0, 0.0),
             boost: None,
+            rot: None,
         }],
         gaps: Vec::<TrackGap>::new(),
     }
@@ -36,6 +37,7 @@ fn car(pri: i32, p: Vec3) -> CarState {
         p,
         v: v(0.0, 0.0, 0.0),
         boost: None,
+        rot: None,
     }
 }
 
@@ -91,8 +93,8 @@ fn attacking_frame_makes_both_teams_attack_plus_y() {
             v: v(0.0, 500.0, 0.0),
         }),
         cars: vec![
-            GridCar { pri: 10, team: Some(0), p: v(0.0, -4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33) },
-            GridCar { pri: 20, team: Some(1), p: v(0.0, 4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33) },
+            GridCar { pri: 10, team: Some(0), p: v(0.0, -4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33), rot: None },
+            GridCar { pri: 20, team: Some(1), p: v(0.0, 4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33), rot: None },
         ],
     };
 

@@ -8,7 +8,7 @@
 //! identity-stable [`PlayerTrack`]s.
 
 use crate::decode::{ActorClass, ActorUpdate, DecodedReplay};
-use crate::model::{CarState, FrameOut, PlayerTrack, TrackSample, Vec3};
+use crate::model::{CarState, FrameOut, PlayerTrack, Rot3, TrackSample, Vec3};
 use std::collections::HashMap;
 
 use super::identity::{coalesce, IdentityResolver};
@@ -48,6 +48,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut actor_kind: HashMap<i32, ActorClass> = HashMap::new();
     let mut ball_pv: Option<([f32; 3], [f32; 3])> = None;
     let mut car_pv: HashMap<i32, ([f32; 3], [f32; 3])> = HashMap::new();
+    let mut car_rot: HashMap<i32, [f32; 3]> = HashMap::new();
     // Boost (T3): boost component actor -> its car, and car -> last boost byte.
     let mut comp_to_car: HashMap<i32, i32> = HashMap::new();
     let mut car_boost: HashMap<i32, u8> = HashMap::new();
@@ -81,7 +82,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                         victim_pri: resolver.current_pri(*victim_car),
                     });
                 }
-                ActorUpdate::RigidBody { actor, p, v, .. } => {
+                ActorUpdate::RigidBody { actor, p, v, rot, .. } => {
                     match actor_kind.get(actor).copied() {
                         // Single-ball model: the latest ball-classified rigid
                         // body wins. Correct for standard Soccar (one ball). In
@@ -97,10 +98,12 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                                 p: Vec3::from_arr(*p),
                                 v: Vec3::from_arr(*v),
                                 boost: None,
+                                rot: None,
                             });
                         }
                         Some(ActorClass::Car) => {
                             car_pv.insert(*actor, (*p, *v));
+                            car_rot.insert(*actor, *rot);
                             resolver.push_sample(
                                 *actor,
                                 TrackSample {
@@ -109,6 +112,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                                     p: Vec3::from_arr(*p),
                                     v: Vec3::from_arr(*v),
                                     boost: car_boost.get(actor).copied(),
+                                    rot: Some(Rot3::from_arr(*rot)),
                                 },
                             );
                         }
@@ -120,6 +124,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
 
         for da in &frame.deleted {
             car_pv.remove(da);
+            car_rot.remove(da);
             car_boost.remove(da);
             comp_to_car.remove(da);
             resolver.on_delete(*da);
@@ -136,6 +141,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                 p: Vec3::from_arr(*p),
                 v: Vec3::from_arr(*v),
                 boost: car_boost.get(aid).copied(),
+                rot: car_rot.get(aid).map(|r| Rot3::from_arr(*r)),
             })
             .collect();
         cars.sort_by_key(|c| c.actor_id);

@@ -10,7 +10,7 @@
 //! on its own (defensive) half, so the sign of a team's mean `y` reveals which
 //! goal it defends — and therefore which way it attacks.
 
-use crate::model::{FrameOut, GridCar, GridFrame, Kin, PlayerTrack, Vec3};
+use crate::model::{FrameOut, GridCar, GridFrame, Kin, PlayerTrack, Rot3, Vec3};
 use crate::field;
 use std::collections::BTreeMap;
 
@@ -26,6 +26,20 @@ pub fn flip_xy(v: Vec3, sign: i32) -> Vec3 {
             y: -v.y,
             z: v.z,
         }
+    }
+}
+
+/// Rotate an orientation into the attacking frame: a 180° z-flip (`sign < 0`)
+/// adds π to yaw (wrapped to (-π, π]); pitch and roll are unchanged.
+pub fn flip_yaw(r: Rot3, sign: i32) -> Rot3 {
+    if sign >= 0 {
+        r
+    } else {
+        let mut yaw = r.yaw + std::f32::consts::PI;
+        if yaw > std::f32::consts::PI {
+            yaw -= 2.0 * std::f32::consts::PI;
+        }
+        Rot3 { pitch: r.pitch, yaw, roll: r.roll }
     }
 }
 
@@ -112,6 +126,8 @@ pub fn attacking_frame(
                 p: flip_xy(c.p, sign),
                 v: flip_xy(c.v, sign),
                 boost: c.boost,
+                // 180° z-rotation when sign<0 adds π to yaw; pitch/roll unchanged.
+                rot: c.rot.map(|r| flip_yaw(r, sign)),
             })
             .collect(),
     }

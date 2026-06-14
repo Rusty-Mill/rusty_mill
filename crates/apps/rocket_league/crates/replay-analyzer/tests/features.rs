@@ -20,7 +20,7 @@ fn v(x: f32, y: f32, z: f32) -> Vec3 {
 }
 
 fn sample(t: f32, boost: u8) -> TrackSample {
-    TrackSample { t, actor_id: 1, p: v(0.0, 0.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(boost) }
+    TrackSample { t, actor_id: 1, p: v(0.0, 0.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(boost), rot: None }
 }
 
 /// Track for player pri=1: boost 255->155 (uses 100 bytes), +45 pickup
@@ -48,7 +48,7 @@ fn track() -> PlayerTrack {
 }
 
 fn gcar(pri: i32, p: Vec3, speed_x: f32) -> GridCar {
-    GridCar { pri, team: Some(0), p, v: v(speed_x, 0.0, 0.0), boost: Some(50) }
+    GridCar { pri, team: Some(0), p, v: v(speed_x, 0.0, 0.0), boost: Some(50), rot: None }
 }
 
 /// 10 Hz grid: 3 supersonic frames (0.3 s); ball present in 2 frames at

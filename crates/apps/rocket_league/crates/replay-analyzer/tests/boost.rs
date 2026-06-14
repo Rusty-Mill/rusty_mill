@@ -24,6 +24,7 @@ fn rb(actor: i32) -> ActorUpdate {
         actor,
         p: [0.0, 0.0, 17.0],
         v: [0.0, 0.0, 0.0],
+        rot: [0.0, 0.0, 0.0],
         sleeping: false,
     }
 }
