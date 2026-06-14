@@ -121,6 +121,52 @@ pub struct PlayerTrack {
     pub gaps: Vec<TrackGap>,
 }
 
+/// Position + velocity of an actor at an instant (unreal units; uu/s).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Kin {
+    pub p: Vec3,
+    pub v: Vec3,
+}
+
+/// One car on the fixed-rate resample grid, in **world** coordinates.
+///
+/// To view this car in its team's attacking-direction frame (each team attacks
+/// `+Y`), apply [`crate::analyze::normalize::flip_xy`] with
+/// [`Resampled::team_attack_sign`] for [`GridCar::team`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GridCar {
+    /// Stable player identity (PRI) — the grid key for a player.
+    pub pri: i32,
+    /// Team (0/1), if known.
+    pub team: Option<i32>,
+    pub p: Vec3,
+    pub v: Vec3,
+}
+
+/// One frame of the fixed-rate resample grid. Every live actor is present
+/// (interpolated); actors dead/respawning at this instant are absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GridFrame {
+    pub t: f32,
+    /// Ball kinematics in **world** coordinates (shared across teams; normalize
+    /// per-team on demand).
+    pub ball: Option<Kin>,
+    pub cars: Vec<GridCar>,
+}
+
+/// The fixed-rate, gap-aware resampling of the match (T2), in world coordinates,
+/// plus the per-team transform that puts each team attacking `+Y`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Resampled {
+    /// Grid rate in Hz (e.g. 30.0).
+    pub hz: f32,
+    /// Team id -> sign in `{+1, -1}`. Multiplying a world `x` and `y` by this
+    /// sign rotates that team's frame so it attacks `+Y` (a 180° z-rotation when
+    /// `-1`). `z` and speeds are unchanged.
+    pub team_attack_sign: BTreeMap<i32, i32>,
+    pub frames: Vec<GridFrame>,
+}
+
 /// The canonical match model emitted by the analyzer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalMatch {
@@ -139,6 +185,8 @@ pub struct CanonicalMatch {
     pub players: Vec<PlayerMeta>,
     /// Coalesced per-player tracks (T1), keyed by stable identity.
     pub tracks: Vec<PlayerTrack>,
-    /// Per-frame reconstructed world state.
+    /// Per-frame reconstructed world state (native frame rate, carry-forward).
     pub frames: Vec<FrameOut>,
+    /// Fixed-rate, gap-aware resampling with attack-direction normalization (T2).
+    pub resampled: Resampled,
 }

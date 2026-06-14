@@ -20,6 +20,9 @@ pub struct Reconstruction {
     pub frames: Vec<FrameOut>,
     /// Coalesced per-player tracks (T1).
     pub tracks: Vec<PlayerTrack>,
+    /// Raw ball rigid-body observations (t, p, v), in observation order, for
+    /// resampling. Carry-forward is *not* applied here.
+    pub ball_samples: Vec<TrackSample>,
 }
 
 /// Reconstruct per-frame world state and coalesced player tracks from a neutral
@@ -35,6 +38,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut actor_kind: HashMap<i32, ActorClass> = HashMap::new();
     let mut ball_pv: Option<([f32; 3], [f32; 3])> = None;
     let mut car_pv: HashMap<i32, ([f32; 3], [f32; 3])> = HashMap::new();
+    let mut ball_samples: Vec<TrackSample> = Vec::new();
     let mut resolver = IdentityResolver::new();
 
     let mut frames: Vec<FrameOut> = Vec::with_capacity(decoded.frames.len());
@@ -56,7 +60,15 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                         // `Ball_Breakout`), the spec's substring classifier may
                         // also flag a stationary secondary actor — out of scope
                         // here, which targets 2v2 Soccar.
-                        Some(ActorClass::Ball) => ball_pv = Some((*p, *v)),
+                        Some(ActorClass::Ball) => {
+                            ball_pv = Some((*p, *v));
+                            ball_samples.push(TrackSample {
+                                t: frame.time,
+                                actor_id: *actor,
+                                p: Vec3::from_arr(*p),
+                                v: Vec3::from_arr(*v),
+                            });
+                        }
                         Some(ActorClass::Car) => {
                             car_pv.insert(*actor, (*p, *v));
                             resolver.push_sample(
@@ -114,7 +126,11 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
 
     let tracks = coalesce(segments, &pri_to_name, &name_to_team);
 
-    Reconstruction { frames, tracks }
+    Reconstruction {
+        frames,
+        tracks,
+        ball_samples,
+    }
 }
 
 /// Min/max of every reconstructed ball position, for arena-bounds validation.
