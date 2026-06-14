@@ -23,8 +23,7 @@ const SAMPLE: &str = "42f2";
 /// Parse + analyze the sample replay exactly once for all tests in this binary.
 static MATCH: LazyLock<CanonicalMatch> = LazyLock::new(|| {
     let path = sample_path(SAMPLE);
-    let data = std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let decoded = BoxcarsParser::new()
         .parse(&data)
         .unwrap_or_else(|e| panic!("decode {SAMPLE}: {e}"));
@@ -57,9 +56,19 @@ fn ball_stays_inside_arena() {
 
     // ...and the ball must actually traverse the field (not a frozen artifact):
     // wide horizontal spread and meaningful airborne travel confirm real data.
-    assert!(max[0] - min[0] > 4000.0, "ball x spread too small: {min:?}..{max:?}");
-    assert!(max[1] - min[1] > 6000.0, "ball y spread too small: {min:?}..{max:?}");
-    assert!(max[2] > 300.0, "ball never went meaningfully airborne: zmax={}", max[2]);
+    assert!(
+        max[0] - min[0] > 4000.0,
+        "ball x spread too small: {min:?}..{max:?}"
+    );
+    assert!(
+        max[1] - min[1] > 6000.0,
+        "ball y spread too small: {min:?}..{max:?}"
+    );
+    assert!(
+        max[2] > 300.0,
+        "ball never went meaningfully airborne: zmax={}",
+        max[2]
+    );
 }
 
 #[test]
@@ -76,15 +85,18 @@ fn kickoff_frame_has_centered_ball_and_spawn_geometry() {
             && b.y.abs() < 6.0
             && (85.0..100.0).contains(&b.z)
             && f.cars.len() >= 2
-            && f
-                .cars
+            && f.cars
                 .iter()
                 .all(|c| c.p.z < 60.0 && field::is_kickoff_spawn(c.p.to_arr(), 60.0))
     });
 
     let frame = kickoff.expect("a kickoff frame with centered ball and cars on spawns");
     let ball = frame.ball.as_ref().unwrap();
-    assert!((ball.z - field::BALL_RADIUS).abs() < 10.0, "kickoff ball rest height: {}", ball.z);
+    assert!(
+        (ball.z - field::BALL_RADIUS).abs() < 10.0,
+        "kickoff ball rest height: {}",
+        ball.z
+    );
     assert!(frame.cars.len() >= 2, "kickoff should have >= 2 cars");
 }
 
@@ -172,7 +184,10 @@ fn derived_features_are_internally_consistent() {
         .iter()
         .filter(|e| matches!(e, Event::Touch { .. }))
         .count();
-    assert_eq!(touch_total, touch_events, "feature touches re-derive touch events");
+    assert_eq!(
+        touch_total, touch_events,
+        "feature touches re-derive touch events"
+    );
 
     for f in &m.features {
         assert!(
@@ -181,7 +196,11 @@ fn derived_features_are_internally_consistent() {
             f.player,
             f.time_supersonic_s
         );
-        assert!((0.0..=dur + 1.0).contains(&f.possession_time_s), "{} possession", f.player);
+        assert!(
+            (0.0..=dur + 1.0).contains(&f.possession_time_s),
+            "{} possession",
+            f.player
+        );
         assert!(f.boost_used >= 0.0, "{} boost_used negative", f.player);
         assert!(
             f.mean_dist_to_ball > 0.0 && f.mean_dist_to_ball < 12_000.0,
@@ -291,7 +310,11 @@ fn digest(m: &CanonicalMatch) -> Digest {
             Event::Possession { .. } => "possession",
             Event::Demo { .. } => "demo",
             Event::Goal { t, scorer, team } => {
-                goals.push(GoalDigest { t_cs: cs(*t), scorer: scorer.clone(), team: *team });
+                goals.push(GoalDigest {
+                    t_cs: cs(*t),
+                    scorer: scorer.clone(),
+                    team: *team,
+                });
                 "goal"
             }
         };

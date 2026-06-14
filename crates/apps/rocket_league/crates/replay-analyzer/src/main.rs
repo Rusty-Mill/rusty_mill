@@ -88,10 +88,7 @@ fn print_summary(c: &CanonicalMatch) {
     eprintln!("map            : {:?}", c.map);
     eprintln!("team_size      : {:?}", c.team_size);
     eprintln!("record_fps     : {:?}", c.record_fps);
-    eprintln!(
-        "frames         : {}  (~{:.1}s)",
-        c.num_frames, c.duration_s
-    );
+    eprintln!("frames         : {}  (~{:.1}s)", c.num_frames, c.duration_s);
     eprintln!("team_scores    : {:?}", c.team_scores);
 
     eprintln!("players (header stats):");

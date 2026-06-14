@@ -105,7 +105,10 @@ fn recycled_actor_fixture() -> DecodedReplay {
             delta: 2.0,
             new_actors: vec![new_car(15), new_car(8)],
             updates: vec![
-                ActorUpdate::CarPri { car: 15, pri: ALICE },
+                ActorUpdate::CarPri {
+                    car: 15,
+                    pri: ALICE,
+                },
                 ActorUpdate::CarPri { car: 8, pri: BOB },
                 rb(15, 200.0),
                 rb(8, -200.0),

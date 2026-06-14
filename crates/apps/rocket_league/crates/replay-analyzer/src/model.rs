@@ -16,7 +16,11 @@ pub struct Vec3 {
 impl Vec3 {
     /// Construct from a raw `[x, y, z]` array.
     pub fn from_arr(a: [f32; 3]) -> Self {
-        Vec3 { x: a[0], y: a[1], z: a[2] }
+        Vec3 {
+            x: a[0],
+            y: a[1],
+            z: a[2],
+        }
     }
 
     /// Convert back to a raw `[x, y, z]` array.
@@ -37,7 +41,11 @@ pub struct Rot3 {
 impl Rot3 {
     /// Construct from a raw `[pitch, yaw, roll]` array.
     pub fn from_arr(a: [f32; 3]) -> Self {
-        Rot3 { pitch: a[0], yaw: a[1], roll: a[2] }
+        Rot3 {
+            pitch: a[0],
+            yaw: a[1],
+            roll: a[2],
+        }
     }
 }
 

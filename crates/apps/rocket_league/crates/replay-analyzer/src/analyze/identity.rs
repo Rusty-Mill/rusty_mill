@@ -163,11 +163,8 @@ pub fn coalesce(
             }
 
             let num_segments = segs.len();
-            let mut samples: Vec<TrackSample> =
-                segs.into_iter().flat_map(|s| s.samples).collect();
-            samples.sort_by(|a, b| {
-                a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let mut samples: Vec<TrackSample> = segs.into_iter().flat_map(|s| s.samples).collect();
+            samples.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
 
             let pri = match key {
                 Key::Pri(p) => p,

@@ -1,3 +1,6 @@
+[workspace]
+members = ["scoring"]
+
 [package]
 name = "replay-analyzer"
 version = "0.2.0"

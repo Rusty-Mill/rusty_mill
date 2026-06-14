@@ -17,7 +17,11 @@ pub fn player_features(
     tracks: &[PlayerTrack],
     events: &[Event],
 ) -> Vec<PlayerFeatures> {
-    let dt = if resampled.hz > 0.0 { 1.0 / resampled.hz } else { 0.0 };
+    let dt = if resampled.hz > 0.0 {
+        1.0 / resampled.hz
+    } else {
+        0.0
+    };
 
     // Touches per player.
     let mut touches: BTreeMap<i32, usize> = BTreeMap::new();
@@ -26,7 +30,9 @@ pub fn player_features(
     for e in events {
         match e {
             Event::Touch { pri, .. } => *touches.entry(*pri).or_default() += 1,
-            Event::Possession { team, start, end, .. } => {
+            Event::Possession {
+                team, start, end, ..
+            } => {
                 *team_possession.entry(*team).or_default() += end - start;
             }
             _ => {}
@@ -45,8 +51,7 @@ pub fn player_features(
                 *supersonic_frames.entry(c.pri).or_default() += 1;
             }
             if let Some(ball) = &f.ball {
-                let (dx, dy, dz) =
-                    (c.p.x - ball.p.x, c.p.y - ball.p.y, c.p.z - ball.p.z);
+                let (dx, dy, dz) = (c.p.x - ball.p.x, c.p.y - ball.p.y, c.p.z - ball.p.z);
                 *dist_sum.entry(c.pri).or_default() +=
                     ((dx * dx + dy * dy + dz * dz) as f64).sqrt();
                 *dist_cnt.entry(c.pri).or_default() += 1;
@@ -69,8 +74,7 @@ pub fn player_features(
                 team: t.team,
                 touches: touches.get(&t.pri).copied().unwrap_or(0),
                 boost_used: boost_used(t),
-                time_supersonic_s: supersonic_frames.get(&t.pri).copied().unwrap_or(0) as f32
-                    * dt,
+                time_supersonic_s: supersonic_frames.get(&t.pri).copied().unwrap_or(0) as f32 * dt,
                 mean_dist_to_ball,
                 possession_time_s: t
                     .team

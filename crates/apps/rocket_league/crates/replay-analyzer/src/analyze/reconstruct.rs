@@ -75,14 +75,19 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                         car_boost.insert(*car, *amount);
                     }
                 }
-                ActorUpdate::Demolish { attacker_car, victim_car } => {
+                ActorUpdate::Demolish {
+                    attacker_car,
+                    victim_car,
+                } => {
                     demos.push(DemoSample {
                         t: frame.time,
                         attacker_pri: resolver.current_pri(*attacker_car),
                         victim_pri: resolver.current_pri(*victim_car),
                     });
                 }
-                ActorUpdate::RigidBody { actor, p, v, rot, .. } => {
+                ActorUpdate::RigidBody {
+                    actor, p, v, rot, ..
+                } => {
                     match actor_kind.get(actor).copied() {
                         // Single-ball model: the latest ball-classified rigid
                         // body wins. Correct for standard Soccar (one ball). In

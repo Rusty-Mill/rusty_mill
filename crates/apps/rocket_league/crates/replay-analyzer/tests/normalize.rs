@@ -93,8 +93,22 @@ fn attacking_frame_makes_both_teams_attack_plus_y() {
             v: v(0.0, 500.0, 0.0),
         }),
         cars: vec![
-            GridCar { pri: 10, team: Some(0), p: v(0.0, -4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33), rot: None },
-            GridCar { pri: 20, team: Some(1), p: v(0.0, 4608.0, 17.0), v: v(0.0, 0.0, 0.0), boost: Some(33), rot: None },
+            GridCar {
+                pri: 10,
+                team: Some(0),
+                p: v(0.0, -4608.0, 17.0),
+                v: v(0.0, 0.0, 0.0),
+                boost: Some(33),
+                rot: None,
+            },
+            GridCar {
+                pri: 20,
+                team: Some(1),
+                p: v(0.0, 4608.0, 17.0),
+                v: v(0.0, 0.0, 0.0),
+                boost: Some(33),
+                rot: None,
+            },
         ],
     };
 
@@ -110,11 +124,18 @@ fn attacking_frame_makes_both_teams_attack_plus_y() {
     assert_eq!(f1.cars[1].p, v(0.0, -4608.0, 17.0));
     assert_eq!(f1.ball.unwrap().p, v(0.0, -1000.0, 93.0));
     assert_eq!(f1.ball.unwrap().v, v(0.0, -500.0, 0.0));
-    assert_eq!(f1.cars[1].boost, Some(33), "boost is invariant under rotation");
+    assert_eq!(
+        f1.cars[1].boost,
+        Some(33),
+        "boost is invariant under rotation"
+    );
 
     // Comparability: each team's own kickoff car is on the -Y half in its own
     // attacking frame.
     let own0 = flip_xy(v(0.0, -4608.0, 17.0), *signs.get(&0).unwrap());
     let own1 = flip_xy(v(0.0, 4608.0, 17.0), *signs.get(&1).unwrap());
-    assert!(own0.y < 0.0 && own1.y < 0.0, "both own spawns on -Y after normalization");
+    assert!(
+        own0.y < 0.0 && own1.y < 0.0,
+        "both own spawns on -Y after normalization"
+    );
 }

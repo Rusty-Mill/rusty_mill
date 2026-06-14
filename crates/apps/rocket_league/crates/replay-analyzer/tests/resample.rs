@@ -10,7 +10,11 @@ fn s(t: f32, x: f32) -> TrackSample {
         t,
         actor_id: 1,
         p: Vec3 { x, y: 0.0, z: 17.0 },
-        v: Vec3 { x: 10.0, y: 0.0, z: 0.0 },
+        v: Vec3 {
+            x: 10.0,
+            y: 0.0,
+            z: 0.0,
+        },
         boost: Some((t * 10.0).round() as u8),
         rot: None,
     }
@@ -35,16 +39,32 @@ fn recon() -> Reconstruction {
         TrackSample {
             t: 0.0,
             actor_id: 99,
-            p: Vec3 { x: 0.0, y: 0.0, z: 93.0 },
-            v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
+            p: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 93.0,
+            },
+            v: Vec3 {
+                x: 0.0,
+                y: 1000.0,
+                z: 0.0,
+            },
             boost: None,
             rot: None,
         },
         TrackSample {
             t: 1.0,
             actor_id: 99,
-            p: Vec3 { x: 0.0, y: 1000.0, z: 93.0 },
-            v: Vec3 { x: 0.0, y: 1000.0, z: 0.0 },
+            p: Vec3 {
+                x: 0.0,
+                y: 1000.0,
+                z: 93.0,
+            },
+            v: Vec3 {
+                x: 0.0,
+                y: 1000.0,
+                z: 0.0,
+            },
             boost: None,
             rot: None,
         },
@@ -75,7 +95,12 @@ fn grid_is_uniform_at_requested_rate() {
     // Span [0,3] at 10 Hz, inclusive => 31 ticks.
     assert_eq!(grid.len(), 31);
     for w in grid.windows(2) {
-        assert!(near(w[1].t - w[0].t, 0.1), "non-uniform dt: {} -> {}", w[0].t, w[1].t);
+        assert!(
+            near(w[1].t - w[0].t, 0.1),
+            "non-uniform dt: {} -> {}",
+            w[0].t,
+            w[1].t
+        );
     }
 }
 

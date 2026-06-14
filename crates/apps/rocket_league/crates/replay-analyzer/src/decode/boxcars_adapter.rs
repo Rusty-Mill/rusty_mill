@@ -163,7 +163,11 @@ fn extract_goals(replay: &Replay) -> Vec<GoalInfo> {
             Some(HeaderProp::QWord(n)) => Some(*n as i32),
             _ => None,
         };
-        out.push(GoalInfo { frame, scorer, team });
+        out.push(GoalInfo {
+            frame,
+            scorer,
+            team,
+        });
     }
     out
 }

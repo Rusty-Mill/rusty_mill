@@ -10,8 +10,8 @@
 //! on its own (defensive) half, so the sign of a team's mean `y` reveals which
 //! goal it defends — and therefore which way it attacks.
 
-use crate::model::{FrameOut, GridCar, GridFrame, Kin, PlayerTrack, Rot3, Vec3};
 use crate::field;
+use crate::model::{FrameOut, GridCar, GridFrame, Kin, PlayerTrack, Rot3, Vec3};
 use std::collections::BTreeMap;
 
 /// Multiplier that rotates a team's world frame so it attacks `+Y`.
@@ -39,7 +39,11 @@ pub fn flip_yaw(r: Rot3, sign: i32) -> Rot3 {
         if yaw > std::f32::consts::PI {
             yaw -= 2.0 * std::f32::consts::PI;
         }
-        Rot3 { pitch: r.pitch, yaw, roll: r.roll }
+        Rot3 {
+            pitch: r.pitch,
+            yaw,
+            roll: r.roll,
+        }
     }
 }
 
@@ -95,8 +99,7 @@ pub fn find_kickoff(frames: &[FrameOut]) -> Option<&FrameOut> {
             && b.y.abs() < 6.0
             && (85.0..100.0).contains(&b.z)
             && f.cars.len() >= 2
-            && f
-                .cars
+            && f.cars
                 .iter()
                 .all(|c| c.p.z < 60.0 && field::is_kickoff_spawn(c.p.to_arr(), 60.0))
     })
@@ -105,11 +108,7 @@ pub fn find_kickoff(frames: &[FrameOut]) -> Option<&FrameOut> {
 /// Produce a grid frame expressed in `team`'s attacking-direction frame: the
 /// whole world (ball + every car) rotated so `team` attacks `+Y`, making
 /// own/opponent half and left/right comparable across teams.
-pub fn attacking_frame(
-    frame: &GridFrame,
-    team: i32,
-    signs: &BTreeMap<i32, i32>,
-) -> GridFrame {
+pub fn attacking_frame(frame: &GridFrame, team: i32, signs: &BTreeMap<i32, i32>) -> GridFrame {
     let sign = signs.get(&team).copied().unwrap_or(1);
     GridFrame {
         t: frame.t,

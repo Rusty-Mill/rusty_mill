@@ -93,7 +93,12 @@ pub fn touches(resampled: &Resampled, tracks: &[PlayerTrack]) -> Vec<Event> {
             Some((name, team)) => (Some(name.clone()), *team),
             None => (None, nearest.0.team),
         };
-        out.push(Event::Touch { t, pri, player, team });
+        out.push(Event::Touch {
+            t,
+            pri,
+            player,
+            team,
+        });
     }
     out
 }
@@ -106,12 +111,19 @@ pub fn possessions(touches: &[Event]) -> Vec<Event> {
 
     let flush = |run: &mut Option<(i32, f32, f32, usize)>, out: &mut Vec<Event>| {
         if let Some((team, start, end, touches)) = run.take() {
-            out.push(Event::Possession { team, start, end, touches });
+            out.push(Event::Possession {
+                team,
+                start,
+                end,
+                touches,
+            });
         }
     };
 
     for ev in touches {
-        let Event::Touch { t, team, .. } = ev else { continue };
+        let Event::Touch { t, team, .. } = ev else {
+            continue;
+        };
         match team {
             Some(team) => match &mut run {
                 Some((rt, _, end, count)) if *rt == *team => {
@@ -138,7 +150,9 @@ pub fn kickoffs(resampled: &Resampled) -> Vec<Event> {
     let mut last_t: Option<f32> = None;
     for f in &resampled.frames {
         if is_kickoff(f) {
-            let new_kickoff = last_t.map(|p| f.t - p > KICKOFF_SEPARATION_S).unwrap_or(true);
+            let new_kickoff = last_t
+                .map(|p| f.t - p > KICKOFF_SEPARATION_S)
+                .unwrap_or(true);
             if new_kickoff {
                 out.push(Event::Kickoff { t: f.t });
             }
