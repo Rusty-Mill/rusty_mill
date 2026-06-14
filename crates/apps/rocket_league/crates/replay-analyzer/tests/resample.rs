@@ -51,6 +51,7 @@ fn recon() -> Reconstruction {
         frames: Vec::new(),
         tracks: vec![track],
         ball_samples,
+        demos: Vec::new(),
     }
 }
 
@@ -119,6 +120,7 @@ fn empty_reconstruction_yields_empty_grid() {
         frames: Vec::new(),
         tracks: Vec::new(),
         ball_samples: Vec::new(),
+        demos: Vec::new(),
     };
     assert!(resample(&empty, 30.0).is_empty());
 }

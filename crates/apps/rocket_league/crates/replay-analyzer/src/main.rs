@@ -5,7 +5,7 @@
 use replay_analyzer::analyze::{self, reconstruct};
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_analyzer::model::CanonicalMatch;
+use replay_analyzer::model::{CanonicalMatch, Event};
 use std::error::Error;
 use std::path::Path;
 use std::process::ExitCode;
@@ -136,4 +136,17 @@ fn print_summary(c: &CanonicalMatch) {
             replay_analyzer::field::boost_percent(mean_boost as u8),
         );
     }
+
+    let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for e in &c.events {
+        let k = match e {
+            Event::Kickoff { .. } => "kickoff",
+            Event::Touch { .. } => "touch",
+            Event::Possession { .. } => "possession",
+            Event::Demo { .. } => "demo",
+            Event::Goal { .. } => "goal",
+        };
+        *counts.entry(k).or_default() += 1;
+    }
+    eprintln!("events (T4)    : {counts:?}");
 }

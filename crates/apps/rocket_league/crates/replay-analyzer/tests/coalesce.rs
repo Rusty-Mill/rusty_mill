@@ -128,6 +128,7 @@ fn recycled_actor_fixture() -> DecodedReplay {
             record_fps: Some(30.0),
             team_scores: BTreeMap::from([(0, 0), (1, 0)]),
             players: vec![player("Alice", 0), player("Bob", 1)],
+            goals: Vec::new(),
         },
         frames,
     }

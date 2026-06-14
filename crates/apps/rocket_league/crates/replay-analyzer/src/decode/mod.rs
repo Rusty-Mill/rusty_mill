@@ -33,6 +33,17 @@ pub struct ReplayMeta {
     pub team_scores: BTreeMap<i32, i32>,
     /// Per-player summary stats from the header `PlayerStats` array.
     pub players: Vec<PlayerMeta>,
+    /// Goals from the header `Goals` array (authoritative scorer/team per goal).
+    pub goals: Vec<GoalInfo>,
+}
+
+/// One scored goal, from the header `Goals` array.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalInfo {
+    /// Network frame index the goal was recorded at.
+    pub frame: i32,
+    pub scorer: Option<String>,
+    pub team: Option<i32>,
 }
 
 /// A normalized actor-attribute update — only the kinds reconstruction consumes.
@@ -57,6 +68,9 @@ pub enum ActorUpdate {
     /// A boost component reported its boost amount (raw byte, 0..=255; ~`/2.55`
     /// for percent). Sourced from `ReplicatedBoostAmount` or `ReplicatedBoost`.
     BoostAmount { comp: i32, amount: u8 },
+    /// A car was demolished. Car actor ids (resolve to players via current
+    /// binding); sourced from `ReplicatedDemolish`/`ReplicatedDemolishExtended`.
+    Demolish { attacker_car: i32, victim_car: i32 },
 }
 
 /// A new actor appearing in a frame, with its classification.

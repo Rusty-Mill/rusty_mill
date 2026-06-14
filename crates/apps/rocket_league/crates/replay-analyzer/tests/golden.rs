@@ -12,7 +12,7 @@ use replay_analyzer::analyze::{self, reconstruct};
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_analyzer::field;
-use replay_analyzer::model::CanonicalMatch;
+use replay_analyzer::model::{CanonicalMatch, Event};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -124,6 +124,40 @@ fn coalesced_tracks_are_identity_stable() {
     }
 }
 
+#[test]
+fn derived_goal_events_match_header_truth() {
+    let m = &*MATCH;
+    use std::collections::HashMap;
+
+    // Goal events come from the authoritative header; cross-check their per-
+    // scorer counts against the independent PlayerStats goal totals.
+    let mut by_scorer: HashMap<&str, i32> = HashMap::new();
+    let mut by_team: BTreeMap<i32, i32> = BTreeMap::new();
+    for e in &m.events {
+        if let Event::Goal { scorer, team, .. } = e {
+            if let Some(s) = scorer {
+                *by_scorer.entry(s.as_str()).or_default() += 1;
+            }
+            if let Some(t) = team {
+                *by_team.entry(*t).or_default() += 1;
+            }
+        }
+    }
+
+    for p in &m.players {
+        if p.goals > 0 {
+            assert_eq!(
+                by_scorer.get(p.name.as_str()).copied().unwrap_or(0),
+                p.goals,
+                "goal-event count for {} should match PlayerStats",
+                p.name
+            );
+        }
+    }
+    // And team goal tallies must equal the header team scores.
+    assert_eq!(by_team, m.team_scores, "team goal tallies vs team scores");
+}
+
 // ---- Golden digest ----------------------------------------------------------
 
 /// Compact, deterministic fingerprint of the canonical model. Floats are
@@ -142,6 +176,16 @@ struct Digest {
     ball_min: [i32; 3],
     ball_max: [i32; 3],
     tracks: Vec<TrackDigest>,
+    /// Event counts by type, plus the goal list (authoritative, stable).
+    events_by_type: BTreeMap<String, usize>,
+    goals: Vec<GoalDigest>,
+}
+
+#[derive(Serialize)]
+struct GoalDigest {
+    t_cs: i64,
+    scorer: Option<String>,
+    team: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -192,6 +236,22 @@ fn digest(m: &CanonicalMatch) -> Digest {
         })
         .collect();
 
+    let mut events_by_type: BTreeMap<String, usize> = BTreeMap::new();
+    let mut goals = Vec::new();
+    for e in &m.events {
+        let key = match e {
+            Event::Kickoff { .. } => "kickoff",
+            Event::Touch { .. } => "touch",
+            Event::Possession { .. } => "possession",
+            Event::Demo { .. } => "demo",
+            Event::Goal { t, scorer, team } => {
+                goals.push(GoalDigest { t_cs: cs(*t), scorer: scorer.clone(), team: *team });
+                "goal"
+            }
+        };
+        *events_by_type.entry(key.to_string()).or_default() += 1;
+    }
+
     Digest {
         replay_id: m.replay_id.clone(),
         parser_version: m.parser_version.clone(),
@@ -204,6 +264,8 @@ fn digest(m: &CanonicalMatch) -> Digest {
         ball_min: bmin.map(|v| v.round() as i32),
         ball_max: bmax.map(|v| v.round() as i32),
         tracks,
+        events_by_type,
+        goals,
     }
 }
 

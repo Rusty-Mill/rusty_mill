@@ -23,6 +23,16 @@ pub struct Reconstruction {
     /// Raw ball rigid-body observations (t, p, v), in observation order, for
     /// resampling. Carry-forward is *not* applied here.
     pub ball_samples: Vec<TrackSample>,
+    /// Demolitions captured with the players (PRIs) bound at the demo time.
+    pub demos: Vec<DemoSample>,
+}
+
+/// A demolition with attacker/victim resolved to their bound PRI at demo time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DemoSample {
+    pub t: f32,
+    pub attacker_pri: Option<i32>,
+    pub victim_pri: Option<i32>,
 }
 
 /// Reconstruct per-frame world state and coalesced player tracks from a neutral
@@ -42,6 +52,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut comp_to_car: HashMap<i32, i32> = HashMap::new();
     let mut car_boost: HashMap<i32, u8> = HashMap::new();
     let mut ball_samples: Vec<TrackSample> = Vec::new();
+    let mut demos: Vec<DemoSample> = Vec::new();
     let mut resolver = IdentityResolver::new();
 
     let mut frames: Vec<FrameOut> = Vec::with_capacity(decoded.frames.len());
@@ -62,6 +73,13 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                     if let Some(car) = comp_to_car.get(comp) {
                         car_boost.insert(*car, *amount);
                     }
+                }
+                ActorUpdate::Demolish { attacker_car, victim_car } => {
+                    demos.push(DemoSample {
+                        t: frame.time,
+                        attacker_pri: resolver.current_pri(*attacker_car),
+                        victim_pri: resolver.current_pri(*victim_car),
+                    });
                 }
                 ActorUpdate::RigidBody { actor, p, v, .. } => {
                     match actor_kind.get(actor).copied() {
@@ -146,6 +164,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         frames,
         tracks,
         ball_samples,
+        demos,
     }
 }
 

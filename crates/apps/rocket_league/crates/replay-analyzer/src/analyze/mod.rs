@@ -4,13 +4,14 @@
 //! port types — and scoring-agnostic. It is the pure core that golden-file and
 //! fixture tests exercise without ever touching a `.replay` file.
 
+pub mod events;
 pub mod identity;
 pub mod normalize;
 pub mod reconstruct;
 pub mod resample;
 
 use crate::decode::DecodedReplay;
-use crate::model::{CanonicalMatch, Resampled};
+use crate::model::{CanonicalMatch, Event, Resampled};
 
 /// Default resample grid rate (Hz). Matches RL's nominal record rate.
 pub const DEFAULT_HZ: f32 = 30.0;
@@ -37,6 +38,30 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
         frames: grid,
     };
 
+    // T4: derive events. Goals come from the authoritative header; resolve each
+    // goal's frame index to a time via the native frame stream.
+    let mut evs = events::touches(&resampled, &recon.tracks);
+    let possessions = events::possessions(&evs);
+    evs.extend(possessions);
+    evs.extend(events::kickoffs(&resampled));
+    evs.extend(events::demos(&recon.demos, &recon.tracks));
+    for g in &decoded.meta.goals {
+        // The header's goal frame can be one past the last index (a match-ending
+        // goal); clamp to the final frame rather than collapsing to t=0.
+        let t = if decoded.frames.is_empty() {
+            0.0
+        } else {
+            let idx = (g.frame as usize).min(decoded.frames.len() - 1);
+            decoded.frames[idx].time
+        };
+        evs.push(Event::Goal {
+            t,
+            scorer: g.scorer.clone(),
+            team: g.team,
+        });
+    }
+    evs.sort_by(|a, b| a.time().total_cmp(&b.time()));
+
     CanonicalMatch {
         replay_id: replay_id.into(),
         parser_version: decoded.meta.parser_version.clone(),
@@ -51,5 +76,6 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
         tracks: recon.tracks,
         frames: recon.frames,
         resampled,
+        events: evs,
     }
 }

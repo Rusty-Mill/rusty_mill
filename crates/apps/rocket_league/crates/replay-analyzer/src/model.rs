@@ -176,6 +176,57 @@ pub struct Resampled {
     pub frames: Vec<GridFrame>,
 }
 
+/// A derived match event (T4). Touches, possessions, and kickoffs are inferred
+/// from kinematics; demos and goals come from authoritative replay attributes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Event {
+    /// Ball reset to field center for a kickoff (start of the countdown window).
+    Kickoff { t: f32 },
+    /// A car touched the ball (ball-velocity discontinuity + nearest car).
+    Touch {
+        t: f32,
+        pri: i32,
+        player: Option<String>,
+        team: Option<i32>,
+    },
+    /// A maximal run of consecutive same-team touches.
+    Possession {
+        team: i32,
+        start: f32,
+        end: f32,
+        /// Number of touches in the run.
+        touches: usize,
+    },
+    /// One car demolished another (from replay demolish attributes).
+    Demo {
+        t: f32,
+        attacker_pri: Option<i32>,
+        attacker: Option<String>,
+        victim_pri: Option<i32>,
+        victim: Option<String>,
+    },
+    /// A goal (from the authoritative header `Goals` array).
+    Goal {
+        t: f32,
+        scorer: Option<String>,
+        team: Option<i32>,
+    },
+}
+
+impl Event {
+    /// The event's timeline position (a possession's start).
+    pub fn time(&self) -> f32 {
+        match self {
+            Event::Kickoff { t }
+            | Event::Touch { t, .. }
+            | Event::Demo { t, .. }
+            | Event::Goal { t, .. } => *t,
+            Event::Possession { start, .. } => *start,
+        }
+    }
+}
+
 /// The canonical match model emitted by the analyzer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanonicalMatch {
@@ -198,4 +249,6 @@ pub struct CanonicalMatch {
     pub frames: Vec<FrameOut>,
     /// Fixed-rate, gap-aware resampling with attack-direction normalization (T2).
     pub resampled: Resampled,
+    /// Derived match events (T4), sorted by time.
+    pub events: Vec<Event>,
 }

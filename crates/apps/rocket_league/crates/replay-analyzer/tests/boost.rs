@@ -89,6 +89,7 @@ fn fixture() -> DecodedReplay {
                 saves: 0,
                 shots: 0,
             }],
+            goals: Vec::new(),
         },
         frames,
     }

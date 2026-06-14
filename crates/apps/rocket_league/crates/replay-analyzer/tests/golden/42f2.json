@@ -81,5 +81,49 @@
         987
       ]
     }
+  ],
+  "events_by_type": {
+    "demo": 80,
+    "goal": 7,
+    "kickoff": 7,
+    "possession": 77,
+    "touch": 219
+  },
+  "goals": [
+    {
+      "t_cs": 17686,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 20016,
+      "scorer": "xFaceMcMurphyx",
+      "team": 0
+    },
+    {
+      "t_cs": 27082,
+      "scorer": "Unlucky Odd",
+      "team": 1
+    },
+    {
+      "t_cs": 28508,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 31851,
+      "scorer": "Schutzein",
+      "team": 0
+    },
+    {
+      "t_cs": 39150,
+      "scorer": "Unlucky Odd",
+      "team": 1
+    },
+    {
+      "t_cs": 44166,
+      "scorer": "xFaceMcMurphyx",
+      "team": 0
+    }
   ]
 }
