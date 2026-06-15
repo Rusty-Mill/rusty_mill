@@ -1,0 +1,111 @@
+//! Mechanical **skill detection** over the canonical match model.
+//!
+//! A pure consumer of [`replay_analyzer`]'s [`CanonicalMatch`], like the
+//! `scoring` and `value` crates: no parsing, no I/O, no clock. It answers a
+//! different question than scoring — scoring rates *decision discipline*; this
+//! crate catalogs the *individual mechanics* a player executed, and lets a caller
+//! **verify whether a given skill was performed** in the replay (optionally within
+//! a player or a time window).
+//!
+//! Detection is heuristic and inferred from kinematics (spec §0): every instance
+//! carries a confidence, and the thresholds live in a versioned [`SkillConfig`]
+//! so results are reproducible and tunable.
+//!
+//! # Example
+//! ```no_run
+//! use replay_analyzer::{analyze::build_canonical, decode::{ReplayParser, boxcars_adapter::BoxcarsParser}};
+//! use replay_skills::{detect_all, SkillConfig, Skill};
+//! let data = std::fs::read("match.replay").unwrap();
+//! let decoded = BoxcarsParser::new().parse(&data).unwrap();
+//! let canonical = build_canonical(&decoded, "match");
+//! let report = detect_all(&canonical, &SkillConfig::default());
+//! assert!(report.performed(Skill::Aerial) || !report.performed(Skill::Aerial));
+//! ```
+
+pub mod config;
+pub mod detect;
+pub mod report;
+pub mod skill;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use replay_analyzer::model::CanonicalMatch;
+
+pub use config::{SkillConfig, SKILL_CONFIG_VERSION};
+pub use report::{PlayerSkills, SkillInstance, SkillReport};
+pub use skill::{Detection, Skill, SkillCategory};
+
+/// Detect every catalogued skill in a match, producing a [`SkillReport`].
+///
+/// Runs each detector in [`detect`], merges and time-sorts the instances, and
+/// rolls them up per player. Deterministic for a given `(match, cfg)`.
+pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
+    let r = &m.resampled;
+
+    let mut instances = Vec::new();
+    instances.extend(detect::supersonic(r, &m.tracks, cfg));
+    instances.extend(detect::aerials(r, &m.events, cfg));
+    instances.extend(detect::air_dribbles(r, &m.events, cfg));
+    instances.extend(detect::ceiling_plays(r, &m.tracks, cfg));
+    instances.extend(detect::wall_plays(r, &m.events, cfg));
+    instances.extend(detect::ground_dribbles(r, &m.tracks, cfg));
+    instances.extend(detect::flicks(r, &m.events, cfg));
+    instances.extend(detect::power_shots(r, &m.events, cfg));
+    instances.extend(detect::redirects(r, &m.events, cfg));
+    instances.extend(detect::kickoff_first_touches(&m.events, cfg));
+    instances.extend(detect::boost_steals(&m.tracks, r, cfg));
+    instances.extend(detect::demos(&m.events, &m.tracks));
+
+    // Deterministic order: time, then skill, then player.
+    instances.sort_by(|a, b| {
+        a.t.total_cmp(&b.t)
+            .then(a.skill.cmp(&b.skill))
+            .then(a.pri.cmp(&b.pri))
+    });
+
+    let players = rollup(m, &instances);
+
+    SkillReport {
+        replay_id: m.replay_id.clone(),
+        config_version: cfg.version.clone(),
+        analyzer_version: m.analyzer_version.clone(),
+        parser_version: m.parser_version.clone(),
+        instances,
+        players,
+    }
+}
+
+/// Per-player skill counts: one [`PlayerSkills`] per track (plus a synthetic
+/// entry for any instance credited to a PRI without a track), team/PRI sorted.
+fn rollup(m: &CanonicalMatch, instances: &[SkillInstance]) -> Vec<PlayerSkills> {
+    let mut counts: BTreeMap<i32, BTreeMap<Skill, usize>> = BTreeMap::new();
+    for i in instances {
+        *counts.entry(i.pri).or_default().entry(i.skill).or_default() += 1;
+    }
+
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for t in &m.tracks {
+        seen.insert(t.pri);
+        out.push(PlayerSkills {
+            pri: t.pri,
+            player: t.player.clone(),
+            team: t.team,
+            counts: counts.get(&t.pri).cloned().unwrap_or_default(),
+        });
+    }
+    // Credit any instance whose PRI never produced a coalesced track.
+    for (pri, c) in &counts {
+        if !seen.contains(pri) {
+            out.push(PlayerSkills {
+                pri: *pri,
+                player: "<unknown>".to_string(),
+                team: None,
+                counts: c.clone(),
+            });
+        }
+    }
+
+    out.sort_by(|a, b| a.team.cmp(&b.team).then(a.pri.cmp(&b.pri)));
+    out
+}

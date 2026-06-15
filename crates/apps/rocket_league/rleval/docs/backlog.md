@@ -21,6 +21,15 @@ Done (this Rust workspace — the parse/feature/scoring/value worker):
   the rubric. `reconcile` binary + `reconcile` module + tests. ✔
 - **M2 report assembly (Rust slice):** lobby comparison table (§4.10), SVG
   position/touch heatmaps, self-contained HTML report; `replay-scoring --html`. ✔
+- **Mechanical skill detection + verification (`replay-skills` crate):** a
+  12-skill catalog (aerial, air dribble, ceiling/wall play, ground dribble,
+  flick, power shot, redirect, kickoff first touch, boost steal, demo,
+  supersonic) detected purely from the canonical grid/events, plus a
+  verification API (`performed` / `performed_by` / `count_for` /
+  `performed_in_window`) and a `replay-skills --verify <skill>` CLI gate. The
+  complement to decision-discipline scoring (mechanics, not positioning).
+  Synthetic per-detector tests + golden digest. Versioned `SkillConfig`.
+  See `docs/skill-detection.md`. ✔
 
 Everything below is **not started** unless noted.
 
@@ -85,3 +94,9 @@ that this layer persists and renders.
 - **Heavier value learner.** `ValueModel` is a deliberately simple logistic model
   behind a stable interface; swap in a GBM/NN once the corpus justifies it
   (`value/src/model.rs` doc note). Held-out VAL AUC is currently ≈0.71.
+- **Calibrate skill thresholds against a corpus.** `replay-skills`' `SkillConfig`
+  defaults are pre-calibration geometry guesses; fit them (e.g. aerial-height,
+  dribble-proximity, power-shot-speed bands) against the labeled corpus so the
+  per-skill counts track reality, and validate detector precision against
+  ballchasing/hand-labeled clips. Extendable to more mechanics (wave dash,
+  half-flip) only if a kinematic signature proves separable.
