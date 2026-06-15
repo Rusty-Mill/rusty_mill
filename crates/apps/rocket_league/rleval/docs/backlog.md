@@ -74,6 +74,30 @@ that this layer persists and renders.
 
 ---
 
+## Feature directions (this repo, beyond the original spec)
+
+These extend the workspace past `replay-scoring-service-spec.md`, driven by
+product direction rather than the milestone plan.
+
+- **Flesh out individual player skills.** Take `replay-skills` past
+  presence/counts to per-player *proficiency*: rate the quality and consistency
+  of each mechanic (aerial height distribution, dribble duration, flick
+  conversion, redirect accuracy, kickoff-win rate, demo efficiency), roll them
+  into a per-player mechanical profile / rating, and tie skill instances to
+  outcomes (which led to a shot or goal — reuse the value model's ΔV). Grow the
+  catalog toward the harder mechanics (wave dash, half-flip, double touch) where
+  a kinematic signature is separable, each with reported precision. Pairs with
+  the "calibrate skill thresholds" follow-up below. Where: `skills/` (this repo).
+- **3D replay simulation / viewer.** Play the reconstructed match back in 3D:
+  ball + cars (position + orientation + boost) animated over the resampled grid,
+  with timeline scrubbing, camera controls, and event/skill annotations overlaid
+  from `replay-skills` and `replay-scoring`. The canonical-match JSON is already
+  the data contract, so this is a pure consumer of existing analyzer output — a
+  web viewer (three.js/WebGL over the JSON) is the natural form. Where: new
+  `viewer/` (web), feeding off `replay-analyzer --json`.
+
+---
+
 ## Engineering follow-ups (this repo, smaller)
 
 - **Reconciliation as a standing gate.** Add a `--gate` to `reconcile` (and a
