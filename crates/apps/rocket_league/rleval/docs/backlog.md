@@ -88,13 +88,15 @@ product direction rather than the milestone plan.
   catalog toward the harder mechanics (wave dash, half-flip, double touch) where
   a kinematic signature is separable, each with reported precision. Pairs with
   the "calibrate skill thresholds" follow-up below. Where: `skills/` (this repo).
-- **3D replay simulation / viewer.** Play the reconstructed match back in 3D:
-  ball + cars (position + orientation + boost) animated over the resampled grid,
-  with timeline scrubbing, camera controls, and event/skill annotations overlaid
-  from `replay-skills` and `replay-scoring`. The canonical-match JSON is already
-  the data contract, so this is a pure consumer of existing analyzer output — a
-  web viewer (three.js/WebGL over the JSON) is the natural form. Where: new
-  `viewer/` (web), feeding off `replay-analyzer --json`.
+- **3D replay simulation / viewer.** ✔ *First increment shipped* — the
+  `replay-viewer` crate distills the resampled grid + events + detected skills
+  into a compact `Scene` and embeds it in a self-contained three.js viewer
+  (ball + cars with boost/labels, scrubable timeline, orbit camera, event/skill
+  ticker). Pure scene core, golden-tested; `replay-viewer <replay> --html`. See
+  `docs/replay-viewer.md`. Remaining: vendor three.js for a fully-offline file;
+  tune car orientation against footage + a chase/ball cam; overlay scoring
+  (roles / 1st-2nd man / leak) alongside the skill ticker; optional `--hz`
+  playback downsample; a headless-GL render smoke test.
 
 ---
 
