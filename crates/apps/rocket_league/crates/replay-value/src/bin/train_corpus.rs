@@ -1,0 +1,182 @@
+//! Train the value model on a whole replay corpus, with a **replay-level**
+//! train/val split (rows from one match are correlated, so splitting by row
+//! would leak). Reports held-out log-loss and AUC against the base-rate baseline
+//! — the honest "does the value model generalize" check, the per-match overfit's
+//! antidote.
+//!
+//! Usage: `train_corpus [manifest.json]` (default `assets/corpus/manifest.json`).
+//! Labels are self-supervised from goals, so the manifest's ranks are unused.
+
+use std::error::Error;
+use std::path::{Path, PathBuf};
+
+use replay_analyzer::analyze::build_canonical;
+use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
+use replay_analyzer::decode::ReplayParser;
+use replay_value::config::TrainConfig;
+use replay_value::dataset::{Dataset, Row};
+use replay_value::model::ValueModel;
+use replay_value::{build_dataset, ValueConfig};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct ManifestEntry {
+    file: String,
+}
+
+fn base_rate_log_loss(rows: &[Row], p: f32) -> f32 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let p = p.clamp(1e-7, 1.0 - 1e-7);
+    let s: f32 = rows
+        .iter()
+        .map(|r| -(r.y * p.ln() + (1.0 - r.y) * (1.0 - p).ln()))
+        .sum();
+    s / rows.len() as f32
+}
+
+/// Mann–Whitney AUC: P(model scores a random positive above a random negative).
+fn auc(model: &ValueModel, rows: &[Row]) -> f32 {
+    let mut scored: Vec<(f32, f32)> = rows.iter().map(|r| (model.predict(&r.x), r.y)).collect();
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut rank_sum, mut npos, mut i) = (0.0f64, 0usize, 0usize);
+    // Average ranks for ties, 1-based.
+    while i < scored.len() {
+        let mut j = i;
+        while j + 1 < scored.len() && scored[j + 1].0 == scored[i].0 {
+            j += 1;
+        }
+        let avg_rank = (i + j) as f64 / 2.0 + 1.0;
+        for s in &scored[i..=j] {
+            if s.1 > 0.5 {
+                rank_sum += avg_rank;
+                npos += 1;
+            }
+        }
+        i = j + 1;
+    }
+    let nneg = scored.len() - npos;
+    if npos == 0 || nneg == 0 {
+        return 0.5;
+    }
+    ((rank_sum - (npos * (npos + 1)) as f64 / 2.0) / (npos as f64 * nneg as f64)) as f32
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let manifest = PathBuf::from(
+        std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "assets/corpus/manifest.json".into()),
+    );
+    let dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let entries: Vec<ManifestEntry> = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+
+    let cfg = ValueConfig {
+        sample_stride: 30, // 1 s; plenty of states across a corpus, keeps it fast
+        train: TrainConfig {
+            epochs: 2500,
+            ..TrainConfig::default()
+        },
+        ..ValueConfig::default()
+    };
+
+    let nthreads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(entries.len().max(1));
+    let chunk = entries.len().div_ceil(nthreads);
+
+    // Parse + build each replay's rows in parallel, preserving replay grouping.
+    let per_replay: Vec<Vec<Row>> = std::thread::scope(|s| {
+        let handles: Vec<_> = entries
+            .chunks(chunk)
+            .map(|slice| {
+                let dir = &dir;
+                let cfg = &cfg;
+                s.spawn(move || {
+                    let mut out = Vec::new();
+                    for e in slice {
+                        let Ok(data) = std::fs::read(dir.join(&e.file)) else {
+                            continue;
+                        };
+                        let Ok(decoded) = BoxcarsParser::new().parse(&data) else {
+                            continue;
+                        };
+                        let m = build_canonical(&decoded, "x");
+                        out.push(build_dataset(&m, cfg).rows);
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect()
+    });
+
+    // Replay-level split: every 5th replay is held out.
+    let (mut train, mut val) = (Vec::new(), Vec::new());
+    for (i, rows) in per_replay.iter().enumerate() {
+        let dst = if i % 5 == 0 { &mut val } else { &mut train };
+        dst.extend(rows.iter().cloned());
+    }
+    let train_ds = Dataset {
+        rows: train,
+        horizon_s: cfg.horizon_s,
+    };
+    let val_ds = Dataset {
+        rows: val,
+        horizon_s: cfg.horizon_s,
+    };
+
+    let base = if train_ds.rows.is_empty() {
+        0.0
+    } else {
+        train_ds.rows.iter().map(|r| r.y).sum::<f32>() / train_ds.rows.len() as f32
+    };
+    let model = ValueModel::train(&train_ds, &cfg.train);
+
+    eprintln!(
+        "corpus value model (horizon={:.0}s, stride={}):",
+        cfg.horizon_s, cfg.sample_stride
+    );
+    eprintln!(
+        "  replays={}  train_rows={}  val_rows={}  base_rate={:.3}",
+        per_replay.len(),
+        train_ds.rows.len(),
+        val_ds.rows.len(),
+        base
+    );
+    eprintln!(
+        "  train log_loss = {:.4}   (base {:.4})",
+        model.log_loss(&train_ds),
+        base_rate_log_loss(&train_ds.rows, base)
+    );
+    eprintln!(
+        "  VAL   log_loss = {:.4}   (base {:.4})   [held-out: < base ⇒ generalizes]",
+        model.log_loss(&val_ds),
+        base_rate_log_loss(&val_ds.rows, base)
+    );
+    eprintln!(
+        "  VAL   AUC      = {:.4}   [0.5 = chance]",
+        auc(&model, &val_ds.rows)
+    );
+
+    // Retrain on ALL replays for the shipped model (max data), and persist it.
+    let all_rows: Vec<Row> = per_replay.iter().flat_map(|r| r.iter().cloned()).collect();
+    let full = Dataset {
+        rows: all_rows,
+        horizon_s: cfg.horizon_s,
+    };
+    let final_model = ValueModel::train(&full, &cfg.train);
+    let out = dir.join("value_model.json");
+    std::fs::write(&out, serde_json::to_vec_pretty(&final_model)?)?;
+    eprintln!(
+        "  wrote model ({} rows) -> {}",
+        full.rows.len(),
+        out.display()
+    );
+    Ok(())
+}

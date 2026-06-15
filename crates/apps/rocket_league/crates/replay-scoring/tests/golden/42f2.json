@@ -1,0 +1,41 @@
+[
+  {
+    "player": "Unlucky Odd",
+    "pri": 6,
+    "team": 1,
+    "composite_x10": 487,
+    "first_x10": 470,
+    "second_x10": 0,
+    "general_x10": 503,
+    "licence": "Silver Licence",
+    "player_type": "Stacker",
+    "main_leak": "challenge_timing",
+    "confidence": "LowConfidence"
+  },
+  {
+    "player": "xFaceMcMurphyx",
+    "pri": 14,
+    "team": 0,
+    "composite_x10": 532,
+    "first_x10": 531,
+    "second_x10": 517,
+    "general_x10": 546,
+    "licence": "Silver Licence",
+    "player_type": "Calm Controller",
+    "main_leak": "goalside_discipline_1st",
+    "confidence": "Ok"
+  },
+  {
+    "player": "Schutzein",
+    "pri": 17,
+    "team": 0,
+    "composite_x10": 569,
+    "first_x10": 545,
+    "second_x10": 514,
+    "general_x10": 639,
+    "licence": "Silver Licence",
+    "player_type": "Calm Controller",
+    "main_leak": "central_support_fraction",
+    "confidence": "Ok"
+  }
+]
