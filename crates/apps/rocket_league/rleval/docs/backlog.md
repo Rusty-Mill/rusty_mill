@@ -129,3 +129,18 @@ product direction rather than the milestone plan.
   per-skill counts track reality, and validate detector precision against
   ballchasing/hand-labeled clips. Extendable to more mechanics (wave dash,
   half-flip) only if a kinematic signature proves separable.
+- **Map-aware field geometry.** The map name *is* read from the replay
+  (`MapName` → `CanonicalMatch.map`) but is used only as a display label — all
+  geometry is the fixed standard-Soccar constants in `field.rs`, applied to every
+  replay. Correct for the competitive Standard arenas (cosmetic reskins, identical
+  collision), but wrong for genuinely non-standard geometry: non-standard Soccar
+  arenas (Wasteland, Starbase ARC, Pillars/Octagon) and alternate modes (Hoops,
+  Dropshot, Snow Day). On those the wrong dimensions degrade kickoff detection →
+  attack-direction normalization, the wall/ceiling/boost-steal skills, the
+  field-third / central-zone scoring, and the viewer's drawn field box + goals.
+  Fix: make `field.rs` constants a `FieldGeometry` value selected by `MapName`
+  (default = standard), thread it through `analyze`, `skills`, `scoring`, and
+  `viewer`. Authoritative data (goals/demos/scores/boost) and raw reconstruction
+  (positions/velocities) are already map-agnostic and unaffected. Note the spec
+  scopes the product to standard 2v2; the analyzer neither detects nor rejects
+  non-standard maps today — a cheap interim step is to flag/quarantine them.
