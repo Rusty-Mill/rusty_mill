@@ -226,29 +226,51 @@ const ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 14 14"><rect x="3" 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1); // Rocket League is Z-up
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0e14);
-scene.fog = new THREE.Fog(0x0b0e14, F.back_wall_y * 2.4, F.back_wall_y * 5);
+scene.background = gradientBg();
+scene.fog = new THREE.Fog(0x0b0e14, F.back_wall_y * 2.6, F.back_wall_y * 5.5);
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 10, 60000);
 const renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.getElementById('c') });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.maxDistance = F.back_wall_y * 4;
 
-scene.add(new THREE.HemisphereLight(0xb8d0ff, 0x202830, 1.15));
-const dir = new THREE.DirectionalLight(0xffffff, 1.25);
-dir.position.set(2500, -3500, 7000);
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x1a2230, 1.0));
+const dir = new THREE.DirectionalLight(0xffffff, 2.2);
+dir.position.set(2800, -3200, 7000);
+dir.castShadow = true;
+dir.shadow.mapSize.set(2048, 2048);
+dir.shadow.bias = -0.0004;
+Object.assign(dir.shadow.camera, { near: 800, far: 20000, left: -6500, right: 6500, top: 7500, bottom: -7500 });
+dir.shadow.camera.updateProjectionMatrix();
 scene.add(dir);
+
+function gradientBg() {
+  const cv = document.createElement('canvas'); cv.width = 2; cv.height = 256;
+  const x = cv.getContext('2d'), g = x.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, '#10161f'); g.addColorStop(0.55, '#0b0e14'); g.addColorStop(1, '#05070a');
+  x.fillStyle = g; x.fillRect(0, 0, 2, 256);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
 
 // --- camera presets ---
 const OVERVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.22, F.ceiling_z * 2.0), tgt: new THREE.Vector3(0, 0, 150) };
 const GOALVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.5, F.ceiling_z * 1.1), tgt: new THREE.Vector3(0, F.back_wall_y * 0.3, 200) };
 let cam = { mode: 'free', pri: null };
-function applyPose(p) { camera.position.copy(p.pos); controls.target.copy(p.tgt); controls.update(); }
-applyPose(OVERVIEW);
+let camTween = null; // eased preset transition
+function applyPose(p, snap) {
+  if (snap) { camera.position.copy(p.pos); controls.target.copy(p.tgt); controls.update(); camTween = null; return; }
+  camTween = { fromPos: camera.position.clone(), toPos: p.pos.clone(), fromTgt: controls.target.clone(), toTgt: p.tgt.clone(), start: performance.now(), dur: 650 };
+}
+applyPose(OVERVIEW, true);
+controls.addEventListener('start', () => camTween = null); // user grab cancels the tween
 
 function setCam(mode, pri) {
   cam = { mode, pri: pri ?? null };
@@ -264,7 +286,6 @@ document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => s
 
 buildField();
 const ball = makeBall();
-const ballShadow = makeShadow(F.ball_radius * 1.1);
 const cars = buildCars();
 
 // --- floor heatmap: occupancy of the ball or the followed car over the match,
@@ -444,44 +465,64 @@ function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(2 * fx, 2 * fy),
-    new THREE.MeshStandardMaterial({ color: 0x12351f, roughness: 1 }));
+    new THREE.MeshStandardMaterial({ map: pitchTexture(), roughness: 1, metalness: 0 }));
+  floor.receiveShadow = true;
   scene.add(floor);
   const walls = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(2 * fx, 2 * fy, fz)),
-    new THREE.LineBasicMaterial({ color: 0x2b4d6f }));
+    new THREE.LineBasicMaterial({ color: 0x2b4d6f, transparent: true, opacity: .6 }));
   walls.position.set(0, 0, fz / 2);
   scene.add(walls);
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x3a5a78 });
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(
-    [new THREE.Vector3(-fx, 0, 2), new THREE.Vector3(fx, 0, 2)]), lineMat));
-  const circ = new THREE.Mesh(new THREE.RingGeometry(900, 920, 48),
-    new THREE.MeshBasicMaterial({ color: 0x3a5a78, side: THREE.DoubleSide }));
-  circ.position.z = 2; scene.add(circ);
-  for (const sign of [1, -1]) {
-    const g = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(2 * F.goal_half_width, 200, F.goal_height)),
-      new THREE.LineBasicMaterial({ color: 0xffd166 }));
-    g.position.set(0, sign * fy, F.goal_height / 2); scene.add(g);
+  buildGoal(1); buildGoal(-1);
+}
+
+// Painted pitch: green base + mow stripes, boundary, halfway line, centre circle,
+// and goal areas — baked once into a floor texture.
+function pitchTexture() {
+  const W = 1024, H = 1280, fx = F.side_wall_x, fy = F.back_wall_y;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#16401f'; x.fillRect(0, 0, W, H);
+  for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.035)'; x.fillRect(0, i * H / 12, W, H / 12); }
+  const X = wx => (wx + fx) / (2 * fx) * W, Y = wy => (fy - wy) / (2 * fy) * H;
+  x.strokeStyle = 'rgba(225,238,228,.55)'; x.lineWidth = 4;
+  x.strokeRect(8, 8, W - 16, H - 16);
+  x.beginPath(); x.moveTo(0, Y(0)); x.lineTo(W, Y(0)); x.stroke();
+  x.beginPath(); x.arc(X(0), Y(0), 920 / (2 * fx) * W, 0, Math.PI * 2); x.stroke();
+  for (const s of [1, -1]) {
+    const gw = 1300, gd = 1300;
+    x.strokeRect(X(-gw), Y(s * fy), X(gw) - X(-gw), Y(s * (fy - gd)) - Y(s * fy));
   }
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+
+function netTexture() {
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64;
+  const x = cv.getContext('2d'); x.strokeStyle = 'rgba(255,255,255,.85)'; x.lineWidth = 3;
+  for (let i = 0; i <= 64; i += 10) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i, 64); x.moveTo(0, i); x.lineTo(64, i); x.stroke(); }
+  const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+// A goal: white frame (posts + crossbar, shadow-casting) + a translucent back/top net.
+function buildGoal(sign) {
+  const gw = F.goal_half_width, gh = F.goal_height, fy = F.back_wall_y, depth = 330;
+  const white = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: .7 });
+  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), white); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
+  post(-gw); post(gw);
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), white);
+  cross.position.set(0, sign * fy, gh + 11); cross.castShadow = true; scene.add(cross);
+  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), transparent: true, opacity: .4, side: THREE.DoubleSide, depthWrite: false });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, gh), netMat());
+  back.rotation.x = -Math.PI / 2; back.position.set(0, sign * (fy + depth), gh / 2);
+  back.material.map.repeat.set(6, 3); scene.add(back);
+  const top = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, depth), netMat());
+  top.position.set(0, sign * (fy + depth / 2), gh); top.material.map.repeat.set(6, 2); scene.add(top);
 }
 
 function makeBall() {
-  const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 28, 18),
-    new THREE.MeshStandardMaterial({ color: 0xeaeaea, emissive: 0x303030, roughness: .4 }));
-  scene.add(m); return m;
-}
-
-// A flat blob shadow on the floor; opacity/scale track the object's height.
-function makeShadow(r) {
-  const m = new THREE.Mesh(new THREE.CircleGeometry(r, 24),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .35, depthWrite: false }));
-  m.position.z = 1.5; scene.add(m); return m;
-}
-function placeShadow(sh, x, y, z) {
-  sh.position.set(x, y, 1.5);
-  const h = Math.max(0, (z - 17) / F.ceiling_z);
-  sh.material.opacity = Math.max(0.05, 0.38 * (1 - h));
-  const s = 1 + h * 1.2; sh.scale.set(s, s, 1);
+  const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 32, 20),
+    new THREE.MeshStandardMaterial({ color: 0xdcdcdc, roughness: .35, metalness: .1 }));
+  m.castShadow = true; scene.add(m); return m;
 }
 
 function makeLabel(text, hex) {
@@ -502,20 +543,19 @@ function buildCars() {
     const hex = TEAM[pl.team] ?? 0x9aa4b2;
     const g = new THREE.Group();
     const body = new THREE.Mesh(new THREE.BoxGeometry(118, 84, 36),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .5, metalness: .2 }));
-    body.position.z = 18; g.add(body);
+      new THREE.MeshStandardMaterial({ color: hex, roughness: .45, metalness: .25 }));
+    body.position.z = 18; body.castShadow = true; g.add(body);
     const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 70, 30),
       new THREE.MeshStandardMaterial({ color: hex, roughness: .4 }));
-    cabin.position.set(-8, 0, 46); g.add(cabin);
+    cabin.position.set(-8, 0, 46); cabin.castShadow = true; g.add(cabin);
     const nose = new THREE.Mesh(new THREE.BoxGeometry(16, 84, 36),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x444444 }));
-    nose.position.set(59, 0, 18); g.add(nose);
+      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 }));
+    nose.position.set(59, 0, 18); nose.castShadow = true; g.add(nose);
     const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
     g.add(bar);
     const label = makeLabel(pl.name, hex); label.position.set(0, 0, 285); g.add(label);
     scene.add(g);
-    const shadow = makeShadow(95);
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
     const trail = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: .55 }));
@@ -525,7 +565,7 @@ function buildCars() {
     const ring = new THREE.Mesh(new THREE.RingGeometry(108, 150, 36),
       new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: .85, side: THREE.DoubleSide, depthWrite: false }));
     ring.position.z = 3; ring.visible = false; scene.add(ring);
-    map.set(pl.pri, { g, bar, label, shadow, trail, callout, ring });
+    map.set(pl.pri, { g, bar, label, trail, callout, ring });
   }
   return map;
 }
@@ -599,16 +639,15 @@ function updateCallouts(t, st) {
 
 let show = { trails: true, labels: true, boost: true };
 function applyState(st) {
-  if (st.ball) { ball.visible = true; ball.position.set(...st.ball); ballShadow.visible = true; placeShadow(ballShadow, st.ball[0], st.ball[1], st.ball[2]); }
-  else { ball.visible = false; ballShadow.visible = false; }
+  if (st.ball) { ball.visible = true; ball.position.set(...st.ball); }
+  else { ball.visible = false; }
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
-    o.g.visible = live; o.shadow.visible = live; o.label.visible = live && show.labels;
+    o.g.visible = live; o.label.visible = live && show.labels;
     o.bar.visible = live && show.boost; o.trail.visible = live && show.trails;
     if (!live) continue;
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
-    placeShadow(o.shadow, c.p[0], c.p[1], c.p[2]);
     o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
     o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
     o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
@@ -756,6 +795,14 @@ function animate(now) {
   applyState(st);
   updateHud(T, st);
   updateCallouts(T, st);
+  // eased preset transition
+  if (camTween) {
+    const e = Math.min(1, (now - camTween.start) / camTween.dur);
+    const k = e < .5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2; // easeInOutQuad
+    camera.position.lerpVectors(camTween.fromPos, camTween.toPos, k);
+    controls.target.lerpVectors(camTween.fromTgt, camTween.toTgt, k);
+    if (e >= 1) camTween = null;
+  }
   // follow cameras
   let focus = null;
   if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);
