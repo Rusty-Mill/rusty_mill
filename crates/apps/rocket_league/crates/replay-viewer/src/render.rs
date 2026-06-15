@@ -103,6 +103,7 @@ const TEMPLATE: &str = r##"<!doctype html>
     <label><input type="checkbox" id="tgTrails" checked> trails</label>
     <label><input type="checkbox" id="tgLabels" checked> labels</label>
     <label><input type="checkbox" id="tgBoost" checked> boost</label>
+    <label><input type="checkbox" id="tgHeat"> heatmap</label>
   </div>
 </div>
 <div id="help" class="panel">space play · ◀▶ ±1s · n/p next·prev goal · k/j next·prev kickoff · click a player to follow · 0 free cam</div>
@@ -166,6 +167,9 @@ function setCam(mode, pri) {
   document.querySelectorAll('#left .cams button').forEach(b => b.classList.toggle('on', b.dataset.cam === mode));
   if (mode === 'free') applyPose(OVERVIEW);
   else if (mode === 'goal') applyPose(GOALVIEW);
+  if (mode === 'player') heatSubject = pri;
+  else if (mode === 'ball') heatSubject = 'ball';
+  refreshHeat(); // re-bin for the new subject if the heatmap is shown
   updatePlayers(lastState); // refresh follow highlight
 }
 document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => setCam(b.dataset.cam));
@@ -174,6 +178,45 @@ buildField();
 const ball = makeBall();
 const ballShadow = makeShadow(F.ball_radius * 1.1);
 const cars = buildCars();
+
+// --- floor heatmap: occupancy of the ball or the followed car over the match,
+// computed from the same grid positions the scoring heatmaps use ---
+const heatMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(2 * F.side_wall_x, 2 * F.back_wall_y),
+  new THREE.MeshBasicMaterial({ transparent: true, opacity: .72, depthWrite: false }));
+heatMesh.position.z = 6; heatMesh.visible = false; scene.add(heatMesh);
+let heatSubject = 'ball';
+function heatColor(t) { // blue → cyan → green → yellow → red
+  const stops = [[30, 60, 160], [40, 200, 210], [80, 210, 90], [240, 210, 60], [230, 60, 40]];
+  const s = Math.min(0.999, Math.max(0, t)) * (stops.length - 1);
+  const i = Math.floor(s), f = s - i, a = stops[i], b = stops[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
+function buildHeat(subject) {
+  const NX = 48, NY = 60, fx = F.side_wall_x, fy = F.back_wall_y;
+  const grid = new Float32Array(NX * NY);
+  for (const f of frames) {
+    const p = subject === 'ball' ? f.ball : (f.cars.find(c => c.pri === subject)?.p || null);
+    if (!p) continue;
+    const gx = Math.min(NX - 1, Math.max(0, Math.floor((p[0] + fx) / (2 * fx) * NX)));
+    const gy = Math.min(NY - 1, Math.max(0, Math.floor((p[1] + fy) / (2 * fy) * NY)));
+    grid[gy * NX + gx]++;
+  }
+  let max = 0; for (const v of grid) max = Math.max(max, v);
+  const cv = document.createElement('canvas'); cv.width = NX; cv.height = NY;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(NX, NY);
+  for (let gy = 0; gy < NY; gy++) for (let gx = 0; gx < NX; gx++) {
+    const v = grid[gy * NX + gx], t = max > 0 ? Math.pow(v / max, 0.6) : 0;
+    const di = ((NY - 1 - gy) * NX + gx) * 4; // canvas row 0 is +y far end
+    const [r, g, b] = heatColor(t);
+    img.data[di] = r; img.data[di + 1] = g; img.data[di + 2] = b;
+    img.data[di + 3] = t > 0.12 ? Math.min(230, t * 255) : 0; // hide sparse cells
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter;
+  heatMesh.material.map = tex; heatMesh.material.needsUpdate = true;
+}
+function refreshHeat() { if (heatMesh.visible) buildHeat(heatSubject); }
 
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
@@ -434,6 +477,10 @@ document.getElementById('loop').onchange = e => { loop = e.target.checked; };
 for (const id of ['Trails', 'Labels', 'Boost']) {
   document.getElementById('tg' + id).onchange = e => { show[id.toLowerCase()] = e.target.checked; };
 }
+document.getElementById('tgHeat').onchange = e => {
+  heatMesh.visible = e.target.checked;
+  if (e.target.checked) buildHeat(heatSubject);
+};
 function jump(kind, dir) {
   const ts = S.events.filter(e => e.kind === kind).map(e => e.t);
   if (dir > 0) { const n = ts.find(x => x > T + 0.05); if (n != null) { seek(n); setPlaying(false); } }

@@ -122,7 +122,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)
 - [x] Skill highlight callouts on the car in 3D (fading "★ <skill>" above the performer)
 - [x] Possession indicator; per-player trails
-- [ ] Heatmap floor projection (from `replay-scoring`)
+- [x] Heatmap floor projection (toggle; occupancy of the ball or followed player, binned in-viewer from the grid)
 - [ ] Win-probability / ΔV strip synced to playback (from `replay-value`)
 
 **Correctness**
