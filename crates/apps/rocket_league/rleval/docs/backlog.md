@@ -21,6 +21,15 @@ Done (this Rust workspace — the parse/feature/scoring/value worker):
   the rubric. `reconcile` binary + `reconcile` module + tests. ✔
 - **M2 report assembly (Rust slice):** lobby comparison table (§4.10), SVG
   position/touch heatmaps, self-contained HTML report; `replay-scoring --html`. ✔
+- **Mechanical skill detection + verification (`replay-skills` crate):** a
+  12-skill catalog (aerial, air dribble, ceiling/wall play, ground dribble,
+  flick, power shot, redirect, kickoff first touch, boost steal, demo,
+  supersonic) detected purely from the canonical grid/events, plus a
+  verification API (`performed` / `performed_by` / `count_for` /
+  `performed_in_window`) and a `replay-skills --verify <skill>` CLI gate. The
+  complement to decision-discipline scoring (mechanics, not positioning).
+  Synthetic per-detector tests + golden digest. Versioned `SkillConfig`.
+  See `docs/skill-detection.md`. ✔
 
 Everything below is **not started** unless noted.
 
@@ -78,10 +87,19 @@ that this layer persists and renders.
 - **Spurious `<unknown>` tracks.** A few replays coalesce an extra unnamed track
   (an unbound/short-lived PRI). Harmless downstream (excluded from validate /
   reconcile / lobby), but worth eliminating in `analyze::identity`.
-- **Corpus reproducibility.** The 180 corpus `.replay` files live in an
-  uncommitted local cache (gitignored, ~230 MB); only the distilled fixtures are
-  committed. Document/script their retrieval so calibration is reproducible from
-  scratch.
+- **Corpus reproducibility.** ✔ The 180 corpus `.replay` files are gitignored
+  (~230 MB); only the distilled fixtures are committed. Retrieval is now scripted
+  and documented: `assets/corpus/refresh_corpus_replays.py` re-downloads them by
+  manifest `id` from the ballchasing API (token, rate-limit, `--limit`/`--ids`/
+  `--bucket`, atomic writes), alongside `refresh_ballchasing_stats.py` for the
+  ground-truth fixture; see `assets/corpus/README.md`. Token-free checkout
+  samples (`assets/replays/{42f2,419a}.replay`) ship for quick spot-checks.
 - **Heavier value learner.** `ValueModel` is a deliberately simple logistic model
   behind a stable interface; swap in a GBM/NN once the corpus justifies it
   (`value/src/model.rs` doc note). Held-out VAL AUC is currently ≈0.71.
+- **Calibrate skill thresholds against a corpus.** `replay-skills`' `SkillConfig`
+  defaults are pre-calibration geometry guesses; fit them (e.g. aerial-height,
+  dribble-proximity, power-shot-speed bands) against the labeled corpus so the
+  per-skill counts track reality, and validate detector precision against
+  ballchasing/hand-labeled clips. Extendable to more mechanics (wave dash,
+  half-flip) only if a kinematic signature proves separable.
