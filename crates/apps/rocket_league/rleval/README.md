@@ -38,7 +38,9 @@ cargo run -p replay-skills -- assets/replays/42f2.replay
 cargo run -p replay-skills -- assets/replays/42f2.replay --verify aerial --player Schutzein
 ```
 
-See [`docs/`](docs) for the design spec, backlog, and per-feature notes.
+See [`docs/`](docs) for the design spec, backlog, and per-feature notes —
+including [`docs/detection-catalog.md`](docs/detection-catalog.md), a full
+reference of everything detectable in a replay across all crates.
 Scores and skill detections are **heuristic** inferences from kinematics
 (replays carry motion, not inputs); thresholds are versioned and want corpus
 calibration before the absolute numbers are trusted.
