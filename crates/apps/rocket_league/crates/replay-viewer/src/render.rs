@@ -107,13 +107,15 @@ const TEMPLATE: &str = r##"<!doctype html>
   #top #poss { font-size: 11px; font-weight: 700; }
   #warn { top:64px; left:50%; transform:translateX(-50%); font-size:12px; font-weight:700;
     color:#f0b429; background:rgba(46,34,8,.88); border-color:#7a5a10; }
-  #players { top: 10px; left: 10px; min-width: 168px; }
-  #players .row { cursor:pointer; padding:1px 3px; border-radius:4px; }
+  #players { top: 10px; left: 10px; min-width: 196px; }
+  #players .row { cursor:pointer; padding:2px 3px; border-radius:4px; }
   #players .row:hover { background:#1c2230; }
   #players .row.follow { background:#243049; outline:1px solid #3b82f6; }
-  #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
-    margin-right:6px; vertical-align:middle; }
-  #players b { float:right; color:#c9d1d9; }
+  #players .r1 { display:flex; align-items:center; }
+  #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+  #players .r2 { display:flex; align-items:center; gap:8px; font-size:10px; color:#8b949e; padding-left:15px; }
+  #players .r2 b { margin-left:auto; color:#c9d1d9; }
+  #players .r2 .sp { color:#6e7681; }
   #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
   #players .role.first { color:#ffd166; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
@@ -551,6 +553,23 @@ function drawMinimap(st) {
   if (st.ball) { mmx.fillStyle = '#fff'; mmx.beginPath(); mmx.arc(MX(st.ball[0]), MY(st.ball[1]), 3, 0, Math.PI * 2); mmx.fill(); }
 }
 
+// demo flashes: an expanding burst at the demoer when a demo event is crossed
+const demoEvents = S.events.filter(e => e.kind === 'demo');
+const flashes = [];
+let prevT = 0;
+function spawnFlash(p) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(20, 60, 24),
+    new THREE.MeshBasicMaterial({ color: 0xff5533, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+  m.position.set(p[0], p[1], 45); scene.add(m); flashes.push({ m, start: performance.now() });
+}
+function updateFlashes(now) {
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i], age = (now - f.start) / 700;
+    if (age >= 1) { scene.remove(f.m); f.m.material.dispose(); f.m.geometry.dispose(); flashes.splice(i, 1); continue; }
+    const s = 1 + age * 5; f.m.scale.set(s, s, 1); f.m.material.opacity = 0.85 * (1 - age);
+  }
+}
+
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
   const floor = new THREE.Mesh(
@@ -641,6 +660,11 @@ function buildCars() {
     const nose = new THREE.Mesh(new THREE.BoxGeometry(16, 84, 36),
       new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 }));
     nose.position.set(59, 0, 18); nose.castShadow = true; g.add(nose);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .85 });
+    for (const [wx, wy] of [[42, 44], [42, -44], [-42, 44], [-42, -44]]) {
+      const w = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 16, 14), wheelMat);
+      w.position.set(wx, wy, 15); w.castShadow = true; g.add(w);
+    }
     const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
     g.add(bar);
@@ -786,15 +810,24 @@ for (const pl of S.players) {
   const row = document.createElement('div');
   row.className = 'row'; row.dataset.pri = pl.pri;
   const css = TEAM_CSS[pl.team] ?? '#9aa4b2';
-  row.innerHTML = `<span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i><b>0</b>`;
+  row.innerHTML =
+    `<div class="r1"><span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i></div>` +
+    `<div class="r2"><span class="ga">G${pl.goals} A${pl.assists} Sv${pl.saves}</span><span class="sp"></span><b>0</b></div>`;
   row.onclick = () => setCam('player', pl.pri);
   plistEl.appendChild(row);
   rowEls.set(pl.pri, row);
+}
+function carSpeed(pri, t) {
+  const i = frameIndex(t); if (i + 1 >= frames.length) return 0;
+  const a = frames[i].cars.find(c => c.pri === pri), b = frames[i + 1].cars.find(c => c.pri === pri);
+  if (!a || !b) return 0;
+  return Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz;
 }
 function updatePlayers(st) {
   for (const pl of S.players) {
     const row = rowEls.get(pl.pri), c = st ? st.cars.get(pl.pri) : null;
     row.querySelector('b').textContent = c ? c.boost : 0;
+    row.querySelector('.sp').textContent = c ? Math.round(carSpeed(pl.pri, T) * 0.036) + ' kph' : '';
     const r = row.querySelector('.role');
     r.textContent = c && c.role ? (c.role === 1 ? '1ST' : '2ND') : '';
     r.className = 'role' + (c && c.role === 1 ? ' first' : '');
@@ -904,6 +937,9 @@ function animate(now) {
   updateHud(T, st);
   updateCallouts(T, st);
   drawMinimap(st);
+  for (const e of demoEvents) if (e.t > prevT && e.t <= T) { const c = st.cars.get(e.pri); if (c) spawnFlash(c.p); }
+  prevT = T;
+  updateFlashes(now);
   // eased preset transition
   if (camTween) {
     const e = Math.min(1, (now - camTween.start) / camTween.dur);

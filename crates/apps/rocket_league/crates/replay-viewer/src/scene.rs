@@ -48,12 +48,19 @@ impl Default for Field {
     }
 }
 
-/// A player in the roster, keyed by the stable PRI the frames reference.
+/// A player in the roster, keyed by the stable PRI the frames reference, with
+/// header end-of-match stats (joined by name).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenePlayer {
     pub pri: i32,
     pub name: String,
     pub team: Option<i32>,
+    #[serde(default)]
+    pub goals: i32,
+    #[serde(default)]
+    pub assists: i32,
+    #[serde(default)]
+    pub saves: i32,
 }
 
 /// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
@@ -130,10 +137,16 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
     let players = m
         .tracks
         .iter()
-        .map(|t| ScenePlayer {
-            pri: t.pri,
-            name: t.player.clone(),
-            team: t.team,
+        .map(|t| {
+            let meta = m.players.iter().find(|p| p.name == t.player);
+            ScenePlayer {
+                pri: t.pri,
+                name: t.player.clone(),
+                team: t.team,
+                goals: meta.map(|p| p.goals).unwrap_or(0),
+                assists: meta.map(|p| p.assists).unwrap_or(0),
+                saves: meta.map(|p| p.saves).unwrap_or(0),
+            }
         })
         .collect();
 
