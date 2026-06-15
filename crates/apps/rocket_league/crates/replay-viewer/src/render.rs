@@ -98,6 +98,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #helpOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
   #helpOverlay .panel { max-width:560px; line-height:1.7; cursor:pointer; }
   #minimap { position:fixed; right:10px; bottom:48px; width:132px; height:165px; padding:0; overflow:hidden; }
+  #loading { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:8px; background:#0b0e14; color:#9aa4b2; font-size:15px; }
+  #loading small { color:#6e7681; font-size:11px; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -160,6 +163,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <body>
 <canvas id="c"></canvas>
 <canvas id="draw"></canvas>
+<div id="loading">Loading replay…<small>(first load fetches three.js — needs network unless built with --offline)</small></div>
 <div id="tools" class="panel">
   <button id="drawToggle" title="draw mode (d)">draw</button>
   <div id="swatches"></div>
@@ -306,6 +310,10 @@ document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => s
 
 buildField();
 const ball = makeBall();
+const ballTrail = new THREE.Line(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3)),
+  new THREE.LineBasicMaterial({ color: 0xe6e6e6, transparent: true, opacity: .5 }));
+ballTrail.frustumCulled = false; scene.add(ballTrail);
 const cars = buildCars();
 
 // --- floor heatmap: occupancy of the ball or the followed car over the match,
@@ -725,6 +733,18 @@ function trailPoints(pri, t) {
   for (let i = i0; i <= i1; i++) { const c = frames[i].cars.find(c => c.pri === pri); if (c) pts.push(c.p); }
   return pts;
 }
+function writeTrail(line, pts) {
+  const arr = line.geometry.attributes.position.array, n = Math.min(pts.length, 64);
+  for (let i = 0; i < n; i++) { arr[i * 3] = pts[i][0]; arr[i * 3 + 1] = pts[i][1]; arr[i * 3 + 2] = pts[i][2] + 4; }
+  line.geometry.setDrawRange(0, n); line.geometry.attributes.position.needsUpdate = true;
+}
+function ballTrailPoints(t) {
+  const i1 = frameIndex(t), t0 = t - 1.0; let i0 = i1;
+  while (i0 > 0 && frames[i0].t > t0) i0--;
+  const pts = [];
+  for (let i = i0; i <= i1; i++) if (frames[i].ball) pts.push(frames[i].ball);
+  return pts;
+}
 
 // Skill callouts: a fading "★ <skill>" label above the car that just performed
 // it (within ~1.4s), so detected skills surface in the 3D scene, not just the
@@ -767,7 +787,9 @@ function applyState(st) {
       if (d > 1) ball.rotateOnWorldAxis(new THREE.Vector3(-dy, dx, 0).normalize(), d / F.ball_radius);
     }
     prevBall = st.ball;
-  } else { ball.visible = false; prevBall = null; }
+    ballTrail.visible = show.trails;
+    if (show.trails) writeTrail(ballTrail, ballTrailPoints(T));
+  } else { ball.visible = false; ballTrail.visible = false; prevBall = null; }
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
@@ -782,14 +804,7 @@ function applyState(st) {
     o.flame.visible = c.boost < (prevBoost.get(pri) ?? c.boost) - 0.5;
     if (o.flame.visible) { const s = 0.7 + Math.random() * 0.5; o.flame.scale.set(s, 0.9 + Math.random() * 0.5, s); }
     prevBoost.set(pri, c.boost);
-    if (show.trails) {
-      const pts = trailPoints(pri, T);
-      const arr = o.trail.geometry.attributes.position.array;
-      const n = Math.min(pts.length, 64);
-      for (let i = 0; i < n; i++) { arr[i * 3] = pts[i][0]; arr[i * 3 + 1] = pts[i][1]; arr[i * 3 + 2] = pts[i][2] + 4; }
-      o.trail.geometry.setDrawRange(0, n);
-      o.trail.geometry.attributes.position.needsUpdate = true;
-    }
+    if (show.trails) writeTrail(o.trail, trailPoints(pri, T));
   }
 }
 
@@ -968,6 +983,7 @@ function animate(now) {
   controls.update();
   renderer.render(scene, camera);
   window.__rendered = (window.__rendered || 0) + 1; // signal for the headless smoke test
+  if (window.__rendered === 1) document.getElementById('loading').style.display = 'none';
 }
 requestAnimationFrame(animate);
 
