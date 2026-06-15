@@ -410,12 +410,20 @@ document.getElementById('ovFile').onchange = e => { if (e.target.files[0]) loadO
 addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => { e.preventDefault(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) loadOverlayImage(f); });
 
-// big boost pads (6) as faint field markers
-for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -4096], [3584, 0], [-3584, 0]]) {
-  const pad = new THREE.Mesh(new THREE.RingGeometry(140, 165, 24),
-    new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide }));
-  pad.position.set(px, py, 3); scene.add(pad);
-}
+// boost pads as faint field markers: 6 big (rings) + the 28 standard small (dots)
+const BIG_PADS = [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -4096], [3584, 0], [-3584, 0]];
+const SMALL_PADS = [
+  [0, -4240], [-1792, -4184], [1792, -4184], [-940, -3308], [940, -3308], [0, -2816],
+  [-3584, -2484], [3584, -2484], [-1788, -2300], [1788, -2300], [-2048, -1036], [0, -1024],
+  [2048, -1036], [-1024, 0], [1024, 0], [-2048, 1036], [0, 1024], [2048, 1036],
+  [-1788, 2300], [1788, 2300], [-3584, 2484], [3584, 2484], [0, 2816], [-940, 3308],
+  [940, 3308], [-1792, 4184], [1792, 4184], [0, 4240],
+];
+const bigPadMat = new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide });
+const smallPadMat = new THREE.MeshBasicMaterial({ color: 0xe0b840, transparent: true, opacity: .35, side: THREE.DoubleSide });
+const bigPadGeo = new THREE.RingGeometry(140, 165, 24), smallPadGeo = new THREE.CircleGeometry(34, 16);
+for (const [px, py] of BIG_PADS) { const m = new THREE.Mesh(bigPadGeo, bigPadMat); m.position.set(px, py, 3); scene.add(m); }
+for (const [px, py] of SMALL_PADS) { const m = new THREE.Mesh(smallPadGeo, smallPadMat); m.position.set(px, py, 3); scene.add(m); }
 
 // --- telestrator: freehand / arrow / line drawing over the view (a coach's pen).
 // Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
@@ -645,9 +653,22 @@ function buildGoal(sign) {
   top.position.set(0, sign * (fy + depth / 2), gh); top.material.map.repeat.set(6, 2); scene.add(top);
 }
 
+// A panelled ball texture (meridians/parallels + accent panels) so the ball's
+// rotation is actually visible on the sphere.
+function ballTexture() {
+  const W = 256, H = 128, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#d6d6d6'; x.fillRect(0, 0, W, H);
+  x.strokeStyle = '#8f8f8f'; x.lineWidth = 2;
+  for (let i = 0; i <= 8; i++) { const px = i / 8 * W; x.beginPath(); x.moveTo(px, 0); x.lineTo(px, H); x.stroke(); }
+  for (let j = 1; j < 4; j++) { const py = j / 4 * H; x.beginPath(); x.moveTo(0, py); x.lineTo(W, py); x.stroke(); }
+  x.fillStyle = '#9aa7c0'; x.fillRect(W * 0.12, H * 0.36, W * 0.1, H * 0.28);
+  x.fillStyle = '#c79a9a'; x.fillRect(W * 0.62, H * 0.12, W * 0.08, H * 0.2);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
 function makeBall() {
   const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 32, 20),
-    new THREE.MeshStandardMaterial({ color: 0xdcdcdc, roughness: .35, metalness: .1 }));
+    new THREE.MeshStandardMaterial({ map: ballTexture(), roughness: .4, metalness: .1 }));
   m.castShadow = true; scene.add(m); return m;
 }
 
@@ -668,19 +689,32 @@ function buildCars() {
   for (const pl of S.players) {
     const hex = TEAM[pl.team] ?? 0x9aa4b2;
     const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(118, 84, 36),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .45, metalness: .25 }));
-    body.position.z = 18; body.castShadow = true; g.add(body);
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 70, 30),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .4 }));
-    cabin.position.set(-8, 0, 46); cabin.castShadow = true; g.add(cabin);
-    const nose = new THREE.Mesh(new THREE.BoxGeometry(16, 84, 36),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 }));
-    nose.position.set(59, 0, 18); nose.castShadow = true; g.add(nose);
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .85 });
-    for (const [wx, wy] of [[42, 44], [42, -44], [-42, 44], [-42, -44]]) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 16, 14), wheelMat);
-      w.position.set(wx, wy, 15); w.castShadow = true; g.add(w);
+    // wedge-shaped car: chassis + sloped hood + raised cockpit with a windshield,
+    // a rear wing, a white nose (forward / +X), and rimmed wheels.
+    const paint = new THREE.MeshStandardMaterial({ color: hex, roughness: .4, metalness: .35 });
+    const dark = new THREE.MeshStandardMaterial({ color: new THREE.Color(hex).multiplyScalar(.6), roughness: .5, metalness: .3 });
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(120, 84, 22), paint);
+    chassis.position.z = 16; chassis.castShadow = true; g.add(chassis);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 72, 22), dark);
+    cabin.position.set(-10, 0, 33); cabin.castShadow = true; g.add(cabin);
+    const wind = new THREE.Mesh(new THREE.BoxGeometry(30, 66, 22),
+      new THREE.MeshStandardMaterial({ color: 0x1b2733, roughness: .25, metalness: .5 }));
+    wind.position.set(20, 0, 30); wind.rotation.y = -0.6; g.add(wind);
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(44, 82, 12), paint);
+    hood.position.set(44, 0, 18); hood.castShadow = true; g.add(hood);
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(8, 76, 5), dark);
+    wing.position.set(-58, 0, 40); g.add(wing);
+    for (const wy of [-30, 30]) { const s = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 16), dark); s.position.set(-56, wy, 32); g.add(s); }
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(8, 84, 18),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333 }));
+    nose.position.set(61, 0, 16); g.add(nose);
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .9 });
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: .4, metalness: .6 });
+    for (const [wx, wy] of [[44, 46], [44, -46], [-44, 46], [-44, -46]]) {
+      const tire = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 16, 16), tireMat);
+      tire.position.set(wx, wy, 16); tire.castShadow = true; g.add(tire);
+      const rim = new THREE.Mesh(new THREE.CylinderGeometry(8, 8, 17, 12), rimMat);
+      rim.position.set(wx, wy, 16); g.add(rim);
     }
     const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
