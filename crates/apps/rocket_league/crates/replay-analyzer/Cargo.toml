@@ -1,5 +1,5 @@
 [workspace]
-members = ["scoring", "skills", "value"]
+members = ["scoring", "skills", "value", "viewer"]
 
 [package]
 name = "replay-analyzer"

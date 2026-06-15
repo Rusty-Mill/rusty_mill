@@ -1,0 +1,237 @@
+//! The **playback scene**: a compact, viewer-ready distillation of the canonical
+//! match model.
+//!
+//! The full [`CanonicalMatch`] carries native frames, per-player track samples,
+//! and the resampled grid — far more than a 3D viewer needs, and large. This
+//! module projects it down to exactly what playback consumes: per-frame ball +
+//! car kinematics off the **resampled grid** (uniform rate, every live actor
+//! present), a player roster, the field box, and a merged, time-sorted list of
+//! match events and detected skills to annotate the timeline.
+//!
+//! Coordinates stay in Rocket League unreal units (Z-up); the web layer scales
+//! and orients. Values are rounded (positions to 1 uu, rotations to 1e-3 rad) so
+//! the embedded JSON stays small without any visible loss.
+
+use std::collections::BTreeMap;
+
+use replay_analyzer::field;
+use replay_analyzer::model::{CanonicalMatch, Event};
+use replay_skills::SkillInstance;
+use serde::{Deserialize, Serialize};
+
+/// Goal-mouth half-width (uu) — not in `field.rs`; standard Soccar net is ~1786
+/// wide, ~642.78 tall. Used only to draw the goal markers.
+const GOAL_HALF_WIDTH: f32 = 892.755;
+const GOAL_HEIGHT: f32 = 642.775;
+
+/// Arena dimensions the viewer draws (uu).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Field {
+    pub side_wall_x: f32,
+    pub back_wall_y: f32,
+    pub ceiling_z: f32,
+    pub goal_half_width: f32,
+    pub goal_height: f32,
+    pub ball_radius: f32,
+}
+
+impl Default for Field {
+    fn default() -> Self {
+        Field {
+            side_wall_x: field::SIDE_WALL_X,
+            back_wall_y: field::BACK_WALL_Y,
+            ceiling_z: field::CEILING_Z,
+            goal_half_width: GOAL_HALF_WIDTH,
+            goal_height: GOAL_HEIGHT,
+            ball_radius: field::BALL_RADIUS,
+        }
+    }
+}
+
+/// A player in the roster, keyed by the stable PRI the frames reference.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePlayer {
+    pub pri: i32,
+    pub name: String,
+    pub team: Option<i32>,
+}
+
+/// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
+/// percent (0–100).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneCar {
+    pub pri: i32,
+    pub p: [f32; 3],
+    pub rot: [f32; 3],
+    pub boost: u8,
+}
+
+/// One playback frame: time, ball position (absent if the ball isn't live), and
+/// every live car.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneFrame {
+    pub t: f32,
+    pub ball: Option<[f32; 3]>,
+    pub cars: Vec<SceneCar>,
+}
+
+/// A timeline annotation: a match event or a detected skill.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneEvent {
+    /// `goal` | `demo` | `kickoff` | `touch` | `skill`.
+    pub kind: String,
+    pub t: f32,
+    pub pri: Option<i32>,
+    pub team: Option<i32>,
+    /// Human-readable one-liner for the ticker.
+    pub label: String,
+}
+
+/// The full viewer payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Scene {
+    pub replay_id: String,
+    pub map: Option<String>,
+    pub hz: f32,
+    pub duration_s: f32,
+    /// Team id (as string key in JSON) -> final score.
+    pub team_scores: BTreeMap<i32, i32>,
+    pub field: Field,
+    pub players: Vec<ScenePlayer>,
+    pub frames: Vec<SceneFrame>,
+    /// Events + skills, time-sorted.
+    pub events: Vec<SceneEvent>,
+}
+
+fn round(x: f32, places: i32) -> f32 {
+    let f = 10f32.powi(places);
+    (x * f).round() / f
+}
+
+fn pos(p: replay_analyzer::model::Vec3) -> [f32; 3] {
+    [round(p.x, 0), round(p.y, 0), round(p.z, 0)]
+}
+
+/// Build the playback scene from the canonical match and (optionally) detected
+/// skills. Pass an empty slice for `skills` to annotate match events only.
+pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
+    let players = m
+        .tracks
+        .iter()
+        .map(|t| ScenePlayer {
+            pri: t.pri,
+            name: t.player.clone(),
+            team: t.team,
+        })
+        .collect();
+
+    let frames = m
+        .resampled
+        .frames
+        .iter()
+        .map(|f| SceneFrame {
+            t: round(f.t, 2),
+            ball: f.ball.map(|b| pos(b.p)),
+            cars: f
+                .cars
+                .iter()
+                .map(|c| SceneCar {
+                    pri: c.pri,
+                    p: pos(c.p),
+                    rot: c
+                        .rot
+                        .map(|r| [round(r.pitch, 3), round(r.yaw, 3), round(r.roll, 3)])
+                        .unwrap_or([0.0, 0.0, 0.0]),
+                    boost: c
+                        .boost
+                        .map(|b| field::boost_percent(b).round() as u8)
+                        .unwrap_or(0),
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut events = match_events(m);
+    events.extend(skills.iter().map(|s| SceneEvent {
+        kind: "skill".into(),
+        t: round(s.t, 2),
+        pri: Some(s.pri),
+        team: s.team,
+        label: match &s.player {
+            Some(p) => format!("{} — {}", s.skill.display_name(), p),
+            None => s.skill.display_name().to_string(),
+        },
+    }));
+    events.sort_by(|a, b| a.t.total_cmp(&b.t));
+
+    Scene {
+        replay_id: m.replay_id.clone(),
+        map: m.map.clone(),
+        hz: m.resampled.hz,
+        duration_s: round(m.duration_s, 2),
+        team_scores: m.team_scores.clone(),
+        field: Field::default(),
+        players,
+        frames,
+        events,
+    }
+}
+
+/// Project the canonical match events into point annotations (possessions, being
+/// intervals, are dropped — the timeline shows discrete moments).
+fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
+    let mut out = Vec::new();
+    for e in &m.events {
+        let ev = match e {
+            Event::Goal { t, scorer, team } => SceneEvent {
+                kind: "goal".into(),
+                t: round(*t, 2),
+                pri: None,
+                team: *team,
+                label: match scorer {
+                    Some(s) => format!("GOAL — {s}"),
+                    None => "GOAL".into(),
+                },
+            },
+            Event::Demo {
+                t,
+                attacker,
+                victim,
+                attacker_pri,
+                ..
+            } => SceneEvent {
+                kind: "demo".into(),
+                t: round(*t, 2),
+                pri: *attacker_pri,
+                team: None,
+                label: format!(
+                    "DEMO — {} ▸ {}",
+                    attacker.as_deref().unwrap_or("?"),
+                    victim.as_deref().unwrap_or("?")
+                ),
+            },
+            Event::Kickoff { t } => SceneEvent {
+                kind: "kickoff".into(),
+                t: round(*t, 2),
+                pri: None,
+                team: None,
+                label: "Kickoff".into(),
+            },
+            Event::Touch {
+                t,
+                player,
+                team,
+                pri,
+            } => SceneEvent {
+                kind: "touch".into(),
+                t: round(*t, 2),
+                pri: Some(*pri),
+                team: *team,
+                label: format!("touch — {}", player.as_deref().unwrap_or("?")),
+            },
+            Event::Possession { .. } => continue,
+        };
+        out.push(ev);
+    }
+    out
+}

@@ -22,6 +22,10 @@ of it (no parsing, no I/O), so each is deterministic and golden-testable.
   [`docs/skill-detection.md`](docs/skill-detection.md).
 - **`value`** — a calibrated value model used as an independent validator of the
   scoring rubric (two-track reconciliation).
+- **`viewer`** — a self-contained **3D replay viewer**: animates the
+  reconstructed match (ball + cars, boost, name labels) in the browser with a
+  scrubable timeline and an event/skill ticker (`replay-viewer`). See
+  [`docs/replay-viewer.md`](docs/replay-viewer.md).
 
 ## Quickstart
 
@@ -36,6 +40,9 @@ cargo run -p replay-scoring -- assets/replays/42f2.replay --html report.html
 cargo run -p replay-skills -- --list
 cargo run -p replay-skills -- assets/replays/42f2.replay
 cargo run -p replay-skills -- assets/replays/42f2.replay --verify aerial --player Schutzein
+
+# 3D replay viewer (writes a self-contained HTML file; open in a browser)
+cargo run -p replay-viewer -- assets/replays/42f2.replay --html 42f2.html
 ```
 
 See [`docs/`](docs) for the design spec, backlog, and per-feature notes —
