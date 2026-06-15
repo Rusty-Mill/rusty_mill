@@ -19,7 +19,11 @@ Every row is tagged by how much to trust it:
 
 Field constants referenced below (`src/field.rs`, unreal units): side walls
 `|x|=4096`, back walls `|y|=5120`, ceiling `z=2044`, ball radius `92.75`,
-supersonic `≥2200 uu/s`.
+supersonic `≥2200 uu/s`. These assume **standard Soccar** geometry — correct for
+the competitive arenas (cosmetic reskins, identical collision). Non-standard
+maps/modes (Hoops, Dropshot, …) are recognized by `field::classify_map` and
+flagged (scoring → low-confidence; the viewer shows a banner; CLIs warn) rather
+than mis-analyzed.
 
 ---
 

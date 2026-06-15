@@ -59,6 +59,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or("replay")
         .to_string();
     let canonical = build_canonical(&decoded, replay_id);
+    if !replay_analyzer::field::is_standard_geometry(canonical.map.as_deref()) {
+        eprintln!(
+            "warning: non-standard map ({:?}) — positional metrics assume standard Soccar; reports are flagged low-confidence",
+            canonical.map
+        );
+    }
 
     let cfg = match &config_path {
         Some(p) => serde_json::from_slice(&std::fs::read(p)?)?,

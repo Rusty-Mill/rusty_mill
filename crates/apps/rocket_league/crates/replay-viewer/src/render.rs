@@ -93,6 +93,8 @@ const TEMPLATE: &str = r##"<!doctype html>
     font-size: 16px; font-weight: 700; }
   #top small { display:block; font-weight: 400; font-size: 11px; color:#8b949e; }
   #top #poss { font-size: 11px; font-weight: 700; }
+  #warn { top:64px; left:50%; transform:translateX(-50%); font-size:12px; font-weight:700;
+    color:#f0b429; background:rgba(46,34,8,.88); border-color:#7a5a10; }
   #players { top: 10px; left: 10px; min-width: 168px; }
   #players .row { cursor:pointer; padding:1px 3px; border-radius:4px; }
   #players .row:hover { background:#1c2230; }
@@ -141,6 +143,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <body>
 <canvas id="c"></canvas>
 <div id="top" class="panel"><span id="scoreboard"></span><small id="mapline"></small><span id="poss"></span></div>
+<div id="warn" class="panel" style="display:none">⚠ non-standard map — drawn field &amp; positional overlays are approximate</div>
 <div id="players" class="panel"></div>
 <div id="ticker" class="panel"></div>
 <div id="left">
@@ -460,6 +463,7 @@ document.getElementById('scoreboard').innerHTML =
   `<span style="color:#3b82f6">BLUE ${S.team_scores['0'] ?? 0}</span> — ` +
   `<span style="color:#f97316">${S.team_scores['1'] ?? 0} ORANGE</span>`;
 document.getElementById('mapline').textContent = (S.map || 'replay') + '  ·  ' + S.replay_id;
+if (S.non_standard_map) document.getElementById('warn').style.display = '';
 const plistEl = document.getElementById('players');
 const tickerEl = document.getElementById('ticker');
 const possEl = document.getElementById('poss');

@@ -62,9 +62,14 @@ pub fn score(m: &CanonicalMatch, target_pri: i32, cfg: &ScoreConfig) -> Report {
     let player_type = engine::classify(cfg, &raws);
     let (main_leak, focus_chapter) = engine::pick_leak(cfg, &bds);
 
-    // Low confidence if too few analyzable frames or any sub-score had no data
-    // (e.g. a missing/AFK teammate makes support metrics meaningless, §11).
-    let confidence = if valid_frames < cfg.min_sample_frames || subs.iter().any(Option::is_none) {
+    // Low confidence if too few analyzable frames, any sub-score had no data
+    // (e.g. a missing/AFK teammate makes support metrics meaningless, §11), or
+    // the map is non-standard geometry (positional metrics assume standard Soccar).
+    let standard_map = replay_analyzer::field::is_standard_geometry(m.map.as_deref());
+    let confidence = if !standard_map
+        || valid_frames < cfg.min_sample_frames
+        || subs.iter().any(Option::is_none)
+    {
         Confidence::LowConfidence
     } else {
         Confidence::Ok

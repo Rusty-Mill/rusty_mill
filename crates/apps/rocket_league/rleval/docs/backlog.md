@@ -126,7 +126,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Win-probability / momentum strip above the timeline (P(blue scores next) from `replay-value`; model is basic, read as rough momentum)
 
 **Correctness**
-- [ ] Map-aware drawn field (see the map-geometry follow-up above)
+- [x] Map-aware drawn field — non-standard maps draw via `geometry_for_map` + a warning banner (Phase 1; see the map-geometry follow-up)
 - [ ] **(needs input)** Validate car orientation (yaw/pitch/roll → forward) against footage — could add a velocity-alignment self-check
 - [x] Rotation slerp between frames (smoother spin)
 
@@ -168,18 +168,19 @@ Tracked churn-list. Items needing a product/visual decision are marked
   per-skill counts track reality, and validate detector precision against
   ballchasing/hand-labeled clips. Extendable to more mechanics (wave dash,
   half-flip) only if a kinematic signature proves separable.
-- **Map-aware field geometry.** The map name *is* read from the replay
-  (`MapName` → `CanonicalMatch.map`) but is used only as a display label — all
-  geometry is the fixed standard-Soccar constants in `field.rs`, applied to every
-  replay. Correct for the competitive Standard arenas (cosmetic reskins, identical
-  collision), but wrong for genuinely non-standard geometry: non-standard Soccar
-  arenas (Wasteland, Starbase ARC, Pillars/Octagon) and alternate modes (Hoops,
-  Dropshot, Snow Day). On those the wrong dimensions degrade kickoff detection →
-  attack-direction normalization, the wall/ceiling/boost-steal skills, the
-  field-third / central-zone scoring, and the viewer's drawn field box + goals.
-  Fix: make `field.rs` constants a `FieldGeometry` value selected by `MapName`
-  (default = standard), thread it through `analyze`, `skills`, `scoring`, and
-  `viewer`. Authoritative data (goals/demos/scores/boost) and raw reconstruction
-  (positions/velocities) are already map-agnostic and unaffected. Note the spec
-  scopes the product to standard 2v2; the analyzer neither detects nor rejects
-  non-standard maps today — a cheap interim step is to flag/quarantine them.
+- **Map-aware field geometry.** *Phase 1 (classify + flag) ✔* — `field.rs` now
+  has geometry-as-data (`FieldGeometry`, `geometry_for_map`) and a `classify_map`
+  / `is_standard_geometry` registry. The competitive Standard arenas (cosmetic
+  reskins, identical collision — the common case) classify standard and are
+  unaffected; recognized non-standard maps/modes (Hoops, Dropshot, Octagon,
+  Pillars, Badlands, Starbase ARC) are flagged: scoring forces such reports
+  **low-confidence**, the viewer shows a **"non-standard map" banner** (and draws
+  via `geometry_for_map`), and both CLIs warn. Authoritative data + raw
+  reconstruction were already map-agnostic.
+  *Phase 2 (remaining):* `geometry_for_map` still returns standard geometry for
+  every map — substituting **measured** non-standard dimensions (and threading
+  `FieldGeometry` through the analyzer kickoff/normalization, skills wall/ceiling,
+  and scoring thirds) needs real collision data per arena/mode, which isn't
+  reliably documented. Until then, flag-not-transform is the honest behavior. The
+  non-standard registry (`field::NON_STANDARD_MAPS`) is conservative; extend as
+  maps are confirmed.

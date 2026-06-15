@@ -78,6 +78,12 @@ fn run() -> Result<(), Box<dyn Error>> {
         .unwrap_or("replay")
         .to_string();
     let canonical = build_canonical(&decoded, stem.clone());
+    if !replay_analyzer::field::is_standard_geometry(canonical.map.as_deref()) {
+        eprintln!(
+            "warning: non-standard map ({:?}) — the drawn field and positional overlays are approximate",
+            canonical.map
+        );
+    }
 
     let instances = if skills {
         detect_all(&canonical, &SkillConfig::default()).instances
