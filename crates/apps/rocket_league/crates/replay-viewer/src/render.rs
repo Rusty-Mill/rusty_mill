@@ -97,6 +97,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   .sw.on { outline:2px solid #fff; outline-offset:-1px; }
   #helpOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
   #helpOverlay .panel { max-width:560px; line-height:1.7; cursor:pointer; }
+  #minimap { position:fixed; right:10px; bottom:48px; width:132px; height:165px; padding:0; overflow:hidden; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -207,6 +208,7 @@ const TEMPLATE: &str = r##"<!doctype html>
     <input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity">
   </div>
 </div>
+<canvas id="minimap" class="panel"></canvas>
 <div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · d draw · s png · ? help</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
@@ -526,6 +528,28 @@ function exportPNG() {
 document.getElementById('drawSave').onclick = exportPNG;
 const helpEl = document.getElementById('helpOverlay');
 helpEl.onclick = () => { helpEl.style.display = 'none'; };
+
+// minimap: top-down field with live car (team-coloured, 1st-man ringed) + ball dots
+const mm = document.getElementById('minimap'), mmx = mm.getContext('2d');
+const MMW = 132, MMH = 165;
+mm.width = MMW * 2; mm.height = MMH * 2; mmx.scale(2, 2);
+function drawMinimap(st) {
+  mmx.clearRect(0, 0, MMW, MMH);
+  mmx.fillStyle = '#10301a'; mmx.fillRect(0, 0, MMW, MMH);
+  const fx = F.side_wall_x, fy = F.back_wall_y;
+  const MX = wx => (wx + fx) / (2 * fx) * MMW, MY = wy => (fy - wy) / (2 * fy) * MMH;
+  mmx.strokeStyle = 'rgba(255,255,255,.35)'; mmx.lineWidth = 1;
+  mmx.strokeRect(2, 2, MMW - 4, MMH - 4);
+  mmx.beginPath(); mmx.moveTo(0, MY(0)); mmx.lineTo(MMW, MY(0)); mmx.stroke();
+  mmx.beginPath(); mmx.arc(MX(0), MY(0), 11, 0, Math.PI * 2); mmx.stroke();
+  for (const pl of S.players) {
+    const c = st.cars.get(pl.pri); if (!c) continue;
+    mmx.fillStyle = TEAM_CSS[pl.team] ?? '#9aa4b2';
+    mmx.beginPath(); mmx.arc(MX(c.p[0]), MY(c.p[1]), c.role === 1 ? 4 : 3, 0, Math.PI * 2); mmx.fill();
+    if (c.role === 1) { mmx.strokeStyle = '#ffd166'; mmx.lineWidth = 1.5; mmx.stroke(); }
+  }
+  if (st.ball) { mmx.fillStyle = '#fff'; mmx.beginPath(); mmx.arc(MX(st.ball[0]), MY(st.ball[1]), 3, 0, Math.PI * 2); mmx.fill(); }
+}
 
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
@@ -879,6 +903,7 @@ function animate(now) {
   applyState(st);
   updateHud(T, st);
   updateCallouts(T, st);
+  drawMinimap(st);
   // eased preset transition
   if (camTween) {
     const e = Math.min(1, (now - camTween.start) / camTween.dur);
