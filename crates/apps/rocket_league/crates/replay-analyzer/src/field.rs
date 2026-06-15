@@ -63,3 +63,128 @@ pub fn is_kickoff_spawn(p: [f32; 3], tol: f32) -> bool {
         .iter()
         .any(|(sx, sy)| (ax - sx).abs() <= tol && (ay - sy).abs() <= tol)
 }
+
+/// Arena geometry as **data** (vs. the bare constants above), so it can vary by
+/// map. Physics constants (ball radius, supersonic speed) are map-independent and
+/// stay as module constants; this captures only the arena envelope a non-standard
+/// map would change.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FieldGeometry {
+    pub side_wall_x: f32,
+    pub back_wall_y: f32,
+    pub ceiling_z: f32,
+    pub goal_depth_y: f32,
+}
+
+impl FieldGeometry {
+    /// Standard Soccar geometry (the module constants).
+    pub const fn standard() -> Self {
+        FieldGeometry {
+            side_wall_x: SIDE_WALL_X,
+            back_wall_y: BACK_WALL_Y,
+            ceiling_z: CEILING_Z,
+            goal_depth_y: GOAL_DEPTH_Y,
+        }
+    }
+}
+
+impl Default for FieldGeometry {
+    fn default() -> Self {
+        FieldGeometry::standard()
+    }
+}
+
+/// How a replay's map relates to standard Soccar geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapClass {
+    /// Standard Soccar geometry — the competitive arenas are cosmetic reskins
+    /// with identical collision, so kinematic analysis is valid.
+    Standard,
+    /// A recognized non-standard arena or game mode (different field shape/size or
+    /// goals). Geometry-derived analysis (kickoffs, walls/ceiling, field thirds,
+    /// the drawn field) is **unreliable** and should be flagged.
+    NonStandard,
+}
+
+/// MapName substrings (lowercased) for known **non-standard-geometry** maps and
+/// modes. Deliberately conservative — only clearly different fields — so the
+/// overwhelmingly-common standard arenas are never misflagged. Extend as more
+/// maps are confirmed.
+const NON_STANDARD_MAPS: &[&str] = &[
+    "hoops", // basketball: smaller field, elevated round goals
+    "hoopsstadium",
+    "shattershot", // Dropshot: hexagonal floor, no back-wall goals
+    "octagon",
+    "pillars",
+    "badlands",
+    "starbase", // Starbase ARC: curved/oval field, raised centre
+];
+
+/// Classify a replay's `MapName` (the header value, e.g. `"EuroStadium_P"`).
+///
+/// Recognized non-standard maps/modes are flagged; everything else is treated as
+/// standard, since the standard competitive arenas (different *names*, identical
+/// geometry) are by far the common case and `None`/unknown names are almost
+/// always standard Soccar.
+pub fn classify_map(map: Option<&str>) -> MapClass {
+    match map {
+        Some(m) => {
+            let key = m.to_ascii_lowercase();
+            if NON_STANDARD_MAPS.iter().any(|p| key.contains(p)) {
+                MapClass::NonStandard
+            } else {
+                MapClass::Standard
+            }
+        }
+        None => MapClass::Standard,
+    }
+}
+
+/// Whether geometry-derived analysis is trustworthy for this map.
+pub fn is_standard_geometry(map: Option<&str>) -> bool {
+    classify_map(map) == MapClass::Standard
+}
+
+/// Arena geometry for a map. Currently always [`FieldGeometry::standard`]:
+/// non-standard arenas keep standard geometry as the best available value until
+/// real collision dimensions are measured — use [`classify_map`] to flag them.
+pub fn geometry_for_map(_map: Option<&str>) -> FieldGeometry {
+    FieldGeometry::standard()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standard_and_cosmetic_arenas_classify_standard() {
+        // The two test-sample maps (Mannfield, DFH Stadium) and any unknown name.
+        for m in [
+            "EuroStadium_P",
+            "Stadium_P",
+            "CS_P",
+            "Park_Night_P",
+            "BrandNew_P",
+        ] {
+            assert_eq!(classify_map(Some(m)), MapClass::Standard, "{m}");
+        }
+        assert_eq!(classify_map(None), MapClass::Standard);
+        assert!(is_standard_geometry(Some("Stadium_P")));
+    }
+
+    #[test]
+    fn known_non_standard_maps_are_flagged() {
+        for m in ["HoopsStadium_P", "ShatterShot_P", "Octagon_P", "Starbase_P"] {
+            assert_eq!(classify_map(Some(m)), MapClass::NonStandard, "{m}");
+            assert!(!is_standard_geometry(Some(m)), "{m}");
+        }
+    }
+
+    #[test]
+    fn geometry_for_map_is_standard_for_now() {
+        assert_eq!(
+            geometry_for_map(Some("HoopsStadium_P")),
+            FieldGeometry::standard()
+        );
+    }
+}

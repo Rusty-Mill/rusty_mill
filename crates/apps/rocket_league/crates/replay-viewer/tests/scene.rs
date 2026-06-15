@@ -193,6 +193,20 @@ fn html_offline_embeds_three_as_data_urls_no_cdn() {
 }
 
 #[test]
+fn non_standard_map_sets_the_scene_flag() {
+    let mut m = minimal_match();
+    assert!(
+        !build_scene(&m, &[]).non_standard_map,
+        "standard map: flag off"
+    );
+    m.map = Some("HoopsStadium_P".into());
+    assert!(
+        build_scene(&m, &[]).non_standard_map,
+        "non-standard map: flag on"
+    );
+}
+
+#[test]
 fn attach_roles_tags_cars_with_a_man_role() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);

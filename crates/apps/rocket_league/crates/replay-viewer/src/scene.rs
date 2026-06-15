@@ -95,6 +95,10 @@ pub struct SceneEvent {
 pub struct Scene {
     pub replay_id: String,
     pub map: Option<String>,
+    /// True if the map is a recognized non-standard arena/mode, so the drawn
+    /// field and geometry-derived overlays are approximate (see
+    /// [`replay_analyzer::field::classify_map`]).
+    pub non_standard_map: bool,
     pub hz: f32,
     pub duration_s: f32,
     /// Team id (as string key in JSON) -> final score.
@@ -176,14 +180,29 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
     Scene {
         replay_id: m.replay_id.clone(),
         map: m.map.clone(),
+        non_standard_map: !field::is_standard_geometry(m.map.as_deref()),
         hz: m.resampled.hz,
         duration_s: round(m.duration_s, 2),
         team_scores: m.team_scores.clone(),
-        field: Field::default(),
+        field: field_for(m.map.as_deref()),
         players,
         frames,
         events,
         win_prob: Vec::new(),
+    }
+}
+
+/// The drawn-arena dimensions for a map (envelope from
+/// [`field::geometry_for_map`]; goal mouth + ball radius are constants).
+fn field_for(map: Option<&str>) -> Field {
+    let g = field::geometry_for_map(map);
+    Field {
+        side_wall_x: g.side_wall_x,
+        back_wall_y: g.back_wall_y,
+        ceiling_z: g.ceiling_z,
+        goal_half_width: GOAL_HALF_WIDTH,
+        goal_height: GOAL_HEIGHT,
+        ball_radius: field::BALL_RADIUS,
     }
 }
 
