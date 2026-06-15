@@ -162,6 +162,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div id="swatches"></div>
   <select id="drawTool" title="tool"><option value="pen">pen</option><option value="arrow">arrow</option><option value="line">line</option></select>
   <label>w<input type="range" id="drawWidth" min="2" max="16" value="5"></label>
+  <label><input type="checkbox" id="draw3d"> on field</label>
   <button id="drawUndo" title="undo (z)">undo</button>
   <button id="drawClear">clear</button>
   <button id="drawSave" title="save PNG (s)">save png</button>
@@ -404,7 +405,7 @@ for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -409
 // Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
 const drawCv = document.getElementById('draw'), dctx = drawCv.getContext('2d');
 let drawMode = false, drawingNow = false, strokes = [], curStroke = null;
-const pen = { color: '#ffd166', width: 5, tool: 'pen' };
+const pen = { color: '#ffd166', width: 5, tool: 'pen', field: false };
 function sizeDraw() {
   const dpr = Math.min(devicePixelRatio, 2);
   drawCv.width = innerWidth * dpr; drawCv.height = innerHeight * dpr;
@@ -444,27 +445,64 @@ function setDrawMode(on) {
   document.getElementById('drawToggle').classList.toggle('on', on);
   if (on) setPlaying(false);
 }
+// world-anchored (on-field) drawing: raycast the pointer to the floor plane and
+// build a 3D polyline that stays put as the camera moves.
+const fieldGroup = new THREE.Group(); scene.add(fieldGroup);
+const raycaster = new THREE.Raycaster();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const undoStack = []; // each entry removes one stroke (screen or field)
+let fieldStroke = null;
+function fieldPoint(e) {
+  raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  const p = new THREE.Vector3();
+  return raycaster.ray.intersectPlane(floorPlane, p) ? p.setZ(7) : null;
+}
+function pushFieldPoint(p) {
+  const i = fieldStroke.n;
+  if (i * 3 + 2 >= fieldStroke.arr.length) return;
+  fieldStroke.arr.set([p.x, p.y, p.z], i * 3); fieldStroke.n++;
+  fieldStroke.line.geometry.setDrawRange(0, fieldStroke.n);
+  fieldStroke.line.geometry.attributes.position.needsUpdate = true;
+}
 drawCv.addEventListener('pointerdown', e => {
   if (!drawMode) return;
   drawingNow = true;
   try { drawCv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events */ }
-  curStroke = { color: pen.color, width: pen.width, tool: pen.tool, points: [[e.clientX, e.clientY]] };
+  if (pen.field) {
+    const p = fieldPoint(e); if (!p) { drawingNow = false; return; }
+    const arr = new Float32Array(3 * 2048), geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: pen.color }));
+    line.frustumCulled = false; fieldGroup.add(line);
+    fieldStroke = { line, arr, n: 0 }; pushFieldPoint(p);
+  } else {
+    curStroke = { color: pen.color, width: pen.width, tool: pen.tool, points: [[e.clientX, e.clientY]] };
+  }
 });
 drawCv.addEventListener('pointermove', e => {
   if (!drawingNow) return;
-  if (pen.tool === 'pen') curStroke.points.push([e.clientX, e.clientY]);
-  else curStroke.points[1] = [e.clientX, e.clientY];
-  redrawStrokes();
+  if (fieldStroke) { const p = fieldPoint(e); if (p) pushFieldPoint(p); }
+  else if (curStroke) {
+    if (pen.tool === 'pen') curStroke.points.push([e.clientX, e.clientY]);
+    else curStroke.points[1] = [e.clientX, e.clientY];
+    redrawStrokes();
+  }
 });
 addEventListener('pointerup', () => {
-  if (drawingNow && curStroke) { strokes.push(curStroke); curStroke = null; }
+  if (drawingNow) {
+    if (fieldStroke) { const fs = fieldStroke; undoStack.push(() => { fieldGroup.remove(fs.line); fs.line.geometry.dispose(); }); fieldStroke = null; }
+    else if (curStroke) { const s = curStroke; strokes.push(s); undoStack.push(() => { const i = strokes.indexOf(s); if (i >= 0) strokes.splice(i, 1); redrawStrokes(); }); curStroke = null; }
+  }
   drawingNow = false; redrawStrokes();
 });
+function undoLast() { const f = undoStack.pop(); if (f) f(); }
+function clearAll() { while (undoStack.length) undoStack.pop()(); }
 document.getElementById('drawToggle').onclick = () => setDrawMode(!drawMode);
 document.getElementById('drawTool').onchange = e => pen.tool = e.target.value;
 document.getElementById('drawWidth').oninput = e => pen.width = +e.target.value;
-document.getElementById('drawUndo').onclick = () => { strokes.pop(); redrawStrokes(); };
-document.getElementById('drawClear').onclick = () => { strokes = []; redrawStrokes(); };
+document.getElementById('draw3d').onchange = e => pen.field = e.target.checked;
+document.getElementById('drawUndo').onclick = undoLast;
+document.getElementById('drawClear').onclick = clearAll;
 const swatchEl = document.getElementById('swatches');
 for (const c of ['#ffd166', '#ff5d5d', '#3b82f6', '#22dd66', '#ffffff', '#0b0e14']) {
   const b = document.createElement('button'); b.className = 'sw'; b.style.background = c;
@@ -826,7 +864,7 @@ addEventListener('keydown', e => {
   else if (e.key === 'j') jump('kickoff', -1);
   else if (e.key === '0') setCam('free');
   else if (e.key === 'd') setDrawMode(!drawMode);
-  else if (e.key === 'z' && drawMode) { strokes.pop(); redrawStrokes(); }
+  else if (e.key === 'z' && drawMode) undoLast();
   else if (e.key === 's') exportPNG();
   else if (e.key === '?') helpEl.style.display = helpEl.style.display === 'flex' ? 'none' : 'flex';
 });
