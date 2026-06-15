@@ -188,7 +188,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div class="panel cams">
     <button data-cam="free" class="on">overview</button>
     <button data-cam="goal">goal</button>
-    <button data-cam="ball">ball-cam</button>
+    <button data-cam="ball">ball</button>
+    <button data-cam="broadcast">tv</button>
   </div>
   <div class="panel">
     <label><input type="checkbox" id="tgTrails" checked> trails</label>
@@ -281,6 +282,7 @@ function gradientBg() {
 // --- camera presets ---
 const OVERVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.22, F.ceiling_z * 2.0), tgt: new THREE.Vector3(0, 0, 150) };
 const GOALVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.5, F.ceiling_z * 1.1), tgt: new THREE.Vector3(0, F.back_wall_y * 0.3, 200) };
+const BROADCAST_POS = new THREE.Vector3(F.side_wall_x * 1.4, -F.back_wall_y * 0.2, F.ceiling_z * 1.6);
 let cam = { mode: 'free', pri: null };
 let camTween = null; // eased preset transition
 function applyPose(p, snap) {
@@ -949,13 +951,19 @@ function animate(now) {
     if (e >= 1) camTween = null;
   }
   // follow cameras
-  let focus = null;
-  if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);
-  else if (cam.mode === 'player' && cam.pri != null) { const c = st.cars.get(cam.pri); if (c) focus = new THREE.Vector3(...c.p); }
-  if (focus) {
-    controls.target.lerp(focus, 0.18);
-    const desired = focus.clone().add(new THREE.Vector3(0, -1500, 750));
-    camera.position.lerp(desired, 0.06);
+  if (cam.mode === 'broadcast') {
+    // fixed elevated sideline position that pans to track the ball
+    if (st.ball) controls.target.lerp(new THREE.Vector3(...st.ball), 0.08);
+    camera.position.lerp(BROADCAST_POS, 0.05);
+  } else {
+    let focus = null;
+    if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);
+    else if (cam.mode === 'player' && cam.pri != null) { const c = st.cars.get(cam.pri); if (c) focus = new THREE.Vector3(...c.p); }
+    if (focus) {
+      controls.target.lerp(focus, 0.18);
+      const desired = focus.clone().add(new THREE.Vector3(0, -1500, 750));
+      camera.position.lerp(desired, 0.06);
+    }
   }
   controls.update();
   renderer.render(scene, camera);
