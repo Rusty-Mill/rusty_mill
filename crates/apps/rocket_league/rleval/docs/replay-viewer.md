@@ -1,8 +1,9 @@
 # 3D Replay Viewer — `replay-viewer`
 
-> Play a reconstructed match back in 3D in the browser: ball + cars animated over
-> the resampled grid, team-coloured with name labels and boost gauges, a
-> scrubable timeline, orbit camera, and a live event/skill ticker.
+> Play a reconstructed match back in 3D in the browser — a broadcast-grade render
+> (shadows, painted pitch, goal nets) with analysis overlays (1st/2nd-man roles,
+> skills, heatmap, momentum), coaching tools (field overlays + a telestrator), and
+> the usual scrubable timeline, camera presets, and event/skill ticker.
 
 Like `scoring`, `skills`, and `value`, this is a **pure consumer** of the
 canonical match model — no parsing, no I/O in the core. It splits cleanly into a
@@ -34,12 +35,19 @@ uses). `--hz <rate>` thins the playback grid to shrink the payload.
 ## Controls
 
 Spacebar play/pause · drag the timeline to scrub · ◀/▶ ±1 s · `n`/`p` next/prev
-goal · `k`/`j` next/prev kickoff · speed (0.25–4×) · loop · mouse drag orbits,
-scroll zooms, right-drag pans.
+goal · `k`/`j` next/prev kickoff · speed (0.25–4×) · loop · `s` save PNG ·
+`?` help · mouse drag orbits, scroll zooms, right-drag pans (touch works too).
 
-**Camera:** `overview` / `goal` / `ball-cam` presets, or click a player row to
-lock the camera onto that car (`0` returns to free overview). Goal/demo/kickoff
-markers on the timeline are clickable, as is each ticker entry — both seek.
+**Camera:** `overview` / `goal` / `ball` / `tv` (broadcast) presets with eased
+transitions, or click a player row to lock onto that car (`0` returns to free
+overview). Goal/demo/kickoff markers on the timeline are clickable, as is each
+ticker entry — both seek.
+
+## Look
+
+Filmic (ACES) tone mapping, real soft shadow maps, a painted pitch (lines, centre
+circle, goal areas, mow stripes), goal nets, four-wheeled cars, a gradient sky,
+a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
 
 ## Overlays
 
@@ -48,8 +56,9 @@ markers on the timeline are clickable, as is each ticker entry — both seek.
   assignment; `--no-roles` to omit).
 - **Skills** — a fading `★ <skill>` callout pops above the car that just
   performed a detected skill, and skills also stream in the ticker.
-- **Possession** (current team, from the last touch), **per-player trails**, and
-  blob **drop-shadows** for depth. Toggle trails / labels / boost / heatmap.
+- **Possession** (current team, from the last touch), **per-player trails**, a
+  top-down **minimap**, and a roster with header **G/A/Sv** + live **speed**.
+  Toggle trails / labels / boost / heatmap.
 - **Heatmap** — a floor occupancy heatmap of the ball (or the followed player),
   binned in-viewer from the grid.
 - **Momentum strip** — a P(blue scores the next goal) curve above the timeline
