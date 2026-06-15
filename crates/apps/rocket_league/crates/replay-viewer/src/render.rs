@@ -152,6 +152,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   #tltrack { position:relative; height:24px; display:flex; align-items:center; }
   #timeline { width:100%; }
   #marks { position:absolute; left:0; right:0; top:5px; height:10px; pointer-events:none; }
+  #loopRegion { position:absolute; top:2px; height:20px; display:none; pointer-events:none;
+    background:rgba(86,212,221,.16); border-left:2px solid #56d4dd; border-right:2px solid #56d4dd; }
   #marks .mk { position:absolute; top:0; width:2px; height:10px; transform:translateX(-1px);
     pointer-events:auto; cursor:pointer; }
   #marks .mk.goal { background:#ffd166; height:14px; top:-2px; width:3px; }
@@ -177,7 +179,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <div id="helpOverlay"><div class="panel">
   <b>Keyboard</b><br>
   space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
-  0 free cam · d draw mode · z undo · s save PNG · ? this help<br><br>
+  i / o set an A–B loop · x clear it · 0 free cam · d draw · z undo · s save PNG · ? help<br><br>
   <b>Mouse</b><br>
   drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
   <b>Tools</b><br>
@@ -223,7 +225,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div id="tlwrap">
     <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
     <div id="wpcursor"></div>
-    <div id="tltrack"><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
+    <div id="tltrack"><div id="loopRegion"></div><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
   </div>
   <select id="speed" title="playback speed">
     <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
@@ -622,15 +624,20 @@ function netTexture() {
   const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
 }
 
-// A goal: white frame (posts + crossbar, shadow-casting) + a translucent back/top net.
+// A goal: frame (posts + crossbar) + a translucent net, tinted by the team that
+// defends this end (it attacks the opposite goal), so attack direction reads.
 function buildGoal(sign) {
   const gw = F.goal_half_width, gh = F.goal_height, fy = F.back_wall_y, depth = 330;
-  const white = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: .7 });
-  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), white); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
+  const defEntry = Object.entries(S.attack_sign || {}).find(([, s]) => s === -sign);
+  const teamHex = defEntry ? (TEAM[+defEntry[0]] ?? null) : null;
+  const frameCol = teamHex != null ? new THREE.Color(teamHex).lerp(new THREE.Color(0xffffff), 0.55) : new THREE.Color(0xe8e8e8);
+  const netCol = teamHex != null ? new THREE.Color(teamHex).lerp(new THREE.Color(0xffffff), 0.35) : new THREE.Color(0xffffff);
+  const frame = new THREE.MeshStandardMaterial({ color: frameCol, roughness: .7 });
+  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), frame); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
   post(-gw); post(gw);
-  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), white);
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), frame);
   cross.position.set(0, sign * fy, gh + 11); cross.castShadow = true; scene.add(cross);
-  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), transparent: true, opacity: .4, side: THREE.DoubleSide, depthWrite: false });
+  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), color: netCol, transparent: true, opacity: .42, side: THREE.DoubleSide, depthWrite: false });
   const back = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, gh), netMat());
   back.rotation.x = -Math.PI / 2; back.position.set(0, sign * (fy + depth), gh / 2);
   back.material.map.repeat.set(6, 3); scene.add(back);
@@ -838,7 +845,8 @@ function carSpeed(pri, t) {
   const i = frameIndex(t); if (i + 1 >= frames.length) return 0;
   const a = frames[i].cars.find(c => c.pri === pri), b = frames[i + 1].cars.find(c => c.pri === pri);
   if (!a || !b) return 0;
-  return Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz;
+  // cap at ~max car speed so a respawn/demo teleport (position jump) doesn't spike it
+  return Math.min(Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz, 2300);
 }
 function updatePlayers(st) {
   for (const pl of S.players) {
@@ -907,6 +915,12 @@ drawWP();
 
 // --- playback ---
 let T = 0, playing = true, speed = 1, loop = false, last = performance.now(), lastState = null;
+let loopA = null, loopB = null; // A–B film-review loop
+function updateLoopUI() {
+  const r = document.getElementById('loopRegion'), on = loopA != null && loopB != null && loopB > loopA;
+  r.style.display = on ? 'block' : 'none';
+  if (on) { r.style.left = (loopA / dur * 100) + '%'; r.style.width = ((loopB - loopA) / dur * 100) + '%'; }
+}
 const tl = document.getElementById('timeline'), playBtn = document.getElementById('play');
 tl.max = dur; tl.step = 0.01; playBtn.innerHTML = ICON_PAUSE;
 function setPlaying(p) { playing = p; playBtn.innerHTML = p ? ICON_PAUSE : ICON_PLAY; }
@@ -941,12 +955,17 @@ addEventListener('keydown', e => {
   else if (e.key === 'z' && drawMode) undoLast();
   else if (e.key === 's') exportPNG();
   else if (e.key === '?') helpEl.style.display = helpEl.style.display === 'flex' ? 'none' : 'flex';
+  else if (e.key === 'i') { loopA = T; updateLoopUI(); }
+  else if (e.key === 'o') { loopB = T; updateLoopUI(); }
+  else if (e.key === 'x') { loopA = loopB = null; updateLoopUI(); }
 });
 
 function animate(now) {
   requestAnimationFrame(animate);
   const dt = (now - last) / 1000; last = now;
-  if (playing) { T += dt * speed; if (T >= dur) { if (loop) T = 0; else { T = dur; setPlaying(false); } } }
+  const seg = loopA != null && loopB != null && loopB > loopA;
+  const segEnd = seg ? loopB : dur, segStart = seg ? loopA : 0;
+  if (playing) { T += dt * speed; if (T >= segEnd) { if (loop || seg) T = segStart; else { T = dur; setPlaying(false); } } }
   tl.value = T;
   wpCursor.style.left = (T / dur * 100) + '%';
   const st = stateAt(T); lastState = st;
