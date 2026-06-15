@@ -15,6 +15,7 @@ pub mod config;
 pub mod engine;
 pub mod features;
 pub mod metrics;
+pub mod reconcile;
 pub mod report;
 pub mod roles;
 
