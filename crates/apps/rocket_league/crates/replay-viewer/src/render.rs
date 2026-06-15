@@ -95,6 +95,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   #swatches { display:flex; flex-wrap:wrap; gap:3px; }
   .sw { width:18px; height:18px; border-radius:4px; border:1px solid #30363d; padding:0; cursor:pointer; }
   .sw.on { outline:2px solid #fff; outline-offset:-1px; }
+  #helpOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
+  #helpOverlay .panel { max-width:560px; line-height:1.7; cursor:pointer; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -162,7 +164,18 @@ const TEMPLATE: &str = r##"<!doctype html>
   <label>w<input type="range" id="drawWidth" min="2" max="16" value="5"></label>
   <button id="drawUndo" title="undo (z)">undo</button>
   <button id="drawClear">clear</button>
+  <button id="drawSave" title="save PNG (s)">save png</button>
 </div>
+<div id="helpOverlay"><div class="panel">
+  <b>Keyboard</b><br>
+  space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
+  0 free cam · d draw mode · z undo · s save PNG · ? this help<br><br>
+  <b>Mouse</b><br>
+  drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
+  <b>Tools</b><br>
+  overlay: thirds / lanes / grid, or drop an image on the field · telestrator: arrows / lines / pen · heatmap toggle<br><br>
+  <span style="color:#6e7681">press ? or click to close</span>
+</div></div>
 <div id="top" class="panel"><span id="scoreboard"></span><small id="mapline"></small><span id="poss"></span></div>
 <div id="warn" class="panel" style="display:none">⚠ non-standard map — drawn field &amp; positional overlays are approximate</div>
 <div id="players" class="panel"></div>
@@ -193,7 +206,7 @@ const TEMPLATE: &str = r##"<!doctype html>
     <input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity">
   </div>
 </div>
-<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click a player to follow · 0 free cam · drop an image to overlay the field</div>
+<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · d draw · s png · ? help</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock">0:00.0</span>
@@ -230,7 +243,7 @@ scene.background = gradientBg();
 scene.fog = new THREE.Fog(0x0b0e14, F.back_wall_y * 2.6, F.back_wall_y * 5.5);
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 10, 60000);
-const renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.getElementById('c') });
+const renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.getElementById('c'), preserveDrawingBuffer: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -461,6 +474,21 @@ for (const c of ['#ffd166', '#ff5d5d', '#3b82f6', '#22dd66', '#ffffff', '#0b0e14
 swatchEl.firstChild.classList.add('on');
 sizeDraw();
 
+// screenshot: composite the 3D view + any drawings into a PNG download
+function exportPNG() {
+  renderer.render(scene, camera);
+  const out = document.createElement('canvas'); out.width = innerWidth; out.height = innerHeight;
+  const x = out.getContext('2d');
+  x.drawImage(renderer.domElement, 0, 0, innerWidth, innerHeight);
+  if (strokes.length || curStroke) x.drawImage(drawCv, 0, 0, innerWidth, innerHeight);
+  const a = document.createElement('a');
+  a.download = (S.replay_id || 'replay') + '-' + Math.round(T) + 's.png';
+  a.href = out.toDataURL('image/png'); a.click();
+}
+document.getElementById('drawSave').onclick = exportPNG;
+const helpEl = document.getElementById('helpOverlay');
+helpEl.onclick = () => { helpEl.style.display = 'none'; };
+
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
   const floor = new THREE.Mesh(
@@ -565,7 +593,10 @@ function buildCars() {
     const ring = new THREE.Mesh(new THREE.RingGeometry(108, 150, 36),
       new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: .85, side: THREE.DoubleSide, depthWrite: false }));
     ring.position.z = 3; ring.visible = false; scene.add(ring);
-    map.set(pl.pri, { g, bar, label, trail, callout, ring });
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
+    map.set(pl.pri, { g, bar, label, trail, callout, ring, flame });
   }
   return map;
 }
@@ -638,19 +669,31 @@ function updateCallouts(t, st) {
 }
 
 let show = { trails: true, labels: true, boost: true };
+let prevBall = null;
+const prevBoost = new Map();
 function applyState(st) {
-  if (st.ball) { ball.visible = true; ball.position.set(...st.ball); }
-  else { ball.visible = false; }
+  if (st.ball) {
+    ball.visible = true; ball.position.set(...st.ball);
+    if (prevBall) { // roll the ball by how far it moved
+      const dx = st.ball[0] - prevBall[0], dy = st.ball[1] - prevBall[1], d = Math.hypot(dx, dy);
+      if (d > 1) ball.rotateOnWorldAxis(new THREE.Vector3(-dy, dx, 0).normalize(), d / F.ball_radius);
+    }
+    prevBall = st.ball;
+  } else { ball.visible = false; prevBall = null; }
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
     o.g.visible = live; o.label.visible = live && show.labels;
     o.bar.visible = live && show.boost; o.trail.visible = live && show.trails;
-    if (!live) continue;
+    if (!live) { o.flame.visible = false; continue; }
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
     o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
     o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
     o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
+    // boost flame: visible while boost is dropping (i.e. boosting)
+    o.flame.visible = c.boost < (prevBoost.get(pri) ?? c.boost) - 0.5;
+    if (o.flame.visible) { const s = 0.7 + Math.random() * 0.5; o.flame.scale.set(s, 0.9 + Math.random() * 0.5, s); }
+    prevBoost.set(pri, c.boost);
     if (show.trails) {
       const pts = trailPoints(pri, T);
       const arr = o.trail.geometry.attributes.position.array;
@@ -773,6 +816,7 @@ function jump(kind, dir) {
   else { const p = [...ts].reverse().find(x => x < T - 0.05); if (p != null) { seek(p); setPlaying(false); } }
 }
 addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.code === 'ArrowRight') seek(T + 1);
   else if (e.code === 'ArrowLeft') seek(T - 1);
@@ -783,6 +827,8 @@ addEventListener('keydown', e => {
   else if (e.key === '0') setCam('free');
   else if (e.key === 'd') setDrawMode(!drawMode);
   else if (e.key === 'z' && drawMode) { strokes.pop(); redrawStrokes(); }
+  else if (e.key === 's') exportPNG();
+  else if (e.key === '?') helpEl.style.display = helpEl.style.display === 'flex' ? 'none' : 'flex';
 });
 
 function animate(now) {
