@@ -87,10 +87,13 @@ that this layer persists and renders.
 - **Spurious `<unknown>` tracks.** A few replays coalesce an extra unnamed track
   (an unbound/short-lived PRI). Harmless downstream (excluded from validate /
   reconcile / lobby), but worth eliminating in `analyze::identity`.
-- **Corpus reproducibility.** The 180 corpus `.replay` files live in an
-  uncommitted local cache (gitignored, ~230 MB); only the distilled fixtures are
-  committed. Document/script their retrieval so calibration is reproducible from
-  scratch.
+- **Corpus reproducibility.** ✔ The 180 corpus `.replay` files are gitignored
+  (~230 MB); only the distilled fixtures are committed. Retrieval is now scripted
+  and documented: `assets/corpus/refresh_corpus_replays.py` re-downloads them by
+  manifest `id` from the ballchasing API (token, rate-limit, `--limit`/`--ids`/
+  `--bucket`, atomic writes), alongside `refresh_ballchasing_stats.py` for the
+  ground-truth fixture; see `assets/corpus/README.md`. Token-free checkout
+  samples (`assets/replays/{42f2,419a}.replay`) ship for quick spot-checks.
 - **Heavier value learner.** `ValueModel` is a deliberately simple logistic model
   behind a stable interface; swap in a GBM/NN once the corpus justifies it
   (`value/src/model.rs` doc note). Held-out VAL AUC is currently ≈0.71.
