@@ -177,6 +177,22 @@ fn html_escapes_angle_brackets_in_player_names() {
 }
 
 #[test]
+fn html_offline_embeds_three_as_data_urls_no_cdn() {
+    let out = replay_viewer::html_offline(&build_scene(&minimal_match(), &[]));
+    assert!(
+        out.contains("data:text/javascript;base64,"),
+        "three embedded as a data url"
+    );
+    assert!(
+        !out.contains("cdn.jsdelivr.net"),
+        "no CDN reference in offline output"
+    );
+    // The viewer imports this exact specifier, so the offline map must key it exactly.
+    assert!(out.contains("three/addons/controls/OrbitControls.js"));
+    assert!(out.contains("const S = {") && !out.contains("/*IMPORTMAP*/"));
+}
+
+#[test]
 fn attach_roles_tags_cars_with_a_man_role() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);

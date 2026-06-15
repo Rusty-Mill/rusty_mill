@@ -132,10 +132,10 @@ Tracked churn-list. Items needing a product/visual decision are marked
 
 **Performance & portability**
 - [x] `--hz` playback downsample to shrink the embedded payload (e.g. `--hz 15` ≈ halves it)
-- [ ] Vendor three.js for a fully-offline single file (no CDN)
+- [x] Vendor three.js for a fully-offline single file (no CDN) — `--offline` embeds three.js as `data:` URLs
 
 **Testing**
-- [ ] Headless-GL render smoke test in CI
+- [x] Headless-GL render smoke test in CI (`viewer/tests/gl_smoke.mjs` + `.github/workflows/ci.yml`; renders the `--offline` file under swiftshader)
 
 ---
 

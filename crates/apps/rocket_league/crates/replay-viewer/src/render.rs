@@ -7,8 +7,30 @@
 
 use crate::scene::Scene;
 
-/// Render a scene to a complete, self-contained HTML document.
+/// Render a scene to a complete HTML document, loading three.js from a CDN
+/// (smaller file; needs network to view).
 pub fn html(scene: &Scene) -> String {
+    render(scene, CDN_IMPORTS.to_string())
+}
+
+/// Like [`html`], but with three.js + OrbitControls embedded as `data:` URLs so
+/// the file is fully self-contained and needs **no network** to view. Larger
+/// (three.js is ~1.3 MB, base64-encoded into the import map).
+pub fn html_offline(scene: &Scene) -> String {
+    let three = base64(include_bytes!("../vendor/three.module.js"));
+    let orbit = base64(include_bytes!("../vendor/OrbitControls.js"));
+    let imports = format!(
+        "{{\n  \"three\": \"data:text/javascript;base64,{three}\",\n  \
+         \"three/addons/controls/OrbitControls.js\": \"data:text/javascript;base64,{orbit}\"\n}}"
+    );
+    render(scene, imports)
+}
+
+const CDN_IMPORTS: &str = "{\n  \"three\": \
+\"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js\",\n  \
+\"three/addons/\": \"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/\"\n}";
+
+fn render(scene: &Scene, imports: String) -> String {
     let json = serde_json::to_string(scene).expect("scene serializes");
     // Escape `< > &` so a player name can never break out of the <script> or
     // the embedded literal; the result is still valid JSON / JS.
@@ -24,6 +46,31 @@ pub fn html(scene: &Scene) -> String {
     TEMPLATE
         .replace("/*SCENE_DATA*/", &safe)
         .replace("{{TITLE}}", &title)
+        .replace("/*IMPORTMAP*/", &imports)
+}
+
+/// Standard base64 (no line breaks), for embedding vendored JS as data URLs.
+fn base64(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let n = ((c[0] as u32) << 16)
+            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
+            | (*c.get(2).unwrap_or(&0) as u32);
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        out.push(if c.len() > 1 {
+            A[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            A[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 const TEMPLATE: &str = r##"<!doctype html>
@@ -119,10 +166,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 </div>
 
 <script type="importmap">
-{ "imports": {
-  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
-  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
-}}
+{ "imports": /*IMPORTMAP*/ }
 </script>
 <script type="module">
 import * as THREE from 'three';
@@ -517,6 +561,7 @@ function animate(now) {
   }
   controls.update();
   renderer.render(scene, camera);
+  window.__rendered = (window.__rendered || 0) + 1; // signal for the headless smoke test
 }
 requestAnimationFrame(animate);
 
