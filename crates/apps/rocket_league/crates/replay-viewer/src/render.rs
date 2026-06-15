@@ -84,8 +84,17 @@ const TEMPLATE: &str = r##"<!doctype html>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0e14;
     color: #e6edf3; font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
   #c { position: fixed; inset: 0; }
-  .panel { position: fixed; background: rgba(13,17,23,.82); border: 1px solid #1f2937;
+  .panel { position: fixed; z-index: 3; background: rgba(13,17,23,.82); border: 1px solid #1f2937;
     border-radius: 8px; padding: 8px 10px; backdrop-filter: blur(3px); }
+  #draw { position: fixed; inset: 0; z-index: 1; pointer-events: none; }
+  #tools { top:50%; right:10px; transform:translateY(-50%); display:flex; flex-direction:column;
+    gap:5px; align-items:stretch; width:120px; }
+  #tools button.on { background:#243049; border-color:#3b82f6; }
+  #tools select, #tools input[type=range] { width:100%; }
+  #tools label { color:#8b949e; font-size:11px; display:flex; align-items:center; gap:4px; }
+  #swatches { display:flex; flex-wrap:wrap; gap:3px; }
+  .sw { width:18px; height:18px; border-radius:4px; border:1px solid #30363d; padding:0; cursor:pointer; }
+  .sw.on { outline:2px solid #fff; outline-offset:-1px; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -145,6 +154,15 @@ const TEMPLATE: &str = r##"<!doctype html>
 </head>
 <body>
 <canvas id="c"></canvas>
+<canvas id="draw"></canvas>
+<div id="tools" class="panel">
+  <button id="drawToggle" title="draw mode (d)">draw</button>
+  <div id="swatches"></div>
+  <select id="drawTool" title="tool"><option value="pen">pen</option><option value="arrow">arrow</option><option value="line">line</option></select>
+  <label>w<input type="range" id="drawWidth" min="2" max="16" value="5"></label>
+  <button id="drawUndo" title="undo (z)">undo</button>
+  <button id="drawClear">clear</button>
+</div>
 <div id="top" class="panel"><span id="scoreboard"></span><small id="mapline"></small><span id="poss"></span></div>
 <div id="warn" class="panel" style="display:none">⚠ non-standard map — drawn field &amp; positional overlays are approximate</div>
 <div id="players" class="panel"></div>
@@ -347,6 +365,80 @@ for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -409
     new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide }));
   pad.position.set(px, py, 3); scene.add(pad);
 }
+
+// --- telestrator: freehand / arrow / line drawing over the view (a coach's pen).
+// Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
+const drawCv = document.getElementById('draw'), dctx = drawCv.getContext('2d');
+let drawMode = false, drawingNow = false, strokes = [], curStroke = null;
+const pen = { color: '#ffd166', width: 5, tool: 'pen' };
+function sizeDraw() {
+  const dpr = Math.min(devicePixelRatio, 2);
+  drawCv.width = innerWidth * dpr; drawCv.height = innerHeight * dpr;
+  drawCv.style.width = innerWidth + 'px'; drawCv.style.height = innerHeight + 'px';
+  dctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redrawStrokes();
+}
+function strokePath(s) {
+  if (!s.points.length) return;
+  dctx.strokeStyle = s.color; dctx.lineWidth = s.width; dctx.lineCap = 'round'; dctx.lineJoin = 'round';
+  if (s.tool === 'pen') {
+    dctx.beginPath(); dctx.moveTo(s.points[0][0], s.points[0][1]);
+    for (let i = 1; i < s.points.length; i++) dctx.lineTo(s.points[i][0], s.points[i][1]);
+    dctx.stroke();
+  } else {
+    const a = s.points[0], b = s.points[s.points.length - 1];
+    dctx.beginPath(); dctx.moveTo(a[0], a[1]); dctx.lineTo(b[0], b[1]); dctx.stroke();
+    if (s.tool === 'arrow') {
+      const ang = Math.atan2(b[1] - a[1], b[0] - a[0]), h = 9 + s.width * 2.2;
+      dctx.beginPath();
+      dctx.moveTo(b[0], b[1]); dctx.lineTo(b[0] - h * Math.cos(ang - .4), b[1] - h * Math.sin(ang - .4));
+      dctx.moveTo(b[0], b[1]); dctx.lineTo(b[0] - h * Math.cos(ang + .4), b[1] - h * Math.sin(ang + .4));
+      dctx.stroke();
+    }
+  }
+}
+function redrawStrokes() {
+  dctx.clearRect(0, 0, innerWidth, innerHeight);
+  for (const s of strokes) strokePath(s);
+  if (curStroke) strokePath(curStroke);
+}
+function setDrawMode(on) {
+  drawMode = on;
+  drawCv.style.pointerEvents = on ? 'auto' : 'none';
+  drawCv.style.cursor = on ? 'crosshair' : '';
+  controls.enabled = !on;
+  document.getElementById('drawToggle').classList.toggle('on', on);
+  if (on) setPlaying(false);
+}
+drawCv.addEventListener('pointerdown', e => {
+  if (!drawMode) return;
+  drawingNow = true;
+  try { drawCv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events */ }
+  curStroke = { color: pen.color, width: pen.width, tool: pen.tool, points: [[e.clientX, e.clientY]] };
+});
+drawCv.addEventListener('pointermove', e => {
+  if (!drawingNow) return;
+  if (pen.tool === 'pen') curStroke.points.push([e.clientX, e.clientY]);
+  else curStroke.points[1] = [e.clientX, e.clientY];
+  redrawStrokes();
+});
+addEventListener('pointerup', () => {
+  if (drawingNow && curStroke) { strokes.push(curStroke); curStroke = null; }
+  drawingNow = false; redrawStrokes();
+});
+document.getElementById('drawToggle').onclick = () => setDrawMode(!drawMode);
+document.getElementById('drawTool').onchange = e => pen.tool = e.target.value;
+document.getElementById('drawWidth').oninput = e => pen.width = +e.target.value;
+document.getElementById('drawUndo').onclick = () => { strokes.pop(); redrawStrokes(); };
+document.getElementById('drawClear').onclick = () => { strokes = []; redrawStrokes(); };
+const swatchEl = document.getElementById('swatches');
+for (const c of ['#ffd166', '#ff5d5d', '#3b82f6', '#22dd66', '#ffffff', '#0b0e14']) {
+  const b = document.createElement('button'); b.className = 'sw'; b.style.background = c;
+  b.onclick = () => { pen.color = c; swatchEl.querySelectorAll('.sw').forEach(x => x.classList.remove('on')); b.classList.add('on'); };
+  swatchEl.appendChild(b);
+}
+swatchEl.firstChild.classList.add('on');
+sizeDraw();
 
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
@@ -650,6 +742,8 @@ addEventListener('keydown', e => {
   else if (e.key === 'k') jump('kickoff', 1);
   else if (e.key === 'j') jump('kickoff', -1);
   else if (e.key === '0') setCam('free');
+  else if (e.key === 'd') setDrawMode(!drawMode);
+  else if (e.key === 'z' && drawMode) { strokes.pop(); redrawStrokes(); }
 });
 
 function animate(now) {
@@ -682,6 +776,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   drawWP();
+  sizeDraw();
 });
 </script>
 </body>
