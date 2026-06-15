@@ -22,7 +22,11 @@
 //! ```
 
 pub mod render;
+pub mod roles;
 pub mod scene;
+pub mod winprob;
 
-pub use render::html;
+pub use render::{html, html_offline};
+pub use roles::attach_roles;
 pub use scene::{build_scene, Scene};
+pub use winprob::attach_winprob;

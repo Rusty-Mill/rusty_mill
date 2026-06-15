@@ -57,13 +57,16 @@ pub struct ScenePlayer {
 }
 
 /// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
-/// percent (0–100).
+/// percent (0–100). `role` is `1` (1st man) / `2` (2nd man) when the optional
+/// scoring overlay is attached (see [`crate::roles::attach_roles`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneCar {
     pub pri: i32,
     pub p: [f32; 3],
     pub rot: [f32; 3],
     pub boost: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<u8>,
 }
 
 /// One playback frame: time, ball position (absent if the ball isn't live), and
@@ -101,6 +104,11 @@ pub struct Scene {
     pub frames: Vec<SceneFrame>,
     /// Events + skills, time-sorted.
     pub events: Vec<SceneEvent>,
+    /// Optional coarse momentum curve: P(team 0 scores the next goal) sampled
+    /// evenly across the match (see [`crate::winprob::attach_winprob`]). Empty
+    /// unless attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub win_prob: Vec<f32>,
 }
 
 fn round(x: f32, places: i32) -> f32 {
@@ -146,6 +154,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
                         .boost
                         .map(|b| field::boost_percent(b).round() as u8)
                         .unwrap_or(0),
+                    role: None,
                 })
                 .collect(),
         })
@@ -174,7 +183,29 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         players,
         frames,
         events,
+        win_prob: Vec::new(),
     }
+}
+
+/// Thin the playback frames toward `target_hz` (keep every k-th frame) to shrink
+/// the embedded payload. No-op if `target_hz` is non-positive or already ≥ the
+/// scene's rate. Updates [`Scene::hz`]; events are untouched (they carry their
+/// own times).
+pub fn downsample(scene: &mut Scene, target_hz: f32) {
+    if target_hz <= 0.0 || target_hz >= scene.hz {
+        return;
+    }
+    let k = (scene.hz / target_hz).round().max(1.0) as usize;
+    if k <= 1 {
+        return;
+    }
+    let mut i = 0usize;
+    scene.frames.retain(|_| {
+        let keep = i.is_multiple_of(k);
+        i += 1;
+        keep
+    });
+    scene.hz /= k as f32;
 }
 
 /// Project the canonical match events into point annotations (possessions, being

@@ -100,6 +100,45 @@ product direction rather than the milestone plan.
 
 ---
 
+## Viewer improvements (`replay-viewer`)
+
+Tracked churn-list. Items needing a product/visual decision are marked
+**(needs input)** and left open; the rest are implementable directly.
+
+**Readability**
+- [x] Closer default camera + presets (overview / behind-goal / ball-cam)
+- [x] Ground / drop shadows for cars + ball (depth perception)
+- [x] Clearer car mesh (cabin + nose) + forward marker
+- [x] More prominent boost gauge
+
+**Navigation & UX**
+- [x] Event markers on the timeline (goals/demos/kickoffs), clickable to seek
+- [x] Click-to-focus / follow a player (HUD row → camera locks + row highlights); click a ticker entry to seek
+- [x] Jump to next/prev goal & kickoff (n/p, k/j); loop; ◀▶ ±1s
+- [x] Show/hide toggles (trails, labels, boost)
+- [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
+
+**Analysis overlays**
+- [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)
+- [x] Skill highlight callouts on the car in 3D (fading "★ <skill>" above the performer)
+- [x] Possession indicator; per-player trails
+- [x] Heatmap floor projection (toggle; occupancy of the ball or followed player, binned in-viewer from the grid)
+- [x] Win-probability / momentum strip above the timeline (P(blue scores next) from `replay-value`; model is basic, read as rough momentum)
+
+**Correctness**
+- [ ] Map-aware drawn field (see the map-geometry follow-up above)
+- [ ] **(needs input)** Validate car orientation (yaw/pitch/roll → forward) against footage — could add a velocity-alignment self-check
+- [x] Rotation slerp between frames (smoother spin)
+
+**Performance & portability**
+- [x] `--hz` playback downsample to shrink the embedded payload (e.g. `--hz 15` ≈ halves it)
+- [x] Vendor three.js for a fully-offline single file (no CDN) — `--offline` embeds three.js as `data:` URLs
+
+**Testing**
+- [x] Headless-GL render smoke test in CI (`viewer/tests/gl_smoke.mjs` + `.github/workflows/ci.yml`; renders the `--offline` file under swiftshader)
+
+---
+
 ## Engineering follow-ups (this repo, smaller)
 
 - **Reconciliation as a standing gate.** Add a `--gate` to `reconcile` (and a

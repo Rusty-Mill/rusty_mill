@@ -25,16 +25,36 @@ cargo run -p replay-viewer -- assets/replays/419a.replay --html out.html
 cargo run -p replay-viewer -- assets/replays/42f2.replay --json scene.json --no-skills
 ```
 
-The match data is fully inline; **three.js is loaded from a CDN** (an import map),
-so *viewing* needs network access for that one dependency. Vendoring three.js for
-a fully-offline artifact is a possible follow-up.
+The match data is fully inline; by default **three.js loads from a CDN** (an
+import map), so viewing needs network for that one dependency. Pass `--offline`
+to embed three.js + OrbitControls as `data:` URLs instead — a larger but fully
+self-contained file that renders with no network (this is what the CI smoke test
+uses). `--hz <rate>` thins the playback grid to shrink the payload.
 
 ## Controls
 
-Spacebar play/pause · drag the timeline to scrub · ◀/▶ jump ±1 s · speed select
-(0.25–4×) · mouse drag orbits, scroll zooms, right-drag pans. The HUD shows the
-scoreboard, clock, per-player boost, and the last few timeline events (goals,
-demos, kickoffs, touches, and detected skills).
+Spacebar play/pause · drag the timeline to scrub · ◀/▶ ±1 s · `n`/`p` next/prev
+goal · `k`/`j` next/prev kickoff · speed (0.25–4×) · loop · mouse drag orbits,
+scroll zooms, right-drag pans.
+
+**Camera:** `overview` / `goal` / `ball-cam` presets, or click a player row to
+lock the camera onto that car (`0` returns to free overview). Goal/demo/kickoff
+markers on the timeline are clickable, as is each ticker entry — both seek.
+
+## Overlays
+
+- **Scoring roles** — the 1st man on each team wears a gold ground-ring and a
+  `1ST` HUD tag; support is tagged `2ND` (from `replay_scoring`'s per-frame role
+  assignment; `--no-roles` to omit).
+- **Skills** — a fading `★ <skill>` callout pops above the car that just
+  performed a detected skill, and skills also stream in the ticker.
+- **Possession** (current team, from the last touch), **per-player trails**, and
+  blob **drop-shadows** for depth. Toggle trails / labels / boost / heatmap.
+- **Heatmap** — a floor occupancy heatmap of the ball (or the followed player),
+  binned in-viewer from the grid.
+- **Momentum strip** — a P(blue scores the next goal) curve above the timeline
+  (from `replay-value`; the model is basic, so read it as rough momentum, not a
+  calibrated win probability). `--no-roles` / `--no-winprob` omit the overlays.
 
 ## Coordinates
 
@@ -44,16 +64,18 @@ Cars are oriented from `[pitch, yaw, roll]` (yaw about Z, then pitch, then roll)
 with a white nose marking forward (+X) — exact orientation is a known area to
 refine against footage.
 
-## What's tested vs. not
+## What's tested
 
-The Rust scene projection and HTML substitution are unit- and golden-tested
-(`viewer/tests/`), and the embedded JS is syntax-checked. The **visual** 3D
-rendering itself is only verifiable in a browser — there's no headless-GL test in
-CI — so treat the rendering layer as the iterate-in-browser part.
+The Rust scene projection, role attachment, downsample, and HTML/import-map
+substitution are unit- and golden-tested (`viewer/tests/scene.rs`,
+`golden.rs`). The JS/three.js rendering path is covered by a **headless-GL smoke
+test** (`viewer/tests/gl_smoke.mjs`): it renders the `--offline` file under
+swiftshader and asserts the scene drew (`window.__rendered`) with no page errors.
+CI runs it (`.github/workflows/ci.yml`); locally, `npm i puppeteer` then
+`node viewer/tests/gl_smoke.mjs <file.html>`.
 
 ## Follow-ups
 
-- Vendor three.js for a fully offline file.
-- Tune car orientation against footage; add a chase/ball cam.
-- Overlay scoring (roles, 1st/2nd man, leak) alongside the skill ticker.
-- Optional playback downsample (`--hz`) to shrink the embedded payload.
+Tracked in `backlog.md` (Viewer improvements). Remaining: validate car
+orientation against footage; a win-probability / ΔV strip from `replay-value`;
+and map-aware field geometry for non-standard arenas.
