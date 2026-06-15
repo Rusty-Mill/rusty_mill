@@ -120,6 +120,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #left .cams button { padding:3px 7px; }
   #left .cams button.on { background:#243049; border-color:#3b82f6; }
   #left label { color:#c9d1d9; margin-right:8px; user-select:none; }
+  #left .ov { display:flex; align-items:center; gap:5px; color:#8b949e; }
+  #left .ov select, #left .ov button { height:24px; padding:0 6px; }
+  #left .ov input[type=range] { width:74px; }
   #help { left:10px; bottom:10px; color:#6e7681; font-size:11px; }
   #bar { left: 50%; bottom: 14px; transform: translateX(-50%); display:flex;
     align-items:center; gap:10px; width: min(900px, 92vw); }
@@ -158,8 +161,21 @@ const TEMPLATE: &str = r##"<!doctype html>
     <label><input type="checkbox" id="tgBoost" checked> boost</label>
     <label><input type="checkbox" id="tgHeat"> heatmap</label>
   </div>
+  <div class="panel ov">
+    overlay
+    <select id="ovSel" title="field overlay">
+      <option value="none">none</option>
+      <option value="thirds">thirds</option>
+      <option value="lanes">lanes</option>
+      <option value="grid">grid</option>
+      <option value="image" id="ovImgOpt" disabled>image</option>
+    </select>
+    <button id="ovLoad" title="load a field image (or drag one onto the view)">img…</button>
+    <input type="file" id="ovFile" accept="image/*" style="display:none">
+    <input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity">
+  </div>
 </div>
-<div id="help" class="panel">space play · ◀▶ ±1s · n/p next·prev goal · k/j next·prev kickoff · click a player to follow · 0 free cam</div>
+<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click a player to follow · 0 free cam · drop an image to overlay the field</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock">0:00.0</span>
@@ -271,6 +287,66 @@ function buildHeat(subject) {
   heatMesh.material.map = tex; heatMesh.material.needsUpdate = true;
 }
 function refreshHeat() { if (heatMesh.visible) buildHeat(heatSubject); }
+
+// --- field overlay: tactical zone presets, or a loaded/dropped image, projected
+// on the floor to break down spaces ---
+const overlayMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(2 * F.side_wall_x, 2 * F.back_wall_y),
+  new THREE.MeshBasicMaterial({ transparent: true, opacity: .55, depthWrite: false }));
+overlayMesh.position.z = 4; overlayMesh.visible = false; scene.add(overlayMesh);
+let overlayImageTex = null;
+function presetTexture(kind) {
+  const W = 1024, H = 1280, fx = F.side_wall_x, fy = F.back_wall_y;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  const X = wx => (wx + fx) / (2 * fx) * W, Y = wy => (fy - wy) / (2 * fy) * H;
+  x.lineWidth = 3; x.font = 'bold 34px sans-serif'; x.textAlign = 'center';
+  if (kind === 'thirds' || kind === 'grid') {
+    const t = fy / 3;
+    x.fillStyle = 'rgba(59,130,246,.16)'; x.fillRect(0, Y(-t), W, Y(-fy) - Y(-t));
+    x.fillStyle = 'rgba(249,115,22,.16)'; x.fillRect(0, Y(fy), W, Y(t) - Y(fy));
+    x.strokeStyle = 'rgba(255,255,255,.5)';
+    x.beginPath(); x.moveTo(0, Y(-t)); x.lineTo(W, Y(-t)); x.moveTo(0, Y(t)); x.lineTo(W, Y(t)); x.stroke();
+    x.fillStyle = 'rgba(255,255,255,.65)';
+    x.fillText('DEFENSIVE', W / 2, Y(-fy * 0.66)); x.fillText('MIDFIELD', W / 2, Y(0) - 10); x.fillText('ATTACKING', W / 2, Y(fy * 0.66));
+  }
+  if (kind === 'lanes' || kind === 'grid') {
+    const c = fx / 3;
+    x.strokeStyle = 'rgba(255,255,255,.5)';
+    x.beginPath(); x.moveTo(X(-c), 0); x.lineTo(X(-c), H); x.moveTo(X(c), 0); x.lineTo(X(c), H); x.stroke();
+    if (kind === 'lanes') { x.fillStyle = 'rgba(255,255,255,.6)'; x.fillText('LEFT', X(-fx * 0.66), 64); x.fillText('CENTER', X(0), 64); x.fillText('RIGHT', X(fx * 0.66), 64); }
+  }
+  x.strokeStyle = 'rgba(255,255,255,.6)'; x.beginPath(); x.moveTo(0, Y(0)); x.lineTo(W, Y(0)); x.stroke();
+  const tex = new THREE.CanvasTexture(cv); tex.minFilter = THREE.LinearFilter; return tex;
+}
+function setOverlay(kind) {
+  if (kind === 'none' || (kind === 'image' && !overlayImageTex)) { overlayMesh.visible = false; return; }
+  overlayMesh.material.map = kind === 'image' ? overlayImageTex : presetTexture(kind);
+  overlayMesh.material.needsUpdate = true; overlayMesh.visible = true;
+}
+document.getElementById('ovSel').onchange = e => setOverlay(e.target.value);
+document.getElementById('ovOpacity').oninput = e => { overlayMesh.material.opacity = e.target.value / 100; };
+function loadOverlayImage(file) {
+  const url = URL.createObjectURL(file), img = new Image();
+  img.onload = () => {
+    overlayImageTex = new THREE.Texture(img); overlayImageTex.colorSpace = THREE.SRGBColorSpace; overlayImageTex.needsUpdate = true;
+    document.getElementById('ovImgOpt').disabled = false;
+    document.getElementById('ovSel').value = 'image'; setOverlay('image');
+    URL.revokeObjectURL(url);
+  };
+  img.src = url;
+}
+document.getElementById('ovLoad').onclick = () => document.getElementById('ovFile').click();
+document.getElementById('ovFile').onchange = e => { if (e.target.files[0]) loadOverlayImage(e.target.files[0]); };
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) loadOverlayImage(f); });
+
+// big boost pads (6) as faint field markers
+for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -4096], [3584, 0], [-3584, 0]]) {
+  const pad = new THREE.Mesh(new THREE.RingGeometry(140, 165, 24),
+    new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide }));
+  pad.position.set(px, py, 3); scene.add(pad);
+}
 
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
