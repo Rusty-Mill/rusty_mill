@@ -95,6 +95,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #swatches { display:flex; flex-wrap:wrap; gap:3px; }
   .sw { width:18px; height:18px; border-radius:4px; border:1px solid #30363d; padding:0; cursor:pointer; }
   .sw.on { outline:2px solid #fff; outline-offset:-1px; }
+  #helpOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
+  #helpOverlay .panel { max-width:560px; line-height:1.7; cursor:pointer; }
+  #minimap { position:fixed; right:10px; bottom:48px; width:132px; height:165px; padding:0; overflow:hidden; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -104,13 +107,15 @@ const TEMPLATE: &str = r##"<!doctype html>
   #top #poss { font-size: 11px; font-weight: 700; }
   #warn { top:64px; left:50%; transform:translateX(-50%); font-size:12px; font-weight:700;
     color:#f0b429; background:rgba(46,34,8,.88); border-color:#7a5a10; }
-  #players { top: 10px; left: 10px; min-width: 168px; }
-  #players .row { cursor:pointer; padding:1px 3px; border-radius:4px; }
+  #players { top: 10px; left: 10px; min-width: 196px; }
+  #players .row { cursor:pointer; padding:2px 3px; border-radius:4px; }
   #players .row:hover { background:#1c2230; }
   #players .row.follow { background:#243049; outline:1px solid #3b82f6; }
-  #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
-    margin-right:6px; vertical-align:middle; }
-  #players b { float:right; color:#c9d1d9; }
+  #players .r1 { display:flex; align-items:center; }
+  #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
+  #players .r2 { display:flex; align-items:center; gap:8px; font-size:10px; color:#8b949e; padding-left:15px; }
+  #players .r2 b { margin-left:auto; color:#c9d1d9; }
+  #players .r2 .sp { color:#6e7681; }
   #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
   #players .role.first { color:#ffd166; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
@@ -160,9 +165,21 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div id="swatches"></div>
   <select id="drawTool" title="tool"><option value="pen">pen</option><option value="arrow">arrow</option><option value="line">line</option></select>
   <label>w<input type="range" id="drawWidth" min="2" max="16" value="5"></label>
+  <label><input type="checkbox" id="draw3d"> on field</label>
   <button id="drawUndo" title="undo (z)">undo</button>
   <button id="drawClear">clear</button>
+  <button id="drawSave" title="save PNG (s)">save png</button>
 </div>
+<div id="helpOverlay"><div class="panel">
+  <b>Keyboard</b><br>
+  space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
+  0 free cam · d draw mode · z undo · s save PNG · ? this help<br><br>
+  <b>Mouse</b><br>
+  drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
+  <b>Tools</b><br>
+  overlay: thirds / lanes / grid, or drop an image on the field · telestrator: arrows / lines / pen · heatmap toggle<br><br>
+  <span style="color:#6e7681">press ? or click to close</span>
+</div></div>
 <div id="top" class="panel"><span id="scoreboard"></span><small id="mapline"></small><span id="poss"></span></div>
 <div id="warn" class="panel" style="display:none">⚠ non-standard map — drawn field &amp; positional overlays are approximate</div>
 <div id="players" class="panel"></div>
@@ -171,7 +188,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div class="panel cams">
     <button data-cam="free" class="on">overview</button>
     <button data-cam="goal">goal</button>
-    <button data-cam="ball">ball-cam</button>
+    <button data-cam="ball">ball</button>
+    <button data-cam="broadcast">tv</button>
   </div>
   <div class="panel">
     <label><input type="checkbox" id="tgTrails" checked> trails</label>
@@ -193,7 +211,8 @@ const TEMPLATE: &str = r##"<!doctype html>
     <input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity">
   </div>
 </div>
-<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click a player to follow · 0 free cam · drop an image to overlay the field</div>
+<canvas id="minimap" class="panel"></canvas>
+<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · d draw · s png · ? help</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock">0:00.0</span>
@@ -226,29 +245,52 @@ const ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 14 14"><rect x="3" 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1); // Rocket League is Z-up
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0b0e14);
-scene.fog = new THREE.Fog(0x0b0e14, F.back_wall_y * 2.4, F.back_wall_y * 5);
+scene.background = gradientBg();
+scene.fog = new THREE.Fog(0x0b0e14, F.back_wall_y * 2.6, F.back_wall_y * 5.5);
 
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 10, 60000);
-const renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.getElementById('c') });
+const renderer = new THREE.WebGLRenderer({ antialias: true, canvas: document.getElementById('c'), preserveDrawingBuffer: true });
 renderer.setSize(innerWidth, innerHeight);
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.maxDistance = F.back_wall_y * 4;
 
-scene.add(new THREE.HemisphereLight(0xb8d0ff, 0x202830, 1.15));
-const dir = new THREE.DirectionalLight(0xffffff, 1.25);
-dir.position.set(2500, -3500, 7000);
+scene.add(new THREE.HemisphereLight(0xbcd3ff, 0x1a2230, 1.0));
+const dir = new THREE.DirectionalLight(0xffffff, 2.2);
+dir.position.set(2800, -3200, 7000);
+dir.castShadow = true;
+dir.shadow.mapSize.set(2048, 2048);
+dir.shadow.bias = -0.0004;
+Object.assign(dir.shadow.camera, { near: 800, far: 20000, left: -6500, right: 6500, top: 7500, bottom: -7500 });
+dir.shadow.camera.updateProjectionMatrix();
 scene.add(dir);
+
+function gradientBg() {
+  const cv = document.createElement('canvas'); cv.width = 2; cv.height = 256;
+  const x = cv.getContext('2d'), g = x.createLinearGradient(0, 0, 0, 256);
+  g.addColorStop(0, '#10161f'); g.addColorStop(0.55, '#0b0e14'); g.addColorStop(1, '#05070a');
+  x.fillStyle = g; x.fillRect(0, 0, 2, 256);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
 
 // --- camera presets ---
 const OVERVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.22, F.ceiling_z * 2.0), tgt: new THREE.Vector3(0, 0, 150) };
 const GOALVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.5, F.ceiling_z * 1.1), tgt: new THREE.Vector3(0, F.back_wall_y * 0.3, 200) };
+const BROADCAST_POS = new THREE.Vector3(F.side_wall_x * 1.4, -F.back_wall_y * 0.2, F.ceiling_z * 1.6);
 let cam = { mode: 'free', pri: null };
-function applyPose(p) { camera.position.copy(p.pos); controls.target.copy(p.tgt); controls.update(); }
-applyPose(OVERVIEW);
+let camTween = null; // eased preset transition
+function applyPose(p, snap) {
+  if (snap) { camera.position.copy(p.pos); controls.target.copy(p.tgt); controls.update(); camTween = null; return; }
+  camTween = { fromPos: camera.position.clone(), toPos: p.pos.clone(), fromTgt: controls.target.clone(), toTgt: p.tgt.clone(), start: performance.now(), dur: 650 };
+}
+applyPose(OVERVIEW, true);
+controls.addEventListener('start', () => camTween = null); // user grab cancels the tween
 
 function setCam(mode, pri) {
   cam = { mode, pri: pri ?? null };
@@ -264,7 +306,6 @@ document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => s
 
 buildField();
 const ball = makeBall();
-const ballShadow = makeShadow(F.ball_radius * 1.1);
 const cars = buildCars();
 
 // --- floor heatmap: occupancy of the ball or the followed car over the match,
@@ -370,7 +411,7 @@ for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -409
 // Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
 const drawCv = document.getElementById('draw'), dctx = drawCv.getContext('2d');
 let drawMode = false, drawingNow = false, strokes = [], curStroke = null;
-const pen = { color: '#ffd166', width: 5, tool: 'pen' };
+const pen = { color: '#ffd166', width: 5, tool: 'pen', field: false };
 function sizeDraw() {
   const dpr = Math.min(devicePixelRatio, 2);
   drawCv.width = innerWidth * dpr; drawCv.height = innerHeight * dpr;
@@ -410,27 +451,64 @@ function setDrawMode(on) {
   document.getElementById('drawToggle').classList.toggle('on', on);
   if (on) setPlaying(false);
 }
+// world-anchored (on-field) drawing: raycast the pointer to the floor plane and
+// build a 3D polyline that stays put as the camera moves.
+const fieldGroup = new THREE.Group(); scene.add(fieldGroup);
+const raycaster = new THREE.Raycaster();
+const floorPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+const undoStack = []; // each entry removes one stroke (screen or field)
+let fieldStroke = null;
+function fieldPoint(e) {
+  raycaster.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  const p = new THREE.Vector3();
+  return raycaster.ray.intersectPlane(floorPlane, p) ? p.setZ(7) : null;
+}
+function pushFieldPoint(p) {
+  const i = fieldStroke.n;
+  if (i * 3 + 2 >= fieldStroke.arr.length) return;
+  fieldStroke.arr.set([p.x, p.y, p.z], i * 3); fieldStroke.n++;
+  fieldStroke.line.geometry.setDrawRange(0, fieldStroke.n);
+  fieldStroke.line.geometry.attributes.position.needsUpdate = true;
+}
 drawCv.addEventListener('pointerdown', e => {
   if (!drawMode) return;
   drawingNow = true;
   try { drawCv.setPointerCapture(e.pointerId); } catch (_) { /* synthetic events */ }
-  curStroke = { color: pen.color, width: pen.width, tool: pen.tool, points: [[e.clientX, e.clientY]] };
+  if (pen.field) {
+    const p = fieldPoint(e); if (!p) { drawingNow = false; return; }
+    const arr = new Float32Array(3 * 2048), geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color: pen.color }));
+    line.frustumCulled = false; fieldGroup.add(line);
+    fieldStroke = { line, arr, n: 0 }; pushFieldPoint(p);
+  } else {
+    curStroke = { color: pen.color, width: pen.width, tool: pen.tool, points: [[e.clientX, e.clientY]] };
+  }
 });
 drawCv.addEventListener('pointermove', e => {
   if (!drawingNow) return;
-  if (pen.tool === 'pen') curStroke.points.push([e.clientX, e.clientY]);
-  else curStroke.points[1] = [e.clientX, e.clientY];
-  redrawStrokes();
+  if (fieldStroke) { const p = fieldPoint(e); if (p) pushFieldPoint(p); }
+  else if (curStroke) {
+    if (pen.tool === 'pen') curStroke.points.push([e.clientX, e.clientY]);
+    else curStroke.points[1] = [e.clientX, e.clientY];
+    redrawStrokes();
+  }
 });
 addEventListener('pointerup', () => {
-  if (drawingNow && curStroke) { strokes.push(curStroke); curStroke = null; }
+  if (drawingNow) {
+    if (fieldStroke) { const fs = fieldStroke; undoStack.push(() => { fieldGroup.remove(fs.line); fs.line.geometry.dispose(); }); fieldStroke = null; }
+    else if (curStroke) { const s = curStroke; strokes.push(s); undoStack.push(() => { const i = strokes.indexOf(s); if (i >= 0) strokes.splice(i, 1); redrawStrokes(); }); curStroke = null; }
+  }
   drawingNow = false; redrawStrokes();
 });
+function undoLast() { const f = undoStack.pop(); if (f) f(); }
+function clearAll() { while (undoStack.length) undoStack.pop()(); }
 document.getElementById('drawToggle').onclick = () => setDrawMode(!drawMode);
 document.getElementById('drawTool').onchange = e => pen.tool = e.target.value;
 document.getElementById('drawWidth').oninput = e => pen.width = +e.target.value;
-document.getElementById('drawUndo').onclick = () => { strokes.pop(); redrawStrokes(); };
-document.getElementById('drawClear').onclick = () => { strokes = []; redrawStrokes(); };
+document.getElementById('draw3d').onchange = e => pen.field = e.target.checked;
+document.getElementById('drawUndo').onclick = undoLast;
+document.getElementById('drawClear').onclick = clearAll;
 const swatchEl = document.getElementById('swatches');
 for (const c of ['#ffd166', '#ff5d5d', '#3b82f6', '#22dd66', '#ffffff', '#0b0e14']) {
   const b = document.createElement('button'); b.className = 'sw'; b.style.background = c;
@@ -440,48 +518,122 @@ for (const c of ['#ffd166', '#ff5d5d', '#3b82f6', '#22dd66', '#ffffff', '#0b0e14
 swatchEl.firstChild.classList.add('on');
 sizeDraw();
 
+// screenshot: composite the 3D view + any drawings into a PNG download
+function exportPNG() {
+  renderer.render(scene, camera);
+  const out = document.createElement('canvas'); out.width = innerWidth; out.height = innerHeight;
+  const x = out.getContext('2d');
+  x.drawImage(renderer.domElement, 0, 0, innerWidth, innerHeight);
+  if (strokes.length || curStroke) x.drawImage(drawCv, 0, 0, innerWidth, innerHeight);
+  const a = document.createElement('a');
+  a.download = (S.replay_id || 'replay') + '-' + Math.round(T) + 's.png';
+  a.href = out.toDataURL('image/png'); a.click();
+}
+document.getElementById('drawSave').onclick = exportPNG;
+const helpEl = document.getElementById('helpOverlay');
+helpEl.onclick = () => { helpEl.style.display = 'none'; };
+
+// minimap: top-down field with live car (team-coloured, 1st-man ringed) + ball dots
+const mm = document.getElementById('minimap'), mmx = mm.getContext('2d');
+const MMW = 132, MMH = 165;
+mm.width = MMW * 2; mm.height = MMH * 2; mmx.scale(2, 2);
+function drawMinimap(st) {
+  mmx.clearRect(0, 0, MMW, MMH);
+  mmx.fillStyle = '#10301a'; mmx.fillRect(0, 0, MMW, MMH);
+  const fx = F.side_wall_x, fy = F.back_wall_y;
+  const MX = wx => (wx + fx) / (2 * fx) * MMW, MY = wy => (fy - wy) / (2 * fy) * MMH;
+  mmx.strokeStyle = 'rgba(255,255,255,.35)'; mmx.lineWidth = 1;
+  mmx.strokeRect(2, 2, MMW - 4, MMH - 4);
+  mmx.beginPath(); mmx.moveTo(0, MY(0)); mmx.lineTo(MMW, MY(0)); mmx.stroke();
+  mmx.beginPath(); mmx.arc(MX(0), MY(0), 11, 0, Math.PI * 2); mmx.stroke();
+  for (const pl of S.players) {
+    const c = st.cars.get(pl.pri); if (!c) continue;
+    mmx.fillStyle = TEAM_CSS[pl.team] ?? '#9aa4b2';
+    mmx.beginPath(); mmx.arc(MX(c.p[0]), MY(c.p[1]), c.role === 1 ? 4 : 3, 0, Math.PI * 2); mmx.fill();
+    if (c.role === 1) { mmx.strokeStyle = '#ffd166'; mmx.lineWidth = 1.5; mmx.stroke(); }
+  }
+  if (st.ball) { mmx.fillStyle = '#fff'; mmx.beginPath(); mmx.arc(MX(st.ball[0]), MY(st.ball[1]), 3, 0, Math.PI * 2); mmx.fill(); }
+}
+
+// demo flashes: an expanding burst at the demoer when a demo event is crossed
+const demoEvents = S.events.filter(e => e.kind === 'demo');
+const flashes = [];
+let prevT = 0;
+function spawnFlash(p) {
+  const m = new THREE.Mesh(new THREE.RingGeometry(20, 60, 24),
+    new THREE.MeshBasicMaterial({ color: 0xff5533, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+  m.position.set(p[0], p[1], 45); scene.add(m); flashes.push({ m, start: performance.now() });
+}
+function updateFlashes(now) {
+  for (let i = flashes.length - 1; i >= 0; i--) {
+    const f = flashes[i], age = (now - f.start) / 700;
+    if (age >= 1) { scene.remove(f.m); f.m.material.dispose(); f.m.geometry.dispose(); flashes.splice(i, 1); continue; }
+    const s = 1 + age * 5; f.m.scale.set(s, s, 1); f.m.material.opacity = 0.85 * (1 - age);
+  }
+}
+
 function buildField() {
   const fx = F.side_wall_x, fy = F.back_wall_y, fz = F.ceiling_z;
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(2 * fx, 2 * fy),
-    new THREE.MeshStandardMaterial({ color: 0x12351f, roughness: 1 }));
+    new THREE.MeshStandardMaterial({ map: pitchTexture(), roughness: 1, metalness: 0 }));
+  floor.receiveShadow = true;
   scene.add(floor);
   const walls = new THREE.LineSegments(
     new THREE.EdgesGeometry(new THREE.BoxGeometry(2 * fx, 2 * fy, fz)),
-    new THREE.LineBasicMaterial({ color: 0x2b4d6f }));
+    new THREE.LineBasicMaterial({ color: 0x2b4d6f, transparent: true, opacity: .6 }));
   walls.position.set(0, 0, fz / 2);
   scene.add(walls);
-  const lineMat = new THREE.LineBasicMaterial({ color: 0x3a5a78 });
-  scene.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(
-    [new THREE.Vector3(-fx, 0, 2), new THREE.Vector3(fx, 0, 2)]), lineMat));
-  const circ = new THREE.Mesh(new THREE.RingGeometry(900, 920, 48),
-    new THREE.MeshBasicMaterial({ color: 0x3a5a78, side: THREE.DoubleSide }));
-  circ.position.z = 2; scene.add(circ);
-  for (const sign of [1, -1]) {
-    const g = new THREE.LineSegments(
-      new THREE.EdgesGeometry(new THREE.BoxGeometry(2 * F.goal_half_width, 200, F.goal_height)),
-      new THREE.LineBasicMaterial({ color: 0xffd166 }));
-    g.position.set(0, sign * fy, F.goal_height / 2); scene.add(g);
+  buildGoal(1); buildGoal(-1);
+}
+
+// Painted pitch: green base + mow stripes, boundary, halfway line, centre circle,
+// and goal areas — baked once into a floor texture.
+function pitchTexture() {
+  const W = 1024, H = 1280, fx = F.side_wall_x, fy = F.back_wall_y;
+  const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#16401f'; x.fillRect(0, 0, W, H);
+  for (let i = 0; i < 12; i++) { x.fillStyle = i % 2 ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.035)'; x.fillRect(0, i * H / 12, W, H / 12); }
+  const X = wx => (wx + fx) / (2 * fx) * W, Y = wy => (fy - wy) / (2 * fy) * H;
+  x.strokeStyle = 'rgba(225,238,228,.55)'; x.lineWidth = 4;
+  x.strokeRect(8, 8, W - 16, H - 16);
+  x.beginPath(); x.moveTo(0, Y(0)); x.lineTo(W, Y(0)); x.stroke();
+  x.beginPath(); x.arc(X(0), Y(0), 920 / (2 * fx) * W, 0, Math.PI * 2); x.stroke();
+  for (const s of [1, -1]) {
+    const gw = 1300, gd = 1300;
+    x.strokeRect(X(-gw), Y(s * fy), X(gw) - X(-gw), Y(s * (fy - gd)) - Y(s * fy));
   }
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8; return t;
+}
+
+function netTexture() {
+  const cv = document.createElement('canvas'); cv.width = 64; cv.height = 64;
+  const x = cv.getContext('2d'); x.strokeStyle = 'rgba(255,255,255,.85)'; x.lineWidth = 3;
+  for (let i = 0; i <= 64; i += 10) { x.beginPath(); x.moveTo(i, 0); x.lineTo(i, 64); x.moveTo(0, i); x.lineTo(64, i); x.stroke(); }
+  const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+// A goal: white frame (posts + crossbar, shadow-casting) + a translucent back/top net.
+function buildGoal(sign) {
+  const gw = F.goal_half_width, gh = F.goal_height, fy = F.back_wall_y, depth = 330;
+  const white = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: .7 });
+  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), white); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
+  post(-gw); post(gw);
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), white);
+  cross.position.set(0, sign * fy, gh + 11); cross.castShadow = true; scene.add(cross);
+  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), transparent: true, opacity: .4, side: THREE.DoubleSide, depthWrite: false });
+  const back = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, gh), netMat());
+  back.rotation.x = -Math.PI / 2; back.position.set(0, sign * (fy + depth), gh / 2);
+  back.material.map.repeat.set(6, 3); scene.add(back);
+  const top = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, depth), netMat());
+  top.position.set(0, sign * (fy + depth / 2), gh); top.material.map.repeat.set(6, 2); scene.add(top);
 }
 
 function makeBall() {
-  const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 28, 18),
-    new THREE.MeshStandardMaterial({ color: 0xeaeaea, emissive: 0x303030, roughness: .4 }));
-  scene.add(m); return m;
-}
-
-// A flat blob shadow on the floor; opacity/scale track the object's height.
-function makeShadow(r) {
-  const m = new THREE.Mesh(new THREE.CircleGeometry(r, 24),
-    new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: .35, depthWrite: false }));
-  m.position.z = 1.5; scene.add(m); return m;
-}
-function placeShadow(sh, x, y, z) {
-  sh.position.set(x, y, 1.5);
-  const h = Math.max(0, (z - 17) / F.ceiling_z);
-  sh.material.opacity = Math.max(0.05, 0.38 * (1 - h));
-  const s = 1 + h * 1.2; sh.scale.set(s, s, 1);
+  const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 32, 20),
+    new THREE.MeshStandardMaterial({ color: 0xdcdcdc, roughness: .35, metalness: .1 }));
+  m.castShadow = true; scene.add(m); return m;
 }
 
 function makeLabel(text, hex) {
@@ -502,20 +654,24 @@ function buildCars() {
     const hex = TEAM[pl.team] ?? 0x9aa4b2;
     const g = new THREE.Group();
     const body = new THREE.Mesh(new THREE.BoxGeometry(118, 84, 36),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .5, metalness: .2 }));
-    body.position.z = 18; g.add(body);
+      new THREE.MeshStandardMaterial({ color: hex, roughness: .45, metalness: .25 }));
+    body.position.z = 18; body.castShadow = true; g.add(body);
     const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 70, 30),
       new THREE.MeshStandardMaterial({ color: hex, roughness: .4 }));
-    cabin.position.set(-8, 0, 46); g.add(cabin);
+    cabin.position.set(-8, 0, 46); cabin.castShadow = true; g.add(cabin);
     const nose = new THREE.Mesh(new THREE.BoxGeometry(16, 84, 36),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x444444 }));
-    nose.position.set(59, 0, 18); g.add(nose);
+      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 }));
+    nose.position.set(59, 0, 18); nose.castShadow = true; g.add(nose);
+    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .85 });
+    for (const [wx, wy] of [[42, 44], [42, -44], [-42, 44], [-42, -44]]) {
+      const w = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 16, 14), wheelMat);
+      w.position.set(wx, wy, 15); w.castShadow = true; g.add(w);
+    }
     const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
     g.add(bar);
     const label = makeLabel(pl.name, hex); label.position.set(0, 0, 285); g.add(label);
     scene.add(g);
-    const shadow = makeShadow(95);
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
     const trail = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: .55 }));
@@ -525,7 +681,10 @@ function buildCars() {
     const ring = new THREE.Mesh(new THREE.RingGeometry(108, 150, 36),
       new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: .85, side: THREE.DoubleSide, depthWrite: false }));
     ring.position.z = 3; ring.visible = false; scene.add(ring);
-    map.set(pl.pri, { g, bar, label, shadow, trail, callout, ring });
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
+    map.set(pl.pri, { g, bar, label, trail, callout, ring, flame });
   }
   return map;
 }
@@ -598,20 +757,31 @@ function updateCallouts(t, st) {
 }
 
 let show = { trails: true, labels: true, boost: true };
+let prevBall = null;
+const prevBoost = new Map();
 function applyState(st) {
-  if (st.ball) { ball.visible = true; ball.position.set(...st.ball); ballShadow.visible = true; placeShadow(ballShadow, st.ball[0], st.ball[1], st.ball[2]); }
-  else { ball.visible = false; ballShadow.visible = false; }
+  if (st.ball) {
+    ball.visible = true; ball.position.set(...st.ball);
+    if (prevBall) { // roll the ball by how far it moved
+      const dx = st.ball[0] - prevBall[0], dy = st.ball[1] - prevBall[1], d = Math.hypot(dx, dy);
+      if (d > 1) ball.rotateOnWorldAxis(new THREE.Vector3(-dy, dx, 0).normalize(), d / F.ball_radius);
+    }
+    prevBall = st.ball;
+  } else { ball.visible = false; prevBall = null; }
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
-    o.g.visible = live; o.shadow.visible = live; o.label.visible = live && show.labels;
+    o.g.visible = live; o.label.visible = live && show.labels;
     o.bar.visible = live && show.boost; o.trail.visible = live && show.trails;
-    if (!live) continue;
+    if (!live) { o.flame.visible = false; continue; }
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
-    placeShadow(o.shadow, c.p[0], c.p[1], c.p[2]);
     o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
     o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
     o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
+    // boost flame: visible while boost is dropping (i.e. boosting)
+    o.flame.visible = c.boost < (prevBoost.get(pri) ?? c.boost) - 0.5;
+    if (o.flame.visible) { const s = 0.7 + Math.random() * 0.5; o.flame.scale.set(s, 0.9 + Math.random() * 0.5, s); }
+    prevBoost.set(pri, c.boost);
     if (show.trails) {
       const pts = trailPoints(pri, T);
       const arr = o.trail.geometry.attributes.position.array;
@@ -642,15 +812,24 @@ for (const pl of S.players) {
   const row = document.createElement('div');
   row.className = 'row'; row.dataset.pri = pl.pri;
   const css = TEAM_CSS[pl.team] ?? '#9aa4b2';
-  row.innerHTML = `<span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i><b>0</b>`;
+  row.innerHTML =
+    `<div class="r1"><span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i></div>` +
+    `<div class="r2"><span class="ga">G${pl.goals} A${pl.assists} Sv${pl.saves}</span><span class="sp"></span><b>0</b></div>`;
   row.onclick = () => setCam('player', pl.pri);
   plistEl.appendChild(row);
   rowEls.set(pl.pri, row);
+}
+function carSpeed(pri, t) {
+  const i = frameIndex(t); if (i + 1 >= frames.length) return 0;
+  const a = frames[i].cars.find(c => c.pri === pri), b = frames[i + 1].cars.find(c => c.pri === pri);
+  if (!a || !b) return 0;
+  return Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz;
 }
 function updatePlayers(st) {
   for (const pl of S.players) {
     const row = rowEls.get(pl.pri), c = st ? st.cars.get(pl.pri) : null;
     row.querySelector('b').textContent = c ? c.boost : 0;
+    row.querySelector('.sp').textContent = c ? Math.round(carSpeed(pl.pri, T) * 0.036) + ' kph' : '';
     const r = row.querySelector('.role');
     r.textContent = c && c.role ? (c.role === 1 ? '1ST' : '2ND') : '';
     r.className = 'role' + (c && c.role === 1 ? ' first' : '');
@@ -734,6 +913,7 @@ function jump(kind, dir) {
   else { const p = [...ts].reverse().find(x => x < T - 0.05); if (p != null) { seek(p); setPlaying(false); } }
 }
 addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.code === 'ArrowRight') seek(T + 1);
   else if (e.code === 'ArrowLeft') seek(T - 1);
@@ -743,7 +923,9 @@ addEventListener('keydown', e => {
   else if (e.key === 'j') jump('kickoff', -1);
   else if (e.key === '0') setCam('free');
   else if (e.key === 'd') setDrawMode(!drawMode);
-  else if (e.key === 'z' && drawMode) { strokes.pop(); redrawStrokes(); }
+  else if (e.key === 'z' && drawMode) undoLast();
+  else if (e.key === 's') exportPNG();
+  else if (e.key === '?') helpEl.style.display = helpEl.style.display === 'flex' ? 'none' : 'flex';
 });
 
 function animate(now) {
@@ -756,14 +938,32 @@ function animate(now) {
   applyState(st);
   updateHud(T, st);
   updateCallouts(T, st);
+  drawMinimap(st);
+  for (const e of demoEvents) if (e.t > prevT && e.t <= T) { const c = st.cars.get(e.pri); if (c) spawnFlash(c.p); }
+  prevT = T;
+  updateFlashes(now);
+  // eased preset transition
+  if (camTween) {
+    const e = Math.min(1, (now - camTween.start) / camTween.dur);
+    const k = e < .5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2; // easeInOutQuad
+    camera.position.lerpVectors(camTween.fromPos, camTween.toPos, k);
+    controls.target.lerpVectors(camTween.fromTgt, camTween.toTgt, k);
+    if (e >= 1) camTween = null;
+  }
   // follow cameras
-  let focus = null;
-  if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);
-  else if (cam.mode === 'player' && cam.pri != null) { const c = st.cars.get(cam.pri); if (c) focus = new THREE.Vector3(...c.p); }
-  if (focus) {
-    controls.target.lerp(focus, 0.18);
-    const desired = focus.clone().add(new THREE.Vector3(0, -1500, 750));
-    camera.position.lerp(desired, 0.06);
+  if (cam.mode === 'broadcast') {
+    // fixed elevated sideline position that pans to track the ball
+    if (st.ball) controls.target.lerp(new THREE.Vector3(...st.ball), 0.08);
+    camera.position.lerp(BROADCAST_POS, 0.05);
+  } else {
+    let focus = null;
+    if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);
+    else if (cam.mode === 'player' && cam.pri != null) { const c = st.cars.get(cam.pri); if (c) focus = new THREE.Vector3(...c.p); }
+    if (focus) {
+      controls.target.lerp(focus, 0.18);
+      const desired = focus.clone().add(new THREE.Vector3(0, -1500, 750));
+      camera.position.lerp(desired, 0.06);
+    }
   }
   controls.update();
   renderer.render(scene, camera);
