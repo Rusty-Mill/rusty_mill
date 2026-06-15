@@ -31,10 +31,23 @@ a fully-offline artifact is a possible follow-up.
 
 ## Controls
 
-Spacebar play/pause · drag the timeline to scrub · ◀/▶ jump ±1 s · speed select
-(0.25–4×) · mouse drag orbits, scroll zooms, right-drag pans. The HUD shows the
-scoreboard, clock, per-player boost, and the last few timeline events (goals,
-demos, kickoffs, touches, and detected skills).
+Spacebar play/pause · drag the timeline to scrub · ◀/▶ ±1 s · `n`/`p` next/prev
+goal · `k`/`j` next/prev kickoff · speed (0.25–4×) · loop · mouse drag orbits,
+scroll zooms, right-drag pans.
+
+**Camera:** `overview` / `goal` / `ball-cam` presets, or click a player row to
+lock the camera onto that car (`0` returns to free overview). Goal/demo/kickoff
+markers on the timeline are clickable, as is each ticker entry — both seek.
+
+## Overlays
+
+- **Scoring roles** — the 1st man on each team wears a gold ground-ring and a
+  `1ST` HUD tag; support is tagged `2ND` (from `replay_scoring`'s per-frame role
+  assignment; `--no-roles` to omit).
+- **Skills** — a fading `★ <skill>` callout pops above the car that just
+  performed a detected skill, and skills also stream in the ticker.
+- **Possession** (current team, from the last touch), **per-player trails**, and
+  blob **drop-shadows** for depth. Toggle trails / labels / boost in the HUD.
 
 ## Coordinates
 
@@ -53,7 +66,7 @@ CI — so treat the rendering layer as the iterate-in-browser part.
 
 ## Follow-ups
 
-- Vendor three.js for a fully offline file.
-- Tune car orientation against footage; add a chase/ball cam.
-- Overlay scoring (roles, 1st/2nd man, leak) alongside the skill ticker.
-- Optional playback downsample (`--hz`) to shrink the embedded payload.
+Tracked in `backlog.md` (Viewer improvements). Remaining: vendor three.js for a
+fully-offline file (+ a headless-GL CI smoke test); validate car orientation
+against footage; heatmap floor projection; a win-probability / ΔV strip from
+`replay-value`; and map-aware field geometry for non-standard arenas.

@@ -119,7 +119,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
 
 **Analysis overlays**
-- [ ] Scoring roles (1st/2nd man) coloured/labelled at the current time + the leak
+- [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)
 - [x] Skill highlight callouts on the car in 3D (fading "★ <skill>" above the performer)
 - [x] Possession indicator; per-player trails
 - [ ] Heatmap floor projection (from `replay-scoring`)

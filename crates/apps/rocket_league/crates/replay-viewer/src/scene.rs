@@ -57,13 +57,16 @@ pub struct ScenePlayer {
 }
 
 /// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
-/// percent (0–100).
+/// percent (0–100). `role` is `1` (1st man) / `2` (2nd man) when the optional
+/// scoring overlay is attached (see [`crate::roles::attach_roles`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SceneCar {
     pub pri: i32,
     pub p: [f32; 3],
     pub rot: [f32; 3],
     pub boost: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<u8>,
 }
 
 /// One playback frame: time, ball position (absent if the ball isn't live), and
@@ -146,6 +149,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
                         .boost
                         .map(|b| field::boost_percent(b).round() as u8)
                         .unwrap_or(0),
+                    role: None,
                 })
                 .collect(),
         })

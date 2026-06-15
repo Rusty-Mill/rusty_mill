@@ -18,7 +18,7 @@ use replay_skills::{detect_all, SkillConfig};
 use replay_viewer::{build_scene, html};
 
 const USAGE: &str = "usage: replay-viewer <file.replay> [--html <out.html>] [--json <scene.json>] \
-[--hz <rate>] [--no-skills]";
+[--hz <rate>] [--no-skills] [--no-roles]";
 
 fn main() -> ExitCode {
     match run() {
@@ -36,6 +36,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut json_out = None;
     let mut hz: Option<f32> = None;
     let mut skills = true;
+    let mut roles = true;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -50,6 +51,7 @@ fn run() -> Result<(), Box<dyn Error>> {
                 )
             }
             "--no-skills" => skills = false,
+            "--no-roles" => roles = false,
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -78,6 +80,14 @@ fn run() -> Result<(), Box<dyn Error>> {
         Vec::new()
     };
     let mut scene = build_scene(&canonical, &instances);
+    // Roles map 1:1 to the full grid, so attach before any downsample.
+    if roles {
+        replay_viewer::attach_roles(
+            &mut scene,
+            &canonical,
+            &replay_scoring::ScoreConfig::default(),
+        );
+    }
     if let Some(target) = hz {
         replay_viewer::scene::downsample(&mut scene, target);
     }

@@ -22,7 +22,9 @@
 //! ```
 
 pub mod render;
+pub mod roles;
 pub mod scene;
 
 pub use render::html;
+pub use roles::attach_roles;
 pub use scene::{build_scene, Scene};

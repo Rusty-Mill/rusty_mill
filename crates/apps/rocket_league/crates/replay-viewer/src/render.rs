@@ -53,6 +53,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     margin-right:6px; vertical-align:middle; }
   #players b { float:right; color:#c9d1d9; }
+  #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
+  #players .role.first { color:#ffd166; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
   #ticker .ev { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
     cursor:pointer; }
@@ -255,7 +257,10 @@ function buildCars() {
     trail.frustumCulled = false; scene.add(trail);
     const callout = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false, opacity: 0 }));
     callout.scale.set(780, 174, 1); callout.visible = false; scene.add(callout);
-    map.set(pl.pri, { g, bar, label, shadow, trail, callout });
+    const ring = new THREE.Mesh(new THREE.RingGeometry(108, 150, 36),
+      new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true, opacity: .85, side: THREE.DoubleSide, depthWrite: false }));
+    ring.position.z = 3; ring.visible = false; scene.add(ring);
+    map.set(pl.pri, { g, bar, label, shadow, trail, callout, ring });
   }
   return map;
 }
@@ -284,7 +289,7 @@ function stateAt(t) {
     const c2 = nb.get(ca.pri);
     const q = quatOf(ca.rot);
     if (c2) q.slerp(quatOf(c2.rot), w); // smooth spin across frames
-    out.set(ca.pri, { p: c2 ? lerp3(ca.p, c2.p, w) : ca.p, q, boost: ca.boost });
+    out.set(ca.pri, { p: c2 ? lerp3(ca.p, c2.p, w) : ca.p, q, boost: ca.boost, role: ca.role });
   }
   return { ball, cars: out };
 }
@@ -339,6 +344,7 @@ function applyState(st) {
     if (!live) continue;
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
     placeShadow(o.shadow, c.p[0], c.p[1], c.p[2]);
+    o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
     o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
     o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
     if (show.trails) {
@@ -370,7 +376,7 @@ for (const pl of S.players) {
   const row = document.createElement('div');
   row.className = 'row'; row.dataset.pri = pl.pri;
   const css = TEAM_CSS[pl.team] ?? '#9aa4b2';
-  row.innerHTML = `<span class="dot" style="background:${css}"></span>${esc(pl.name)}<b>0</b>`;
+  row.innerHTML = `<span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i><b>0</b>`;
   row.onclick = () => setCam('player', pl.pri);
   plistEl.appendChild(row);
   rowEls.set(pl.pri, row);
@@ -379,6 +385,9 @@ function updatePlayers(st) {
   for (const pl of S.players) {
     const row = rowEls.get(pl.pri), c = st ? st.cars.get(pl.pri) : null;
     row.querySelector('b').textContent = c ? c.boost : 0;
+    const r = row.querySelector('.role');
+    r.textContent = c && c.role ? (c.role === 1 ? '1ST' : '2ND') : '';
+    r.className = 'role' + (c && c.role === 1 ? ' first' : '');
     row.classList.toggle('follow', cam.mode === 'player' && cam.pri === pl.pri);
   }
 }

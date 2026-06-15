@@ -177,6 +177,21 @@ fn html_escapes_angle_brackets_in_player_names() {
 }
 
 #[test]
+fn attach_roles_tags_cars_with_a_man_role() {
+    let m = minimal_match();
+    let mut s = build_scene(&m, &[]);
+    assert_eq!(
+        s.frames[0].cars[0].role, None,
+        "build_scene leaves role unset"
+    );
+    replay_viewer::attach_roles(&mut s, &m, &replay_scoring::ScoreConfig::default());
+    assert!(
+        matches!(s.frames[0].cars[0].role, Some(1) | Some(2)),
+        "a live car gets a 1st/2nd-man role"
+    );
+}
+
+#[test]
 fn downsample_thins_frames_and_updates_hz() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);
