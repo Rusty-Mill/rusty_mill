@@ -9,7 +9,8 @@ use std::error::Error;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: replay-scoring <file.replay> [--player <name>] [--json <out.json>]";
+const USAGE: &str =
+    "usage: replay-scoring <file.replay> [--player <name>] [--config <cfg.json>] [--json <out.json>]";
 
 fn main() -> ExitCode {
     match run() {
@@ -25,11 +26,13 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut replay = None;
     let mut player = None;
     let mut json_out = None;
+    let mut config_path = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--player" => player = Some(it.next().ok_or("--player needs a name")?),
             "--json" => json_out = Some(it.next().ok_or("--json needs a path")?),
+            "--config" => config_path = Some(it.next().ok_or("--config needs a path")?),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -52,7 +55,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         .to_string();
     let canonical = build_canonical(&decoded, replay_id);
 
-    let cfg = ScoreConfig::default();
+    let cfg = match &config_path {
+        Some(p) => serde_json::from_slice(&std::fs::read(p)?)?,
+        None => ScoreConfig::default(),
+    };
     let reports: Vec<Report> = match &player {
         Some(name) => vec![score_by_name(&canonical, name, &cfg)
             .ok_or_else(|| format!("player '{name}' not found in replay"))?],

@@ -6,7 +6,7 @@
 //! are masked out of positional validity (per spec §11).
 
 use replay_analyzer::analyze::normalize::flip_xy;
-use replay_analyzer::model::{CanonicalMatch, Event, Kin, Vec3};
+use replay_analyzer::model::{CanonicalMatch, Event, Kin, Rot3, Vec3};
 
 use crate::config::ScoreConfig;
 
@@ -36,6 +36,35 @@ pub struct CarView {
     /// Car is between the ball and its own goal (attacking frame: `pa.y < ball`).
     pub goalside: bool,
     pub ball_third: Third,
+    /// Car orientation (carried from the last keyframe), `None` until observed.
+    pub rot: Option<Rot3>,
+    /// Car centre is above the airborne height threshold (aerial / off-ground).
+    pub airborne: bool,
+    /// Wheels-down attitude: |pitch| and |roll| within the upright threshold.
+    pub upright: bool,
+    /// This team's attack sign (multiply world x/y to view the team attacking +Y).
+    pub attack_sign: i32,
+}
+
+impl CarView {
+    /// World-space forward (heading) unit vector from yaw; `None` if no rotation
+    /// has been observed for this car yet.
+    pub fn facing(&self) -> Option<Vec3> {
+        let r = self.rot?;
+        Some(Vec3 {
+            x: r.yaw.cos(),
+            y: r.yaw.sin(),
+            z: 0.0,
+        })
+    }
+
+    /// Cosine alignment of the car's heading with `dir` in the XY plane, in
+    /// `[-1, 1]`; `None` if the car has no rotation or `dir` is ~vertical.
+    pub fn forward_align(&self, dir: Vec3) -> Option<f32> {
+        let f = self.facing()?;
+        let n = (dir.x * dir.x + dir.y * dir.y).sqrt();
+        (n > f32::EPSILON).then(|| (f.x * dir.x + f.y * dir.y) / n)
+    }
 }
 
 /// One resampled frame, scoring-annotated.
@@ -147,6 +176,14 @@ pub fn build_frames(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<FrameView> {
                         None => (f32::INFINITY, 0.0, f32::INFINITY, false, Third::Mid),
                     };
 
+                    let upright = c
+                        .rot
+                        .map(|r| {
+                            r.pitch.abs() <= cfg.upright_max_rad
+                                && r.roll.abs() <= cfg.upright_max_rad
+                        })
+                        .unwrap_or(false);
+
                     CarView {
                         pri: c.pri,
                         team,
@@ -160,6 +197,10 @@ pub fn build_frames(m: &CanonicalMatch, cfg: &ScoreConfig) -> Vec<FrameView> {
                         time_to_ball: ttb,
                         goalside,
                         ball_third: third,
+                        rot: c.rot,
+                        airborne: c.p.z > cfg.airborne_z_uu,
+                        upright,
+                        attack_sign: sign,
                     }
                 })
                 .collect();

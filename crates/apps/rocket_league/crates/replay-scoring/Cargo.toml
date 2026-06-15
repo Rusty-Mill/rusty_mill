@@ -3,6 +3,7 @@ name = "replay-scoring"
 version = "0.1.0"
 edition = "2021"
 description = "Pure, config-driven decision-discipline scoring over the canonical match model"
+default-run = "replay-scoring"
 
 [lib]
 name = "replay_scoring"

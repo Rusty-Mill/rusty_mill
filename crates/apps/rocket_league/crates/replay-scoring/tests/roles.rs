@@ -29,6 +29,10 @@ fn cv(pri: i32, ttb: f32) -> CarView {
         time_to_ball: ttb,
         goalside: false,
         ball_third: Third::Mid,
+        rot: None,
+        airborne: false,
+        upright: false,
+        attack_sign: 1,
     }
 }
 

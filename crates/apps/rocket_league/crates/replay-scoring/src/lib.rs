@@ -10,6 +10,7 @@
 //! and the default [`ScoreConfig`] bands are pre-calibration guesses; trustworthy
 //! numbers require a labeled corpus (see the design spec §0/§13).
 
+pub mod calibrate;
 pub mod config;
 pub mod engine;
 pub mod features;

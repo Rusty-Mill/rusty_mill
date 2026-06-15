@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v1";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v3";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +34,11 @@ pub enum Metric {
     PossessionRetention,
     BallChaseIndex,
     GoalsideDisciplineTeam,
+    ChallengeTiming,
+    FirstTouchValue,
+    TransitionReadiness,
+    RecoverySpeed,
+    AerialPresence,
 }
 
 impl Metric {
@@ -49,6 +54,11 @@ impl Metric {
             Metric::PossessionRetention => "possession_retention",
             Metric::BallChaseIndex => "ball_chase_index",
             Metric::GoalsideDisciplineTeam => "goalside_discipline_team",
+            Metric::ChallengeTiming => "challenge_timing",
+            Metric::FirstTouchValue => "first_touch_value",
+            Metric::TransitionReadiness => "transition_readiness",
+            Metric::RecoverySpeed => "recovery_speed",
+            Metric::AerialPresence => "aerial_presence",
         }
     }
 }
@@ -147,6 +157,28 @@ pub struct ScoreConfig {
     pub respawn_exclude_s: f32,
     /// Minimum valid positional frames for a confident report.
     pub min_sample_frames: usize,
+    /// Both 1st men within this radius (uu) of the ball ⇒ a 50/50 contest.
+    pub challenge_radius_uu: f32,
+    /// Minimum boost (%) for a challenge arrival to count as "with boost".
+    pub challenge_boost_min: f32,
+    /// Arrival is "not late" if our time_to_ball ≤ opp's × this margin.
+    pub challenge_late_margin: f32,
+    /// Min cosine alignment of heading→ball/play to count as "facing".
+    pub facing_cos_min: f32,
+    /// Car centre above this height (uu) is airborne (aerial / off-ground).
+    pub airborne_z_uu: f32,
+    /// |pitch| and |roll| (rad) below this is "wheels-down" (upright).
+    pub upright_max_rad: f32,
+    /// Cap (s) on a single recovery (and the value charged for non-recoveries).
+    pub recovery_cap_s: f32,
+    /// Post-touch ball speed (uu/s) above which a touch counts as a boom.
+    pub boom_speed_uu: f32,
+    /// Window (s) after a possession flip over which a ready 2nd man closes on
+    /// the ball (its time-to-ball shrinks) as it steps up to 1st.
+    pub transition_window_s: f32,
+    /// Boost-collection rate (units/s) that maps to a full collection score in
+    /// the boost-management composite.
+    pub boost_collect_scale: f32,
 }
 
 impl Default for ScoreConfig {
@@ -169,7 +201,7 @@ impl Default for ScoreConfig {
                         zero: 0.50,
                         full: 0.10,
                     },
-                    0.5,
+                    0.25,
                     "Controlled counterattacks",
                 ),
                 m(
@@ -179,8 +211,28 @@ impl Default for ScoreConfig {
                         zero: 0.50,
                         full: 0.90,
                     },
-                    0.5,
+                    0.25,
                     "Core game states / defence",
+                ),
+                m(
+                    Metric::ChallengeTiming,
+                    Role::First,
+                    Curve::Higher {
+                        zero: 0.30,
+                        full: 0.80,
+                    },
+                    0.30,
+                    "Trigger discipline",
+                ),
+                m(
+                    Metric::FirstTouchValue,
+                    Role::First,
+                    Curve::Higher {
+                        zero: -0.20,
+                        full: 0.60,
+                    },
+                    0.20,
+                    "Ground control / stop booming",
                 ),
                 // --- 2nd man (support quality) ---
                 m(
@@ -191,7 +243,7 @@ impl Default for ScoreConfig {
                         hi: 2600.0,
                         falloff: 1400.0,
                     },
-                    0.34,
+                    0.25,
                     "Central support",
                 ),
                 m(
@@ -201,7 +253,7 @@ impl Default for ScoreConfig {
                         zero: 0.30,
                         full: 0.75,
                     },
-                    0.33,
+                    0.25,
                     "Central support",
                 ),
                 m(
@@ -211,18 +263,28 @@ impl Default for ScoreConfig {
                         zero: 0.40,
                         full: 0.08,
                     },
-                    0.33,
+                    0.25,
                     "Central support",
+                ),
+                m(
+                    Metric::TransitionReadiness,
+                    Role::Second,
+                    Curve::Higher {
+                        zero: 0.30,
+                        full: 0.80,
+                    },
+                    0.25,
+                    "Core game states / transitions",
                 ),
                 // --- general (cross-role habits) ---
                 m(
                     Metric::BoostManagement,
                     Role::General,
                     Curve::Higher {
-                        zero: 20.0,
-                        full: 55.0,
+                        zero: 0.12,
+                        full: 0.45,
                     },
-                    0.25,
+                    0.20,
                     "Fundamentals / boost",
                 ),
                 m(
@@ -232,7 +294,7 @@ impl Default for ScoreConfig {
                         zero: 0.30,
                         full: 0.60,
                     },
-                    0.25,
+                    0.20,
                     "Ground control / stop booming",
                 ),
                 m(
@@ -242,7 +304,7 @@ impl Default for ScoreConfig {
                         zero: 0.60,
                         full: 0.20,
                     },
-                    0.25,
+                    0.20,
                     "Positioning",
                 ),
                 m(
@@ -252,8 +314,28 @@ impl Default for ScoreConfig {
                         zero: 0.70,
                         full: 0.97,
                     },
-                    0.25,
+                    0.20,
                     "Defence structure",
+                ),
+                m(
+                    Metric::RecoverySpeed,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 2.0,
+                        full: 0.8,
+                    },
+                    0.20,
+                    "Air system / recovery",
+                ),
+                m(
+                    Metric::AerialPresence,
+                    Role::General,
+                    Curve::Higher {
+                        zero: 0.01,
+                        full: 0.10,
+                    },
+                    0.20,
+                    "Air system / aerial threat",
                 ),
             ],
             top_weights: [0.35, 0.30, 0.35],
@@ -309,6 +391,16 @@ impl Default for ScoreConfig {
             kickoff_exclude_s: 3.0,
             respawn_exclude_s: 3.0,
             min_sample_frames: 1500,
+            challenge_radius_uu: 900.0,
+            challenge_boost_min: 12.0,
+            challenge_late_margin: 1.25,
+            facing_cos_min: 0.30,
+            airborne_z_uu: 300.0,
+            upright_max_rad: 0.45,
+            recovery_cap_s: 2.5,
+            boom_speed_uu: 4000.0,
+            transition_window_s: 1.5,
+            boost_collect_scale: 30.0,
         }
     }
 }

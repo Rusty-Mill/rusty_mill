@@ -9,7 +9,7 @@
 
 use crate::decode::{ActorClass, ActorUpdate, DecodedReplay};
 use crate::model::{CarState, FrameOut, PlayerTrack, Rot3, TrackSample, Vec3};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::identity::{coalesce, IdentityResolver};
 
@@ -89,12 +89,9 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                     actor, p, v, rot, ..
                 } => {
                     match actor_kind.get(actor).copied() {
-                        // Single-ball model: the latest ball-classified rigid
-                        // body wins. Correct for standard Soccar (one ball). In
-                        // modes with several `Ball`-named actors (e.g. Dropshot
-                        // `Ball_Breakout`), the spec's substring classifier may
-                        // also flag a stationary secondary actor — out of scope
-                        // here, which targets 2v2 Soccar.
+                        // Latest ball-classified rigid body wins per frame.
+                        // Static secondary `Ball` actors (some non-Soccar modes)
+                        // are dropped after the pass (see `moving_ball_actors`).
                         Some(ActorClass::Ball) => {
                             ball_pv = Some((*p, *v));
                             ball_samples.push(TrackSample {
@@ -169,6 +166,25 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         }
     }
 
+    // Multi-ball robustness: the ball actor id recycles across goals (several
+    // ids, all moving). Some non-Soccar modes additionally spawn a *stationary*
+    // secondary `Ball`-named actor (a decoy near origin) that the substring
+    // classifier also flags. Keep only ball actors that actually move, then
+    // rebuild each frame's ball by carry-forward over them. No-op for Soccar.
+    let moving = moving_ball_actors(&ball_samples, 250.0);
+    if !moving.is_empty() {
+        ball_samples.retain(|s| moving.contains(&s.actor_id));
+        let mut si = 0;
+        let mut cur: Option<Vec3> = None;
+        for frame in &mut frames {
+            while si < ball_samples.len() && ball_samples[si].t <= frame.t {
+                cur = Some(ball_samples[si].p);
+                si += 1;
+            }
+            frame.ball = cur;
+        }
+    }
+
     let tracks = coalesce(segments, &pri_to_name, &name_to_team);
 
     Reconstruction {
@@ -177,6 +193,30 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         ball_samples,
         demos,
     }
+}
+
+/// Ball-classified actor ids whose observed positions span at least `min_diag`
+/// (uu) — i.e. that actually move. Filters out stationary secondary `Ball`
+/// actors while keeping every recycled life of the real ball.
+fn moving_ball_actors(samples: &[TrackSample], min_diag: f32) -> HashSet<i32> {
+    let mut bb: HashMap<i32, ([f32; 3], [f32; 3])> = HashMap::new();
+    for s in samples {
+        let p = s.p.to_arr();
+        let e = bb
+            .entry(s.actor_id)
+            .or_insert(([f32::MAX; 3], [f32::MIN; 3]));
+        for ((lo, hi), &pi) in e.0.iter_mut().zip(e.1.iter_mut()).zip(p.iter()) {
+            *lo = lo.min(pi);
+            *hi = hi.max(pi);
+        }
+    }
+    bb.into_iter()
+        .filter_map(|(id, (mn, mx))| {
+            let d = ((mx[0] - mn[0]).powi(2) + (mx[1] - mn[1]).powi(2) + (mx[2] - mn[2]).powi(2))
+                .sqrt();
+            (d >= min_diag).then_some(id)
+        })
+        .collect()
 }
 
 /// Min/max of every reconstructed ball position, for arena-bounds validation.
@@ -196,4 +236,54 @@ pub fn ball_bounds(frames: &[FrameOut]) -> Option<([f32; 3], [f32; 3])> {
         }
     }
     seen.then_some((min, max))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample(actor: i32, x: f32) -> TrackSample {
+        TrackSample {
+            t: 0.0,
+            actor_id: actor,
+            p: Vec3 { x, y: 0.0, z: 0.0 },
+            v: Vec3 {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            boost: None,
+            rot: None,
+        }
+    }
+
+    #[test]
+    fn moving_ball_actors_drops_static_decoy() {
+        // Actor 1 ranges across the field; actor 2 is a near-origin decoy.
+        let samples = vec![
+            sample(1, -3000.0),
+            sample(1, 3000.0),
+            sample(2, 1.0),
+            sample(2, 2.0),
+        ];
+        let moving = moving_ball_actors(&samples, 250.0);
+        assert!(moving.contains(&1), "the real ball must be kept");
+        assert!(!moving.contains(&2), "the static decoy must be dropped");
+    }
+
+    #[test]
+    fn moving_ball_actors_keeps_recycled_lives() {
+        // Two ids, both moving (the real ball recycled across a goal).
+        let samples = vec![
+            sample(1, -2000.0),
+            sample(1, 2000.0),
+            sample(2, -1500.0),
+            sample(2, 1500.0),
+        ];
+        let moving = moving_ball_actors(&samples, 250.0);
+        assert!(
+            moving.contains(&1) && moving.contains(&2),
+            "both lives kept"
+        );
+    }
 }
