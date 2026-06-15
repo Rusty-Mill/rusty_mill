@@ -16,6 +16,10 @@ path = "src/lib.rs"
 name = "replay-analyzer"
 path = "src/main.rs"
 
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+
 [dependencies]
 boxcars = "0.11"
 serde = { version = "1", features = ["derive"] }

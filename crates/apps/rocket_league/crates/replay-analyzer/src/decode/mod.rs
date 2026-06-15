@@ -64,6 +64,9 @@ pub enum ActorUpdate {
     CarPri { car: i32, pri: i32 },
     /// A PRI actor was assigned a player name.
     PriName { pri: i32, name: String },
+    /// A PRI actor was assigned to a team (`0` = blue, `1` = orange), resolved
+    /// from `Engine.PlayerReplicationInfo:Team` → the team actor's archetype.
+    PriTeam { pri: i32, team: i32 },
     /// A car-component actor was linked to its car (`TAGame.CarComponent_TA:Vehicle`).
     /// Only boost components are queried downstream, but all links are emitted.
     CompVehicle { comp: i32, car: i32 },

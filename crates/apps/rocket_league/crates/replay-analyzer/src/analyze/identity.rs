@@ -113,6 +113,7 @@ impl IdentityResolver {
 pub fn coalesce(
     segments: Vec<CarSegment>,
     pri_to_name: &HashMap<i32, String>,
+    pri_to_team: &HashMap<i32, i32>,
     name_to_team: &HashMap<String, i32>,
 ) -> Vec<PlayerTrack> {
     // Group segments under a stable key. Bound cars group by PRI; unbound cars
@@ -174,7 +175,12 @@ pub fn coalesce(
                 .get(&pri)
                 .cloned()
                 .unwrap_or_else(|| "<unknown>".to_string());
-            let team = name_to_team.get(&player).copied();
+            // Prefer the network team binding (stable PRI key); fall back to the
+            // header name→team join only when the network never bound a team.
+            let team = pri_to_team
+                .get(&pri)
+                .copied()
+                .or_else(|| name_to_team.get(&player).copied());
 
             PlayerTrack {
                 player,

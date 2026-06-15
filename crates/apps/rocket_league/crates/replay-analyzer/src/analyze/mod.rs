@@ -10,6 +10,7 @@ pub mod identity;
 pub mod normalize;
 pub mod reconstruct;
 pub mod resample;
+pub mod validate;
 
 use crate::decode::DecodedReplay;
 use crate::model::{CanonicalMatch, Event, Resampled};

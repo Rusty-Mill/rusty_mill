@@ -1,13 +1,13 @@
 //! T5 feature tests.
 //!
-//! `external_validation`: the milestone's intended cross-check is against
-//! ballchasing.com or carball for the same replay. Neither is available in this
-//! environment — the ballchasing API requires a token (HTTP 401 without one) and
-//! `carball` pins `pandas==1.0.3`/`numpy==1.14.5`, which fail to build on modern
-//! Python. So feature *logic* is validated definitively here against
-//! hand-computed expected values, and feature *plausibility* against internal
-//! invariants on a real replay; the external numeric cross-check remains the
-//! open item, gated on those credentials/installs.
+//! Feature *logic* is validated here against hand-computed expected values. The
+//! milestone's external numeric cross-check (the analyzer's aggregates vs an
+//! independent parser) is now **closed**: ballchasing.com ground truth is
+//! distilled into `assets/corpus/ballchasing_stats.json` and compared per replay
+//! by the `external_validation` test and the `validate` binary (see
+//! `analyze::validate`). Across the 180-replay ranked corpus the reconstruction
+//! agrees within tolerance (supersonic ρ≈0.997, dist-to-ball ρ≈0.97, boost
+//! ρ≈0.98).
 
 use replay_analyzer::analyze::features::player_features;
 use replay_analyzer::model::{

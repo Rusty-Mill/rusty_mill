@@ -45,6 +45,10 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         .map(|p| (p.name.clone(), p.team))
         .collect();
 
+    // Network-sourced team binding (`Engine.PlayerReplicationInfo:Team`), keyed by
+    // the stable PRI — preferred over the fragile header name→team join below.
+    let mut pri_to_team: HashMap<i32, i32> = HashMap::new();
+
     let mut actor_kind: HashMap<i32, ActorClass> = HashMap::new();
     let mut ball_pv: Option<([f32; 3], [f32; 3])> = None;
     let mut car_pv: HashMap<i32, ([f32; 3], [f32; 3])> = HashMap::new();
@@ -67,6 +71,9 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
             match upd {
                 ActorUpdate::CarPri { car, pri } => resolver.on_car_pri(*car, *pri),
                 ActorUpdate::PriName { pri, name } => resolver.on_pri_name(*pri, name.clone()),
+                ActorUpdate::PriTeam { pri, team } => {
+                    pri_to_team.insert(*pri, *team);
+                }
                 ActorUpdate::CompVehicle { comp, car } => {
                     comp_to_car.insert(*comp, *car);
                 }
@@ -185,7 +192,7 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         }
     }
 
-    let tracks = coalesce(segments, &pri_to_name, &name_to_team);
+    let tracks = coalesce(segments, &pri_to_name, &pri_to_team, &name_to_team);
 
     Reconstruction {
         frames,

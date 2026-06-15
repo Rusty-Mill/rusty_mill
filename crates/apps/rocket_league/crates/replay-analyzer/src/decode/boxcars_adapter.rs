@@ -21,6 +21,9 @@ const OBJ_RB_STATE: &str = "TAGame.RBActor_TA:ReplicatedRBState";
 const OBJ_CAR_PRI: &str = "Engine.Pawn:PlayerReplicationInfo";
 /// Object string carrying a PRI's player name.
 const OBJ_PRI_NAME: &str = "Engine.PlayerReplicationInfo:PlayerName";
+/// Object string carrying a PRI's team assignment (an [`ActiveActor`] link to a
+/// team actor whose archetype is `Archetypes.Teams.Team0`/`Team1`).
+const OBJ_PRI_TEAM: &str = "Engine.PlayerReplicationInfo:Team";
 /// Object string linking a car component to its car.
 const OBJ_COMP_VEHICLE: &str = "TAGame.CarComponent_TA:Vehicle";
 /// Object strings carrying a boost amount (byte) — two encodings exist.
@@ -220,6 +223,7 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
     let rb_state_id = object_id(replay, OBJ_RB_STATE);
     let car_pri_id = object_id(replay, OBJ_CAR_PRI);
     let pri_name_id = object_id(replay, OBJ_PRI_NAME);
+    let pri_team_id = object_id(replay, OBJ_PRI_TEAM);
     let comp_vehicle_id = object_id(replay, OBJ_COMP_VEHICLE);
     let boost_amount_id = object_id(replay, OBJ_BOOST_AMOUNT);
     let boost_repl_id = object_id(replay, OBJ_BOOST_REPL);
@@ -240,6 +244,28 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
             ActorClass::Other
         }
     };
+
+    // Team actors (`Archetypes.Teams.Team0`/`Team1`) carry the 0/1 index a PRI's
+    // `Engine.PlayerReplicationInfo:Team` link points at. Pre-scan every spawn so
+    // the index resolves regardless of spawn-vs-link frame ordering.
+    let mut team_actor: BTreeMap<i32, i32> = BTreeMap::new();
+    for frame in &network.frames {
+        for na in &frame.new_actors {
+            let n = replay
+                .objects
+                .get(na.object_id.0 as usize)
+                .map(String::as_str)
+                .unwrap_or("");
+            let idx = if n.ends_with("Teams.Team0") {
+                0
+            } else if n.ends_with("Teams.Team1") {
+                1
+            } else {
+                continue;
+            };
+            team_actor.insert(na.actor_id.0, idx);
+        }
+    }
 
     let mut frames = Vec::with_capacity(network.frames.len());
     for frame in &network.frames {
@@ -275,6 +301,15 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
                         pri: ua.actor_id.0,
                         name: name.clone(),
                     });
+                }
+            } else if oid == pri_team_id {
+                if let Attribute::ActiveActor(ActiveActor { actor, .. }) = &ua.attribute {
+                    if let Some(&team) = team_actor.get(&actor.0) {
+                        raw.updates.push(ActorUpdate::PriTeam {
+                            pri: ua.actor_id.0,
+                            team,
+                        });
+                    }
                 }
             } else if oid == rb_state_id {
                 if let Attribute::RigidBody(rb) = &ua.attribute {
