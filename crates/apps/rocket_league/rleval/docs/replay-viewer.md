@@ -56,6 +56,17 @@ markers on the timeline are clickable, as is each ticker entry — both seek.
   (from `replay-value`; the model is basic, so read it as rough momentum, not a
   calibrated win probability). `--no-roles` / `--no-winprob` omit the overlays.
 
+## Coaching tools
+
+- **Field overlay** — break down spaces by projecting a layout on the floor:
+  built-in presets (`thirds` defensive/mid/attacking · `lanes` left/center/right ·
+  `grid`), or **your own image** (the `img…` button, or drag-and-drop an image onto
+  the view) with an opacity slider. The six big boost pads are marked.
+- **Telestrator** — a coach's pen over the view: toggle `draw` (key `d`), pick a
+  colour/width and `pen` / `arrow` / `line`, and annotate. Strokes persist on
+  screen until `clear`; `undo` (key `z`) removes the last. Drawing pauses playback
+  and frees the mouse from the camera.
+
 ## Coordinates
 
 The scene stays in Rocket League unreal units (Z-up: X side, Y length, Z height);
