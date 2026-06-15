@@ -100,6 +100,45 @@ product direction rather than the milestone plan.
 
 ---
 
+## Viewer improvements (`replay-viewer`)
+
+Tracked churn-list. Items needing a product/visual decision are marked
+**(needs input)** and left open; the rest are implementable directly.
+
+**Readability**
+- [x] Closer default camera + presets (overview / behind-goal / ball-cam)
+- [x] Ground / drop shadows for cars + ball (depth perception)
+- [x] Clearer car mesh (cabin + nose) + forward marker
+- [x] More prominent boost gauge
+
+**Navigation & UX**
+- [x] Event markers on the timeline (goals/demos/kickoffs), clickable to seek
+- [x] Click-to-focus / follow a player (HUD row → camera locks + row highlights); click a ticker entry to seek
+- [x] Jump to next/prev goal & kickoff (n/p, k/j); loop; ◀▶ ±1s
+- [x] Show/hide toggles (trails, labels, boost)
+- [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
+
+**Analysis overlays**
+- [ ] Scoring roles (1st/2nd man) coloured/labelled at the current time + the leak
+- [ ] Skill highlight callouts on the car in 3D (not just the ticker)
+- [x] Possession indicator; per-player trails
+- [ ] Heatmap floor projection (from `replay-scoring`)
+- [ ] Win-probability / ΔV strip synced to playback (from `replay-value`)
+
+**Correctness**
+- [ ] Map-aware drawn field (see the map-geometry follow-up above)
+- [ ] **(needs input)** Validate car orientation (yaw/pitch/roll → forward) against footage — could add a velocity-alignment self-check
+- [x] Rotation slerp between frames (smoother spin)
+
+**Performance & portability**
+- [ ] `--hz` playback downsample to shrink the embedded payload
+- [ ] Vendor three.js for a fully-offline single file (no CDN)
+
+**Testing**
+- [ ] Headless-GL render smoke test in CI
+
+---
+
 ## Engineering follow-ups (this repo, smaller)
 
 - **Reconciliation as a standing gate.** Add a `--gate` to `reconcile` (and a
