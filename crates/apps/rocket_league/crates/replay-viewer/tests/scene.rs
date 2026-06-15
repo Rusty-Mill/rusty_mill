@@ -208,6 +208,19 @@ fn attach_roles_tags_cars_with_a_man_role() {
 }
 
 #[test]
+fn attach_winprob_fills_a_valid_momentum_curve() {
+    let m = minimal_match();
+    let mut s = build_scene(&m, &[]);
+    assert!(s.win_prob.is_empty(), "build_scene leaves win_prob empty");
+    replay_viewer::attach_winprob(&mut s, &m, &replay_value::ValueConfig::default());
+    assert!(!s.win_prob.is_empty(), "win_prob curve attached");
+    assert!(
+        s.win_prob.iter().all(|&p| (0.0..=1.0).contains(&p)),
+        "probabilities stay in [0,1]"
+    );
+}
+
+#[test]
 fn downsample_thins_frames_and_updates_hz() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);

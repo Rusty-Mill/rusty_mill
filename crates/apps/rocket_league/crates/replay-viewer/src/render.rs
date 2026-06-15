@@ -124,9 +124,12 @@ const TEMPLATE: &str = r##"<!doctype html>
   #bar button.icon { width:34px; height:30px; display:flex; align-items:center; justify-content:center; }
   #bar select { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px; height:30px; }
   #clock { min-width: 116px; text-align:center; color:#c9d1d9; }
-  #tlwrap { position:relative; flex:1; height:30px; display:flex; align-items:center; }
+  #tlwrap { position:relative; flex:1; display:flex; flex-direction:column; gap:1px; }
+  #wp { width:100%; height:20px; display:block; border-radius:3px; }
+  #wpcursor { position:absolute; top:0; height:20px; width:1px; background:#fff; opacity:.7; pointer-events:none; }
+  #tltrack { position:relative; height:24px; display:flex; align-items:center; }
   #timeline { width:100%; }
-  #marks { position:absolute; left:0; right:0; top:3px; height:10px; pointer-events:none; }
+  #marks { position:absolute; left:0; right:0; top:5px; height:10px; pointer-events:none; }
   #marks .mk { position:absolute; top:0; width:2px; height:10px; transform:translateX(-1px);
     pointer-events:auto; cursor:pointer; }
   #marks .mk.goal { background:#ffd166; height:14px; top:-2px; width:3px; }
@@ -157,7 +160,11 @@ const TEMPLATE: &str = r##"<!doctype html>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock">0:00.0</span>
-  <div id="tlwrap"><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
+  <div id="tlwrap">
+    <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
+    <div id="wpcursor"></div>
+    <div id="tltrack"><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
+  </div>
   <select id="speed" title="playback speed">
     <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
     <option value="1" selected>1×</option><option value="2">2×</option><option value="4">4×</option>
@@ -508,6 +515,30 @@ for (const e of S.events) {
   marksEl.appendChild(d);
 }
 
+// momentum strip: P(team 0 scores the next goal) across the match (filled from
+// the 0.5 baseline, blue above / orange below), with a cursor at the current time
+const wpCanvas = document.getElementById('wp'), wpCursor = document.getElementById('wpcursor');
+function drawWP() {
+  const wp = S.win_prob;
+  if (!wp || !wp.length) { wpCanvas.style.display = 'none'; wpCursor.style.display = 'none'; return; }
+  const W = wpCanvas.clientWidth || 600, H = 20;
+  wpCanvas.width = W; wpCanvas.height = H;
+  const x = wpCanvas.getContext('2d'); x.clearRect(0, 0, W, H);
+  const n = wp.length, mid = H / 2;
+  for (let i = 0; i < n; i++) {
+    const px = i / (n - 1) * W, p = wp[i], py = (1 - p) * H;
+    x.strokeStyle = p >= 0.5 ? '#3b82f6' : '#f97316';
+    x.globalAlpha = Math.min(1, Math.abs(p - 0.5) * 2 + 0.12);
+    x.beginPath(); x.moveTo(px, mid); x.lineTo(px, py); x.stroke();
+  }
+  x.globalAlpha = 1;
+  x.strokeStyle = '#30363d'; x.beginPath(); x.moveTo(0, mid); x.lineTo(W, mid); x.stroke();
+  x.strokeStyle = '#cdd9e5'; x.lineWidth = 1; x.beginPath();
+  for (let i = 0; i < n; i++) { const px = i / (n - 1) * W, py = (1 - wp[i]) * H; i ? x.lineTo(px, py) : x.moveTo(px, py); }
+  x.stroke();
+}
+drawWP();
+
 // --- playback ---
 let T = 0, playing = true, speed = 1, loop = false, last = performance.now(), lastState = null;
 const tl = document.getElementById('timeline'), playBtn = document.getElementById('play');
@@ -546,6 +577,7 @@ function animate(now) {
   const dt = (now - last) / 1000; last = now;
   if (playing) { T += dt * speed; if (T >= dur) { if (loop) T = 0; else { T = dur; setPlaying(false); } } }
   tl.value = T;
+  wpCursor.style.left = (T / dur * 100) + '%';
   const st = stateAt(T); lastState = st;
   applyState(st);
   updateHud(T, st);
@@ -569,6 +601,7 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
+  drawWP();
 });
 </script>
 </body>

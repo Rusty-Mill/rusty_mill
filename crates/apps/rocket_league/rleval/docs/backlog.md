@@ -123,7 +123,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Skill highlight callouts on the car in 3D (fading "★ <skill>" above the performer)
 - [x] Possession indicator; per-player trails
 - [x] Heatmap floor projection (toggle; occupancy of the ball or followed player, binned in-viewer from the grid)
-- [ ] Win-probability / ΔV strip synced to playback (from `replay-value`)
+- [x] Win-probability / momentum strip above the timeline (P(blue scores next) from `replay-value`; model is basic, read as rough momentum)
 
 **Correctness**
 - [ ] Map-aware drawn field (see the map-geometry follow-up above)

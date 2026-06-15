@@ -104,6 +104,11 @@ pub struct Scene {
     pub frames: Vec<SceneFrame>,
     /// Events + skills, time-sorted.
     pub events: Vec<SceneEvent>,
+    /// Optional coarse momentum curve: P(team 0 scores the next goal) sampled
+    /// evenly across the match (see [`crate::winprob::attach_winprob`]). Empty
+    /// unless attached.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub win_prob: Vec<f32>,
 }
 
 fn round(x: f32, places: i32) -> f32 {
@@ -178,6 +183,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         players,
         frames,
         events,
+        win_prob: Vec::new(),
     }
 }
 

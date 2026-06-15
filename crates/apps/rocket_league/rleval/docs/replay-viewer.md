@@ -49,7 +49,12 @@ markers on the timeline are clickable, as is each ticker entry — both seek.
 - **Skills** — a fading `★ <skill>` callout pops above the car that just
   performed a detected skill, and skills also stream in the ticker.
 - **Possession** (current team, from the last touch), **per-player trails**, and
-  blob **drop-shadows** for depth. Toggle trails / labels / boost in the HUD.
+  blob **drop-shadows** for depth. Toggle trails / labels / boost / heatmap.
+- **Heatmap** — a floor occupancy heatmap of the ball (or the followed player),
+  binned in-viewer from the grid.
+- **Momentum strip** — a P(blue scores the next goal) curve above the timeline
+  (from `replay-value`; the model is basic, so read it as rough momentum, not a
+  calibrated win probability). `--no-roles` / `--no-winprob` omit the overlays.
 
 ## Coordinates
 
