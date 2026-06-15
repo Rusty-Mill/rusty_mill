@@ -177,6 +177,27 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
     }
 }
 
+/// Thin the playback frames toward `target_hz` (keep every k-th frame) to shrink
+/// the embedded payload. No-op if `target_hz` is non-positive or already ≥ the
+/// scene's rate. Updates [`Scene::hz`]; events are untouched (they carry their
+/// own times).
+pub fn downsample(scene: &mut Scene, target_hz: f32) {
+    if target_hz <= 0.0 || target_hz >= scene.hz {
+        return;
+    }
+    let k = (scene.hz / target_hz).round().max(1.0) as usize;
+    if k <= 1 {
+        return;
+    }
+    let mut i = 0usize;
+    scene.frames.retain(|_| {
+        let keep = i.is_multiple_of(k);
+        i += 1;
+        keep
+    });
+    scene.hz /= k as f32;
+}
+
 /// Project the canonical match events into point annotations (possessions, being
 /// intervals, are dropped — the timeline shows discrete moments).
 fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {

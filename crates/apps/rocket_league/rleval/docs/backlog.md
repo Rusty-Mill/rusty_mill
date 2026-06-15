@@ -120,7 +120,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 
 **Analysis overlays**
 - [ ] Scoring roles (1st/2nd man) coloured/labelled at the current time + the leak
-- [ ] Skill highlight callouts on the car in 3D (not just the ticker)
+- [x] Skill highlight callouts on the car in 3D (fading "★ <skill>" above the performer)
 - [x] Possession indicator; per-player trails
 - [ ] Heatmap floor projection (from `replay-scoring`)
 - [ ] Win-probability / ΔV strip synced to playback (from `replay-value`)
@@ -131,7 +131,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Rotation slerp between frames (smoother spin)
 
 **Performance & portability**
-- [ ] `--hz` playback downsample to shrink the embedded payload
+- [x] `--hz` playback downsample to shrink the embedded payload (e.g. `--hz 15` ≈ halves it)
 - [ ] Vendor three.js for a fully-offline single file (no CDN)
 
 **Testing**

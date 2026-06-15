@@ -253,7 +253,9 @@ function buildCars() {
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
     const trail = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: .55 }));
     trail.frustumCulled = false; scene.add(trail);
-    map.set(pl.pri, { g, bar, label, shadow, trail });
+    const callout = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false, opacity: 0 }));
+    callout.scale.set(780, 174, 1); callout.visible = false; scene.add(callout);
+    map.set(pl.pri, { g, bar, label, shadow, trail, callout });
   }
   return map;
 }
@@ -293,6 +295,36 @@ function trailPoints(pri, t) {
   const pts = [];
   for (let i = i0; i <= i1; i++) { const c = frames[i].cars.find(c => c.pri === pri); if (c) pts.push(c.p); }
   return pts;
+}
+
+// Skill callouts: a fading "★ <skill>" label above the car that just performed
+// it (within ~1.4s), so detected skills surface in the 3D scene, not just the
+// ticker. Textures are cached per skill name.
+const skillEvents = S.events.filter(e => e.kind === 'skill');
+const calloutTexCache = new Map();
+function calloutTex(label) {
+  if (calloutTexCache.has(label)) return calloutTexCache.get(label);
+  const cv = document.createElement('canvas'); cv.width = 340; cv.height = 76;
+  const x = cv.getContext('2d');
+  x.fillStyle = 'rgba(8,32,36,.8)'; x.fillRect(0, 0, 340, 76);
+  x.strokeStyle = '#56d4dd'; x.lineWidth = 4; x.strokeRect(2, 2, 336, 72);
+  x.font = 'bold 32px sans-serif'; x.fillStyle = '#8af0f7';
+  x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('★ ' + label.slice(0, 18), 170, 40);
+  const t = new THREE.CanvasTexture(cv); calloutTexCache.set(label, t); return t;
+}
+function updateCallouts(t, st) {
+  for (const [pri, o] of cars) {
+    let best = null;
+    for (const e of skillEvents) { if (e.t > t) break; if (e.pri === pri && t - e.t <= 1.4) best = e; }
+    const c = st.cars.get(pri);
+    if (best && c && o.callout) {
+      const age = t - best.t, name = best.label.split(' — ')[0];
+      o.callout.material.map = calloutTex(name);
+      o.callout.material.opacity = Math.max(0, 1 - age / 1.4);
+      o.callout.position.set(c.p[0], c.p[1], c.p[2] + 360);
+      o.callout.visible = true;
+    } else if (o.callout) { o.callout.visible = false; }
+  }
 }
 
 let show = { trails: true, labels: true, boost: true };
@@ -417,6 +449,7 @@ function animate(now) {
   const st = stateAt(T); lastState = st;
   applyState(st);
   updateHud(T, st);
+  updateCallouts(T, st);
   // follow cameras
   let focus = null;
   if (cam.mode === 'ball' && st.ball) focus = new THREE.Vector3(...st.ball);

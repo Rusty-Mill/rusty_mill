@@ -175,3 +175,16 @@ fn html_escapes_angle_brackets_in_player_names() {
     assert!(!out.contains("</script><b>x"), "angle brackets escaped");
     assert!(out.contains("\\u003c/script"), "escaped as unicode");
 }
+
+#[test]
+fn downsample_thins_frames_and_updates_hz() {
+    let m = minimal_match();
+    let mut s = build_scene(&m, &[]);
+    assert_eq!((s.frames.len(), s.hz), (2, 30.0));
+    // 30 -> 15 Hz keeps every 2nd frame.
+    replay_viewer::scene::downsample(&mut s, 15.0);
+    assert_eq!((s.frames.len(), s.hz), (1, 15.0));
+    // Target at/above the current rate is a no-op.
+    replay_viewer::scene::downsample(&mut s, 30.0);
+    assert_eq!((s.frames.len(), s.hz), (1, 15.0));
+}

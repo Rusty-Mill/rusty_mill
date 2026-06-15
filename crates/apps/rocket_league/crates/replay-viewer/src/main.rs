@@ -17,8 +17,8 @@ use replay_analyzer::decode::ReplayParser;
 use replay_skills::{detect_all, SkillConfig};
 use replay_viewer::{build_scene, html};
 
-const USAGE: &str =
-    "usage: replay-viewer <file.replay> [--html <out.html>] [--json <scene.json>] [--no-skills]";
+const USAGE: &str = "usage: replay-viewer <file.replay> [--html <out.html>] [--json <scene.json>] \
+[--hz <rate>] [--no-skills]";
 
 fn main() -> ExitCode {
     match run() {
@@ -34,12 +34,21 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut replay = None;
     let mut html_out = None;
     let mut json_out = None;
+    let mut hz: Option<f32> = None;
     let mut skills = true;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--html" => html_out = Some(it.next().ok_or("--html needs a path")?),
             "--json" => json_out = Some(it.next().ok_or("--json needs a path")?),
+            "--hz" => {
+                hz = Some(
+                    it.next()
+                        .ok_or("--hz needs a rate")?
+                        .parse()
+                        .map_err(|_| "--hz must be a number")?,
+                )
+            }
             "--no-skills" => skills = false,
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -68,7 +77,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     } else {
         Vec::new()
     };
-    let scene = build_scene(&canonical, &instances);
+    let mut scene = build_scene(&canonical, &instances);
+    if let Some(target) = hz {
+        replay_viewer::scene::downsample(&mut scene, target);
+    }
 
     eprintln!(
         "scene: {} frames @ {:.0}Hz, {} players, {} timeline events (~{:.0}s)",
