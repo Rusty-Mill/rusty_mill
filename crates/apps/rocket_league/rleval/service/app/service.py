@@ -12,7 +12,7 @@ import hashlib
 
 from sqlmodel import Session
 
-from . import blobs, credits
+from . import blobs, credits, leaderboard
 from .config import settings
 from .db import session_scope
 from .models import Account, Replay, Report
@@ -74,6 +74,11 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
         replay.status = "done"
         session.add(replay)
         credits.confirm(session, replay.account_id, replay.id)
+        # Recompute the leaderboard on this eligible write (§8): no-op unless the
+        # account's locked profile got an ok-confidence report here.
+        account = session.get(Account, replay.account_id)
+        if account is not None:
+            leaderboard.materialize(session, account, replay.id)
         session.commit()
     except Exception as e:  # noqa: BLE001 — any worker failure must refund.
         session.rollback()

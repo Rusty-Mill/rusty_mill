@@ -69,9 +69,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 
 ## M3 — leaderboard, seasons, redundancy
 
-- **Leaderboard + seasons + Founding-N.** Materialized best-per-account-per-season;
-  only **locked-profile** reports with `confidence == ok` are eligible; recompute
-  on each eligible write (§7, §8). Where: service.
+- **Leaderboard + seasons + Founding-N.** ✔ *Core shipped* — `service/app/leaderboard.py`
+  materializes the **best composite per account per season** (`YYYY-Sn` quarters);
+  only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
+  on each successful score; public `GET /v1/leaderboard?season=…&limit=…`. Tested
+  (`service/tests/test_leaderboard.py`: eligibility gates + best-per-season + sorted
+  feed). *Remaining:* Founding-N seeding and the "recent" feed; season rollover/close
+  policy. Where: service.
 - **Re-score endpoint.** `POST /internal/rescore/{id}` re-runs the pure scoring
   core at a new `score_config_version` from the cached canonical blob, no
   re-parse (§8, §9). The core is already pure; needs the cached-blob plumbing.
