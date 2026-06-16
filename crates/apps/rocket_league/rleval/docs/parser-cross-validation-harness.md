@@ -99,6 +99,81 @@ comparator + CI test still get built, and swap a real capture in later.
    second-parser item done, Phase 1; note Phase 2 deferred). Small PR → `main`, merge
    after CI is green.
 
+## Phase 2 — independent Rust reconstruction cross-check (design)
+
+Deferred (not started). Phase 1 corroborates *header facts* against ballchasing;
+Phase 2 corroborates the *frame-level reconstruction* (ball/car trajectories and
+event timing) against a **second, independent** decoder — the thing nothing else
+checks today.
+
+### What gap it fills (and what already covers the rest)
+Reconstruction is already validated three ways, so Phase 2 must add something new:
+- `tests/external_validation.rs` + the `validate` bin — per-player **aggregates**
+  (supersonic time, dist-to-ball, boost) vs the committed ballchasing ground-truth
+  fixture, gated on Spearman + relative error + coverage.
+- `tests/golden.rs` — pins reconstruction output to a digest (catches *regressions*,
+  but it's our output vs our own past output, not correctness).
+- Phase 1 — header facts vs ballchasing.
+
+The uncovered surface is the **trajectories themselves and event timing**: an
+independent decoder agreeing the ball/cars were *there* at *that* time, not just
+that aggregates correlate.
+
+### The independence constraint (the whole point)
+A second reconstruction is only worth building if it is genuinely independent —
+two copies of the same bug agreeing proves nothing. Rules:
+- **May** depend on `boxcars` (the parse layer) and the public `CanonicalMatch`
+  model (to compare against).
+- **Must not** reach into `replay_analyzer::analyze::*` internals — enforce this by
+  putting it in a **separate crate** so the compiler blocks accidental reuse.
+- **Honest caveat:** sharing `boxcars` means parse-layer decode bugs stay invisible
+  to this check (that boundary is what the ballchasing check covers, for header
+  facts). Document it; don't oversell it as full end-to-end independence.
+
+### Two ways to build it
+- **Option A — reuse an existing independent Rust reconstructor** (candidate:
+  `subtr-actor`, the boxcars-based actor-state reconstructor used around the
+  rlgym/rlbot ecosystem). Genuine reconstruction-layer independence (different
+  authors/algorithm), least code. Needs a ½-day spike to confirm it exposes
+  ball + car position/velocity/boost per frame and builds offline. Adds one
+  dependency. **Recommended if viable.**
+- **Option B — hand-roll a minimal reconstructor** over `boxcars` (actor tracking →
+  ball/car kinematics → goal/demo timing). Full control, but ~1–2 weeks plus an
+  ongoing "don't share helpers" discipline tax. Lower ROI.
+
+### What it cross-checks (tiered, with tolerances — it's float/time data)
+- **Tier R1 (tight tolerance → fail):** resample both reconstructions to a common
+  fixed-Hz grid (reuse `Resampled`), then ball position + each car position within
+  ε; player count/identity; goal & demo event timestamps within ±~1 frame.
+- **Tier R2 (statistical → warn):** per-frame velocity/boost correlation (aggregates
+  are already covered by `external_validation`).
+- **Touches/possession:** advisory (definitional differences).
+- The real engineering is **time alignment + resampling to a shared grid** — compare
+  on the grid, not raw native frames.
+
+### CI shape — cleaner than Phase 1
+No network, no key, no ToS, no fixtures to capture/sanitize. Reuse the committed
+`assets/replays/42f2.replay` + `419a.replay`; decode *both* reconstructions live
+in-test (the `canonical_roundtrip` test and the viewer GL-smoke job already decode
+42f2, so the pattern is established) and compare with tolerances. Fully offline.
+
+### Where it lives
+A small `recon-check` crate (depends on `boxcars` + `replay-analyzer`'s public model
+only) + a thin diff bin + one integration-test gate.
+
+### Effort & priority
+Option A ≈ 1–2 days incl. the spike; Option B ≈ 1–2 weeks. This competes for
+priority with getting CI/Actions back online and wiring `reconcile --gate` into CI.
+Its distinct value is *trajectory-level* independence; if a crate makes Option A
+cheap it's worth doing, otherwise the marginal coverage over golden +
+`external_validation` may not yet justify a hand-rolled reimplementation.
+
+**Recommended first step:** a ½-day `subtr-actor` spike — reconstruct 42f2 on a
+throwaway branch, confirm it yields ball + car position/velocity/boost per frame
+offline, and eyeball agreement against our resampled grid. That one spike decides
+Option A vs B and de-risks the rest.
+
 ## Non-goals
-Not a drop-in parser; not validating the scoring rubric; no live API call in CI;
-Phase 2 (carball reconstruction cross-check) is out of scope here.
+Not a drop-in parser; not validating the scoring rubric; no live API call in CI.
+Phase 2 (carball / independent reconstruction cross-check) is designed above but
+**not implemented** here.
