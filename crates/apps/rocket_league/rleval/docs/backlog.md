@@ -84,6 +84,14 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   owner-gate, 409-not-ready); the real weasyprint path verified on the 42f2 report
   (75 KB HTML → 63 KB PDF). Where: `service/app/pdf.py`. *Remaining:* per-player PDF
   scoping (currently the full-lobby report).
+- **Observability.** ✔ A stdlib metrics registry (`service/app/metrics.py`,
+  no `prometheus_client`) at `GET /metrics` in Prometheus text format: upload
+  outcomes, scoring results, **per-stage scoring timings** (parse+score / persist /
+  leaderboard via `Histogram.time()`), and HTTP RED (count + latency by route
+  template, pure-ASGI middleware recording at response-start so background scoring
+  isn't disturbed). `Histogram.time()` also emits structured stage logs. Exposition
+  validated against a real Prometheus parser. *Remaining (prod):* a tracing/metrics
+  backend (OTel) and per-worker process labels.
 - **Entitlement webhook.** ✔ `POST /internal/webhooks/purchase` flips `owns_book`
   and grants credits — monthly (`monthly_grant`, expires period end) or top-up
   (+10, +30 d) — idempotent by the provider's event id (`WebhookEvent`). Completes
