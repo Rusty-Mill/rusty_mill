@@ -187,3 +187,61 @@ fn recycled_actors_collapse_to_one_track_per_player() {
     assert!(bob.samples.iter().any(|s| s.actor_id == 9));
     assert!(bob.samples.iter().any(|s| s.actor_id == 8 && s.t > 1.0));
 }
+
+#[test]
+fn short_unbound_orphan_track_is_dropped() {
+    // Alice is bound (car 8 -> PRI 100, named). Car 50 reports a couple of rigid
+    // bodies but never binds a PRI — a transient glitch that must not coalesce
+    // into a spurious "<unknown>" track.
+    let frames = vec![
+        RawFrame {
+            time: 0.0,
+            delta: 0.0,
+            new_actors: vec![new_car(8), new_car(50)],
+            updates: vec![
+                ActorUpdate::CarPri { car: 8, pri: ALICE },
+                ActorUpdate::PriName {
+                    pri: ALICE,
+                    name: "Alice".into(),
+                },
+                rb(8, 100.0),
+                rb(50, 500.0),
+            ],
+            deleted: vec![],
+        },
+        RawFrame {
+            time: 0.1,
+            delta: 0.1,
+            new_actors: vec![],
+            updates: vec![rb(8, 110.0), rb(50, 510.0)],
+            deleted: vec![50],
+        },
+        RawFrame {
+            time: 0.2,
+            delta: 0.1,
+            new_actors: vec![],
+            updates: vec![rb(8, 120.0)],
+            deleted: vec![],
+        },
+    ];
+    let decoded = DecodedReplay {
+        meta: ReplayMeta {
+            parser_version: "boxcars-test".into(),
+            map: Some("TestArena".into()),
+            team_size: Some(1),
+            record_fps: Some(30.0),
+            team_scores: BTreeMap::from([(0, 0)]),
+            players: vec![player("Alice", 0)],
+            goals: Vec::new(),
+        },
+        frames,
+    };
+
+    let m = build_canonical(&decoded, "fixture");
+    assert_eq!(m.tracks.len(), 1, "the short unbound orphan is dropped");
+    assert_eq!(m.tracks[0].player, "Alice");
+    assert!(
+        m.tracks.iter().all(|t| t.player != "<unknown>"),
+        "no spurious <unknown> track"
+    );
+}

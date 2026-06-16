@@ -18,11 +18,14 @@ use replay_analyzer::decode::ReplayParser;
 use replay_skills::{detect_all, Skill, SkillConfig, SkillReport};
 
 const USAGE: &str = "usage: replay-skills <file.replay> [--player <name>] \
-[--verify <skill>] [--window <start_s> <end_s>] [--profile] [--config <cfg.json>] \
-[--json <out.json>] [--list]";
+[--verify <skill>] [--window <start_s> <end_s>] [--profile] [--outcomes] \
+[--config <cfg.json>] [--json <out.json>] [--list]";
 
 /// Exit code when `--verify` finds the skill was *not* performed (for scripting).
 const NOT_PERFORMED: u8 = 2;
+
+/// Window (s) a skill may precede a same-team goal to count toward its buildup.
+const OUTCOME_WINDOW_S: f32 = 6.0;
 
 struct Args {
     replay: Option<String>,
@@ -33,6 +36,7 @@ struct Args {
     json: Option<String>,
     list: bool,
     profile: bool,
+    outcomes: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -45,6 +49,7 @@ fn parse_args() -> Result<Args, String> {
         json: None,
         list: false,
         profile: false,
+        outcomes: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -62,6 +67,7 @@ fn parse_args() -> Result<Args, String> {
             "--json" => a.json = Some(it.next().ok_or("--json needs a path")?),
             "--list" => a.list = true,
             "--profile" => a.profile = true,
+            "--outcomes" => a.outcomes = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag {other}\n{USAGE}"))
@@ -115,6 +121,8 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
         None => {
             if args.profile {
                 print_profiles(&report, canonical.duration_s, args.player.as_deref());
+            } else if args.outcomes {
+                print_outcomes(&report, &canonical.events, args.player.as_deref());
             } else {
                 print_summary(&report, args.player.as_deref());
             }
@@ -251,6 +259,39 @@ fn print_profiles(report: &SkillReport, duration_s: f32, player_filter: Option<&
                 st.per_min,
                 st.mean_quality
             );
+        }
+    }
+}
+
+/// Per-player skill→goal involvement: reps within the window before a same-team goal.
+fn print_outcomes(
+    report: &SkillReport,
+    events: &[replay_analyzer::model::Event],
+    filter: Option<&str>,
+) {
+    eprintln!(
+        "== SKILL OUTCOMES ==  (reps within {:.0}s before a same-team goal)",
+        OUTCOME_WINDOW_S
+    );
+    for o in replay_skills::outcomes(report, events, OUTCOME_WINDOW_S) {
+        if let Some(name) = filter {
+            if o.player != name {
+                continue;
+            }
+        }
+        eprintln!(
+            "\n-- {} (pri {}, team {:?}) --  {}/{} skills in goal buildups",
+            o.player, o.pri, o.team, o.total_before_goal, o.total
+        );
+        for (skill, (total, conv)) in &o.by_skill {
+            if *conv > 0 {
+                eprintln!(
+                    "  {:<20} {}/{} before a goal",
+                    skill.display_name(),
+                    conv,
+                    total
+                );
+            }
         }
     }
 }

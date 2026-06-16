@@ -70,6 +70,11 @@ ranks cleaner reps higher for the detectors whose confidence ramps with magnitud
 (aerial height, dribble duration, redirect angle, …); event-sourced skills sit at
 1.0. So two players with the same aerial count are separable by rate and quality.
 
+`outcomes(&SkillReport, &[Event], window_s)` links skills to **goals**: per player,
+how many reps fell within `window_s` before a same-team goal ("buildup
+involvement"). Goals are sparse, so counts are small — read it as involvement, not
+a success rate; a richer link via the value model's ΔV is a follow-up.
+
 ## CLI
 
 ```
@@ -81,6 +86,8 @@ replay-skills <file.replay> [--player <name>] [--verify <skill>]
 - default: a per-player skill table (scope to one `--player`).
 - `--profile`: the proficiency view — per-player `skills/min` and per-skill
   `count`, rate, and quality.
+- `--outcomes`: per player, how many skills fell in a goal buildup (within ~6 s
+  before a same-team goal).
 - `--verify <skill>`: prints YES/no and exits `0` if performed, `2` if not — a
   scripting gate. Combine with `--player` and/or `--window` to verify within a
   clip:

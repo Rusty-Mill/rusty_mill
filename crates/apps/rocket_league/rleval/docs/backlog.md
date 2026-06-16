@@ -79,17 +79,17 @@ that this layer persists and renders.
 These extend the workspace past `replay-scoring-service-spec.md`, driven by
 product direction rather than the milestone plan.
 
-- **Flesh out individual player skills.** *Proficiency profiles ✔* —
-  `replay-skills` now has `profile::profiles` (+ `replay-skills --profile`):
-  per-player `skills/min` and a per-skill `SkillStat` (count, per-minute rate,
-  and a `mean_quality` proxy from detection confidence), so two players with the
-  same count are separable by rate and quality. *Remaining:* tie skill instances
-  to **outcomes** (which preceded a shot/goal — reuse the value model's ΔV; needs
-  the match events, not just the report); richer per-skill quality from structured
-  evidence (aerial height, dribble duration) rather than the confidence proxy; and
-  growing the catalog toward harder mechanics (wave dash, half-flip, double touch)
-  where a kinematic signature is separable. Pairs with the "calibrate skill
-  thresholds" follow-up. Where: `skills/` (this repo).
+- **Flesh out individual player skills.** *Proficiency profiles ✔* +
+  *goal-outcome linking ✔* — `replay-skills` has `profile::profiles`
+  (`--profile`): per-player `skills/min` + per-skill `SkillStat` (count, rate,
+  `mean_quality` from detection confidence); and `outcome::outcomes`
+  (`--outcomes`): per-player skill→goal buildup involvement within a window.
+  *Remaining:* a richer outcome link via the value model's per-touch **ΔV** swing
+  (vs. the sparse goal-conversion here); richer per-skill quality from structured
+  evidence (aerial height, dribble duration) instead of the confidence proxy; and
+  harder mechanics (wave dash, half-flip, double touch) where a kinematic signature
+  is separable. Pairs with the "calibrate skill thresholds" follow-up. Where:
+  `skills/` (this repo).
 - **3D replay simulation / viewer.** ✔ *First increment shipped* — the
   `replay-viewer` crate distills the resampled grid + events + detected skills
   into a compact `Scene` and embeds it in a self-contained three.js viewer
@@ -155,9 +155,11 @@ Tracked churn-list. Items needing a product/visual decision are marked
   ballchasing-mangled player names, so ~38/720 players go unranked (name
   mangling, not a team issue). Reuse the team-anchored matching from
   `analyze::validate` so every player gets its rank label.
-- **Spurious `<unknown>` tracks.** A few replays coalesce an extra unnamed track
-  (an unbound/short-lived PRI). Harmless downstream (excluded from validate /
-  reconcile / lobby), but worth eliminating in `analyze::identity`.
+- **Spurious `<unknown>` tracks.** ✔ `analyze::identity::coalesce` now drops short
+  unbound (`<unknown>`) tracks — a brief actor that never binds a PRI is a glitch,
+  not a player (real players always bind one). Threshold `MIN_ORPHAN_SAMPLES`;
+  substantial unbound tracks are kept. Unit test (`short_unbound_orphan_track_is_dropped`);
+  the 42f2 golden is unaffected (it has no orphan).
 - **Corpus reproducibility.** ✔ The 180 corpus `.replay` files are gitignored
   (~230 MB); only the distilled fixtures are committed. Retrieval is now scripted
   and documented: `assets/corpus/refresh_corpus_replays.py` re-downloads them by
