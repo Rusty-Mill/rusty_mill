@@ -85,9 +85,14 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   (`service/tests/test_leaderboard.py`: eligibility gates + best-per-season + sorted
   feed). *Remaining:* Founding-N seeding and the "recent" feed; season rollover/close
   policy. Where: service.
-- **Re-score endpoint.** `POST /internal/rescore/{id}` re-runs the pure scoring
-  core at a new `score_config_version` from the cached canonical blob, no
-  re-parse (§8, §9). The core is already pure; needs the cached-blob plumbing.
+- **Re-score endpoint.** ✔ `POST /internal/rescore/{id}` re-runs the scoring core
+  at the worker's current `score_config_version` and **swaps in the fresh reports**
+  (no re-upload), re-materializing the leaderboard (FK-safe) and dropping the stale
+  PDF. Tested (`service/tests/test_rescore.py`: replace-at-new-version, leaderboard
+  refresh, PDF invalidation, 404/409). *Remaining (the §9 optimization):* cache the
+  **canonical-match** blob so re-score skips the parse — `CanonicalMatch` is
+  serde-ready; needs `replay-scoring --dump-canonical`/`--from-canonical` modes +
+  service plumbing. Where: `service/app/service.py` (`rescore`).
 - **Second parser adapter** for redundancy/contract-testing: `carball` or the
   ballchasing.com API behind the existing `ReplayParser` port (§6). Where:
   `src/decode/` (this repo).

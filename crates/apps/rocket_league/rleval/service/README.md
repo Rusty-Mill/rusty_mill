@@ -38,13 +38,17 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 - **Endpoints** (§7): `POST /v1/replays`, `GET /v1/replays/{id}`,
   `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf`, `GET /v1/leaderboard`,
   `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
-  `POST /internal/webhooks/purchase`, plus `GET /healthz`. Upload guards:
-  `owns_book` + a positive credit balance.
+  `POST /internal/webhooks/purchase`, `POST /internal/rescore/{id}`, plus
+  `GET /healthz`. Upload guards: `owns_book` + a positive credit balance.
 - **PDF report** (§4.10): the worker's PDF-ready report HTML (captured at score
   time) is rendered to PDF via a `PdfRenderer` port (weasyprint adapter) and
   **cached per replay**; served owner-gated at `GET /v1/reports/{id}/pdf`. Rendering
   is optional (the `pdf` extra) — tests use a fake renderer, so the base install
   doesn't need weasyprint's native libs.
+- **Re-score** (§8/§9): `POST /internal/rescore/{id}` re-runs the (now-newer)
+  scoring core and **swaps in the fresh reports** without a re-upload — refreshing
+  the leaderboard and dropping the stale PDF. (Currently re-parses; the no-re-parse
+  canonical-blob cache is the remaining §9 optimization.)
 - **Leaderboard** (§5/§8): materialized **best composite per account per season**;
   only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
   on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
@@ -56,10 +60,10 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): admin **re-score**
-(`POST /internal/rescore/{id}` — the core is already pure, needs the cached
-canonical blob), a real **job queue**
-(Celery/RQ vs. the in-process background task), per-account **rate-limiting**,
+Tracked in `docs/backlog.md` (M2): a **no-re-parse re-score** (cache the
+canonical-match blob so re-score skips parsing — the worker is serde-ready), a
+real **job queue** (Celery/RQ vs. the in-process background task), per-account
+**rate-limiting**,
 webhook **signature verification**, **encryption-at-rest**, and real **auth** (the
 current `X-Account-Email` header is a dev stub — authentication is the web layer's
 job).
