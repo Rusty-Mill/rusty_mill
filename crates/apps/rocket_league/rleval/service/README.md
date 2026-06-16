@@ -22,9 +22,10 @@ HTTP (FastAPI)  ──>  domain flow (service.py)  ──>  Scorer port (scoring
 Scoring is an injected capability behind the `Scorer` protocol, so the whole
 service is testable without the Rust toolchain or real `.replay` files. The
 production adapter (`SubprocessScorer`) runs `replay-scoring <file> --json out`
-and maps each per-player Rust `Report` to a stored `Report` row. Three more
-seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher`
-(§12), and the `JobQueue` (§4) that schedules scoring.
+and maps each per-player Rust `Report` to a stored `Report` row. Four more
+seams are pluggable the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher`
+(§12), the `JobQueue` (§4) that schedules scoring, and the `BlobStore` (§5,
+filesystem or S3).
 
 ## What's implemented
 
@@ -34,6 +35,10 @@ seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher
 - **Idempotency** (§9): `replay_id = sha256(blob)`; a re-upload returns the
   existing replay/report and is **not** re-charged. Raw blobs are content-addressed
   on disk for re-scoring without re-upload.
+- **Storage backend** (§5): the `BlobStore` port (`blobs.py`) is `fs` by default
+  (files at `blob_dir`) or `s3` (`RLS_BLOB_BACKEND=s3`, incl. MinIO/localstack via
+  `RLS_S3_ENDPOINT_URL`) so API and workers don't share a local disk. The backend
+  moves opaque `(key, bytes)`; cipher/gzip/dedupe sit above it, identical on either.
 - **Encryption-at-rest** (§12): every stored artifact (raw blob, report HTML/PDF,
   canonical cache) is written through a pluggable cipher. With `RLS_ENCRYPTION_KEY`
   set it's stdlib AEAD (HMAC-SHA256 CTR + encrypt-then-MAC); unset, a no-op
@@ -82,8 +87,9 @@ seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): real **auth** (the current `X-Account-Email`
-header is a dev stub — authentication is the web layer's job) and Postgres +
-object storage for true multi-node.
+header is a dev stub — authentication is the web layer's job) and **Postgres**
+(the DB side of true multi-node — object storage is done; the engine still hard-codes
+a SQLite-only connect-arg and uses create-all rather than migrations).
 
 ## Run
 
@@ -149,7 +155,12 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | Var | Default | Meaning |
 |---|---|---|
 | `RLS_DATABASE_URL` | `sqlite:///./rls.db` | SQLAlchemy URL |
-| `RLS_BLOB_DIR` | `./blobs` | raw-replay store |
+| `RLS_BLOB_BACKEND` | `fs` | artifact store: `fs` or `s3` |
+| `RLS_BLOB_DIR` | `./blobs` | artifact dir (`fs` backend) |
+| `RLS_S3_BUCKET` | `rls-blobs` | bucket (`s3` backend) |
+| `RLS_S3_PREFIX` | _(empty)_ | key prefix (`s3` backend) |
+| `RLS_S3_REGION` | `us-east-1` | region (`s3` backend) |
+| `RLS_S3_ENDPOINT_URL` | _(empty)_ | custom endpoint (MinIO/localstack) |
 | `RLS_WORKER_BIN` | `replay-scoring` | Rust worker binary |
 | `RLS_WORKER_TIMEOUT_S` | `300` | worker subprocess timeout |
 | `RLS_SCORE_CONFIG_VERSION` | `score-v1` | current scoring version (re-score gate) |

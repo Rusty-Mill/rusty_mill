@@ -13,8 +13,10 @@ dependencies = [
 [project.optional-dependencies]
 # Broker-backed job queue (§4): the API enqueues, Celery workers score.
 queue = ["celery>=5.3", "redis>=5"]
-# dev pulls in `queue` so CI exercises the Celery adapter (eager-mode test).
-dev = ["pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5"]
+# S3/object-storage blob backend (§5): the multi-node artifact store.
+s3 = ["boto3>=1.28"]
+# dev pulls in the queue + s3 deps (and moto) so CI exercises both adapters.
+dev = ["pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5", "boto3>=1.28", "moto>=5"]
 # Production PDF rendering (weasyprint needs native libs: pango, cairo, gdk-pixbuf).
 pdf = ["weasyprint>=60"]
 

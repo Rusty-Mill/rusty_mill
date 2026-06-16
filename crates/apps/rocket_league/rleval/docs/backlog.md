@@ -53,9 +53,17 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   `service/app/main.py`.
 - **Persistence.** ✔ SQLModel tables (§5): `Account`, `CreditLedger`, `Replay`,
   `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
-  Idempotency `replay_id = sha256(blob)`; raw blobs content-addressed on disk for
+  Idempotency `replay_id = sha256(blob)`; artifacts are content-addressed for
   re-scoring without re-upload; the **canonical-match** blob is optionally cached
   (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`).
+- **Blob store (§5).** ✔ A `BlobStore` port (`service/app/blobs.py`):
+  `FilesystemBlobStore` (default, `blob_dir`) or `S3BlobStore`
+  (`RLS_BLOB_BACKEND=s3`; AWS or MinIO/localstack via `RLS_S3_ENDPOINT_URL`) so API
+  and workers don't share a local disk. The backend moves opaque `(key, bytes)`;
+  cipher/gzip/dedupe sit above it, so encryption-at-rest works identically on
+  either. Tested with moto (real boto3, faked S3): per-artifact round-trips, prefix,
+  sealed-on-S3, and a full upload→score pipeline landing artifacts in the bucket.
+  *Remaining (prod):* the bucket + IAM standup.
 - **Encryption-at-rest (§12).** ✔ Every stored artifact is written through a
   pluggable cipher (`service/app/cipher.py`): `NullCipher` by default, stdlib AEAD
   (HMAC-SHA256 CTR + encrypt-then-MAC, HKDF-separated subkeys) when
