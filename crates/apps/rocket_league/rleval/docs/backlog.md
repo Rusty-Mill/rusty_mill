@@ -63,9 +63,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 - **PDF rendering.** *Not started.* Feed the existing report HTML
   (`replay_scoring::render::html`) to headless Chromium / weasyprint; cache by
   `replay_id+player`; `GET /v1/reports/{id}/pdf` (§4.10, §8).
-- **Entitlement webhook.** *Not started.* `POST /internal/webhooks/purchase`
-  (Stripe/PayPal) → set `owns_book`, grant monthly credits + top-ups (§8). The
-  ledger primitives (`credits.grant`) are ready.
+- **Entitlement webhook.** ✔ `POST /internal/webhooks/purchase` flips `owns_book`
+  and grants credits — monthly (`monthly_grant`, expires period end) or top-up
+  (+10, +30 d) — idempotent by the provider's event id (`WebhookEvent`). Completes
+  §8's grant side (spend/refund already shipped). Tested
+  (`service/tests/test_webhook.py`: grant, idempotency, top-up, and end-to-end
+  account provisioning → upload). *Remaining:* signature/shared-secret verification
+  on the `/internal/` caller. Where: `service/app/webhooks.py`.
 
 ## M3 — leaderboard, seasons, redundancy
 
