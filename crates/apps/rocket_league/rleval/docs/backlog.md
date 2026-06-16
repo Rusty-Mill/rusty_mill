@@ -37,28 +37,35 @@ Everything below is **not started** unless noted.
 
 ## M2 — service & monetization (web/DB layer, Python per spec §3/§6)
 
-This is a separate FastAPI + SQLModel + SQLite codebase, not this Rust workspace.
-The Rust worker already emits the full scored `LobbyReport` (JSON) + report HTML
-that this layer persists and renders.
+A separate FastAPI + SQLModel codebase under `service/` (not this Rust
+workspace), shelling out to the `replay-scoring` worker. **Foundation shipped** —
+see `service/README.md`. Pure-ish, ports-and-adapters, tested without the Rust
+toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
+(`.github/workflows/ci.yml`, `service` job).
 
-- **API service.** FastAPI, async-first, ports-and-adapters. Endpoints from §8:
-  upload/status, `GET /v1/reports/{id}`, `POST /v1/account/lock-profile`,
-  `GET /v1/account/credits`. Where: new `service/` (Python).
-- **Persistence.** SQLModel tables (§7): `Replay`, `Report`, `Account`,
-  `LedgerEntry`, `LeaderboardEntry`, `Config`. SQLite → Postgres. Idempotency:
-  `replay_id = sha256(blob)`; cache the canonical-match blob so re-scoring never
-  re-parses (§9). Where: service DB layer.
-- **Job queue + worker split.** Rust parse/feature worker (this repo, invoked as
-  a subprocess or service) feeding a Python scoring/report worker; heavy work
-  off-thread (§9). Where: service workers.
-- **PDF rendering.** Feed the existing report HTML (`replay_scoring::render::html`)
-  to headless Chromium or weasyprint; cache by `replay_id+player`; `GET
-  /v1/reports/{id}/pdf` (§4.10, §8). The HTML is already PDF-ready; this is the
-  only missing piece of §4.10. Where: report worker.
-- **Credit ledger.** Soft-hold on upload → commit on success → **auto-refund on
-  any post-hold failure** (§4.10, §10 property test). Where: service.
-- **Entitlement webhook.** `POST /internal/webhooks/purchase` (Stripe/PayPal) →
-  set `owns_book`, grant monthly credits (§8). Where: service.
+- **API service.** ✔ FastAPI, ports-and-adapters. Implemented: `POST /v1/replays`
+  (upload→guard→hold→enqueue), `GET /v1/replays/{id}`, `GET /v1/reports/{id}`,
+  `GET /v1/account/credits`, `POST /v1/account/lock-profile`, `GET /healthz`.
+  Upload guards: `owns_book` + positive balance. Auth is a dev `X-Account-Email`
+  stub (real auth = web layer). Where: `service/app/main.py`.
+- **Persistence.** ✔ SQLModel tables (§5): `Account`, `CreditLedger`, `Replay`,
+  `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
+  Idempotency `replay_id = sha256(blob)`; raw blobs content-addressed on disk for
+  re-scoring without re-upload. *Remaining:* cache the **canonical-match** blob so
+  a re-score skips re-parse (§9), and encryption-at-rest (§12).
+- **Credit ledger.** ✔ Balance = sum of non-expired deltas; soft-hold → confirm →
+  **auto-refund on failure**, idempotent by `replay_id`; holds inherit the grant's
+  expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
+  Where: `service/app/credits.py`.
+- **Job queue + worker split.** *Partial* — upload enqueues an in-process
+  background task (the Rust parse+score worker via `SubprocessScorer`). *Remaining:*
+  a real queue (Celery/RQ) so workers scale independently (§9).
+- **PDF rendering.** *Not started.* Feed the existing report HTML
+  (`replay_scoring::render::html`) to headless Chromium / weasyprint; cache by
+  `replay_id+player`; `GET /v1/reports/{id}/pdf` (§4.10, §8).
+- **Entitlement webhook.** *Not started.* `POST /internal/webhooks/purchase`
+  (Stripe/PayPal) → set `owns_book`, grant monthly credits + top-ups (§8). The
+  ledger primitives (`credits.grant`) are ready.
 
 ## M3 — leaderboard, seasons, redundancy
 
