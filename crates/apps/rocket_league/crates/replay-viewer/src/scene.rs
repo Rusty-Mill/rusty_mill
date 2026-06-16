@@ -61,6 +61,10 @@ pub struct ScenePlayer {
     pub assists: i32,
     #[serde(default)]
     pub saves: i32,
+    /// Total ΔV (scoring-probability swing) this player's touches caused — an
+    /// "impact" readout. Filled by [`crate::impact::attach_impact`]; `None` until.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub impact: Option<f32>,
 }
 
 /// One car's pose at a frame. `rot` is `[pitch, yaw, roll]` (rad); `boost` is a
@@ -95,6 +99,11 @@ pub struct SceneEvent {
     pub team: Option<i32>,
     /// Human-readable one-liner for the ticker.
     pub label: String,
+    /// Scoring-probability swing (ΔV) of the touch this annotates — signed
+    /// (+ helped the toucher's team). Set on `touch` events by
+    /// [`crate::impact::attach_impact`]; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dv: Option<f32>,
 }
 
 /// The full viewer payload.
@@ -149,6 +158,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
                 goals: meta.map(|p| p.goals).unwrap_or(0),
                 assists: meta.map(|p| p.assists).unwrap_or(0),
                 saves: meta.map(|p| p.saves).unwrap_or(0),
+                impact: None,
             }
         })
         .collect();
@@ -190,6 +200,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
             Some(p) => format!("{} — {}", s.skill.display_name(), p),
             None => s.skill.display_name().to_string(),
         },
+        dv: None,
     }));
     events.sort_by(|a, b| a.t.total_cmp(&b.t));
 
@@ -259,6 +270,7 @@ fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
                     Some(s) => format!("GOAL — {s}"),
                     None => "GOAL".into(),
                 },
+                dv: None,
             },
             Event::Demo {
                 t,
@@ -276,6 +288,7 @@ fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
                     attacker.as_deref().unwrap_or("?"),
                     victim.as_deref().unwrap_or("?")
                 ),
+                dv: None,
             },
             Event::Kickoff { t } => SceneEvent {
                 kind: "kickoff".into(),
@@ -283,6 +296,7 @@ fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
                 pri: None,
                 team: None,
                 label: "Kickoff".into(),
+                dv: None,
             },
             Event::Touch {
                 t,
@@ -295,6 +309,7 @@ fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
                 pri: Some(*pri),
                 team: *team,
                 label: format!("touch — {}", player.as_deref().unwrap_or("?")),
+                dv: None,
             },
             Event::Possession { .. } => continue,
         };

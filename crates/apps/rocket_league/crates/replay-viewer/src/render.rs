@@ -121,6 +121,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   #players .r2 .sp { color:#6e7681; }
   #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
   #players .role.first { color:#ffd166; }
+  #players .imp { margin-left:auto; font-size:10px; font-weight:700; cursor:help; }
+  #ticker .ev .d { font-weight:700; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
   #ticker .ev { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
     cursor:pointer; }
@@ -791,16 +793,27 @@ function ballTrailPoints(t) {
 // it (within ~1.4s), so detected skills surface in the 3D scene, not just the
 // ticker. Textures are cached per skill name.
 const skillEvents = S.events.filter(e => e.kind === 'skill');
+// Per-touch ΔV (scoring-prob swing) keyed by "pri:time" — a ball-contact skill's
+// (pri, time) matches its touch exactly, so its callout can pick up the swing.
+const touchDv = new Map();
+for (const e of S.events) if (e.kind === 'touch' && e.dv != null) touchDv.set(e.pri + ':' + e.t.toFixed(2), e.dv);
 const calloutTexCache = new Map();
-function calloutTex(label) {
-  if (calloutTexCache.has(label)) return calloutTexCache.get(label);
+function calloutTex(label, dv) {
+  const key = label + '|' + (dv == null ? '' : dv.toFixed(3));
+  if (calloutTexCache.has(key)) return calloutTexCache.get(key);
   const cv = document.createElement('canvas'); cv.width = 340; cv.height = 76;
   const x = cv.getContext('2d');
+  // Tint the callout by the swing the touch caused: green helped, red hurt.
+  const pos = dv != null && dv > 0.0005, neg = dv != null && dv < -0.0005;
+  const edge = pos ? '#3fb950' : neg ? '#f85149' : '#56d4dd';
+  const ink = pos ? '#7ee2a8' : neg ? '#ff9b95' : '#8af0f7';
   x.fillStyle = 'rgba(8,32,36,.8)'; x.fillRect(0, 0, 340, 76);
-  x.strokeStyle = '#56d4dd'; x.lineWidth = 4; x.strokeRect(2, 2, 336, 72);
-  x.font = 'bold 32px sans-serif'; x.fillStyle = '#8af0f7';
-  x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('★ ' + label.slice(0, 18), 170, 40);
-  const t = new THREE.CanvasTexture(cv); calloutTexCache.set(label, t); return t;
+  x.strokeStyle = edge; x.lineWidth = 4; x.strokeRect(2, 2, 336, 72);
+  x.font = 'bold 28px sans-serif'; x.fillStyle = ink;
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  const tail = dv != null ? '  ' + (dv >= 0 ? '+' : '') + dv.toFixed(2) : '';
+  x.fillText('★ ' + label.slice(0, 16) + tail, 170, 40);
+  const t = new THREE.CanvasTexture(cv); calloutTexCache.set(key, t); return t;
 }
 function updateCallouts(t, st) {
   for (const [pri, o] of cars) {
@@ -809,7 +822,7 @@ function updateCallouts(t, st) {
     const c = st.cars.get(pri);
     if (best && c && o.callout) {
       const age = t - best.t, name = best.label.split(' — ')[0];
-      o.callout.material.map = calloutTex(name);
+      o.callout.material.map = calloutTex(name, touchDv.get(best.pri + ':' + best.t.toFixed(2)));
       o.callout.material.opacity = Math.max(0, 1 - age / 1.4);
       o.callout.position.set(c.p[0], c.p[1], c.p[2] + 360);
       o.callout.visible = true;
@@ -862,6 +875,15 @@ const plistEl = document.getElementById('players');
 const tickerEl = document.getElementById('ticker');
 const possEl = document.getElementById('poss');
 
+// ΔV (scoring-prob swing) formatting, shared by the roster impact chip + ticker.
+function dvColor(v) { return v > 0.0005 ? '#3fb950' : v < -0.0005 ? '#f85149' : '#8b949e'; }
+function fmtDv(v) { return (v >= 0 ? '+' : '') + v.toFixed(3); }
+// A player's total-impact chip (sum ΔV of their touches), or '' if not attached.
+function impChip(v) {
+  if (v == null) return '';
+  return `<span class="imp" style="color:${dvColor(v)}" title="impact: total scoring-prob swing (ΔV) from this player's touches — + helped, − hurt">Δ${fmtDv(v)}</span>`;
+}
+
 // Player rows are built once; only the boost value + follow highlight change.
 const rowEls = new Map();
 for (const pl of S.players) {
@@ -869,7 +891,7 @@ for (const pl of S.players) {
   row.className = 'row'; row.dataset.pri = pl.pri;
   const css = TEAM_CSS[pl.team] ?? '#9aa4b2';
   row.innerHTML =
-    `<div class="r1"><span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i></div>` +
+    `<div class="r1"><span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i>${impChip(pl.impact)}</div>` +
     `<div class="r2"><span class="ga">G${pl.goals} A${pl.assists} Sv${pl.saves}</span><span class="sp"></span><b>0</b></div>`;
   row.onclick = () => setCam('player', pl.pri);
   plistEl.appendChild(row);
@@ -908,7 +930,9 @@ function updateHud(t, st) {
     lastTickerIdx = i;
     const recent = S.events.slice(Math.max(0, i - 6), i + 1);
     tickerEl.innerHTML = recent.map(e =>
-      `<div class="ev ${e.kind}" data-t="${e.t}"><span>${fmt(e.t)}</span>${esc(e.label)}</div>`).join('');
+      `<div class="ev ${e.kind}" data-t="${e.t}"><span>${fmt(e.t)}</span>` +
+      (e.dv != null ? `<span class="d" style="color:${dvColor(e.dv)}">${fmtDv(e.dv)}</span>` : '') +
+      `${esc(e.label)}</div>`).join('');
     tickerEl.querySelectorAll('.ev').forEach(d => d.onclick = () => seek(+d.dataset.t));
   }
 }

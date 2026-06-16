@@ -2,7 +2,8 @@
 
 > Play a reconstructed match back in 3D in the browser — a broadcast-grade render
 > (shadows, painted pitch, goal nets) with analysis overlays (1st/2nd-man roles,
-> skills, heatmap, momentum), coaching tools (field overlays + a telestrator), and
+> skills, heatmap, momentum, per-touch impact), coaching tools (field overlays + a
+> telestrator), and
 > the usual scrubable timeline, camera presets, and event/skill ticker.
 
 Like `scoring`, `skills`, and `value`, this is a **pure consumer** of the
@@ -55,7 +56,8 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
   `1ST` HUD tag; support is tagged `2ND` (from `replay_scoring`'s per-frame role
   assignment; `--no-roles` to omit).
 - **Skills** — a fading `★ <skill>` callout pops above the car that just
-  performed a detected skill, and skills also stream in the ticker.
+  performed a detected skill (tinted by the touch's value swing when it is a ball
+  contact), and skills also stream in the ticker.
 - **Possession** (current team, from the last touch), **per-player trails**, a
   top-down **minimap**, and a roster with header **G/A/Sv** + live **speed**.
   Toggle trails / labels / boost / heatmap.
@@ -64,6 +66,11 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
 - **Momentum strip** — a P(blue scores the next goal) curve above the timeline
   (from `replay-value`; the model is basic, so read it as rough momentum, not a
   calibrated win probability). `--no-roles` / `--no-winprob` omit the overlays.
+- **Impact (ΔV)** — each ball-contact touch is credited the scoring-probability
+  swing it caused (from `replay-value`'s per-touch ΔV): the roster carries a
+  per-player **impact** chip (total ΔV, green helped / red hurt), touches in the
+  ticker show their signed swing, and ball-contact skill callouts are tinted by it.
+  Read it as a rough impact signal (same basic model). `--no-impact` omits it.
 
 ## Coaching tools
 
@@ -97,5 +104,5 @@ CI runs it (`.github/workflows/ci.yml`); locally, `npm i puppeteer` then
 ## Follow-ups
 
 Tracked in `backlog.md` (Viewer improvements). Remaining: validate car
-orientation against footage; a win-probability / ΔV strip from `replay-value`;
-and map-aware field geometry for non-standard arenas.
+orientation against footage; and map-aware field geometry (Phase 2) for
+non-standard arenas.
