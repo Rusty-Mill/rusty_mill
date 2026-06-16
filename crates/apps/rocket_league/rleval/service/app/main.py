@@ -27,7 +27,7 @@ from fastapi import (
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from . import credits, leaderboard
+from . import credits, leaderboard, webhooks
 from .config import settings
 from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report
@@ -194,6 +194,32 @@ def account_credits(
         "balance": credits.balance(session, account.id),
         "owns_book": account.owns_book,
         "locked_player_id": account.locked_player_id,
+    }
+
+
+class PurchaseEvent(BaseModel):
+    email: str
+    event_id: str  # provider event id (idempotency key)
+    kind: str = webhooks.MONTHLY  # "monthly" | "topup"
+    grant_book: bool = False
+
+
+@app.post("/internal/webhooks/purchase")
+def purchase_webhook(
+    body: PurchaseEvent, session: Session = Depends(get_session)
+) -> dict:
+    # Internal: expected behind a shared-secret/signature check (deferred).
+    account = webhooks.apply_purchase(
+        session,
+        email=body.email,
+        event_id=body.event_id,
+        kind=body.kind,
+        grant_book=body.grant_book,
+    )
+    return {
+        "account_id": account.id,
+        "owns_book": account.owns_book,
+        "balance": credits.balance(session, account.id),
     }
 
 

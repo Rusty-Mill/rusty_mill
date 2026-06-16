@@ -42,19 +42,21 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 - **Leaderboard** (§5/§8): materialized **best composite per account per season**;
   only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
   on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
+- **Entitlement webhook** (§8): `POST /internal/webhooks/purchase` flips
+  `owns_book` and grants credits — monthly (expires period end, no rollover) or a
+  top-up (+30 d) — idempotent by the provider's event id.
 - **Off-thread scoring**: upload enqueues a background task; the worker path shares
   the engine, so it's exercised in tests.
 
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): PDF rendering (`GET /v1/reports/{id}/pdf` via
-the existing report HTML), purchase **webhook**
-(`POST /internal/webhooks/purchase`), admin **re-score**
-(`POST /internal/rescore/{id}` — the core is already pure, needs the cached
-canonical blob), a real **job queue** (Celery/RQ vs. the in-process background
-task), per-account **rate-limiting**, **encryption-at-rest**, and real **auth**
-(the current `X-Account-Email` header is a dev stub — authentication is the web
-layer's job).
+the existing report HTML), admin **re-score** (`POST /internal/rescore/{id}` — the
+core is already pure, needs the cached canonical blob), a real **job queue**
+(Celery/RQ vs. the in-process background task), per-account **rate-limiting**,
+webhook **signature verification**, **encryption-at-rest**, and real **auth** (the
+current `X-Account-Email` header is a dev stub — authentication is the web layer's
+job).
 
 ## Run
 
@@ -69,15 +71,17 @@ cargo build -p replay-scoring --release   # from the repo root
 uvicorn app.main:app --reload
 ```
 
-Then, e.g.:
+Then provision an account (the webhook flips `owns_book` + grants credits), and
+upload:
 
 ```bash
+curl -X POST http://127.0.0.1:8000/internal/webhooks/purchase \
+  -H 'content-type: application/json' \
+  -d '{"email":"me@example.com","event_id":"dev-1","kind":"monthly","grant_book":true}'
+
 curl -F file=@assets/replays/42f2.replay -F playlist=ranked-2v2 \
   -H 'X-Account-Email: me@example.com' http://127.0.0.1:8000/v1/replays
 ```
-
-(An account needs `owns_book` + credits — granted by the purchase webhook in
-production; in dev, seed the `account` / `credit_ledger` rows directly.)
 
 ## Test
 

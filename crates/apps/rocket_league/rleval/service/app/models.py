@@ -69,6 +69,14 @@ class Report(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class WebhookEvent(SQLModel, table=True):
+    """A processed purchase/billing event, keyed by the provider's event id, so
+    the entitlement webhook is idempotent (no double-grant on redelivery, §8)."""
+
+    id: str = Field(primary_key=True)  # provider event id
+    created_at: datetime = Field(default_factory=utcnow)
+
+
 class LeaderboardEntry(SQLModel, table=True):
     """Materialized best locked-profile score per account per season (§5).
 
