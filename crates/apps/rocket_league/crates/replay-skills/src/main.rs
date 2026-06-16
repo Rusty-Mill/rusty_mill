@@ -15,17 +15,28 @@ use std::process::ExitCode;
 use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_skills::{detect_all, Skill, SkillConfig, SkillReport};
+use replay_analyzer::model::CanonicalMatch;
+use replay_skills::{detect_all, skill_values, Skill, SkillConfig, SkillReport, TouchDv};
+use replay_value::{build_dataset, per_touch_delta_v, ValueConfig, ValueModel};
 
 const USAGE: &str = "usage: replay-skills <file.replay> [--player <name>] \
 [--verify <skill>] [--window <start_s> <end_s>] [--profile] [--outcomes] \
-[--config <cfg.json>] [--json <out.json>] [--list]";
+[--value] [--value-model <model.json>] [--config <cfg.json>] [--json <out.json>] \
+[--list]";
 
 /// Exit code when `--verify` finds the skill was *not* performed (for scripting).
 const NOT_PERFORMED: u8 = 2;
 
 /// Window (s) a skill may precede a same-team goal to count toward its buildup.
 const OUTCOME_WINDOW_S: f32 = 6.0;
+
+/// Default pretrained (corpus-fit) value-model artifact for `--value`.
+const DEFAULT_VALUE_MODEL: &str = "assets/corpus/value_model.json";
+
+/// Max time gap (s) to link a skill instance to a touch's ΔV — touch-based
+/// skills are emitted exactly at the touch time, so this only needs slack for
+/// float jitter, not to bridge to unrelated touches.
+const VALUE_LINK_TOL_S: f32 = 0.1;
 
 struct Args {
     replay: Option<String>,
@@ -37,6 +48,8 @@ struct Args {
     list: bool,
     profile: bool,
     outcomes: bool,
+    value: bool,
+    value_model: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +63,8 @@ fn parse_args() -> Result<Args, String> {
         list: false,
         profile: false,
         outcomes: false,
+        value: false,
+        value_model: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -68,6 +83,8 @@ fn parse_args() -> Result<Args, String> {
             "--list" => a.list = true,
             "--profile" => a.profile = true,
             "--outcomes" => a.outcomes = true,
+            "--value" => a.value = true,
+            "--value-model" => a.value_model = Some(it.next().ok_or("--value-model needs a path")?),
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag {other}\n{USAGE}"))
@@ -123,6 +140,13 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
                 print_profiles(&report, canonical.duration_s, args.player.as_deref());
             } else if args.outcomes {
                 print_outcomes(&report, &canonical.events, args.player.as_deref());
+            } else if args.value {
+                print_value(
+                    &report,
+                    &canonical,
+                    args.value_model.as_deref(),
+                    args.player.as_deref(),
+                );
             } else {
                 print_summary(&report, args.player.as_deref());
             }
@@ -308,6 +332,79 @@ fn print_outcomes(
                     total
                 );
             }
+        }
+    }
+}
+
+/// Per-player skill→value (ΔV) view: how much each ball-contact skill moved the
+/// team's scoring probability, via the value model's per-touch swing.
+fn print_value(
+    report: &SkillReport,
+    canonical: &CanonicalMatch,
+    model_path: Option<&str>,
+    filter: Option<&str>,
+) {
+    let vcfg = ValueConfig::default();
+    let model = load_value_model(model_path.unwrap_or(DEFAULT_VALUE_MODEL), canonical, &vcfg);
+    let touch_dv: Vec<TouchDv> = per_touch_delta_v(canonical, &model, &vcfg)
+        .into_iter()
+        .map(|tv| TouchDv {
+            pri: tv.pri,
+            t: tv.t,
+            dv: tv.dv,
+        })
+        .collect();
+
+    eprintln!("== SKILL VALUE ==  (mean ΔV = scoring-prob swing per rep; + helps, - hurts)");
+    for v in skill_values(report, &touch_dv, VALUE_LINK_TOL_S) {
+        if let Some(name) = filter {
+            if v.player != name {
+                continue;
+            }
+        }
+        if v.linked == 0 {
+            continue;
+        }
+        eprintln!(
+            "\n-- {} (pri {}, team {:?}) --  ΔV {:+.3} over {} linked rep{}",
+            v.player,
+            v.pri,
+            v.team,
+            v.sum_dv,
+            v.linked,
+            if v.linked == 1 { "" } else { "s" },
+        );
+        for (skill, (n, sum)) in &v.by_skill {
+            eprintln!(
+                "  {:<20} x{:<3} ΔV {:+.3}/rep",
+                skill.display_name(),
+                n,
+                sum / *n as f32,
+            );
+        }
+    }
+}
+
+/// Load the pretrained (corpus-fit) value model from `path`; if it can't be read,
+/// fall back to a per-match model trained on this single replay (weak, but keeps
+/// `--value` working) and note it on stderr.
+fn load_value_model(path: &str, canonical: &CanonicalMatch, vcfg: &ValueConfig) -> ValueModel {
+    match std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<ValueModel>(&b).ok())
+    {
+        Some(m) => {
+            eprintln!("(value model: {path}, trained on {} states)", m.n_train);
+            m
+        }
+        None => {
+            let ds = build_dataset(canonical, vcfg);
+            let m = ValueModel::train(&ds, &vcfg.train);
+            eprintln!(
+                "(no value model at {path}; trained per-match on {} states — single-replay, weak)",
+                m.n_train
+            );
+            m
         }
     }
 }

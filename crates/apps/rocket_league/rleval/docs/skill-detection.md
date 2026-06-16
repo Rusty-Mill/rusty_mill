@@ -81,13 +81,25 @@ axes:
 `outcomes(&SkillReport, &[Event], window_s)` links skills to **goals**: per player,
 how many reps fell within `window_s` before a same-team goal ("buildup
 involvement"). Goals are sparse, so counts are small — read it as involvement, not
-a success rate; a richer link via the value model's ΔV is a follow-up.
+a success rate.
+
+`value_link::skill_values(&SkillReport, &[TouchDv], tol_s)` is the richer,
+continuous outcome link: each **ball-contact** skill instance is credited the
+scoring-probability swing (**ΔV**) of the touch it rode on, from `replay-value`'s
+`per_touch_delta_v`. So a player's aerials, flicks, redirects, and kickoff touches
+carry a signed "how much did it move the needle" value — positive helped, negative
+hurt (a giveaway) — instead of only a sparse goal count. Run-based skills
+(supersonic, ceiling, ground dribble) and non-contact events (boost steal, demo)
+aren't a ball contact (`Skill::is_ball_contact`), so they're left unlinked rather
+than credited a coincidental nearby touch. The join takes plain `TouchDv` numbers,
+so the skills library stays independent of the value crate; the CLI wires the two.
 
 ## CLI
 
 ```
 replay-skills <file.replay> [--player <name>] [--verify <skill>]
               [--window <start_s> <end_s>] [--profile] [--outcomes]
+              [--value] [--value-model <model.json>]
               [--config <cfg.json>] [--json <out.json>] [--list]
 ```
 
@@ -96,6 +108,10 @@ replay-skills <file.replay> [--player <name>] [--verify <skill>]
   `count`, rate, mean evidence magnitude (with unit), and mean confidence.
 - `--outcomes`: per player, how many skills fell in a goal buildup (within ~6 s
   before a same-team goal).
+- `--value`: per player, the mean **ΔV** (scoring-prob swing) of each ball-contact
+  skill, via the value model. Loads the pretrained
+  `assets/corpus/value_model.json` by default (override with `--value-model`, or it
+  falls back to a weak per-match model). Signed: `+` helped, `-` hurt.
 - `--verify <skill>`: prints YES/no and exits `0` if performed, `2` if not — a
   scripting gate. Combine with `--player` and/or `--window` to verify within a
   clip:

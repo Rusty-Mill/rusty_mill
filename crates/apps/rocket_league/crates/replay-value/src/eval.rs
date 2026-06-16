@@ -28,19 +28,34 @@ pub struct PlayerValue {
     pub mean_dv: f32,
 }
 
-/// Compute per-player ΔV over all touches with a known toucher and team.
-pub fn per_player_delta_v(
+/// One touch's value swing — the building block [`per_player_delta_v`] sums.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TouchValue {
+    /// Match time of the touch (s).
+    pub t: f32,
+    /// Toucher (PRI).
+    pub pri: i32,
+    /// Toucher's team — the frame ΔV was evaluated in.
+    pub team: Option<i32>,
+    /// `ΔV = V(after) − V(before)`, signed: positive moved the toucher's team
+    /// toward scoring next; negative away (a giveaway).
+    pub dv: f32,
+}
+
+/// Per-touch ΔV for every touch with a known toucher/team and a computable
+/// before/after state, in event (time) order. A touch is credited the change it
+/// caused in its team's scoring probability over `cfg.touch_post_delay_s`,
+/// evaluated in the toucher's attacking frame. [`per_player_delta_v`] aggregates
+/// this; consumers (e.g. linking skills to outcomes) can use the per-touch swings
+/// directly.
+pub fn per_touch_delta_v(
     m: &CanonicalMatch,
     model: &ValueModel,
     cfg: &ValueConfig,
-) -> Vec<PlayerValue> {
+) -> Vec<TouchValue> {
     let frames = &m.resampled.frames;
     let signs = &m.resampled.team_attack_sign;
-    let names: BTreeMap<i32, String> = m.tracks.iter().map(|t| (t.pri, t.player.clone())).collect();
-    let teams: BTreeMap<i32, Option<i32>> = m.tracks.iter().map(|t| (t.pri, t.team)).collect();
-
-    // pri -> (touch count, ΔV sum).
-    let mut acc: BTreeMap<i32, (usize, f32)> = BTreeMap::new();
+    let mut out = Vec::new();
     for e in &m.events {
         let Event::Touch {
             t,
@@ -64,9 +79,32 @@ pub fn per_player_delta_v(
             continue;
         };
         let dv = model.predict(&s1.x) - model.predict(&s0.x);
-        let entry = acc.entry(*pri).or_insert((0, 0.0));
+        out.push(TouchValue {
+            t: *t,
+            pri: *pri,
+            team: Some(*team),
+            dv,
+        });
+    }
+    out
+}
+
+/// Compute per-player ΔV over all touches with a known toucher and team, by
+/// summing the [`per_touch_delta_v`] credits per player.
+pub fn per_player_delta_v(
+    m: &CanonicalMatch,
+    model: &ValueModel,
+    cfg: &ValueConfig,
+) -> Vec<PlayerValue> {
+    let names: BTreeMap<i32, String> = m.tracks.iter().map(|t| (t.pri, t.player.clone())).collect();
+    let teams: BTreeMap<i32, Option<i32>> = m.tracks.iter().map(|t| (t.pri, t.team)).collect();
+
+    // pri -> (touch count, ΔV sum), aggregated from the per-touch credits.
+    let mut acc: BTreeMap<i32, (usize, f32)> = BTreeMap::new();
+    for tv in per_touch_delta_v(m, model, cfg) {
+        let entry = acc.entry(tv.pri).or_insert((0, 0.0));
         entry.0 += 1;
-        entry.1 += dv;
+        entry.1 += tv.dv;
     }
 
     let mut out: Vec<PlayerValue> = acc

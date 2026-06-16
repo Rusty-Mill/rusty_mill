@@ -28,6 +28,7 @@ pub mod outcome;
 pub mod profile;
 pub mod report;
 pub mod skill;
+pub mod value_link;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,6 +39,7 @@ pub use outcome::{outcomes, SkillOutcome};
 pub use profile::{profiles, PlayerSkillProfile, SkillStat};
 pub use report::{PlayerSkills, SkillInstance, SkillReport};
 pub use skill::{Detection, Skill, SkillCategory};
+pub use value_link::{skill_values, SkillValue, TouchDv};
 
 /// Detect every catalogued skill in a match, producing a [`SkillReport`].
 ///

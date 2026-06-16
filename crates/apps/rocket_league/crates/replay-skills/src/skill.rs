@@ -153,6 +153,25 @@ impl Skill {
         }
     }
 
+    /// Whether the skill *is* a ball contact — its instance is emitted at a touch.
+    /// True for the striking/aerial-contact mechanics; false for run-based skills
+    /// (supersonic, ceiling, ground dribble) and non-contact events (boost steal,
+    /// demo). Used to gate value-model ΔV linking: only a real ball contact has a
+    /// touch swing to credit; matching a run-start to a nearby touch would credit
+    /// the wrong action.
+    pub fn is_ball_contact(&self) -> bool {
+        matches!(
+            self,
+            Skill::Aerial
+                | Skill::AirDribble
+                | Skill::WallPlay
+                | Skill::Flick
+                | Skill::PowerShot
+                | Skill::Redirect
+                | Skill::KickoffFirstTouch
+        )
+    }
+
     /// Short label for a skill's **primary evidence magnitude** — the structured
     /// number a [`crate::SkillInstance`] carries in its `metric` field (e.g. an
     /// aerial's peak height, a dribble's duration). Empty for skills with no
