@@ -89,6 +89,22 @@ filesystem or S3).
   end-to-end (real broker + worker + Rust scorer). `docker compose up` brings up
   the whole stack.
 
+## Parser redundancy (§13, M3 — Phase 1 ✔)
+
+The last open M3 item, the "second parser adapter for redundancy", ships as a
+**canonical-vs-external comparator** in the Rust workspace rather than a second
+decoder behind the `ReplayParser` port — carball/ballchasing decode above our
+port's granularity, and the contract (§4.2/§10) lives at the canonical-match
+level. `replay_scoring::contract::cross_check` tiers our boxcars-derived match
+facts against ballchasing's independent decode: **Tier 1** (goals, per-team
+score, roster, map, team_size) must match exactly; **Tier 2** (recomputed
+saves/shots/assists) is advisory; boost economy is deferred (Tier 3). The
+`contract` bin diffs two JSON files (exit non-zero on a Tier-1 mismatch) and the
+offline `scoring/tests/ballchasing_contract.rs` guards against silent parser
+drift (§11) in CI. Fixtures are captured + sanitized by the manual, key-gated
+`scripts/ballchasing_fetch.py` (never in CI). Phase 2 (carball reconstruction
+cross-check) is deferred — see `docs/parser-cross-validation-harness.md`.
+
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): real **auth** — the current `X-Account-Email`

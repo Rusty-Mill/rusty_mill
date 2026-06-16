@@ -1,8 +1,17 @@
 # Parser cross-validation harness — scope & handoff
 
-Status: **scoped, not started.** The last open M3 item (spec §13, "second parser
-adapter for redundancy"). Everything else in M2 and M3 is merged to `main`
-(PRs #17–#30). Resume from the checklist at the bottom.
+Status: **Phase 1 shipped.** The last open M3 item (spec §13, "second parser
+adapter for redundancy"). The ballchasing.com header cross-check — comparator
+(`scoring/src/contract.rs`), `contract` bin, offline CI test
+(`scoring/tests/ballchasing_contract.rs`) on sanitized real fixtures, and the
+key-gated fetch shim (`scripts/ballchasing_fetch.py`) — is built and green.
+**Phase 2 (carball reconstruction cross-check) remains deferred.**
+
+Capture note: uploading our `42f2`/`419a` samples was blocked by this
+environment's egress **request-body cap** (`POST` bodies over ~64 KB → 413;
+`GET` is fine), so the committed real pair is a corpus replay already on
+ballchasing (`990e4485-…`), fetched by id. To pair the exact `42f2` sample,
+relax the egress body limit and upload it privately via the shim.
 
 ## Decision (made)
 This is **not** a drop-in `ReplayParser` adapter. carball/ballchasing operate above

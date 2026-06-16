@@ -17,6 +17,10 @@ path = "src/main.rs"
 name = "reconcile"
 path = "src/bin/reconcile.rs"
 
+[[bin]]
+name = "contract"
+path = "src/bin/contract.rs"
+
 [dependencies]
 replay-analyzer = { path = ".." }
 replay-value = { path = "../value" }

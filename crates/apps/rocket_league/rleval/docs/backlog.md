@@ -138,9 +138,26 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   leaderboard refresh, PDF invalidation, canonical-vs-reparse selection, 404/409).
   Where: `service/app/service.py` (`rescore`) + `scoring/src/main.rs`
   (`--dump-canonical` / `--from-canonical`).
-- **Second parser adapter** for redundancy/contract-testing: `carball` or the
-  ballchasing.com API behind the existing `ReplayParser` port (§6). Where:
-  `src/decode/` (this repo).
+- **Second parser adapter** for redundancy/contract-testing. **Phase 1 ✔** —
+  *not* a drop-in `ReplayParser` adapter (carball/ballchasing operate above our
+  decode port's network-actor granularity; the spec's contract §4.2/§10 lives at
+  the **canonical-match** level). Instead a **canonical-vs-external comparator**:
+  `replay_scoring::contract::cross_check(&CanonicalMatch, &BallchasingReplay)`
+  tiers the cross-check — **Tier 1 (exact, fail):** goal count + each goal's
+  `(scorer, team)`, per-team score, roster (name ↔ team), `map`, `team_size`;
+  **Tier 2 (advisory, warn):** per-player saves/shots/assists (ballchasing
+  recomputes); **Tier 3 (deferred):** boost economy (different definitions). A
+  thin `contract` bin diffs two JSON files and exits non-zero on any Tier-1
+  mismatch; the offline CI test `scoring/tests/ballchasing_contract.rs` asserts a
+  Tier-1 pass on a real ranked pair and that a deliberately-drifted fixture is
+  caught — the §11 parser-drift tripwire. Fixtures captured (private upload was
+  blocked by the egress request-body cap, so a corpus replay already on
+  ballchasing was fetched by id) + sanitized (uploader + player ids stripped) via
+  the manual, key-gated `scripts/ballchasing_fetch.py` (never in CI). The 14
+  scoring-rubric metrics are our IP and never cross-checked. Where:
+  `scoring/src/contract.rs`, `scoring/src/bin/contract.rs`, `scripts/`.
+  *Phase 2 (deferred, not started):* carball frame-level reconstruction
+  cross-check. See `docs/parser-cross-validation-harness.md`.
 
 ---
 

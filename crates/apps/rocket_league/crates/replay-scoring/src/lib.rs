@@ -12,6 +12,7 @@
 
 pub mod calibrate;
 pub mod config;
+pub mod contract;
 pub mod engine;
 pub mod features;
 pub mod heatmap;
@@ -27,6 +28,7 @@ use std::collections::BTreeSet;
 use replay_analyzer::model::CanonicalMatch;
 
 pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
+pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
 pub use report::{Confidence, MetricBreakdown, Report};
 
 /// Score one target player (by stable PRI) against `cfg`.
