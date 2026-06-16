@@ -155,9 +155,11 @@ Tracked churn-list. Items needing a product/visual decision are marked
   ballchasing-mangled player names, so ~38/720 players go unranked (name
   mangling, not a team issue). Reuse the team-anchored matching from
   `analyze::validate` so every player gets its rank label.
-- **Spurious `<unknown>` tracks.** A few replays coalesce an extra unnamed track
-  (an unbound/short-lived PRI). Harmless downstream (excluded from validate /
-  reconcile / lobby), but worth eliminating in `analyze::identity`.
+- **Spurious `<unknown>` tracks.** ✔ `analyze::identity::coalesce` now drops short
+  unbound (`<unknown>`) tracks — a brief actor that never binds a PRI is a glitch,
+  not a player (real players always bind one). Threshold `MIN_ORPHAN_SAMPLES`;
+  substantial unbound tracks are kept. Unit test (`short_unbound_orphan_track_is_dropped`);
+  the 42f2 golden is unaffected (it has no orphan).
 - **Corpus reproducibility.** ✔ The 180 corpus `.replay` files are gitignored
   (~230 MB); only the distilled fixtures are committed. Retrieval is now scripted
   and documented: `assets/corpus/refresh_corpus_replays.py` re-downloads them by

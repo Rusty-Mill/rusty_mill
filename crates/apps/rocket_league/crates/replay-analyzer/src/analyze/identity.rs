@@ -17,6 +17,12 @@ use std::collections::HashMap;
 /// Sentinel PRI for a car whose binding has not yet arrived.
 const UNBOUND: i32 = -1;
 
+/// An unbound ("<unknown>") track with fewer samples than this is a transient
+/// glitch (a brief actor that never bound a PRI), not a real player whose binding
+/// was missed — drop it instead of emitting a spurious track. A real player over
+/// even ~1 s reports far more than this; a substantial unbound track is kept.
+const MIN_ORPHAN_SAMPLES: usize = 30;
+
 /// One continuous lifetime of a single car actor: every position sample it
 /// produced while bound to one PRI.
 #[derive(Debug, Clone, PartialEq)]
@@ -192,6 +198,10 @@ pub fn coalesce(
             }
         })
         .collect();
+
+    // Drop transient unbound ("<unknown>") tracks — a brief actor that never
+    // bound a PRI is a glitch, not a player (real players always bind one).
+    tracks.retain(|t| t.pri != UNBOUND || t.samples.len() >= MIN_ORPHAN_SAMPLES);
 
     // Deterministic output: by team, then PRI.
     tracks.sort_by(|a, b| {
