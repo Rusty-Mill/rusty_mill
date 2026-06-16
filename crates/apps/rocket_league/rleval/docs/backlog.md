@@ -43,11 +43,14 @@ see `service/README.md`. Pure-ish, ports-and-adapters, tested without the Rust
 toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 (`.github/workflows/ci.yml`, `service` job).
 
-- **API service.** ✔ FastAPI, ports-and-adapters. Implemented: `POST /v1/replays`
-  (upload→guard→hold→enqueue), `GET /v1/replays/{id}`, `GET /v1/reports/{id}`,
-  `GET /v1/account/credits`, `POST /v1/account/lock-profile`, `GET /healthz`.
-  Upload guards: `owns_book` + positive balance. Auth is a dev `X-Account-Email`
-  stub (real auth = web layer). Where: `service/app/main.py`.
+- **API service.** ✔ FastAPI, ports-and-adapters. The full §7 surface:
+  `POST /v1/replays` (upload→guard→hold→enqueue), `GET /v1/replays/{id}`,
+  `GET /v1/reports/{id}` (+`/pdf`), `GET /v1/leaderboard`, `GET /v1/account/credits`,
+  `POST /v1/account/lock-profile`, `POST /internal/webhooks/purchase`,
+  `POST /internal/rescore/{id}`, `GET /healthz`. Upload guards: `owns_book` +
+  positive balance + a **per-account rate limit** (§7, `RLS_UPLOAD_RATE_LIMIT`).
+  Auth is a dev `X-Account-Email` stub (real auth = web layer). Where:
+  `service/app/main.py`.
 - **Persistence.** ✔ SQLModel tables (§5): `Account`, `CreditLedger`, `Replay`,
   `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
   Idempotency `replay_id = sha256(blob)`; raw blobs content-addressed on disk for
@@ -74,8 +77,9 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   (+10, +30 d) — idempotent by the provider's event id (`WebhookEvent`). Completes
   §8's grant side (spend/refund already shipped). Tested
   (`service/tests/test_webhook.py`: grant, idempotency, top-up, and end-to-end
-  account provisioning → upload). *Remaining:* signature/shared-secret verification
-  on the `/internal/` caller. Where: `service/app/webhooks.py`.
+  account provisioning → upload) + **`X-Signature` HMAC-SHA256 verification** when
+  `RLS_WEBHOOK_SECRET` is set (idempotent, valid/invalid/missing covered). Where:
+  `service/app/webhooks.py`, `main._verify_webhook_signature`.
 
 ## M3 — leaderboard, seasons, redundancy
 

@@ -37,6 +37,12 @@ class Settings:
         # Monthly credit grant (§8); top-ups handled by the (deferred) webhook.
         self.monthly_grant = int(os.getenv("RLS_MONTHLY_GRANT", "20"))
         self.upload_max_bytes = int(os.getenv("RLS_UPLOAD_MAX_BYTES", str(25 * _MB)))
+        # Per-account upload rate limit (§7): at most N new uploads per window.
+        self.upload_rate_limit = int(os.getenv("RLS_UPLOAD_RATE_LIMIT", "30"))
+        self.upload_rate_window_s = int(os.getenv("RLS_UPLOAD_RATE_WINDOW_S", "3600"))
+        # Shared secret for verifying the purchase webhook's HMAC-SHA256 signature
+        # (§8). Empty disables verification (dev only).
+        self.webhook_secret = os.getenv("RLS_WEBHOOK_SECRET", "")
 
 
 settings = Settings()
