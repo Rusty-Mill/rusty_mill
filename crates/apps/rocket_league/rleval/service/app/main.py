@@ -45,7 +45,8 @@ from .service import ingest, replay_id_for, rescore
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    if settings.db_auto_create:  # dev; production runs Alembic migrations instead
+        init_db()
     yield
 
 

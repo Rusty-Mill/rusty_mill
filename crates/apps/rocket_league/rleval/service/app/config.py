@@ -15,6 +15,14 @@ class Settings:
     def __init__(self) -> None:
         # SQLAlchemy URL. SQLite for dev; point at Postgres in production (§5).
         self.database_url = os.getenv("RLS_DATABASE_URL", "sqlite:///./rls.db")
+        # Auto-create tables on startup (dev). Set 0 in production, where schema is
+        # managed by Alembic (`alembic upgrade head`) so create-all can't race it.
+        self.db_auto_create = os.getenv("RLS_DB_AUTO_CREATE", "1") not in (
+            "0",
+            "",
+            "false",
+            "False",
+        )
         # Artifact store (content-addressed by replay_id, §9/§12). "fs" keeps the
         # filesystem store at blob_dir; "s3" uses object storage (multi-node).
         self.blob_backend = os.getenv("RLS_BLOB_BACKEND", "fs")

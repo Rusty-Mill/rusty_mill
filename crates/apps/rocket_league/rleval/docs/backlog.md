@@ -52,10 +52,15 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   Auth is a dev `X-Account-Email` stub (real auth = web layer). Where:
   `service/app/main.py`.
 - **Persistence.** ✔ SQLModel tables (§5): `Account`, `CreditLedger`, `Replay`,
-  `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
-  Idempotency `replay_id = sha256(blob)`; artifacts are content-addressed for
-  re-scoring without re-upload; the **canonical-match** blob is optionally cached
-  (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`).
+  `Report`, `WebhookEvent`, `LeaderboardEntry`. **Postgres-ready**: SQLite for dev,
+  Postgres via `RLS_DATABASE_URL` (connect-args are dialect-aware — `check_same_thread`
+  only for SQLite — + `pool_pre_ping`), schema by **Alembic** (`migrations/`, initial
+  baseline) rather than create-all in prod (`RLS_DB_AUTO_CREATE=0`). Verified on a
+  real Postgres 16: `alembic upgrade head` + `check` (no drift) + a full
+  credit+scoring flow through the service's engine; an in-CI `alembic check` guards
+  model/migration drift. Idempotency `replay_id = sha256(blob)`; artifacts
+  content-addressed for re-scoring without re-upload; the **canonical-match** blob is
+  optionally cached (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`).
 - **Blob store (§5).** ✔ A `BlobStore` port (`service/app/blobs.py`):
   `FilesystemBlobStore` (default, `blob_dir`) or `S3BlobStore`
   (`RLS_BLOB_BACKEND=s3`; AWS or MinIO/localstack via `RLS_S3_ENDPOINT_URL`) so API
