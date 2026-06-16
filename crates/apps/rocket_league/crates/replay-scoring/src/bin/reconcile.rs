@@ -7,12 +7,17 @@
 //! then reports how the rubric agrees with each independent ground truth. See
 //! [`replay_scoring::reconcile`] for what the correlations mean.
 //!
-//! Usage: `reconcile [manifest.json]` (default `assets/corpus/manifest.json`).
-//! Reads `fitted_config.json` and `value_model.json` from the manifest's dir.
+//! Usage: `reconcile [manifest.json] [--gate]` (default manifest
+//! `assets/corpus/manifest.json`). Reads `fitted_config.json` and
+//! `value_model.json` from the manifest's dir. With `--gate` it exits non-zero on
+//! any rank-vs-impact **sign disagreement** — a regression gate that catches a
+//! future metric change that tracks the ranked cohort but not in-match value,
+//! mirroring `validate --gate`.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
@@ -36,12 +41,30 @@ fn show(o: Option<f32>) -> String {
         .unwrap_or_else(|| "  n/a".into())
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let manifest_path = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "assets/corpus/manifest.json".into()),
-    );
+fn main() -> ExitCode {
+    match run() {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Returns `Ok(false)` when `--gate` is set and a sign disagreement is found.
+fn run() -> Result<bool, Box<dyn Error>> {
+    let mut gate = false;
+    let mut manifest_arg: Option<String> = None;
+    for a in std::env::args().skip(1) {
+        match a.as_str() {
+            "--gate" => gate = true,
+            other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
+            other => manifest_arg = Some(other.to_string()),
+        }
+    }
+    let manifest_path =
+        PathBuf::from(manifest_arg.unwrap_or_else(|| "assets/corpus/manifest.json".into()));
     let dir = manifest_path
         .parent()
         .unwrap_or(Path::new("."))
@@ -175,9 +198,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     } else {
         println!("\nSign disagreements (track ranked cohort but not in-match impact):");
-        for m in dis {
+        for m in &dis {
             println!("  - {}", m.metric.key());
         }
     }
-    Ok(())
+
+    if gate && !dis.is_empty() {
+        eprintln!(
+            "\nGATE FAIL: {} metric(s) track the ranked cohort but disagree on in-match value.",
+            dis.len()
+        );
+        return Ok(false);
+    }
+    Ok(true)
 }

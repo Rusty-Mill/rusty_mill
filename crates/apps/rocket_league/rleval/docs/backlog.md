@@ -145,10 +145,12 @@ Tracked churn-list. Items needing a product/visual decision are marked
 
 ## Engineering follow-ups (this repo, smaller)
 
-- **Reconciliation as a standing gate.** Add a `--gate` to `reconcile` (and a
-  test) that fails on a rank-vs-impact **sign disagreement**, so a future metric
-  change that tracks the ranked cohort but not in-match value is caught in CI.
-  Mirrors `validate --gate`. (Currently reports 0 disagreements.)
+- **Reconciliation as a standing gate.** ✔ `reconcile --gate` exits non-zero on
+  any rank-vs-impact **sign disagreement** (mirrors `validate --gate`); the
+  `disagreements()` logic is covered by `flags_sign_disagreement`. Note: it reads
+  the corpus replays (gitignored) + `value_model.json`, so it's a local/with-corpus
+  gate — not wired into the no-corpus CI job. Wiring it in CI needs the corpus
+  fetch step (see corpus reproducibility). Currently 0 disagreements.
 - **Team-anchored rank join in `calibrate`.** The manifest keys ranks by
   ballchasing-mangled player names, so ~38/720 players go unranked (name
   mangling, not a team issue). Reuse the team-anchored matching from
