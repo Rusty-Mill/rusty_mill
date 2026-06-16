@@ -156,8 +156,17 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   the manual, key-gated `scripts/ballchasing_fetch.py` (never in CI). The 14
   scoring-rubric metrics are our IP and never cross-checked. Where:
   `scoring/src/contract.rs`, `scoring/src/bin/contract.rs`, `scripts/`.
-  *Phase 2 (deferred, not started):* carball frame-level reconstruction
-  cross-check. See `docs/parser-cross-validation-harness.md`.
+  **Phase 2 ✔** — the independent *reconstruction* cross-check: the `recon-check`
+  crate compares our `build_canonical` against **`subtr-actor`** (a separately
+  authored Rust reconstructor pinning our exact boxcars) frame-by-frame on a shared
+  30 Hz grid. Tier R1 gates roster + coverage + ball-position agreement (median
+  ≤ 60 uu and ≥ 80% of frames within 200 uu — the agree-rate gate tolerates
+  goal-celebration windows); Tier R2 reports per-player car position + boost.
+  Measured: 42f2 median 15 uu / 97% agree, 419a 28 uu / 88% agree; a synthetic ball
+  drift trips R1. Offline CI test `recon-check/tests/recon_contract.rs` (decodes
+  `42f2`/`419a` and runs both reconstructions in-process — no network). This is
+  *reconstruction-layer* independence (boxcars is the deliberately-shared parse
+  layer; Phase 1 covers that boundary for header facts). Where: `recon-check/`.
 
 ---
 

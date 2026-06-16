@@ -1,11 +1,13 @@
 # Parser cross-validation harness — scope & handoff
 
-Status: **Phase 1 shipped.** The last open M3 item (spec §13, "second parser
-adapter for redundancy"). The ballchasing.com header cross-check — comparator
-(`scoring/src/contract.rs`), `contract` bin, offline CI test
-(`scoring/tests/ballchasing_contract.rs`) on sanitized real fixtures, and the
-key-gated fetch shim (`scripts/ballchasing_fetch.py`) — is built and green.
-**Phase 2 (carball reconstruction cross-check) remains deferred.**
+Status: **Phase 1 + Phase 2 shipped.** The last open M3 item (spec §13, "second
+parser adapter for redundancy"). **Phase 1** — the ballchasing.com header
+cross-check (comparator `scoring/src/contract.rs`, `contract` bin, offline CI test
+`scoring/tests/ballchasing_contract.rs` on sanitized real fixtures, key-gated fetch
+shim `scripts/ballchasing_fetch.py`). **Phase 2** — the independent *reconstruction*
+cross-check (the `recon-check` crate, comparing our `build_canonical` against
+`subtr-actor` frame-by-frame; offline CI test on the committed `42f2`/`419a`). Both
+built and green.
 
 Capture note: uploading our `42f2`/`419a` samples was blocked by this
 environment's egress **request-body cap** (`POST` bodies over ~64 KB → 413;
@@ -182,13 +184,31 @@ A `subtr-actor` spike (v1.0.2) settled it:
   mid-match** — well under one ball radius (~93 uu), in the same coordinate frame.
   That sets a sensible Tier-R1 tolerance (~50–100 uu).
 
-So Option A is chosen. Remaining work is engineering, not feasibility: a
-`recon-check` crate wrapping subtr-actor, a tolerance comparator (ball/car
-position + velocity + boost on the shared grid, event-timing windows), and an
-offline CI test on `42f2`/`419a`. Caveat stands — sharing `boxcars` means this is
-**reconstruction-layer** independence, not parse-layer.
+So Option A was chosen and built.
+
+### Implemented (Option A — `recon-check` crate)
+`recon-check` decodes a replay, builds **our** reconstruction via the public
+`build_canonical` and the **independent** one via `subtr-actor`
+(`NDArrayCollector` at our grid's Hz), aligns the two grids by nearest game-clock
+time, and tiers the comparison:
+- **Tier R1 (gated):** roster (player set), frame coverage (≥ 90% aligned), and
+  ball-position agreement — **median ≤ 60 uu** *and* an **agree-rate ≥ 80%** of
+  frames within 200 uu. The agree-rate (not p95) is the gate because goal
+  celebration / reset windows are non-gameplay frames where the ball legitimately
+  diverges (they blow up p95/max but not the median or the bulk agreement).
+- **Tier R2 (advisory):** per-player car position (matched by name) and boost
+  (boost units differ by convention — reported, never gated).
+
+Measured on the committed replays (offline): **42f2** median 15 uu, 97% agree;
+**419a** median 28 uu, 88% agree — both pass with margin, and a synthetic +600 uu
+ball drift trips R1 (the reconstruction-regression tripwire). The `recon-check`
+bin prints the tiered diff (non-zero exit on an R1 breach);
+`recon-check/tests/recon_contract.rs` is the offline CI gate (decodes
+`42f2`/`419a` and runs both reconstructions in-process — no network, no fixtures).
+Caveat stands — sharing `boxcars` means this is **reconstruction-layer**
+independence, not parse-layer.
 
 ## Non-goals
 Not a drop-in parser; not validating the scoring rubric; no live API call in CI.
-Phase 2 (carball / independent reconstruction cross-check) is designed above but
-**not implemented** here.
+Parse-layer decode bugs (shared `boxcars`) are out of scope for Phase 2 — the
+ballchasing header check (Phase 1) covers that boundary for header facts.

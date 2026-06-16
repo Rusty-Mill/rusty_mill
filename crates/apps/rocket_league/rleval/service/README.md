@@ -102,8 +102,12 @@ saves/shots/assists) is advisory; boost economy is deferred (Tier 3). The
 `contract` bin diffs two JSON files (exit non-zero on a Tier-1 mismatch) and the
 offline `scoring/tests/ballchasing_contract.rs` guards against silent parser
 drift (§11) in CI. Fixtures are captured + sanitized by the manual, key-gated
-`scripts/ballchasing_fetch.py` (never in CI). Phase 2 (carball reconstruction
-cross-check) is deferred — see `docs/parser-cross-validation-harness.md`.
+`scripts/ballchasing_fetch.py` (never in CI). **Phase 2** ships too: the
+`recon-check` crate cross-checks our `build_canonical` *reconstruction* against
+`subtr-actor` (an independent Rust reconstructor) frame-by-frame on a shared 30 Hz
+grid — Tier R1 gates roster/coverage/ball-position agreement, Tier R2 reports
+per-player car position. Offline CI test, no network. See
+`docs/parser-cross-validation-harness.md`.
 
 ## Deferred follow-ups
 
