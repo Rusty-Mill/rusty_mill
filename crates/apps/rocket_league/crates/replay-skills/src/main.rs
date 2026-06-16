@@ -18,7 +18,7 @@ use replay_analyzer::decode::ReplayParser;
 use replay_skills::{detect_all, Skill, SkillConfig, SkillReport};
 
 const USAGE: &str = "usage: replay-skills <file.replay> [--player <name>] \
-[--verify <skill>] [--window <start_s> <end_s>] [--config <cfg.json>] \
+[--verify <skill>] [--window <start_s> <end_s>] [--profile] [--config <cfg.json>] \
 [--json <out.json>] [--list]";
 
 /// Exit code when `--verify` finds the skill was *not* performed (for scripting).
@@ -32,6 +32,7 @@ struct Args {
     config: Option<String>,
     json: Option<String>,
     list: bool,
+    profile: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -43,6 +44,7 @@ fn parse_args() -> Result<Args, String> {
         config: None,
         json: None,
         list: false,
+        profile: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -59,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
             "--config" => a.config = Some(it.next().ok_or("--config needs a path")?),
             "--json" => a.json = Some(it.next().ok_or("--json needs a path")?),
             "--list" => a.list = true,
+            "--profile" => a.profile = true,
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with('-') => {
                 return Err(format!("unknown flag {other}\n{USAGE}"))
@@ -110,7 +113,11 @@ fn run() -> Result<ExitCode, Box<dyn Error>> {
     let code = match &args.verify {
         Some(key) => verify(&report, key, &args)?,
         None => {
-            print_summary(&report, args.player.as_deref());
+            if args.profile {
+                print_profiles(&report, canonical.duration_s, args.player.as_deref());
+            } else {
+                print_summary(&report, args.player.as_deref());
+            }
             ExitCode::SUCCESS
         }
     };
@@ -212,6 +219,38 @@ fn print_summary(report: &SkillReport, player_filter: Option<&str>) {
         }
         for (skill, n) in &p.counts {
             eprintln!("  {:<20} x{}", skill.display_name(), n);
+        }
+    }
+}
+
+/// Per-player proficiency: counts, rate per minute, and a quality proxy.
+fn print_profiles(report: &SkillReport, duration_s: f32, player_filter: Option<&str>) {
+    eprintln!(
+        "== SKILL PROFILE ==  (~{:.0}s · quality = mean detection confidence)",
+        duration_s
+    );
+    for p in replay_skills::profiles(report, duration_s) {
+        if let Some(name) = player_filter {
+            if p.player != name {
+                continue;
+            }
+        }
+        eprintln!(
+            "\n-- {} (pri {}, team {:?}) --  {:.2} skills/min",
+            p.player, p.pri, p.team, p.total_per_min
+        );
+        if p.skills.is_empty() {
+            eprintln!("  (no catalogued skills detected)");
+            continue;
+        }
+        for (skill, st) in &p.skills {
+            eprintln!(
+                "  {:<20} x{:<3} {:>5.2}/min  q{:.2}",
+                skill.display_name(),
+                st.count,
+                st.per_min,
+                st.mean_quality
+            );
         }
     }
 }
