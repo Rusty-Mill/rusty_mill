@@ -54,9 +54,21 @@ app.state.scorer = SubprocessScorer(
     settings.worker_bin, settings.worker_timeout_s, settings.cache_canonical
 )
 app.state.pdf_renderer = WeasyPrintRenderer()
-# Job-queue factory (queue.py): None → the in-process BackgroundTaskQueue default;
-# a Celery/RQ deployment sets a `(background, scorer) -> JobQueue` factory.
-app.state.queue_factory = None
+
+
+def _select_queue_factory():
+    """Pick the JobQueue adapter from config (queue.py). Celery imports happen
+    only when the broker backend is selected, so the in-process default never
+    pulls in celery; tests can still override `app.state.queue_factory`."""
+    if settings.queue_backend == "celery":
+        from .queue import CeleryJobQueue
+
+        queue = CeleryJobQueue()
+        return lambda background, scorer: queue
+    return None  # None → the in-process BackgroundTaskQueue default
+
+
+app.state.queue_factory = _select_queue_factory()
 
 
 def get_scorer(request: Request) -> Scorer:

@@ -11,7 +11,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "httpx>=0.27"]
+# Broker-backed job queue (§4): the API enqueues, Celery workers score.
+queue = ["celery>=5.3", "redis>=5"]
+# dev pulls in `queue` so CI exercises the Celery adapter (eager-mode test).
+dev = ["pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5"]
 # Production PDF rendering (weasyprint needs native libs: pango, cairo, gdk-pixbuf).
 pdf = ["weasyprint>=60"]
 

@@ -1,0 +1,45 @@
+# Stand up the broker-backed service:  docker compose up --build
+#
+# Redis (broker) + the API (enqueues scoring) + a Celery worker (scores). The API
+# and worker share a volume so the SQLite DB and blob store are visible to both —
+# fine for a single-node demo; use Postgres + object storage for real multi-node.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    environment:
+      RLS_QUEUE_BACKEND: celery
+      RLS_CELERY_BROKER_URL: redis://redis:6379/0
+      RLS_DATABASE_URL: sqlite:////data/rls.db
+      RLS_BLOB_DIR: /data/blobs
+    volumes: ["rls-data:/data"]
+    ports: ["8000:8000"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command:
+      ["celery", "-A", "app.celery_app:celery_app", "worker",
+       "-Q", "scoring", "--concurrency=2", "--loglevel=info"]
+    environment:
+      RLS_CELERY_BROKER_URL: redis://redis:6379/0
+      RLS_DATABASE_URL: sqlite:////data/rls.db
+      RLS_BLOB_DIR: /data/blobs
+    volumes: ["rls-data:/data"]
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  rls-data:
