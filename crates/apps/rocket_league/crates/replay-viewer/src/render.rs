@@ -98,6 +98,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #helpOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.55); }
   #helpOverlay .panel { max-width:560px; line-height:1.7; cursor:pointer; }
   #minimap { position:fixed; right:10px; bottom:48px; width:132px; height:165px; padding:0; overflow:hidden; }
+  #loading { position:fixed; inset:0; z-index:10; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; gap:8px; background:#0b0e14; color:#9aa4b2; font-size:15px; }
+  #loading small { color:#6e7681; font-size:11px; }
   button { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px;
     cursor:pointer; font:inherit; }
   button:hover { background:#2b333d; }
@@ -149,6 +152,8 @@ const TEMPLATE: &str = r##"<!doctype html>
   #tltrack { position:relative; height:24px; display:flex; align-items:center; }
   #timeline { width:100%; }
   #marks { position:absolute; left:0; right:0; top:5px; height:10px; pointer-events:none; }
+  #loopRegion { position:absolute; top:2px; height:20px; display:none; pointer-events:none;
+    background:rgba(86,212,221,.16); border-left:2px solid #56d4dd; border-right:2px solid #56d4dd; }
   #marks .mk { position:absolute; top:0; width:2px; height:10px; transform:translateX(-1px);
     pointer-events:auto; cursor:pointer; }
   #marks .mk.goal { background:#ffd166; height:14px; top:-2px; width:3px; }
@@ -160,6 +165,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <body>
 <canvas id="c"></canvas>
 <canvas id="draw"></canvas>
+<div id="loading">Loading replay…<small>(first load fetches three.js — needs network unless built with --offline)</small></div>
 <div id="tools" class="panel">
   <button id="drawToggle" title="draw mode (d)">draw</button>
   <div id="swatches"></div>
@@ -173,7 +179,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <div id="helpOverlay"><div class="panel">
   <b>Keyboard</b><br>
   space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
-  0 free cam · d draw mode · z undo · s save PNG · ? this help<br><br>
+  i / o set an A–B loop · x clear it · 0 free cam · d draw · z undo · s save PNG · ? help<br><br>
   <b>Mouse</b><br>
   drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
   <b>Tools</b><br>
@@ -219,7 +225,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   <div id="tlwrap">
     <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
     <div id="wpcursor"></div>
-    <div id="tltrack"><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
+    <div id="tltrack"><div id="loopRegion"></div><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
   </div>
   <select id="speed" title="playback speed">
     <option value="0.25">0.25×</option><option value="0.5">0.5×</option>
@@ -306,6 +312,10 @@ document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => s
 
 buildField();
 const ball = makeBall();
+const ballTrail = new THREE.Line(
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3)),
+  new THREE.LineBasicMaterial({ color: 0xe6e6e6, transparent: true, opacity: .5 }));
+ballTrail.frustumCulled = false; scene.add(ballTrail);
 const cars = buildCars();
 
 // --- floor heatmap: occupancy of the ball or the followed car over the match,
@@ -400,12 +410,20 @@ document.getElementById('ovFile').onchange = e => { if (e.target.files[0]) loadO
 addEventListener('dragover', e => e.preventDefault());
 addEventListener('drop', e => { e.preventDefault(); const f = [...e.dataTransfer.files].find(f => f.type.startsWith('image/')); if (f) loadOverlayImage(f); });
 
-// big boost pads (6) as faint field markers
-for (const [px, py] of [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -4096], [3584, 0], [-3584, 0]]) {
-  const pad = new THREE.Mesh(new THREE.RingGeometry(140, 165, 24),
-    new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide }));
-  pad.position.set(px, py, 3); scene.add(pad);
-}
+// boost pads as faint field markers: 6 big (rings) + the 28 standard small (dots)
+const BIG_PADS = [[3072, 4096], [-3072, 4096], [3072, -4096], [-3072, -4096], [3584, 0], [-3584, 0]];
+const SMALL_PADS = [
+  [0, -4240], [-1792, -4184], [1792, -4184], [-940, -3308], [940, -3308], [0, -2816],
+  [-3584, -2484], [3584, -2484], [-1788, -2300], [1788, -2300], [-2048, -1036], [0, -1024],
+  [2048, -1036], [-1024, 0], [1024, 0], [-2048, 1036], [0, 1024], [2048, 1036],
+  [-1788, 2300], [1788, 2300], [-3584, 2484], [3584, 2484], [0, 2816], [-940, 3308],
+  [940, 3308], [-1792, 4184], [1792, 4184], [0, 4240],
+];
+const bigPadMat = new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide });
+const smallPadMat = new THREE.MeshBasicMaterial({ color: 0xe0b840, transparent: true, opacity: .35, side: THREE.DoubleSide });
+const bigPadGeo = new THREE.RingGeometry(140, 165, 24), smallPadGeo = new THREE.CircleGeometry(34, 16);
+for (const [px, py] of BIG_PADS) { const m = new THREE.Mesh(bigPadGeo, bigPadMat); m.position.set(px, py, 3); scene.add(m); }
+for (const [px, py] of SMALL_PADS) { const m = new THREE.Mesh(smallPadGeo, smallPadMat); m.position.set(px, py, 3); scene.add(m); }
 
 // --- telestrator: freehand / arrow / line drawing over the view (a coach's pen).
 // Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
@@ -614,15 +632,20 @@ function netTexture() {
   const t = new THREE.CanvasTexture(cv); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
 }
 
-// A goal: white frame (posts + crossbar, shadow-casting) + a translucent back/top net.
+// A goal: frame (posts + crossbar) + a translucent net, tinted by the team that
+// defends this end (it attacks the opposite goal), so attack direction reads.
 function buildGoal(sign) {
   const gw = F.goal_half_width, gh = F.goal_height, fy = F.back_wall_y, depth = 330;
-  const white = new THREE.MeshStandardMaterial({ color: 0xe8e8e8, roughness: .7 });
-  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), white); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
+  const defEntry = Object.entries(S.attack_sign || {}).find(([, s]) => s === -sign);
+  const teamHex = defEntry ? (TEAM[+defEntry[0]] ?? null) : null;
+  const frameCol = teamHex != null ? new THREE.Color(teamHex).lerp(new THREE.Color(0xffffff), 0.55) : new THREE.Color(0xe8e8e8);
+  const netCol = teamHex != null ? new THREE.Color(teamHex).lerp(new THREE.Color(0xffffff), 0.35) : new THREE.Color(0xffffff);
+  const frame = new THREE.MeshStandardMaterial({ color: frameCol, roughness: .7 });
+  const post = px => { const m = new THREE.Mesh(new THREE.BoxGeometry(22, 22, gh + 22), frame); m.position.set(px, sign * fy, gh / 2); m.castShadow = true; scene.add(m); };
   post(-gw); post(gw);
-  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), white);
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(2 * gw + 22, 22, 22), frame);
   cross.position.set(0, sign * fy, gh + 11); cross.castShadow = true; scene.add(cross);
-  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), transparent: true, opacity: .4, side: THREE.DoubleSide, depthWrite: false });
+  const netMat = () => new THREE.MeshBasicMaterial({ map: netTexture(), color: netCol, transparent: true, opacity: .42, side: THREE.DoubleSide, depthWrite: false });
   const back = new THREE.Mesh(new THREE.PlaneGeometry(2 * gw, gh), netMat());
   back.rotation.x = -Math.PI / 2; back.position.set(0, sign * (fy + depth), gh / 2);
   back.material.map.repeat.set(6, 3); scene.add(back);
@@ -630,9 +653,22 @@ function buildGoal(sign) {
   top.position.set(0, sign * (fy + depth / 2), gh); top.material.map.repeat.set(6, 2); scene.add(top);
 }
 
+// A panelled ball texture (meridians/parallels + accent panels) so the ball's
+// rotation is actually visible on the sphere.
+function ballTexture() {
+  const W = 256, H = 128, cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+  const x = cv.getContext('2d');
+  x.fillStyle = '#d6d6d6'; x.fillRect(0, 0, W, H);
+  x.strokeStyle = '#8f8f8f'; x.lineWidth = 2;
+  for (let i = 0; i <= 8; i++) { const px = i / 8 * W; x.beginPath(); x.moveTo(px, 0); x.lineTo(px, H); x.stroke(); }
+  for (let j = 1; j < 4; j++) { const py = j / 4 * H; x.beginPath(); x.moveTo(0, py); x.lineTo(W, py); x.stroke(); }
+  x.fillStyle = '#9aa7c0'; x.fillRect(W * 0.12, H * 0.36, W * 0.1, H * 0.28);
+  x.fillStyle = '#c79a9a'; x.fillRect(W * 0.62, H * 0.12, W * 0.08, H * 0.2);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace; return t;
+}
 function makeBall() {
   const m = new THREE.Mesh(new THREE.SphereGeometry(F.ball_radius, 32, 20),
-    new THREE.MeshStandardMaterial({ color: 0xdcdcdc, roughness: .35, metalness: .1 }));
+    new THREE.MeshStandardMaterial({ map: ballTexture(), roughness: .4, metalness: .1 }));
   m.castShadow = true; scene.add(m); return m;
 }
 
@@ -653,19 +689,32 @@ function buildCars() {
   for (const pl of S.players) {
     const hex = TEAM[pl.team] ?? 0x9aa4b2;
     const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(118, 84, 36),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .45, metalness: .25 }));
-    body.position.z = 18; body.castShadow = true; g.add(body);
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 70, 30),
-      new THREE.MeshStandardMaterial({ color: hex, roughness: .4 }));
-    cabin.position.set(-8, 0, 46); cabin.castShadow = true; g.add(cabin);
-    const nose = new THREE.Mesh(new THREE.BoxGeometry(16, 84, 36),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 }));
-    nose.position.set(59, 0, 18); nose.castShadow = true; g.add(nose);
-    const wheelMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .85 });
-    for (const [wx, wy] of [[42, 44], [42, -44], [-42, 44], [-42, -44]]) {
-      const w = new THREE.Mesh(new THREE.CylinderGeometry(15, 15, 16, 14), wheelMat);
-      w.position.set(wx, wy, 15); w.castShadow = true; g.add(w);
+    // wedge-shaped car: chassis + sloped hood + raised cockpit with a windshield,
+    // a rear wing, a white nose (forward / +X), and rimmed wheels.
+    const paint = new THREE.MeshStandardMaterial({ color: hex, roughness: .4, metalness: .35 });
+    const dark = new THREE.MeshStandardMaterial({ color: new THREE.Color(hex).multiplyScalar(.6), roughness: .5, metalness: .3 });
+    const chassis = new THREE.Mesh(new THREE.BoxGeometry(120, 84, 22), paint);
+    chassis.position.z = 16; chassis.castShadow = true; g.add(chassis);
+    const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 72, 22), dark);
+    cabin.position.set(-10, 0, 33); cabin.castShadow = true; g.add(cabin);
+    const wind = new THREE.Mesh(new THREE.BoxGeometry(30, 66, 22),
+      new THREE.MeshStandardMaterial({ color: 0x1b2733, roughness: .25, metalness: .5 }));
+    wind.position.set(20, 0, 30); wind.rotation.y = -0.6; g.add(wind);
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(44, 82, 12), paint);
+    hood.position.set(44, 0, 18); hood.castShadow = true; g.add(hood);
+    const wing = new THREE.Mesh(new THREE.BoxGeometry(8, 76, 5), dark);
+    wing.position.set(-58, 0, 40); g.add(wing);
+    for (const wy of [-30, 30]) { const s = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 16), dark); s.position.set(-56, wy, 32); g.add(s); }
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(8, 84, 18),
+      new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333 }));
+    nose.position.set(61, 0, 16); g.add(nose);
+    const tireMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .9 });
+    const rimMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: .4, metalness: .6 });
+    for (const [wx, wy] of [[44, 46], [44, -46], [-44, 46], [-44, -46]]) {
+      const tire = new THREE.Mesh(new THREE.CylinderGeometry(16, 16, 16, 16), tireMat);
+      tire.position.set(wx, wy, 16); tire.castShadow = true; g.add(tire);
+      const rim = new THREE.Mesh(new THREE.CylinderGeometry(8, 8, 17, 12), rimMat);
+      rim.position.set(wx, wy, 16); g.add(rim);
     }
     const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
@@ -725,6 +774,18 @@ function trailPoints(pri, t) {
   for (let i = i0; i <= i1; i++) { const c = frames[i].cars.find(c => c.pri === pri); if (c) pts.push(c.p); }
   return pts;
 }
+function writeTrail(line, pts) {
+  const arr = line.geometry.attributes.position.array, n = Math.min(pts.length, 64);
+  for (let i = 0; i < n; i++) { arr[i * 3] = pts[i][0]; arr[i * 3 + 1] = pts[i][1]; arr[i * 3 + 2] = pts[i][2] + 4; }
+  line.geometry.setDrawRange(0, n); line.geometry.attributes.position.needsUpdate = true;
+}
+function ballTrailPoints(t) {
+  const i1 = frameIndex(t), t0 = t - 1.0; let i0 = i1;
+  while (i0 > 0 && frames[i0].t > t0) i0--;
+  const pts = [];
+  for (let i = i0; i <= i1; i++) if (frames[i].ball) pts.push(frames[i].ball);
+  return pts;
+}
 
 // Skill callouts: a fading "★ <skill>" label above the car that just performed
 // it (within ~1.4s), so detected skills surface in the 3D scene, not just the
@@ -767,7 +828,9 @@ function applyState(st) {
       if (d > 1) ball.rotateOnWorldAxis(new THREE.Vector3(-dy, dx, 0).normalize(), d / F.ball_radius);
     }
     prevBall = st.ball;
-  } else { ball.visible = false; prevBall = null; }
+    ballTrail.visible = show.trails;
+    if (show.trails) writeTrail(ballTrail, ballTrailPoints(T));
+  } else { ball.visible = false; ballTrail.visible = false; prevBall = null; }
   for (const [pri, o] of cars) {
     const c = st.cars.get(pri);
     const live = !!c;
@@ -782,14 +845,7 @@ function applyState(st) {
     o.flame.visible = c.boost < (prevBoost.get(pri) ?? c.boost) - 0.5;
     if (o.flame.visible) { const s = 0.7 + Math.random() * 0.5; o.flame.scale.set(s, 0.9 + Math.random() * 0.5, s); }
     prevBoost.set(pri, c.boost);
-    if (show.trails) {
-      const pts = trailPoints(pri, T);
-      const arr = o.trail.geometry.attributes.position.array;
-      const n = Math.min(pts.length, 64);
-      for (let i = 0; i < n; i++) { arr[i * 3] = pts[i][0]; arr[i * 3 + 1] = pts[i][1]; arr[i * 3 + 2] = pts[i][2] + 4; }
-      o.trail.geometry.setDrawRange(0, n);
-      o.trail.geometry.attributes.position.needsUpdate = true;
-    }
+    if (show.trails) writeTrail(o.trail, trailPoints(pri, T));
   }
 }
 
@@ -823,7 +879,8 @@ function carSpeed(pri, t) {
   const i = frameIndex(t); if (i + 1 >= frames.length) return 0;
   const a = frames[i].cars.find(c => c.pri === pri), b = frames[i + 1].cars.find(c => c.pri === pri);
   if (!a || !b) return 0;
-  return Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz;
+  // cap at ~max car speed so a respawn/demo teleport (position jump) doesn't spike it
+  return Math.min(Math.hypot(b.p[0] - a.p[0], b.p[1] - a.p[1], b.p[2] - a.p[2]) * S.hz, 2300);
 }
 function updatePlayers(st) {
   for (const pl of S.players) {
@@ -892,6 +949,12 @@ drawWP();
 
 // --- playback ---
 let T = 0, playing = true, speed = 1, loop = false, last = performance.now(), lastState = null;
+let loopA = null, loopB = null; // A–B film-review loop
+function updateLoopUI() {
+  const r = document.getElementById('loopRegion'), on = loopA != null && loopB != null && loopB > loopA;
+  r.style.display = on ? 'block' : 'none';
+  if (on) { r.style.left = (loopA / dur * 100) + '%'; r.style.width = ((loopB - loopA) / dur * 100) + '%'; }
+}
 const tl = document.getElementById('timeline'), playBtn = document.getElementById('play');
 tl.max = dur; tl.step = 0.01; playBtn.innerHTML = ICON_PAUSE;
 function setPlaying(p) { playing = p; playBtn.innerHTML = p ? ICON_PAUSE : ICON_PLAY; }
@@ -926,12 +989,17 @@ addEventListener('keydown', e => {
   else if (e.key === 'z' && drawMode) undoLast();
   else if (e.key === 's') exportPNG();
   else if (e.key === '?') helpEl.style.display = helpEl.style.display === 'flex' ? 'none' : 'flex';
+  else if (e.key === 'i') { loopA = T; updateLoopUI(); }
+  else if (e.key === 'o') { loopB = T; updateLoopUI(); }
+  else if (e.key === 'x') { loopA = loopB = null; updateLoopUI(); }
 });
 
 function animate(now) {
   requestAnimationFrame(animate);
   const dt = (now - last) / 1000; last = now;
-  if (playing) { T += dt * speed; if (T >= dur) { if (loop) T = 0; else { T = dur; setPlaying(false); } } }
+  const seg = loopA != null && loopB != null && loopB > loopA;
+  const segEnd = seg ? loopB : dur, segStart = seg ? loopA : 0;
+  if (playing) { T += dt * speed; if (T >= segEnd) { if (loop || seg) T = segStart; else { T = dur; setPlaying(false); } } }
   tl.value = T;
   wpCursor.style.left = (T / dur * 100) + '%';
   const st = stateAt(T); lastState = st;
@@ -968,6 +1036,7 @@ function animate(now) {
   controls.update();
   renderer.render(scene, camera);
   window.__rendered = (window.__rendered || 0) + 1; // signal for the headless smoke test
+  if (window.__rendered === 1) document.getElementById('loading').style.display = 'none';
 }
 requestAnimationFrame(animate);
 

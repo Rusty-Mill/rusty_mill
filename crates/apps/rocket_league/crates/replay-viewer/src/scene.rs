@@ -110,6 +110,9 @@ pub struct Scene {
     pub duration_s: f32,
     /// Team id (as string key in JSON) -> final score.
     pub team_scores: BTreeMap<i32, i32>,
+    /// Team id -> attack-direction sign (+1 attacks +Y), so the viewer can show
+    /// which end each team defends.
+    pub attack_sign: BTreeMap<i32, i32>,
     pub field: Field,
     pub players: Vec<ScenePlayer>,
     pub frames: Vec<SceneFrame>,
@@ -197,6 +200,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         hz: m.resampled.hz,
         duration_s: round(m.duration_s, 2),
         team_scores: m.team_scores.clone(),
+        attack_sign: m.resampled.team_attack_sign.clone(),
         field: field_for(m.map.as_deref()),
         players,
         frames,
