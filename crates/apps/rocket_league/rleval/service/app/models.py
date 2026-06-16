@@ -24,6 +24,9 @@ class Account(SQLModel, table=True):
     email: str = Field(index=True, unique=True)
     owns_book: bool = False  # entitlement gate, set by the purchase webhook (§8)
     locked_player_id: str | None = None  # the locked leaderboard profile (§5)
+    # Founding-member ordinal (§13): assigned 1..N on an account's first eligible
+    # leaderboard entry, then immutable. None = not (yet) a founding member.
+    founding_number: int | None = Field(default=None, index=True)
     created_at: datetime = Field(default_factory=utcnow)
 
 

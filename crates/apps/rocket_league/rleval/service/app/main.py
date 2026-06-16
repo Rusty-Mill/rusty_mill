@@ -254,16 +254,35 @@ def get_reports(
     }
 
 
-def _leaderboard_dict(rank: int, e: LeaderboardEntry) -> dict:
-    return {
+def _leaderboard_dict(rank: int, e: LeaderboardEntry, founding: int | None) -> dict:
+    d = {
         "rank": rank,
         "player_id": e.player_id,  # the public locked-profile handle
+        "season": e.season,
         "composite": e.composite,
         "first_man": e.first_man,
         "second_man": e.second_man,
         "general": e.general,
         "uploaded_at": e.uploaded_at.isoformat(),
     }
+    if founding is not None:
+        d["founding_number"] = founding
+    return d
+
+
+def _enrich(session: Session, rows: list[LeaderboardEntry]) -> list[dict]:
+    """Number the rows and attach each account's founding ordinal (one query)."""
+    ids = [e.account_id for e in rows]
+    founders: dict[int, int] = {}
+    if ids:
+        founders = dict(
+            session.exec(
+                select(Account.id, Account.founding_number).where(
+                    Account.id.in_(ids), Account.founding_number.is_not(None)
+                )
+            ).all()
+        )
+    return [_leaderboard_dict(i + 1, e, founders.get(e.account_id)) for i, e in enumerate(rows)]
 
 
 @app.get("/v1/reports/{replay_id}/pdf")
@@ -327,7 +346,30 @@ def get_leaderboard(
     rows = leaderboard.top(session, season, limit)
     return {
         "season": season,
-        "entries": [_leaderboard_dict(i + 1, e) for i, e in enumerate(rows)],
+        "closed": leaderboard.is_closed(season),
+        "entries": _enrich(session, rows),
+    }
+
+
+@app.get("/v1/leaderboard/recent")
+def get_recent(
+    season: str | None = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+) -> dict:
+    # Public activity feed: most recently-set personal bests (any season by default).
+    limit = max(1, min(limit, 200))
+    rows = leaderboard.recent(session, limit, season)
+    return {"season": season, "entries": _enrich(session, rows)}
+
+
+@app.get("/v1/leaderboard/seasons")
+def get_seasons(session: Session = Depends(get_session)) -> dict:
+    return {
+        "seasons": [
+            {"season": s, "closed": leaderboard.is_closed(s)}
+            for s in leaderboard.seasons(session)
+        ]
     }
 
 
