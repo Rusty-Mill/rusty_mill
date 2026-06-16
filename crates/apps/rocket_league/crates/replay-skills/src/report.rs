@@ -24,6 +24,15 @@ pub struct SkillInstance {
     /// Heuristic confidence in this detection, `0.0..=1.0` (1.0 for skills with
     /// an authoritative event source).
     pub confidence: f32,
+    /// The skill's **primary evidence magnitude** in its natural unit — the
+    /// structured number behind the detection (aerial peak height in uu, dribble
+    /// duration in s, power-shot ball speed in uu/s, redirect angle in deg, …),
+    /// described by [`Skill::metric_label`] / [`Skill::metric_unit`]. Distinct
+    /// from `confidence` (a normalized detector certainty): this is the raw
+    /// physical quantity, so profiles can report mean aerial height rather than
+    /// only a mean confidence. Interpretation is per-skill (most read
+    /// higher-is-bigger; kickoff `reaction` is lower-is-better).
+    pub metric: f32,
     /// Human-readable supporting evidence (e.g. `"car_z=850 ball_z=910"`).
     pub detail: String,
 }

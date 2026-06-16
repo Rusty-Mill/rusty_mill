@@ -80,16 +80,19 @@ These extend the workspace past `replay-scoring-service-spec.md`, driven by
 product direction rather than the milestone plan.
 
 - **Flesh out individual player skills.** *Proficiency profiles ✔* +
-  *goal-outcome linking ✔* — `replay-skills` has `profile::profiles`
-  (`--profile`): per-player `skills/min` + per-skill `SkillStat` (count, rate,
-  `mean_quality` from detection confidence); and `outcome::outcomes`
-  (`--outcomes`): per-player skill→goal buildup involvement within a window.
-  *Remaining:* a richer outcome link via the value model's per-touch **ΔV** swing
-  (vs. the sparse goal-conversion here); richer per-skill quality from structured
-  evidence (aerial height, dribble duration) instead of the confidence proxy; and
-  harder mechanics (wave dash, half-flip, double touch) where a kinematic signature
-  is separable. Pairs with the "calibrate skill thresholds" follow-up. Where:
-  `skills/` (this repo).
+  *goal-outcome linking ✔* + *structured per-skill quality ✔* — `replay-skills`
+  has `profile::profiles` (`--profile`): per-player `skills/min` + per-skill
+  `SkillStat` (count, rate, `mean_metric`, `mean_quality`); and `outcome::outcomes`
+  (`--outcomes`): per-player skill→goal buildup involvement within a window. Each
+  `SkillInstance` now carries a structured `metric` (the skill's primary evidence
+  magnitude in its natural unit — aerial peak height in uu, dribble duration in s,
+  power-shot ball speed in uu/s, redirect angle in deg, boost stolen in %), so
+  profiles report **mean aerial height / dribble duration** rather than only the
+  normalized confidence proxy; `Skill::metric_label` / `metric_unit` self-describe
+  it. *Remaining:* a richer outcome link via the value model's per-touch **ΔV**
+  swing (vs. the sparse goal-conversion here); and harder mechanics (wave dash,
+  half-flip, double touch) where a kinematic signature is separable. Pairs with the
+  "calibrate skill thresholds" follow-up. Where: `skills/` (this repo).
 - **3D replay simulation / viewer.** ✔ *First increment shipped* — the
   `replay-viewer` crate distills the resampled grid + events + detected skills
   into a compact `Scene` and embeds it in a self-contained three.js viewer

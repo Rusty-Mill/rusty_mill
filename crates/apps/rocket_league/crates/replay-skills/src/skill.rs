@@ -153,6 +153,48 @@ impl Skill {
         }
     }
 
+    /// Short label for a skill's **primary evidence magnitude** — the structured
+    /// number a [`crate::SkillInstance`] carries in its `metric` field (e.g. an
+    /// aerial's peak height, a dribble's duration). Empty for skills with no
+    /// meaningful continuous magnitude (a demo is a binary event), which callers
+    /// use to skip displaying it.
+    pub fn metric_label(&self) -> &'static str {
+        match self {
+            Skill::Supersonic => "duration",
+            Skill::Aerial => "peak height",
+            Skill::AirDribble => "duration",
+            Skill::CeilingPlay => "duration",
+            Skill::WallPlay => "height",
+            Skill::GroundDribble => "duration",
+            Skill::Flick => "pop speed",
+            Skill::PowerShot => "ball speed",
+            Skill::Redirect => "angle",
+            Skill::KickoffFirstTouch => "reaction",
+            Skill::BoostSteal => "boost",
+            Skill::Demo => "",
+        }
+    }
+
+    /// Unit for the [`Skill::metric_label`] magnitude (`uu` = unreal units, the
+    /// game's distance unit; `uu/s` speed; `s` seconds; `deg` degrees). Empty for
+    /// dimensionless or unlabelled metrics.
+    pub fn metric_unit(&self) -> &'static str {
+        match self {
+            Skill::Supersonic => "s",
+            Skill::Aerial => "uu",
+            Skill::AirDribble => "s",
+            Skill::CeilingPlay => "s",
+            Skill::WallPlay => "uu",
+            Skill::GroundDribble => "s",
+            Skill::Flick => "uu/s",
+            Skill::PowerShot => "uu/s",
+            Skill::Redirect => "deg",
+            Skill::KickoffFirstTouch => "s",
+            Skill::BoostSteal => "%",
+            Skill::Demo => "",
+        }
+    }
+
     /// One-line description of what the detector looks for.
     pub fn description(&self) -> &'static str {
         match self {

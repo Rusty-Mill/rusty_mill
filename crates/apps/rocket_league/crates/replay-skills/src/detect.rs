@@ -174,6 +174,7 @@ fn emit_speed_run(
         player,
         team,
         confidence: 1.0,
+        metric: end - start,
         detail: format!("peak={:.0}uu/s dur={:.2}s", peak, end - start),
     });
 }
@@ -216,6 +217,7 @@ pub fn aerials(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Ve
                 player: player.clone(),
                 team: *team,
                 confidence: conf(car_z, cfg.aerial_min_height, cfg.high_aerial_height),
+                metric: car_z,
                 detail: format!("car_z={car_z:.0} ball_z={ball_z:.0}"),
             });
         }
@@ -274,6 +276,7 @@ pub fn air_dribbles(
                     cfg.air_dribble_min_touches as f32,
                     cfg.air_dribble_min_touches as f32 + 3.0,
                 ),
+                metric: aerial[j - 1].0 - t,
                 detail: format!("touches={} dur={:.2}s", len, aerial[j - 1].0 - t),
             });
             i = j;
@@ -348,6 +351,7 @@ fn emit_ceiling_run(
         player,
         team,
         confidence: 1.0,
+        metric: end - start,
         detail: format!("peak_z={peak_z:.0} dur={:.2}s", end - start),
     });
 }
@@ -386,6 +390,7 @@ pub fn wall_plays(
                 player: player.clone(),
                 team: *team,
                 confidence: conf(car.p.z, cfg.wall_min_height, field::CEILING_Z * 0.6),
+                metric: car.p.z,
                 detail: format!("{which} wall z={:.0}", car.p.z),
             });
         }
@@ -458,6 +463,7 @@ fn emit_dribble(
             cfg.dribble_min_duration_s,
             cfg.dribble_min_duration_s * 3.0,
         ),
+        metric: dur,
         detail: format!("dur={dur:.2}s"),
     });
 }
@@ -495,6 +501,7 @@ pub fn flicks(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec
                 player: player.clone(),
                 team: *team,
                 confidence: conf(post.v.z, cfg.flick_min_up_dv, cfg.flick_min_up_dv + 800.0),
+                metric: post.v.z,
                 detail: format!("up_v={:.0} ball_z={:.0}", post.v.z, post.p.z),
             });
         }
@@ -540,6 +547,7 @@ pub fn power_shots(
                 player: player.clone(),
                 team: *team,
                 confidence: conf(spd, cfg.power_shot_min_speed, 3500.0),
+                metric: spd,
                 detail: format!("speed={spd:.0} goalward={goalward:.0}"),
             });
         }
@@ -585,6 +593,7 @@ pub fn redirects(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> 
                 player: player.clone(),
                 team: *team,
                 confidence: conf(ang, cfg.redirect_min_angle_deg, 130.0),
+                metric: ang,
                 detail: format!("angle={ang:.0}deg speed={post_spd:.0}"),
             });
         }
@@ -618,6 +627,7 @@ pub fn kickoff_first_touches(events: &[Event], cfg: &SkillConfig) -> Vec<SkillIn
                     player: player.clone(),
                     team: *team,
                     confidence: 1.0,
+                    metric: t - kt,
                     detail: format!("{:.2}s after kickoff", t - kt),
                 });
                 break;
@@ -657,6 +667,9 @@ pub fn boost_steals(
                         player: Some(tr.player.clone()),
                         team: tr.team,
                         confidence: 0.7,
+                        // Boost gained, as a percent of a full tank (the raw
+                        // 0..=255 replication byte is a network detail).
+                        metric: f32::from(cb - pb) / 255.0 * 100.0,
                         detail: format!("+{} to {} at y={:.0}", cb - pb, cb, ap.y),
                     });
                 }
@@ -690,6 +703,7 @@ pub fn demos(events: &[Event], tracks: &[PlayerTrack]) -> Vec<SkillInstance> {
             player: attacker.clone(),
             team,
             confidence: 1.0,
+            metric: 1.0,
             detail: match victim {
                 Some(v) => format!("demoed {v}"),
                 None => "demoed opponent".to_string(),

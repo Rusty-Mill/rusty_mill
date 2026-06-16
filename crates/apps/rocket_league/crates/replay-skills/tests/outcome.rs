@@ -14,6 +14,7 @@ fn inst(skill: Skill, pri: i32, team: i32, t: f32) -> SkillInstance {
         player: Some(format!("p{pri}")),
         team: Some(team),
         confidence: 1.0,
+        metric: 0.0,
         detail: String::new(),
     }
 }

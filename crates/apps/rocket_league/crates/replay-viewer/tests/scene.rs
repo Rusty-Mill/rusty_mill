@@ -111,6 +111,7 @@ fn scene_projects_roster_frames_and_rounds() {
         player: Some("Alice".into()),
         team: Some(0),
         confidence: 1.0,
+        metric: 0.0,
         detail: String::new(),
     }];
     let s = build_scene(&m, &skills);
@@ -140,6 +141,7 @@ fn scene_merges_events_and_skills_drops_possessions() {
         player: Some("Alice".into()),
         team: Some(0),
         confidence: 1.0,
+        metric: 0.0,
         detail: String::new(),
     }];
     let s = build_scene(&m, &skills);
