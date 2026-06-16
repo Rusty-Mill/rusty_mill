@@ -50,3 +50,20 @@ class BackgroundTaskQueue:
 
     def enqueue_scoring(self, replay_id: str) -> None:
         self._background.add_task(process, replay_id, self._scorer)
+
+
+class CeleryJobQueue:
+    """Broker-backed adapter: hand the `replay_id` to Celery; a worker scores it.
+
+    Importing the task here (at construction) makes a misconfigured deployment
+    — `RLS_QUEUE_BACKEND=celery` without the `[queue]` extra — fail fast at app
+    startup rather than on the first upload.
+    """
+
+    def __init__(self) -> None:
+        from .celery_app import score_task
+
+        self._task = score_task
+
+    def enqueue_scoring(self, replay_id: str) -> None:
+        self._task.delay(replay_id)

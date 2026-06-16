@@ -67,12 +67,15 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
   Where: `service/app/credits.py`.
 - **Job queue + worker split.** ✔ Upload enqueues scoring through a `JobQueue`
-  port (`service/app/queue.py`); the default `BackgroundTaskQueue` runs it
-  in-process. The payload is just the `replay_id` (worker reloads from DB + blob
-  store) and the `Scorer` is built worker-side, so a broker adapter is a few lines
-  behind the same interface — proven swappable by a test injecting a recording
-  queue via `app.state.queue_factory`. *Remaining (prod):* the Celery/RQ + Redis
-  adapter itself, so workers scale independently (§9).
+  port (`service/app/queue.py`); `BackgroundTaskQueue` runs it in-process,
+  `CeleryJobQueue` (+ `celery_app.py`) hands the `replay_id` to Redis for dedicated
+  workers (`RLS_QUEUE_BACKEND=celery`). The payload is just the `replay_id` (worker
+  reloads from DB + blob store) and the `Scorer` is built worker-side, so nothing
+  app-specific crosses the broker. Covered by an eager-mode test (CI) **and**
+  verified live end-to-end (real Redis + Celery worker + Rust scorer:
+  `queued→scoring→done`, credit confirmed). `docker compose up` runs the stack
+  (multi-stage image bundles the Rust binary). *Remaining (prod):* Postgres +
+  object storage for true multi-node (the demo shares a SQLite/blob volume).
 - **PDF rendering.** ✔ The worker's PDF-ready report HTML is captured at score
   time (`replay-scoring --html`, stored as an artifact) and rendered to PDF behind
   a `PdfRenderer` port (weasyprint adapter, lazy/optional `pdf` extra), **cached

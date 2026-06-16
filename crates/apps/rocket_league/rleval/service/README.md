@@ -68,17 +68,17 @@ seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher
   top-up (+30 d) — idempotent by the provider's event id, with an `X-Signature`
   HMAC-SHA256 verified when `RLS_WEBHOOK_SECRET` is set.
 - **Off-thread scoring** (§4): upload *enqueues* scoring through a `JobQueue` port
-  (`queue.py`). The default `BackgroundTaskQueue` runs it in-process (the worker
-  path shares the engine, so it's exercised in tests); the job payload is just the
-  `replay_id`, so a broker-backed Celery/RQ adapter drops in behind the same
-  interface (set `app.state.queue_factory`) without touching the endpoint.
+  (`queue.py`). The default `BackgroundTaskQueue` runs it in-process (exercised in
+  tests); set `RLS_QUEUE_BACKEND=celery` and the **`CeleryJobQueue`** hands the
+  `replay_id` to Redis for dedicated workers (`celery_app.py`) — verified live
+  end-to-end (real broker + worker + Rust scorer). `docker compose up` brings up
+  the whole stack.
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): the broker-backed **JobQueue adapter**
-(Celery/RQ + Redis) behind the existing port, observability (per-stage
-timings/metrics), and real **auth** (the current `X-Account-Email` header is a dev
-stub — authentication is the web layer's job).
+Tracked in `docs/backlog.md` (M2): observability (per-stage timings/metrics) and
+real **auth** (the current `X-Account-Email` header is a dev stub — authentication
+is the web layer's job).
 
 ## Run
 
@@ -104,6 +104,30 @@ curl -X POST http://127.0.0.1:8000/internal/webhooks/purchase \
 curl -F file=@assets/replays/42f2.replay -F playlist=ranked-2v2 \
   -H 'X-Account-Email: me@example.com' http://127.0.0.1:8000/v1/replays
 ```
+
+### Scaling out: Celery + Redis (§4)
+
+By default scoring runs in-process (FastAPI `BackgroundTasks`). Set
+`RLS_QUEUE_BACKEND=celery` and the API instead enqueues to Redis; dedicated
+workers score in their own processes. Locally:
+
+```bash
+pip install -e ".[queue]"           # celery + redis
+redis-server &                      # the broker
+export RLS_QUEUE_BACKEND=celery RLS_CELERY_BROKER_URL=redis://localhost:6379/0
+celery -A app.celery_app:celery_app worker -Q scoring --concurrency=2 &   # a worker
+uvicorn app.main:app                # the API (now enqueues)
+```
+
+Or the whole stack (Redis + API + worker, worker image bundles the Rust binary):
+
+```bash
+docker compose up --build           # repo root
+```
+
+The job payload is just the `replay_id`, so workers reload the replay from the DB
+and the blob from the store and build their own scorer — nothing app-specific
+crosses the broker.
 
 ## Test
 
@@ -131,3 +155,5 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | `RLS_UPLOAD_RATE_WINDOW_S` | `3600` | rate-limit window (s) |
 | `RLS_WEBHOOK_SECRET` | _(empty)_ | webhook HMAC secret (empty = no verify) |
 | `RLS_ENCRYPTION_KEY` | _(empty)_ | at-rest artifact key (empty = store verbatim) |
+| `RLS_QUEUE_BACKEND` | `inprocess` | `inprocess` or `celery` |
+| `RLS_CELERY_BROKER_URL` | `redis://localhost:6379/0` | Celery broker (when `celery`) |

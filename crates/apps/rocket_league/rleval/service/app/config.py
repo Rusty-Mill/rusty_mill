@@ -45,6 +45,11 @@ class Settings:
         self.webhook_secret = os.getenv("RLS_WEBHOOK_SECRET", "")
         # Master key for at-rest artifact encryption (§12). Empty = store verbatim.
         self.encryption_key = os.getenv("RLS_ENCRYPTION_KEY", "")
+        # Job-queue backend (§4): "inprocess" (FastAPI BackgroundTasks) or "celery".
+        self.queue_backend = os.getenv("RLS_QUEUE_BACKEND", "inprocess")
+        self.celery_broker_url = os.getenv(
+            "RLS_CELERY_BROKER_URL", "redis://localhost:6379/0"
+        )
 
 
 settings = Settings()
