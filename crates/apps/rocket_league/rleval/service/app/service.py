@@ -12,7 +12,7 @@ import hashlib
 
 from sqlmodel import Session, select
 
-from . import blobs, credits, leaderboard
+from . import blobs, credits, leaderboard, metrics
 from .config import settings
 from .db import session_scope
 from .models import Account, LeaderboardEntry, Replay, Report
@@ -73,22 +73,26 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
     session.add(replay)
     session.commit()
     try:
-        result = scorer.score(blob, replay.id)
-        if result.report_html:
-            blobs.store_html(replay.id, result.report_html)  # for PDF rendering
-        if result.canonical_blob:
-            blobs.store_canonical(replay.id, result.canonical_blob)  # no-re-parse re-score
-        _store_reports(session, replay, result)
-        replay.parser_version = result.parser_version
-        replay.status = "done"
-        session.add(replay)
-        credits.confirm(session, replay.account_id, replay.id)
-        # Recompute the leaderboard on this eligible write (§8): no-op unless the
-        # account's locked profile got an ok-confidence report here.
-        account = session.get(Account, replay.account_id)
-        if account is not None:
-            leaderboard.materialize(session, account, replay.id)
-        session.commit()
+        with metrics.SCORING_STAGE.time(stage="score"):
+            result = scorer.score(blob, replay.id)
+        with metrics.SCORING_STAGE.time(stage="persist"):
+            if result.report_html:
+                blobs.store_html(replay.id, result.report_html)  # for PDF rendering
+            if result.canonical_blob:
+                blobs.store_canonical(replay.id, result.canonical_blob)  # no-re-parse re-score
+            _store_reports(session, replay, result)
+            replay.parser_version = result.parser_version
+            replay.status = "done"
+            session.add(replay)
+            credits.confirm(session, replay.account_id, replay.id)
+        with metrics.SCORING_STAGE.time(stage="leaderboard"):
+            # Recompute the leaderboard on this eligible write (§8): no-op unless the
+            # account's locked profile got an ok-confidence report here.
+            account = session.get(Account, replay.account_id)
+            if account is not None:
+                leaderboard.materialize(session, account, replay.id)
+            session.commit()
+        metrics.SCORED.inc(result="done")
     except Exception as e:  # noqa: BLE001 — any worker failure must refund.
         session.rollback()
         replay = session.get(Replay, replay.id)
@@ -98,6 +102,7 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
             session.add(replay)
             credits.refund(session, replay.account_id, replay.id)
             session.commit()
+        metrics.SCORED.inc(result="failed")
 
 
 def rescore(session: Session, replay: Replay, scorer: Scorer) -> ScoreResult:

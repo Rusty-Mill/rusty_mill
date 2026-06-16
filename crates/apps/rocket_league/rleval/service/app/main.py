@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
@@ -32,7 +33,7 @@ from pydantic import BaseModel, ValidationError
 from sqlalchemy import func
 from sqlmodel import Session, select
 
-from . import blobs, credits, leaderboard, webhooks
+from . import blobs, credits, leaderboard, metrics, webhooks
 from .config import settings
 from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report, utcnow
@@ -48,7 +49,36 @@ async def lifespan(app: FastAPI):
     yield
 
 
+class MetricsMiddleware:
+    """Pure-ASGI RED metrics, recorded at response-start so background-task
+    scoring (which runs *after* the response) isn't counted in request latency
+    and isn't disturbed. Labels use the matched route template, not the raw path,
+    to bound cardinality."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        start = time.perf_counter()
+
+        async def send_wrapper(message) -> None:
+            if message["type"] == "http.response.start":
+                dt = time.perf_counter() - start
+                route = scope.get("route")
+                path = getattr(route, "path", None) or "unmatched"
+                labels = {"method": scope["method"], "route": path}
+                metrics.HTTP_REQUESTS.inc(status=str(message["status"]), **labels)
+                metrics.HTTP_LATENCY.observe(dt, **labels)
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
 app = FastAPI(title="Replay-Scoring Service", version="0.1.0", lifespan=lifespan)
+app.add_middleware(MetricsMiddleware)
 # Default production adapters; tests override `app.state.{scorer,pdf_renderer}`.
 app.state.scorer = SubprocessScorer(
     settings.worker_bin, settings.worker_timeout_s, settings.cache_canonical
@@ -140,6 +170,13 @@ def healthz() -> dict:
     return {"ok": True}
 
 
+@app.get("/metrics")
+def metrics_endpoint() -> Response:
+    return Response(
+        metrics.render(), media_type="text/plain; version=0.0.4; charset=utf-8"
+    )
+
+
 @app.post("/v1/replays", status_code=202)
 def upload_replay(
     file: UploadFile = File(...),
@@ -150,25 +187,32 @@ def upload_replay(
 ) -> dict:
     # Guards (§7): entitlement, then a non-empty/bounded blob, then credit.
     if not account.owns_book:
+        metrics.UPLOADS.inc(outcome="forbidden")
         raise HTTPException(403, "owns_book entitlement required")
     blob = file.file.read()
     if not blob:
+        metrics.UPLOADS.inc(outcome="empty")
         raise HTTPException(400, "empty upload")
     if len(blob) > settings.upload_max_bytes:
+        metrics.UPLOADS.inc(outcome="too_large")
         raise HTTPException(413, "replay too large")
 
     rid = replay_id_for(blob)
     existing = session.get(Replay, rid)
     if existing is not None:  # idempotent re-upload (§9); doesn't count toward the limit
+        metrics.UPLOADS.inc(outcome="deduped")
         return {"replay_id": rid, "status": existing.status, "deduped": True}
 
     if _rate_limited(session, account.id):
+        metrics.UPLOADS.inc(outcome="rate_limited")
         raise HTTPException(429, "upload rate limit exceeded")
     if credits.balance(session, account.id) <= 0:
+        metrics.UPLOADS.inc(outcome="no_credit")
         raise HTTPException(402, "no credits")
 
     replay = ingest(session, account, blob, playlist)
     queue.enqueue_scoring(rid)
+    metrics.UPLOADS.inc(outcome="accepted")
     return {"replay_id": rid, "status": replay.status, "deduped": False}
 
 

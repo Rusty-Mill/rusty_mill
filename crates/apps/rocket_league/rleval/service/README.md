@@ -47,8 +47,13 @@ seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher
   `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf`, `GET /v1/leaderboard`,
   `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
   `POST /internal/webhooks/purchase`, `POST /internal/rescore/{id}`, plus
-  `GET /healthz`. Upload guards: `owns_book`, a positive credit balance, and a
-  per-account **rate limit** (§7).
+  `GET /healthz` and `GET /metrics`. Upload guards: `owns_book`, a positive credit
+  balance, and a per-account **rate limit** (§7).
+- **Observability**: a stdlib metrics registry (`metrics.py`) exposed at
+  `GET /metrics` in Prometheus text format — upload outcomes, scoring results,
+  **per-stage scoring timings** (parse+score / persist / leaderboard), and HTTP
+  RED (request count + latency by route, via a pure-ASGI middleware). No
+  `prometheus_client` dep; the exposition parses with a real Prometheus client.
 - **PDF report** (§4.10): the worker's PDF-ready report HTML (captured at score
   time) is rendered to PDF via a `PdfRenderer` port (weasyprint adapter) and
   **cached per replay**; served owner-gated at `GET /v1/reports/{id}/pdf`. Rendering
@@ -76,9 +81,9 @@ seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): observability (per-stage timings/metrics) and
-real **auth** (the current `X-Account-Email` header is a dev stub — authentication
-is the web layer's job).
+Tracked in `docs/backlog.md` (M2): real **auth** (the current `X-Account-Email`
+header is a dev stub — authentication is the web layer's job) and Postgres +
+object storage for true multi-node.
 
 ## Run
 
