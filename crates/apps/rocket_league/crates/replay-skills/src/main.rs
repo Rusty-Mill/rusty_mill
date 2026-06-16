@@ -234,7 +234,7 @@ fn print_summary(report: &SkillReport, player_filter: Option<&str>) {
 /// Per-player proficiency: counts, rate per minute, and a quality proxy.
 fn print_profiles(report: &SkillReport, duration_s: f32, player_filter: Option<&str>) {
     eprintln!(
-        "== SKILL PROFILE ==  (~{:.0}s · quality = mean detection confidence)",
+        "== SKILL PROFILE ==  (~{:.0}s · q = mean confidence · last column = mean evidence magnitude)",
         duration_s
     );
     for p in replay_skills::profiles(report, duration_s) {
@@ -253,13 +253,29 @@ fn print_profiles(report: &SkillReport, duration_s: f32, player_filter: Option<&
         }
         for (skill, st) in &p.skills {
             eprintln!(
-                "  {:<20} x{:<3} {:>5.2}/min  q{:.2}",
+                "  {:<20} x{:<3} {:>5.2}/min  q{:.2}  {}",
                 skill.display_name(),
                 st.count,
                 st.per_min,
-                st.mean_quality
+                st.mean_quality,
+                fmt_metric(*skill, st.mean_metric),
             );
         }
+    }
+}
+
+/// Render a skill's mean structured metric with its unit (seconds get decimals,
+/// the rest round to whole units). Empty for skills with no labelled magnitude.
+fn fmt_metric(skill: Skill, value: f32) -> String {
+    let label = skill.metric_label();
+    if label.is_empty() {
+        return String::new();
+    }
+    let unit = skill.metric_unit();
+    if unit == "s" {
+        format!("{label} {value:.2}{unit}")
+    } else {
+        format!("{label} {value:.0}{unit}")
     }
 }
 

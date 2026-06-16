@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use replay_skills::report::{PlayerSkills, SkillInstance, SkillReport};
 use replay_skills::{profiles, Skill};
 
-fn inst(skill: Skill, pri: i32, conf: f32) -> SkillInstance {
+fn inst(skill: Skill, pri: i32, conf: f32, metric: f32) -> SkillInstance {
     SkillInstance {
         skill,
         t: 0.0,
@@ -13,13 +13,15 @@ fn inst(skill: Skill, pri: i32, conf: f32) -> SkillInstance {
         player: Some(format!("p{pri}")),
         team: Some(0),
         confidence: conf,
+        metric,
         detail: String::new(),
     }
 }
 
 #[test]
 fn profile_computes_rates_and_quality() {
-    // p1: 3 aerials (conf .6/.8/1.0) + 1 demo, over a 2-minute match.
+    // p1: 3 aerials (conf .6/.8/1.0, peak height 1000/1500/2000 uu) + 1 demo,
+    // over a 2-minute match.
     let counts: BTreeMap<Skill, usize> =
         [(Skill::Aerial, 3), (Skill::Demo, 1)].into_iter().collect();
     let report = SkillReport {
@@ -28,10 +30,10 @@ fn profile_computes_rates_and_quality() {
         analyzer_version: "t".into(),
         parser_version: "t".into(),
         instances: vec![
-            inst(Skill::Aerial, 1, 0.6),
-            inst(Skill::Aerial, 1, 0.8),
-            inst(Skill::Aerial, 1, 1.0),
-            inst(Skill::Demo, 1, 1.0),
+            inst(Skill::Aerial, 1, 0.6, 1000.0),
+            inst(Skill::Aerial, 1, 0.8, 1500.0),
+            inst(Skill::Aerial, 1, 1.0, 2000.0),
+            inst(Skill::Demo, 1, 1.0, 1.0),
         ],
         players: vec![PlayerSkills {
             pri: 1,
@@ -54,6 +56,10 @@ fn profile_computes_rates_and_quality() {
         "mean of .6/.8/1.0 = .8"
     );
     assert!(
+        (aer.mean_metric - 1500.0).abs() < 1e-3,
+        "mean peak height of 1000/1500/2000 = 1500"
+    );
+    assert!(
         (pr[0].total_per_min - 2.0).abs() < 1e-3,
         "4 skills / 2 min = 2/min"
     );
@@ -68,7 +74,7 @@ fn profile_handles_zero_duration_without_dividing_by_zero() {
         config_version: "t".into(),
         analyzer_version: "t".into(),
         parser_version: "t".into(),
-        instances: vec![inst(Skill::Supersonic, 1, 1.0)],
+        instances: vec![inst(Skill::Supersonic, 1, 1.0, 0.0)],
         players: vec![PlayerSkills {
             pri: 1,
             player: "p1".into(),

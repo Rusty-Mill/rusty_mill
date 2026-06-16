@@ -64,11 +64,19 @@ string of the supporting evidence.
 
 Beyond presence/counts, `profiles(&SkillReport, duration_s) -> Vec<PlayerSkillProfile>`
 turns the per-player roll-up into *how good / how often*: a per-skill `SkillStat`
-(`count`, `per_min`, `mean_quality`) plus `total_per_min` (overall mechanical
-activity). `mean_quality` is the mean detection **confidence** — a proxy that
-ranks cleaner reps higher for the detectors whose confidence ramps with magnitude
-(aerial height, dribble duration, redirect angle, …); event-sourced skills sit at
-1.0. So two players with the same aerial count are separable by rate and quality.
+(`count`, `per_min`, `mean_metric`, `mean_quality`) plus `total_per_min` (overall
+mechanical activity). Two players with the same aerial count are separated on two
+axes:
+
+- **`mean_metric`** — the mean of the skill's **structured evidence magnitude** in
+  its natural unit, read straight off each instance's `metric`: aerial peak height
+  (uu), dribble/ceiling/supersonic duration (s), power-shot ball speed (uu/s),
+  redirect angle (deg), kickoff reaction (s), boost stolen (%). The real physical
+  quantity — "how high were the aerials", not just "how confident the detector
+  was". Each `Skill` self-describes the unit via `metric_label()` / `metric_unit()`.
+- **`mean_quality`** — the mean detection **confidence** (`0..=1`), a normalized
+  certainty that ramps with magnitude but saturates; a coarser companion to
+  `mean_metric`. Event-sourced skills sit at 1.0.
 
 `outcomes(&SkillReport, &[Event], window_s)` links skills to **goals**: per player,
 how many reps fell within `window_s` before a same-team goal ("buildup
@@ -79,13 +87,13 @@ a success rate; a richer link via the value model's ΔV is a follow-up.
 
 ```
 replay-skills <file.replay> [--player <name>] [--verify <skill>]
-              [--window <start_s> <end_s>] [--profile]
+              [--window <start_s> <end_s>] [--profile] [--outcomes]
               [--config <cfg.json>] [--json <out.json>] [--list]
 ```
 
 - default: a per-player skill table (scope to one `--player`).
-- `--profile`: the proficiency view — per-player `skills/min` and per-skill
-  `count`, rate, and quality.
+- `--profile`: the proficiency view — per-player `skills/min` and, per skill,
+  `count`, rate, mean evidence magnitude (with unit), and mean confidence.
 - `--outcomes`: per player, how many skills fell in a goal buildup (within ~6 s
   before a same-team goal).
 - `--verify <skill>`: prints YES/no and exits `0` if performed, `2` if not — a
