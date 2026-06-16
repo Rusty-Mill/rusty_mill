@@ -30,8 +30,10 @@ filesystem or S3).
 ## What's implemented
 
 - **Persistence** (§5): `Account`, `CreditLedger`, `Replay`, `Report`,
-  `LeaderboardEntry` SQLModel tables; SQLite by default (point `RLS_DATABASE_URL`
-  at Postgres for prod).
+  `WebhookEvent`, `LeaderboardEntry` SQLModel tables; SQLite by default, **Postgres**
+  in prod (`RLS_DATABASE_URL`; the engine applies SQLite-only connect-args only to
+  SQLite). Schema is managed by **Alembic** migrations (`alembic upgrade head`); an
+  `alembic check` test fails CI if the models and the migration ever drift.
 - **Idempotency** (§9): `replay_id = sha256(blob)`; a re-upload returns the
   existing replay/report and is **not** re-charged. Raw blobs are content-addressed
   on disk for re-scoring without re-upload.
@@ -86,10 +88,11 @@ filesystem or S3).
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): real **auth** (the current `X-Account-Email`
-header is a dev stub — authentication is the web layer's job) and **Postgres**
-(the DB side of true multi-node — object storage is done; the engine still hard-codes
-a SQLite-only connect-arg and uses create-all rather than migrations).
+Tracked in `docs/backlog.md` (M2): real **auth** — the current `X-Account-Email`
+header is a dev stub, and authentication is the web layer's job. The multi-node
+building blocks (Postgres + Alembic, S3 object storage, the Celery/Redis broker)
+are all in; what remains is the production standup — provisioning the managed
+Postgres / bucket / Redis and pointing the env at them.
 
 ## Run
 
@@ -114,6 +117,17 @@ curl -X POST http://127.0.0.1:8000/internal/webhooks/purchase \
 
 curl -F file=@assets/replays/42f2.replay -F playlist=ranked-2v2 \
   -H 'X-Account-Email: me@example.com' http://127.0.0.1:8000/v1/replays
+```
+
+### Postgres + migrations (§5)
+
+SQLite auto-creates tables (dev). For Postgres, run migrations and turn auto-create
+off so the app doesn't race them:
+
+```bash
+pip install -e ".[migrations,postgres]"
+export RLS_DATABASE_URL=postgresql+psycopg2://user:pass@host/rls RLS_DB_AUTO_CREATE=0
+alembic upgrade head                 # from service/
 ```
 
 ### Scaling out: Celery + Redis (§4)
@@ -154,7 +168,8 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 
 | Var | Default | Meaning |
 |---|---|---|
-| `RLS_DATABASE_URL` | `sqlite:///./rls.db` | SQLAlchemy URL |
+| `RLS_DATABASE_URL` | `sqlite:///./rls.db` | SQLAlchemy URL (SQLite or Postgres) |
+| `RLS_DB_AUTO_CREATE` | `1` | create tables on startup; set `0` in prod (use Alembic) |
 | `RLS_BLOB_BACKEND` | `fs` | artifact store: `fs` or `s3` |
 | `RLS_BLOB_DIR` | `./blobs` | artifact dir (`fs` backend) |
 | `RLS_S3_BUCKET` | `rls-blobs` | bucket (`s3` backend) |

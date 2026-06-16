@@ -18,12 +18,19 @@ from .config import settings
 _engine = None
 
 
+def _connect_args(url: str) -> dict:
+    # check_same_thread is SQLite-only (background tasks run in a worker thread);
+    # passing it to other drivers (e.g. psycopg2) errors.
+    return {"check_same_thread": False} if url.startswith("sqlite") else {}
+
+
 def get_engine():
     global _engine
     if _engine is None:
-        # check_same_thread=False: background tasks run in a worker thread.
+        url = settings.database_url
+        # pool_pre_ping keeps pooled Postgres connections healthy across drops.
         _engine = create_engine(
-            settings.database_url, connect_args={"check_same_thread": False}
+            url, connect_args=_connect_args(url), pool_pre_ping=True
         )
     return _engine
 

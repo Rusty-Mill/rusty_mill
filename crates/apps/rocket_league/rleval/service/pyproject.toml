@@ -15,8 +15,15 @@ dependencies = [
 queue = ["celery>=5.3", "redis>=5"]
 # S3/object-storage blob backend (§5): the multi-node artifact store.
 s3 = ["boto3>=1.28"]
-# dev pulls in the queue + s3 deps (and moto) so CI exercises both adapters.
-dev = ["pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5", "boto3>=1.28", "moto>=5"]
+# Schema migrations (§5): `alembic upgrade head` at deploy time.
+migrations = ["alembic>=1.13"]
+# Postgres driver (§5): the production database.
+postgres = ["psycopg2-binary>=2.9"]
+# dev pulls in the queue/s3/migration deps (and moto) so CI exercises them.
+dev = [
+    "pytest>=8", "httpx>=0.27", "celery>=5.3", "redis>=5",
+    "boto3>=1.28", "moto>=5", "alembic>=1.13",
+]
 # Production PDF rendering (weasyprint needs native libs: pango, cairo, gdk-pixbuf).
 pdf = ["weasyprint>=60"]
 
