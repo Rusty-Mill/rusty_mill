@@ -24,6 +24,7 @@
 
 pub mod config;
 pub mod detect;
+pub mod outcome;
 pub mod profile;
 pub mod report;
 pub mod skill;
@@ -33,6 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use replay_analyzer::model::CanonicalMatch;
 
 pub use config::{SkillConfig, SKILL_CONFIG_VERSION};
+pub use outcome::{outcomes, SkillOutcome};
 pub use profile::{profiles, PlayerSkillProfile, SkillStat};
 pub use report::{PlayerSkills, SkillInstance, SkillReport};
 pub use skill::{Detection, Skill, SkillCategory};
