@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 
+from app import config
+
 H = {"X-Account-Email": "u@example.com"}
 
 
@@ -66,6 +68,16 @@ def test_failed_scoring_auto_refunds(failing_client, make_account):
     assert status["status"] == "failed"
     # Refunded back to the starting balance.
     assert failing_client.get("/v1/account/credits", headers=H).json()["balance"] == 3
+
+
+def test_upload_is_rate_limited_per_account(client, make_account, monkeypatch):
+    monkeypatch.setattr(config.settings, "upload_rate_limit", 2)
+    make_account(credits_n=10)
+    for i in range(2):
+        r = client.post("/v1/replays", files=_file(f"replay{i}".encode()), headers=H)
+        assert r.status_code == 202
+    # The third distinct upload within the window is throttled.
+    assert client.post("/v1/replays", files=_file(b"replay2"), headers=H).status_code == 429
 
 
 def test_lock_profile(client, make_account):

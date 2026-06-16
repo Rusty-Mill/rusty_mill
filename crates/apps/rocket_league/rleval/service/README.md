@@ -39,7 +39,8 @@ and maps each per-player Rust `Report` to a stored `Report` row.
   `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf`, `GET /v1/leaderboard`,
   `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
   `POST /internal/webhooks/purchase`, `POST /internal/rescore/{id}`, plus
-  `GET /healthz`. Upload guards: `owns_book` + a positive credit balance.
+  `GET /healthz`. Upload guards: `owns_book`, a positive credit balance, and a
+  per-account **rate limit** (§7).
 - **PDF report** (§4.10): the worker's PDF-ready report HTML (captured at score
   time) is rendered to PDF via a `PdfRenderer` port (weasyprint adapter) and
   **cached per replay**; served owner-gated at `GET /v1/reports/{id}/pdf`. Rendering
@@ -56,17 +57,17 @@ and maps each per-player Rust `Report` to a stored `Report` row.
   on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
 - **Entitlement webhook** (§8): `POST /internal/webhooks/purchase` flips
   `owns_book` and grants credits — monthly (expires period end, no rollover) or a
-  top-up (+30 d) — idempotent by the provider's event id.
+  top-up (+30 d) — idempotent by the provider's event id, with an `X-Signature`
+  HMAC-SHA256 verified when `RLS_WEBHOOK_SECRET` is set.
 - **Off-thread scoring**: upload enqueues a background task; the worker path shares
   the engine, so it's exercised in tests.
 
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): a real **job queue** (Celery/RQ vs. the
-in-process background task), per-account **rate-limiting**,
-webhook **signature verification**, **encryption-at-rest**, and real **auth** (the
-current `X-Account-Email` header is a dev stub — authentication is the web layer's
-job).
+in-process background task), **encryption-at-rest**, observability (per-stage
+timings/metrics), and real **auth** (the current `X-Account-Email` header is a dev
+stub — authentication is the web layer's job).
 
 ## Run
 
@@ -115,3 +116,6 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | `RLS_CACHE_CANONICAL` | `0` | cache the canonical blob for no-re-parse re-score |
 | `RLS_MONTHLY_GRANT` | `20` | monthly credit grant |
 | `RLS_UPLOAD_MAX_BYTES` | `26214400` | upload size cap |
+| `RLS_UPLOAD_RATE_LIMIT` | `30` | max new uploads per window/account |
+| `RLS_UPLOAD_RATE_WINDOW_S` | `3600` | rate-limit window (s) |
+| `RLS_WEBHOOK_SECRET` | _(empty)_ | webhook HMAC secret (empty = no verify) |

@@ -10,8 +10,11 @@ Auth is a dev stub: the account is resolved from an ``X-Account-Email`` header
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import (
     BackgroundTasks,
@@ -25,13 +28,14 @@ from fastapi import (
     Response,
     UploadFile,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from . import blobs, credits, leaderboard, webhooks
 from .config import settings
 from .db import get_session, init_db
-from .models import Account, LeaderboardEntry, Replay, Report
+from .models import Account, LeaderboardEntry, Replay, Report, utcnow
 from .pdf import PdfRenderer, PdfRenderError, WeasyPrintRenderer
 from .scoring import Scorer, SubprocessScorer
 from .service import ingest, process, replay_id_for, rescore
@@ -93,6 +97,17 @@ def _report_dict(r: Report) -> dict:
     }
 
 
+def _rate_limited(session: Session, account_id: int) -> bool:
+    """True if the account has hit its new-upload rate limit (§7)."""
+    cutoff = utcnow() - timedelta(seconds=settings.upload_rate_window_s)
+    recent = session.exec(
+        select(func.count(Replay.id)).where(
+            Replay.account_id == account_id, Replay.created_at > cutoff
+        )
+    ).one()
+    return recent >= settings.upload_rate_limit
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     return {"ok": True}
@@ -118,9 +133,11 @@ def upload_replay(
 
     rid = replay_id_for(blob)
     existing = session.get(Replay, rid)
-    if existing is not None:  # idempotent re-upload (§9)
+    if existing is not None:  # idempotent re-upload (§9); doesn't count toward the limit
         return {"replay_id": rid, "status": existing.status, "deduped": True}
 
+    if _rate_limited(session, account.id):
+        raise HTTPException(429, "upload rate limit exceeded")
     if credits.balance(session, account.id) <= 0:
         raise HTTPException(402, "no credits")
 
@@ -262,11 +279,31 @@ class PurchaseEvent(BaseModel):
     grant_book: bool = False
 
 
+def _verify_webhook_signature(raw: bytes, signature: str | None) -> None:
+    """Verify the provider's HMAC-SHA256 signature over the raw body (§8).
+
+    A no-op when `RLS_WEBHOOK_SECRET` is unset (dev); otherwise `401` on a missing
+    or mismatched `X-Signature`.
+    """
+    secret = settings.webhook_secret
+    if not secret:
+        return
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    if not signature or not hmac.compare_digest(expected, signature):
+        raise HTTPException(401, "invalid webhook signature")
+
+
 @app.post("/internal/webhooks/purchase")
-def purchase_webhook(
-    body: PurchaseEvent, session: Session = Depends(get_session)
+async def purchase_webhook(
+    request: Request, session: Session = Depends(get_session)
 ) -> dict:
-    # Internal: expected behind a shared-secret/signature check (deferred).
+    # HMAC is over the exact raw bytes, so read the body before parsing.
+    raw = await request.body()
+    _verify_webhook_signature(raw, request.headers.get("X-Signature"))
+    try:
+        body = PurchaseEvent.model_validate_json(raw)
+    except ValidationError as e:
+        raise HTTPException(422, "invalid payload") from e
     account = webhooks.apply_purchase(
         session,
         email=body.email,

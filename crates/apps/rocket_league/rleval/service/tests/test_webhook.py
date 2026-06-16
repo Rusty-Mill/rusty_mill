@@ -2,7 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import io
+import json
+
+from app import config
+
+
+def _signed(payload: dict, secret: str):
+    raw = json.dumps(payload).encode()
+    sig = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+    return raw, {"X-Signature": sig, "content-type": "application/json"}
 
 
 def _file(content: bytes = b"a-fake-replay"):
@@ -31,6 +42,38 @@ def test_topup_adds_ten_after_monthly(client):
     _purchase(client, event_id="m1", grant_book=True)
     body = _purchase(client, event_id="t1", kind="topup").json()
     assert body["balance"] == 30
+
+
+def test_valid_signature_is_accepted(client, monkeypatch):
+    monkeypatch.setattr(config.settings, "webhook_secret", "shh")
+    raw, headers = _signed(
+        {"email": "b@example.com", "event_id": "s1", "kind": "monthly", "grant_book": True},
+        "shh",
+    )
+    r = client.post("/internal/webhooks/purchase", content=raw, headers=headers)
+    assert r.status_code == 200 and r.json()["owns_book"] is True
+
+
+def test_bad_signature_is_rejected(client, monkeypatch):
+    monkeypatch.setattr(config.settings, "webhook_secret", "shh")
+    raw, _ = _signed({"email": "b@example.com", "event_id": "s1"}, "shh")
+    r = client.post(
+        "/internal/webhooks/purchase",
+        content=raw,
+        headers={"X-Signature": "deadbeef", "content-type": "application/json"},
+    )
+    assert r.status_code == 401
+
+
+def test_missing_signature_is_rejected_when_secret_set(client, monkeypatch):
+    monkeypatch.setattr(config.settings, "webhook_secret", "shh")
+    raw, _ = _signed({"email": "b@example.com", "event_id": "s1"}, "shh")
+    r = client.post(
+        "/internal/webhooks/purchase",
+        content=raw,
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 401
 
 
 def test_webhook_provisions_an_uploadable_account(client):
