@@ -51,8 +51,8 @@ filesystem or S3).
   enqueue → **confirm** on success → **auto-refund** on failure, idempotent by
   `replay_id`; holds inherit their grant's expiry (no rollover / no drift).
 - **Endpoints** (§7): `POST /v1/replays`, `GET /v1/replays/{id}`,
-  `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf`, `GET /v1/leaderboard`,
-  `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
+  `GET /v1/reports/{id}`, `GET /v1/reports/{id}/pdf`, `GET /v1/leaderboard`
+  (+ `/recent`, `/seasons`), `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
   `POST /internal/webhooks/purchase`, `POST /internal/rescore/{id}`, plus
   `GET /healthz` and `GET /metrics`. Upload guards: `owns_book`, a positive credit
   balance, and a per-account **rate limit** (§7).
@@ -72,9 +72,12 @@ filesystem or S3).
   off by default), re-score runs **from the cached canonical match, skipping the
   parse** (`replay-scoring --dump-canonical` / `--from-canonical`, byte-identical
   to a fresh parse); otherwise it re-parses.
-- **Leaderboard** (§5/§8): materialized **best composite per account per season**;
-  only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
-  on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
+- **Leaderboard** (§5/§8/§13): materialized **best composite per account per
+  season**; only **locked-profile** reports with `confidence == "ok"` are eligible,
+  recomputed on each successful score. Public `GET /v1/leaderboard?season=…&limit=…`
+  (with a `closed` flag once the season's quarter elapses), a `/recent` activity
+  feed (newest personal bests), and `/seasons`. The first `RLS_FOUNDING_N` accounts
+  to qualify get an immutable **Founding** ordinal, surfaced in the feed.
 - **Entitlement webhook** (§8): `POST /internal/webhooks/purchase` flips
   `owns_book` and grants credits — monthly (expires period end, no rollover) or a
   top-up (+30 d) — idempotent by the provider's event id, with an `X-Signature`
@@ -181,6 +184,7 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | `RLS_SCORE_CONFIG_VERSION` | `score-v1` | current scoring version (re-score gate) |
 | `RLS_CACHE_CANONICAL` | `0` | cache the canonical blob for no-re-parse re-score |
 | `RLS_MONTHLY_GRANT` | `20` | monthly credit grant |
+| `RLS_FOUNDING_N` | `100` | first-N accounts flagged "Founding" |
 | `RLS_UPLOAD_MAX_BYTES` | `26214400` | upload size cap |
 | `RLS_UPLOAD_RATE_LIMIT` | `30` | max new uploads per window/account |
 | `RLS_UPLOAD_RATE_WINDOW_S` | `3600` | rate-limit window (s) |

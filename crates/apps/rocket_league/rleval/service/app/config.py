@@ -50,6 +50,8 @@ class Settings:
         )
         # Monthly credit grant (§8); top-ups handled by the (deferred) webhook.
         self.monthly_grant = int(os.getenv("RLS_MONTHLY_GRANT", "20"))
+        # Founding-member cap (§13): the first N accounts to qualify are flagged.
+        self.founding_n = int(os.getenv("RLS_FOUNDING_N", "100"))
         self.upload_max_bytes = int(os.getenv("RLS_UPLOAD_MAX_BYTES", str(25 * _MB)))
         # Per-account upload rate limit (§7): at most N new uploads per window.
         self.upload_rate_limit = int(os.getenv("RLS_UPLOAD_RATE_LIMIT", "30"))

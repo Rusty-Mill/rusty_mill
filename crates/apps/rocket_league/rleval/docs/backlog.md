@@ -116,13 +116,18 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 
 ## M3 — leaderboard, seasons, redundancy
 
-- **Leaderboard + seasons + Founding-N.** ✔ *Core shipped* — `service/app/leaderboard.py`
+- **Leaderboard + seasons + Founding-N.** ✔ `service/app/leaderboard.py`
   materializes the **best composite per account per season** (`YYYY-Sn` quarters);
   only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
-  on each successful score; public `GET /v1/leaderboard?season=…&limit=…`. Tested
-  (`service/tests/test_leaderboard.py`: eligibility gates + best-per-season + sorted
-  feed). *Remaining:* Founding-N seeding and the "recent" feed; season rollover/close
-  policy. Where: service.
+  on each successful score. **Founding-N** ✔ — the first `RLS_FOUNDING_N` accounts to
+  qualify get an immutable ordinal (`Account.founding_number`, migration `0002`),
+  surfaced in the feed. **Recent feed** ✔ (`GET /v1/leaderboard/recent`, newest
+  personal bests) and **season close** ✔ (`season_bounds`/`is_closed`; the feed
+  carries a `closed` flag, closed seasons never take new entries since materialize
+  only writes the current season; `GET /v1/leaderboard/seasons`). Tested
+  (`service/tests/test_leaderboard.py`: eligibility gates, best-per-season, sorted
+  feed, founding order+cap+idempotence, recent ordering, season bounds/closed).
+  *Remaining:* none material. Where: service.
 - **Re-score endpoint.** ✔ `POST /internal/rescore/{id}` re-runs the scoring core
   at the worker's current `score_config_version` and **swaps in the fresh reports**
   (no re-upload), re-materializing the leaderboard (FK-safe) and dropping the stale
