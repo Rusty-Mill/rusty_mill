@@ -15,9 +15,15 @@ class Settings:
     def __init__(self) -> None:
         # SQLAlchemy URL. SQLite for dev; point at Postgres in production (§5).
         self.database_url = os.getenv("RLS_DATABASE_URL", "sqlite:///./rls.db")
-        # Where raw replay blobs are kept, content-addressed by replay_id (§9/§12).
-        # NOTE: encryption-at-rest (§12) is a deferred follow-up.
+        # Artifact store (content-addressed by replay_id, §9/§12). "fs" keeps the
+        # filesystem store at blob_dir; "s3" uses object storage (multi-node).
+        self.blob_backend = os.getenv("RLS_BLOB_BACKEND", "fs")
         self.blob_dir = os.getenv("RLS_BLOB_DIR", "./blobs")
+        self.s3_bucket = os.getenv("RLS_S3_BUCKET", "rls-blobs")
+        self.s3_prefix = os.getenv("RLS_S3_PREFIX", "")
+        self.s3_region = os.getenv("RLS_S3_REGION", "us-east-1")
+        # Custom endpoint for S3-compatible stores (MinIO/localstack); "" = AWS.
+        self.s3_endpoint_url = os.getenv("RLS_S3_ENDPOINT_URL", "") or None
         # The Rust parse+score worker binary (`replay-scoring`) on PATH or absolute.
         self.worker_bin = os.getenv("RLS_WORKER_BIN", "replay-scoring")
         self.worker_timeout_s = int(os.getenv("RLS_WORKER_TIMEOUT_S", "300"))
