@@ -24,6 +24,16 @@ class Settings:
         # The config version the service currently scores at; a report stored at an
         # older version is a re-score candidate (§9).
         self.score_config_version = os.getenv("RLS_SCORE_CONFIG_VERSION", "score-v1")
+        # Cache the (serde) canonical-match blob so a re-score skips re-parsing
+        # (§9). Off by default: the canonical JSON is large (~3 MB gzipped vs a
+        # ~1 MB replay) and parsing is cheap, so this trades storage for re-score
+        # speed — enable it only where re-parse cost dominates.
+        self.cache_canonical = os.getenv("RLS_CACHE_CANONICAL", "0") not in (
+            "0",
+            "",
+            "false",
+            "False",
+        )
         # Monthly credit grant (§8); top-ups handled by the (deferred) webhook.
         self.monthly_grant = int(os.getenv("RLS_MONTHLY_GRANT", "20"))
         self.upload_max_bytes = int(os.getenv("RLS_UPLOAD_MAX_BYTES", str(25 * _MB)))

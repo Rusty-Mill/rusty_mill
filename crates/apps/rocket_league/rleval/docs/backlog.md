@@ -51,8 +51,9 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 - **Persistence.** ✔ SQLModel tables (§5): `Account`, `CreditLedger`, `Replay`,
   `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
   Idempotency `replay_id = sha256(blob)`; raw blobs content-addressed on disk for
-  re-scoring without re-upload. *Remaining:* cache the **canonical-match** blob so
-  a re-score skips re-parse (§9), and encryption-at-rest (§12).
+  re-scoring without re-upload; the **canonical-match** blob is optionally cached
+  (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`). *Remaining:*
+  encryption-at-rest (§12).
 - **Credit ledger.** ✔ Balance = sum of non-expired deltas; soft-hold → confirm →
   **auto-refund on failure**, idempotent by `replay_id`; holds inherit the grant's
   expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
@@ -88,11 +89,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 - **Re-score endpoint.** ✔ `POST /internal/rescore/{id}` re-runs the scoring core
   at the worker's current `score_config_version` and **swaps in the fresh reports**
   (no re-upload), re-materializing the leaderboard (FK-safe) and dropping the stale
-  PDF. Tested (`service/tests/test_rescore.py`: replace-at-new-version, leaderboard
-  refresh, PDF invalidation, 404/409). *Remaining (the §9 optimization):* cache the
-  **canonical-match** blob so re-score skips the parse — `CanonicalMatch` is
-  serde-ready; needs `replay-scoring --dump-canonical`/`--from-canonical` modes +
-  service plumbing. Where: `service/app/service.py` (`rescore`).
+  PDF. **No-re-parse re-score ✔** — with `RLS_CACHE_CANONICAL`, score caches the
+  gzipped canonical blob and re-score runs the worker's `--from-canonical` mode
+  (byte-identical to a fresh parse, proven by `scoring/tests/canonical_roundtrip.rs`);
+  else it re-parses. Tested (`service/tests/test_rescore.py`: replace-at-new-version,
+  leaderboard refresh, PDF invalidation, canonical-vs-reparse selection, 404/409).
+  Where: `service/app/service.py` (`rescore`) + `scoring/src/main.rs`
+  (`--dump-canonical` / `--from-canonical`).
 - **Second parser adapter** for redundancy/contract-testing: `carball` or the
   ballchasing.com API behind the existing `ReplayParser` port (§6). Where:
   `src/decode/` (this repo).

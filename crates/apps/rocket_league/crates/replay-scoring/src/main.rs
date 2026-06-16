@@ -12,8 +12,9 @@ use std::error::Error;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: replay-scoring <file.replay> [--player <name>] \
-[--config <cfg.json>] [--json <out.json>] [--html <out.html>]";
+const USAGE: &str = "usage: replay-scoring [<file.replay>] [--player <name>] \
+[--config <cfg.json>] [--json <out.json>] [--html <out.html>] \
+[--dump-canonical <out.json>] [--from-canonical <in.json>]";
 
 fn main() -> ExitCode {
     match run() {
@@ -31,6 +32,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut json_out = None;
     let mut config_path = None;
     let mut html_out = None;
+    let mut dump_canonical: Option<String> = None;
+    let mut from_canonical: Option<String> = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
@@ -38,6 +41,12 @@ fn run() -> Result<(), Box<dyn Error>> {
             "--json" => json_out = Some(it.next().ok_or("--json needs a path")?),
             "--config" => config_path = Some(it.next().ok_or("--config needs a path")?),
             "--html" => html_out = Some(it.next().ok_or("--html needs a path")?),
+            "--dump-canonical" => {
+                dump_canonical = Some(it.next().ok_or("--dump-canonical needs a path")?)
+            }
+            "--from-canonical" => {
+                from_canonical = Some(it.next().ok_or("--from-canonical needs a path")?)
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return Ok(());
@@ -49,16 +58,29 @@ fn run() -> Result<(), Box<dyn Error>> {
             other => return Err(format!("unexpected arg {other}\n{USAGE}").into()),
         }
     }
-    let replay = replay.ok_or(USAGE)?;
+    // Build the canonical match either by parsing a `.replay` or by loading a
+    // cached canonical blob — the re-score path runs the identical pure core with
+    // no re-parse (service §9). `CanonicalMatch` is serde round-trippable.
+    let canonical = match &from_canonical {
+        Some(path) => serde_json::from_slice(&std::fs::read(path)?)?,
+        None => {
+            let replay = replay.as_deref().ok_or(USAGE)?;
+            let data = std::fs::read(replay)?;
+            let decoded = BoxcarsParser::new().parse(&data)?;
+            let replay_id = Path::new(replay)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("replay")
+                .to_string();
+            build_canonical(&decoded, replay_id)
+        }
+    };
 
-    let data = std::fs::read(&replay)?;
-    let decoded = BoxcarsParser::new().parse(&data)?;
-    let replay_id = Path::new(&replay)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("replay")
-        .to_string();
-    let canonical = build_canonical(&decoded, replay_id);
+    if let Some(path) = &dump_canonical {
+        std::fs::write(path, serde_json::to_vec(&canonical)?)?;
+        eprintln!("wrote canonical -> {path}");
+    }
+
     if !replay_analyzer::field::is_standard_geometry(canonical.map.as_deref()) {
         eprintln!(
             "warning: non-standard map ({:?}) — positional metrics assume standard Soccar; reports are flagged low-confidence",

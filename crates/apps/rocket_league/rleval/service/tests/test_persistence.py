@@ -6,7 +6,7 @@ import hashlib
 
 from sqlmodel import select
 
-from app import credits, service
+from app import blobs, credits, service
 from app.models import Replay, Report
 
 
@@ -34,6 +34,9 @@ def test_run_scoring_success_stores_reports_and_confirms(session, make_account, 
     rows = session.exec(select(Report).where(Report.replay_id == replay.id)).all()
     assert len(rows) == 1 and rows[0].player_id == "Alice"
     assert credits.balance(session, account.id) == 1  # held credit confirmed
+    # The worker's canonical blob is cached for a no-re-parse re-score (§9).
+    assert blobs.has_canonical(replay.id)
+    assert blobs.load_canonical(replay.id) == b'{"fake":"canonical"}'
 
 
 def test_run_scoring_failure_marks_failed_and_refunds(

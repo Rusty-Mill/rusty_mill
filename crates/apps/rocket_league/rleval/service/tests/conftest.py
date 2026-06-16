@@ -47,24 +47,39 @@ class FakeScorer:
         parser_version: str = "boxcars-fake",
         config_version: str = "score-test",
         report_html: str = "<html><body>fake report</body></html>",
+        canonical_blob: bytes | None = b'{"fake":"canonical"}',
     ) -> None:
         self.fail = fail
         self.players = sample_players() if players is None else players
         self.parser_version = parser_version
         self.config_version = config_version
         self.report_html = report_html
+        self.canonical_blob = canonical_blob
         self.calls = 0
+        self.last_method: str | None = None
 
-    def score(self, blob: bytes, replay_id: str) -> ScoreResult:
-        self.calls += 1
-        if self.fail:
-            raise RuntimeError("worker boom")
+    def _result(self, *, with_canonical: bool) -> ScoreResult:
         return ScoreResult(
             self.parser_version,
             self.config_version,
             list(self.players),
             report_html=self.report_html,
+            canonical_blob=self.canonical_blob if with_canonical else None,
         )
+
+    def score(self, blob: bytes, replay_id: str) -> ScoreResult:
+        self.calls += 1
+        self.last_method = "score"
+        if self.fail:
+            raise RuntimeError("worker boom")
+        return self._result(with_canonical=True)
+
+    def score_from_canonical(self, canonical_blob: bytes, replay_id: str) -> ScoreResult:
+        self.calls += 1
+        self.last_method = "from_canonical"
+        if self.fail:
+            raise RuntimeError("worker boom")
+        return self._result(with_canonical=False)
 
 
 class FakePdfRenderer:
