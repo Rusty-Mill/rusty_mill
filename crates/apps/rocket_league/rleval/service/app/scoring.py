@@ -46,10 +46,17 @@ class ScoreResult:
     # The full-lobby report HTML (from `--html`), for PDF rendering (§4.10). May
     # be absent if the worker didn't emit it.
     report_html: str | None = None
+    # The serialized canonical match (from `--dump-canonical`), for a no-re-parse
+    # re-score (§9). Present only when canonical caching is enabled.
+    canonical_blob: bytes | None = None
 
 
 class Scorer(Protocol):
     def score(self, blob: bytes, replay_id: str) -> ScoreResult: ...
+
+    def score_from_canonical(
+        self, canonical_blob: bytes, replay_id: str
+    ) -> ScoreResult: ...
 
 
 def _player_from_report(r: dict) -> PlayerScore:
@@ -76,38 +83,63 @@ class SubprocessScorer:
     full lobby); with one player it emits a single object. We handle both.
     """
 
-    def __init__(self, worker_bin: str, timeout_s: int = 300) -> None:
+    def __init__(
+        self, worker_bin: str, timeout_s: int = 300, cache_canonical: bool = False
+    ) -> None:
         self.worker_bin = worker_bin
         self.timeout_s = timeout_s
+        self.cache_canonical = cache_canonical
 
     def score(self, blob: bytes, replay_id: str) -> ScoreResult:
+        """Parse + score a raw replay (optionally dumping the canonical blob)."""
         with tempfile.TemporaryDirectory() as d:
             in_path = os.path.join(d, f"{replay_id}.replay")
-            out_path = os.path.join(d, "report.json")
-            html_path = os.path.join(d, "report.html")
             with open(in_path, "wb") as f:
                 f.write(blob)
-            try:
-                # One invocation emits both the per-player JSON and the full-lobby
-                # report HTML (the latter feeds PDF rendering).
-                proc = subprocess.run(
-                    [self.worker_bin, in_path, "--json", out_path, "--html", html_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_s,
-                )
-            except (OSError, subprocess.TimeoutExpired) as e:
-                raise ScoringError(f"worker did not run: {e}") from e
-            if proc.returncode != 0:
-                raise ScoringError(
-                    f"worker exit {proc.returncode}: {proc.stderr[-500:].strip()}"
-                )
-            with open(out_path) as f:
-                data = json.load(f)
-            report_html = None
-            if os.path.exists(html_path):
-                with open(html_path, encoding="utf-8") as f:
-                    report_html = f.read()
+            can_out = os.path.join(d, "canonical.json") if self.cache_canonical else None
+            input_args = [in_path]
+            if can_out:
+                input_args += ["--dump-canonical", can_out]
+            return self._run(d, input_args, can_out)
+
+    def score_from_canonical(self, canonical_blob: bytes, replay_id: str) -> ScoreResult:
+        """Score from a cached canonical match — the identical core, no re-parse."""
+        with tempfile.TemporaryDirectory() as d:
+            can_in = os.path.join(d, f"{replay_id}.canonical.json")
+            with open(can_in, "wb") as f:
+                f.write(canonical_blob)
+            return self._run(d, ["--from-canonical", can_in], None)
+
+    def _run(
+        self, d: str, input_args: list[str], canonical_out: str | None
+    ) -> ScoreResult:
+        out_path = os.path.join(d, "report.json")
+        html_path = os.path.join(d, "report.html")
+        try:
+            # One invocation emits the per-player JSON + the full-lobby report HTML
+            # (the latter feeds PDF rendering).
+            proc = subprocess.run(
+                [self.worker_bin, *input_args, "--json", out_path, "--html", html_path],
+                capture_output=True,
+                text=True,
+                timeout=self.timeout_s,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise ScoringError(f"worker did not run: {e}") from e
+        if proc.returncode != 0:
+            raise ScoringError(
+                f"worker exit {proc.returncode}: {proc.stderr[-500:].strip()}"
+            )
+        with open(out_path) as f:
+            data = json.load(f)
+        report_html = None
+        if os.path.exists(html_path):
+            with open(html_path, encoding="utf-8") as f:
+                report_html = f.read()
+        canonical_blob = None
+        if canonical_out and os.path.exists(canonical_out):
+            with open(canonical_out, "rb") as f:
+                canonical_blob = f.read()
 
         reports = data if isinstance(data, list) else [data]
         if not reports:
@@ -118,4 +150,5 @@ class SubprocessScorer:
             score_config_version=first["score_config_version"],
             players=[_player_from_report(r) for r in reports],
             report_html=report_html,
+            canonical_blob=canonical_blob,
         )

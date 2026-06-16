@@ -8,6 +8,7 @@ swap for object storage in production. Encryption-at-rest (§12) is deferred.
 
 from __future__ import annotations
 
+import gzip
 from pathlib import Path
 
 from .config import settings
@@ -65,3 +66,17 @@ def has_pdf(replay_id: str) -> bool:
 def delete_pdf(replay_id: str) -> None:
     """Drop the cached PDF (e.g. after a re-score changes the report)."""
     _path(replay_id, ".pdf").unlink(missing_ok=True)
+
+
+# --- cached canonical-match blob (gzipped; for no-re-parse re-score, §9) ---
+def store_canonical(replay_id: str, canonical_json: bytes) -> None:
+    _path(replay_id, ".canonical.json.gz").write_bytes(gzip.compress(canonical_json))
+
+
+def load_canonical(replay_id: str) -> bytes:
+    """The raw canonical JSON (the worker's `--from-canonical` reads it raw)."""
+    return gzip.decompress(_path(replay_id, ".canonical.json.gz").read_bytes())
+
+
+def has_canonical(replay_id: str) -> bool:
+    return _path(replay_id, ".canonical.json.gz").exists()

@@ -45,7 +45,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Replay-Scoring Service", version="0.1.0", lifespan=lifespan)
 # Default production adapters; tests override `app.state.{scorer,pdf_renderer}`.
-app.state.scorer = SubprocessScorer(settings.worker_bin, settings.worker_timeout_s)
+app.state.scorer = SubprocessScorer(
+    settings.worker_bin, settings.worker_timeout_s, settings.cache_canonical
+)
 app.state.pdf_renderer = WeasyPrintRenderer()
 
 

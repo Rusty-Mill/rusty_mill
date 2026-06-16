@@ -45,10 +45,12 @@ and maps each per-player Rust `Report` to a stored `Report` row.
   **cached per replay**; served owner-gated at `GET /v1/reports/{id}/pdf`. Rendering
   is optional (the `pdf` extra) — tests use a fake renderer, so the base install
   doesn't need weasyprint's native libs.
-- **Re-score** (§8/§9): `POST /internal/rescore/{id}` re-runs the (now-newer)
-  scoring core and **swaps in the fresh reports** without a re-upload — refreshing
-  the leaderboard and dropping the stale PDF. (Currently re-parses; the no-re-parse
-  canonical-blob cache is the remaining §9 optimization.)
+- **Re-score** (§8/§9): `POST /internal/rescore/{id}` re-runs the scoring core and
+  **swaps in the fresh reports** without a re-upload — refreshing the leaderboard
+  and dropping the stale PDF. With canonical caching enabled (`RLS_CACHE_CANONICAL`,
+  off by default), re-score runs **from the cached canonical match, skipping the
+  parse** (`replay-scoring --dump-canonical` / `--from-canonical`, byte-identical
+  to a fresh parse); otherwise it re-parses.
 - **Leaderboard** (§5/§8): materialized **best composite per account per season**;
   only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
   on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
@@ -60,10 +62,8 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): a **no-re-parse re-score** (cache the
-canonical-match blob so re-score skips parsing — the worker is serde-ready), a
-real **job queue** (Celery/RQ vs. the in-process background task), per-account
-**rate-limiting**,
+Tracked in `docs/backlog.md` (M2): a real **job queue** (Celery/RQ vs. the
+in-process background task), per-account **rate-limiting**,
 webhook **signature verification**, **encryption-at-rest**, and real **auth** (the
 current `X-Account-Email` header is a dev stub — authentication is the web layer's
 job).
@@ -112,5 +112,6 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | `RLS_WORKER_BIN` | `replay-scoring` | Rust worker binary |
 | `RLS_WORKER_TIMEOUT_S` | `300` | worker subprocess timeout |
 | `RLS_SCORE_CONFIG_VERSION` | `score-v1` | current scoring version (re-score gate) |
+| `RLS_CACHE_CANONICAL` | `0` | cache the canonical blob for no-re-parse re-score |
 | `RLS_MONTHLY_GRANT` | `20` | monthly credit grant |
 | `RLS_UPLOAD_MAX_BYTES` | `26214400` | upload size cap |

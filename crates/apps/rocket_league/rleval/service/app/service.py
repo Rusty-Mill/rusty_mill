@@ -76,6 +76,8 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
         result = scorer.score(blob, replay.id)
         if result.report_html:
             blobs.store_html(replay.id, result.report_html)  # for PDF rendering
+        if result.canonical_blob:
+            blobs.store_canonical(replay.id, result.canonical_blob)  # no-re-parse re-score
         _store_reports(session, replay, result)
         replay.parser_version = result.parser_version
         replay.status = "done"
@@ -106,8 +108,12 @@ def rescore(session: Session, replay: Replay, scorer: Scorer) -> ScoreResult:
     PDF and re-materializing the leaderboard. (The §9 "skip re-parse via a cached
     canonical blob" optimization is a separate follow-up; this re-parses.)
     """
-    blob = blobs.load(replay.id)
-    result = scorer.score(blob, replay.id)
+    # Re-score from the cached canonical when available (no re-parse, §9);
+    # otherwise re-parse the raw replay.
+    if blobs.has_canonical(replay.id):
+        result = scorer.score_from_canonical(blobs.load_canonical(replay.id), replay.id)
+    else:
+        result = scorer.score(blobs.load(replay.id), replay.id)
     if result.report_html:
         blobs.store_html(replay.id, result.report_html)
 

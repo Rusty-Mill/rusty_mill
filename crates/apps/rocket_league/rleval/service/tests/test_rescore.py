@@ -69,6 +69,23 @@ def test_rescore_invalidates_the_pdf_cache(client, make_account, pdf_renderer):
     assert pdf_renderer.calls == 2  # cache dropped -> re-rendered
 
 
+def test_rescore_uses_cached_canonical_no_reparse(client, make_account, scorer):
+    make_account(credits_n=2)
+    rid = _upload(client)  # caches the canonical blob
+    scorer.last_method = None
+    client.post(f"/internal/rescore/{rid}")
+    assert scorer.last_method == "from_canonical"  # no re-parse
+
+
+def test_rescore_reparses_when_no_canonical(client, make_account, scorer):
+    scorer.canonical_blob = None  # worker didn't cache a canonical
+    make_account(credits_n=2)
+    rid = _upload(client)
+    scorer.last_method = None
+    client.post(f"/internal/rescore/{rid}")
+    assert scorer.last_method == "score"  # fell back to re-parse
+
+
 def test_rescore_missing_is_404(client, make_account):
     make_account(credits_n=1)
     assert client.post("/internal/rescore/nope").status_code == 404
