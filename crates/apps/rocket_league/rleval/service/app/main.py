@@ -1,8 +1,8 @@
 """FastAPI surface (spec §7).
 
-Implemented here: upload (`POST /v1/replays`), status, report fetch, credit
-balance, and lock-profile. The PDF endpoint, public leaderboard, purchase
-webhook, and admin re-score are deferred follow-ups (see README).
+The full surface: upload, status, reports (+PDF), public leaderboard, credit
+balance, lock-profile, the purchase webhook, and admin re-score. Scoring is
+scheduled through a `JobQueue` port (in-process by default; see `queue.py`).
 
 Auth is a dev stub: the account is resolved from an ``X-Account-Email`` header
 (get-or-create). Real authentication is the web layer's job.
@@ -37,8 +37,9 @@ from .config import settings
 from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report, utcnow
 from .pdf import PdfRenderer, PdfRenderError, WeasyPrintRenderer
+from .queue import BackgroundTaskQueue, JobQueue
 from .scoring import Scorer, SubprocessScorer
-from .service import ingest, process, replay_id_for, rescore
+from .service import ingest, replay_id_for, rescore
 
 
 @asynccontextmanager
@@ -53,10 +54,24 @@ app.state.scorer = SubprocessScorer(
     settings.worker_bin, settings.worker_timeout_s, settings.cache_canonical
 )
 app.state.pdf_renderer = WeasyPrintRenderer()
+# Job-queue factory (queue.py): None → the in-process BackgroundTaskQueue default;
+# a Celery/RQ deployment sets a `(background, scorer) -> JobQueue` factory.
+app.state.queue_factory = None
 
 
 def get_scorer(request: Request) -> Scorer:
     return request.app.state.scorer
+
+
+def get_queue(
+    request: Request,
+    background: BackgroundTasks,
+    scorer: Scorer = Depends(get_scorer),
+) -> JobQueue:
+    factory = request.app.state.queue_factory
+    if factory is not None:
+        return factory(background, scorer)
+    return BackgroundTaskQueue(background, scorer)
 
 
 def get_pdf_renderer(request: Request) -> PdfRenderer:
@@ -115,12 +130,11 @@ def healthz() -> dict:
 
 @app.post("/v1/replays", status_code=202)
 def upload_replay(
-    background: BackgroundTasks,
     file: UploadFile = File(...),
     playlist: str = Form("unknown"),
     account: Account = Depends(current_account),
     session: Session = Depends(get_session),
-    scorer: Scorer = Depends(get_scorer),
+    queue: JobQueue = Depends(get_queue),
 ) -> dict:
     # Guards (§7): entitlement, then a non-empty/bounded blob, then credit.
     if not account.owns_book:
@@ -142,7 +156,7 @@ def upload_replay(
         raise HTTPException(402, "no credits")
 
     replay = ingest(session, account, blob, playlist)
-    background.add_task(process, rid, scorer)
+    queue.enqueue_scoring(rid)
     return {"replay_id": rid, "status": replay.status, "deduped": False}
 
 
