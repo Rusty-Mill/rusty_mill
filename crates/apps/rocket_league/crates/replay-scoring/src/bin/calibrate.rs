@@ -18,11 +18,12 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 
 use replay_analyzer::analyze::build_canonical;
+use replay_analyzer::analyze::validate::GroundTruth;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_scoring::calibrate::{
-    composite_with, fit_tiers, fit_weights, fit_weights_ridge, raws_from_report, refit_config,
-    spearman,
+    composite_with, fit_tiers, fit_weights, fit_weights_ridge, join_ranks, raws_from_report,
+    refit_config, spearman,
 };
 use replay_scoring::config::{Curve, Metric, ScoreConfig};
 use replay_scoring::{score_all, Confidence};
@@ -30,6 +31,9 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct ManifestEntry {
+    /// ballchasing replay id — the key into the ground-truth stats fixture.
+    #[serde(default)]
+    id: String,
     file: String,
     bucket: String,
     #[serde(default)]
@@ -114,6 +118,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         manifest_path.display()
     );
 
+    // Ground-truth stats give each ballchasing-mangled rank key its team, which is
+    // what lets the rank join team-anchor a mangled name to the analyzer's true
+    // name (recovering players an exact-name lookup drops). Optional: absent → the
+    // join degrades to exact-name matching.
+    let ground_truth: Option<GroundTruth> =
+        std::fs::read(corpus_dir.join("ballchasing_stats.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+    if ground_truth.is_none() {
+        eprintln!("note: no ballchasing_stats.json — rank join uses exact names only");
+    }
+
     let cfg = ScoreConfig::default();
     let nthreads = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -128,6 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|slice| {
                 let cfg = &cfg;
                 let dir = &corpus_dir;
+                let gt = &ground_truth;
                 s.spawn(move || {
                     let mut out = Vec::new();
                     for e in slice {
@@ -151,16 +168,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .and_then(|x| x.to_str())
                             .unwrap_or("replay");
                         let canonical = build_canonical(&decoded, stem);
-                        for r in score_all(&canonical, cfg) {
-                            let Some(&tier) = e.ranks.get(&r.target_player) else {
-                                continue;
-                            };
+                        let reports = score_all(&canonical, cfg);
+                        // Team-anchored rank join: a mangled ballchasing name still
+                        // resolves to the analyzer's player (vs. dropping it).
+                        let players: Vec<(String, Option<i32>)> = reports
+                            .iter()
+                            .map(|r| (r.target_player.clone(), r.target_team))
+                            .collect();
+                        let gt_players: Option<Vec<(String, i32)>> =
+                            gt.as_ref().and_then(|g| g.replays.get(&e.id)).map(|rep| {
+                                rep.players
+                                    .iter()
+                                    .map(|p| (p.name.clone(), p.team))
+                                    .collect()
+                            });
+                        let tiers = join_ranks(&players, &e.ranks, gt_players.as_deref());
+                        for (r, tier) in reports.iter().zip(&tiers) {
+                            let Some(tier) = tier else { continue };
                             out.push(Sample {
-                                tier: tier as f32,
+                                tier: *tier as f32,
                                 bucket: e.bucket.clone(),
                                 composite_before: r.composite,
                                 confident: r.confidence == Confidence::Ok,
-                                raws: raws_from_report(cfg, &r),
+                                raws: raws_from_report(cfg, r),
                             });
                         }
                     }

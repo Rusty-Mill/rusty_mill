@@ -13,9 +13,51 @@
 
 use std::collections::BTreeMap;
 
+use replay_analyzer::analyze::roster_match::{team_anchored_pairs, RosterSlot};
+
 use crate::config::{Curve, Metric, Role, ScoreConfig, Tier};
 use crate::engine;
 use crate::report::Report;
+
+/// Join each scored player to their rank tier, **team-anchored** so a ballchasing-
+/// mangled rank key still resolves to the analyzer's true name.
+///
+/// `players` are the scored reports as `(true_name, team)`; `ranks` is the
+/// manifest's `mangled_name → tier`; `gt` (optional) supplies each ranked
+/// (mangled) name's team from the ballchasing stats fixture, which is what lets a
+/// residual mangled name pair by team. Returns a tier per player, aligned to
+/// `players`, `None` where unresolved. Without `gt` it degrades to exact-name
+/// matching (the prior behavior) — so a missing fixture never regresses, it just
+/// can't recover the ~5% of players whose ballchasing name was mangled.
+pub fn join_ranks(
+    players: &[(String, Option<i32>)],
+    ranks: &BTreeMap<String, i32>,
+    gt: Option<&[(String, i32)]>,
+) -> Vec<Option<i32>> {
+    // Exact-name match: the common case, and the only path when `gt` is absent.
+    let mut tiers: Vec<Option<i32>> = players
+        .iter()
+        .map(|(name, _)| ranks.get(name).copied())
+        .collect();
+
+    // Team-anchor the residuals against the ranked roster (names carry team here).
+    if let Some(gt) = gt {
+        let left: Vec<RosterSlot> = players
+            .iter()
+            .map(|(name, team)| RosterSlot::new(*team, name))
+            .collect();
+        let right: Vec<RosterSlot> = gt
+            .iter()
+            .map(|(name, team)| RosterSlot::new(Some(*team), name))
+            .collect();
+        for (li, ri) in team_anchored_pairs(&left, &right) {
+            if tiers[li].is_none() {
+                tiers[li] = ranks.get(gt[ri].0.as_str()).copied();
+            }
+        }
+    }
+    tiers
+}
 
 /// Average-rank transform (ties share the mean of their rank span), 1-based.
 fn rankdata(v: &[f32]) -> Vec<f32> {
