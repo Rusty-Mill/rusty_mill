@@ -21,11 +21,13 @@
 //! std::fs::write("match.html", html(&scene)).unwrap();
 //! ```
 
+pub mod impact;
 pub mod render;
 pub mod roles;
 pub mod scene;
 pub mod winprob;
 
+pub use impact::attach_impact;
 pub use render::{html, html_offline};
 pub use roles::attach_roles;
 pub use scene::{build_scene, Scene};

@@ -133,6 +133,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Possession indicator; per-player trails
 - [x] Heatmap floor projection (toggle; occupancy of the ball or followed player, binned in-viewer from the grid)
 - [x] Win-probability / momentum strip above the timeline (P(blue scores next) from `replay-value`; model is basic, read as rough momentum)
+- [x] Impact (ΔV) overlay — per-player roster impact chip + per-touch swing in the ticker + ball-contact skill callouts tinted by swing (from `replay-value`'s `per_touch_delta_v`; `--no-impact` omits)
 
 **Correctness**
 - [x] Map-aware drawn field — non-standard maps draw via `geometry_for_map` + a warning banner (Phase 1; see the map-geometry follow-up)
