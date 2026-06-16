@@ -60,3 +60,8 @@ def load_pdf(replay_id: str) -> bytes:
 
 def has_pdf(replay_id: str) -> bool:
     return _path(replay_id, ".pdf").exists()
+
+
+def delete_pdf(replay_id: str) -> None:
+    """Drop the cached PDF (e.g. after a re-score changes the report)."""
+    _path(replay_id, ".pdf").unlink(missing_ok=True)

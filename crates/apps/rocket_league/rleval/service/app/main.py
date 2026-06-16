@@ -34,7 +34,7 @@ from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report
 from .pdf import PdfRenderer, PdfRenderError, WeasyPrintRenderer
 from .scoring import Scorer, SubprocessScorer
-from .service import ingest, process, replay_id_for
+from .service import ingest, process, replay_id_for, rescore
 
 
 @asynccontextmanager
@@ -202,6 +202,27 @@ def get_report_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'inline; filename="{replay_id}.pdf"'},
     )
+
+
+@app.post("/internal/rescore/{replay_id}")
+def rescore_replay(
+    replay_id: str,
+    session: Session = Depends(get_session),
+    scorer: Scorer = Depends(get_scorer),
+) -> dict:
+    # Admin/internal: re-run the (now-newer) scoring core, no re-upload (§9).
+    replay = session.get(Replay, replay_id)
+    if replay is None:
+        raise HTTPException(404, "replay not found")
+    if replay.status != "done":
+        raise HTTPException(409, f"replay not scored (status={replay.status})")
+    result = rescore(session, replay, scorer)
+    return {
+        "replay_id": replay_id,
+        "reports": len(result.players),
+        "score_config_version": result.score_config_version,
+        "parser_version": result.parser_version,
+    }
 
 
 @app.get("/v1/leaderboard")

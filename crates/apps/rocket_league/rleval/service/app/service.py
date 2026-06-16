@@ -10,13 +10,36 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from . import blobs, credits, leaderboard
 from .config import settings
 from .db import session_scope
-from .models import Account, Replay, Report
-from .scoring import Scorer
+from .models import Account, LeaderboardEntry, Replay, Report
+from .scoring import ScoreResult, Scorer
+
+
+def _store_reports(session: Session, replay: Replay, result: ScoreResult) -> None:
+    """Persist a [`ScoreResult`]'s per-player reports for a replay."""
+    for ps in result.players:
+        session.add(
+            Report(
+                replay_id=replay.id,
+                player_id=ps.player_id,
+                composite=ps.composite,
+                first_man=ps.first_man,
+                second_man=ps.second_man,
+                general=ps.general,
+                licence=ps.licence,
+                player_type=ps.player_type,
+                main_leak=ps.main_leak,
+                focus_chapter=ps.focus_chapter,
+                confidence=ps.confidence,
+                score_config_version=result.score_config_version,
+                parser_version=result.parser_version,
+                metrics_json=ps.metrics_json,
+            )
+        )
 
 
 def replay_id_for(blob: bytes) -> str:
@@ -53,25 +76,7 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
         result = scorer.score(blob, replay.id)
         if result.report_html:
             blobs.store_html(replay.id, result.report_html)  # for PDF rendering
-        for ps in result.players:
-            session.add(
-                Report(
-                    replay_id=replay.id,
-                    player_id=ps.player_id,
-                    composite=ps.composite,
-                    first_man=ps.first_man,
-                    second_man=ps.second_man,
-                    general=ps.general,
-                    licence=ps.licence,
-                    player_type=ps.player_type,
-                    main_leak=ps.main_leak,
-                    focus_chapter=ps.focus_chapter,
-                    confidence=ps.confidence,
-                    score_config_version=result.score_config_version,
-                    parser_version=result.parser_version,
-                    metrics_json=ps.metrics_json,
-                )
-            )
+        _store_reports(session, replay, result)
         replay.parser_version = result.parser_version
         replay.status = "done"
         session.add(replay)
@@ -91,6 +96,45 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
             session.add(replay)
             credits.refund(session, replay.account_id, replay.id)
             session.commit()
+
+
+def rescore(session: Session, replay: Replay, scorer: Scorer) -> ScoreResult:
+    """Re-run scoring on a `done` replay and replace its stored reports (§8/§9).
+
+    Re-runs the worker at its current `score_config_version` (deploy a newer
+    worker → newer version) and swaps in the fresh reports, dropping the cached
+    PDF and re-materializing the leaderboard. (The §9 "skip re-parse via a cached
+    canonical blob" optimization is a separate follow-up; this re-parses.)
+    """
+    blob = blobs.load(replay.id)
+    result = scorer.score(blob, replay.id)
+    if result.report_html:
+        blobs.store_html(replay.id, result.report_html)
+
+    old = list(session.exec(select(Report).where(Report.replay_id == replay.id)).all())
+    old_ids = [r.id for r in old]
+    # No FK cascade in SQLite: drop leaderboard entries pointing at replaced
+    # reports before deleting them, then re-materialize from the new report.
+    if old_ids:
+        for entry in session.exec(
+            select(LeaderboardEntry).where(LeaderboardEntry.report_id.in_(old_ids))
+        ).all():
+            session.delete(entry)
+    for r in old:
+        session.delete(r)
+    session.flush()
+
+    _store_reports(session, replay, result)
+    replay.parser_version = result.parser_version
+    session.add(replay)
+    session.flush()
+
+    account = session.get(Account, replay.account_id)
+    if account is not None:
+        leaderboard.materialize(session, account, replay.id)
+    blobs.delete_pdf(replay.id)  # stale: the report changed
+    session.commit()
+    return result
 
 
 def process(replay_id: str, scorer: Scorer) -> None:
