@@ -80,6 +80,22 @@ def test_upload_is_rate_limited_per_account(client, make_account, monkeypatch):
     assert client.post("/v1/replays", files=_file(b"replay2"), headers=H).status_code == 429
 
 
+def test_artifacts_are_encrypted_at_rest(client, make_account, monkeypatch):
+    from app import blobs
+
+    monkeypatch.setattr(config.settings, "encryption_key", "at-rest-test-key")
+    make_account(credits_n=5)
+    marker = b"PLAINTEXT-REPLAY-MARKER"
+    r = client.post("/v1/replays", files=_file(marker + b"\x00" * 64), headers=H)
+    assert r.status_code == 202
+    rid = r.json()["replay_id"]
+    # On disk the raw blob is sealed (no plaintext marker), but load() decrypts it,
+    # and the sealed HTML artifact round-trips through the scoring pipeline too.
+    assert marker not in blobs._path(rid).read_bytes()
+    assert blobs.load(rid) == marker + b"\x00" * 64
+    assert "fake report" in blobs.load_html(rid)
+
+
 def test_lock_profile(client, make_account):
     make_account(credits_n=1)
     r = client.post("/v1/account/lock-profile", json={"player_id": "Alice"}, headers=H)

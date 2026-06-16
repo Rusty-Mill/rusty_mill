@@ -55,8 +55,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   `Report`, `LeaderboardEntry`; SQLite (→ Postgres via `RLS_DATABASE_URL`).
   Idempotency `replay_id = sha256(blob)`; raw blobs content-addressed on disk for
   re-scoring without re-upload; the **canonical-match** blob is optionally cached
-  (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`). *Remaining:*
-  encryption-at-rest (§12).
+  (gzipped) so a re-score skips the parse (§9, `RLS_CACHE_CANONICAL`).
+- **Encryption-at-rest (§12).** ✔ Every stored artifact is written through a
+  pluggable cipher (`service/app/cipher.py`): `NullCipher` by default, stdlib AEAD
+  (HMAC-SHA256 CTR + encrypt-then-MAC, HKDF-separated subkeys) when
+  `RLS_ENCRYPTION_KEY` is set. Transparent to the worker (it only sees decrypted
+  bytes); verified end-to-end against the real worker on a sealed store. *Remaining
+  (prod):* swap a KMS/AES-GCM adapter behind the same port + a key-rotation path.
 - **Credit ledger.** ✔ Balance = sum of non-expired deltas; soft-hold → confirm →
   **auto-refund on failure**, idempotent by `replay_id`; holds inherit the grant's
   expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
