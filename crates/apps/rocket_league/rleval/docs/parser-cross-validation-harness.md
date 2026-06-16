@@ -168,10 +168,25 @@ Its distinct value is *trajectory-level* independence; if a crate makes Option A
 cheap it's worth doing, otherwise the marginal coverage over golden +
 `external_validation` may not yet justify a hand-rolled reimplementation.
 
-**Recommended first step:** a ½-day `subtr-actor` spike — reconstruct 42f2 on a
-throwaway branch, confirm it yields ball + car position/velocity/boost per frame
-offline, and eyeball agreement against our resampled grid. That one spike decides
-Option A vs B and de-risks the rest.
+### Spike result (done — Option A confirmed viable)
+A `subtr-actor` spike (v1.0.2) settled it:
+- It pins **`boxcars 0.11.3` — our exact version**, so it shares our parse layer
+  with no type conflict, and builds/runs fully offline (no network, no key).
+- `NDArrayCollector` + `FrameRateDecorator::new_from_fps(30.0, …)` yields a 30 Hz
+  matrix with ball position/rotation/linear+angular velocity and per-player
+  position/velocity/rotation + **boost** — exactly the per-frame fields we need.
+- On `42f2` it independently recovered the same **3-player roster** and **12560
+  frames @ 30 Hz** (frame-for-frame with our grid; both share the clock origin
+  `current_time ≈ 23 s` at kickoff, so they align by frame index).
+- Ball-position agreement vs our resampled grid: **0 uu at kickoff, ~20–30 uu
+  mid-match** — well under one ball radius (~93 uu), in the same coordinate frame.
+  That sets a sensible Tier-R1 tolerance (~50–100 uu).
+
+So Option A is chosen. Remaining work is engineering, not feasibility: a
+`recon-check` crate wrapping subtr-actor, a tolerance comparator (ball/car
+position + velocity + boost on the shared grid, event-timing windows), and an
+offline CI test on `42f2`/`419a`. Caveat stands — sharing `boxcars` means this is
+**reconstruction-layer** independence, not parse-layer.
 
 ## Non-goals
 Not a drop-in parser; not validating the scoring rubric; no live API call in CI.
