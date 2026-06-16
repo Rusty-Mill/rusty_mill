@@ -27,10 +27,10 @@ from fastapi import (
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from . import credits
+from . import credits, leaderboard
 from .config import settings
 from .db import get_session, init_db
-from .models import Account, Replay, Report
+from .models import Account, LeaderboardEntry, Replay, Report
 from .scoring import Scorer, SubprocessScorer
 from .service import ingest, process, replay_id_for
 
@@ -154,6 +154,34 @@ def get_reports(
         "replay_id": replay_id,
         "status": replay.status,
         "reports": [_report_dict(r) for r in rows],
+    }
+
+
+def _leaderboard_dict(rank: int, e: LeaderboardEntry) -> dict:
+    return {
+        "rank": rank,
+        "player_id": e.player_id,  # the public locked-profile handle
+        "composite": e.composite,
+        "first_man": e.first_man,
+        "second_man": e.second_man,
+        "general": e.general,
+        "uploaded_at": e.uploaded_at.isoformat(),
+    }
+
+
+@app.get("/v1/leaderboard")
+def get_leaderboard(
+    season: str | None = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+) -> dict:
+    # Public feed; no account required. Defaults to the current season.
+    season = season or leaderboard.current_season()
+    limit = max(1, min(limit, 200))
+    rows = leaderboard.top(session, season, limit)
+    return {
+        "season": season,
+        "entries": [_leaderboard_dict(i + 1, e) for i, e in enumerate(rows)],
     }
 
 

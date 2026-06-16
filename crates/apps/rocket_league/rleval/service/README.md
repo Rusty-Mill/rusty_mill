@@ -36,16 +36,20 @@ and maps each per-player Rust `Report` to a stored `Report` row.
   enqueue → **confirm** on success → **auto-refund** on failure, idempotent by
   `replay_id`; holds inherit their grant's expiry (no rollover / no drift).
 - **Endpoints** (§7): `POST /v1/replays`, `GET /v1/replays/{id}`,
-  `GET /v1/reports/{id}`, `GET /v1/account/credits`, `POST /v1/account/lock-profile`,
-  plus `GET /healthz`. Upload guards: `owns_book` + a positive credit balance.
+  `GET /v1/reports/{id}`, `GET /v1/leaderboard`, `GET /v1/account/credits`,
+  `POST /v1/account/lock-profile`, plus `GET /healthz`. Upload guards: `owns_book`
+  + a positive credit balance.
+- **Leaderboard** (§5/§8): materialized **best composite per account per season**;
+  only **locked-profile** reports with `confidence == "ok"` are eligible, recomputed
+  on each successful score. Public read at `GET /v1/leaderboard?season=…&limit=…`.
 - **Off-thread scoring**: upload enqueues a background task; the worker path shares
   the engine, so it's exercised in tests.
 
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): PDF rendering (`GET /v1/reports/{id}/pdf` via
-the existing report HTML), public **leaderboard** + season materialization,
-purchase **webhook** (`POST /internal/webhooks/purchase`), admin **re-score**
+the existing report HTML), purchase **webhook**
+(`POST /internal/webhooks/purchase`), admin **re-score**
 (`POST /internal/rescore/{id}` — the core is already pure, needs the cached
 canonical blob), a real **job queue** (Celery/RQ vs. the in-process background
 task), per-account **rate-limiting**, **encryption-at-rest**, and real **auth**
