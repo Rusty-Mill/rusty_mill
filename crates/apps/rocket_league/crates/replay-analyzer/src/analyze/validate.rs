@@ -24,6 +24,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::analyze::roster_match::{team_anchored_pairs, RosterSlot};
 use crate::model::PlayerFeatures;
 
 /// One player's ground-truth stats for a single replay (a row of the committed
@@ -99,41 +100,20 @@ pub fn pair_replay(
     acc: &mut Samples,
 ) -> MatchCount {
     let minutes = duration_s / 60.0;
-    let mut feat_used = vec![false; features.len()];
-    let mut gt_used = vec![false; gt.players.len()];
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
 
-    // Pass 1: exact name match.
-    for (gi, g) in gt.players.iter().enumerate() {
-        if let Some((fi, _)) = features
-            .iter()
-            .enumerate()
-            .find(|(fi, f)| !feat_used[*fi] && f.player == g.name)
-        {
-            feat_used[fi] = true;
-            gt_used[gi] = true;
-            pairs.push((fi, gi));
-        }
-    }
-
-    // Pass 2: per team, pair the *unique* remaining named track with the unique
-    // remaining ground-truth player (forced 1-1 → unambiguous). Skip `<unknown>`
-    // / team-less spurious tracks; skip teams with >1 residual (can't disambiguate
-    // two mangled names without leaning on the very stats we are validating).
-    for team in 0..2 {
-        let ours: Vec<usize> = (0..features.len())
-            .filter(|&i| !feat_used[i])
-            .filter(|&i| features[i].team == Some(team) && features[i].player != "<unknown>")
-            .collect();
-        let theirs: Vec<usize> = (0..gt.players.len())
-            .filter(|&i| !gt_used[i] && gt.players[i].team == team)
-            .collect();
-        if ours.len() == 1 && theirs.len() == 1 {
-            feat_used[ours[0]] = true;
-            gt_used[theirs[0]] = true;
-            pairs.push((ours[0], theirs[0]));
-        }
-    }
+    // Team-anchored identity match (immune to ballchasing's inconsistent name
+    // mangling): exact names first, then the unique residual per team. See
+    // `analyze::roster_match`.
+    let ours: Vec<RosterSlot> = features
+        .iter()
+        .map(|f| RosterSlot::new(f.team, &f.player))
+        .collect();
+    let theirs: Vec<RosterSlot> = gt
+        .players
+        .iter()
+        .map(|g| RosterSlot::new(Some(g.team), &g.name))
+        .collect();
+    let pairs = team_anchored_pairs(&ours, &theirs);
 
     for (fi, gi) in &pairs {
         let (ours, g) = (&features[*fi], &gt.players[*gi]);

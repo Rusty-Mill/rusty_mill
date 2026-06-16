@@ -158,10 +158,18 @@ Tracked churn-list. Items needing a product/visual decision are marked
   the corpus replays (gitignored) + `value_model.json`, so it's a local/with-corpus
   gate — not wired into the no-corpus CI job. Wiring it in CI needs the corpus
   fetch step (see corpus reproducibility). Currently 0 disagreements.
-- **Team-anchored rank join in `calibrate`.** The manifest keys ranks by
-  ballchasing-mangled player names, so ~38/720 players go unranked (name
-  mangling, not a team issue). Reuse the team-anchored matching from
-  `analyze::validate` so every player gets its rank label.
+- **Team-anchored rank join in `calibrate`.** ✔ The two-pass team-anchored matcher
+  (exact names, then the unique residual per team) is now a shared, tested
+  primitive — `analyze::roster_match::team_anchored_pairs` — reused by both
+  `analyze::validate::pair_replay` (refactored onto it, behavior unchanged) and the
+  calibrate rank join. `calibrate::join_ranks` joins each scored player to their
+  manifest tier through it, using the ballchasing **stats fixture** (loaded by
+  replay `id`) to supply each mangled rank key's team, so a name-mangled player
+  (~38/720, where ballchasing's name ≠ the true in-replay name) still resolves to
+  its rank instead of being dropped. Degrades to exact-name matching if the fixture
+  is absent. Unit-tested (`team_anchored_pairs` cases; `join_ranks` recovery vs.
+  exact-only); the end-to-end recovered count needs the gitignored corpus to
+  measure.
 - **Spurious `<unknown>` tracks.** ✔ `analyze::identity::coalesce` now drops short
   unbound (`<unknown>`) tracks — a brief actor that never binds a PRI is a glitch,
   not a player (real players always bind one). Threshold `MIN_ORPHAN_SAMPLES`;

@@ -139,6 +139,47 @@ fn fit_weights_favors_rank_correlated_metrics() {
 }
 
 #[test]
+fn join_ranks_recovers_mangled_names_via_team_anchor() {
+    use replay_scoring::calibrate::join_ranks;
+    use std::collections::BTreeMap;
+
+    // Analyzer reports keep the true in-replay names; ballchasing mangled Bób→Bob.
+    let players = vec![
+        ("Alice".to_string(), Some(0)),
+        ("Bób".to_string(), Some(0)),
+        ("Carol".to_string(), Some(1)),
+        ("Dave".to_string(), Some(1)),
+    ];
+    // The manifest keys ranks by the mangled names.
+    let ranks: BTreeMap<String, i32> = [
+        ("Alice".to_string(), 12),
+        ("Bob".to_string(), 13),
+        ("Carol".to_string(), 14),
+        ("Dave".to_string(), 15),
+    ]
+    .into_iter()
+    .collect();
+    // Ground-truth stats carry the same mangled names *with team*.
+    let gt = vec![
+        ("Alice".to_string(), 0),
+        ("Bob".to_string(), 0),
+        ("Carol".to_string(), 1),
+        ("Dave".to_string(), 1),
+    ];
+
+    // Without ground truth, the mangled "Bób" can't be resolved (exact-only).
+    assert_eq!(
+        join_ranks(&players, &ranks, None),
+        vec![Some(12), None, Some(14), Some(15)]
+    );
+    // With ground truth, the unique team-0 residual pairs Bób→Bob→tier 13.
+    assert_eq!(
+        join_ranks(&players, &ranks, Some(&gt)),
+        vec![Some(12), Some(13), Some(14), Some(15)]
+    );
+}
+
+#[test]
 fn fit_tiers_spreads_and_is_monotonic() {
     use replay_scoring::calibrate::fit_tiers;
     use replay_scoring::config::ScoreConfig;
