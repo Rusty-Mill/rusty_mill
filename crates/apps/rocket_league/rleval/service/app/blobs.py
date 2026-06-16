@@ -1,9 +1,9 @@
-"""Content-addressed raw-replay storage.
+"""Content-addressed artifact storage (raw replay + derived report HTML/PDF).
 
-Blobs are kept on disk keyed by ``replay_id`` (= sha256 of the bytes), so the
-canonical worker can re-read them for a re-score without a re-upload (§9). A
-filesystem store is the dev default; swap for object storage in production.
-Encryption-at-rest (§12) is a deferred follow-up.
+Everything is keyed by ``replay_id`` (= sha256 of the bytes): the raw blob (so the
+worker can re-read it for a re-score without a re-upload, §9), the rendered report
+HTML, and the cached report PDF (§4.10). A filesystem store is the dev default;
+swap for object storage in production. Encryption-at-rest (§12) is deferred.
 """
 
 from __future__ import annotations
@@ -19,13 +19,44 @@ def _dir() -> Path:
     return p
 
 
+def _path(replay_id: str, suffix: str = "") -> Path:
+    return _dir() / f"{replay_id}{suffix}"
+
+
+# --- raw replay blob ---
 def store(replay_id: str, blob: bytes) -> None:
-    (_dir() / replay_id).write_bytes(blob)
+    _path(replay_id).write_bytes(blob)
 
 
 def load(replay_id: str) -> bytes:
-    return (_dir() / replay_id).read_bytes()
+    return _path(replay_id).read_bytes()
 
 
 def exists(replay_id: str) -> bool:
-    return (_dir() / replay_id).exists()
+    return _path(replay_id).exists()
+
+
+# --- derived report HTML (from `replay-scoring --html`) ---
+def store_html(replay_id: str, html: str) -> None:
+    _path(replay_id, ".html").write_text(html, encoding="utf-8")
+
+
+def load_html(replay_id: str) -> str:
+    return _path(replay_id, ".html").read_text(encoding="utf-8")
+
+
+def has_html(replay_id: str) -> bool:
+    return _path(replay_id, ".html").exists()
+
+
+# --- cached report PDF (rendered once, §4.10) ---
+def store_pdf(replay_id: str, pdf: bytes) -> None:
+    _path(replay_id, ".pdf").write_bytes(pdf)
+
+
+def load_pdf(replay_id: str) -> bytes:
+    return _path(replay_id, ".pdf").read_bytes()
+
+
+def has_pdf(replay_id: str) -> bool:
+    return _path(replay_id, ".pdf").exists()

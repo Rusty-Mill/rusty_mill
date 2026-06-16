@@ -46,18 +46,36 @@ class FakeScorer:
         players: list[PlayerScore] | None = None,
         parser_version: str = "boxcars-fake",
         config_version: str = "score-test",
+        report_html: str = "<html><body>fake report</body></html>",
     ) -> None:
         self.fail = fail
         self.players = sample_players() if players is None else players
         self.parser_version = parser_version
         self.config_version = config_version
+        self.report_html = report_html
         self.calls = 0
 
     def score(self, blob: bytes, replay_id: str) -> ScoreResult:
         self.calls += 1
         if self.fail:
             raise RuntimeError("worker boom")
-        return ScoreResult(self.parser_version, self.config_version, list(self.players))
+        return ScoreResult(
+            self.parser_version,
+            self.config_version,
+            list(self.players),
+            report_html=self.report_html,
+        )
+
+
+class FakePdfRenderer:
+    """A renderer with no engine: returns a tiny valid-looking PDF, counts calls."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def render(self, html: str) -> bytes:
+        self.calls += 1
+        return b"%PDF-1.4\n" + html.encode()[:32]
 
 
 @pytest.fixture
@@ -91,6 +109,11 @@ def failing_scorer():
 
 
 @pytest.fixture
+def pdf_renderer():
+    return FakePdfRenderer()
+
+
+@pytest.fixture
 def make_account(session):
     def _make(email: str = "u@example.com", *, owns_book: bool = True, credits_n: int = 5):
         account = Account(email=email, owns_book=owns_book)
@@ -105,18 +128,19 @@ def make_account(session):
     return _make
 
 
-def _client(scorer) -> TestClient:
+def _client(scorer, pdf_renderer) -> TestClient:
     from app.main import app
 
     app.state.scorer = scorer
+    app.state.pdf_renderer = pdf_renderer
     return TestClient(app)
 
 
 @pytest.fixture
-def client(engine, scorer):
-    return _client(scorer)
+def client(engine, scorer, pdf_renderer):
+    return _client(scorer, pdf_renderer)
 
 
 @pytest.fixture
-def failing_client(engine, failing_scorer):
-    return _client(failing_scorer)
+def failing_client(engine, failing_scorer, pdf_renderer):
+    return _client(failing_scorer, pdf_renderer)

@@ -43,6 +43,9 @@ class ScoreResult:
     parser_version: str
     score_config_version: str
     players: list[PlayerScore]
+    # The full-lobby report HTML (from `--html`), for PDF rendering (§4.10). May
+    # be absent if the worker didn't emit it.
+    report_html: str | None = None
 
 
 class Scorer(Protocol):
@@ -81,11 +84,14 @@ class SubprocessScorer:
         with tempfile.TemporaryDirectory() as d:
             in_path = os.path.join(d, f"{replay_id}.replay")
             out_path = os.path.join(d, "report.json")
+            html_path = os.path.join(d, "report.html")
             with open(in_path, "wb") as f:
                 f.write(blob)
             try:
+                # One invocation emits both the per-player JSON and the full-lobby
+                # report HTML (the latter feeds PDF rendering).
                 proc = subprocess.run(
-                    [self.worker_bin, in_path, "--json", out_path],
+                    [self.worker_bin, in_path, "--json", out_path, "--html", html_path],
                     capture_output=True,
                     text=True,
                     timeout=self.timeout_s,
@@ -98,6 +104,10 @@ class SubprocessScorer:
                 )
             with open(out_path) as f:
                 data = json.load(f)
+            report_html = None
+            if os.path.exists(html_path):
+                with open(html_path, encoding="utf-8") as f:
+                    report_html = f.read()
 
         reports = data if isinstance(data, list) else [data]
         if not reports:
@@ -107,4 +117,5 @@ class SubprocessScorer:
             parser_version=first["parser_version"],
             score_config_version=first["score_config_version"],
             players=[_player_from_report(r) for r in reports],
+            report_html=report_html,
         )
