@@ -79,15 +79,17 @@ that this layer persists and renders.
 These extend the workspace past `replay-scoring-service-spec.md`, driven by
 product direction rather than the milestone plan.
 
-- **Flesh out individual player skills.** Take `replay-skills` past
-  presence/counts to per-player *proficiency*: rate the quality and consistency
-  of each mechanic (aerial height distribution, dribble duration, flick
-  conversion, redirect accuracy, kickoff-win rate, demo efficiency), roll them
-  into a per-player mechanical profile / rating, and tie skill instances to
-  outcomes (which led to a shot or goal — reuse the value model's ΔV). Grow the
-  catalog toward the harder mechanics (wave dash, half-flip, double touch) where
-  a kinematic signature is separable, each with reported precision. Pairs with
-  the "calibrate skill thresholds" follow-up below. Where: `skills/` (this repo).
+- **Flesh out individual player skills.** *Proficiency profiles ✔* —
+  `replay-skills` now has `profile::profiles` (+ `replay-skills --profile`):
+  per-player `skills/min` and a per-skill `SkillStat` (count, per-minute rate,
+  and a `mean_quality` proxy from detection confidence), so two players with the
+  same count are separable by rate and quality. *Remaining:* tie skill instances
+  to **outcomes** (which preceded a shot/goal — reuse the value model's ΔV; needs
+  the match events, not just the report); richer per-skill quality from structured
+  evidence (aerial height, dribble duration) rather than the confidence proxy; and
+  growing the catalog toward harder mechanics (wave dash, half-flip, double touch)
+  where a kinematic signature is separable. Pairs with the "calibrate skill
+  thresholds" follow-up. Where: `skills/` (this repo).
 - **3D replay simulation / viewer.** ✔ *First increment shipped* — the
   `replay-viewer` crate distills the resampled grid + events + detected skills
   into a compact `Scene` and embeds it in a self-contained three.js viewer
@@ -143,10 +145,12 @@ Tracked churn-list. Items needing a product/visual decision are marked
 
 ## Engineering follow-ups (this repo, smaller)
 
-- **Reconciliation as a standing gate.** Add a `--gate` to `reconcile` (and a
-  test) that fails on a rank-vs-impact **sign disagreement**, so a future metric
-  change that tracks the ranked cohort but not in-match value is caught in CI.
-  Mirrors `validate --gate`. (Currently reports 0 disagreements.)
+- **Reconciliation as a standing gate.** ✔ `reconcile --gate` exits non-zero on
+  any rank-vs-impact **sign disagreement** (mirrors `validate --gate`); the
+  `disagreements()` logic is covered by `flags_sign_disagreement`. Note: it reads
+  the corpus replays (gitignored) + `value_model.json`, so it's a local/with-corpus
+  gate — not wired into the no-corpus CI job. Wiring it in CI needs the corpus
+  fetch step (see corpus reproducibility). Currently 0 disagreements.
 - **Team-anchored rank join in `calibrate`.** The manifest keys ranks by
   ballchasing-mangled player names, so ~38/720 players go unranked (name
   mangling, not a team issue). Reuse the team-anchored matching from

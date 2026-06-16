@@ -60,15 +60,27 @@ Each `SkillInstance` carries the time, the credited player, a `confidence`
 (`0.0..=1.0`; `1.0` for event-sourced skills), and a human-readable `detail`
 string of the supporting evidence.
 
+## Proficiency profiles
+
+Beyond presence/counts, `profiles(&SkillReport, duration_s) -> Vec<PlayerSkillProfile>`
+turns the per-player roll-up into *how good / how often*: a per-skill `SkillStat`
+(`count`, `per_min`, `mean_quality`) plus `total_per_min` (overall mechanical
+activity). `mean_quality` is the mean detection **confidence** — a proxy that
+ranks cleaner reps higher for the detectors whose confidence ramps with magnitude
+(aerial height, dribble duration, redirect angle, …); event-sourced skills sit at
+1.0. So two players with the same aerial count are separable by rate and quality.
+
 ## CLI
 
 ```
 replay-skills <file.replay> [--player <name>] [--verify <skill>]
-              [--window <start_s> <end_s>] [--config <cfg.json>]
-              [--json <out.json>] [--list]
+              [--window <start_s> <end_s>] [--profile]
+              [--config <cfg.json>] [--json <out.json>] [--list]
 ```
 
 - default: a per-player skill table (scope to one `--player`).
+- `--profile`: the proficiency view — per-player `skills/min` and per-skill
+  `count`, rate, and quality.
 - `--verify <skill>`: prints YES/no and exits `0` if performed, `2` if not — a
   scripting gate. Combine with `--player` and/or `--window` to verify within a
   clip:
