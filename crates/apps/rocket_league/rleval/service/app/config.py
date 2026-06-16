@@ -43,6 +43,8 @@ class Settings:
         # Shared secret for verifying the purchase webhook's HMAC-SHA256 signature
         # (§8). Empty disables verification (dev only).
         self.webhook_secret = os.getenv("RLS_WEBHOOK_SECRET", "")
+        # Master key for at-rest artifact encryption (§12). Empty = store verbatim.
+        self.encryption_key = os.getenv("RLS_ENCRYPTION_KEY", "")
 
 
 settings = Settings()

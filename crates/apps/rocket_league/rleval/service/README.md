@@ -32,6 +32,12 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 - **Idempotency** (§9): `replay_id = sha256(blob)`; a re-upload returns the
   existing replay/report and is **not** re-charged. Raw blobs are content-addressed
   on disk for re-scoring without re-upload.
+- **Encryption-at-rest** (§12): every stored artifact (raw blob, report HTML/PDF,
+  canonical cache) is written through a pluggable cipher. With `RLS_ENCRYPTION_KEY`
+  set it's stdlib AEAD (HMAC-SHA256 CTR + encrypt-then-MAC); unset, a no-op
+  (byte-identical to before). Keys stay the plaintext hash, so dedupe is unaffected
+  and the worker — which only ever sees decrypted bytes — is oblivious. Swap a
+  KMS/AES-GCM adapter behind the same `seal`/`unseal` port in production.
 - **Credit ledger** (§8): balance = sum of non-expired deltas; a **soft-hold** at
   enqueue → **confirm** on success → **auto-refund** on failure, idempotent by
   `replay_id`; holds inherit their grant's expiry (no rollover / no drift).
@@ -65,9 +71,9 @@ and maps each per-player Rust `Report` to a stored `Report` row.
 ## Deferred follow-ups
 
 Tracked in `docs/backlog.md` (M2): a real **job queue** (Celery/RQ vs. the
-in-process background task), **encryption-at-rest**, observability (per-stage
-timings/metrics), and real **auth** (the current `X-Account-Email` header is a dev
-stub — authentication is the web layer's job).
+in-process background task), observability (per-stage timings/metrics), and real
+**auth** (the current `X-Account-Email` header is a dev stub — authentication is
+the web layer's job).
 
 ## Run
 
@@ -119,3 +125,4 @@ CI runs it (`.github/workflows/ci.yml`, the `service` job).
 | `RLS_UPLOAD_RATE_LIMIT` | `30` | max new uploads per window/account |
 | `RLS_UPLOAD_RATE_WINDOW_S` | `3600` | rate-limit window (s) |
 | `RLS_WEBHOOK_SECRET` | _(empty)_ | webhook HMAC secret (empty = no verify) |
+| `RLS_ENCRYPTION_KEY` | _(empty)_ | at-rest artifact key (empty = store verbatim) |
