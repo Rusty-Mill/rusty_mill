@@ -51,6 +51,8 @@ def run_scoring(session: Session, replay: Replay, blob: bytes, scorer: Scorer) -
     session.commit()
     try:
         result = scorer.score(blob, replay.id)
+        if result.report_html:
+            blobs.store_html(replay.id, result.report_html)  # for PDF rendering
         for ps in result.players:
             session.add(
                 Report(

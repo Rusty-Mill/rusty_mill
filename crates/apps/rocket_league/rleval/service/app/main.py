@@ -22,15 +22,17 @@ from fastapi import (
     Header,
     HTTPException,
     Request,
+    Response,
     UploadFile,
 )
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from . import credits, leaderboard, webhooks
+from . import blobs, credits, leaderboard, webhooks
 from .config import settings
 from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report
+from .pdf import PdfRenderer, PdfRenderError, WeasyPrintRenderer
 from .scoring import Scorer, SubprocessScorer
 from .service import ingest, process, replay_id_for
 
@@ -42,12 +44,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Replay-Scoring Service", version="0.1.0", lifespan=lifespan)
-# Default production scorer; tests override `app.state.scorer`.
+# Default production adapters; tests override `app.state.{scorer,pdf_renderer}`.
 app.state.scorer = SubprocessScorer(settings.worker_bin, settings.worker_timeout_s)
+app.state.pdf_renderer = WeasyPrintRenderer()
 
 
 def get_scorer(request: Request) -> Scorer:
     return request.app.state.scorer
+
+
+def get_pdf_renderer(request: Request) -> PdfRenderer:
+    return request.app.state.pdf_renderer
 
 
 def current_account(
@@ -167,6 +174,34 @@ def _leaderboard_dict(rank: int, e: LeaderboardEntry) -> dict:
         "general": e.general,
         "uploaded_at": e.uploaded_at.isoformat(),
     }
+
+
+@app.get("/v1/reports/{replay_id}/pdf")
+def get_report_pdf(
+    replay_id: str,
+    account: Account = Depends(current_account),
+    session: Session = Depends(get_session),
+    renderer: PdfRenderer = Depends(get_pdf_renderer),
+) -> Response:
+    replay = session.get(Replay, replay_id)
+    if replay is None or replay.account_id != account.id:
+        raise HTTPException(404, "report not found")
+    if replay.status != "done":
+        raise HTTPException(409, f"report not ready (status={replay.status})")
+
+    if not blobs.has_pdf(replay_id):  # render once, then cache (§4.10)
+        if not blobs.has_html(replay_id):
+            raise HTTPException(404, "no report html to render")
+        try:
+            blobs.store_pdf(replay_id, renderer.render(blobs.load_html(replay_id)))
+        except PdfRenderError as e:
+            raise HTTPException(503, str(e)) from e
+
+    return Response(
+        blobs.load_pdf(replay_id),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{replay_id}.pdf"'},
+    )
 
 
 @app.get("/v1/leaderboard")

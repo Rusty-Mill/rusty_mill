@@ -60,9 +60,14 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 - **Job queue + worker split.** *Partial* — upload enqueues an in-process
   background task (the Rust parse+score worker via `SubprocessScorer`). *Remaining:*
   a real queue (Celery/RQ) so workers scale independently (§9).
-- **PDF rendering.** *Not started.* Feed the existing report HTML
-  (`replay_scoring::render::html`) to headless Chromium / weasyprint; cache by
-  `replay_id+player`; `GET /v1/reports/{id}/pdf` (§4.10, §8).
+- **PDF rendering.** ✔ The worker's PDF-ready report HTML is captured at score
+  time (`replay-scoring --html`, stored as an artifact) and rendered to PDF behind
+  a `PdfRenderer` port (weasyprint adapter, lazy/optional `pdf` extra), **cached
+  per replay**; served owner-gated at `GET /v1/reports/{id}/pdf` (§4.10).
+  Tested with a fake renderer (`service/tests/test_pdf.py`: render, cache-once,
+  owner-gate, 409-not-ready); the real weasyprint path verified on the 42f2 report
+  (75 KB HTML → 63 KB PDF). Where: `service/app/pdf.py`. *Remaining:* per-player PDF
+  scoping (currently the full-lobby report).
 - **Entitlement webhook.** ✔ `POST /internal/webhooks/purchase` flips `owns_book`
   and grants credits — monthly (`monthly_grant`, expires period end) or top-up
   (+10, +30 d) — idempotent by the provider's event id (`WebhookEvent`). Completes
