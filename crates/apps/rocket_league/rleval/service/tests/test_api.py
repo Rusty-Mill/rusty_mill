@@ -96,6 +96,30 @@ def test_artifacts_are_encrypted_at_rest(client, make_account, monkeypatch):
     assert "fake report" in blobs.load_html(rid)
 
 
+def test_upload_delegates_to_injected_job_queue(client, make_account, monkeypatch):
+    """A swapped JobQueue adapter receives the job; scoring does not run inline."""
+    from app.main import app
+
+    enqueued: list[str] = []
+
+    class RecordingQueue:
+        def enqueue_scoring(self, replay_id: str) -> None:
+            enqueued.append(replay_id)
+
+    monkeypatch.setattr(
+        app.state, "queue_factory", lambda background, scorer: RecordingQueue()
+    )
+    make_account(credits_n=5)
+    r = client.post("/v1/replays", files=_file(b"queued-not-scored"), headers=H)
+    assert r.status_code == 202
+    rid = r.json()["replay_id"]
+    # The job was handed to our queue, and the default in-process scoring did NOT
+    # run, so the replay is still queued with no reports.
+    assert enqueued == [rid]
+    assert client.get(f"/v1/replays/{rid}", headers=H).json()["status"] == "queued"
+    assert client.get(f"/v1/reports/{rid}", headers=H).json()["reports"] == []
+
+
 def test_lock_profile(client, make_account):
     make_account(credits_n=1)
     r = client.post("/v1/account/lock-profile", json={"player_id": "Alice"}, headers=H)

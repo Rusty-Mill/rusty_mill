@@ -22,7 +22,9 @@ HTTP (FastAPI)  ──>  domain flow (service.py)  ──>  Scorer port (scoring
 Scoring is an injected capability behind the `Scorer` protocol, so the whole
 service is testable without the Rust toolchain or real `.replay` files. The
 production adapter (`SubprocessScorer`) runs `replay-scoring <file> --json out`
-and maps each per-player Rust `Report` to a stored `Report` row.
+and maps each per-player Rust `Report` to a stored `Report` row. Three more
+seams are injected the same way: the `PdfRenderer` (§4.10), the at-rest `Cipher`
+(§12), and the `JobQueue` (§4) that schedules scoring.
 
 ## What's implemented
 
@@ -65,15 +67,18 @@ and maps each per-player Rust `Report` to a stored `Report` row.
   `owns_book` and grants credits — monthly (expires period end, no rollover) or a
   top-up (+30 d) — idempotent by the provider's event id, with an `X-Signature`
   HMAC-SHA256 verified when `RLS_WEBHOOK_SECRET` is set.
-- **Off-thread scoring**: upload enqueues a background task; the worker path shares
-  the engine, so it's exercised in tests.
+- **Off-thread scoring** (§4): upload *enqueues* scoring through a `JobQueue` port
+  (`queue.py`). The default `BackgroundTaskQueue` runs it in-process (the worker
+  path shares the engine, so it's exercised in tests); the job payload is just the
+  `replay_id`, so a broker-backed Celery/RQ adapter drops in behind the same
+  interface (set `app.state.queue_factory`) without touching the endpoint.
 
 ## Deferred follow-ups
 
-Tracked in `docs/backlog.md` (M2): a real **job queue** (Celery/RQ vs. the
-in-process background task), observability (per-stage timings/metrics), and real
-**auth** (the current `X-Account-Email` header is a dev stub — authentication is
-the web layer's job).
+Tracked in `docs/backlog.md` (M2): the broker-backed **JobQueue adapter**
+(Celery/RQ + Redis) behind the existing port, observability (per-stage
+timings/metrics), and real **auth** (the current `X-Account-Email` header is a dev
+stub — authentication is the web layer's job).
 
 ## Run
 

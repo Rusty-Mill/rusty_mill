@@ -66,9 +66,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   **auto-refund on failure**, idempotent by `replay_id`; holds inherit the grant's
   expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
   Where: `service/app/credits.py`.
-- **Job queue + worker split.** *Partial* — upload enqueues an in-process
-  background task (the Rust parse+score worker via `SubprocessScorer`). *Remaining:*
-  a real queue (Celery/RQ) so workers scale independently (§9).
+- **Job queue + worker split.** ✔ Upload enqueues scoring through a `JobQueue`
+  port (`service/app/queue.py`); the default `BackgroundTaskQueue` runs it
+  in-process. The payload is just the `replay_id` (worker reloads from DB + blob
+  store) and the `Scorer` is built worker-side, so a broker adapter is a few lines
+  behind the same interface — proven swappable by a test injecting a recording
+  queue via `app.state.queue_factory`. *Remaining (prod):* the Celery/RQ + Redis
+  adapter itself, so workers scale independently (§9).
 - **PDF rendering.** ✔ The worker's PDF-ready report HTML is captured at score
   time (`replay-scoring --html`, stored as an artifact) and rendered to PDF behind
   a `PdfRenderer` port (weasyprint adapter, lazy/optional `pdf` extra), **cached
