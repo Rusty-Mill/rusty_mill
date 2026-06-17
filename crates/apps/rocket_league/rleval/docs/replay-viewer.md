@@ -61,6 +61,11 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
 - **Possession** (current team, from the last touch), **per-player trails**, a
   top-down **minimap**, and a roster with header **G/A/Sv** + live **speed**.
   Toggle trails / labels / boost / heatmap.
+- **Boost readout** — each car carries a tinted **boost-amount number** floating
+  above it (green/amber/red by level), alongside the existing boost gauge bar;
+  both follow the `boost` toggle.
+- **Live scoreboard** — the score **counts up with the playhead** (goals up to the
+  current time), so scrubbing shows the score as it stood, not the final result.
 - **Heatmap** — a floor occupancy heatmap of the ball (or the followed player),
   binned in-viewer from the grid.
 - **Momentum strip** — a P(blue scores the next goal) curve above the timeline

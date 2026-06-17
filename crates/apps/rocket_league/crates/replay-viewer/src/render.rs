@@ -686,6 +686,25 @@ function makeLabel(text, hex) {
   spr.scale.set(620, 155, 1); return spr;
 }
 
+// A small boost-amount readout that floats above a car. The canvas is redrawn
+// only when the integer value changes (boost moves most frames, but the cars are
+// few), tinted to match the boost gauge.
+function makeBoostNum() {
+  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64;
+  const tex = new THREE.CanvasTexture(cv);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  spr.scale.set(150, 75, 1); spr.userData = { cv, tex, val: -1 };
+  return spr;
+}
+function setBoostNum(spr, n) {
+  const u = spr.userData; if (u.val === n) return; u.val = n;
+  const x = u.cv.getContext('2d'); x.clearRect(0, 0, 128, 64);
+  x.font = 'bold 46px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 7; x.strokeStyle = 'rgba(0,0,0,.85)'; x.strokeText(n, 64, 36);
+  x.fillStyle = n > 50 ? '#22dd66' : n > 20 ? '#e0b020' : '#dd4030'; x.fillText(n, 64, 36);
+  u.tex.needsUpdate = true;
+}
+
 function buildCars() {
   const map = new Map();
   for (const pl of S.players) {
@@ -722,6 +741,7 @@ function buildCars() {
       new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
     g.add(bar);
     const label = makeLabel(pl.name, hex); label.position.set(0, 0, 285); g.add(label);
+    const boostNum = makeBoostNum(); boostNum.position.set(0, 0, 222); g.add(boostNum);
     scene.add(g);
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
@@ -735,7 +755,7 @@ function buildCars() {
     const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
       new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
     flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
-    map.set(pl.pri, { g, bar, label, trail, callout, ring, flame });
+    map.set(pl.pri, { g, bar, label, boostNum, trail, callout, ring, flame });
   }
   return map;
 }
@@ -849,9 +869,11 @@ function applyState(st) {
     const live = !!c;
     o.g.visible = live; o.label.visible = live && show.labels;
     o.bar.visible = live && show.boost; o.trail.visible = live && show.trails;
+    o.boostNum.visible = live && show.boost;
     if (!live) { o.flame.visible = false; continue; }
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
     o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
+    if (show.boost) setBoostNum(o.boostNum, c.boost);
     o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
     o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
     // boost flame: visible while boost is dropping (i.e. boosting)
@@ -866,9 +888,23 @@ function applyState(st) {
 const esc = s => s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
 const fmt = s => { const m = Math.floor(s / 60); return m + ':' + (s % 60).toFixed(1).padStart(4, '0'); };
 const dur = S.duration_s;
-document.getElementById('scoreboard').innerHTML =
-  `<span style="color:#3b82f6">BLUE ${S.team_scores['0'] ?? 0}</span> — ` +
-  `<span style="color:#f97316">${S.team_scores['1'] ?? 0} ORANGE</span>`;
+// Live scoreboard: tally goals up to the playhead so the score counts up during
+// playback, rather than always showing the final result. (Goal events carry the
+// scoring team; S.events is time-sorted, so the early break is safe.)
+const goalEvents = S.events.filter(e => e.kind === 'goal');
+const scoreEl = document.getElementById('scoreboard');
+let lastScoreKey = '';
+function updateScore(t) {
+  let b = 0, o = 0;
+  for (const e of goalEvents) { if (e.t > t + 1e-3) break; if (e.team === 0) b++; else if (e.team === 1) o++; }
+  const key = b + '-' + o;
+  if (key === lastScoreKey) return;
+  lastScoreKey = key;
+  scoreEl.innerHTML =
+    `<span style="color:#3b82f6">BLUE ${b}</span> — ` +
+    `<span style="color:#f97316">${o} ORANGE</span>`;
+}
+updateScore(0);
 document.getElementById('mapline').textContent = (S.map || 'replay') + '  ·  ' + S.replay_id;
 if (S.non_standard_map) document.getElementById('warn').style.display = '';
 const plistEl = document.getElementById('players');
@@ -921,6 +957,7 @@ function possAt(t) { let team = null; for (const e of S.events) { if (e.t > t + 
 let lastTickerIdx = -2;
 function updateHud(t, st) {
   document.getElementById('clock').textContent = fmt(t) + ' / ' + fmt(dur);
+  updateScore(t);
   updatePlayers(st);
   const pt = possAt(t);
   possEl.innerHTML = pt == null ? '' : ` · poss <span style="color:${TEAM_CSS[pt] ?? '#888'}">${pt === 0 ? 'BLUE' : 'ORANGE'}</span>`;

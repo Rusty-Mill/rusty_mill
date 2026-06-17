@@ -251,9 +251,9 @@ Tracked churn-list. Items needing a product/visual decision are marked
 
 **Ballchasing-parity adds** (see `docs/ballchasing-parity.md` §4)
 - [ ] Better car models — recognizable RL-body silhouette over the cabin+nose box **(needs visual decision)**
-- [ ] Boost amount above each car in 3D (boost byte already in `Scene`; toggle like the other overlays)
-- [ ] Score reflects playback time — count `Event::Goal`s with `t <= playhead` instead of final `team_scores`
-- [ ] Boost-pad pickup map — light the 6 big / 28 small pads as collected (depends on the boost-pad pickup model, parity item #2)
+- [x] Boost amount above each car in 3D — a tinted numeric sprite over each car, tied to the `boost` toggle (`makeBoostNum`/`setBoostNum`)
+- [x] Score reflects playback time — `updateScore(t)` tallies `goal` events with `t <= playhead` instead of the final `team_scores`
+- [ ] Boost-pad pickup map — light the 6 big / 28 small pads as collected (pad model shipped; needs the timestamped `PadPickup` stream plumbed into `Scene`)
 - [ ] Boost-timeline strip per player; "pressure" / ball-side timeline; thirds-occupancy + most-back tag; speed-bucket bar
 
 **Analysis overlays**
