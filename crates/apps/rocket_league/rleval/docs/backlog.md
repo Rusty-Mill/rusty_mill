@@ -179,8 +179,14 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
     thirds/halves, behind/in-front of ball — in the attack frame), and demos.
     Pure consumer (no canonical-model change); synthetic + invariant tests
     (`tests/bcstats.rs`); surfaced in the analyzer summary + `--bc-stats <json>`.
-  - **(2) boost-pad pickup model** *(not started)* — 6 big / 28 small pad snapping
-    + stolen/overfill (the one structural gap; also the viewer pickup-map data).
+  - **(2) boost-pad pickup model ✔** — `analyze::boost_pads` attributes every
+    boost-gauge gain (above a jitter floor) to the nearest of the 6 big / 28 small
+    pads (`field::BIG/SMALL_BOOST_PADS`), tags stolen (opponent-half), computes
+    overfill, and derives jitter-free collected/used via the conservation budget;
+    folded into `BcBoost`. `tests/boost_pads.rs`; validated vs ballchasing ground
+    truth (bpm/bcpm correlate, ours ~10–15% low — honest inferred-model undercount).
+    *Remaining:* per-pad spatial heatmaps + the timestamped `PadPickup` stream
+    feeding the viewer pickup-map overlay.
   - **(3) per-team Y-ordering** *(not started)* — most-back/forward/last-defender/
     time-in-side; also possession-split distance-to-ball.
   - **(4) contract cross-check** *(not started)* — extend `contract.rs` with a

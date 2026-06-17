@@ -37,6 +37,96 @@ pub fn boost_percent(byte: u8) -> f32 {
     byte as f32 / (BOOST_MAX_BYTE as f32) * 100.0
 }
 
+/// The 6 **big** boost pads (full boost), as world `(x, y)` on the floor.
+/// Standard Soccar layout (RLBot "Useful Game Values"); pads sit at `z≈73`.
+pub const BIG_BOOST_PADS: [(f32, f32); 6] = [
+    (3584.0, 0.0),
+    (-3584.0, 0.0),
+    (3072.0, 4096.0),
+    (-3072.0, 4096.0),
+    (3072.0, -4096.0),
+    (-3072.0, -4096.0),
+];
+
+/// The 28 **small** boost pads (12 boost each), as world `(x, y)` on the floor.
+pub const SMALL_BOOST_PADS: [(f32, f32); 28] = [
+    (0.0, -4240.0),
+    (-1792.0, -4184.0),
+    (1792.0, -4184.0),
+    (-940.0, -3308.0),
+    (940.0, -3308.0),
+    (0.0, -2816.0),
+    (-3584.0, -2484.0),
+    (3584.0, -2484.0),
+    (-1788.0, -2300.0),
+    (1788.0, -2300.0),
+    (-2048.0, -1036.0),
+    (0.0, -1024.0),
+    (2048.0, -1036.0),
+    (-1024.0, 0.0),
+    (1024.0, 0.0),
+    (-2048.0, 1036.0),
+    (0.0, 1024.0),
+    (2048.0, 1036.0),
+    (-1788.0, 2300.0),
+    (1788.0, 2300.0),
+    (-3584.0, 2484.0),
+    (3584.0, 2484.0),
+    (0.0, 2816.0),
+    (-940.0, 3308.0),
+    (940.0, 3308.0),
+    (-1792.0, 4184.0),
+    (1792.0, 4184.0),
+    (0.0, 4240.0),
+];
+
+/// Boost a small pad grants (percent); big pads fill to 100.
+pub const SMALL_PAD_BOOST: f32 = 12.0;
+
+/// Which kind of boost pad.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadKind {
+    Big,
+    Small,
+}
+
+/// Nominal boost a pad grants into an empty tank (percent).
+pub fn pad_nominal(kind: PadKind) -> f32 {
+    match kind {
+        PadKind::Big => 100.0,
+        PadKind::Small => SMALL_PAD_BOOST,
+    }
+}
+
+/// The boost pad nearest a position (compared in the floor plane), with its kind,
+/// world `(x, y)`, and distance. Boost only comes from pads in standard Soccar, so
+/// a pickup attributes to the nearest pad of the relevant kind.
+pub fn nearest_pad(p: [f32; 3], kind: PadKind) -> ((f32, f32), f32) {
+    let pads: &[(f32, f32)] = match kind {
+        PadKind::Big => &BIG_BOOST_PADS,
+        PadKind::Small => &SMALL_BOOST_PADS,
+    };
+    let mut best = ((0.0, 0.0), f32::INFINITY);
+    for &(px, py) in pads {
+        let d = ((p[0] - px).powi(2) + (p[1] - py).powi(2)).sqrt();
+        if d < best.1 {
+            best = ((px, py), d);
+        }
+    }
+    best
+}
+
+/// The nearest pad of **either** kind to a position (kind, `(x,y)`, distance).
+pub fn nearest_pad_any(p: [f32; 3]) -> (PadKind, (f32, f32), f32) {
+    let (big_pos, big_d) = nearest_pad(p, PadKind::Big);
+    let (small_pos, small_d) = nearest_pad(p, PadKind::Small);
+    if big_d <= small_d {
+        (PadKind::Big, big_pos, big_d)
+    } else {
+        (PadKind::Small, small_pos, small_d)
+    }
+}
+
 /// Canonical kickoff spawn locations, as `(|x|, |y|)` magnitude pairs. The five
 /// standard kickoff positions (two diagonal corners, two back, one far-back
 /// center) collapse to these three magnitudes by side/team symmetry. Every car

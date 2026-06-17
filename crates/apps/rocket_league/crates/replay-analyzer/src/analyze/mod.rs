@@ -5,6 +5,7 @@
 //! fixture tests exercise without ever touching a `.replay` file.
 
 pub mod bcstats;
+pub mod boost_pads;
 pub mod events;
 pub mod features;
 pub mod identity;

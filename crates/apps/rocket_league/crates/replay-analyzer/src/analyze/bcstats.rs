@@ -20,7 +20,7 @@
 //! boost-gauge integrals, not pad pickups.
 
 use crate::field;
-use crate::model::{CanonicalMatch, Event, GridFrame, PlayerTrack, Vec3};
+use crate::model::{CanonicalMatch, Event, GridFrame, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -71,6 +71,20 @@ pub struct BcBoost {
     pub percent_25_50: f32,
     pub percent_50_75: f32,
     pub percent_75_100: f32,
+    /// Pad-pickup breakdown (from [`crate::analyze::boost_pads`]). `collected`
+    /// here equals `amount_collected` above (both sum the same boost-gauge gains),
+    /// now split big/small and by "stolen" (collected in the opponent's half).
+    pub amount_collected_big: f32,
+    pub amount_collected_small: f32,
+    pub amount_stolen: f32,
+    pub amount_stolen_big: f32,
+    pub amount_stolen_small: f32,
+    pub count_collected_big: u32,
+    pub count_collected_small: u32,
+    pub count_stolen_big: u32,
+    pub count_stolen_small: u32,
+    pub amount_overfill: f32,
+    pub amount_overfill_stolen: f32,
 }
 
 /// Speed / air distribution.
@@ -262,31 +276,6 @@ fn fold_frame(frame: &GridFrame, signs: &BTreeMap<i32, i32>, accs: &mut BTreeMap
     }
 }
 
-/// Net boost-gauge `(collected, used)` over a track, in boost units (0–100),
-/// summing positive / negative deltas within a car life (skipping respawn gaps).
-fn boost_flow(track: &PlayerTrack) -> (f32, f32) {
-    let (mut up, mut down) = (0.0f32, 0.0f32);
-    for pair in track.samples.windows(2) {
-        let (prev, cur) = (&pair[0], &pair[1]);
-        let across_gap = track
-            .gaps
-            .iter()
-            .any(|g| prev.t <= g.start && cur.t >= g.end);
-        if across_gap {
-            continue;
-        }
-        if let (Some(pb), Some(cb)) = (prev.boost, cur.boost) {
-            if cb > pb {
-                up += (cb - pb) as f32;
-            } else {
-                down += (pb - cb) as f32;
-            }
-        }
-    }
-    let scale = field::BOOST_MAX_BYTE as f32 / 100.0;
-    (up / scale, down / scale)
-}
-
 /// Compute ballchasing-shaped per-player stats from the canonical match. One
 /// [`BcPlayerStats`] per track, sorted by team then PRI (matching
 /// [`crate::analyze::features::player_features`]).
@@ -337,10 +326,14 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
         .iter()
         .map(|t| {
             let a = accs.remove(&t.pri).unwrap_or_default();
-            let (collected, used) = boost_flow(t);
             let minutes = secs(a.present) / 60.0;
             let per_min = |amt: f32| if minutes > 0.0 { amt / minutes } else { 0.0 };
             let behind_den = a.behind + a.infront;
+            // Pad-pickup attribution needs the player's attack sign; the economy
+            // gives jitter-free collected/used plus the big/small/stolen split.
+            let sign = t.team.and_then(|tm| signs.get(&tm).copied()).unwrap_or(1);
+            let econ = crate::analyze::boost_pads::boost_economy(t, sign);
+            let (collected, used, pads) = (econ.collected, econ.used, econ.pads);
 
             BcPlayerStats {
                 pri: t.pri,
@@ -364,6 +357,17 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     percent_25_50: pct(a.b_q[1], a.boost_frames),
                     percent_50_75: pct(a.b_q[2], a.boost_frames),
                     percent_75_100: pct(a.b_q[3], a.boost_frames),
+                    amount_collected_big: pads.amount_collected_big,
+                    amount_collected_small: pads.amount_collected_small,
+                    amount_stolen: pads.amount_stolen,
+                    amount_stolen_big: pads.amount_stolen_big,
+                    amount_stolen_small: pads.amount_stolen_small,
+                    count_collected_big: pads.count_collected_big,
+                    count_collected_small: pads.count_collected_small,
+                    count_stolen_big: pads.count_stolen_big,
+                    count_stolen_small: pads.count_stolen_small,
+                    amount_overfill: pads.amount_overfill,
+                    amount_overfill_stolen: pads.amount_overfill_stolen,
                 },
                 movement: BcMovement {
                     avg_speed: mean(a.speed_sum, a.present),
