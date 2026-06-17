@@ -235,3 +235,95 @@ fn boost_flow_skips_respawn_gap() {
     let s = ballchasing_stats(&m);
     assert!(near(s[0].boost.amount_used, 0.0, 1e-3));
 }
+
+#[test]
+fn ordering_possession_and_last_defender() {
+    // team 0: pri 1 always back (y=-2000), pri 2 always forward (y=+2000).
+    // Team 0 holds the ball for the first half, team 1 the second; a team-1 goal
+    // at t=0.25 is conceded by the back-most team-0 player (pri 1).
+    let two = |t: f32| GridFrame {
+        t,
+        ball: Some(Kin {
+            p: v(0.0, 0.0, 93.0),
+            v: v(0.0, 0.0, 0.0),
+        }),
+        cars: vec![
+            car(1, v(0.0, -2000.0, 17.0), 0.0, Some(50)),
+            car(2, v(0.0, 2000.0, 17.0), 0.0, Some(50)),
+        ],
+    };
+    let frames = vec![two(0.0), two(0.1), two(0.2), two(0.3)];
+    let tk = |pri: i32| PlayerTrack {
+        player: format!("P{pri}"),
+        pri,
+        team: Some(0),
+        num_segments: 1,
+        samples: vec![
+            TrackSample {
+                t: 0.0,
+                actor_id: pri,
+                p: v(0.0, 0.0, 17.0),
+                v: v(0.0, 0.0, 0.0),
+                boost: Some(50),
+                rot: None,
+            },
+            TrackSample {
+                t: 0.3,
+                actor_id: pri,
+                p: v(0.0, 0.0, 17.0),
+                v: v(0.0, 0.0, 0.0),
+                boost: Some(50),
+                rot: None,
+            },
+        ],
+        gaps: vec![],
+    };
+    let events = vec![
+        Event::Possession {
+            team: 0,
+            start: 0.0,
+            end: 0.15,
+            touches: 1,
+        },
+        Event::Possession {
+            team: 1,
+            start: 0.2,
+            end: 0.35,
+            touches: 1,
+        },
+        Event::Goal {
+            t: 0.25,
+            scorer: None,
+            team: Some(1),
+        },
+    ];
+    let mut m = match_with(frames, events, tk(1));
+    m.tracks.push(tk(2));
+
+    let s = ballchasing_stats(&m);
+    let p1 = s.iter().find(|p| p.pri == 1).unwrap();
+    let p2 = s.iter().find(|p| p.pri == 2).unwrap();
+
+    // pri 1 is the back-most every frame; pri 2 the forward-most.
+    assert!(near(p1.positioning.percent_most_back, 100.0, 1e-3));
+    assert!(near(p1.positioning.percent_most_forward, 0.0, 1e-3));
+    assert!(near(p2.positioning.percent_most_forward, 100.0, 1e-3));
+    assert!(near(p2.positioning.percent_most_back, 0.0, 1e-3));
+
+    // Possession split: 2 frames team-0 possession, 2 frames team-1 (= no
+    // possession for team 0); both distances are the same ~2001 uu here.
+    assert!(near(
+        p1.positioning.avg_dist_to_ball_possession,
+        2001.4,
+        1.0
+    ));
+    assert!(near(
+        p1.positioning.avg_dist_to_ball_no_possession,
+        2001.4,
+        1.0
+    ));
+
+    // The conceded goal is charged to the last defender (back-most), pri 1.
+    assert_eq!(p1.positioning.goals_against_while_last_defender, 1);
+    assert_eq!(p2.positioning.goals_against_while_last_defender, 0);
+}

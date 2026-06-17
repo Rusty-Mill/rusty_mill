@@ -13,11 +13,13 @@
 //! boost buckets use the documented thresholds below; positioning is computed in
 //! each team's attack-direction frame (every team attacks `+Y`).
 //!
-//! Not yet covered (tracked in `docs/ballchasing-parity.md`): boost-pad pickup
-//! attribution (`amount_stolen`/`big`/`small`/overfill — needs a pad model),
-//! possession-split distance-to-ball, and most-back/most-forward/last-defender
-//! (needs per-team ordering). `amount_collected`/`amount_used` here are net
-//! boost-gauge integrals, not pad pickups.
+//! Boost-pad attribution (big/small/stolen/overfill) comes from
+//! [`crate::analyze::boost_pads`], which also supplies the jitter-free
+//! `amount_collected`/`amount_used`. Positioning covers possession-split
+//! distance-to-ball, most-back/most-forward, and goals-against-while-last-defender.
+//! Not yet covered (tracked in `docs/ballchasing-parity.md`): per-pad boost
+//! heatmaps, and `time_in_side` (a team/ball stat, a different shape than this
+//! per-player block).
 
 use crate::field;
 use crate::model::{CanonicalMatch, Event, GridFrame, Vec3};
@@ -110,6 +112,11 @@ pub struct BcMovement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BcPositioning {
     pub avg_dist_to_ball: f32,
+    /// Mean distance to ball while the player's team has possession / does not
+    /// (split by the possession run containing each frame; ambiguous frames are
+    /// in neither).
+    pub avg_dist_to_ball_possession: f32,
+    pub avg_dist_to_ball_no_possession: f32,
     pub avg_dist_to_mates: f32,
     pub time_defensive_third_s: f32,
     pub percent_defensive_third: f32,
@@ -125,6 +132,14 @@ pub struct BcPositioning {
     pub percent_behind_ball: f32,
     pub time_infront_ball_s: f32,
     pub percent_infront_ball: f32,
+    /// Time as the back-most / forward-most player on the team (by attack-frame
+    /// `y`); the back-most is the "last defender".
+    pub time_most_back_s: f32,
+    pub percent_most_back: f32,
+    pub time_most_forward_s: f32,
+    pub percent_most_forward: f32,
+    /// Goals conceded while this player was the team's last defender (back-most).
+    pub goals_against_while_last_defender: u32,
 }
 
 /// Demolitions (from authoritative demo events).
@@ -154,6 +169,11 @@ struct Acc {
     // distances
     ball_frames: u64,
     ball_dist_sum: f64,
+    // ball distance split by team possession (ball present AND possession known)
+    gp_frames: u64,
+    gp_dist_sum: f64,
+    gnp_frames: u64,
+    gnp_dist_sum: f64,
     mate_pairs: u64,
     mate_dist_sum: f64,
     // positioning (team known)
@@ -163,6 +183,8 @@ struct Acc {
     off3: u64,
     def_half: u64,
     off_half: u64,
+    most_back: u64,
+    most_forward: u64,
     // behind/infront (team known AND ball present)
     behind: u64,
     infront: u64,
@@ -177,8 +199,24 @@ fn dist(a: Vec3, b: Vec3) -> f64 {
     ((dx * dx + dy * dy + dz * dz) as f64).sqrt()
 }
 
-/// Reduce one grid frame into the per-pri accumulators.
-fn fold_frame(frame: &GridFrame, signs: &BTreeMap<i32, i32>, accs: &mut BTreeMap<i32, Acc>) {
+/// Y in the team's attack frame (`+Y` attacking): unchanged for `sign>=0`, negated
+/// for `sign<0`.
+fn norm_y(y: f32, sign: i32) -> f32 {
+    if sign >= 0 {
+        y
+    } else {
+        -y
+    }
+}
+
+/// Reduce one grid frame into the per-pri accumulators. `possessing` is the team
+/// holding the ball this frame (from the possession run containing it), if any.
+fn fold_frame(
+    frame: &GridFrame,
+    signs: &BTreeMap<i32, i32>,
+    possessing: Option<i32>,
+    accs: &mut BTreeMap<i32, Acc>,
+) {
     let third_y = field::BACK_WALL_Y / 3.0;
     for c in &frame.cars {
         let a = accs.entry(c.pri).or_default();
@@ -227,13 +265,25 @@ fn fold_frame(frame: &GridFrame, signs: &BTreeMap<i32, i32>, accs: &mut BTreeMap
 
         if let Some(ball) = &frame.ball {
             a.ball_frames += 1;
-            a.ball_dist_sum += dist(c.p, ball.p);
+            let d = dist(c.p, ball.p);
+            a.ball_dist_sum += d;
+            // Split by possession when both the car's team and the possessing
+            // team are known.
+            if let (Some(team), Some(pt)) = (c.team, possessing) {
+                if team == pt {
+                    a.gp_frames += 1;
+                    a.gp_dist_sum += d;
+                } else {
+                    a.gnp_frames += 1;
+                    a.gnp_dist_sum += d;
+                }
+            }
         }
 
         // Positioning in the car's own attack frame (+Y attacking).
         if let Some(team) = c.team {
             let sign = signs.get(&team).copied().unwrap_or(1);
-            let ny = if sign >= 0 { c.p.y } else { -c.p.y };
+            let ny = norm_y(c.p.y, sign);
             a.pos_frames += 1;
             if ny < -third_y {
                 a.def3 += 1;
@@ -248,7 +298,7 @@ fn fold_frame(frame: &GridFrame, signs: &BTreeMap<i32, i32>, accs: &mut BTreeMap
                 a.off_half += 1;
             }
             if let Some(ball) = &frame.ball {
-                let nby = if sign >= 0 { ball.p.y } else { -ball.p.y };
+                let nby = norm_y(ball.p.y, sign);
                 if ny < nby {
                     a.behind += 1;
                 } else {
@@ -274,6 +324,48 @@ fn fold_frame(frame: &GridFrame, signs: &BTreeMap<i32, i32>, accs: &mut BTreeMap
             a.mate_pairs += n;
         }
     }
+
+    // Most-back / most-forward per team this frame (by attack-frame y). With one
+    // car on a team it is both. Ties keep the first car seen.
+    let mut by_team: BTreeMap<i32, Vec<(i32, f32)>> = BTreeMap::new();
+    for c in &frame.cars {
+        if let Some(team) = c.team {
+            let sign = signs.get(&team).copied().unwrap_or(1);
+            by_team
+                .entry(team)
+                .or_default()
+                .push((c.pri, norm_y(c.p.y, sign)));
+        }
+    }
+    for cars in by_team.values() {
+        if let Some((pri, _)) = cars
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.1 < a.1 { b } else { a })
+        {
+            accs.entry(pri).or_default().most_back += 1;
+        }
+        if let Some((pri, _)) = cars
+            .iter()
+            .copied()
+            .reduce(|a, b| if b.1 > a.1 { b } else { a })
+        {
+            accs.entry(pri).or_default().most_forward += 1;
+        }
+    }
+}
+
+/// The grid frame whose time is nearest `t` (for joining an event to positions).
+fn nearest_frame(frames: &[GridFrame], t: f32) -> Option<&GridFrame> {
+    if frames.is_empty() {
+        return None;
+    }
+    let i = frames.partition_point(|f| f.t < t);
+    [i.checked_sub(1), (i < frames.len()).then_some(i)]
+        .into_iter()
+        .flatten()
+        .map(|j| &frames[j])
+        .min_by(|a, b| (a.t - t).abs().total_cmp(&(b.t - t).abs()))
 }
 
 /// Compute ballchasing-shaped per-player stats from the canonical match. One
@@ -287,9 +379,52 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
     };
     let signs = &m.resampled.team_attack_sign;
 
+    // Possession runs (team, start, end) for the per-frame possession split.
+    let poss: Vec<(f32, f32, i32)> = m
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Possession {
+                team, start, end, ..
+            } => Some((*start, *end, *team)),
+            _ => None,
+        })
+        .collect();
+    let possessing_at = |t: f32| -> Option<i32> {
+        poss.iter()
+            .find(|(s, e, _)| t >= *s && t <= *e)
+            .map(|p| p.2)
+    };
+
     let mut accs: BTreeMap<i32, Acc> = BTreeMap::new();
     for f in &m.resampled.frames {
-        fold_frame(f, signs, &mut accs);
+        fold_frame(f, signs, possessing_at(f.t), &mut accs);
+    }
+
+    // Goals conceded while last defender: each attributed goal is charged to the
+    // back-most player on the conceding team at goal time.
+    let mut gawld: BTreeMap<i32, u32> = BTreeMap::new();
+    for e in &m.events {
+        if let Event::Goal {
+            t,
+            team: Some(scoring),
+            ..
+        } = e
+        {
+            let conceding = if *scoring == 0 { 1 } else { 0 };
+            if let Some(frame) = nearest_frame(&m.resampled.frames, *t) {
+                let sign = signs.get(&conceding).copied().unwrap_or(1);
+                let last_def = frame
+                    .cars
+                    .iter()
+                    .filter(|c| c.team == Some(conceding))
+                    .map(|c| (c.pri, norm_y(c.p.y, sign)))
+                    .reduce(|a, b| if b.1 < a.1 { b } else { a });
+                if let Some((pri, _)) = last_def {
+                    *gawld.entry(pri).or_default() += 1;
+                }
+            }
+        }
     }
 
     // Demo tallies from authoritative events.
@@ -387,6 +522,8 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                 },
                 positioning: BcPositioning {
                     avg_dist_to_ball: mean(a.ball_dist_sum, a.ball_frames),
+                    avg_dist_to_ball_possession: mean(a.gp_dist_sum, a.gp_frames),
+                    avg_dist_to_ball_no_possession: mean(a.gnp_dist_sum, a.gnp_frames),
                     avg_dist_to_mates: mean(a.mate_dist_sum, a.mate_pairs),
                     time_defensive_third_s: secs(a.def3),
                     percent_defensive_third: pct(a.def3, a.pos_frames),
@@ -402,6 +539,11 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     percent_behind_ball: pct(a.behind, behind_den),
                     time_infront_ball_s: secs(a.infront),
                     percent_infront_ball: pct(a.infront, behind_den),
+                    time_most_back_s: secs(a.most_back),
+                    percent_most_back: pct(a.most_back, a.pos_frames),
+                    time_most_forward_s: secs(a.most_forward),
+                    percent_most_forward: pct(a.most_forward, a.pos_frames),
+                    goals_against_while_last_defender: gawld.get(&t.pri).copied().unwrap_or(0),
                 },
                 demo: BcDemo {
                     inflicted: demo_in.get(&t.pri).copied().unwrap_or(0),

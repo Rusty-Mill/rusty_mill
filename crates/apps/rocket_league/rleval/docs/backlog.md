@@ -187,8 +187,10 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
     truth (bpm/bcpm correlate, ours ~10–15% low — honest inferred-model undercount).
     *Remaining:* per-pad spatial heatmaps + the timestamped `PadPickup` stream
     feeding the viewer pickup-map overlay.
-  - **(3) per-team Y-ordering** *(not started)* — most-back/forward/last-defender/
-    time-in-side; also possession-split distance-to-ball.
+  - **(3) per-team Y-ordering ✔** — most-back/forward, goals-against-while-last-
+    defender, and possession-split distance-to-ball in `analyze::bcstats` (per-frame
+    per-team Y-ordering + a goal→back-most join). `tests/bcstats.rs`; validated on a
+    corpus replay. *Remaining:* `time_in_side` (a team/ball stat, different shape).
   - **(4) contract cross-check** *(not started)* — extend `contract.rs` with a
     Tier-2/3 band over the new aggregates (subsumes the deferred boost spike).
 
