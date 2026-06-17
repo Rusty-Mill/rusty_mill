@@ -4,6 +4,7 @@
 //! port types — and scoring-agnostic. It is the pure core that golden-file and
 //! fixture tests exercise without ever touching a `.replay` file.
 
+pub mod bcstats;
 pub mod events;
 pub mod features;
 pub mod identity;

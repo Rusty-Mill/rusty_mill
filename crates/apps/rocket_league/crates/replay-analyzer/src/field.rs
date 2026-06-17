@@ -24,6 +24,11 @@ pub const GOAL_DEPTH_Y: f32 = 880.0;
 /// (max ground speed is ~2300 uu/s).
 pub const SUPERSONIC_SPEED: f32 = 2200.0;
 
+/// "Boost speed" threshold (uu/s): the speed a car can only sustain while
+/// boosting/dodging. Below this is "slow" (throttle only); at/above it up to
+/// [`SUPERSONIC_SPEED`] is "boost speed" — mirrors ballchasing's speed buckets.
+pub const BOOST_SPEED: f32 = 1400.0;
+
 /// Maximum raw replicated boost value; full boost.
 pub const BOOST_MAX_BYTE: u8 = 255;
 

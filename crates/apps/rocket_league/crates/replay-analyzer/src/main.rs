@@ -10,21 +10,27 @@ use std::error::Error;
 use std::path::Path;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: replay-analyzer <file.replay> [--json <out.json>]";
+const USAGE: &str =
+    "usage: replay-analyzer <file.replay> [--json <out.json>] [--bc-stats <out.json>]";
 
 struct Args {
     replay: String,
     json_out: Option<String>,
+    bc_stats_out: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut replay = None;
     let mut json_out = None;
+    let mut bc_stats_out = None;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--json" => {
                 json_out = Some(it.next().ok_or("--json requires a path argument")?);
+            }
+            "--bc-stats" => {
+                bc_stats_out = Some(it.next().ok_or("--bc-stats requires a path argument")?);
             }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with('-') => {
@@ -41,6 +47,7 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args {
         replay: replay.ok_or(USAGE)?,
         json_out,
+        bc_stats_out,
     })
 }
 
@@ -69,6 +76,12 @@ fn run() -> Result<(), Box<dyn Error>> {
     let canonical = analyze::build_canonical(&decoded, replay_id);
 
     print_summary(&canonical);
+
+    if let Some(path) = &args.bc_stats_out {
+        let stats = analyze::bcstats::ballchasing_stats(&canonical);
+        std::fs::write(path, serde_json::to_vec_pretty(&stats)?)?;
+        eprintln!("\nwrote ballchasing-parity stats -> {path}");
+    }
 
     match &args.json_out {
         Some(path) => {
@@ -158,6 +171,23 @@ fn print_summary(c: &CanonicalMatch) {
             f.time_supersonic_s,
             f.mean_dist_to_ball,
             f.possession_time_s,
+        );
+    }
+
+    eprintln!("ballchasing-parity stats (--bc-stats for full JSON):");
+    for s in replay_analyzer::analyze::bcstats::ballchasing_stats(c) {
+        eprintln!(
+            "  - {:<20} team={:?} bpm={:>4.0} avg_boost={:>3.0}% super={:>4.1}% air={:>4.1}% def/neu/off={:>3.0}/{:>3.0}/{:>3.0}% dist_ball={:>5.0}",
+            s.player,
+            s.team,
+            s.boost.bpm,
+            s.boost.avg_amount,
+            s.movement.percent_supersonic,
+            s.movement.percent_low_air + s.movement.percent_high_air,
+            s.positioning.percent_defensive_third,
+            s.positioning.percent_neutral_third,
+            s.positioning.percent_offensive_third,
+            s.positioning.avg_dist_to_ball,
         );
     }
 }

@@ -167,15 +167,24 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   `42f2`/`419a` and runs both reconstructions in-process — no network). This is
   *reconstruction-layer* independence (boxcars is the deliberately-shared parse
   layer; Phase 1 covers that boundary for header facts). Where: `recon-check/`.
-- **Ballchasing stat parity** *(not started)* — close the gap between our 5-field
+- **Ballchasing stat parity** *(in progress)* — close the gap between our 5-field
   `PlayerFeatures` and ballchasing's full boost/movement/positioning surface. Full
   audit + parity matrix + plan in `docs/ballchasing-parity.md`. Mostly an
-  aggregate-and-expose problem: (1) a pure `BallchasingStats` reducer over the
-  existing 30 Hz grid + `CarView` flags (~70% of the gap, golden-testable); (2) a
-  **boost-pad pickup model** (6 big / 28 small pad snapping + stolen/overfill — the
-  one structural gap, also the viewer pickup-map data); (3) per-team Y-ordering for
-  most-back/forward/last-defender/time-in-side; (4) extend `contract.rs` with a
-  Tier-2/3 band over the new aggregates (subsumes the deferred boost spike).
+  aggregate-and-expose problem:
+  - **(1) `BallchasingStats` reducer ✔** — `analyze::bcstats::ballchasing_stats`
+    reduces the existing 30 Hz grid + tracks + events into a ballchasing-shaped
+    per-player block: boost (avg/collected/used/bpm/bcpm, zero/full, 0–25…75–100
+    quartiles), movement (avg speed, total distance, slow/boost/supersonic,
+    ground/low-air/high-air), positioning (dist-to-ball, dist-to-mates,
+    thirds/halves, behind/in-front of ball — in the attack frame), and demos.
+    Pure consumer (no canonical-model change); synthetic + invariant tests
+    (`tests/bcstats.rs`); surfaced in the analyzer summary + `--bc-stats <json>`.
+  - **(2) boost-pad pickup model** *(not started)* — 6 big / 28 small pad snapping
+    + stolen/overfill (the one structural gap; also the viewer pickup-map data).
+  - **(3) per-team Y-ordering** *(not started)* — most-back/forward/last-defender/
+    time-in-side; also possession-split distance-to-ball.
+  - **(4) contract cross-check** *(not started)* — extend `contract.rs` with a
+    Tier-2/3 band over the new aggregates (subsumes the deferred boost spike).
 
 ---
 
