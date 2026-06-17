@@ -27,15 +27,18 @@ the recommended next thread, and the context/gotchas so you don't re-derive them
   - Full design + measured numbers: `docs/parser-cross-validation-harness.md`.
     Backlog: `docs/backlog.md` (M3 section).
 
-## ⛔ Top blocker (fix first): CI / GitHub Actions is down
-No workflow runs have triggered repo-wide since **2026-06-16 ~10:37 UTC** — Actions
-appears **quota-exhausted or disabled**. So the two harness CI gates (and the whole
-`cargo test --workspace` / `pytest` suite) are **not actually enforced**. PRs
-#32–#35 were merged without a green check (per the owner's direction, since the
-change passes every check locally). **The fix is owner-side** (GitHub billing /
-Actions settings) — you can confirm the symptom via the Actions API
-(`list_workflow_runs` shows nothing since 10:37 UTC) but cannot flip billing. Raise
-this before building more CI gates, since none of them run today.
+## ℹ️ Standing condition: GitHub Actions is intentionally disabled
+The owner **deliberately disabled GitHub Actions** (as of 2026-06-16); no workflow
+runs have triggered repo-wide since ~10:37 UTC and none are expected to. This is
+**not a blocker to fix** — it's the standing state. Consequences to internalize:
+- The CI gates (the two harness checks, `cargo test --workspace`, `pytest`) are
+  **not enforced remotely**. The **local gates are the source of truth** — run them
+  before every merge (see Conventions below); don't wait for a green check.
+- **Merging PRs without a remote check is expected**, not a workaround. PRs #32–#37
+  were merged this way (each passes every check locally).
+- Don't invest in new *CI-only* gates while Actions is off — they won't run. Prefer
+  checks that are also runnable locally (e.g. a `--gate` binary), or wire the
+  corpus/local gates the existing follow-ups describe.
 
 ## ⭐ Recommended next thread: corpus-wide recon-check
 `recon-check` currently *passes* on `42f2`/`419a`. Its real value is as a
@@ -93,9 +96,9 @@ replays where it doesn't (= real reconstruction bugs).
 
 ## Conventions
 - Develop on the session's **designated branch**; small PRs to `main`,
-  **squash-merge** after CI is green (CI is currently down — prior slices merged
-  without green per owner direction; confirm with the owner).
-- Rust gates (CI parity): `cargo fmt --all -- --check`,
+  **squash-merge** after the local gates pass (Actions is intentionally disabled —
+  see the standing-condition section above; merge without a remote check).
+- Rust gates (the source of truth, run locally): `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
   Python: `cd service && pytest -q`. `recon-check` tests are heavy (subtr-actor) —
   run `--release` locally.
