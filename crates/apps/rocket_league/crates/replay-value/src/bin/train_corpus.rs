@@ -21,8 +21,20 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 struct ManifestEntry {
+    #[serde(default)]
+    id: String,
     file: String,
+    /// Playlist slug (backfilled by `refresh_manifest_playlist.py`). Train only
+    /// on ranked doubles.
+    #[serde(default)]
+    playlist: Option<String>,
+    /// Team size from the replay header; must be 2 for this 2v2 corpus.
+    #[serde(default)]
+    team_size: Option<i32>,
 }
+
+/// The only playlist the corpus admits (see `manifest.json`).
+const RANKED_DOUBLES: &str = "ranked-doubles";
 
 fn base_rate_log_loss(rows: &[Row], p: f32) -> f32 {
     if rows.is_empty() {
@@ -70,7 +82,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             .unwrap_or_else(|| "assets/corpus/manifest.json".into()),
     );
     let dir = manifest.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let entries: Vec<ManifestEntry> = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+    let all_entries: Vec<ManifestEntry> = serde_json::from_slice(&std::fs::read(&manifest)?)?;
+    // Train only on ranked 2v2 — exclude (loudly) anything else so a stray
+    // refresh can't pollute the value model.
+    let total = all_entries.len();
+    let entries: Vec<ManifestEntry> = all_entries
+        .into_iter()
+        .filter(|e| {
+            let ok = e.team_size == Some(2) && e.playlist.as_deref() == Some(RANKED_DOUBLES);
+            if !ok {
+                eprintln!(
+                    "skip {}: not ranked 2v2 (playlist={:?}, team_size={:?})",
+                    e.id, e.playlist, e.team_size
+                );
+            }
+            ok
+        })
+        .collect();
+    eprintln!(
+        "corpus: {}/{} replays are ranked-doubles 2v2",
+        entries.len(),
+        total
+    );
+    if entries.is_empty() {
+        return Err("no ranked-doubles 2v2 replays in manifest (run \
+             assets/corpus/refresh_manifest_playlist.py to backfill playlist/team_size)"
+            .into());
+    }
 
     let cfg = ValueConfig {
         sample_stride: 30, // 1 s; plenty of states across a corpus, keeps it fast
@@ -104,6 +142,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                             continue;
                         };
                         let m = build_canonical(&decoded, "x");
+                        // Defense-in-depth: drop anything not actually 2v2.
+                        if m.team_size != Some(2) {
+                            eprintln!("skip {}: decoded team_size {:?} != 2", e.file, m.team_size);
+                            continue;
+                        }
                         out.push(build_dataset(&m, cfg).rows);
                     }
                     out

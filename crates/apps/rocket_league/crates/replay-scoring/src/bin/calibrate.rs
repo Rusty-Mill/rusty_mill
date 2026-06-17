@@ -38,7 +38,17 @@ struct ManifestEntry {
     bucket: String,
     #[serde(default)]
     ranks: BTreeMap<String, i32>,
+    /// Playlist slug (backfilled by `refresh_manifest_playlist.py`). The corpus is
+    /// **ranked doubles only** — anything else is excluded from calibration.
+    #[serde(default)]
+    playlist: Option<String>,
+    /// Team size from the replay header; must be 2 for this 2v2 corpus.
+    #[serde(default)]
+    team_size: Option<i32>,
 }
+
+/// The only playlist the calibration corpus admits (see `manifest.json`).
+const RANKED_DOUBLES: &str = "ranked-doubles";
 
 struct Sample {
     tier: f32,
@@ -111,12 +121,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         .parent()
         .unwrap_or(Path::new("."))
         .to_path_buf();
-    let entries: Vec<ManifestEntry> = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    let all_entries: Vec<ManifestEntry> = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    // Train only on ranked 2v2 — exclude (loudly) anything the manifest doesn't
+    // tag as ranked-doubles / team_size 2 so a stray refresh can't pollute the fit.
+    let total = all_entries.len();
+    let entries: Vec<ManifestEntry> = all_entries
+        .into_iter()
+        .filter(|e| {
+            let ok = e.team_size == Some(2) && e.playlist.as_deref() == Some(RANKED_DOUBLES);
+            if !ok {
+                eprintln!(
+                    "skip {}: not ranked 2v2 (playlist={:?}, team_size={:?})",
+                    e.id, e.playlist, e.team_size
+                );
+            }
+            ok
+        })
+        .collect();
     eprintln!(
-        "corpus: {} replays from {}",
+        "corpus: {}/{} replays are ranked-doubles 2v2 from {}",
         entries.len(),
+        total,
         manifest_path.display()
     );
+    if entries.is_empty() {
+        return Err("no ranked-doubles 2v2 replays in manifest (run \
+             assets/corpus/refresh_manifest_playlist.py to backfill playlist/team_size)"
+            .into());
+    }
 
     // Ground-truth stats give each ballchasing-mangled rank key its team, which is
     // what lets the rank join team-anchor a mangled name to the analyzer's true
@@ -168,6 +200,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .and_then(|x| x.to_str())
                             .unwrap_or("replay");
                         let canonical = build_canonical(&decoded, stem);
+                        // Defense-in-depth: trust the decoded header over the
+                        // manifest tag — drop anything that isn't actually 2v2.
+                        if canonical.team_size != Some(2) {
+                            eprintln!(
+                                "skip {}: decoded team_size {:?} != 2",
+                                e.file, canonical.team_size
+                            );
+                            continue;
+                        }
                         let reports = score_all(&canonical, cfg);
                         // Team-anchored rank join: a mangled ballchasing name still
                         // resolves to the analyzer's player (vs. dropping it).
