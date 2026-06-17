@@ -167,6 +167,15 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   `42f2`/`419a` and runs both reconstructions in-process — no network). This is
   *reconstruction-layer* independence (boxcars is the deliberately-shared parse
   layer; Phase 1 covers that boundary for header facts). Where: `recon-check/`.
+- **Ballchasing stat parity** *(not started)* — close the gap between our 5-field
+  `PlayerFeatures` and ballchasing's full boost/movement/positioning surface. Full
+  audit + parity matrix + plan in `docs/ballchasing-parity.md`. Mostly an
+  aggregate-and-expose problem: (1) a pure `BallchasingStats` reducer over the
+  existing 30 Hz grid + `CarView` flags (~70% of the gap, golden-testable); (2) a
+  **boost-pad pickup model** (6 big / 28 small pad snapping + stolen/overfill — the
+  one structural gap, also the viewer pickup-map data); (3) per-team Y-ordering for
+  most-back/forward/last-defender/time-in-side; (4) extend `contract.rs` with a
+  Tier-2/3 band over the new aggregates (subsumes the deferred boost spike).
 
 ---
 
@@ -222,6 +231,13 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Jump to next/prev goal & kickoff (n/p, k/j); loop; ◀▶ ±1s
 - [x] Show/hide toggles (trails, labels, boost)
 - [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
+
+**Ballchasing-parity adds** (see `docs/ballchasing-parity.md` §4)
+- [ ] Better car models — recognizable RL-body silhouette over the cabin+nose box **(needs visual decision)**
+- [ ] Boost amount above each car in 3D (boost byte already in `Scene`; toggle like the other overlays)
+- [ ] Score reflects playback time — count `Event::Goal`s with `t <= playhead` instead of final `team_scores`
+- [ ] Boost-pad pickup map — light the 6 big / 28 small pads as collected (depends on the boost-pad pickup model, parity item #2)
+- [ ] Boost-timeline strip per player; "pressure" / ball-side timeline; thirds-occupancy + most-back tag; speed-bucket bar
 
 **Analysis overlays**
 - [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)
