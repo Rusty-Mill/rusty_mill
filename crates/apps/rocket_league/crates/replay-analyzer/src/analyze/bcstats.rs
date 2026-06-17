@@ -16,10 +16,10 @@
 //! Boost-pad attribution (big/small/stolen/overfill) comes from
 //! [`crate::analyze::boost_pads`], which also supplies the jitter-free
 //! `amount_collected`/`amount_used`. Positioning covers possession-split
-//! distance-to-ball, most-back/most-forward, and goals-against-while-last-defender.
+//! distance-to-ball, most-back/most-forward, goals-against-while-last-defender,
+//! and `time_ball_in_side` (a team/ball stat denormalized onto each player).
 //! Not yet covered (tracked in `docs/ballchasing-parity.md`): per-pad boost
-//! heatmaps, and `time_in_side` (a team/ball stat, a different shape than this
-//! per-player block).
+//! heatmaps.
 
 use crate::field;
 use crate::model::{CanonicalMatch, Event, GridFrame, Vec3};
@@ -132,6 +132,10 @@ pub struct BcPositioning {
     pub percent_behind_ball: f32,
     pub time_infront_ball_s: f32,
     pub percent_infront_ball: f32,
+    /// Time the ball spent in this team's defensive half (a team/ball stat,
+    /// denormalized onto each player; over the player's present-with-ball frames).
+    pub time_ball_in_side_s: f32,
+    pub percent_ball_in_side: f32,
     /// Time as the back-most / forward-most player on the team (by attack-frame
     /// `y`); the back-most is the "last defender".
     pub time_most_back_s: f32,
@@ -188,6 +192,8 @@ struct Acc {
     // behind/infront (team known AND ball present)
     behind: u64,
     infront: u64,
+    // ball in this team's defensive half (team known AND ball present)
+    in_side: u64,
 }
 
 fn speed(v: Vec3) -> f32 {
@@ -303,6 +309,10 @@ fn fold_frame(
                     a.behind += 1;
                 } else {
                     a.infront += 1;
+                }
+                // Ball in this team's defensive half (own half is −Y in attack frame).
+                if nby < 0.0 {
+                    a.in_side += 1;
                 }
             }
         }
@@ -539,6 +549,8 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     percent_behind_ball: pct(a.behind, behind_den),
                     time_infront_ball_s: secs(a.infront),
                     percent_infront_ball: pct(a.infront, behind_den),
+                    time_ball_in_side_s: secs(a.in_side),
+                    percent_ball_in_side: pct(a.in_side, behind_den),
                     time_most_back_s: secs(a.most_back),
                     percent_most_back: pct(a.most_back, a.pos_frames),
                     time_most_forward_s: secs(a.most_forward),

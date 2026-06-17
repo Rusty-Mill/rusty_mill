@@ -190,7 +190,7 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   - **(3) per-team Y-ordering ✔** — most-back/forward, goals-against-while-last-
     defender, and possession-split distance-to-ball in `analyze::bcstats` (per-frame
     per-team Y-ordering + a goal→back-most join). `tests/bcstats.rs`; validated on a
-    corpus replay. *Remaining:* `time_in_side` (a team/ball stat, different shape).
+    corpus replay. `time_ball_in_side` ✔ (team/ball stat, denormalized per player).
   - **(4) cross-check the new aggregates** *(token-free portion ✔)* — a committed
     corpus gate (`tests/external_validation.rs::bcstats_agrees_with_ballchasing`)
     cross-checks `bcstats` `bpm`/`bcpm`/supersonic/dist against the ballchasing

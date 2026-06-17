@@ -237,6 +237,21 @@ fn boost_flow_skips_respawn_gap() {
 }
 
 #[test]
+fn ball_in_side_tracks_defensive_half() {
+    // Ball in team 0's half (y<0) for 3 of 4 frames → 75%.
+    let frames = vec![
+        frame(0.0, v(0.0, 0.0, 17.0), 0.0, 50, Some(v(0.0, -2000.0, 93.0))),
+        frame(0.1, v(0.0, 0.0, 17.0), 0.0, 50, Some(v(0.0, -2000.0, 93.0))),
+        frame(0.2, v(0.0, 0.0, 17.0), 0.0, 50, Some(v(0.0, -2000.0, 93.0))),
+        frame(0.3, v(0.0, 0.0, 17.0), 0.0, 50, Some(v(0.0, 2000.0, 93.0))),
+    ];
+    let m = match_with(frames, vec![], track());
+    let s = ballchasing_stats(&m);
+    let p = s.iter().find(|p| p.pri == 1).unwrap();
+    assert!(near(p.positioning.percent_ball_in_side, 75.0, 1e-3));
+}
+
+#[test]
 fn ordering_possession_and_last_defender() {
     // team 0: pri 1 always back (y=-2000), pri 2 always forward (y=+2000).
     // Team 0 holds the ball for the first half, team 1 the second; a team-1 goal
