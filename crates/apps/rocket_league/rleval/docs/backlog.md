@@ -191,8 +191,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
     defender, and possession-split distance-to-ball in `analyze::bcstats` (per-frame
     per-team Y-ordering + a goal→back-most join). `tests/bcstats.rs`; validated on a
     corpus replay. *Remaining:* `time_in_side` (a team/ball stat, different shape).
-  - **(4) contract cross-check** *(not started)* — extend `contract.rs` with a
-    Tier-2/3 band over the new aggregates (subsumes the deferred boost spike).
+  - **(4) cross-check the new aggregates** *(token-free portion ✔)* — a committed
+    corpus gate (`tests/external_validation.rs::bcstats_agrees_with_ballchasing`)
+    cross-checks `bcstats` `bpm`/`bcpm`/supersonic/dist against the ballchasing
+    fixture (team-anchored match): on the first 16 corpus replays ρ≈0.999/0.99/
+    0.94/0.92, rel 2.5%/2.9%/7.1%/8.4%. *Remaining (needs a token):* a `contract.rs`
+    Tier-2/3 band over thirds/quartiles needs ballchasing's full per-player block,
+    which the committed fixture doesn't carry.
 
 ---
 

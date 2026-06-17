@@ -235,6 +235,133 @@ fn evaluate_passes_strong_agreement_and_flags_drift() {
 }
 
 #[test]
+fn bcstats_agrees_with_ballchasing() {
+    use replay_analyzer::analyze::bcstats::ballchasing_stats;
+    use replay_analyzer::analyze::roster_match::{team_anchored_pairs, RosterSlot};
+
+    let fixture = Path::new("assets/corpus/ballchasing_stats.json");
+    if !fixture.exists() {
+        eprintln!("skip bcstats gate: no ground-truth fixture");
+        return;
+    }
+    let corpus = Path::new("assets/corpus");
+    let truth: GroundTruth =
+        serde_json::from_slice(&std::fs::read(fixture).expect("read fixture")).expect("parse");
+    let mut ids: Vec<&String> = truth.replays.keys().collect();
+    ids.sort();
+
+    let (mut sup, mut dist, mut bpm, mut bcpm) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut present = 0usize;
+    for id in ids.iter().take(CORPUS_TEST_LIMIT) {
+        let path = corpus.join(format!("{id}.replay"));
+        if !path.exists() {
+            continue;
+        }
+        present += 1;
+        let decoded = BoxcarsParser::new()
+            .parse(&std::fs::read(&path).expect("read"))
+            .expect("decode");
+        let canonical = build_canonical(&decoded, (*id).clone());
+        let stats = ballchasing_stats(&canonical);
+        let entry = &truth.replays[*id];
+        let ours: Vec<RosterSlot> = stats
+            .iter()
+            .map(|s| RosterSlot::new(s.team, &s.player))
+            .collect();
+        let theirs: Vec<RosterSlot> = entry
+            .players
+            .iter()
+            .map(|g| RosterSlot::new(Some(g.team), &g.name))
+            .collect();
+        for (oi, gi) in team_anchored_pairs(&ours, &theirs) {
+            let (s, g) = (&stats[oi], &entry.players[gi]);
+            if let Some(t) = g.time_supersonic_s {
+                sup.push(Pair {
+                    ours: s.movement.time_supersonic_s,
+                    theirs: t,
+                });
+            }
+            if let Some(d) = g.avg_dist_to_ball {
+                dist.push(Pair {
+                    ours: s.positioning.avg_dist_to_ball,
+                    theirs: d,
+                });
+            }
+            if let Some(b) = g.bpm {
+                bpm.push(Pair {
+                    ours: s.boost.bpm,
+                    theirs: b,
+                });
+            }
+            if let Some(b) = g.bcpm {
+                bcpm.push(Pair {
+                    ours: s.boost.bcpm,
+                    theirs: b,
+                });
+            }
+        }
+    }
+    if present == 0 {
+        eprintln!("skip bcstats gate: corpus .replay files not present (gitignored)");
+        return;
+    }
+
+    let (sa, da, pa, ca) = (
+        agreement(&sup, 2.0),
+        agreement(&dist, 100.0),
+        agreement(&bpm, 50.0),
+        agreement(&bcpm, 50.0),
+    );
+    eprintln!(
+        "bcstats vs ballchasing ({present} replays): \
+         supersonic ρ={:?} rel={:.3} | dist ρ={:?} rel={:.3} | \
+         bpm ρ={:?} rel={:.3} | bcpm ρ={:?} rel={:.3}",
+        sa.spearman,
+        sa.median_rel_err,
+        da.spearman,
+        da.median_rel_err,
+        pa.spearman,
+        pa.median_rel_err,
+        ca.spearman,
+        ca.median_rel_err,
+    );
+
+    // Thresholds locked from observed corpus agreement, with margin. bpm/bcpm are
+    // a rate-vs-rate comparison of the inferred pad model (ours runs a little low),
+    // so the relative-error bound is looser than the position/velocity channels.
+    let ok = |a: &replay_analyzer::analyze::validate::Agreement, rho: f32, rel: f32| {
+        a.spearman.unwrap_or(0.0) >= rho && a.median_rel_err <= rel
+    };
+    // Observed on the first 16 corpus replays: supersonic ρ≈0.999/2.5%,
+    // dist ρ≈0.989/2.9%, bpm ρ≈0.94/7.1%, bcpm ρ≈0.92/8.4%. Bounds keep ~2–3×
+    // margin so the gate guards against regressions without flaking.
+    assert!(
+        ok(&sa, 0.97, 0.08),
+        "supersonic: ρ={:?} rel={:.3}",
+        sa.spearman,
+        sa.median_rel_err
+    );
+    assert!(
+        ok(&da, 0.95, 0.08),
+        "dist: ρ={:?} rel={:.3}",
+        da.spearman,
+        da.median_rel_err
+    );
+    assert!(
+        ok(&pa, 0.88, 0.15),
+        "bpm: ρ={:?} rel={:.3}",
+        pa.spearman,
+        pa.median_rel_err
+    );
+    assert!(
+        ok(&ca, 0.85, 0.15),
+        "bcpm: ρ={:?} rel={:.3}",
+        ca.spearman,
+        ca.median_rel_err
+    );
+}
+
+#[test]
 fn corpus_agrees_with_ballchasing() {
     let fixture = Path::new("assets/corpus/ballchasing_stats.json");
     if !fixture.exists() {
