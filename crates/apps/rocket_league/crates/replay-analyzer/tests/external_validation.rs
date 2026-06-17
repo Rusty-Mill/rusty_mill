@@ -362,6 +362,269 @@ fn bcstats_agrees_with_ballchasing() {
 }
 
 #[test]
+fn bcstats_full_agrees_with_ballchasing() {
+    use replay_analyzer::analyze::bcstats::{ballchasing_stats, BcPlayerStats};
+    use replay_analyzer::analyze::roster_match::{team_anchored_pairs, RosterSlot};
+    use std::collections::HashMap;
+
+    #[derive(serde::Deserialize)]
+    struct FullGt {
+        replays: HashMap<String, FullReplay>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FullReplay {
+        players: Vec<FullPlayer>,
+    }
+    #[derive(serde::Deserialize)]
+    struct FullPlayer {
+        name: String,
+        team: i32,
+        boost: HashMap<String, f64>,
+        movement: HashMap<String, f64>,
+        positioning: HashMap<String, f64>,
+    }
+
+    let fixture = Path::new("assets/corpus/ballchasing_bcstats.json");
+    if !fixture.exists() {
+        eprintln!("skip bcstats-full gate: no fixture");
+        return;
+    }
+    let corpus = Path::new("assets/corpus");
+    let truth: FullGt =
+        serde_json::from_slice(&std::fs::read(fixture).expect("read")).expect("parse");
+
+    // (channel, group, ballchasing key, extractor) — our bcstats value vs theirs.
+    type Ex = fn(&BcPlayerStats) -> f32;
+    let channels: Vec<(&str, &str, &str, Ex)> = vec![
+        ("bpm", "boost", "bpm", |s| s.boost.bpm),
+        ("bcpm", "boost", "bcpm", |s| s.boost.bcpm),
+        ("avg_boost", "boost", "avg_amount", |s| s.boost.avg_amount),
+        ("pct_zero", "boost", "percent_zero_boost", |s| {
+            s.boost.percent_zero
+        }),
+        ("pct_full", "boost", "percent_full_boost", |s| {
+            s.boost.percent_full
+        }),
+        ("pct_b0_25", "boost", "percent_boost_0_25", |s| {
+            s.boost.percent_0_25
+        }),
+        ("pct_b25_50", "boost", "percent_boost_25_50", |s| {
+            s.boost.percent_25_50
+        }),
+        ("pct_b50_75", "boost", "percent_boost_50_75", |s| {
+            s.boost.percent_50_75
+        }),
+        ("pct_b75_100", "boost", "percent_boost_75_100", |s| {
+            s.boost.percent_75_100
+        }),
+        ("collected", "boost", "amount_collected", |s| {
+            s.boost.amount_collected
+        }),
+        ("stolen", "boost", "amount_stolen", |s| {
+            s.boost.amount_stolen
+        }),
+        ("cnt_big", "boost", "count_collected_big", |s| {
+            s.boost.count_collected_big as f32
+        }),
+        ("cnt_small", "boost", "count_collected_small", |s| {
+            s.boost.count_collected_small as f32
+        }),
+        ("overfill", "boost", "amount_overfill", |s| {
+            s.boost.amount_overfill
+        }),
+        ("avg_speed", "movement", "avg_speed", |s| {
+            s.movement.avg_speed
+        }),
+        ("total_dist", "movement", "total_distance", |s| {
+            s.movement.total_distance
+        }),
+        ("pct_slow", "movement", "percent_slow_speed", |s| {
+            s.movement.percent_slow
+        }),
+        ("pct_boostspd", "movement", "percent_boost_speed", |s| {
+            s.movement.percent_boost_speed
+        }),
+        ("pct_super", "movement", "percent_supersonic_speed", |s| {
+            s.movement.percent_supersonic
+        }),
+        ("pct_ground", "movement", "percent_ground", |s| {
+            s.movement.percent_ground
+        }),
+        ("pct_lowair", "movement", "percent_low_air", |s| {
+            s.movement.percent_low_air
+        }),
+        ("pct_highair", "movement", "percent_high_air", |s| {
+            s.movement.percent_high_air
+        }),
+        ("dist_ball", "positioning", "avg_distance_to_ball", |s| {
+            s.positioning.avg_dist_to_ball
+        }),
+        (
+            "dist_poss",
+            "positioning",
+            "avg_distance_to_ball_possession",
+            |s| s.positioning.avg_dist_to_ball_possession,
+        ),
+        (
+            "dist_nopos",
+            "positioning",
+            "avg_distance_to_ball_no_possession",
+            |s| s.positioning.avg_dist_to_ball_no_possession,
+        ),
+        ("dist_mates", "positioning", "avg_distance_to_mates", |s| {
+            s.positioning.avg_dist_to_mates
+        }),
+        ("pct_def3", "positioning", "percent_defensive_third", |s| {
+            s.positioning.percent_defensive_third
+        }),
+        ("pct_neu3", "positioning", "percent_neutral_third", |s| {
+            s.positioning.percent_neutral_third
+        }),
+        ("pct_off3", "positioning", "percent_offensive_third", |s| {
+            s.positioning.percent_offensive_third
+        }),
+        (
+            "pct_defhalf",
+            "positioning",
+            "percent_defensive_half",
+            |s| s.positioning.percent_defensive_half,
+        ),
+        (
+            "pct_offhalf",
+            "positioning",
+            "percent_offensive_half",
+            |s| s.positioning.percent_offensive_half,
+        ),
+        ("pct_behind", "positioning", "percent_behind_ball", |s| {
+            s.positioning.percent_behind_ball
+        }),
+        ("pct_infront", "positioning", "percent_infront_ball", |s| {
+            s.positioning.percent_infront_ball
+        }),
+        ("pct_mostback", "positioning", "percent_most_back", |s| {
+            s.positioning.percent_most_back
+        }),
+        ("pct_mostfwd", "positioning", "percent_most_forward", |s| {
+            s.positioning.percent_most_forward
+        }),
+        (
+            "ga_lastdef",
+            "positioning",
+            "goals_against_while_last_defender",
+            |s| s.positioning.goals_against_while_last_defender as f32,
+        ),
+    ];
+
+    let mut acc: HashMap<&str, Vec<Pair>> = channels.iter().map(|c| (c.0, Vec::new())).collect();
+    let mut present = 0usize;
+    let mut ids: Vec<&String> = truth.replays.keys().collect();
+    ids.sort();
+    for id in ids {
+        let path = corpus.join(format!("{id}.replay"));
+        if !path.exists() {
+            continue;
+        }
+        present += 1;
+        let decoded = BoxcarsParser::new()
+            .parse(&std::fs::read(&path).expect("read"))
+            .expect("decode");
+        let stats = ballchasing_stats(&build_canonical(&decoded, id.clone()));
+        let gt = &truth.replays[id];
+        let ours: Vec<RosterSlot> = stats
+            .iter()
+            .map(|s| RosterSlot::new(s.team, &s.player))
+            .collect();
+        let theirs: Vec<RosterSlot> = gt
+            .players
+            .iter()
+            .map(|g| RosterSlot::new(Some(g.team), &g.name))
+            .collect();
+        for (oi, gi) in team_anchored_pairs(&ours, &theirs) {
+            let (s, g) = (&stats[oi], &gt.players[gi]);
+            for (name, group, key, ex) in &channels {
+                let map = match *group {
+                    "boost" => &g.boost,
+                    "movement" => &g.movement,
+                    _ => &g.positioning,
+                };
+                if let Some(&their) = map.get(*key) {
+                    acc.get_mut(name).unwrap().push(Pair {
+                        ours: ex(s),
+                        theirs: their as f32,
+                    });
+                }
+            }
+        }
+    }
+    if present == 0 {
+        eprintln!("skip bcstats-full gate: corpus .replay files not present");
+        return;
+    }
+
+    // The strong core: channels that should be near-exact (the pad model, speed
+    // buckets, thirds/halves, distances). The rest still must rank-correlate, but
+    // are inherently noisier: the middle boost quartiles have little cross-player
+    // variance; the low/high-air *magnitudes* depend on our approximate z-band
+    // thresholds (rank stays high, magnitude drifts); possession-split distance
+    // depends on our derived possession model.
+    let core: &[&str] = &[
+        "bpm",
+        "collected",
+        "stolen",
+        "cnt_big",
+        "cnt_small",
+        "pct_zero",
+        "pct_full",
+        "avg_speed",
+        "total_dist",
+        "pct_slow",
+        "pct_boostspd",
+        "pct_super",
+        "pct_ground",
+        "dist_ball",
+        "dist_mates",
+        "pct_def3",
+        "pct_neu3",
+        "pct_off3",
+        "pct_defhalf",
+        "pct_offhalf",
+        "pct_behind",
+        "pct_infront",
+        "pct_mostfwd",
+    ];
+
+    eprintln!("bcstats full block vs ballchasing ({present} replays):");
+    let mut fails = Vec::new();
+    for (name, ..) in &channels {
+        let a = agreement(&acc[name], 1.0);
+        let rho = a.spearman.unwrap_or(0.0);
+        eprintln!(
+            "  {:<14} n={:>3} ρ={:>6} rel={:.3}{}",
+            name,
+            a.n,
+            a.spearman
+                .map(|v| format!("{v:.3}"))
+                .unwrap_or_else(|| "—".into()),
+            a.median_rel_err,
+            if core.contains(name) { "  [core]" } else { "" },
+        );
+        // Every channel must rank-correlate — a broken reducer (sign flip, wrong
+        // field) tanks Spearman.
+        if a.n >= 10 && rho < 0.50 {
+            fails.push(format!("{name}: ρ={rho:.3} < 0.50"));
+        }
+        // Core channels must be near-exact.
+        if core.contains(name) && (rho < 0.90 || a.median_rel_err > 0.12) {
+            fails.push(format!(
+                "core {name}: ρ={rho:.3} rel={:.3}",
+                a.median_rel_err
+            ));
+        }
+    }
+    assert!(fails.is_empty(), "bcstats-full gate failures: {fails:?}");
+}
+
+#[test]
 fn corpus_agrees_with_ballchasing() {
     let fixture = Path::new("assets/corpus/ballchasing_stats.json");
     if !fixture.exists() {

@@ -191,13 +191,15 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
     defender, and possession-split distance-to-ball in `analyze::bcstats` (per-frame
     per-team Y-ordering + a goal→back-most join). `tests/bcstats.rs`; validated on a
     corpus replay. `time_ball_in_side` ✔ (team/ball stat, denormalized per player).
-  - **(4) cross-check the new aggregates** *(token-free portion ✔)* — a committed
-    corpus gate (`tests/external_validation.rs::bcstats_agrees_with_ballchasing`)
-    cross-checks `bcstats` `bpm`/`bcpm`/supersonic/dist against the ballchasing
-    fixture (team-anchored match): on the first 16 corpus replays ρ≈0.999/0.99/
-    0.94/0.92, rel 2.5%/2.9%/7.1%/8.4%. *Remaining (needs a token):* a `contract.rs`
-    Tier-2/3 band over thirds/quartiles needs ballchasing's full per-player block,
-    which the committed fixture doesn't carry.
+  - **(4) cross-check against ground truth ✔** — two committed corpus gates in
+    `tests/external_validation.rs`: `bcstats_agrees_with_ballchasing` (bpm/bcpm/
+    supersonic/dist) and `bcstats_full_agrees_with_ballchasing` (the **whole
+    35-channel block** vs an enriched, sanitized fixture `ballchasing_bcstats.json`
+    from `refresh_bcstats_fixture.py`). Across 96 players the pad model is near-exact
+    (count_collected_big rel 0.000, collected ρ 0.997, stolen ρ 0.985), thirds/halves
+    ρ≈0.999, speed buckets ρ 0.98–0.997. Gate: every channel ρ≥0.50, strong core
+    ρ≥0.90/rel≤0.12. A single-fixture `contract.rs` per-field tiered band is an
+    optional remaining nicety.
 
 ---
 
