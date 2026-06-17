@@ -1,9 +1,11 @@
 # Handoff — RLEvalSystem after the parser cross-validation harness
 
-Status as of 2026-06-17. Paste this into a fresh session to continue. The last
-big workstream — the parser cross-validation harness (spec §13) — is **done**
-and merged; **M3 is fully closed**. This handoff is forward-looking: the blocker,
-the recommended next thread, and the context/gotchas so you don't re-derive them.
+Status as of 2026-06-16. Paste this into a fresh session to continue. **M1/M2/M3
+are closed.** The most recent workstream — the **ballchasing stat-parity track**
+(full per-player stat block + boost-pad pickup model + viewer overlays, all
+validated against ballchasing ground truth) — is mostly done (see the TL;DR and
+`docs/ballchasing-parity.md`). This handoff is forward-looking: the standing CI
+condition, the recommended next threads, and the context/gotchas.
 
 ## TL;DR of what exists now
 - **Rust workspace** (root crate `replay-analyzer` + `scoring/`, `skills/`,
@@ -26,6 +28,26 @@ the recommended next thread, and the context/gotchas so you don't re-derive them
     `recon-check/tests/recon_contract.rs`. PRs #33–#35.
   - Full design + measured numbers: `docs/parser-cross-validation-harness.md`.
     Backlog: `docs/backlog.md` (M3 section).
+- **Ballchasing stat-parity track (mostly done) — see `docs/ballchasing-parity.md`:**
+  Our per-player stat surface went from 5 fields to a full ballchasing-shaped block.
+  - **`analyze::bcstats::ballchasing_stats(&CanonicalMatch)`** — pure reducer →
+    boost / movement / positioning / demo aggregates (speed & boost buckets,
+    air/ground, thirds/halves, behind/in-front, dist-to-ball incl. possession-split,
+    most-back/forward, goals-against-while-last-defender, `time_ball_in_side`).
+    Surfaced via `replay-analyzer --bc-stats <json>`. (#40, #42, #47)
+  - **`analyze::boost_pads`** — boost-pad pickup model: attributes gauge gains to
+    the 6 big / 28 small pads (`field::BIG/SMALL_BOOST_PADS`), tags stolen/overfill,
+    and gives jitter-free collected/used. (#41)
+  - **Validation gate** `tests/external_validation.rs::bcstats_agrees_with_ballchasing`
+    — vs ground truth on 16 corpus replays: supersonic ρ≈0.999, dist ρ≈0.989,
+    bpm ρ≈0.94, bcpm ρ≈0.92. (#46)
+  - **Viewer** gained: boost-amount-above-car, playhead-driven scoreboard,
+    **boost-pad pickup-map** (pads flash on collection, team-tinted), and a
+    **pressure / ball-side strip**. (#43–#45)
+- **Corpus is ranked-2v2-only — recorded and enforced** (#39): `manifest.json`
+  carries `playlist`/`team_size`/`playlist_source`; `calibrate` + `train_corpus`
+  filter to `ranked-doubles` + `team_size==2` and drop any non-2v2 decode.
+  Regenerate with `assets/corpus/refresh_manifest_playlist.py`.
 
 ## ℹ️ Standing condition: GitHub Actions is intentionally disabled
 The owner **deliberately disabled GitHub Actions** (as of 2026-06-16); no workflow
@@ -59,8 +81,15 @@ replays where it doesn't (= real reconstruction bugs).
 - **recon-check event-timing:** subtr-actor also exposes goal/demo/touch events;
   add a Tier-R1 cross-check of **goal/demo timestamps** (currently positions only).
   ~½ day, high cohesion.
-- **Phase 1 Tier-3 boost spike:** map our `boost_used` (0–100 integral) to
-  ballchasing `bpm`/`amount_collected` so boost economy can be cross-checked.
+- **Ballchasing-parity remainder (mostly token-gated):** the `contract.rs`
+  **Tier-2/Tier-3 band** over the new boost/movement/positioning aggregates needs
+  ballchasing's *full* per-player block, which the committed fixture doesn't carry
+  — so it needs a `BALLCHASING_API_KEY` fetch (egress allows GET) to enrich the
+  fixture first. Unblocked leftovers: per-pad boost **heatmaps** (the live pickup
+  map already exists), and surfacing `bcstats` aggregates in the viewer roster.
+  *Needs a product call:* better viewer car models. Boost economy is **already
+  cross-checked** by `bcstats_agrees_with_ballchasing` (supersedes the old
+  "Tier-3 boost spike" thread).
 - **M2 prod standup:** provision managed Postgres / S3 bucket+IAM / Redis; swap a
   KMS/AES-GCM cipher behind the existing `Cipher` port; real auth (replace the
   `X-Account-Email` dev stub); per-player PDF scoping.
