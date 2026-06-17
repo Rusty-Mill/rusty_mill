@@ -256,9 +256,13 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Show/hide toggles (trails, labels, boost)
 - [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
 
-**Ballchasing-parity adds** (see `docs/ballchasing-parity.md` §4)
+**Ballchasing-parity adds** (see `docs/ballchasing-parity.md` §4 and the 3D-viewer
+look-&-feel comparison against ballchasing's own viewer in
+`docs/viewer-vs-ballchasing-video.md`)
 - [ ] Better car models — recognizable RL-body silhouette over the cabin+nose box **(needs visual decision)**
-- [x] Boost amount above each car in 3D — a tinted numeric sprite over each car, tied to the `boost` toggle (`makeBoostNum`/`setBoostNum`)
+- [x] Boost amount above each car in 3D — a **refilling boost pill** over each car (rounded track that fills left-to-right with the level, green/amber/red, value inside; `makeBoostPill`/`setBoostPill`), tied to the `boost` toggle; replaced the earlier vertical bar + numeric sprite
+- [x] Roster boost fill bar (side panel) — each roster row's `.bz` pill fills with the boost level (matches ballchasing's side gauge), alongside speed / role / G·A·Sv / impact
+- [ ] Game-clock countdown, kickoff 3-2-1 indicator, top-down camera preset, settings parity (one-colour-per-team, split hide-names/hide-boost, trail duration) — see `docs/viewer-vs-ballchasing-video.md`
 - [x] Score reflects playback time — `updateScore(t)` tallies `goal` events with `t <= playhead` instead of the final `team_scores`
 - [x] Boost-pad pickup map — the 6 big / 28 small pads flash when collected, tinted by team (`Scene.pad_pickups` → `updatePads`/`padByKey`; `pads` toggle)
 - [x] "Pressure" / ball-side timeline strip — which half the ball sits in over the match (ball y in team 0's attack frame; blue pressing above / orange below), next to the momentum strip (`drawPressure`)

@@ -117,7 +117,11 @@ const TEMPLATE: &str = r##"<!doctype html>
   #players .r1 { display:flex; align-items:center; }
   #players .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; }
   #players .r2 { display:flex; align-items:center; gap:8px; font-size:10px; color:#8b949e; padding-left:15px; }
-  #players .r2 b { margin-left:auto; color:#c9d1d9; }
+  #players .r2 .bz { margin-left:auto; position:relative; width:56px; height:13px;
+    border-radius:7px; background:#21262d; border:1px solid #30363d; overflow:hidden; }
+  #players .r2 .bz .f { position:absolute; left:0; top:0; bottom:0; width:0; border-radius:7px; }
+  #players .r2 .bz b { position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; font-size:9px; line-height:1; color:#e6edf3; text-shadow:0 0 2px rgba(0,0,0,.9); }
   #players .r2 .sp { color:#6e7681; }
   #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
   #players .role.first { color:#ffd166; }
@@ -719,22 +723,38 @@ function makeLabel(text, hex) {
   spr.scale.set(620, 155, 1); return spr;
 }
 
-// A small boost-amount readout that floats above a car. The canvas is redrawn
-// only when the integer value changes (boost moves most frames, but the cars are
-// few), tinted to match the boost gauge.
-function makeBoostNum() {
-  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 64;
-  const tex = new THREE.CanvasTexture(cv);
+// A boost-amount pill that floats above a car: a rounded track that refills
+// left-to-right with the boost level (tinted green/amber/red), the value drawn
+// inside. The canvas is redrawn only when the integer value changes (boost moves
+// most frames, but the cars are few).
+function pillPath(x, X, Y, W, H, r) {
+  x.beginPath();
+  x.moveTo(X + r, Y);
+  x.arcTo(X + W, Y, X + W, Y + H, r);
+  x.arcTo(X + W, Y + H, X, Y + H, r);
+  x.arcTo(X, Y + H, X, Y, r);
+  x.arcTo(X, Y, X + W, Y, r);
+  x.closePath();
+}
+function makeBoostPill() {
+  const cv = document.createElement('canvas'); cv.width = 256; cv.height = 72;
+  const tex = new THREE.CanvasTexture(cv); tex.colorSpace = THREE.SRGBColorSpace;
   const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
-  spr.scale.set(150, 75, 1); spr.userData = { cv, tex, val: -1 };
+  spr.scale.set(320, 90, 1); spr.userData = { cv, tex, val: -1 };
   return spr;
 }
-function setBoostNum(spr, n) {
+function setBoostPill(spr, n) {
   const u = spr.userData; if (u.val === n) return; u.val = n;
-  const x = u.cv.getContext('2d'); x.clearRect(0, 0, 128, 64);
-  x.font = 'bold 46px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-  x.lineWidth = 7; x.strokeStyle = 'rgba(0,0,0,.85)'; x.strokeText(n, 64, 36);
-  x.fillStyle = n > 50 ? '#22dd66' : n > 20 ? '#e0b020' : '#dd4030'; x.fillText(n, 64, 36);
+  const x = u.cv.getContext('2d'); x.clearRect(0, 0, 256, 72);
+  const PX = 8, PY = 12, W = 256 - PX * 2, H = 72 - PY * 2, R = H / 2;
+  pillPath(x, PX, PY, W, H, R); x.fillStyle = 'rgba(0,0,0,.6)'; x.fill();
+  x.save(); pillPath(x, PX, PY, W, H, R); x.clip();
+  x.fillStyle = n > 50 ? '#22dd66' : n > 20 ? '#e0b020' : '#dd4030';
+  x.fillRect(PX, PY, W * Math.max(0, Math.min(n, 100)) / 100, H); x.restore();
+  pillPath(x, PX, PY, W, H, R); x.lineWidth = 3; x.strokeStyle = 'rgba(255,255,255,.28)'; x.stroke();
+  x.font = 'bold 38px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 6; x.strokeStyle = 'rgba(0,0,0,.85)'; x.strokeText(n, 128, 38);
+  x.fillStyle = '#fff'; x.fillText(n, 128, 38);
   u.tex.needsUpdate = true;
 }
 
@@ -770,11 +790,8 @@ function buildCars() {
       const rim = new THREE.Mesh(new THREE.CylinderGeometry(8, 8, 17, 12), rimMat);
       rim.position.set(wx, wy, 16); g.add(rim);
     }
-    const bar = new THREE.Mesh(new THREE.BoxGeometry(26, 26, 1),
-      new THREE.MeshBasicMaterial({ color: 0x22dd66 }));
-    g.add(bar);
-    const label = makeLabel(pl.name, hex); label.position.set(0, 0, 285); g.add(label);
-    const boostNum = makeBoostNum(); boostNum.position.set(0, 0, 222); g.add(boostNum);
+    const label = makeLabel(pl.name, hex); label.position.set(0, 0, 210); g.add(label);
+    const boostPill = makeBoostPill(); boostPill.position.set(0, 0, 345); g.add(boostPill);
     scene.add(g);
     const tg = new THREE.BufferGeometry();
     tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
@@ -788,7 +805,7 @@ function buildCars() {
     const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
       new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
     flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
-    map.set(pl.pri, { g, bar, label, boostNum, trail, callout, ring, flame });
+    map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame });
   }
   return map;
 }
@@ -877,7 +894,7 @@ function updateCallouts(t, st) {
       const age = t - best.t, name = best.label.split(' — ')[0];
       o.callout.material.map = calloutTex(name, touchDv.get(best.pri + ':' + best.t.toFixed(2)));
       o.callout.material.opacity = Math.max(0, 1 - age / 1.4);
-      o.callout.position.set(c.p[0], c.p[1], c.p[2] + 360);
+      o.callout.position.set(c.p[0], c.p[1], c.p[2] + 510);
       o.callout.visible = true;
     } else if (o.callout) { o.callout.visible = false; }
   }
@@ -901,14 +918,12 @@ function applyState(st) {
     const c = st.cars.get(pri);
     const live = !!c;
     o.g.visible = live; o.label.visible = live && show.labels;
-    o.bar.visible = live && show.boost; o.trail.visible = live && show.trails;
-    o.boostNum.visible = live && show.boost;
+    o.trail.visible = live && show.trails;
+    o.boostPill.visible = live && show.boost;
     if (!live) { o.flame.visible = false; continue; }
     o.g.position.set(...c.p); o.g.quaternion.copy(c.q);
     o.ring.position.set(c.p[0], c.p[1], 3); o.ring.visible = (c.role === 1);
-    if (show.boost) setBoostNum(o.boostNum, c.boost);
-    o.bar.scale.z = Math.max(c.boost * 2.2, 0.5); o.bar.position.z = 72 + c.boost * 1.1;
-    o.bar.material.color.setHex(c.boost > 50 ? 0x22dd66 : c.boost > 20 ? 0xe0b020 : 0xdd4030);
+    if (show.boost) setBoostPill(o.boostPill, c.boost);
     // boost flame: visible while boost is dropping (i.e. boosting)
     o.flame.visible = c.boost < (prevBoost.get(pri) ?? c.boost) - 0.5;
     if (o.flame.visible) { const s = 0.7 + Math.random() * 0.5; o.flame.scale.set(s, 0.9 + Math.random() * 0.5, s); }
@@ -961,7 +976,7 @@ for (const pl of S.players) {
   const css = TEAM_CSS[pl.team] ?? '#9aa4b2';
   row.innerHTML =
     `<div class="r1"><span class="dot" style="background:${css}"></span>${esc(pl.name)}<i class="role"></i>${impChip(pl.impact)}</div>` +
-    `<div class="r2"><span class="ga">G${pl.goals} A${pl.assists} Sv${pl.saves}</span><span class="sp"></span><b>0</b></div>`;
+    `<div class="r2"><span class="ga">G${pl.goals} A${pl.assists} Sv${pl.saves}</span><span class="sp"></span><span class="bz"><i class="f"></i><b>0</b></span></div>`;
   row.onclick = () => setCam('player', pl.pri);
   plistEl.appendChild(row);
   rowEls.set(pl.pri, row);
@@ -976,7 +991,10 @@ function carSpeed(pri, t) {
 function updatePlayers(st) {
   for (const pl of S.players) {
     const row = rowEls.get(pl.pri), c = st ? st.cars.get(pl.pri) : null;
-    row.querySelector('b').textContent = c ? c.boost : 0;
+    const bv = c ? c.boost : 0, bf = row.querySelector('.bz .f');
+    row.querySelector('.bz b').textContent = bv;
+    bf.style.width = bv + '%';
+    bf.style.background = bv > 50 ? '#22dd66' : bv > 20 ? '#e0b020' : '#dd4030';
     row.querySelector('.sp').textContent = c ? Math.round(carSpeed(pl.pri, T) * 0.036) + ' kph' : '';
     const r = row.querySelector('.role');
     r.textContent = c && c.role ? (c.role === 1 ? '1ST' : '2ND') : '';
