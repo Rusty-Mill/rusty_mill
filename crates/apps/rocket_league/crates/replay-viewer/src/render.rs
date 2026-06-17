@@ -150,6 +150,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   #clock { min-width: 116px; text-align:center; color:#c9d1d9; }
   #tlwrap { position:relative; flex:1; display:flex; flex-direction:column; gap:1px; }
   #wp { width:100%; height:20px; display:block; border-radius:3px; }
+  #pressure { width:100%; height:14px; display:block; border-radius:3px; margin-bottom:2px; }
   #wpcursor { position:absolute; top:0; height:20px; width:1px; background:#fff; opacity:.7; pointer-events:none; }
   #tltrack { position:relative; height:24px; display:flex; align-items:center; }
   #timeline { width:100%; }
@@ -226,6 +227,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock">0:00.0</span>
   <div id="tlwrap">
+    <canvas id="pressure" title="pressure — which half the ball is in: blue pressing above, orange below"></canvas>
     <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
     <div id="wpcursor"></div>
     <div id="tltrack"><div id="loopRegion"></div><input id="timeline" type="range" min="0" value="0"><div id="marks"></div></div>
@@ -1039,6 +1041,32 @@ function drawWP() {
 }
 drawWP();
 
+// pressure strip: which half the ball sits in over the match (ball y in team 0's
+// attack frame), blue pressing above the midline / orange below — ballchasing's
+// signature "pressure" view. Drawn once from the playback frames.
+const presCanvas = document.getElementById('pressure');
+function drawPressure() {
+  const fr = S.frames;
+  if (!fr.length) { presCanvas.style.display = 'none'; return; }
+  const W = presCanvas.clientWidth || 600, H = 14;
+  presCanvas.width = W; presCanvas.height = H;
+  const x = presCanvas.getContext('2d'); x.clearRect(0, 0, W, H);
+  const sign0 = (S.attack_sign && S.attack_sign['0']) || 1;
+  const Y = S.field.back_wall_y || 5120, mid = H / 2;
+  const stride = Math.max(1, Math.floor(fr.length / (W * 2)));
+  for (let i = 0; i < fr.length; i += stride) {
+    const f = fr[i]; if (!f.ball) continue;
+    const p = Math.max(-1, Math.min(1, f.ball[1] * sign0 / Y)); // +1 ⇒ blue pressing
+    const px = (f.t / dur) * W, py = mid - p * mid;
+    x.strokeStyle = p >= 0 ? '#3b82f6' : '#f97316';
+    x.globalAlpha = Math.min(1, Math.abs(p) + 0.1);
+    x.beginPath(); x.moveTo(px, mid); x.lineTo(px, py); x.stroke();
+  }
+  x.globalAlpha = 1;
+  x.strokeStyle = '#30363d'; x.beginPath(); x.moveTo(0, mid); x.lineTo(W, mid); x.stroke();
+}
+drawPressure();
+
 // --- playback ---
 let T = 0, playing = true, speed = 1, loop = false, last = performance.now(), lastState = null;
 let loopA = null, loopB = null; // A–B film-review loop
@@ -1138,6 +1166,7 @@ addEventListener('resize', () => {
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   drawWP();
+  drawPressure();
   sizeDraw();
 });
 </script>

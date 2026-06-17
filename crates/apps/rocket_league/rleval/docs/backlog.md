@@ -254,7 +254,8 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Boost amount above each car in 3D — a tinted numeric sprite over each car, tied to the `boost` toggle (`makeBoostNum`/`setBoostNum`)
 - [x] Score reflects playback time — `updateScore(t)` tallies `goal` events with `t <= playhead` instead of the final `team_scores`
 - [x] Boost-pad pickup map — the 6 big / 28 small pads flash when collected, tinted by team (`Scene.pad_pickups` → `updatePads`/`padByKey`; `pads` toggle)
-- [ ] Boost-timeline strip per player; "pressure" / ball-side timeline; thirds-occupancy + most-back tag; speed-bucket bar
+- [x] "Pressure" / ball-side timeline strip — which half the ball sits in over the match (ball y in team 0's attack frame; blue pressing above / orange below), next to the momentum strip (`drawPressure`)
+- [ ] Boost-timeline strip per player; thirds-occupancy + most-back tag; speed-bucket bar
 
 **Analysis overlays**
 - [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)

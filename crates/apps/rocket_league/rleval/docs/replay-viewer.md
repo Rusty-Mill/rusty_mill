@@ -73,6 +73,9 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
   current time), so scrubbing shows the score as it stood, not the final result.
 - **Heatmap** — a floor occupancy heatmap of the ball (or the followed player),
   binned in-viewer from the grid.
+- **Pressure strip** — a thin band above the timeline showing which half the ball
+  occupied over the match (ball *y* in team 0's attack frame): blue pressing above
+  the midline, orange below — ballchasing's signature "pressure" view.
 - **Momentum strip** — a P(blue scores the next goal) curve above the timeline
   (from `replay-value`; the model is basic, so read it as rough momentum, not a
   calibrated win probability). `--no-roles` / `--no-winprob` omit the overlays.
