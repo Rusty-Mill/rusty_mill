@@ -253,7 +253,7 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [ ] Better car models — recognizable RL-body silhouette over the cabin+nose box **(needs visual decision)**
 - [x] Boost amount above each car in 3D — a tinted numeric sprite over each car, tied to the `boost` toggle (`makeBoostNum`/`setBoostNum`)
 - [x] Score reflects playback time — `updateScore(t)` tallies `goal` events with `t <= playhead` instead of the final `team_scores`
-- [ ] Boost-pad pickup map — light the 6 big / 28 small pads as collected (pad model shipped; needs the timestamped `PadPickup` stream plumbed into `Scene`)
+- [x] Boost-pad pickup map — the 6 big / 28 small pads flash when collected, tinted by team (`Scene.pad_pickups` → `updatePads`/`padByKey`; `pads` toggle)
 - [ ] Boost-timeline strip per player; "pressure" / ball-side timeline; thirds-occupancy + most-back tag; speed-bucket bar
 
 **Analysis overlays**

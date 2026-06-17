@@ -37,6 +37,9 @@ const STOLEN_Y: f32 = 1.0;
 pub struct PadPickup {
     pub t: f32,
     pub kind: PadKind,
+    /// World `(x, y)` of the pad this pickup was attributed to (for the viewer
+    /// pickup-map overlay).
+    pub pad: (f32, f32),
     /// Boost actually added to the tank (percent) — caps at the tank, so a pickup
     /// at high boost adds less than the pad's nominal value.
     pub gain: f32,
@@ -92,6 +95,7 @@ pub fn pad_pickups(track: &PlayerTrack, sign: i32) -> Vec<PadPickup> {
         out.push(PadPickup {
             t: cur.t,
             kind,
+            pad: pad_pos,
             gain,
             overfill,
             stolen: pad_y > STOLEN_Y,

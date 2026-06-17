@@ -106,6 +106,21 @@ pub struct SceneEvent {
     pub dv: Option<f32>,
 }
 
+/// A boost-pad pickup, for the viewer pickup-map overlay: which pad lit up, when,
+/// and for whom (from [`replay_analyzer::analyze::boost_pads`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePadPickup {
+    pub t: f32,
+    /// World `(x, y)` of the pad (matches the viewer's drawn pad positions).
+    pub pad: [f32; 2],
+    /// Collecting player's team (tints the flash).
+    pub team: Option<i32>,
+    /// A big (full) pad vs a small one.
+    pub big: bool,
+    /// Collected in the opponent's half.
+    pub stolen: bool,
+}
+
 /// The full viewer payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
@@ -127,6 +142,10 @@ pub struct Scene {
     pub frames: Vec<SceneFrame>,
     /// Events + skills, time-sorted.
     pub events: Vec<SceneEvent>,
+    /// Boost-pad pickups, time-sorted (for the pickup-map overlay). Empty unless
+    /// any were attributed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pad_pickups: Vec<ScenePadPickup>,
     /// Optional coarse momentum curve: P(team 0 scores the next goal) sampled
     /// evenly across the match (see [`crate::winprob::attach_winprob`]). Empty
     /// unless attached.
@@ -190,6 +209,28 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         })
         .collect();
 
+    // Boost-pad pickups per player, tagged with the collecting team.
+    let mut pad_pickups: Vec<ScenePadPickup> = m
+        .tracks
+        .iter()
+        .flat_map(|t| {
+            let sign = t
+                .team
+                .and_then(|tm| m.resampled.team_attack_sign.get(&tm).copied())
+                .unwrap_or(1);
+            replay_analyzer::analyze::boost_pads::pad_pickups(t, sign)
+                .into_iter()
+                .map(move |pk| ScenePadPickup {
+                    t: round(pk.t, 2),
+                    pad: [round(pk.pad.0, 0), round(pk.pad.1, 0)],
+                    team: t.team,
+                    big: matches!(pk.kind, replay_analyzer::field::PadKind::Big),
+                    stolen: pk.stolen,
+                })
+        })
+        .collect();
+    pad_pickups.sort_by(|a, b| a.t.total_cmp(&b.t));
+
     let mut events = match_events(m);
     events.extend(skills.iter().map(|s| SceneEvent {
         kind: "skill".into(),
@@ -216,6 +257,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         players,
         frames,
         events,
+        pad_pickups,
         win_prob: Vec::new(),
     }
 }

@@ -203,6 +203,7 @@ const TEMPLATE: &str = r##"<!doctype html>
     <label><input type="checkbox" id="tgTrails" checked> trails</label>
     <label><input type="checkbox" id="tgLabels" checked> labels</label>
     <label><input type="checkbox" id="tgBoost" checked> boost</label>
+    <label><input type="checkbox" id="tgPads" checked> pads</label>
     <label><input type="checkbox" id="tgHeat"> heatmap</label>
   </div>
   <div class="panel ov">
@@ -424,8 +425,38 @@ const SMALL_PADS = [
 const bigPadMat = new THREE.MeshBasicMaterial({ color: 0xffcf5a, transparent: true, opacity: .45, side: THREE.DoubleSide });
 const smallPadMat = new THREE.MeshBasicMaterial({ color: 0xe0b840, transparent: true, opacity: .35, side: THREE.DoubleSide });
 const bigPadGeo = new THREE.RingGeometry(140, 165, 24), smallPadGeo = new THREE.CircleGeometry(34, 16);
-for (const [px, py] of BIG_PADS) { const m = new THREE.Mesh(bigPadGeo, bigPadMat); m.position.set(px, py, 3); scene.add(m); }
-for (const [px, py] of SMALL_PADS) { const m = new THREE.Mesh(smallPadGeo, smallPadMat); m.position.set(px, py, 3); scene.add(m); }
+// Per-pad meshes (own material clone) keyed by position, so the pickup-map
+// overlay can flash a single pad when it's collected.
+function padKey(x, y) { return Math.round(x) + ',' + Math.round(y); }
+const padByKey = new Map();
+for (const [px, py] of BIG_PADS) {
+  const m = new THREE.Mesh(bigPadGeo, bigPadMat.clone()); m.position.set(px, py, 3); scene.add(m);
+  padByKey.set(padKey(px, py), { mesh: m, base: 0xffcf5a, baseOp: .45 });
+}
+for (const [px, py] of SMALL_PADS) {
+  const m = new THREE.Mesh(smallPadGeo, smallPadMat.clone()); m.position.set(px, py, 3); scene.add(m);
+  padByKey.set(padKey(px, py), { mesh: m, base: 0xe0b840, baseOp: .35 });
+}
+// Pickup-map: each frame, flash pads collected in the trailing window, tinted by
+// the collecting team. Recomputed from the playhead, so scrubbing just works.
+const PAD_FLASH_S = 1.2;
+const padPickups = S.pad_pickups || [];
+function updatePads(t) {
+  for (const p of padByKey.values()) {
+    p.mesh.material.color.setHex(p.base); p.mesh.material.opacity = p.baseOp; p.mesh.scale.setScalar(1);
+  }
+  if (!show.pads) return;
+  for (const pk of padPickups) {            // sorted by t; later (more recent) wins
+    const age = t - pk.t;
+    if (age < 0) break;
+    if (age > PAD_FLASH_S) continue;
+    const e = padByKey.get(padKey(pk.pad[0], pk.pad[1])); if (!e) continue;
+    const k = 1 - age / PAD_FLASH_S;        // 1 at pickup → 0 at window end
+    e.mesh.material.color.setHex(pk.team === 0 ? 0x3b82f6 : pk.team === 1 ? 0xf97316 : 0xffffff);
+    e.mesh.material.opacity = Math.min(1, e.baseOp + k * (pk.stolen ? 0.95 : 0.7));
+    e.mesh.scale.setScalar(1 + k * (pk.big ? 0.5 : 0.3));
+  }
+}
 
 // --- telestrator: freehand / arrow / line drawing over the view (a coach's pen).
 // Strokes persist on screen until cleared; drawing disables orbit and pauses. ---
@@ -850,7 +881,7 @@ function updateCallouts(t, st) {
   }
 }
 
-let show = { trails: true, labels: true, boost: true };
+let show = { trails: true, labels: true, boost: true, pads: true };
 let prevBall = null;
 const prevBoost = new Map();
 function applyState(st) {
@@ -1024,7 +1055,7 @@ playBtn.onclick = () => setPlaying(!playing);
 tl.oninput = () => { T = parseFloat(tl.value); setPlaying(false); };
 document.getElementById('speed').onchange = e => { speed = parseFloat(e.target.value); };
 document.getElementById('loop').onchange = e => { loop = e.target.checked; };
-for (const id of ['Trails', 'Labels', 'Boost']) {
+for (const id of ['Trails', 'Labels', 'Boost', 'Pads']) {
   document.getElementById('tg' + id).onchange = e => { show[id.toLowerCase()] = e.target.checked; };
 }
 document.getElementById('tgHeat').onchange = e => {
@@ -1065,6 +1096,7 @@ function animate(now) {
   wpCursor.style.left = (T / dur * 100) + '%';
   const st = stateAt(T); lastState = st;
   applyState(st);
+  updatePads(T);
   updateHud(T, st);
   updateCallouts(T, st);
   drawMinimap(st);

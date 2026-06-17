@@ -60,7 +60,12 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
   contact), and skills also stream in the ticker.
 - **Possession** (current team, from the last touch), **per-player trails**, a
   top-down **minimap**, and a roster with header **G/A/Sv** + live **speed**.
-  Toggle trails / labels / boost / heatmap.
+  Toggle trails / labels / boost / pads / heatmap.
+- **Boost-pad pickup map** — the 6 big / 28 small pads on the floor **flash when
+  collected**, tinted by the collecting team (brighter for big/stolen pickups),
+  from `analyze::boost_pads`' attributed `PadPickup` stream. Recomputed from the
+  playhead, so scrubbing shows pads lighting up in time; the `pads` toggle hides
+  the flashes.
 - **Boost readout** — each car carries a tinted **boost-amount number** floating
   above it (green/amber/red by level), alongside the existing boost gauge bar;
   both follow the `boost` toggle.
