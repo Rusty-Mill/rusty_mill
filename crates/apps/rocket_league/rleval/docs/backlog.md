@@ -369,11 +369,17 @@ look-&-feel comparison against ballchasing's own viewer in
   the same `predict(&[f32; N_FEATURES])` shape as the logistic `ValueModel`, and
   `train_corpus` now prints a logistic-vs-GBT head-to-head on the same replay-level
   held-out split. On the 180-replay corpus the GBT **clearly wins**: VAL AUC
-  0.7147 → **0.7405** (+0.026), VAL log-loss 0.2844 → **0.2736** (no leakage; 92.5k
-  train / 21.7k val rows). *Remaining (production swap, gated on this win):* route the
-  ~3 consumers (`eval::per_touch_delta_v`, `skills/src/main.rs::load_value_model`,
-  `value/src/lib.rs`) through a small `predict`-polymorphic boundary, ship a tagged
-  `value_model.json`, and re-validate reconcile/skills.
+  0.7147 → **0.7406** (+0.026), VAL log-loss 0.2844 → **0.2738** (no leakage; 92.5k
+  train / 21.7k val rows). *Production swap ✔* — the ΔV evaluators are generic over a
+  `Predict` trait and the loaders/storage go through a tagged `ValuePredictor` enum
+  (`{"kind":"gbt"|"logistic", …}`); `value_model.json` now ships the GBT, while the
+  per-match `evaluate` stays logistic (one replay is too few rows to boost). Consumers
+  (`eval`, `skills`, `reconcile`, viewer impact/winprob) updated. The **production GBT
+  is more regularized** than the library default (rounds 100, min_leaf 250, λ 3) —
+  same held-out AUC, but a smoother per-touch ΔV that keeps `reconcile --gate` at 0
+  sign-disagreements (the default GBT flipped the near-zero `first_touch_value` and
+  tripped it). Re-validated: all crate tests, `skills --value`, and `reconcile --gate`
+  (exit 0) on the corpus.
 - **Calibrate skill thresholds against a corpus.** *Harness ✔* — `calibrate-skills`
   (`skills/src/bin/calibrate_skills.rs` + pure `skills/src/calibrate.rs`) detects
   across the ranked-2v2 corpus and reports, per skill, the metric distribution

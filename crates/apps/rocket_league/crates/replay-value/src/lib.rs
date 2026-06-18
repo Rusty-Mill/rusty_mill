@@ -21,6 +21,7 @@ pub mod eval;
 pub mod features;
 pub mod gbt;
 pub mod model;
+pub mod predictor;
 
 use replay_analyzer::model::CanonicalMatch;
 
@@ -29,19 +30,22 @@ pub use dataset::{build_dataset, Dataset};
 pub use eval::{per_player_delta_v, per_touch_delta_v, PlayerValue, TouchValue};
 pub use gbt::{GbtConfig, GbtModel};
 pub use model::ValueModel;
+pub use predictor::{Predict, ValuePredictor};
 
 /// End-to-end value evaluation of one match: build the labeled dataset, fit the
 /// value model, and credit per-player ΔV.
 #[derive(Debug, Clone)]
 pub struct Evaluation {
-    pub model: ValueModel,
+    pub model: ValuePredictor,
     pub dataset_rows: usize,
     pub base_rate: f32,
     pub log_loss: f32,
     pub players: Vec<PlayerValue>,
 }
 
-/// Run the full pipeline with `cfg`.
+/// Run the full pipeline with `cfg`. The per-match model is **logistic**: one
+/// replay's few hundred rows are too few to boost (the gradient-boosted model is
+/// the corpus-trained one shipped in `value_model.json`).
 pub fn evaluate(m: &CanonicalMatch, cfg: &ValueConfig) -> Evaluation {
     let dataset = build_dataset(m, cfg);
     let base_rate = if dataset.rows.is_empty() {
@@ -49,7 +53,7 @@ pub fn evaluate(m: &CanonicalMatch, cfg: &ValueConfig) -> Evaluation {
     } else {
         dataset.rows.iter().map(|r| r.y).sum::<f32>() / dataset.rows.len() as f32
     };
-    let model = ValueModel::train(&dataset, &cfg.train);
+    let model = ValuePredictor::Logistic(ValueModel::train(&dataset, &cfg.train));
     let log_loss = model.log_loss(&dataset);
     let players = per_player_delta_v(m, &model, cfg);
     Evaluation {

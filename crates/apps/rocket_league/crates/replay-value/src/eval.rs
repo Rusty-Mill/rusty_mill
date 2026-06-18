@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::config::ValueConfig;
 use crate::features::{frame_index_at, state_features};
-use crate::model::ValueModel;
+use crate::predictor::Predict;
 
 /// One player's aggregated value contribution.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -48,9 +48,9 @@ pub struct TouchValue {
 /// evaluated in the toucher's attacking frame. [`per_player_delta_v`] aggregates
 /// this; consumers (e.g. linking skills to outcomes) can use the per-touch swings
 /// directly.
-pub fn per_touch_delta_v(
+pub fn per_touch_delta_v<P: Predict>(
     m: &CanonicalMatch,
-    model: &ValueModel,
+    model: &P,
     cfg: &ValueConfig,
 ) -> Vec<TouchValue> {
     let frames = &m.resampled.frames;
@@ -91,9 +91,9 @@ pub fn per_touch_delta_v(
 
 /// Compute per-player ΔV over all touches with a known toucher and team, by
 /// summing the [`per_touch_delta_v`] credits per player.
-pub fn per_player_delta_v(
+pub fn per_player_delta_v<P: Predict>(
     m: &CanonicalMatch,
-    model: &ValueModel,
+    model: &P,
     cfg: &ValueConfig,
 ) -> Vec<PlayerValue> {
     let names: BTreeMap<i32, String> = m.tracks.iter().map(|t| (t.pri, t.player.clone())).collect();

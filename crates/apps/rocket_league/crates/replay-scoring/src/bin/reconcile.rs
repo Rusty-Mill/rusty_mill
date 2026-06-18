@@ -26,7 +26,7 @@ use replay_scoring::calibrate::raws_from_report;
 use replay_scoring::config::ScoreConfig;
 use replay_scoring::reconcile::{reconcile, CrossSample};
 use replay_scoring::score_all;
-use replay_value::{per_player_delta_v, ValueConfig, ValueModel};
+use replay_value::{per_player_delta_v, ValueConfig, ValuePredictor};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -79,13 +79,14 @@ fn run() -> Result<bool, Box<dyn Error>> {
             ScoreConfig::default()
         }
     };
-    let model: ValueModel = serde_json::from_slice(&std::fs::read(dir.join("value_model.json"))?)?;
+    let model: ValuePredictor =
+        serde_json::from_slice(&std::fs::read(dir.join("value_model.json"))?)?;
     let vcfg = ValueConfig::default();
     eprintln!(
         "corpus: {} replays   rubric={}   value model n_train={}",
         entries.len(),
         cfg.version,
-        model.n_train
+        model.n_train()
     );
 
     let nthreads = std::thread::available_parallelism()

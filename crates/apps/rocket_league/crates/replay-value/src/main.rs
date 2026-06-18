@@ -7,7 +7,7 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_value::dataset::to_jsonl;
 use replay_value::{
-    build_dataset, evaluate, per_player_delta_v, Evaluation, ValueConfig, ValueModel,
+    build_dataset, evaluate, per_player_delta_v, Evaluation, ValueConfig, ValuePredictor,
 };
 use std::error::Error;
 use std::path::Path;
@@ -74,7 +74,7 @@ fn run() -> Result<(), Box<dyn Error>> {
 
     let eval = match &model_path {
         Some(p) => {
-            let model: ValueModel = serde_json::from_slice(&std::fs::read(p)?)?;
+            let model: ValuePredictor = serde_json::from_slice(&std::fs::read(p)?)?;
             let ds = build_dataset(&canonical, &cfg);
             let base = if ds.rows.is_empty() {
                 0.0

@@ -17,7 +17,7 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_analyzer::model::CanonicalMatch;
 use replay_skills::{detect_all, skill_values, Skill, SkillConfig, SkillReport, TouchDv};
-use replay_value::{build_dataset, per_touch_delta_v, ValueConfig, ValueModel};
+use replay_value::{build_dataset, per_touch_delta_v, ValueConfig, ValueModel, ValuePredictor};
 
 const USAGE: &str = "usage: replay-skills <file.replay> [--player <name>] \
 [--verify <skill>] [--window <start_s> <end_s>] [--profile] [--outcomes] \
@@ -388,13 +388,13 @@ fn print_value(
 /// Load the pretrained (corpus-fit) value model from `path`; if it can't be read,
 /// fall back to a per-match model trained on this single replay (weak, but keeps
 /// `--value` working) and note it on stderr.
-fn load_value_model(path: &str, canonical: &CanonicalMatch, vcfg: &ValueConfig) -> ValueModel {
+fn load_value_model(path: &str, canonical: &CanonicalMatch, vcfg: &ValueConfig) -> ValuePredictor {
     match std::fs::read(path)
         .ok()
-        .and_then(|b| serde_json::from_slice::<ValueModel>(&b).ok())
+        .and_then(|b| serde_json::from_slice::<ValuePredictor>(&b).ok())
     {
         Some(m) => {
-            eprintln!("(value model: {path}, trained on {} states)", m.n_train);
+            eprintln!("(value model: {path}, trained on {} states)", m.n_train());
             m
         }
         None => {
@@ -404,7 +404,7 @@ fn load_value_model(path: &str, canonical: &CanonicalMatch, vcfg: &ValueConfig) 
                 "(no value model at {path}; trained per-match on {} states — single-replay, weak)",
                 m.n_train
             );
-            m
+            ValuePredictor::Logistic(m)
         }
     }
 }

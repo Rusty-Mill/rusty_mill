@@ -17,7 +17,7 @@ use replay_value::config::TrainConfig;
 use replay_value::dataset::{Dataset, Row};
 use replay_value::features::N_FEATURES;
 use replay_value::model::ValueModel;
-use replay_value::{build_dataset, GbtConfig, GbtModel, ValueConfig};
+use replay_value::{build_dataset, GbtConfig, GbtModel, ValueConfig, ValuePredictor};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -216,9 +216,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     // Head-to-head on the SAME held-out split: logistic vs gradient-boosted trees.
-    // The spike question — does the heavier learner meaningfully beat the linear
-    // model? Ship the GBT into production only if it clearly wins here.
-    let gbt_cfg = GbtConfig::default();
+    // The GBT clearly wins (VAL AUC ~0.715 → ~0.741), so it's the shipped model.
+    // The production config is more regularized than the library default (more
+    // corpus data warrants it): besides matching the default's held-out AUC, the
+    // smoother per-touch ΔV surface keeps `reconcile` green (the default GBT flipped
+    // the near-zero `first_touch_value` sign and tripped that gate).
+    let gbt_cfg = GbtConfig {
+        rounds: 100,
+        max_depth: 3,
+        learning_rate: 0.1,
+        min_leaf: 250,
+        lambda: 3.0,
+    };
     let gbt = GbtModel::train(&train_ds, &gbt_cfg);
     let base_ll = base_rate_log_loss(&val_ds.rows, base);
     eprintln!("  VAL base-rate log_loss = {base_ll:.4}   [held-out: model < base ⇒ generalizes]");
@@ -230,13 +239,15 @@ fn main() -> Result<(), Box<dyn Error>> {
         auc(|x| model.predict(x), &val_ds.rows),
     );
     eprintln!(
-        "  {:<10} {:>10.4} {:>10.4}   (rounds={}, depth={}, lr={})",
+        "  {:<10} {:>10.4} {:>10.4}   (rounds={}, depth={}, lr={}, min_leaf={}, lambda={})",
         "gbt",
         log_loss(|x| gbt.predict(x), &val_ds.rows),
         auc(|x| gbt.predict(x), &val_ds.rows),
         gbt_cfg.rounds,
         gbt_cfg.max_depth,
         gbt_cfg.learning_rate,
+        gbt_cfg.min_leaf,
+        gbt_cfg.lambda,
     );
 
     // Retrain on ALL replays for the shipped model (max data), and persist it.
@@ -245,11 +256,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         rows: all_rows,
         horizon_s: cfg.horizon_s,
     };
-    let final_model = ValueModel::train(&full, &cfg.train);
+    // Ship the gradient-boosted model — it wins the held-out head-to-head above.
+    let final_model = ValuePredictor::Gbt(GbtModel::train(&full, &gbt_cfg));
     let out = dir.join("value_model.json");
     std::fs::write(&out, serde_json::to_vec_pretty(&final_model)?)?;
     eprintln!(
-        "  wrote model ({} rows) -> {}",
+        "  wrote gbt model ({} rows) -> {}",
         full.rows.len(),
         out.display()
     );
