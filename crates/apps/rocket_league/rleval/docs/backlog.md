@@ -181,8 +181,15 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   distributions, offender list); `--gate` exits non-zero on any R1 fail. It's a
   local/with-corpus gate (corpus replays gitignored — `refresh_corpus_replays.py`),
   gating only replays that actually ran, so a corpus-less checkout is a no-op. Run
-  in `--release`. *Remaining:* the full 180-replay run needs `BALLCHASING_API_KEY`
-  to fetch the corpus, then investigate any offenders (don't loosen thresholds).
+  in `--release`. **Full 180-replay run ✔** — investigated the 35 R1 "failures" and
+  found none were reconstruction bugs, just harness strictness: (a) the roster check
+  compared the *header* player list, empty for empty-header replays — now matches on
+  the network-derived **tracks** (the names were always correct there); (b) the ball
+  agree-rate counted **post-goal reset frames** (celebration/replay/kickoff, where the
+  ball is non-gameplay and the two reconstructions legitimately diverge) — now ball
+  stats are taken over gameplay frames only, excluding `[goal, next kickoff)` windows
+  (no thresholds loosened). After both: **R1 PASS 180/180**, ball median 18.7 uu,
+  agree ≥99.2%. The gameplay-divergence tripwire is preserved (unit-tested).
 - **Ballchasing stat parity** *(in progress)* — close the gap between our 5-field
   `PlayerFeatures` and ballchasing's full boost/movement/positioning surface. Full
   audit + parity matrix + plan in `docs/ballchasing-parity.md`. Mostly an

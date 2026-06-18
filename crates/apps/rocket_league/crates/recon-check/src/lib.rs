@@ -19,10 +19,13 @@
 //! for header facts. This is *reconstruction-layer* independence.
 //!
 //! ## What it cross-checks (tiered, with tolerances — float/time data)
-//! - **Tier R1 — fail:** roster (player set), adequate frame coverage, and **ball
-//!   position** agreement on the shared fixed-rate grid (median + 95th-percentile
-//!   under tolerance). The spike measured ~20–30 uu mid-match, well under a ball
-//!   radius (~93 uu).
+//! - **Tier R1 — fail:** roster (player set, matched on the network-derived
+//!   *tracks* so empty-header replays still resolve), adequate frame coverage, and
+//!   **ball position** agreement on the shared fixed-rate grid (median + agree-rate
+//!   under tolerance). Ball stats are taken over *gameplay* frames only — post-goal
+//!   reset windows `[goal, next kickoff)` are excluded, since the ball is
+//!   non-gameplay there and the two reconstructions legitimately diverge. The spike
+//!   measured ~20–30 uu mid-match, well under a ball radius (~93 uu).
 //! - **Tier R2 — advisory:** per-player **car position** agreement (matched by
 //!   name) and boost. Boost units differ by convention (Phase 1 Tier-3 territory),
 //!   so it is reported, never gated.
@@ -30,7 +33,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
-use replay_analyzer::model::{CanonicalMatch, Vec3};
+use replay_analyzer::model::{CanonicalMatch, Event, Vec3};
 use serde::{Deserialize, Serialize};
 use subtr_actor::{Collector, FrameRateDecorator, NDArrayCollector};
 
@@ -241,7 +244,12 @@ pub fn cross_check_recon(our: &CanonicalMatch, subtr: &SubtrGrid) -> ReconReport
     let hz = our.resampled.hz;
 
     // --- roster (R1): the player sets must match (by normalized name) ---
-    let ours_names: Vec<String> = our.players.iter().map(|p| norm_name(&p.name)).collect();
+    // Use the network-derived tracks, not the header player list: empty-header
+    // replays carry no header players, but their tracks still bind the real names
+    // (the same source the per-player car matching below uses).
+    let mut ours_names: Vec<String> = our.tracks.iter().map(|t| norm_name(&t.player)).collect();
+    ours_names.sort();
+    ours_names.dedup();
     let subtr_names: Vec<String> = subtr.players.iter().map(|p| norm_name(p)).collect();
     for n in &ours_names {
         if !subtr_names.contains(n) {
@@ -273,7 +281,34 @@ pub fn cross_check_recon(our: &CanonicalMatch, subtr: &SubtrGrid) -> ReconReport
     let subtr_times: Vec<f32> = subtr.frames.iter().map(|f| f.time).collect();
     let tol = 0.5 / hz.max(1.0); // half a frame
 
-    let mut ball_deltas: Vec<f32> = Vec::new();
+    // Post-goal reset windows `[goal, next kickoff)`: the ball is non-gameplay
+    // (celebration / goal replay / kickoff setup) and the two reconstructions
+    // legitimately diverge there, so these frames are excluded from the ball-delta
+    // stats. Parameter-free — built from the goal + kickoff events we already emit.
+    let kickoff_times: Vec<f32> = our
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Kickoff { .. }))
+        .map(|e| e.time())
+        .collect();
+    let reset_windows: Vec<(f32, f32)> = our
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Goal { .. }))
+        .map(|e| e.time())
+        .map(|g| {
+            let next_ko = kickoff_times
+                .iter()
+                .copied()
+                .find(|&k| k > g)
+                .unwrap_or(f32::INFINITY);
+            (g, next_ko)
+        })
+        .collect();
+    let in_reset = |t: f32| reset_windows.iter().any(|&(a, b)| t >= a && t < b);
+
+    // (frame time, ball Δ) so reset-window frames can be filtered from the stats.
+    let mut ball_deltas: Vec<(f32, f32)> = Vec::new();
     let mut car_deltas: HashMap<String, Vec<f32>> = HashMap::new();
     let mut our_ball_frames = 0usize;
 
@@ -298,7 +333,7 @@ pub fn cross_check_recon(our: &CanonicalMatch, subtr: &SubtrGrid) -> ReconReport
         }
         let sf = &subtr.frames[si];
         if let Some(sb) = sf.ball {
-            ball_deltas.push(dist(our_ball.p, sb));
+            ball_deltas.push((gf.t, dist(our_ball.p, sb)));
         }
         // per-player car positions (advisory)
         for gc in &gf.cars {
@@ -323,21 +358,22 @@ pub fn cross_check_recon(our: &CanonicalMatch, subtr: &SubtrGrid) -> ReconReport
     } else {
         matched_frames as f32 / our_ball_frames as f32
     };
-    // Agree rate: fraction of aligned frames whose ball positions are within
-    // `BALL_AGREE_TOL_UU`. Robust to the minority of goal-celebration / reset
-    // frames where the ball is non-gameplay and the two reconstructions
-    // legitimately diverge (those blow up p95/max but not the median or the
-    // bulk agreement).
-    let agree = ball_deltas
+    // Ball-delta stats over *gameplay* frames only: post-goal reset windows are
+    // excluded (the ball is non-gameplay there and the reconstructions legitimately
+    // diverge — they blow up p95/max and the agree rate but not the bulk agreement).
+    // Coverage above stays over all aligned frames (an alignment metric).
+    let gameplay: Vec<f32> = ball_deltas
         .iter()
-        .filter(|&&d| d <= BALL_AGREE_TOL_UU)
-        .count();
-    let agree_rate = if matched_frames == 0 {
-        0.0
+        .filter(|&&(t, _)| !in_reset(t))
+        .map(|&(_, d)| d)
+        .collect();
+    let agree = gameplay.iter().filter(|&&d| d <= BALL_AGREE_TOL_UU).count();
+    let agree_rate = if gameplay.is_empty() {
+        1.0 // no gameplay frames to disagree on (degenerate); don't false-fail
     } else {
-        agree as f32 / matched_frames as f32
+        agree as f32 / gameplay.len() as f32
     };
-    let (ball_median, ball_p95, ball_max) = percentiles(ball_deltas);
+    let (ball_median, ball_p95, ball_max) = percentiles(gameplay);
 
     // --- Tier R1 gates ---
     if matched_frames == 0 {
@@ -592,5 +628,110 @@ mod tests {
         }
         let rep = cross_check_recon(&our_match(), &subtr);
         assert!(rep.tier1.iter().any(|f| f.field == "roster"));
+    }
+
+    #[test]
+    fn empty_header_roster_matches_via_tracks() {
+        // Empty-header replays carry no header players, but the tracks still bind
+        // the real names — the roster check must use those, not `players`.
+        let mut our = our_match();
+        our.players = vec![];
+        let rep = cross_check_recon(&our, &subtr_agreeing(5.0));
+        assert!(
+            !rep.tier1.iter().any(|f| f.field == "roster"),
+            "track names match subtr; no roster breach expected: {:?}",
+            rep.tier1
+        );
+        assert!(rep.tier1_ok(), "{:?}", rep.tier1);
+    }
+
+    /// A 6-frame match whose ball agrees everywhere except the `diverge` times
+    /// (5000 uu off), with the given events — for the reset-window test.
+    fn diverging_pair(events: Vec<Event>, diverge: &[f32]) -> (CanonicalMatch, SubtrGrid) {
+        let times = [0.0_f32, 0.1, 0.2, 0.3, 0.4, 0.5];
+        let car = |pri, x: f32| GridCar {
+            pri,
+            team: Some(0),
+            p: v(x, 0.0, 17.0),
+            v: v(0.0, 0.0, 0.0),
+            boost: Some(100),
+            rot: None,
+        };
+        let mut our = our_match();
+        our.players = vec![];
+        our.events = events;
+        our.resampled.frames = times
+            .iter()
+            .map(|&t| GridFrame {
+                t,
+                ball: Some(Kin {
+                    p: v(0.0, 0.0, 93.0),
+                    v: v(0.0, 0.0, 0.0),
+                }),
+                cars: vec![car(1, -50.0), car(2, 50.0)],
+            })
+            .collect();
+        let subtr = SubtrGrid {
+            hz: 30.0,
+            players: vec!["Alice".into(), "Bob".into()],
+            frames: times
+                .iter()
+                .map(|&t| SubtrFrame {
+                    time: t,
+                    ball: Some(v(
+                        if diverge.contains(&t) { 5000.0 } else { 0.0 },
+                        0.0,
+                        93.0,
+                    )),
+                    cars: vec![
+                        SubtrCar {
+                            player: "Alice".into(),
+                            pos: Some(v(-50.0, 0.0, 17.0)),
+                            boost: Some(255.0),
+                        },
+                        SubtrCar {
+                            player: "Bob".into(),
+                            pos: Some(v(50.0, 0.0, 17.0)),
+                            boost: Some(255.0),
+                        },
+                    ],
+                })
+                .collect(),
+        };
+        (our, subtr)
+    }
+
+    #[test]
+    fn post_goal_reset_frames_excluded_from_agree_rate() {
+        // Goal at 0.25, kickoff at 0.45 → reset window [0.25, 0.45) covers the
+        // diverging frames at 0.3 and 0.4. They must be excluded from the stats.
+        let events = vec![
+            Event::Goal {
+                t: 0.25,
+                scorer: None,
+                team: Some(0),
+            },
+            Event::Kickoff { t: 0.45 },
+        ];
+        let (our, subtr) = diverging_pair(events, &[0.3, 0.4]);
+        let rep = cross_check_recon(&our, &subtr);
+        assert!(
+            !rep.tier1.iter().any(|f| f.field == "ball_position"),
+            "reset-window divergence must be excluded: {:?}",
+            rep.tier1
+        );
+        assert!(rep.tier1_ok(), "{:?}", rep.tier1);
+    }
+
+    #[test]
+    fn gameplay_divergence_still_trips_r1() {
+        // Same divergence but with no goal events → no reset window → the tripwire
+        // must still fire (we relax false positives, not real ones).
+        let (our, subtr) = diverging_pair(vec![], &[0.3, 0.4]);
+        let rep = cross_check_recon(&our, &subtr);
+        assert!(
+            rep.tier1.iter().any(|f| f.field == "ball_position"),
+            "gameplay divergence must still fail R1"
+        );
     }
 }
