@@ -10,9 +10,10 @@ use replay_analyzer::model::{
     Event, GridCar, GridFrame, Kin, PlayerTrack, Resampled, Rot3, TrackGap, TrackSample, Vec3,
 };
 use replay_skills::detect::{
-    aerial_candidates, aerials, air_dribbles, boost_steals, ceiling_plays, demos, double_touches,
-    flick_candidates, flicks, ground_dribbles, kickoff_first_touches, power_shot_candidates,
-    power_shots, redirect_candidates, redirects, supersonic, wall_plays,
+    aerial_candidates, aerials, air_dribbles, boost_steals, ceiling_candidates, ceiling_plays,
+    demos, double_touches, dribble_candidates, flick_candidates, flicks, ground_dribbles,
+    kickoff_first_touches, power_shot_candidates, power_shots, redirect_candidates, redirects,
+    supersonic, supersonic_candidates, wall_plays,
 };
 use replay_skills::{Skill, SkillConfig};
 
@@ -339,6 +340,70 @@ fn no_ground_dribble_when_too_brief() {
         ),
     ];
     assert!(ground_dribbles(&grid(frames), &[track(1, 0)], &cfg()).is_empty());
+}
+
+#[test]
+fn run_candidates_emit_durations_of_sub_floor_runs() {
+    // Each run detector's candidate twin emits the duration of *every* run, including
+    // short ones the gated detector drops — exactly the sub-floor tail a floor fit
+    // needs. Gated output stays empty for these brief runs.
+
+    // Supersonic: fast for 0.2s (< supersonic_min_duration_s 0.5), then slow.
+    let ss = grid(vec![
+        frame(
+            0.0,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(2300.0, 0.0, 0.0))],
+        ),
+        frame(
+            0.1,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(2300.0, 0.0, 0.0))],
+        ),
+        frame(
+            0.2,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(2300.0, 0.0, 0.0))],
+        ),
+        frame(
+            0.3,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(500.0, 0.0, 0.0))],
+        ),
+    ]);
+    assert!(supersonic(&ss, &[track(1, 0)], &cfg()).is_empty());
+    let c = supersonic_candidates(&ss, &cfg());
+    assert_eq!(c.len(), 1);
+    assert!((c[0] - 0.2).abs() < 1e-3, "0.2s run, got {}", c[0]);
+
+    // Ceiling: near the ceiling for 0.05s (< ceiling_min_duration_s 0.1).
+    let z = field::CEILING_Z - 50.0;
+    let cp = grid(vec![
+        frame(0.0, None, vec![car(1, 0, v(0.0, 0.0, z), v(0.0, 0.0, 0.0))]),
+        frame(
+            0.05,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, z), v(0.0, 0.0, 0.0))],
+        ),
+    ]);
+    assert!(ceiling_plays(&cp, &[track(1, 0)], &cfg()).is_empty());
+    let c = ceiling_candidates(&cp, &cfg());
+    assert_eq!(c.len(), 1);
+    assert!((c[0] - 0.05).abs() < 1e-3, "0.05s run, got {}", c[0]);
+
+    // Ground dribble: carried for 0.2s (< dribble_min_duration_s 0.75).
+    let low = |t: f32| {
+        frame(
+            t,
+            Some(kin(v(0.0, 0.0, 140.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        )
+    };
+    let gd = grid(vec![low(0.0), low(0.2)]);
+    assert!(ground_dribbles(&gd, &[track(1, 0)], &cfg()).is_empty());
+    let c = dribble_candidates(&gd, &cfg());
+    assert_eq!(c.len(), 1);
+    assert!((c[0] - 0.2).abs() < 1e-3, "0.2s run, got {}", c[0]);
 }
 
 #[test]

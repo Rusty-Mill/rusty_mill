@@ -51,6 +51,13 @@ fit, so the calibrator sees the full sub-threshold tail:
 | Flick | up-velocity of every *carried* ball | low + slow-incoming ball | `flick_min_up_dv` |
 | Power shot | speed of every *goalward* touch | ball sent toward goal | `power_shot_min_speed` |
 | Redirect | turn angle of every fast-in/out goalward touch | fast in, fast + goalward out | `redirect_min_angle_deg` |
+| Supersonic | duration of every sustained-speed run | speed ≥ entry, release hysteresis | `supersonic_min_duration_s` |
+| Ceiling play | duration of every ceiling run | car within `ceiling_tol` of the ceiling | `ceiling_min_duration_s` |
+| Ground dribble | duration of every dribble run | `dribble_carrier` holds the ball low | `dribble_min_duration_s` |
+
+The run detectors (last three) factor their run-building loop into a `*_runs`
+extractor shared by the gated detector and the candidate twin, so candidate-mode
+emits the duration of **every** run — short, sub-floor ones included.
 
 The harness pools these per skill and prints a `└ candidates` line (count +
 pre-gate p50/p90/p99). A skill where **nothing cleared the gate** still shows its
@@ -66,19 +73,23 @@ study), so we fit the structural gap instead. The fit is **self-guarding**: the 
 must span at least `MIN_VALLEY_FRAC` (15%) of the band, else there is no real valley
 (a continuous, unimodal distribution) and the **hand-set default is kept**. Aerial
 height is genuinely bimodal (on-ground vs airborne) so it fits readily; the
-continuous metrics (up-velocity, speed, angle) only move on a clear separation.
+continuous metrics (up-velocity, speed, angle, run duration) only move on a clear
+separation — in practice supersonic/ceiling durations are continuous and hold their
+default, while a dribble-duration gap (brief carries vs sustained dribbles) does fit.
 
 **Ramp tops.** Only aerials have a configurable top: `high_aerial_height` ←
 candidate **p99.5** (kept ≥ floor + 100; falls back to the gated **p90** when no
-aerial candidates). The flick/power/redirect ramps use fixed offsets from their
-floor, so candidate-mode fits them **floor-only**.
+aerial candidates). Every other ramp uses a fixed offset from its floor (or
+`confidence = 1.0`), so candidate-mode fits them **floor-only**.
 
 Skills with fewer than 8 candidates (or observations) keep their default (a handful
 of replays shouldn't move a gate). The fitted config stamps `version =
 "{base}-fitted"`.
 
 **Extending to more detectors:** factor a detector's per-candidate read out of its
-gated body (as `flicks` shares `flick_candidate`), emit it from a `*_candidates`
-twin, add it to `candidate_metrics`, and add a `fit_floor_into` call with a band to
-`refit_skill_config` — the duration-gated runs (supersonic, ceiling, dribble) follow
-the same shape.
+gated body (as `flicks` shares `flick_candidate`, or a run detector shares its
+`*_runs` extractor), emit it from a `*_candidates` twin, add it to
+`candidate_metrics`, and add a `fit_floor_into` call with a band to
+`refit_skill_config`. All thirteen catalogued skills with a magnitude/duration floor
+are now covered; the remaining touch detectors (wall play, double touch, kickoff,
+boost steal) gate on geometry/identity rather than a tunable floor.

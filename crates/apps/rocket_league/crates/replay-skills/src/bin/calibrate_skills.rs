@@ -310,9 +310,24 @@ fn main() -> Result<(), Box<dyn Error>> {
             cfg.redirect_min_angle_deg,
             fitted.redirect_min_angle_deg,
         ),
+        (
+            "supersonic_min_duration_s",
+            cfg.supersonic_min_duration_s,
+            fitted.supersonic_min_duration_s,
+        ),
+        (
+            "ceiling_min_duration_s",
+            cfg.ceiling_min_duration_s,
+            fitted.ceiling_min_duration_s,
+        ),
+        (
+            "dribble_min_duration_s",
+            cfg.dribble_min_duration_s,
+            fitted.dribble_min_duration_s,
+        ),
     ];
     for (name, before, after) in moves {
-        eprintln!("    {name:<24} {before:>7.0} -> {after:>7.0}");
+        eprintln!("    {name:<26} {before:>9.3} -> {after:>9.3}");
     }
     if replays_run == 0 {
         eprintln!(

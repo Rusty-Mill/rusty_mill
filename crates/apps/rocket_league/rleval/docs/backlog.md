@@ -369,17 +369,20 @@ look-&-feel comparison against ballchasing's own viewer in
   mode ✔** — `candidate_metrics` (`skills/src/lib.rs`) emits each detector's metric
   *pre-gate* (holding the context gates, dropping only the magnitude floor), so the
   fit sees the sub-threshold tail and can place **floors**, not just ramp tops. Now
-  covers **aerial** (car height), **flick** (up-velocity of carried balls),
-  **power-shot** (goalward speed) and **redirect** (turn angle): each floor ←
+  covers every skill with a magnitude/duration floor — the touch metrics **aerial**
+  (car height), **flick** (up-velocity of carried balls), **power-shot** (goalward
+  speed), **redirect** (turn angle), and the **duration-gated runs** **supersonic** /
+  **ceiling** / **ground-dribble** (each detector's run loop factored into a `*_runs`
+  extractor shared by the gated detector and the candidate twin, so every run's
+  duration — short ones included — is emitted pre-gate). Each floor ←
   `fit_floor_valley`, the valley between weak attempts and the real mechanic within a
   per-skill band, **self-guarding** (no clear gap ⇒ keep the hand-set default, so the
-  continuous metrics only move on a real separation). Aerials also fit
-  `high_aerial_height` ← candidate p99.5 (the other ramps use fixed offsets, so
-  they're floor-only). The report prints a `└ candidates` line per skill, including
-  "none cleared the gate" when a floor admits nothing. See `docs/skill-calibration.md`.
-  *Remaining:* the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`;
-  extend candidate-mode to the duration-gated runs (supersonic/ceiling/dribble) the
-  same way.
+  continuous metrics only move on a real separation — e.g. on the sample, dribble
+  duration fits 0.75→1.03s while supersonic/ceiling hold). Aerials also fit
+  `high_aerial_height` ← candidate p99.5 (other ramps use fixed offsets, so they're
+  floor-only). The report prints a `└ candidates` line per skill, including "none
+  cleared the gate" when a floor admits nothing. See `docs/skill-calibration.md`.
+  *Remaining:* the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`.
   Harder mechanics (wave dash, half-flip) stay out — input-only, no kinematic
   signature (double-touch shipped; see the skills feature-direction item).
 - **Map-aware field geometry.** *Phase 1 (classify + flag) ✔* — `field.rs` now

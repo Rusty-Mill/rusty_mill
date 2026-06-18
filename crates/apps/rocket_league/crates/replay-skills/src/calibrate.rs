@@ -109,12 +109,17 @@ const AERIAL_TOP_Q: f32 = 0.995;
 /// and the real-mechanic tail. The band is the **policy** knob: a percentile of all
 /// candidates would track how *often* players do the mechanic (the very thing we
 /// study), so we look for the structural gap instead, bounded to sane floors.
-/// Brackets each detector's hand-set default (aerial 300uu, flick 550uu/s, power
-/// 2000uu/s, redirect 55°).
+/// Brackets each detector's hand-set default — touch metrics (aerial 300uu, flick
+/// 550uu/s, power 2000uu/s, redirect 55°) and duration-gated runs in **seconds**
+/// (supersonic 0.5s, ceiling 0.1s, dribble 0.75s). Run durations are
+/// continuous/decaying, so the valley self-guard will usually keep their default.
 const AERIAL_FLOOR_BAND: (f32, f32) = (100.0, 600.0);
 const FLICK_FLOOR_BAND: (f32, f32) = (300.0, 800.0);
 const POWER_SHOT_FLOOR_BAND: (f32, f32) = (1500.0, 2800.0);
 const REDIRECT_FLOOR_BAND: (f32, f32) = (35.0, 80.0);
+const SUPERSONIC_FLOOR_BAND: (f32, f32) = (0.3, 1.5);
+const CEILING_FLOOR_BAND: (f32, f32) = (0.1, 0.6);
+const DRIBBLE_FLOOR_BAND: (f32, f32) = (0.4, 1.5);
 
 /// A valley must span at least this fraction of the band width to count — so a
 /// continuous, unimodal distribution (many similar small gaps) is rejected and only
@@ -173,10 +178,11 @@ fn fit_floor_into(
 /// Candidate-mode metrics (`replay_skills::candidate_metrics`) let us fit detection
 /// **floors** at the valley between weak attempts and the real mechanic
 /// ([`fit_floor_valley`], self-guarding): `aerial_min_height`, `flick_min_up_dv`,
-/// `power_shot_min_speed`, `redirect_min_angle_deg`. For aerials — the only skill
-/// with a configurable ramp *top* — we also fit `high_aerial_height` to the
-/// candidate [`AERIAL_TOP_Q`] percentile (the flick/power/redirect ramps use fixed
-/// offsets, so they're floor-only); without aerial candidates we fall back to
+/// `power_shot_min_speed`, `redirect_min_angle_deg`, and the run-duration floors
+/// `supersonic_min_duration_s`, `ceiling_min_duration_s`, `dribble_min_duration_s`.
+/// For aerials — the only skill with a configurable ramp *top* — we also fit
+/// `high_aerial_height` to the candidate [`AERIAL_TOP_Q`] percentile (the other ramps
+/// use fixed offsets, so they're floor-only); without aerial candidates we fall back to
 /// fitting that top from the gated p90 of observed peak heights. Skills with fewer
 /// than [`MIN_FIT_SAMPLES`] candidates, or no clear valley, keep their default — a
 /// handful of replays shouldn't move a gate.
@@ -222,6 +228,26 @@ pub fn refit_skill_config(
         candidates_by_skill,
         Skill::Redirect,
         REDIRECT_FLOOR_BAND,
+    );
+
+    // Duration floors for the run detectors (seconds).
+    fit_floor_into(
+        &mut cfg.supersonic_min_duration_s,
+        candidates_by_skill,
+        Skill::Supersonic,
+        SUPERSONIC_FLOOR_BAND,
+    );
+    fit_floor_into(
+        &mut cfg.ceiling_min_duration_s,
+        candidates_by_skill,
+        Skill::CeilingPlay,
+        CEILING_FLOOR_BAND,
+    );
+    fit_floor_into(
+        &mut cfg.dribble_min_duration_s,
+        candidates_by_skill,
+        Skill::GroundDribble,
+        DRIBBLE_FLOOR_BAND,
     );
 
     cfg.version = format!("{}-fitted", base.version);

@@ -99,19 +99,13 @@ fn attack_sign(resampled: &Resampled, team: Option<i32>) -> i32 {
 
 // --- detectors ---
 
-/// Sustained supersonic sprints: one instance per run a car holds top speed,
-/// entered at `field::SUPERSONIC_SPEED` and held until it drops below
-/// `supersonic_release_speed` (hysteresis, so a single sprint isn't fragmented),
-/// keeping only runs of at least `supersonic_min_duration_s`.
-pub fn supersonic(
-    resampled: &Resampled,
-    tracks: &[PlayerTrack],
-    cfg: &SkillConfig,
-) -> Vec<SkillInstance> {
-    let lookup = pri_lookup(tracks);
+/// Every sustained-speed run (pre-gate): `(pri, start, end, peak_speed)`. Holds the
+/// supersonic entry/release-hysteresis context; the duration floor is applied by the
+/// caller. Shared by [`supersonic`] and candidate-mode ([`supersonic_candidates`]).
+fn speed_runs(resampled: &Resampled, cfg: &SkillConfig) -> Vec<(i32, f32, f32, f32)> {
     // pri -> (start_t, last_t, peak_speed)
     let mut active: HashMap<i32, (f32, f32, f32)> = HashMap::new();
-    let mut out = Vec::new();
+    let mut runs = Vec::new();
 
     for f in &resampled.frames {
         // A car absent this frame (respawn/gap) ends any run it was in.
@@ -122,8 +116,8 @@ pub fn supersonic(
             .filter(|p| !present.contains(p))
             .collect();
         for pri in absent {
-            if let Some(run) = active.remove(&pri) {
-                emit_speed_run(pri, run, &lookup, cfg, &mut out);
+            if let Some((s, e, peak)) = active.remove(&pri) {
+                runs.push((pri, s, e, peak));
             }
         }
 
@@ -144,15 +138,41 @@ pub fn supersonic(
             }
         }
         for pri in to_close {
-            if let Some(run) = active.remove(&pri) {
-                emit_speed_run(pri, run, &lookup, cfg, &mut out);
+            if let Some((s, e, peak)) = active.remove(&pri) {
+                runs.push((pri, s, e, peak));
             }
         }
     }
-    for (pri, run) in active.drain() {
-        emit_speed_run(pri, run, &lookup, cfg, &mut out);
+    for (pri, (s, e, peak)) in active.drain() {
+        runs.push((pri, s, e, peak));
+    }
+    runs
+}
+
+/// Sustained supersonic sprints: one instance per run a car holds top speed,
+/// entered at `field::SUPERSONIC_SPEED` and held until it drops below
+/// `supersonic_release_speed` (hysteresis, so a single sprint isn't fragmented),
+/// keeping only runs of at least `supersonic_min_duration_s`.
+pub fn supersonic(
+    resampled: &Resampled,
+    tracks: &[PlayerTrack],
+    cfg: &SkillConfig,
+) -> Vec<SkillInstance> {
+    let lookup = pri_lookup(tracks);
+    let mut out = Vec::new();
+    for (pri, start, end, peak) in speed_runs(resampled, cfg) {
+        emit_speed_run(pri, (start, end, peak), &lookup, cfg, &mut out);
     }
     out
+}
+
+/// Candidate-mode for supersonic: the duration of *every* sustained-speed run
+/// (pre-gate), short ones included, so the calibrator can fit the duration floor.
+pub fn supersonic_candidates(resampled: &Resampled, cfg: &SkillConfig) -> Vec<f32> {
+    speed_runs(resampled, cfg)
+        .into_iter()
+        .map(|(_, s, e, _)| e - s)
+        .collect()
 }
 
 fn emit_speed_run(
@@ -391,9 +411,20 @@ pub fn ceiling_plays(
     cfg: &SkillConfig,
 ) -> Vec<SkillInstance> {
     let lookup = pri_lookup(tracks);
+    let mut out = Vec::new();
+    for (pri, start, end, peak_z) in ceiling_runs(resampled, cfg) {
+        emit_ceiling_run(pri, (start, end, peak_z), &lookup, cfg, &mut out);
+    }
+    out
+}
+
+/// Every ceiling run (pre-gate): `(pri, start, end, peak_z)`. Holds the
+/// near-the-ceiling context; the duration floor is applied by the caller. Shared by
+/// [`ceiling_plays`] and candidate-mode ([`ceiling_candidates`]).
+fn ceiling_runs(resampled: &Resampled, cfg: &SkillConfig) -> Vec<(i32, f32, f32, f32)> {
     let threshold = field::CEILING_Z - cfg.ceiling_tol;
     let mut active: HashMap<i32, (f32, f32, f32)> = HashMap::new(); // start, last, peak_z
-    let mut out = Vec::new();
+    let mut runs = Vec::new();
 
     for f in &resampled.frames {
         let mut hot: HashMap<i32, f32> = HashMap::new();
@@ -408,8 +439,8 @@ pub fn ceiling_plays(
             .filter(|p| !hot.contains_key(p))
             .collect();
         for pri in ended {
-            if let Some(run) = active.remove(&pri) {
-                emit_ceiling_run(pri, run, &lookup, cfg, &mut out);
+            if let Some((s, e, peak)) = active.remove(&pri) {
+                runs.push((pri, s, e, peak));
             }
         }
         for (pri, z) in hot {
@@ -422,10 +453,19 @@ pub fn ceiling_plays(
                 .or_insert((f.t, f.t, z));
         }
     }
-    for (pri, run) in active.drain() {
-        emit_ceiling_run(pri, run, &lookup, cfg, &mut out);
+    for (pri, (s, e, peak)) in active.drain() {
+        runs.push((pri, s, e, peak));
     }
-    out
+    runs
+}
+
+/// Candidate-mode for ceiling plays: the duration of *every* ceiling run (pre-gate),
+/// short ones included, so the calibrator can fit the duration floor.
+pub fn ceiling_candidates(resampled: &Resampled, cfg: &SkillConfig) -> Vec<f32> {
+    ceiling_runs(resampled, cfg)
+        .into_iter()
+        .map(|(_, s, e, _)| e - s)
+        .collect()
 }
 
 fn emit_ceiling_run(
@@ -518,6 +558,17 @@ pub fn ground_dribbles(
 ) -> Vec<SkillInstance> {
     let lookup = pri_lookup(tracks);
     let mut out = Vec::new();
+    for (pri, start, end, _) in dribble_runs(resampled, cfg) {
+        emit_dribble(Some((pri, start, end)), &lookup, cfg, &mut out);
+    }
+    out
+}
+
+/// Every ground-dribble run (pre-gate): `(pri, start, end, 0.0)`. Holds the
+/// `dribble_carrier` (ball low and tracking the car) context; the duration floor is
+/// applied by the caller. Shared by [`ground_dribbles`] and [`dribble_candidates`].
+fn dribble_runs(resampled: &Resampled, cfg: &SkillConfig) -> Vec<(i32, f32, f32, f32)> {
+    let mut runs = Vec::new();
     let mut run: Option<(i32, f32, f32)> = None; // pri, start, last
 
     for f in &resampled.frames {
@@ -525,15 +576,32 @@ pub fn ground_dribbles(
             Some(pri) => match &mut run {
                 Some((rp, _, last)) if *rp == pri => *last = f.t,
                 _ => {
-                    emit_dribble(run.take(), &lookup, cfg, &mut out);
+                    if let Some((p, s, e)) = run.take() {
+                        runs.push((p, s, e, 0.0));
+                    }
                     run = Some((pri, f.t, f.t));
                 }
             },
-            None => emit_dribble(run.take(), &lookup, cfg, &mut out),
+            None => {
+                if let Some((p, s, e)) = run.take() {
+                    runs.push((p, s, e, 0.0));
+                }
+            }
         }
     }
-    emit_dribble(run.take(), &lookup, cfg, &mut out);
-    out
+    if let Some((p, s, e)) = run.take() {
+        runs.push((p, s, e, 0.0));
+    }
+    runs
+}
+
+/// Candidate-mode for ground dribbles: the duration of *every* dribble run
+/// (pre-gate), short ones included, so the calibrator can fit the duration floor.
+pub fn dribble_candidates(resampled: &Resampled, cfg: &SkillConfig) -> Vec<f32> {
+    dribble_runs(resampled, cfg)
+        .into_iter()
+        .map(|(_, s, e, _)| e - s)
+        .collect()
 }
 
 fn emit_dribble(

@@ -109,11 +109,15 @@ fn refit_fits_continuous_mechanic_floors_at_the_valley() {
     // its band. The floor should land in the gap; a no-gap sample keeps the default.
     let base = SkillConfig::default();
 
-    // (skill, weak cluster value, strong cluster value, band, current default getter)
-    let cases: [(Skill, f32, f32); 3] = [
+    // (skill, weak cluster value, strong cluster value) — touch metrics + the three
+    // run-duration floors (seconds). The fitted floor = the valley midpoint.
+    let cases: [(Skill, f32, f32); 6] = [
         (Skill::Flick, 200.0, 720.0),       // up_dv, band (300,800) -> ~460
         (Skill::PowerShot, 1300.0, 2500.0), // speed, band (1500,2800) -> ~1900
         (Skill::Redirect, 25.0, 90.0),      // angle, band (35,80) -> ~57.5
+        (Skill::Supersonic, 0.4, 1.2),      // dur, band (0.3,1.5) -> ~0.8
+        (Skill::CeilingPlay, 0.15, 0.5),    // dur, band (0.1,0.6) -> ~0.325
+        (Skill::GroundDribble, 0.5, 1.3),   // dur, band (0.4,1.5) -> ~0.9
     ];
     for (skill, weak, strong) in cases {
         let mut c = vec![weak; 40];
@@ -125,6 +129,9 @@ fn refit_fits_continuous_mechanic_floors_at_the_valley() {
             Skill::Flick => fitted.flick_min_up_dv,
             Skill::PowerShot => fitted.power_shot_min_speed,
             Skill::Redirect => fitted.redirect_min_angle_deg,
+            Skill::Supersonic => fitted.supersonic_min_duration_s,
+            Skill::CeilingPlay => fitted.ceiling_min_duration_s,
+            Skill::GroundDribble => fitted.dribble_min_duration_s,
             _ => unreachable!(),
         };
         let expected = 0.5 * (weak + strong);
@@ -146,10 +153,28 @@ fn refit_fits_continuous_mechanic_floors_at_the_valley() {
         Skill::Redirect,
         (0..40).map(|i| 40.0 + 0.1 * i as f32).collect(),
     );
+    flat.insert(
+        Skill::Supersonic,
+        (0..40).map(|i| 0.8 + 0.001 * i as f32).collect(),
+    );
+    flat.insert(
+        Skill::CeilingPlay,
+        (0..40).map(|i| 0.3 + 0.001 * i as f32).collect(),
+    );
+    flat.insert(
+        Skill::GroundDribble,
+        (0..40).map(|i| 0.9 + 0.001 * i as f32).collect(),
+    );
     let kept = refit_skill_config(&base, &BTreeMap::new(), &flat);
     assert_eq!(kept.flick_min_up_dv, base.flick_min_up_dv);
     assert_eq!(kept.power_shot_min_speed, base.power_shot_min_speed);
     assert_eq!(kept.redirect_min_angle_deg, base.redirect_min_angle_deg);
+    assert_eq!(
+        kept.supersonic_min_duration_s,
+        base.supersonic_min_duration_s
+    );
+    assert_eq!(kept.ceiling_min_duration_s, base.ceiling_min_duration_s);
+    assert_eq!(kept.dribble_min_duration_s, base.dribble_min_duration_s);
 }
 
 #[test]

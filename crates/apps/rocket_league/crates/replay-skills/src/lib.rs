@@ -88,10 +88,12 @@ pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
 /// the full distribution (gated observations only ever sit above the floor).
 ///
 /// Each candidate holds the detector's *context* gates (what makes the event an
-/// attempt at that mechanic) and drops only the magnitude *floor* being fit:
-/// aerial → car height at every touch; flick → up-velocity of every carried ball;
-/// power shot → speed of every goalward touch; redirect → turn angle of every
-/// fast-in/out goalward touch. Extend as more detectors expose a `*_candidates` twin.
+/// attempt at that mechanic) and drops only the magnitude *floor* being fit. Touch
+/// metrics: aerial → car height at every touch; flick → up-velocity of every carried
+/// ball; power shot → speed of every goalward touch; redirect → turn angle of every
+/// fast-in/out goalward touch. Run durations (every run, short ones included):
+/// supersonic, ceiling play, ground dribble. Extend as detectors gain a `*_candidates`
+/// twin.
 pub fn candidate_metrics(m: &CanonicalMatch, cfg: &SkillConfig) -> BTreeMap<Skill, Vec<f32>> {
     let (r, ev) = (&m.resampled, &m.events);
     BTreeMap::from([
@@ -99,6 +101,9 @@ pub fn candidate_metrics(m: &CanonicalMatch, cfg: &SkillConfig) -> BTreeMap<Skil
         (Skill::Flick, detect::flick_candidates(r, ev, cfg)),
         (Skill::PowerShot, detect::power_shot_candidates(r, ev, cfg)),
         (Skill::Redirect, detect::redirect_candidates(r, ev, cfg)),
+        (Skill::Supersonic, detect::supersonic_candidates(r, cfg)),
+        (Skill::CeilingPlay, detect::ceiling_candidates(r, cfg)),
+        (Skill::GroundDribble, detect::dribble_candidates(r, cfg)),
     ])
 }
 
