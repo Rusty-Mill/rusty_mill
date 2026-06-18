@@ -17,11 +17,11 @@
 //! from it (selection bias). **Candidate-mode** (`replay_skills::candidate_metrics`)
 //! removes that blind spot: each detector also emits the pre-gate metric for
 //! *every* candidate event, so the calibrator sees the full distribution and can
-//! place the floor as well as the top. For aerials we fit both `aerial_min_height`
-//! and `high_aerial_height` from the candidate touch-height distribution; without
-//! candidates we fall back to fitting only the top from gated peak heights (and
-//! leave floors at their defaults). As detectors expose candidates, extend
-//! [`refit_skill_config`].
+//! place the floor as well as the top. We fit floors at the valley between weak
+//! attempts and the real mechanic (`aerial_min_height`, `flick_min_up_dv`,
+//! `power_shot_min_speed`, `redirect_min_angle_deg`) and, for aerials, the ramp top
+//! too. The fit is self-guarding — no clear valley ⇒ the hand-set default holds. As
+//! detectors expose candidates, extend [`refit_skill_config`].
 
 use std::collections::BTreeMap;
 
@@ -104,21 +104,35 @@ const MIN_FIT_SAMPLES: usize = 8;
 /// for the full-confidence ramp top. High enough to sit among genuine aerials.
 const AERIAL_TOP_Q: f32 = 0.995;
 
-/// Plausible band (uu) for the aerial detection floor. The floor is fit to the
-/// emptiest height inside this window — the valley between the dense ground-touch
-/// cluster (~17uu) and the aerial tail. The band is the **policy** knob: a percentile
-/// of *all* touches would track how often players aerial (the very thing we study),
-/// so we look for the structural gap instead, bounded to physically sane floors.
+/// Plausible band for each candidate-mode detection floor: the floor is fit to the
+/// emptiest value inside this window — the valley between the "weak attempt" cluster
+/// and the real-mechanic tail. The band is the **policy** knob: a percentile of all
+/// candidates would track how *often* players do the mechanic (the very thing we
+/// study), so we look for the structural gap instead, bounded to sane floors.
+/// Brackets each detector's hand-set default (aerial 300uu, flick 550uu/s, power
+/// 2000uu/s, redirect 55°).
 const AERIAL_FLOOR_BAND: (f32, f32) = (100.0, 600.0);
+const FLICK_FLOOR_BAND: (f32, f32) = (300.0, 800.0);
+const POWER_SHOT_FLOOR_BAND: (f32, f32) = (1500.0, 2800.0);
+const REDIRECT_FLOOR_BAND: (f32, f32) = (35.0, 80.0);
 
-/// Fit the aerial detection floor from candidate-mode touch heights: the midpoint
-/// of the largest gap between consecutive heights whose midpoint lands inside
-/// [`AERIAL_FLOOR_BAND`] — i.e. the valley separating ground touches from aerials.
+/// A valley must span at least this fraction of the band width to count — so a
+/// continuous, unimodal distribution (many similar small gaps) is rejected and only
+/// a genuine empty separation is accepted. The band is already a tuned policy
+/// window, so a fraction of it is a sane "this gap is real" bar.
+const MIN_VALLEY_FRAC: f32 = 0.15;
+
+/// Fit a detection floor from candidate-mode metrics: the midpoint of the largest
+/// gap between consecutive values whose midpoint lands inside `band` — i.e. the
+/// valley separating weak attempts from the real mechanic.
 ///
-/// Robust to the aerial *fraction* (a fixed percentile is not — see the band note).
-/// `None` when there's no clear gap in the band, so the caller keeps the default.
-pub fn fit_aerial_floor(candidates: &[f32]) -> Option<f32> {
-    let (lo, hi) = AERIAL_FLOOR_BAND;
+/// Robust to the mechanic's *frequency* (a fixed percentile is not — see the band
+/// note). Self-guarding: returns `None` unless the largest in-band gap spans at
+/// least [`MIN_VALLEY_FRAC`] of the band (no real valley ⇒ a continuous/unimodal
+/// distribution), so the caller keeps the hand-set default.
+pub fn fit_floor_valley(candidates: &[f32], band: (f32, f32)) -> Option<f32> {
+    let (lo, hi) = band;
+    let min_gap = MIN_VALLEY_FRAC * (hi - lo);
     let mut s: Vec<f32> = candidates
         .iter()
         .copied()
@@ -133,20 +147,39 @@ pub fn fit_aerial_floor(candidates: &[f32]) -> Option<f32> {
             best = Some((gap, mid));
         }
     }
-    best.map(|(_, mid)| mid)
+    best.filter(|&(gap, _)| gap >= min_gap).map(|(_, mid)| mid)
+}
+
+/// Apply a self-guarding valley floor fit to one config field from a skill's
+/// candidate distribution, when it has at least [`MIN_FIT_SAMPLES`] candidates.
+fn fit_floor_into(
+    field: &mut f32,
+    candidates_by_skill: &BTreeMap<Skill, Vec<f32>>,
+    skill: Skill,
+    band: (f32, f32),
+) {
+    if let Some(c) = candidates_by_skill.get(&skill) {
+        if c.len() >= MIN_FIT_SAMPLES {
+            if let Some(floor) = fit_floor_valley(c, band) {
+                *field = floor;
+            }
+        }
+    }
 }
 
 /// Refit the calibratable confidence-ramp anchors from per-skill metric
 /// distributions and stamp a `-fitted` version.
 ///
-/// For aerials, candidate-mode metrics (car height at *every* touch, from
-/// `replay_skills::candidate_metrics`) let us fit both the floor and the top:
-/// `aerial_min_height` ← the ground/aerial valley ([`fit_aerial_floor`]), and
-/// `high_aerial_height` ← the candidate [`AERIAL_TOP_Q`] percentile (kept clear of
-/// the floor). Without candidates we fall back to fitting only the top from the
-/// gated p90 of observed aerial peak heights, leaving the floor at its default.
-/// Skills with fewer than [`MIN_FIT_SAMPLES`] candidates (or observations), or with
-/// no clear valley, keep the default — a handful of replays shouldn't move a gate.
+/// Candidate-mode metrics (`replay_skills::candidate_metrics`) let us fit detection
+/// **floors** at the valley between weak attempts and the real mechanic
+/// ([`fit_floor_valley`], self-guarding): `aerial_min_height`, `flick_min_up_dv`,
+/// `power_shot_min_speed`, `redirect_min_angle_deg`. For aerials — the only skill
+/// with a configurable ramp *top* — we also fit `high_aerial_height` to the
+/// candidate [`AERIAL_TOP_Q`] percentile (the flick/power/redirect ramps use fixed
+/// offsets, so they're floor-only); without aerial candidates we fall back to
+/// fitting that top from the gated p90 of observed peak heights. Skills with fewer
+/// than [`MIN_FIT_SAMPLES`] candidates, or no clear valley, keep their default — a
+/// handful of replays shouldn't move a gate.
 pub fn refit_skill_config(
     base: &SkillConfig,
     metrics_by_skill: &BTreeMap<Skill, Vec<f32>>,
@@ -154,15 +187,14 @@ pub fn refit_skill_config(
 ) -> SkillConfig {
     let mut cfg = base.clone();
 
+    // Aerial floor + top (top is candidate-driven, with a gated-p90 fallback).
     match candidates_by_skill.get(&Skill::Aerial) {
-        // Candidate-mode: fit the floor at the valley and the top from the tail.
         Some(c) if c.len() >= MIN_FIT_SAMPLES => {
-            if let Some(floor) = fit_aerial_floor(c) {
+            if let Some(floor) = fit_floor_valley(c, AERIAL_FLOOR_BAND) {
                 cfg.aerial_min_height = floor;
             }
             cfg.high_aerial_height = pctl(c, AERIAL_TOP_Q).max(cfg.aerial_min_height + 100.0);
         }
-        // Fallback (no candidates): top only, from gated peak heights; floor kept.
         _ => {
             if let Some(v) = metrics_by_skill.get(&Skill::Aerial) {
                 if v.len() >= MIN_FIT_SAMPLES {
@@ -171,6 +203,26 @@ pub fn refit_skill_config(
             }
         }
     }
+
+    // Floor-only valley fits for the continuous-metric mechanics.
+    fit_floor_into(
+        &mut cfg.flick_min_up_dv,
+        candidates_by_skill,
+        Skill::Flick,
+        FLICK_FLOOR_BAND,
+    );
+    fit_floor_into(
+        &mut cfg.power_shot_min_speed,
+        candidates_by_skill,
+        Skill::PowerShot,
+        POWER_SHOT_FLOOR_BAND,
+    );
+    fit_floor_into(
+        &mut cfg.redirect_min_angle_deg,
+        candidates_by_skill,
+        Skill::Redirect,
+        REDIRECT_FLOOR_BAND,
+    );
 
     cfg.version = format!("{}-fitted", base.version);
     cfg

@@ -229,31 +229,38 @@ fn main() -> Result<(), Box<dyn Error>> {
         "skill", "count", "p10", "p50", "p90", "rho(rank)"
     );
     for skill in Skill::ALL {
-        let Some(raws) = raw_by_skill.get(&skill) else {
-            continue;
-        };
-        let label = skill.metric_label();
-        if label.is_empty() {
-            // No continuous magnitude (e.g. demo) — report the count only.
-            println!("{:<20} {:>6}", skill.key(), raws.len());
+        let raws = raw_by_skill.get(&skill);
+        let cands = cand_by_skill.get(&skill).filter(|c| !c.is_empty());
+        // Show a skill if anything passed its gate *or* it has a candidate
+        // population (a gateless skill with candidates = its floor admitted none).
+        if raws.is_none() && cands.is_none() {
             continue;
         }
-        let rho = pairs_by_skill.get(&skill).and_then(|(m, t)| spearman(m, t));
-        println!(
-            "{:<20} {:>6}  {:>8.1} {:>8.1} {:>8.1}   {:>8}   {} ({})",
-            skill.key(),
-            raws.len(),
-            pctl(raws, 0.10),
-            pctl(raws, 0.50),
-            pctl(raws, 0.90),
-            rho.map(|v| format!("{v:+.3}"))
-                .unwrap_or_else(|| "  n/a".into()),
-            label,
-            skill.metric_unit(),
-        );
+        let label = skill.metric_label();
+        match raws {
+            Some(raws) if !label.is_empty() => {
+                let rho = pairs_by_skill.get(&skill).and_then(|(m, t)| spearman(m, t));
+                println!(
+                    "{:<20} {:>6}  {:>8.1} {:>8.1} {:>8.1}   {:>8}   {} ({})",
+                    skill.key(),
+                    raws.len(),
+                    pctl(raws, 0.10),
+                    pctl(raws, 0.50),
+                    pctl(raws, 0.90),
+                    rho.map(|v| format!("{v:+.3}"))
+                        .unwrap_or_else(|| "  n/a".into()),
+                    label,
+                    skill.metric_unit(),
+                );
+            }
+            // No continuous magnitude (e.g. demo) — report the count only.
+            Some(raws) => println!("{:<20} {:>6}", skill.key(), raws.len()),
+            // Candidates exist but nothing cleared the gate.
+            None => println!("{:<20} {:>6}   none cleared the gate", skill.key(), 0),
+        }
         // Candidate-mode: the pre-gate population the floor is fit from. The gated
         // row above is its upper tail; this shows how far below the floor sits.
-        if let Some(c) = cand_by_skill.get(&skill).filter(|c| !c.is_empty()) {
+        if let Some(c) = cands {
             println!(
                 "{:<20} {:>6}  {:>8.1} {:>8.1} {:>8.1}   {:>8}   candidates (pre-gate p50/p90/p99)",
                 "  └ candidates",
@@ -272,14 +279,41 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_path = corpus_dir.join("fitted_skill_config.json");
     std::fs::write(&out_path, serde_json::to_vec_pretty(&fitted)?)?;
     eprintln!(
-        "\nwrote {} (version {}) — aerial_min_height {:.0} -> {:.0}, high_aerial_height {:.0} -> {:.0}",
+        "\nwrote {} (version {})",
         out_path.display(),
-        fitted.version,
-        cfg.aerial_min_height,
-        fitted.aerial_min_height,
-        cfg.high_aerial_height,
-        fitted.high_aerial_height,
+        fitted.version
     );
+    eprintln!("  fitted anchors (default -> fitted; unchanged = no clear valley):");
+    let moves = [
+        (
+            "aerial_min_height",
+            cfg.aerial_min_height,
+            fitted.aerial_min_height,
+        ),
+        (
+            "high_aerial_height",
+            cfg.high_aerial_height,
+            fitted.high_aerial_height,
+        ),
+        (
+            "flick_min_up_dv",
+            cfg.flick_min_up_dv,
+            fitted.flick_min_up_dv,
+        ),
+        (
+            "power_shot_min_speed",
+            cfg.power_shot_min_speed,
+            fitted.power_shot_min_speed,
+        ),
+        (
+            "redirect_min_angle_deg",
+            cfg.redirect_min_angle_deg,
+            fitted.redirect_min_angle_deg,
+        ),
+    ];
+    for (name, before, after) in moves {
+        eprintln!("    {name:<24} {before:>7.0} -> {after:>7.0}");
+    }
     if replays_run == 0 {
         eprintln!(
             "note: no corpus replays found under {} — fetch with \

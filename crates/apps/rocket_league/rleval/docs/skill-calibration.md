@@ -41,33 +41,44 @@ floor, so a hard minimum **cannot be lowered** from it (selection bias).
 
 **Candidate-mode** removes that blind spot: `replay_skills::candidate_metrics`
 (`skills/src/lib.rs`) has each detector also emit the pre-gate metric for *every*
-candidate event, so the calibrator sees the full distribution — sub-threshold tail
-included — and can place the floor as well as the top. The harness pools these per
-skill and prints a `└ candidates` line under each skill's gated row (count +
-pre-gate p50/p90/p99), so you can see how far below the floor the candidate
-population sits.
+candidate event. Each candidate **holds the detector's context gates** (what makes
+the event an attempt at that mechanic) and **drops only the magnitude floor** being
+fit, so the calibrator sees the full sub-threshold tail:
 
-Worked example — **aerials** (candidate metric = car height at *every* ball touch,
-`detect::aerial_candidates`):
+| Skill | candidate (`detect::*_candidates`) | held context | fitted floor |
+|---|---|---|---|
+| Aerial | car height at every touch | (a touch) | `aerial_min_height` |
+| Flick | up-velocity of every *carried* ball | low + slow-incoming ball | `flick_min_up_dv` |
+| Power shot | speed of every *goalward* touch | ball sent toward goal | `power_shot_min_speed` |
+| Redirect | turn angle of every fast-in/out goalward touch | fast in, fast + goalward out | `redirect_min_angle_deg` |
 
-- `aerial_min_height` (floor) ← the **valley** between the dense ground-touch
-  cluster (~17uu) and the aerial tail: the midpoint of the largest gap in candidate
-  heights whose midpoint falls in the plausible band `[100, 600]` uu
-  (`calibrate::fit_aerial_floor`). A *percentile* of all touches would track how
-  often players aerial — the very thing we study — so we fit the structural gap
-  instead. No clear valley ⇒ the floor is left at its default.
-- `high_aerial_height` (top) ← candidate **p99.5**, kept ≥ floor + 100.
+The harness pools these per skill and prints a `└ candidates` line (count +
+pre-gate p50/p90/p99). A skill where **nothing cleared the gate** still shows its
+candidate line (e.g. `power_shot  0  none cleared the gate`) — the telling case that
+a floor may be too high.
 
-Without candidate-mode data the fit falls back to the previous behavior: only the
-top moves, to the corpus **p90** of gated aerial peak heights, and the floor is
-left untouched.
+**Floor fit — the valley (`calibrate::fit_floor_valley`).** Each floor is set to the
+midpoint of the largest gap between consecutive candidate values whose midpoint
+falls in a per-skill **band** (`*_FLOOR_BAND`, bracketing the hand-set default) —
+the valley between weak attempts and the real mechanic. A *percentile* of all
+candidates would track how *often* players do the mechanic (the very thing we
+study), so we fit the structural gap instead. The fit is **self-guarding**: the gap
+must span at least `MIN_VALLEY_FRAC` (15%) of the band, else there is no real valley
+(a continuous, unimodal distribution) and the **hand-set default is kept**. Aerial
+height is genuinely bimodal (on-ground vs airborne) so it fits readily; the
+continuous metrics (up-velocity, speed, angle) only move on a clear separation.
+
+**Ramp tops.** Only aerials have a configurable top: `high_aerial_height` ←
+candidate **p99.5** (kept ≥ floor + 100; falls back to the gated **p90** when no
+aerial candidates). The flick/power/redirect ramps use fixed offsets from their
+floor, so candidate-mode fits them **floor-only**.
 
 Skills with fewer than 8 candidates (or observations) keep their default (a handful
 of replays shouldn't move a gate). The fitted config stamps `version =
 "{base}-fitted"`.
 
-**Extending to other detectors:** factor a detector's per-candidate metric out of
-its gated body (as `aerial_touch` shares `touch_car_z`), emit it from a
-`*_candidates` twin, add it to `candidate_metrics`, and add a floor fit to
-`refit_skill_config`'s match — flicks (pop speed), power shots (ball speed),
-redirects (angle) and the duration-gated runs follow the same shape.
+**Extending to more detectors:** factor a detector's per-candidate read out of its
+gated body (as `flicks` shares `flick_candidate`), emit it from a `*_candidates`
+twin, add it to `candidate_metrics`, and add a `fit_floor_into` call with a band to
+`refit_skill_config` — the duration-gated runs (supersonic, ceiling, dribble) follow
+the same shape.

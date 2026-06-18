@@ -564,6 +564,19 @@ fn emit_dribble(
     });
 }
 
+/// Carried-ball touch read for flicks: `(up_dv, ball_z)` when the touch releases a
+/// *carried* ball (low, slow incoming) — the flick context, read *without* the
+/// `flick_min_up_dv` gate. Shared by [`flicks`] (which then applies the floor) and
+/// candidate-mode ([`flick_candidates`]). `None` when not a flick candidate.
+fn flick_candidate(frames: &[GridFrame], fi: usize, cfg: &SkillConfig) -> Option<(f32, f32)> {
+    if fi == 0 {
+        return None;
+    }
+    let (pre, post) = (frames[fi - 1].ball?, frames[fi].ball?);
+    let carried = post.p.z <= cfg.dribble_ball_height_max && speed(pre.v) <= cfg.flick_max_incoming;
+    carried.then_some((post.v.z, post.p.z))
+}
+
 /// Flicks: a touch that releases a carried (low, slow) ball sharply upward.
 pub fn flicks(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec<SkillInstance> {
     let frames = &resampled.frames;
@@ -581,28 +594,61 @@ pub fn flicks(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec
         let Some(fi) = frame_at(frames, *t, cfg.touch_frame_tol_s) else {
             continue;
         };
-        if fi == 0 {
-            continue;
-        }
-        let (Some(pre), Some(post)) = (frames[fi - 1].ball, frames[fi].ball) else {
+        let Some((up_dv, ball_z)) = flick_candidate(frames, fi, cfg) else {
             continue;
         };
-        let carried =
-            post.p.z <= cfg.dribble_ball_height_max && speed(pre.v) <= cfg.flick_max_incoming;
-        if carried && post.v.z >= cfg.flick_min_up_dv {
+        if up_dv >= cfg.flick_min_up_dv {
             out.push(SkillInstance {
                 skill: Skill::Flick,
                 t: *t,
                 pri: *pri,
                 player: player.clone(),
                 team: *team,
-                confidence: conf(post.v.z, cfg.flick_min_up_dv, cfg.flick_min_up_dv + 800.0),
-                metric: post.v.z,
-                detail: format!("up_v={:.0} ball_z={:.0}", post.v.z, post.p.z),
+                confidence: conf(up_dv, cfg.flick_min_up_dv, cfg.flick_min_up_dv + 800.0),
+                metric: up_dv,
+                detail: format!("up_v={up_dv:.0} ball_z={ball_z:.0}"),
             });
         }
     }
     out
+}
+
+/// Candidate-mode for flicks: the up-velocity imparted to *every carried* ball
+/// (pre-gate). Holds the carry context that defines a flick attempt and drops the
+/// `flick_min_up_dv` floor, so the calibrator sees gentle releases and real flicks
+/// alike — the gap between them is where the floor belongs.
+pub fn flick_candidates(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec<f32> {
+    let frames = &resampled.frames;
+    let mut out = Vec::new();
+    for e in events {
+        let Event::Touch { t, .. } = e else {
+            continue;
+        };
+        let Some(fi) = frame_at(frames, *t, cfg.touch_frame_tol_s) else {
+            continue;
+        };
+        if let Some((up_dv, _)) = flick_candidate(frames, fi, cfg) {
+            out.push(up_dv);
+        }
+    }
+    out
+}
+
+/// Goalward touch read for power shots: `(speed, goalward)` when the touch sends
+/// the ball toward the attacking goal — the power-shot context, read *without* the
+/// `power_shot_min_speed` gate. Shared by [`power_shots`] (which then applies the
+/// floor) and candidate-mode ([`power_shot_candidates`]). `None` when not goalward.
+fn power_shot_candidate(
+    resampled: &Resampled,
+    fi: usize,
+    team: Option<i32>,
+    cfg: &SkillConfig,
+) -> Option<(f32, f32)> {
+    let ball = resampled.frames[fi].ball?;
+    let spd = speed(ball.v);
+    // Rotate the result into the toucher's attacking frame: +Y is the goal.
+    let goalward = flip_xy(ball.v, attack_sign(resampled, team)).y;
+    (goalward >= cfg.power_shot_min_goalward * spd).then_some((spd, goalward))
 }
 
 /// Power shots: a touch that sends the ball fast and toward the opponent goal.
@@ -626,16 +672,10 @@ pub fn power_shots(
         let Some(fi) = frame_at(frames, *t, cfg.touch_frame_tol_s) else {
             continue;
         };
-        let Some(ball) = frames[fi].ball else {
+        let Some((spd, goalward)) = power_shot_candidate(resampled, fi, *team, cfg) else {
             continue;
         };
-        let spd = speed(ball.v);
-        if spd < cfg.power_shot_min_speed {
-            continue;
-        }
-        // Rotate the result into the toucher's attacking frame: +Y is the goal.
-        let goalward = flip_xy(ball.v, attack_sign(resampled, *team)).y;
-        if goalward >= cfg.power_shot_min_goalward * spd {
+        if spd >= cfg.power_shot_min_speed {
             out.push(SkillInstance {
                 skill: Skill::PowerShot,
                 t: *t,
@@ -649,6 +689,54 @@ pub fn power_shots(
         }
     }
     out
+}
+
+/// Candidate-mode for power shots: the ball speed of *every goalward* touch
+/// (pre-gate). Holds the direction context that defines a power-shot attempt and
+/// drops the `power_shot_min_speed` floor, so the calibrator sees gentle passes and
+/// real cannons alike.
+pub fn power_shot_candidates(
+    resampled: &Resampled,
+    events: &[Event],
+    cfg: &SkillConfig,
+) -> Vec<f32> {
+    let mut out = Vec::new();
+    for e in events {
+        let Event::Touch { t, team, .. } = e else {
+            continue;
+        };
+        let Some(fi) = frame_at(&resampled.frames, *t, cfg.touch_frame_tol_s) else {
+            continue;
+        };
+        if let Some((spd, _)) = power_shot_candidate(resampled, fi, *team, cfg) {
+            out.push(spd);
+        }
+    }
+    out
+}
+
+/// Fast-redirect touch read: `(angle, post_speed)` when a touch turns a fast
+/// incoming ball back toward goal while keeping it fast — the redirect context,
+/// read *without* the `redirect_min_angle_deg` gate. Shared by [`redirects`] (which
+/// then applies the angle floor) and candidate-mode ([`redirect_candidates`]).
+/// `None` when not a redirect candidate (slow in/out, or not goalward).
+fn redirect_candidate(
+    resampled: &Resampled,
+    fi: usize,
+    team: Option<i32>,
+    cfg: &SkillConfig,
+) -> Option<(f32, f32)> {
+    if fi == 0 {
+        return None;
+    }
+    let (pre, post) = (resampled.frames[fi - 1].ball?, resampled.frames[fi].ball?);
+    let ang = angle_deg(pre.v, post.v);
+    let post_spd = speed(post.v);
+    let goalward = flip_xy(post.v, attack_sign(resampled, team)).y;
+    (speed(pre.v) >= cfg.redirect_min_incoming
+        && post_spd >= cfg.redirect_min_speed
+        && goalward > 0.0)
+        .then_some((ang, post_spd))
 }
 
 /// Redirects: a touch that sharply turns a fast incoming ball back toward goal.
@@ -668,20 +756,10 @@ pub fn redirects(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> 
         let Some(fi) = frame_at(frames, *t, cfg.touch_frame_tol_s) else {
             continue;
         };
-        if fi == 0 {
-            continue;
-        }
-        let (Some(pre), Some(post)) = (frames[fi - 1].ball, frames[fi].ball) else {
+        let Some((ang, post_spd)) = redirect_candidate(resampled, fi, *team, cfg) else {
             continue;
         };
-        let ang = angle_deg(pre.v, post.v);
-        let post_spd = speed(post.v);
-        let goalward = flip_xy(post.v, attack_sign(resampled, *team)).y;
-        if speed(pre.v) >= cfg.redirect_min_incoming
-            && ang >= cfg.redirect_min_angle_deg
-            && post_spd >= cfg.redirect_min_speed
-            && goalward > 0.0
-        {
+        if ang >= cfg.redirect_min_angle_deg {
             out.push(SkillInstance {
                 skill: Skill::Redirect,
                 t: *t,
@@ -692,6 +770,26 @@ pub fn redirects(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> 
                 metric: ang,
                 detail: format!("angle={ang:.0}deg speed={post_spd:.0}"),
             });
+        }
+    }
+    out
+}
+
+/// Candidate-mode for redirects: the turn angle of *every* fast-in/fast-out
+/// goalward touch (pre-gate). Holds the redirect context (fast incoming, still fast
+/// and goalward after) and drops the `redirect_min_angle_deg` floor, so the
+/// calibrator sees glancing touches and sharp redirects alike.
+pub fn redirect_candidates(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec<f32> {
+    let mut out = Vec::new();
+    for e in events {
+        let Event::Touch { t, team, .. } = e else {
+            continue;
+        };
+        let Some(fi) = frame_at(&resampled.frames, *t, cfg.touch_frame_tol_s) else {
+            continue;
+        };
+        if let Some((ang, _)) = redirect_candidate(resampled, fi, *team, cfg) {
+            out.push(ang);
         }
     }
     out

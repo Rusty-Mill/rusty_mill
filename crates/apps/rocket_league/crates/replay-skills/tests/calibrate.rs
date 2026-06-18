@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use replay_skills::calibrate::{fit_aerial_floor, fit_band, pctl, refit_skill_config, spearman};
+use replay_skills::calibrate::{fit_band, fit_floor_valley, pctl, refit_skill_config, spearman};
 use replay_skills::{Skill, SkillConfig};
 
 #[test]
@@ -77,7 +77,7 @@ fn refit_with_candidates_fits_the_aerial_floor_and_top() {
 
     let fitted = refit_skill_config(&base, &BTreeMap::new(), &cand_by_skill);
 
-    let valley = fit_aerial_floor(&candidates).expect("a clear ground/aerial valley");
+    let valley = fit_floor_valley(&candidates, (100.0, 600.0)).expect("a clear valley");
     assert!(
         (valley - 308.5).abs() < 1.0,
         "valley midpoint, got {valley}"
@@ -101,6 +101,55 @@ fn refit_with_candidates_fits_the_aerial_floor_and_top() {
         flat_fit.aerial_min_height, base.aerial_min_height,
         "no valley in band ⇒ floor unchanged"
     );
+}
+
+#[test]
+fn refit_fits_continuous_mechanic_floors_at_the_valley() {
+    // Each mechanic: a weak-attempt cluster + a real-mechanic tail with a gap in
+    // its band. The floor should land in the gap; a no-gap sample keeps the default.
+    let base = SkillConfig::default();
+
+    // (skill, weak cluster value, strong cluster value, band, current default getter)
+    let cases: [(Skill, f32, f32); 3] = [
+        (Skill::Flick, 200.0, 720.0),       // up_dv, band (300,800) -> ~460
+        (Skill::PowerShot, 1300.0, 2500.0), // speed, band (1500,2800) -> ~1900
+        (Skill::Redirect, 25.0, 90.0),      // angle, band (35,80) -> ~57.5
+    ];
+    for (skill, weak, strong) in cases {
+        let mut c = vec![weak; 40];
+        c.extend(std::iter::repeat_n(strong, 10));
+        let mut cand: BTreeMap<Skill, Vec<f32>> = BTreeMap::new();
+        cand.insert(skill, c);
+        let fitted = refit_skill_config(&base, &BTreeMap::new(), &cand);
+        let got = match skill {
+            Skill::Flick => fitted.flick_min_up_dv,
+            Skill::PowerShot => fitted.power_shot_min_speed,
+            Skill::Redirect => fitted.redirect_min_angle_deg,
+            _ => unreachable!(),
+        };
+        let expected = 0.5 * (weak + strong);
+        assert!(
+            (got - expected).abs() < 1e-3,
+            "{skill:?} floor fit to the valley {expected}, got {got}"
+        );
+    }
+
+    // A tight unimodal cluster *inside* each band (no real valley, just small even
+    // gaps) ⇒ the self-guard rejects it and every floor keeps its default.
+    let mut flat: BTreeMap<Skill, Vec<f32>> = BTreeMap::new();
+    flat.insert(Skill::Flick, (0..40).map(|i| 400.0 + i as f32).collect());
+    flat.insert(
+        Skill::PowerShot,
+        (0..40).map(|i| 1600.0 + i as f32).collect(),
+    );
+    flat.insert(
+        Skill::Redirect,
+        (0..40).map(|i| 40.0 + 0.1 * i as f32).collect(),
+    );
+    let kept = refit_skill_config(&base, &BTreeMap::new(), &flat);
+    assert_eq!(kept.flick_min_up_dv, base.flick_min_up_dv);
+    assert_eq!(kept.power_shot_min_speed, base.power_shot_min_speed);
+    assert_eq!(kept.redirect_min_angle_deg, base.redirect_min_angle_deg);
 }
 
 #[test]

@@ -367,14 +367,19 @@ look-&-feel comparison against ballchasing's own viewer in
   precision check), then writes a fitted `SkillConfig` to
   `assets/corpus/fitted_skill_config.json` (`replay-skills --config`). **Candidate-
   mode ✔** — `candidate_metrics` (`skills/src/lib.rs`) emits each detector's metric
-  *pre-gate*, so the fit sees the sub-threshold tail and can place **floors**, not
-  just ramp tops: for aerials, `aerial_min_height` ← the ground/aerial valley in the
-  every-touch height distribution (`fit_aerial_floor`) and `high_aerial_height` ←
-  candidate p99.5; without candidates it falls back to the old top-only fit. The
-  report prints a `└ candidates` line per skill. See `docs/skill-calibration.md`.
+  *pre-gate* (holding the context gates, dropping only the magnitude floor), so the
+  fit sees the sub-threshold tail and can place **floors**, not just ramp tops. Now
+  covers **aerial** (car height), **flick** (up-velocity of carried balls),
+  **power-shot** (goalward speed) and **redirect** (turn angle): each floor ←
+  `fit_floor_valley`, the valley between weak attempts and the real mechanic within a
+  per-skill band, **self-guarding** (no clear gap ⇒ keep the hand-set default, so the
+  continuous metrics only move on a real separation). Aerials also fit
+  `high_aerial_height` ← candidate p99.5 (the other ramps use fixed offsets, so
+  they're floor-only). The report prints a `└ candidates` line per skill, including
+  "none cleared the gate" when a floor admits nothing. See `docs/skill-calibration.md`.
   *Remaining:* the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`;
-  extend candidate-mode + floor fits to the other detectors (flick/power-shot/
-  redirect/duration runs) following the aerials shape.
+  extend candidate-mode to the duration-gated runs (supersonic/ceiling/dribble) the
+  same way.
   Harder mechanics (wave dash, half-flip) stay out — input-only, no kinematic
   signature (double-touch shipped; see the skills feature-direction item).
 - **Map-aware field geometry.** *Phase 1 (classify + flag) ✔* — `field.rs` now

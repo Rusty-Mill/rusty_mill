@@ -87,16 +87,19 @@ pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
 /// event, so the calibrator can fit detection floors — not just ramp tops — from
 /// the full distribution (gated observations only ever sit above the floor).
 ///
-/// Today populates [`Skill::Aerial`] (car height at every ball touch); other
-/// detectors extend the same way as their raw per-candidate metric is factored
-/// out of the gated detector.
+/// Each candidate holds the detector's *context* gates (what makes the event an
+/// attempt at that mechanic) and drops only the magnitude *floor* being fit:
+/// aerial → car height at every touch; flick → up-velocity of every carried ball;
+/// power shot → speed of every goalward touch; redirect → turn angle of every
+/// fast-in/out goalward touch. Extend as more detectors expose a `*_candidates` twin.
 pub fn candidate_metrics(m: &CanonicalMatch, cfg: &SkillConfig) -> BTreeMap<Skill, Vec<f32>> {
-    let mut out = BTreeMap::new();
-    out.insert(
-        Skill::Aerial,
-        detect::aerial_candidates(&m.resampled, &m.events, cfg),
-    );
-    out
+    let (r, ev) = (&m.resampled, &m.events);
+    BTreeMap::from([
+        (Skill::Aerial, detect::aerial_candidates(r, ev, cfg)),
+        (Skill::Flick, detect::flick_candidates(r, ev, cfg)),
+        (Skill::PowerShot, detect::power_shot_candidates(r, ev, cfg)),
+        (Skill::Redirect, detect::redirect_candidates(r, ev, cfg)),
+    ])
 }
 
 /// Per-player skill counts: one [`PlayerSkills`] per track (plus a synthetic

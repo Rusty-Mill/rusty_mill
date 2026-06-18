@@ -11,7 +11,8 @@ use replay_analyzer::model::{
 };
 use replay_skills::detect::{
     aerial_candidates, aerials, air_dribbles, boost_steals, ceiling_plays, demos, double_touches,
-    flicks, ground_dribbles, kickoff_first_touches, power_shots, redirects, supersonic, wall_plays,
+    flick_candidates, flicks, ground_dribbles, kickoff_first_touches, power_shot_candidates,
+    power_shots, redirect_candidates, redirects, supersonic, wall_plays,
 };
 use replay_skills::{Skill, SkillConfig};
 
@@ -409,6 +410,103 @@ fn redirect_detected_on_sharp_direction_change() {
         Skill::Redirect,
     );
     assert!(i.detail.contains("angle=90deg"));
+}
+
+#[test]
+fn flick_candidates_emit_up_dv_for_carried_touches_below_the_floor() {
+    // A carried touch whose up-velocity (300) is *below* flick_min_up_dv (550) —
+    // the gated detector drops it, candidate-mode keeps it. A non-carried touch
+    // (ball released high) is not a flick attempt and is excluded.
+    let frames = vec![
+        frame(
+            0.9,
+            Some(kin(v(0.0, 0.0, 150.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            1.0,
+            Some(kin(v(0.0, 0.0, 160.0), v(0.0, 0.0, 300.0))), // carried, weak pop
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            1.9,
+            Some(kin(v(0.0, 0.0, 150.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            2.0,
+            Some(kin(v(0.0, 0.0, 500.0), v(0.0, 0.0, 300.0))), // ball high → not carried
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+    ];
+    let g = grid(frames);
+    let events = [touch(1.0, 1, 0), touch(2.0, 1, 0)];
+    assert!(flicks(&g, &events, &cfg()).is_empty(), "300 < floor 550");
+    assert_eq!(flick_candidates(&g, &events, &cfg()), vec![300.0]);
+}
+
+#[test]
+fn power_shot_candidates_emit_speed_for_goalward_touches_below_the_floor() {
+    // A goalward touch at 1400uu/s — below power_shot_min_speed (2000) — is dropped
+    // by the gate but kept as a candidate. A fast ball away from goal is excluded.
+    let frames = vec![
+        frame(
+            3.0,
+            Some(kin(v(0.0, 0.0, 100.0), v(0.0, 1400.0, 0.0))), // goalward, sub-floor
+            vec![car(1, 0, v(0.0, -200.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            4.0,
+            Some(kin(v(0.0, 0.0, 100.0), v(0.0, -1400.0, 0.0))), // away from goal
+            vec![car(1, 0, v(0.0, 200.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+    ];
+    let g = grid(frames);
+    let events = [touch(3.0, 1, 0), touch(4.0, 1, 0)];
+    assert!(
+        power_shots(&g, &events, &cfg()).is_empty(),
+        "1400 < floor 2000"
+    );
+    assert_eq!(power_shot_candidates(&g, &events, &cfg()), vec![1400.0]);
+}
+
+#[test]
+fn redirect_candidates_emit_angle_for_glancing_goalward_touches() {
+    // A 30° turn on a fast incoming, fast-out, goalward ball — below
+    // redirect_min_angle_deg (55) so the gate drops it, candidate-mode keeps it.
+    // A slow-incoming touch isn't a redirect attempt and is excluded.
+    let frames = vec![
+        frame(
+            4.9,
+            Some(kin(v(0.0, 0.0, 200.0), v(750.0, 1299.0, 0.0))), // 30° off +Y, fast
+            vec![car(1, 0, v(0.0, 0.0, 180.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            5.0,
+            Some(kin(v(0.0, 0.0, 200.0), v(0.0, 1500.0, 0.0))), // goalward, fast
+            vec![car(1, 0, v(0.0, 0.0, 180.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            5.9,
+            Some(kin(v(0.0, 0.0, 200.0), v(0.0, 300.0, 0.0))), // slow incoming
+            vec![car(1, 0, v(0.0, 0.0, 180.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            6.0,
+            Some(kin(v(0.0, 0.0, 200.0), v(0.0, 1500.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 180.0), v(0.0, 0.0, 0.0))],
+        ),
+    ];
+    let g = grid(frames);
+    let events = [touch(5.0, 1, 0), touch(6.0, 1, 0)];
+    assert!(redirects(&g, &events, &cfg()).is_empty(), "30° < floor 55°");
+    let cands = redirect_candidates(&g, &events, &cfg());
+    assert_eq!(
+        cands.len(),
+        1,
+        "only the fast-incoming touch is a candidate"
+    );
+    assert!((cands[0] - 30.0).abs() < 1.0, "≈30° turn, got {}", cands[0]);
 }
 
 #[test]
