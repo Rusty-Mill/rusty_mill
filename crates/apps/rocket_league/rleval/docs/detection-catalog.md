@@ -77,7 +77,7 @@ Source: `skills/src/{skill,detect,config}.rs`. Full design notes in
 [`skill-detection.md`](skill-detection.md). Every detection emits a
 `SkillInstance` (skill, time, player/team, **confidence 0–1**, evidence string)
 and rolls up into per-player counts. Thresholds are the `SkillConfig` defaults
-(`SKILL_CONFIG_VERSION = skcfg-v1`).
+(`SKILL_CONFIG_VERSION = skcfg-v3`).
 
 | Skill | Category | Granularity | Trigger | Default thresholds |
 |---|---|---|---|---|
@@ -90,7 +90,7 @@ and rolls up into per-player counts. Thresholds are the `SkillConfig` defaults
 | **Flick** | Dribbling | per touch | Carried ball popped upward | incoming ≤800 uu/s, release vz ≥550 |
 | **Power shot** | Striking | per touch | Fast strike toward opponent goal | ball ≥2000 uu/s, ≥60% goalward |
 | **Redirect** | Striking | per touch | Sharp turn of a fast ball, goalward | incoming ≥700, angle ≥55°, result ≥1200 uu/s |
-| **Kickoff first touch** | Kickoff | per kickoff | First touch after a kickoff | ≤6.0 s after kickoff |
+| **Kickoff first touch** | Kickoff | per kickoff | First touch after a kickoff; reaction measured from car release (GO) | ≤10 s setup window |
 | **Boost steal** | Boost | per pickup | Full big-pad grab in opponent's half | →≥250 byte, gain ≥100, attack-frame y ≥2000 |
 | **Demo** | Aggression | per event | Demolition credited to attacker | authoritative event |
 

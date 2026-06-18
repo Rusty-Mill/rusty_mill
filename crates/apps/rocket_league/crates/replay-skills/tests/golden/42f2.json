@@ -1,5 +1,5 @@
 {
-  "total_instances": 294,
+  "total_instances": 295,
   "by_skill": {
     "aerial": 2,
     "boost_steal": 5,
@@ -8,7 +8,7 @@
     "double_touch": 2,
     "flick": 2,
     "ground_dribble": 2,
-    "kickoff_first_touch": 6,
+    "kickoff_first_touch": 7,
     "redirect": 9,
     "supersonic": 181,
     "wall_play": 1
@@ -37,7 +37,7 @@
         "demo": 28,
         "double_touch": 2,
         "ground_dribble": 1,
-        "kickoff_first_touch": 3,
+        "kickoff_first_touch": 4,
         "redirect": 5,
         "supersonic": 69
       }

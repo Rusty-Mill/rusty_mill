@@ -574,24 +574,74 @@ fn redirect_candidates_emit_angle_for_glancing_goalward_touches() {
     assert!((cands[0] - 30.0).abs() < 1.0, "≈30° turn, got {}", cands[0]);
 }
 
+// Kickoff event at t=0 with cars frozen (countdown) until they release ("GO") at
+// t=0.5 — the reaction metric is measured from GO, not the frozen setup frame.
+fn kickoff_grid() -> Resampled {
+    let frozen = |t: f32| {
+        frame(
+            t,
+            None,
+            vec![
+                car(1, 0, v(-256.0, 0.0, 17.0), v(0.0, 0.0, 0.0)),
+                car(2, 1, v(256.0, 0.0, 17.0), v(0.0, 0.0, 0.0)),
+            ],
+        )
+    };
+    let moving = frame(
+        0.5,
+        None,
+        vec![
+            car(1, 0, v(-256.0, 0.0, 17.0), v(900.0, 0.0, 0.0)),
+            car(2, 1, v(256.0, 0.0, 17.0), v(-900.0, 0.0, 0.0)),
+        ],
+    );
+    grid(vec![frozen(0.0), frozen(0.25), moving])
+}
+
 #[test]
-fn kickoff_first_touch_credited_to_first_toucher_in_window() {
+fn kickoff_first_touch_credited_to_first_toucher_after_release() {
     let events = vec![
         Event::Kickoff { t: 0.0 },
-        touch(1.2, 2, 1), // first touch after kickoff
+        touch(1.2, 2, 1), // first touch after release
         touch(1.5, 1, 0),
     ];
     let i = only(
-        kickoff_first_touches(&events, &cfg()),
+        kickoff_first_touches(&kickoff_grid(), &events, &cfg()),
         Skill::KickoffFirstTouch,
     );
     assert_eq!(i.pri, 2);
+    // Metric is from GO (0.5s), not the frozen kickoff frame (0.0s): 1.2 - 0.5.
+    assert!(
+        (i.metric - 0.7).abs() < 1e-5,
+        "reaction from GO, got {}",
+        i.metric
+    );
 }
 
 #[test]
 fn kickoff_first_touch_ignores_touch_past_window() {
+    // GO is at 0.5s; a touch 30s later is well past GO + window.
     let events = vec![Event::Kickoff { t: 0.0 }, touch(30.0, 1, 0)];
-    assert!(kickoff_first_touches(&events, &cfg()).is_empty());
+    assert!(kickoff_first_touches(&kickoff_grid(), &events, &cfg()).is_empty());
+}
+
+#[test]
+fn kickoff_first_touch_skipped_when_cars_never_release() {
+    // Cars stay frozen → no GO within the window → no instance (degenerate).
+    let g = grid(vec![
+        frame(
+            0.0,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+        frame(
+            0.5,
+            None,
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        ),
+    ]);
+    let events = vec![Event::Kickoff { t: 0.0 }, touch(1.2, 1, 0)];
+    assert!(kickoff_first_touches(&g, &events, &cfg()).is_empty());
 }
 
 #[test]

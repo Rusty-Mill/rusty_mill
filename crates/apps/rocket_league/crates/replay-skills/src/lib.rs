@@ -60,7 +60,7 @@ pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
     instances.extend(detect::flicks(r, &m.events, cfg));
     instances.extend(detect::power_shots(r, &m.events, cfg));
     instances.extend(detect::redirects(r, &m.events, cfg));
-    instances.extend(detect::kickoff_first_touches(&m.events, cfg));
+    instances.extend(detect::kickoff_first_touches(r, &m.events, cfg));
     instances.extend(detect::boost_steals(&m.tracks, r, cfg));
     instances.extend(detect::demos(&m.events, &m.tracks));
 

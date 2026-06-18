@@ -863,16 +863,61 @@ pub fn redirect_candidates(resampled: &Resampled, events: &[Event], cfg: &SkillC
     out
 }
 
-/// Kickoff first touches: for each kickoff, the first touch within the window.
-pub fn kickoff_first_touches(events: &[Event], cfg: &SkillConfig) -> Vec<SkillInstance> {
+/// Car speed (uu/s) marking the kickoff "GO": well above resampling jitter, far
+/// below real driving speed, so the first frame any car clears it is the release.
+const KICKOFF_GO_SPEED: f32 = 100.0;
+
+/// The "GO" time of a kickoff whose first touch is at `touch_t`: walk *backward*
+/// over the grid from the touch through the continuous run of car motion, stopping
+/// at the frozen countdown — the release is where that run begins.
+///
+/// Anchoring on the touch makes it robust to brief pre-countdown twitches (a car
+/// settling on respawn): those sit before the frozen gap, so the backward walk
+/// stops after them. `None` if no car moves at all between `kt` and the touch
+/// (degenerate — not a real kickoff). For post-goal kickoffs whose event frame
+/// already sits at the release, the run reaches back to `kt`, so GO ≈ `kt`.
+fn kickoff_go(resampled: &Resampled, kt: f32, touch_t: f32) -> Option<f32> {
+    let frames = &resampled.frames;
+    let lo = frames.partition_point(|f| f.t < kt);
+    let hi = frames.partition_point(|f| f.t <= touch_t);
+    let span = &frames[lo..hi];
+    let moving = |f: &GridFrame| f.cars.iter().any(|c| speed(c.v) >= KICKOFF_GO_SPEED);
+    if !span.iter().any(&moving) {
+        return None; // cars never moved between setup and touch — degenerate
+    }
+    let mut go = kt;
+    for f in span.iter().rev() {
+        if moving(f) {
+            go = f.t;
+        } else {
+            break;
+        }
+    }
+    Some(go)
+}
+
+/// Kickoff first touches: for each kickoff, the first touch after setup, with
+/// `metric` the time from car *release* ("GO") to that touch.
+///
+/// The metric is measured from GO, not the kickoff event time `kt`: `kt` lands at
+/// the countdown start for some kickoffs (opening) and at the release for others
+/// (post-goal), so a raw `touch - kt` folds the frozen ~3 s countdown in and pins
+/// against the window cap. Measuring from GO yields a true, varying approach time.
+pub fn kickoff_first_touches(
+    resampled: &Resampled,
+    events: &[Event],
+    cfg: &SkillConfig,
+) -> Vec<SkillInstance> {
+    let window = cfg.kickoff_touch_window_s;
     let mut out = Vec::new();
     for (i, e) in events.iter().enumerate() {
         let Event::Kickoff { t: kt } = e else {
             continue;
         };
-        // Events are time-sorted; scan forward for the first touch in the window.
+        // First touch after the kickoff — the ball is frozen until release, so the
+        // next touch is the kickoff touch (window spans the full countdown+approach).
         for f in &events[i + 1..] {
-            if f.time() > kt + cfg.kickoff_touch_window_s {
+            if f.time() > kt + window {
                 break;
             }
             if let Event::Touch {
@@ -882,6 +927,9 @@ pub fn kickoff_first_touches(events: &[Event], cfg: &SkillConfig) -> Vec<SkillIn
                 team,
             } = f
             {
+                let Some(go) = kickoff_go(resampled, *kt, *t) else {
+                    break; // cars never released — degenerate kickoff
+                };
                 out.push(SkillInstance {
                     skill: Skill::KickoffFirstTouch,
                     t: *t,
@@ -889,8 +937,8 @@ pub fn kickoff_first_touches(events: &[Event], cfg: &SkillConfig) -> Vec<SkillIn
                     player: player.clone(),
                     team: *team,
                     confidence: 1.0,
-                    metric: t - kt,
-                    detail: format!("{:.2}s after kickoff", t - kt),
+                    metric: t - go,
+                    detail: format!("{:.2}s after release", t - go),
                 });
                 break;
             }

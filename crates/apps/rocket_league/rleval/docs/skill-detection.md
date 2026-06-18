@@ -32,7 +32,7 @@ Input-only mechanics (flip resets, half-flips, speedflips) are intentionally
 | `flick` | Dribbling | kinematic | A touch that releases a carried (low, slow) ball sharply upward. |
 | `power_shot` | Striking | kinematic | A touch sending the ball fast and toward the opponent goal. |
 | `redirect` | Striking | kinematic | A touch that sharply turns a fast incoming ball back toward goal. |
-| `kickoff_first_touch` | Kickoff | kinematic | The first touch within the window after a kickoff. |
+| `kickoff_first_touch` | Kickoff | kinematic | The first touch after a kickoff; the metric is reaction time from car release (GO), not the frozen-countdown setup frame. |
 | `boost_steal` | Boost | kinematic | A full big-pad pickup in the opponent's half. |
 | `demo` | Aggression | event | A demolition, credited to its attacker (authoritative). |
 

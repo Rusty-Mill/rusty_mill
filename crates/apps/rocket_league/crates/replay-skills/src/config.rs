@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every [`crate::report::SkillReport`]; bump when the
 /// defaults below change so a detection result is always reproducible.
-pub const SKILL_CONFIG_VERSION: &str = "skcfg-v2";
+pub const SKILL_CONFIG_VERSION: &str = "skcfg-v3";
 
 /// Thresholds for the kinematic skill detectors. All distances are unreal units
 /// (uu), speeds uu/s, times seconds, boost a raw replicated byte (0..=255).
@@ -83,7 +83,9 @@ pub struct SkillConfig {
     pub supersonic_release_speed: f32,
 
     // --- Kickoff ---
-    /// Window after a kickoff in which the first touch is attributed to it.
+    /// Window after a kickoff within which the first touch is attributed to it —
+    /// spans the frozen countdown plus the approach, so it must clear the full
+    /// setup. The reaction metric itself is measured from car release (GO).
     pub kickoff_touch_window_s: f32,
 
     // --- Boost ---
@@ -134,7 +136,7 @@ impl Default for SkillConfig {
             supersonic_min_duration_s: 0.5,
             supersonic_release_speed: 2100.0,
 
-            kickoff_touch_window_s: 6.0,
+            kickoff_touch_window_s: 10.0,
 
             boost_steal_min_amount: 250,
             boost_steal_min_gain: 100,
