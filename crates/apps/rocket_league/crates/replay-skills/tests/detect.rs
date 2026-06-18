@@ -10,8 +10,8 @@ use replay_analyzer::model::{
     Event, GridCar, GridFrame, Kin, PlayerTrack, Resampled, Rot3, TrackGap, TrackSample, Vec3,
 };
 use replay_skills::detect::{
-    aerials, air_dribbles, boost_steals, ceiling_plays, demos, double_touches, flicks,
-    ground_dribbles, kickoff_first_touches, power_shots, redirects, supersonic, wall_plays,
+    aerial_candidates, aerials, air_dribbles, boost_steals, ceiling_plays, demos, double_touches,
+    flicks, ground_dribbles, kickoff_first_touches, power_shots, redirects, supersonic, wall_plays,
 };
 use replay_skills::{Skill, SkillConfig};
 
@@ -161,6 +161,31 @@ fn no_aerial_for_ground_touch() {
         vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
     )];
     assert!(aerials(&grid(frames), &[touch(1.0, 1, 0)], &cfg()).is_empty());
+}
+
+#[test]
+fn aerial_candidates_emit_car_height_for_every_touch_pre_gate() {
+    // Two touches: one airborne (would pass the aerial gate), one a ground touch
+    // (the detector drops it). Candidate-mode must emit the car height for *both*
+    // — that sub-floor reading is exactly what lets the calibrator fit the floor.
+    let high = frame(
+        1.0,
+        Some(kin(v(0.0, 0.0, 900.0), v(0.0, 0.0, 0.0))),
+        vec![car(1, 0, v(0.0, 0.0, 850.0), v(0.0, 0.0, 0.0))],
+    );
+    let low = frame(
+        2.0,
+        Some(kin(v(0.0, 0.0, 93.0), v(0.0, 0.0, 0.0))),
+        vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+    );
+    let g = grid(vec![high, low]);
+    let events = [touch(1.0, 1, 0), touch(2.0, 1, 0)];
+
+    // Gated detector keeps only the airborne touch...
+    assert_eq!(aerials(&g, &events, &cfg()).len(), 1);
+    // ...but candidate-mode reports both car heights, including the ground touch.
+    let cands = aerial_candidates(&g, &events, &cfg());
+    assert_eq!(cands, vec![850.0, 17.0]);
 }
 
 #[test]

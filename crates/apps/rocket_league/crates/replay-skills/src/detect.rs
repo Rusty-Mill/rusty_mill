@@ -179,6 +179,13 @@ fn emit_speed_run(
     });
 }
 
+/// Car height at the touch frame for `pri` — the raw per-touch metric behind the
+/// aerial gate, read *without* gating. Shared by [`aerial_touch`] (which then
+/// applies the gate) and by candidate-mode ([`aerial_candidates`]).
+fn touch_car_z(resampled: &Resampled, fi: usize, pri: i32) -> Option<f32> {
+    Some(car_in(&resampled.frames[fi], pri)?.p.z)
+}
+
 /// Whether a touch at frame `fi` was an aerial; returns `(car_z, ball_z)`.
 fn aerial_touch(
     resampled: &Resampled,
@@ -186,11 +193,10 @@ fn aerial_touch(
     pri: i32,
     cfg: &SkillConfig,
 ) -> Option<(f32, f32)> {
-    let f = &resampled.frames[fi];
-    let car = car_in(f, pri)?;
-    let ball_z = f.ball?.p.z;
-    (car.p.z >= cfg.aerial_min_height && ball_z >= cfg.aerial_min_ball_height)
-        .then_some((car.p.z, ball_z))
+    let car_z = touch_car_z(resampled, fi, pri)?;
+    let ball_z = resampled.frames[fi].ball?.p.z;
+    (car_z >= cfg.aerial_min_height && ball_z >= cfg.aerial_min_ball_height)
+        .then_some((car_z, ball_z))
 }
 
 /// Aerials: a ball touch taken with the car airborne and elevated.
@@ -220,6 +226,31 @@ pub fn aerials(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Ve
                 metric: car_z,
                 detail: format!("car_z={car_z:.0} ball_z={ball_z:.0}"),
             });
+        }
+    }
+    out
+}
+
+/// Candidate-mode for aerials: the car height at *every* ball touch (pre-gate).
+///
+/// The [`aerials`] detector keeps only touches clearing `aerial_min_height` /
+/// `aerial_min_ball_height`, so a detected aerial's metric is observed only
+/// *above* the floor — the floor itself can never be fit from gated data
+/// (selection bias). This emits the full candidate population (ground touches
+/// included; aerials are its upper tail) so the calibrator can place the floor
+/// and the full-confidence top on the touch-height distribution. Pure twin of
+/// [`aerials`]: same touch→frame resolution, no gate.
+pub fn aerial_candidates(resampled: &Resampled, events: &[Event], cfg: &SkillConfig) -> Vec<f32> {
+    let mut out = Vec::new();
+    for e in events {
+        let Event::Touch { t, pri, .. } = e else {
+            continue;
+        };
+        let Some(fi) = frame_at(&resampled.frames, *t, cfg.touch_frame_tol_s) else {
+            continue;
+        };
+        if let Some(car_z) = touch_car_z(resampled, fi, *pri) {
+            out.push(car_z);
         }
     }
     out

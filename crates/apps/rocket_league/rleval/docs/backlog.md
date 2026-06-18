@@ -365,12 +365,16 @@ look-&-feel comparison against ballchasing's own viewer in
   across the ranked-2v2 corpus and reports, per skill, the metric distribution
   (p10/p50/p90) and **Spearman(per-player mean metric, rank)** (the detector-
   precision check), then writes a fitted `SkillConfig` to
-  `assets/corpus/fitted_skill_config.json` (`replay-skills --config`). Fitting is
-  conservative — a gate's metric is only observed above it (selection bias), so it
-  refits only explicit ramp *upper* anchors (today `high_aerial_height` ← corpus
-  p90), leaving floors at defaults. See `docs/skill-calibration.md`. *Remaining:*
-  the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`; a future
-  "candidate-mode" detector (emit metric pre-gate) would let floors be fit too.
+  `assets/corpus/fitted_skill_config.json` (`replay-skills --config`). **Candidate-
+  mode ✔** — `candidate_metrics` (`skills/src/lib.rs`) emits each detector's metric
+  *pre-gate*, so the fit sees the sub-threshold tail and can place **floors**, not
+  just ramp tops: for aerials, `aerial_min_height` ← the ground/aerial valley in the
+  every-touch height distribution (`fit_aerial_floor`) and `high_aerial_height` ←
+  candidate p99.5; without candidates it falls back to the old top-only fit. The
+  report prints a `└ candidates` line per skill. See `docs/skill-calibration.md`.
+  *Remaining:* the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`;
+  extend candidate-mode + floor fits to the other detectors (flick/power-shot/
+  redirect/duration runs) following the aerials shape.
   Harder mechanics (wave dash, half-flip) stay out — input-only, no kinematic
   signature (double-touch shipped; see the skills feature-direction item).
 - **Map-aware field geometry.** *Phase 1 (classify + flag) ✔* — `field.rs` now

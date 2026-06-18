@@ -83,6 +83,22 @@ pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
     }
 }
 
+/// Candidate-mode metrics: per skill, the pre-gate metric for *every* candidate
+/// event, so the calibrator can fit detection floors — not just ramp tops — from
+/// the full distribution (gated observations only ever sit above the floor).
+///
+/// Today populates [`Skill::Aerial`] (car height at every ball touch); other
+/// detectors extend the same way as their raw per-candidate metric is factored
+/// out of the gated detector.
+pub fn candidate_metrics(m: &CanonicalMatch, cfg: &SkillConfig) -> BTreeMap<Skill, Vec<f32>> {
+    let mut out = BTreeMap::new();
+    out.insert(
+        Skill::Aerial,
+        detect::aerial_candidates(&m.resampled, &m.events, cfg),
+    );
+    out
+}
+
 /// Per-player skill counts: one [`PlayerSkills`] per track (plus a synthetic
 /// entry for any instance credited to a PRI without a track), team/PRI sorted.
 fn rollup(m: &CanonicalMatch, instances: &[SkillInstance]) -> Vec<PlayerSkills> {

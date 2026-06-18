@@ -28,7 +28,7 @@ use replay_analyzer::analyze::roster_match::{team_anchored_pairs, RosterSlot};
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_skills::calibrate::{pctl, refit_skill_config, spearman};
-use replay_skills::{detect_all, profiles, Skill, SkillConfig};
+use replay_skills::{candidate_metrics, detect_all, profiles, Skill, SkillConfig};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -54,10 +54,11 @@ struct Obs {
     tier: f32,
 }
 
-/// Per-replay collection: every instance's raw metric (for distributions) and the
-/// per-player mean-metric ↔ tier pairs (for rank correlation).
+/// Per-replay collection: every instance's raw (gated) metric, every candidate
+/// (pre-gate) metric, and the per-player mean-metric ↔ tier pairs.
 struct Collected {
     raw: Vec<(Skill, f32)>,
+    cand: Vec<(Skill, f32)>,
     obs: Vec<Obs>,
 }
 
@@ -165,6 +166,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .iter()
                             .map(|i| (i.skill, i.metric))
                             .collect();
+                        // Candidate-mode: pre-gate metric for every candidate, so
+                        // the calibrator can fit floors, not just ramp tops.
+                        let cand: Vec<(Skill, f32)> = candidate_metrics(&canonical, cfg)
+                            .into_iter()
+                            .flat_map(|(skill, ms)| ms.into_iter().map(move |m| (skill, m)))
+                            .collect();
 
                         // Per-player mean metric per skill, joined to rank tier.
                         let profs = profiles(&report, canonical.duration_s);
@@ -184,7 +191,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
-                        out.push(Collected { raw, obs });
+                        out.push(Collected { raw, cand, obs });
                     }
                     out
                 })
@@ -196,12 +203,17 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect()
     });
 
-    // Pool: raw metrics per skill (distribution + fit) and (mean, tier) per skill.
+    // Pool: gated metrics per skill (distribution + fit), candidate (pre-gate)
+    // metrics per skill (floor fit), and (mean, tier) per skill.
     let mut raw_by_skill: BTreeMap<Skill, Vec<f32>> = BTreeMap::new();
+    let mut cand_by_skill: BTreeMap<Skill, Vec<f32>> = BTreeMap::new();
     let mut pairs_by_skill: BTreeMap<Skill, (Vec<f32>, Vec<f32>)> = BTreeMap::new();
     for c in &collected {
         for (skill, m) in &c.raw {
             raw_by_skill.entry(*skill).or_default().push(*m);
+        }
+        for (skill, m) in &c.cand {
+            cand_by_skill.entry(*skill).or_default().push(*m);
         }
         for o in &c.obs {
             let e = pairs_by_skill.entry(o.skill).or_default();
@@ -239,16 +251,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             label,
             skill.metric_unit(),
         );
+        // Candidate-mode: the pre-gate population the floor is fit from. The gated
+        // row above is its upper tail; this shows how far below the floor sits.
+        if let Some(c) = cand_by_skill.get(&skill).filter(|c| !c.is_empty()) {
+            println!(
+                "{:<20} {:>6}  {:>8.1} {:>8.1} {:>8.1}   {:>8}   candidates (pre-gate p50/p90/p99)",
+                "  └ candidates",
+                c.len(),
+                pctl(c, 0.50),
+                pctl(c, 0.90),
+                pctl(c, 0.99),
+                "",
+            );
+        }
     }
 
-    // Refit the available ramp anchors and write the fitted config.
-    let fitted = refit_skill_config(&cfg, &raw_by_skill);
+    // Refit the available ramp anchors (floor + top from candidates where present)
+    // and write the fitted config.
+    let fitted = refit_skill_config(&cfg, &raw_by_skill, &cand_by_skill);
     let out_path = corpus_dir.join("fitted_skill_config.json");
     std::fs::write(&out_path, serde_json::to_vec_pretty(&fitted)?)?;
     eprintln!(
-        "\nwrote {} (version {}) — high_aerial_height {:.0} -> {:.0}",
+        "\nwrote {} (version {}) — aerial_min_height {:.0} -> {:.0}, high_aerial_height {:.0} -> {:.0}",
         out_path.display(),
         fitted.version,
+        cfg.aerial_min_height,
+        fitted.aerial_min_height,
         cfg.high_aerial_height,
         fitted.high_aerial_height,
     );
