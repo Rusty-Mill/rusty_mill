@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "recon-check"
 path = "src/bin/recon_check.rs"
 
+[[bin]]
+name = "batch-recon-check"
+path = "src/bin/batch_recon_check.rs"
+
 [dependencies]
 # Our reconstruction (the thing under test) via its PUBLIC model + build_canonical.
 replay-analyzer = { path = ".." }

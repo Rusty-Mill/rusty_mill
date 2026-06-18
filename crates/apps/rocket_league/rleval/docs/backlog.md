@@ -73,8 +73,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   pluggable cipher (`service/app/cipher.py`): `NullCipher` by default, stdlib AEAD
   (HMAC-SHA256 CTR + encrypt-then-MAC, HKDF-separated subkeys) when
   `RLS_ENCRYPTION_KEY` is set. Transparent to the worker (it only sees decrypted
-  bytes); verified end-to-end against the real worker on a sealed store. *Remaining
-  (prod):* swap a KMS/AES-GCM adapter behind the same port + a key-rotation path.
+  bytes); verified end-to-end against the real worker on a sealed store.
+  **Prod ciphers ✔** — `RLS_CIPHER_BACKEND` selects `hmac` (default) / `aesgcm`
+  (AES-256-GCM, `crypto` extra) / `kms` (per-blob data key wrapped by AWS KMS).
+  `unseal` dispatches by blob MAGIC so a backend migration keeps old blobs
+  readable; `RLS_CIPHER_KEY_VERSION` folds into key derivation (version "0" is
+  byte-compatible with legacy blobs; a bump is a hard rotation). moto-tested.
+  *Remaining (prod, infra):* provision the KMS key + IAM grant.
 - **Credit ledger.** ✔ Balance = sum of non-expired deltas; soft-hold → confirm →
   **auto-refund on failure**, idempotent by `replay_id`; holds inherit the grant's
   expiry (no rollover/drift). Property covered (`test_credits`, `test_persistence`).
@@ -95,8 +100,12 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   per replay**; served owner-gated at `GET /v1/reports/{id}/pdf` (§4.10).
   Tested with a fake renderer (`service/tests/test_pdf.py`: render, cache-once,
   owner-gate, 409-not-ready); the real weasyprint path verified on the 42f2 report
-  (75 KB HTML → 63 KB PDF). Where: `service/app/pdf.py`. *Remaining:* per-player PDF
-  scoping (currently the full-lobby report).
+  (75 KB HTML → 63 KB PDF). Where: `service/app/pdf.py`. **Per-player scoping ✔** —
+  `render::html_for_player` (scoring) renders just one player's card + the lobby
+  comparison table (their column marked); `replay-scoring --html` honours
+  `--player`. `GET /v1/reports/{id}/pdf?player=<id>` renders that player on demand
+  from the cached canonical (`Scorer.render_player_html`), 404/409/503 on
+  unknown-player / no-canonical / render-fail; the full-lobby PDF stays cached.
 - **Observability.** ✔ A stdlib metrics registry (`service/app/metrics.py`,
   no `prometheus_client`) at `GET /metrics` in Prometheus text format: upload
   outcomes, scoring results, **per-stage scoring timings** (parse+score / persist /
@@ -167,6 +176,13 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
   `42f2`/`419a` and runs both reconstructions in-process — no network). This is
   *reconstruction-layer* independence (boxcars is the deliberately-shared parse
   layer; Phase 1 covers that boundary for header facts). Where: `recon-check/`.
+  **Corpus-wide run ✔** — the `batch-recon-check` bin runs the cross-check across
+  the whole manifest and aggregates (R1 pass/fail, ball-median + agree-rate
+  distributions, offender list); `--gate` exits non-zero on any R1 fail. It's a
+  local/with-corpus gate (corpus replays gitignored — `refresh_corpus_replays.py`),
+  gating only replays that actually ran, so a corpus-less checkout is a no-op. Run
+  in `--release`. *Remaining:* the full 180-replay run needs `BALLCHASING_API_KEY`
+  to fetch the corpus, then investigate any offenders (don't loosen thresholds).
 - **Ballchasing stat parity** *(in progress)* — close the gap between our 5-field
   `PlayerFeatures` and ballchasing's full boost/movement/positioning surface. Full
   audit + parity matrix + plan in `docs/ballchasing-parity.md`. Mostly an
@@ -222,10 +238,14 @@ product direction rather than the milestone plan.
   peak height uu, dribble duration s, power-shot ball speed uu/s, redirect angle
   deg, boost stolen %), so profiles report **mean aerial height / dribble
   duration** rather than only the normalized confidence proxy
-  (`Skill::metric_label` / `metric_unit` self-describe it). *Remaining:* harder
-  mechanics (wave dash, half-flip, double touch) where a kinematic signature is
-  separable. Pairs with the "calibrate skill thresholds" follow-up. Where:
-  `skills/` (this repo).
+  (`Skill::metric_label` / `metric_unit` self-describe it). *Double touch ✔* —
+  `detect::double_touches` (13th skill, `skcfg-v2`): two same-player contacts in
+  quick succession with the ball elevated (pop-and-strike); kinematically
+  separable, so unlike the input-only mechanics it earns a detector. *Remaining:*
+  **wave dash / half-flip** are input-only (replays carry motion, not controller
+  inputs) — only worth a best-effort kinematic heuristic if the false-positive
+  risk is acceptable (**needs a product call**). Pairs with the "calibrate skill
+  thresholds" follow-up. Where: `skills/` (this repo).
 - **3D replay simulation / viewer.** ✔ *First increment shipped* — the
   `replay-viewer` crate distills the resampled grid + events + detected skills
   into a compact `Scene` and embeds it in a self-contained three.js viewer
@@ -255,18 +275,31 @@ Tracked churn-list. Items needing a product/visual decision are marked
 - [x] Jump to next/prev goal & kickoff (n/p, k/j); loop; ◀▶ ±1s
 - [x] Show/hide toggles (trails, labels, boost)
 - [x] HUD polish: bottom-bar layout + SVG play/pause (emoji glyph dropped)
+- [x] Consolidate settings onto a single settings panel — a ⚙ button (and `g`
+  key) opens a centered Settings panel holding the show/hide toggles
+  (trails + trail-len, labels, boost, team-colour, pads, heatmap, pad-heatmap,
+  player-stats) and the field-overlay controls; backdrop/✕/Esc close it. Camera
+  presets stay in `#left`; the play/scrub transport + speed/loop stay on the bar.
+  Pure `render.rs` reorg (`#setOverlay`/`toggleSettings`); ids preserved.
 
 **Ballchasing-parity adds** (see `docs/ballchasing-parity.md` §4 and the 3D-viewer
 look-&-feel comparison against ballchasing's own viewer in
 `docs/viewer-vs-ballchasing-video.md`)
-- [ ] Better car models — recognizable RL-body silhouette over the cabin+nose box **(needs visual decision)**
+- [x] Better car models — a rounded procedural hull (`carHullGeometry`): an Octane-ish side silhouette (sloped nose, cabin hump, rear deck) extruded across the width with bevelled edges, + a glass canopy; kept procedural so the offline file stays self-contained
 - [x] Boost amount above each car in 3D — a **refilling boost pill** over each car (rounded track that fills left-to-right with the level, green/amber/red, value inside; `makeBoostPill`/`setBoostPill`), tied to the `boost` toggle; replaced the earlier vertical bar + numeric sprite
 - [x] Roster boost fill bar (side panel) — each roster row's `.bz` pill fills with the boost level (matches ballchasing's side gauge), alongside speed / role / G·A·Sv / impact
-- [ ] Game-clock countdown, kickoff 3-2-1 indicator, top-down camera preset, settings parity (one-colour-per-team, split hide-names/hide-boost, trail duration) — see `docs/viewer-vs-ballchasing-video.md`
+- [x] Game-clock countdown (click the clock to toggle an RL-style 5:00 countdown vs elapsed/total; `gameClock`/`playedBy`), kickoff 3-2-1 indicator (`updateKickoff` — a digit pops over the ball during each kickoff window), top-down camera preset (`top` button + `t` key; `TOPDOWN` pose), and settings parity — one-colour-per-team toggle (`team colour`/`applyCarColours`) + trail-duration slider (`trailSecs`); the split hide-names/hide-boost ballchasing has were already our `labels`/`boost` toggles — see `docs/viewer-vs-ballchasing-video.md`
 - [x] Score reflects playback time — `updateScore(t)` tallies `goal` events with `t <= playhead` instead of the final `team_scores`
 - [x] Boost-pad pickup map — the 6 big / 28 small pads flash when collected, tinted by team (`Scene.pad_pickups` → `updatePads`/`padByKey`; `pads` toggle)
 - [x] "Pressure" / ball-side timeline strip — which half the ball sits in over the match (ball y in team 0's attack frame; blue pressing above / orange below), next to the momentum strip (`drawPressure`)
-- [ ] Boost-timeline strip per player; thirds-occupancy + most-back tag; speed-bucket bar
+- [x] Per-player analysis strips — Settings → "player stats" adds, per roster
+  player, a boost-over-match sparkline (from per-frame `SceneCar.boost`), a
+  speed-bucket bar (slow/boost/supersonic), a thirds-occupancy bar, and a
+  most-back tag (`playerstats::attach_player_stats` → `Scene.player_stats` from
+  `analyze::bcstats`; `buildPlayerStats` in `render.rs`)
+- [x] Per-pad boost heatmap — Settings → "pad heatmap" colours each pad by how
+  often it was collected over the match (`padHeatCounts`/`paintPadHeat`, reusing
+  the `heatColor` ramp; aggregates `Scene.pad_pickups`)
 
 **Analysis overlays**
 - [x] Scoring roles (1st/2nd man): gold ring + HUD tag on the 1st man (from `replay-scoring`; leak still TODO)
@@ -327,12 +360,19 @@ look-&-feel comparison against ballchasing's own viewer in
 - **Heavier value learner.** `ValueModel` is a deliberately simple logistic model
   behind a stable interface; swap in a GBM/NN once the corpus justifies it
   (`value/src/model.rs` doc note). Held-out VAL AUC is currently ≈0.71.
-- **Calibrate skill thresholds against a corpus.** `replay-skills`' `SkillConfig`
-  defaults are pre-calibration geometry guesses; fit them (e.g. aerial-height,
-  dribble-proximity, power-shot-speed bands) against the labeled corpus so the
-  per-skill counts track reality, and validate detector precision against
-  ballchasing/hand-labeled clips. Extendable to more mechanics (wave dash,
-  half-flip) only if a kinematic signature proves separable.
+- **Calibrate skill thresholds against a corpus.** *Harness ✔* — `calibrate-skills`
+  (`skills/src/bin/calibrate_skills.rs` + pure `skills/src/calibrate.rs`) detects
+  across the ranked-2v2 corpus and reports, per skill, the metric distribution
+  (p10/p50/p90) and **Spearman(per-player mean metric, rank)** (the detector-
+  precision check), then writes a fitted `SkillConfig` to
+  `assets/corpus/fitted_skill_config.json` (`replay-skills --config`). Fitting is
+  conservative — a gate's metric is only observed above it (selection bias), so it
+  refits only explicit ramp *upper* anchors (today `high_aerial_height` ← corpus
+  p90), leaving floors at defaults. See `docs/skill-calibration.md`. *Remaining:*
+  the real fit needs the gitignored corpus + `BALLCHASING_API_KEY`; a future
+  "candidate-mode" detector (emit metric pre-gate) would let floors be fit too.
+  Harder mechanics (wave dash, half-flip) stay out — input-only, no kinematic
+  signature (double-touch shipped; see the skills feature-direction item).
 - **Map-aware field geometry.** *Phase 1 (classify + flag) ✔* — `field.rs` now
   has geometry-as-data (`FieldGeometry`, `geometry_for_map`) and a `classify_map`
   / `is_standard_geometry` registry. The competitive Standard arenas (cosmetic

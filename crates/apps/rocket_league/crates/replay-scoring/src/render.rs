@@ -42,6 +42,22 @@ fn mmss(secs: f32) -> String {
 /// Render the full report as a standalone HTML document. `heatmaps` maps a
 /// player's `target_pri` to its inline SVG.
 pub fn html(lobby: &LobbyReport, heatmaps: &[(i32, String)]) -> String {
+    render(lobby, heatmaps, None)
+}
+
+/// Render a **per-player-scoped** report: only `focus_pri`'s detailed card (plus
+/// the lobby comparison table, for context). Used for per-player PDF export
+/// (§4.10). Falls back to the full report if `focus_pri` isn't in the lobby.
+pub fn html_for_player(lobby: &LobbyReport, heatmaps: &[(i32, String)], focus_pri: i32) -> String {
+    let focus = lobby
+        .players
+        .iter()
+        .any(|p| p.target_pri == focus_pri)
+        .then_some(focus_pri);
+    render(lobby, heatmaps, focus)
+}
+
+fn render(lobby: &LobbyReport, heatmaps: &[(i32, String)], focus: Option<i32>) -> String {
     let svg_for = |pri: i32| -> &str {
         heatmaps
             .iter()
@@ -49,24 +65,43 @@ pub fn html(lobby: &LobbyReport, heatmaps: &[(i32, String)]) -> String {
             .map(|(_, s)| s.as_str())
             .unwrap_or("")
     };
+    let focus_name = focus
+        .and_then(|pri| lobby.players.iter().find(|p| p.target_pri == pri))
+        .map(|p| p.target_player.as_str());
 
     let mut h = String::with_capacity(16 * 1024);
     h.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     h.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-    let _ = write!(
-        h,
-        "<title>Replay report — {}</title>",
-        esc(&lobby.replay_id)
-    );
+    match focus_name {
+        Some(name) => {
+            let _ = write!(
+                h,
+                "<title>Replay report — {} — {}</title>",
+                esc(name),
+                esc(&lobby.replay_id)
+            );
+        }
+        None => {
+            let _ = write!(
+                h,
+                "<title>Replay report — {}</title>",
+                esc(&lobby.replay_id)
+            );
+        }
+    }
     h.push_str(STYLE);
     h.push_str("</head><body><main>");
 
-    // Header.
+    // Header (carries the focus player's name when the report is scoped).
     let blue = lobby.team_scores.get(&0).copied().unwrap_or(0);
     let orange = lobby.team_scores.get(&1).copied().unwrap_or(0);
+    let h1 = match focus_name {
+        Some(name) => format!("Decision-discipline report — {}", esc(name)),
+        None => "Decision-discipline report".to_string(),
+    };
     let _ = write!(
         h,
-        "<header><h1>Decision-discipline report</h1>\
+        "<header><h1>{h1}</h1>\
          <div class=\"meta\"><span>{}</span><span class=\"score\">\
          <b class=\"blue\">{blue}</b> – <b class=\"orange\">{orange}</b></span>\
          <span>{}</span><span>{}</span><span class=\"cfg\">{}</span></div></header>",
@@ -76,11 +111,14 @@ pub fn html(lobby: &LobbyReport, heatmaps: &[(i32, String)]) -> String {
         esc(&lobby.score_config_version),
     );
 
-    comparison_table(&mut h, lobby);
+    comparison_table(&mut h, lobby, focus);
 
-    // Player cards.
+    // Player cards — all of them, or just the focus player's when scoped.
     h.push_str("<section class=\"cards\">");
     for p in &lobby.players {
+        if focus.is_some_and(|f| f != p.target_pri) {
+            continue;
+        }
         player_card(&mut h, p, svg_for(p.target_pri));
     }
     h.push_str("</section>");
@@ -89,13 +127,17 @@ pub fn html(lobby: &LobbyReport, heatmaps: &[(i32, String)]) -> String {
     h
 }
 
-fn comparison_table(h: &mut String, lobby: &LobbyReport) {
+fn comparison_table(h: &mut String, lobby: &LobbyReport, focus: Option<i32>) {
+    // Column index of the focus player, so a scoped report marks their column.
+    let focus_idx = focus.and_then(|pri| lobby.players.iter().position(|p| p.target_pri == pri));
+    let foc = |i: usize| if Some(i) == focus_idx { " focus" } else { "" };
     h.push_str("<section><h2>Lobby comparison</h2><table class=\"cmp\"><thead><tr><th>metric</th>");
-    for p in &lobby.players {
+    for (i, p) in lobby.players.iter().enumerate() {
         let _ = write!(
             h,
-            "<th class=\"{}\">{}<small>{:.0}</small></th>",
+            "<th class=\"{}{}\">{}<small>{:.0}</small></th>",
             team_class(p.target_team),
+            foc(i),
             esc(&p.target_player),
             p.composite
         );
@@ -111,14 +153,19 @@ fn comparison_table(h: &mut String, lobby: &LobbyReport) {
         .map(|(i, _)| i);
     for (i, p) in lobby.players.iter().enumerate() {
         let lead = if Some(i) == best { " lead" } else { "" };
-        let _ = write!(h, "<td class=\"num{lead}\">{:.0}</td>", p.composite);
+        let _ = write!(
+            h,
+            "<td class=\"num{lead}{}\">{:.0}</td>",
+            foc(i),
+            p.composite
+        );
     }
     h.push_str("</tr>");
     for row in &lobby.comparison {
         let _ = write!(h, "<tr><td>{}</td>", esc(&row.key));
         for (i, v) in row.normalized.iter().enumerate() {
             let lead = if Some(i) == row.leader { " lead" } else { "" };
-            let _ = write!(h, "<td class=\"num{lead}\">{v:.0}</td>");
+            let _ = write!(h, "<td class=\"num{lead}{}\">{v:.0}</td>", foc(i));
         }
         h.push_str("</tr>");
     }
@@ -188,6 +235,7 @@ table.cmp{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 .cmp th:first-child,.cmp td:first-child{text-align:left;color:var(--mut)}\
 .cmp th small{display:block;color:var(--mut);font-weight:400}\
 .cmp td.num{color:var(--ink)}.cmp td.lead{background:rgba(76,141,255,.16);font-weight:700}\
+.cmp th.focus,.cmp td.focus{box-shadow:inset 2px 0 var(--blue),inset -2px 0 var(--blue)}\
 .cmp tr.composite td{border-bottom:2px solid var(--line);font-weight:600}\
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:14px}\
 .card{background:var(--panel);border:1px solid var(--line);border-top:3px solid var(--mut);border-radius:8px;padding:14px}\

@@ -15,7 +15,7 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from app import config, credits, db
 from app.models import Account
-from app.scoring import PlayerScore, ScoreResult
+from app.scoring import PlayerScore, ScoreResult, ScoringError
 
 
 def sample_players() -> list[PlayerScore]:
@@ -80,6 +80,16 @@ class FakeScorer:
         if self.fail:
             raise RuntimeError("worker boom")
         return self._result(with_canonical=False)
+
+    def render_player_html(
+        self, canonical_blob: bytes, replay_id: str, player_id: str
+    ) -> str:
+        self.calls += 1
+        self.last_method = "render_player_html"
+        if self.fail:
+            raise ScoringError("worker boom")
+        # Echo the player so a test can assert the PDF was scoped to them.
+        return f"<html><body>report for {player_id}</body></html>"
 
 
 class FakePdfRenderer:

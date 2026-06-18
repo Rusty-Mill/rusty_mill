@@ -39,7 +39,7 @@ from .db import get_session, init_db
 from .models import Account, LeaderboardEntry, Replay, Report, utcnow
 from .pdf import PdfRenderer, PdfRenderError, WeasyPrintRenderer
 from .queue import BackgroundTaskQueue, JobQueue
-from .scoring import Scorer, SubprocessScorer
+from .scoring import Scorer, ScoringError, SubprocessScorer
 from .service import ingest, replay_id_for, rescore
 
 
@@ -119,6 +119,10 @@ def get_queue(
 
 def get_pdf_renderer(request: Request) -> PdfRenderer:
     return request.app.state.pdf_renderer
+
+
+def get_scorer(request: Request) -> Scorer:
+    return request.app.state.scorer
 
 
 def current_account(
@@ -288,15 +292,48 @@ def _enrich(session: Session, rows: list[LeaderboardEntry]) -> list[dict]:
 @app.get("/v1/reports/{replay_id}/pdf")
 def get_report_pdf(
     replay_id: str,
+    player: str | None = None,
     account: Account = Depends(current_account),
     session: Session = Depends(get_session),
     renderer: PdfRenderer = Depends(get_pdf_renderer),
+    scorer: Scorer = Depends(get_scorer),
 ) -> Response:
     replay = session.get(Replay, replay_id)
     if replay is None or replay.account_id != account.id:
         raise HTTPException(404, "report not found")
     if replay.status != "done":
         raise HTTPException(409, f"report not ready (status={replay.status})")
+
+    # Per-player scope (?player=<player_id>): render that player's report on
+    # demand from the cached canonical (the worker scopes the HTML via --player).
+    # Not cached — a less-common path, and it sidesteps per-player cache
+    # invalidation on re-score (the full-lobby PDF below stays cached, §4.10).
+    if player is not None:
+        in_report = session.exec(
+            select(Report).where(
+                Report.replay_id == replay_id, Report.player_id == player
+            )
+        ).first()
+        if in_report is None:
+            raise HTTPException(404, "player not in this report")
+        if not blobs.has_canonical(replay_id):
+            raise HTTPException(
+                409, "per-player PDF requires the cached canonical (RLS_CACHE_CANONICAL)"
+            )
+        try:
+            html = scorer.render_player_html(
+                blobs.load_canonical(replay_id), replay_id, player
+            )
+            pdf = renderer.render(html)
+        except PdfRenderError as e:
+            raise HTTPException(503, str(e)) from e
+        except ScoringError as e:
+            raise HTTPException(503, str(e)) from e
+        return Response(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{replay_id}-player.pdf"'},
+        )
 
     if not blobs.has_pdf(replay_id):  # render once, then cache (§4.10)
         if not blobs.has_html(replay_id):

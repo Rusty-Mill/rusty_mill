@@ -89,6 +89,48 @@ fn html_report_has_sections_and_escapes_hostile_names() {
     assert!(!out.contains("<script>"));
 }
 
+#[test]
+fn html_for_player_scopes_to_one_card() {
+    let players = vec![mk_report("Alice", 1, 0, 60.0), mk_report("Bob", 2, 1, 40.0)];
+    let comparison = vec![MetricRow {
+        key: "boost_management".into(),
+        normalized: vec![60.0, 40.0],
+        leader: Some(0),
+    }];
+    let lobby = LobbyReport {
+        replay_id: "rid".into(),
+        map: Some("DFH Stadium".into()),
+        duration_s: 312.0,
+        score_config_version: "scfg-test".into(),
+        team_scores: BTreeMap::from([(0, 3), (1, 2)]),
+        players,
+        comparison,
+    };
+
+    let full = html(&lobby, &[]);
+    assert_eq!(
+        full.matches("<article class=\"card").count(),
+        2,
+        "full report renders every player card"
+    );
+
+    let scoped = replay_scoring::render::html_for_player(&lobby, &[], 1);
+    assert_eq!(
+        scoped.matches("<article class=\"card").count(),
+        1,
+        "scoped report renders only the focus player's card"
+    );
+    assert!(scoped.contains("Decision-discipline report — Alice")); // focus name in header
+    assert!(scoped.contains("<h3>Alice</h3>"));
+    assert!(!scoped.contains("<h3>Bob</h3>")); // Bob's card is dropped
+    assert!(scoped.contains("Bob")); // ...but he's still in the comparison table
+    assert!(scoped.contains("focus")); // the focus column is marked
+
+    // An unknown focus pri falls back to the full report.
+    let fallback = replay_scoring::render::html_for_player(&lobby, &[], 999);
+    assert_eq!(fallback.matches("<article class=\"card").count(), 2);
+}
+
 /// End-to-end smoke test: assemble a real corpus replay if one is present.
 #[test]
 fn assembles_on_real_replay_if_present() {

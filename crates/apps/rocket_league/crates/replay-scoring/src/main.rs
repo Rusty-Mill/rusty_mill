@@ -6,7 +6,7 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
-use replay_scoring::render::html;
+use replay_scoring::render::{html, html_for_player};
 use replay_scoring::{score_all, score_by_name, Report, ScoreConfig};
 use std::error::Error;
 use std::path::Path;
@@ -113,8 +113,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     if let Some(path) = &html_out {
-        // The HTML report is always a full-lobby artifact (§4.10), independent of
-        // --player: every player, the comparison table, and per-player heatmaps.
+        // The HTML report assembles the full lobby (comparison table + per-player
+        // heatmaps); with --player it's scoped to that player's card (§4.10).
         let lobby = assemble(&canonical, &cfg);
         let heatmaps: Vec<(i32, String)> = lobby
             .players
@@ -125,7 +125,12 @@ fn run() -> Result<(), Box<dyn Error>> {
                 (p.target_pri, render_svg(&occ, &touches))
             })
             .collect();
-        std::fs::write(path, html(&lobby, &heatmaps))?;
+        let doc = match &player {
+            // `reports` holds the single scored player when --player is set.
+            Some(_) => html_for_player(&lobby, &heatmaps, reports[0].target_pri),
+            None => html(&lobby, &heatmaps),
+        };
+        std::fs::write(path, doc)?;
         eprintln!("\nwrote HTML report -> {path}");
     }
     Ok(())

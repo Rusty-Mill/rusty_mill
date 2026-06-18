@@ -110,7 +110,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   #top #poss { font-size: 11px; font-weight: 700; }
   #warn { top:64px; left:50%; transform:translateX(-50%); font-size:12px; font-weight:700;
     color:#f0b429; background:rgba(46,34,8,.88); border-color:#7a5a10; }
-  #players { top: 10px; left: 10px; min-width: 196px; }
+  #players { top: 10px; left: 10px; min-width: 196px; max-height: 92vh; overflow:auto; }
   #players .row { cursor:pointer; padding:2px 3px; border-radius:4px; }
   #players .row:hover { background:#1c2230; }
   #players .row.follow { background:#243049; outline:1px solid #3b82f6; }
@@ -126,6 +126,15 @@ const TEMPLATE: &str = r##"<!doctype html>
   #players .role { font-size:9px; color:#6e7681; margin-left:6px; }
   #players .role.first { color:#ffd166; }
   #players .imp { margin-left:auto; font-size:10px; font-weight:700; cursor:help; }
+  #pstats { display:none; margin-top:8px; padding-top:7px; border-top:1px solid #1f2937; }
+  #pstats h4 { margin:0 0 6px; font-size:10px; letter-spacing:.04em; color:#8b949e; font-weight:700; }
+  #pstats .ps { margin-bottom:9px; }
+  #pstats .ps .nm { display:flex; align-items:center; font-size:11px; }
+  #pstats .ps .mb { margin-left:auto; font-size:9px; color:#ffd166; }
+  #pstats canvas.spark { display:block; width:100%; height:20px; margin:3px 0; border-radius:2px; }
+  #pstats .bar { display:flex; height:9px; border-radius:3px; overflow:hidden; margin:2px 0; }
+  #pstats .bar i { display:block; height:100%; }
+  #pstats .cap { font-size:9px; color:#6e7681; }
   #ticker .ev .d { font-weight:700; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
   #ticker .ev { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -143,15 +152,25 @@ const TEMPLATE: &str = r##"<!doctype html>
   #left .cams button { padding:3px 7px; }
   #left .cams button.on { background:#243049; border-color:#3b82f6; }
   #left label { color:#c9d1d9; margin-right:8px; user-select:none; }
-  #left .ov { display:flex; align-items:center; gap:5px; color:#8b949e; }
-  #left .ov select, #left .ov button { height:24px; padding:0 6px; }
-  #left .ov input[type=range] { width:74px; }
+  #setBtn { align-self:flex-start; padding:4px 9px; }
+  #setOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center;
+    justify-content:center; background:rgba(0,0,0,.45); }
+  #setPanel { min-width:300px; max-width:390px; cursor:default; }
+  #setPanel .sethead { display:flex; align-items:center; justify-content:space-between; margin-bottom:9px; }
+  #setPanel .sethead button { padding:1px 8px; }
+  #setPanel .setgrid { display:grid; grid-template-columns:1fr 1fr; gap:7px 14px; }
+  #setPanel label { color:#c9d1d9; display:flex; align-items:center; gap:5px; user-select:none; }
+  #setPanel .setrow { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+    margin-top:11px; padding-top:9px; border-top:1px solid #1f2937; color:#8b949e; }
+  #setPanel select, #setPanel .setrow button { height:24px; padding:0 6px; }
+  #setPanel input[type=range] { width:92px; }
   #help { left:10px; bottom:10px; color:#6e7681; font-size:11px; }
   #bar { left: 50%; bottom: 14px; transform: translateX(-50%); display:flex;
     align-items:center; gap:10px; width: min(900px, 92vw); }
   #bar button.icon { width:34px; height:30px; display:flex; align-items:center; justify-content:center; }
   #bar select { background:#21262d; color:#e6edf3; border:1px solid #30363d; border-radius:6px; height:30px; }
-  #clock { min-width: 116px; text-align:center; color:#c9d1d9; }
+  #clock { min-width: 116px; text-align:center; color:#c9d1d9; cursor:pointer; user-select:none; }
+  #clock:hover { color:#fff; }
   #tlwrap { position:relative; flex:1; display:flex; flex-direction:column; gap:1px; }
   #wp { width:100%; height:20px; display:block; border-radius:3px; }
   #pressure { width:100%; height:14px; display:block; border-radius:3px; margin-bottom:2px; }
@@ -186,7 +205,7 @@ const TEMPLATE: &str = r##"<!doctype html>
 <div id="helpOverlay"><div class="panel">
   <b>Keyboard</b><br>
   space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
-  i / o set an A–B loop · x clear it · 0 free cam · d draw · z undo · s save PNG · ? help<br><br>
+  i / o set an A–B loop · x clear it · 0 free cam · t top-down cam · g settings · d draw · z undo · s save PNG · ? help<br><br>
   <b>Mouse</b><br>
   drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
   <b>Tools</b><br>
@@ -202,17 +221,26 @@ const TEMPLATE: &str = r##"<!doctype html>
     <button data-cam="free" class="on">overview</button>
     <button data-cam="goal">goal</button>
     <button data-cam="ball">ball</button>
+    <button data-cam="top">top</button>
     <button data-cam="broadcast">tv</button>
   </div>
-  <div class="panel">
+  <button id="setBtn" class="panel" title="settings (g)">⚙ settings</button>
+</div>
+<div id="setOverlay"><div id="setPanel" class="panel">
+  <div class="sethead"><b>Settings</b><button id="setClose" title="close (g / esc)">✕</button></div>
+  <div class="setgrid">
     <label><input type="checkbox" id="tgTrails" checked> trails</label>
+    <label title="trail length (s)">trail len<input type="range" id="trailLen" min="0.3" max="4" step="0.1" value="1.3"></label>
     <label><input type="checkbox" id="tgLabels" checked> labels</label>
-    <label><input type="checkbox" id="tgBoost" checked> boost</label>
-    <label><input type="checkbox" id="tgPads" checked> pads</label>
+    <label><input type="checkbox" id="tgBoost" checked> boost amount</label>
+    <label><input type="checkbox" id="tgTeamCol" checked> team colour</label>
+    <label><input type="checkbox" id="tgPads" checked> boost pads</label>
     <label><input type="checkbox" id="tgHeat"> heatmap</label>
+    <label title="colour each pad by how often it was collected"><input type="checkbox" id="tgPadHeat"> pad heatmap</label>
+    <label title="per-player boost / speed / positioning strips in the roster"><input type="checkbox" id="tgPlayerStats"> player stats</label>
   </div>
-  <div class="panel ov">
-    overlay
+  <div class="setrow ov">
+    <span>field overlay</span>
     <select id="ovSel" title="field overlay">
       <option value="none">none</option>
       <option value="thirds">thirds</option>
@@ -222,14 +250,14 @@ const TEMPLATE: &str = r##"<!doctype html>
     </select>
     <button id="ovLoad" title="load a field image (or drag one onto the view)">img…</button>
     <input type="file" id="ovFile" accept="image/*" style="display:none">
-    <input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity">
+    <label>opacity<input type="range" id="ovOpacity" min="0" max="100" value="55" title="overlay opacity"></label>
   </div>
-</div>
+</div></div>
 <canvas id="minimap" class="panel"></canvas>
-<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · d draw · s png · ? help</div>
+<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · g settings · d draw · ? help</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
-  <span id="clock">0:00.0</span>
+  <span id="clock" title="click: RL game clock / elapsed">0:00.0</span>
   <div id="tlwrap">
     <canvas id="pressure" title="pressure — which half the ball is in: blue pressing above, orange below"></canvas>
     <canvas id="wp" title="momentum — P(next goal): blue above, orange below"></canvas>
@@ -297,6 +325,9 @@ function gradientBg() {
 // --- camera presets ---
 const OVERVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.22, F.ceiling_z * 2.0), tgt: new THREE.Vector3(0, 0, 150) };
 const GOALVIEW = { pos: new THREE.Vector3(0, -F.back_wall_y * 1.5, F.ceiling_z * 1.1), tgt: new THREE.Vector3(0, F.back_wall_y * 0.3, 200) };
+// Straight-down overhead: camera high above centre, looking at the floor. Needs
+// a +Y up vector (see setCam) so a goal end reads as screen-up, not a gimbal flip.
+const TOPDOWN = { pos: new THREE.Vector3(0, 0, F.back_wall_y * 2.45), tgt: new THREE.Vector3(0, 0, 0) };
 const BROADCAST_POS = new THREE.Vector3(F.side_wall_x * 1.4, -F.back_wall_y * 0.2, F.ceiling_z * 1.6);
 let cam = { mode: 'free', pri: null };
 let camTween = null; // eased preset transition
@@ -310,8 +341,12 @@ controls.addEventListener('start', () => camTween = null); // user grab cancels 
 function setCam(mode, pri) {
   cam = { mode, pri: pri ?? null };
   document.querySelectorAll('#left .cams button').forEach(b => b.classList.toggle('on', b.dataset.cam === mode));
+  // Overhead wants +Y up; every other view uses the world Z-up. Set before the
+  // pose so OrbitControls orients correctly.
+  camera.up.set(0, mode === 'top' ? 1 : 0, mode === 'top' ? 0 : 1);
   if (mode === 'free') applyPose(OVERVIEW);
   else if (mode === 'goal') applyPose(GOALVIEW);
+  else if (mode === 'top') applyPose(TOPDOWN);
   if (mode === 'player') heatSubject = pri;
   else if (mode === 'ball') heatSubject = 'ball';
   refreshHeat(); // re-bin for the new subject if the heatmap is shown
@@ -321,11 +356,45 @@ document.querySelectorAll('#left .cams button').forEach(b => b.onclick = () => s
 
 buildField();
 const ball = makeBall();
+const TRAIL_CAP = 128; // max points held per trail buffer (caps the duration slider)
+let trailSecs = 1.3;   // car-trail window (s); ball trail uses a touch less
 const ballTrail = new THREE.Line(
-  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3)),
+  new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_CAP * 3), 3)),
   new THREE.LineBasicMaterial({ color: 0xe6e6e6, transparent: true, opacity: .5 }));
 ballTrail.frustumCulled = false; scene.add(ballTrail);
 const cars = buildCars();
+
+// Kickoff 3-2-1: a big digit over the ball during each kickoff's countdown window
+// (ballchasing shows the same). Kickoff events mark the ball reset; the count runs
+// 3→2→1 over the ~3s before play. One reused sprite, textures cached per digit.
+const kickoffTimes = S.events.filter(e => e.kind === 'kickoff').map(e => e.t);
+const koTexCache = new Map();
+function countdownTex(n) {
+  if (koTexCache.has(n)) return koTexCache.get(n);
+  const cv = document.createElement('canvas'); cv.width = 128; cv.height = 128;
+  const x = cv.getContext('2d');
+  x.font = 'bold 104px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 10; x.strokeStyle = 'rgba(0,0,0,.85)'; x.strokeText(n, 64, 70);
+  x.fillStyle = '#fff'; x.fillText(n, 64, 70);
+  const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
+  koTexCache.set(n, t); return t;
+}
+const koSprite = new THREE.Sprite(new THREE.SpriteMaterial({ depthTest: false, transparent: true, opacity: 0 }));
+koSprite.scale.set(520, 520, 1); koSprite.visible = false; scene.add(koSprite);
+function updateKickoff(t, st) {
+  let kt = null;
+  for (const k of kickoffTimes) { if (k > t + 1e-3) break; kt = k; }
+  const age = kt != null ? t - kt : 99;
+  if (!st.ball || age < 0 || age >= 3) { koSprite.visible = false; return; }
+  const n = 3 - Math.floor(age);            // 3, 2, 1
+  const frac = age - Math.floor(age);       // 0→1 within the current second
+  koSprite.material.map = countdownTex(n);
+  koSprite.material.opacity = Math.min(1, (1 - frac) * 1.6); // pop in, fade before the next digit
+  const s = 520 * (1.25 - 0.25 * Math.min(1, frac * 2));     // a brief scale pop each tick
+  koSprite.scale.set(s, s, 1);
+  koSprite.position.set(st.ball[0], st.ball[1], st.ball[2] + 230);
+  koSprite.visible = true;
+}
 
 // --- floor heatmap: occupancy of the ball or the followed car over the match,
 // computed from the same grid positions the scoring heatmaps use ---
@@ -447,10 +516,32 @@ for (const [px, py] of SMALL_PADS) {
 // the collecting team. Recomputed from the playhead, so scrubbing just works.
 const PAD_FLASH_S = 1.2;
 const padPickups = S.pad_pickups || [];
+// Per-pad heatmap: total collections per pad over the whole match, tinted on the
+// pad mesh (which pads get worked hardest). Counts are static, so it's a constant
+// overlay; toggled in Settings. Suppresses the per-frame flash while on.
+let padHeat = false;
+const padHeatCounts = new Map();
+let padHeatMax = 0;
+for (const pk of padPickups) {
+  const key = padKey(pk.pad[0], pk.pad[1]);
+  const c = (padHeatCounts.get(key) || 0) + 1;
+  padHeatCounts.set(key, c);
+  if (c > padHeatMax) padHeatMax = c;
+}
+function paintPadHeat() {
+  for (const [key, e] of padByKey) {
+    const c = padHeatCounts.get(key) || 0;
+    const k = padHeatMax > 0 ? Math.pow(c / padHeatMax, 0.6) : 0;
+    const [r, g, b] = heatColor(k);
+    e.mesh.material.color.setRGB(r / 255, g / 255, b / 255);
+    e.mesh.material.opacity = c > 0 ? Math.min(0.92, 0.25 + k * 0.7) : e.baseOp * 0.4;
+  }
+}
 function updatePads(t) {
   for (const p of padByKey.values()) {
     p.mesh.material.color.setHex(p.base); p.mesh.material.opacity = p.baseOp; p.mesh.scale.setScalar(1);
   }
+  if (padHeat) { paintPadHeat(); return; }
   if (!show.pads) return;
   for (const pk of padPickups) {            // sorted by t; later (more recent) wins
     const age = t - pk.t;
@@ -589,6 +680,18 @@ function exportPNG() {
 document.getElementById('drawSave').onclick = exportPNG;
 const helpEl = document.getElementById('helpOverlay');
 helpEl.onclick = () => { helpEl.style.display = 'none'; };
+
+// Settings panel: one home for the display toggles + overlay controls (camera
+// presets and the playback transport stay on-canvas). The backdrop closes it;
+// clicks on the panel itself don't (target check, no stopPropagation needed).
+const settingsEl = document.getElementById('setOverlay');
+function toggleSettings(show) {
+  const on = show ?? settingsEl.style.display !== 'flex';
+  settingsEl.style.display = on ? 'flex' : 'none';
+}
+document.getElementById('setBtn').onclick = () => toggleSettings(true);
+document.getElementById('setClose').onclick = () => toggleSettings(false);
+settingsEl.onclick = e => { if (e.target === settingsEl) toggleSettings(false); };
 
 // minimap: top-down field with live car (team-coloured, 1st-man ringed) + ball dots
 const mm = document.getElementById('minimap'), mmx = mm.getContext('2d');
@@ -758,30 +861,60 @@ function setBoostPill(spr, n) {
   u.tex.needsUpdate = true;
 }
 
+// A curvy car hull shared across cars: an Octane-ish side silhouette (sloped
+// nose, cabin hump, rear deck) extruded across the car's width with bevelled
+// edges, so the body reads as a rounded RL car rather than a stack of boxes.
+// Built once; the profile is in (length +X, height +Z), extruded along width
+// then rotated/centered so it sits nose-forward (+X) on the ground.
+function carHullGeometry() {
+  const p = new THREE.Shape();
+  p.moveTo(-60, 4);
+  p.lineTo(64, 4);
+  p.lineTo(66, 24);   // short sloped nose
+  p.lineTo(40, 30);
+  p.lineTo(16, 34);
+  p.lineTo(2, 58);    // windshield → roof
+  p.lineTo(-30, 58);  // cabin roof
+  p.lineTo(-50, 40);  // rear deck
+  p.lineTo(-60, 30);
+  p.closePath();
+  const g = new THREE.ExtrudeGeometry(p, {
+    depth: 80, bevelEnabled: true, bevelThickness: 7, bevelSize: 7, bevelSegments: 2, steps: 1,
+  });
+  g.translate(0, 0, -40);   // centre the width
+  g.rotateX(Math.PI / 2);   // height → world Z (up), width → world Y
+  g.computeVertexNormals();
+  return g;
+}
+
 function buildCars() {
   const map = new Map();
+  const teamSeen = new Map(); // team -> how many of its players already built
+  const HULL = carHullGeometry();
   for (const pl of S.players) {
     const hex = TEAM[pl.team] ?? 0x9aa4b2;
+    // A per-player shade of the team colour, for "team colour" off: keep the team
+    // hue recognizable but nudge lightness/hue per teammate so they're tellable
+    // apart. Slot 0 stays the exact team colour.
+    const k = teamSeen.get(pl.team) ?? 0; teamSeen.set(pl.team, k + 1);
+    const distinct = new THREE.Color(hex);
+    if (k > 0) distinct.offsetHSL(0.045 * k * (pl.team === 1 ? -1 : 1), -0.04 * k, (k % 2 ? 0.17 : -0.14));
     const g = new THREE.Group();
-    // wedge-shaped car: chassis + sloped hood + raised cockpit with a windshield,
-    // a rear wing, a white nose (forward / +X), and rimmed wheels.
+    // Rounded car: an extruded hull (body), a dark glass canopy, a rear wing, a
+    // white nose (forward / +X), and rimmed wheels.
     const paint = new THREE.MeshStandardMaterial({ color: hex, roughness: .4, metalness: .35 });
     const dark = new THREE.MeshStandardMaterial({ color: new THREE.Color(hex).multiplyScalar(.6), roughness: .5, metalness: .3 });
-    const chassis = new THREE.Mesh(new THREE.BoxGeometry(120, 84, 22), paint);
-    chassis.position.z = 16; chassis.castShadow = true; g.add(chassis);
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(56, 72, 22), dark);
-    cabin.position.set(-10, 0, 33); cabin.castShadow = true; g.add(cabin);
-    const wind = new THREE.Mesh(new THREE.BoxGeometry(30, 66, 22),
-      new THREE.MeshStandardMaterial({ color: 0x1b2733, roughness: .25, metalness: .5 }));
-    wind.position.set(20, 0, 30); wind.rotation.y = -0.6; g.add(wind);
-    const hood = new THREE.Mesh(new THREE.BoxGeometry(44, 82, 12), paint);
-    hood.position.set(44, 0, 18); hood.castShadow = true; g.add(hood);
+    const body = new THREE.Mesh(HULL, paint);
+    body.castShadow = true; g.add(body);
+    const glass = new THREE.Mesh(new THREE.BoxGeometry(28, 58, 20),
+      new THREE.MeshStandardMaterial({ color: 0x1b2733, roughness: .2, metalness: .6 }));
+    glass.position.set(6, 0, 46); glass.rotation.y = -0.5; g.add(glass);
     const wing = new THREE.Mesh(new THREE.BoxGeometry(8, 76, 5), dark);
-    wing.position.set(-58, 0, 40); g.add(wing);
-    for (const wy of [-30, 30]) { const s = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 16), dark); s.position.set(-56, wy, 32); g.add(s); }
-    const nose = new THREE.Mesh(new THREE.BoxGeometry(8, 84, 18),
+    wing.position.set(-58, 0, 44); g.add(wing);
+    for (const wy of [-30, 30]) { const s = new THREE.Mesh(new THREE.BoxGeometry(6, 5, 16), dark); s.position.set(-56, wy, 36); g.add(s); }
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(8, 80, 16),
       new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x333333 }));
-    nose.position.set(61, 0, 16); g.add(nose);
+    nose.position.set(66, 0, 16); g.add(nose);
     const tireMat = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: .9 });
     const rimMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, roughness: .4, metalness: .6 });
     for (const [wx, wy] of [[44, 46], [44, -46], [-44, 46], [-44, -46]]) {
@@ -794,7 +927,7 @@ function buildCars() {
     const boostPill = makeBoostPill(); boostPill.position.set(0, 0, 345); g.add(boostPill);
     scene.add(g);
     const tg = new THREE.BufferGeometry();
-    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(TRAIL_CAP * 3), 3));
     const trail = new THREE.Line(tg, new THREE.LineBasicMaterial({ color: hex, transparent: true, opacity: .55 }));
     trail.frustumCulled = false; scene.add(trail);
     const callout = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthTest: false, opacity: 0 }));
@@ -805,9 +938,20 @@ function buildCars() {
     const flame = new THREE.Mesh(new THREE.ConeGeometry(20, 72, 12),
       new THREE.MeshBasicMaterial({ color: 0xff9a3c, transparent: true, opacity: .9, blending: THREE.AdditiveBlending, depthWrite: false }));
     flame.rotation.z = Math.PI / 2; flame.position.set(-78, 0, 18); flame.visible = false; g.add(flame);
-    map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame });
+    map.set(pl.pri, { g, label, boostPill, trail, callout, ring, flame, paint, dark, teamHex: hex, distinct });
   }
   return map;
+}
+// Recolour every car body + trail: the exact team colour when "team colour" is
+// on, or each player's distinct shade when off.
+let teamColour = true;
+function applyCarColours() {
+  for (const o of cars.values()) {
+    const col = teamColour ? new THREE.Color(o.teamHex) : o.distinct;
+    o.paint.color.copy(col);
+    o.dark.color.copy(col).multiplyScalar(.6);
+    o.trail.material.color.copy(col);
+  }
 }
 
 // --- frame lookup + interpolation ---
@@ -840,19 +984,21 @@ function stateAt(t) {
 }
 
 function trailPoints(pri, t) {
-  const i1 = frameIndex(t), t0 = t - 1.3; let i0 = i1;
+  const i1 = frameIndex(t), t0 = t - trailSecs; let i0 = i1;
   while (i0 > 0 && frames[i0].t > t0) i0--;
   const pts = [];
   for (let i = i0; i <= i1; i++) { const c = frames[i].cars.find(c => c.pri === pri); if (c) pts.push(c.p); }
   return pts;
 }
 function writeTrail(line, pts) {
-  const arr = line.geometry.attributes.position.array, n = Math.min(pts.length, 64);
+  // Keep the most-recent points if the window holds more than the buffer.
+  if (pts.length > TRAIL_CAP) pts = pts.slice(pts.length - TRAIL_CAP);
+  const arr = line.geometry.attributes.position.array, n = pts.length;
   for (let i = 0; i < n; i++) { arr[i * 3] = pts[i][0]; arr[i * 3 + 1] = pts[i][1]; arr[i * 3 + 2] = pts[i][2] + 4; }
   line.geometry.setDrawRange(0, n); line.geometry.attributes.position.needsUpdate = true;
 }
 function ballTrailPoints(t) {
-  const i1 = frameIndex(t), t0 = t - 1.0; let i0 = i1;
+  const i1 = frameIndex(t), t0 = t - trailSecs * 0.77; let i0 = i1;
   while (i0 > 0 && frames[i0].t > t0) i0--;
   const pts = [];
   for (let i = i0; i <= i1; i++) if (frames[i].ball) pts.push(frames[i].ball);
@@ -936,6 +1082,29 @@ function applyState(st) {
 const esc = s => s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
 const fmt = s => { const m = Math.floor(s / 60); return m + ':' + (s % 60).toFixed(1).padStart(4, '0'); };
 const dur = S.duration_s;
+// Game clock: RL counts the match clock DOWN from 5:00, pausing during goal
+// celebrations (between a goal and the next kickoff). We approximate it by summing
+// active-play time — each kickoff→next-goal span — up to the playhead; past
+// regulation it counts up as overtime ("+M:SS"). Click the clock to switch this
+// RL view vs plain elapsed/total.
+const REG_S = 300;
+const koT = S.events.filter(e => e.kind === 'kickoff').map(e => e.t).sort((a, b) => a - b);
+const goalT = S.events.filter(e => e.kind === 'goal').map(e => e.t).sort((a, b) => a - b);
+const playSegs = koT.map((k, i) => {
+  const nextKick = koT[i + 1] ?? Infinity;
+  const nextGoal = goalT.find(x => x > k + 1e-3) ?? Infinity;
+  return [k, Math.min(nextKick, nextGoal, dur)];
+});
+function playedBy(t) {
+  let s = 0;
+  for (const [a, b] of playSegs) { if (t <= a) break; s += Math.min(t, b) - a; }
+  return s;
+}
+function gameClock(t) {
+  const rem = REG_S - playedBy(t), mmss = r => Math.floor(r / 60) + ':' + (r % 60).toString().padStart(2, '0');
+  return rem >= 0 ? mmss(Math.ceil(rem)) : '+' + mmss(Math.floor(-rem));
+}
+let clockMode = 'elapsed'; // 'elapsed' | 'rl'
 // Live scoreboard: tally goals up to the playhead so the score counts up during
 // playback, rather than always showing the final result. (Goal events carry the
 // scoring team; S.events is time-sorted, so the early break is safe.)
@@ -981,6 +1150,55 @@ for (const pl of S.players) {
   plistEl.appendChild(row);
   rowEls.set(pl.pri, row);
 }
+
+// Per-player analysis strips (Settings → "player stats"): a boost-over-match
+// sparkline (from the per-frame boost already in the scene) plus speed-bucket and
+// thirds-occupancy bars + a most-back tag (from the attached bcstats aggregates).
+// Appended inside the roster panel, built lazily on first show so canvas widths
+// are real. Default off to keep the HUD clean.
+const statByPri = new Map((S.player_stats || []).map(s => [s.pri, s]));
+const pstatsWrap = document.createElement('div'); pstatsWrap.id = 'pstats';
+plistEl.appendChild(pstatsWrap);
+let playerStatsBuilt = false;
+function boostSeries(pri, w) { // max boost per horizontal bucket across the match
+  const out = new Array(w).fill(null), n = frames.length;
+  for (let i = 0; i < n; i++) {
+    const c = frames[i].cars.find(c => c.pri === pri); if (!c) continue;
+    const b = Math.min(w - 1, Math.floor(i / n * w));
+    out[b] = Math.max(out[b] ?? 0, c.boost);
+  }
+  return out;
+}
+function buildPlayerStats() {
+  pstatsWrap.innerHTML = '<h4>PLAYER STATS</h4>';
+  for (const pl of S.players) {
+    const s = statByPri.get(pl.pri), css = TEAM_CSS[pl.team] ?? '#9aa4b2';
+    const sp = s ? s.speed : [0, 0, 0], th = s ? s.thirds : [0, 0, 0];
+    const div = document.createElement('div'); div.className = 'ps';
+    div.innerHTML =
+      `<div class="nm"><span class="dot" style="background:${css}"></span>${esc(pl.name)}` +
+      (s && s.most_back ? `<span class="mb" title="share of time as the most-back defender">⬇ ${Math.round(s.most_back)}% back</span>` : '') + `</div>` +
+      `<canvas class="spark" data-pri="${pl.pri}" title="boost over the match"></canvas>` +
+      `<div class="bar" title="speed: slow / boost-speed / supersonic">` +
+        `<i style="width:${sp[0]}%;background:#3a4150"></i><i style="width:${sp[1]}%;background:#3b82f6"></i><i style="width:${sp[2]}%;background:#ffd166"></i></div>` +
+      `<div class="bar" title="thirds: defensive / neutral / offensive">` +
+        `<i style="width:${th[0]}%;background:#2f6f4f"></i><i style="width:${th[1]}%;background:#4a5568"></i><i style="width:${th[2]}%;background:#9a5b2f"></i></div>` +
+      `<div class="cap">boost · ${Math.round(sp[2])}% supersonic · ${Math.round(th[2])}% attacking</div>`;
+    pstatsWrap.appendChild(div);
+  }
+  for (const cv of pstatsWrap.querySelectorAll('canvas.spark')) {
+    const pri = +cv.dataset.pri, W = cv.clientWidth || 196, H = 20;
+    cv.width = W; cv.height = H;
+    const x = cv.getContext('2d'); x.clearRect(0, 0, W, H);
+    const ser = boostSeries(pri, W), pl = S.players.find(p => p.pri === pri), col = TEAM_CSS[pl.team] ?? '#9aa4b2';
+    x.beginPath(); let started = false;
+    for (let i = 0; i < W; i++) { const v = ser[i]; if (v == null) continue; const y = H - (v / 100) * (H - 1); started ? x.lineTo(i, y) : (x.moveTo(i, y), started = true); }
+    x.lineTo(W, H); x.lineTo(0, H); x.closePath();
+    x.globalAlpha = .18; x.fillStyle = col; x.fill(); x.globalAlpha = 1;
+    x.strokeStyle = col; x.lineWidth = 1; x.stroke();
+  }
+  playerStatsBuilt = true;
+}
 function carSpeed(pri, t) {
   const i = frameIndex(t); if (i + 1 >= frames.length) return 0;
   const a = frames[i].cars.find(c => c.pri === pri), b = frames[i + 1].cars.find(c => c.pri === pri);
@@ -1007,7 +1225,7 @@ function possAt(t) { let team = null; for (const e of S.events) { if (e.t > t + 
 // The ticker is rebuilt only when the most-recent-event index changes.
 let lastTickerIdx = -2;
 function updateHud(t, st) {
-  document.getElementById('clock').textContent = fmt(t) + ' / ' + fmt(dur);
+  document.getElementById('clock').textContent = clockMode === 'rl' ? gameClock(t) : (fmt(t) + ' / ' + fmt(dur));
   updateScore(t);
   updatePlayers(st);
   const pt = possAt(t);
@@ -1104,9 +1322,17 @@ document.getElementById('loop').onchange = e => { loop = e.target.checked; };
 for (const id of ['Trails', 'Labels', 'Boost', 'Pads']) {
   document.getElementById('tg' + id).onchange = e => { show[id.toLowerCase()] = e.target.checked; };
 }
+document.getElementById('trailLen').oninput = e => { trailSecs = parseFloat(e.target.value); };
+document.getElementById('tgTeamCol').onchange = e => { teamColour = e.target.checked; applyCarColours(); };
+document.getElementById('clock').onclick = () => { clockMode = clockMode === 'rl' ? 'elapsed' : 'rl'; updateHud(T, lastState); };
 document.getElementById('tgHeat').onchange = e => {
   heatMesh.visible = e.target.checked;
   if (e.target.checked) buildHeat(heatSubject);
+};
+document.getElementById('tgPadHeat').onchange = e => { padHeat = e.target.checked; updatePads(T); };
+document.getElementById('tgPlayerStats').onchange = e => {
+  if (e.target.checked && !playerStatsBuilt) buildPlayerStats();
+  pstatsWrap.style.display = e.target.checked ? 'block' : 'none';
 };
 function jump(kind, dir) {
   const ts = S.events.filter(e => e.kind === kind).map(e => e.t);
@@ -1114,8 +1340,10 @@ function jump(kind, dir) {
   else { const p = [...ts].reverse().find(x => x < T - 0.05); if (p != null) { seek(p); setPlaying(false); } }
 }
 addEventListener('keydown', e => {
+  if (e.key === 'Escape') { toggleSettings(false); helpEl.style.display = 'none'; return; } // always, even from inputs
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === 'g') toggleSettings();
   else if (e.code === 'ArrowRight') seek(T + 1);
   else if (e.code === 'ArrowLeft') seek(T - 1);
   else if (e.key === 'n') jump('goal', 1);
@@ -1123,6 +1351,7 @@ addEventListener('keydown', e => {
   else if (e.key === 'k') jump('kickoff', 1);
   else if (e.key === 'j') jump('kickoff', -1);
   else if (e.key === '0') setCam('free');
+  else if (e.key === 't') setCam('top');
   else if (e.key === 'd') setDrawMode(!drawMode);
   else if (e.key === 'z' && drawMode) undoLast();
   else if (e.key === 's') exportPNG();
@@ -1145,6 +1374,7 @@ function animate(now) {
   updatePads(T);
   updateHud(T, st);
   updateCallouts(T, st);
+  updateKickoff(T, st);
   drawMinimap(st);
   for (const e of demoEvents) if (e.t > prevT && e.t <= T) { const c = st.cars.get(e.pri); if (c) spawnFlash(c.p); }
   prevT = T;

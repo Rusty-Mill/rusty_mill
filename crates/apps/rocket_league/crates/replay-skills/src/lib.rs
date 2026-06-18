@@ -22,6 +22,7 @@
 //! assert!(report.performed(Skill::Aerial) || !report.performed(Skill::Aerial));
 //! ```
 
+pub mod calibrate;
 pub mod config;
 pub mod detect;
 pub mod outcome;
@@ -52,6 +53,7 @@ pub fn detect_all(m: &CanonicalMatch, cfg: &SkillConfig) -> SkillReport {
     instances.extend(detect::supersonic(r, &m.tracks, cfg));
     instances.extend(detect::aerials(r, &m.events, cfg));
     instances.extend(detect::air_dribbles(r, &m.events, cfg));
+    instances.extend(detect::double_touches(r, &m.events, cfg));
     instances.extend(detect::ceiling_plays(r, &m.tracks, cfg));
     instances.extend(detect::wall_plays(r, &m.events, cfg));
     instances.extend(detect::ground_dribbles(r, &m.tracks, cfg));

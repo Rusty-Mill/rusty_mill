@@ -237,6 +237,36 @@ fn attach_winprob_fills_a_valid_momentum_curve() {
 }
 
 #[test]
+fn attach_player_stats_fills_per_player_aggregates() {
+    let m = minimal_match();
+    let mut s = build_scene(&m, &[]);
+    assert!(
+        s.player_stats.is_empty(),
+        "build_scene leaves player_stats empty"
+    );
+    replay_viewer::attach_player_stats(&mut s, &m);
+    assert_eq!(
+        s.player_stats.len(),
+        s.players.len(),
+        "one stat block per roster player"
+    );
+    for ps in &s.player_stats {
+        // Percent splits are bounded and never negative.
+        for &p in ps.speed.iter().chain(ps.thirds.iter()) {
+            assert!((0.0..=100.0).contains(&p), "percent in [0,100]: {p}");
+        }
+        assert!((0.0..=100.0).contains(&ps.most_back));
+        // Speed buckets partition the moving time, so they sum to ~100 (or ~0 if
+        // the player never moved in this tiny match).
+        let speed_sum: f32 = ps.speed.iter().sum();
+        assert!(
+            speed_sum <= 100.5,
+            "speed buckets don't exceed 100: {speed_sum}"
+        );
+    }
+}
+
+#[test]
 fn downsample_thins_frames_and_updates_hz() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);

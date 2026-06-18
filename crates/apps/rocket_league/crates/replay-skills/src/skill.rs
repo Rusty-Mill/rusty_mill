@@ -46,6 +46,8 @@ pub enum Skill {
     BoostSteal,
     /// Demolished an opponent.
     Demo,
+    /// Contacted the ball twice in quick succession with it elevated (double touch).
+    DoubleTouch,
 }
 
 /// How a family of skills groups, for display and roll-ups.
@@ -75,7 +77,7 @@ pub enum Detection {
 impl Skill {
     /// Every skill in the catalog, in a stable order (used by the CLI `--list`
     /// and to iterate the taxonomy).
-    pub const ALL: [Skill; 12] = [
+    pub const ALL: [Skill; 13] = [
         Skill::Supersonic,
         Skill::Aerial,
         Skill::AirDribble,
@@ -88,6 +90,7 @@ impl Skill {
         Skill::KickoffFirstTouch,
         Skill::BoostSteal,
         Skill::Demo,
+        Skill::DoubleTouch,
     ];
 
     /// Stable string key (for reports, CLI `--verify`, and serialization).
@@ -105,6 +108,7 @@ impl Skill {
             Skill::KickoffFirstTouch => "kickoff_first_touch",
             Skill::BoostSteal => "boost_steal",
             Skill::Demo => "demo",
+            Skill::DoubleTouch => "double_touch",
         }
     }
 
@@ -128,6 +132,7 @@ impl Skill {
             Skill::KickoffFirstTouch => "Kickoff first touch",
             Skill::BoostSteal => "Boost steal",
             Skill::Demo => "Demo",
+            Skill::DoubleTouch => "Double touch",
         }
     }
 
@@ -136,7 +141,7 @@ impl Skill {
         match self {
             Skill::Aerial | Skill::AirDribble | Skill::CeilingPlay => SkillCategory::Aerial,
             Skill::WallPlay => SkillCategory::Wall,
-            Skill::GroundDribble | Skill::Flick => SkillCategory::Dribbling,
+            Skill::GroundDribble | Skill::Flick | Skill::DoubleTouch => SkillCategory::Dribbling,
             Skill::PowerShot | Skill::Redirect => SkillCategory::Striking,
             Skill::Supersonic => SkillCategory::Speed,
             Skill::KickoffFirstTouch => SkillCategory::Kickoff,
@@ -169,6 +174,7 @@ impl Skill {
                 | Skill::PowerShot
                 | Skill::Redirect
                 | Skill::KickoffFirstTouch
+                | Skill::DoubleTouch
         )
     }
 
@@ -191,6 +197,7 @@ impl Skill {
             Skill::KickoffFirstTouch => "reaction",
             Skill::BoostSteal => "boost",
             Skill::Demo => "",
+            Skill::DoubleTouch => "gap",
         }
     }
 
@@ -211,6 +218,7 @@ impl Skill {
             Skill::KickoffFirstTouch => "s",
             Skill::BoostSteal => "%",
             Skill::Demo => "",
+            Skill::DoubleTouch => "s",
         }
     }
 
@@ -229,6 +237,7 @@ impl Skill {
             Skill::KickoffFirstTouch => "Won the first touch off a kickoff.",
             Skill::BoostSteal => "Grabbed a full corner boost pad in the opponent's half.",
             Skill::Demo => "Demolished an opponent.",
+            Skill::DoubleTouch => "Touched the ball twice in quick succession while elevated.",
         }
     }
 }

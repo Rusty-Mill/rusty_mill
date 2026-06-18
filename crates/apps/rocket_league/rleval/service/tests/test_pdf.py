@@ -51,3 +51,32 @@ def test_pdf_not_ready_returns_409(client, make_account, session):
     session.commit()
     r = client.get("/v1/reports/queued1/pdf", headers=H)
     assert r.status_code == 409
+
+
+def test_pdf_per_player_scopes_and_renders_on_demand(client, make_account, pdf_renderer):
+    make_account(credits_n=2)
+    rid = _upload(client)
+    r = client.get(f"/v1/reports/{rid}/pdf?player=Alice", headers=H)
+    assert r.status_code == 200
+    assert r.content.startswith(b"%PDF")
+    # The fake scorer echoes the player into the HTML, which the fake renderer
+    # folds into the PDF bytes — proof the report was scoped to Alice.
+    assert b"Alice" in r.content
+    # Per-player is rendered on demand (not cached): a repeat re-renders.
+    client.get(f"/v1/reports/{rid}/pdf?player=Alice", headers=H)
+    assert pdf_renderer.calls == 2
+
+
+def test_pdf_per_player_unknown_player_404(client, make_account):
+    make_account(credits_n=2)
+    rid = _upload(client)
+    r = client.get(f"/v1/reports/{rid}/pdf?player=Nobody", headers=H)
+    assert r.status_code == 404
+
+
+def test_pdf_per_player_requires_canonical(client, make_account, scorer):
+    scorer.canonical_blob = None  # nothing cached → can't scope per player
+    make_account(credits_n=2)
+    rid = _upload(client)
+    r = client.get(f"/v1/reports/{rid}/pdf?player=Alice", headers=H)
+    assert r.status_code == 409

@@ -10,8 +10,8 @@ use replay_analyzer::model::{
     Event, GridCar, GridFrame, Kin, PlayerTrack, Resampled, Rot3, TrackGap, TrackSample, Vec3,
 };
 use replay_skills::detect::{
-    aerials, air_dribbles, boost_steals, ceiling_plays, demos, flicks, ground_dribbles,
-    kickoff_first_touches, power_shots, redirects, supersonic, wall_plays,
+    aerials, air_dribbles, boost_steals, ceiling_plays, demos, double_touches, flicks,
+    ground_dribbles, kickoff_first_touches, power_shots, redirects, supersonic, wall_plays,
 };
 use replay_skills::{Skill, SkillConfig};
 
@@ -180,6 +180,55 @@ fn air_dribble_chains_consecutive_aerial_touches() {
     );
     assert_eq!(i.pri, 1);
     assert!(i.detail.contains("touches=3"));
+}
+
+#[test]
+fn double_touch_two_quick_elevated_contacts() {
+    let elevated = |t: f32| {
+        frame(
+            t,
+            Some(kin(v(0.0, 0.0, 420.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 300.0), v(0.0, 0.0, 0.0))],
+        )
+    };
+    let frames = vec![elevated(0.0), elevated(0.3)];
+    let events = vec![touch(0.0, 1, 0), touch(0.3, 1, 0)];
+    let i = only(
+        double_touches(&grid(frames), &events, &cfg()),
+        Skill::DoubleTouch,
+    );
+    assert_eq!(i.pri, 1);
+    assert!(i.detail.contains("gap=0.30"));
+}
+
+#[test]
+fn double_touch_ignores_low_ball_and_intervening_opponent() {
+    // Ball low at the second contact → ground micro-touches, not a double touch.
+    let low = |t: f32| {
+        frame(
+            t,
+            Some(kin(v(0.0, 0.0, 120.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 17.0), v(0.0, 0.0, 0.0))],
+        )
+    };
+    assert!(double_touches(
+        &grid(vec![low(0.0), low(0.3)]),
+        &[touch(0.0, 1, 0), touch(0.3, 1, 0)],
+        &cfg()
+    )
+    .is_empty());
+
+    // An opponent touch between the two breaks the same-player pair.
+    let hi = |t: f32| {
+        frame(
+            t,
+            Some(kin(v(0.0, 0.0, 420.0), v(0.0, 0.0, 0.0))),
+            vec![car(1, 0, v(0.0, 0.0, 300.0), v(0.0, 0.0, 0.0))],
+        )
+    };
+    let frames = vec![hi(0.0), hi(0.15), hi(0.3)];
+    let events = vec![touch(0.0, 1, 0), touch(0.15, 2, 1), touch(0.3, 1, 0)];
+    assert!(double_touches(&grid(frames), &events, &cfg()).is_empty());
 }
 
 #[test]

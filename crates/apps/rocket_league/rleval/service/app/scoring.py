@@ -58,6 +58,10 @@ class Scorer(Protocol):
         self, canonical_blob: bytes, replay_id: str
     ) -> ScoreResult: ...
 
+    def render_player_html(
+        self, canonical_blob: bytes, replay_id: str, player_id: str
+    ) -> str: ...
+
 
 def _player_from_report(r: dict) -> PlayerScore:
     """Map one Rust `Report` JSON object to a [`PlayerScore`]."""
@@ -109,6 +113,43 @@ class SubprocessScorer:
             with open(can_in, "wb") as f:
                 f.write(canonical_blob)
             return self._run(d, ["--from-canonical", can_in], None)
+
+    def render_player_html(
+        self, canonical_blob: bytes, replay_id: str, player_id: str
+    ) -> str:
+        """Render one player's scoped report HTML from the cached canonical match
+        (`--from-canonical --player`, the same core, no re-parse) — for per-player
+        PDF export (§4.10)."""
+        with tempfile.TemporaryDirectory() as d:
+            can_in = os.path.join(d, f"{replay_id}.canonical.json")
+            with open(can_in, "wb") as f:
+                f.write(canonical_blob)
+            html_path = os.path.join(d, "player.html")
+            try:
+                proc = subprocess.run(
+                    [
+                        self.worker_bin,
+                        "--from-canonical",
+                        can_in,
+                        "--player",
+                        player_id,
+                        "--html",
+                        html_path,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout_s,
+                )
+            except (OSError, subprocess.TimeoutExpired) as e:
+                raise ScoringError(f"worker did not run: {e}") from e
+            if proc.returncode != 0:
+                raise ScoringError(
+                    f"worker exit {proc.returncode}: {proc.stderr[-500:].strip()}"
+                )
+            if not os.path.exists(html_path):
+                raise ScoringError("worker produced no player HTML")
+            with open(html_path, encoding="utf-8") as f:
+                return f.read()
 
     def _run(
         self, d: str, input_args: list[str], canonical_out: str | None

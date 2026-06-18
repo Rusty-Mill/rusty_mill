@@ -61,6 +61,15 @@ class Settings:
         self.webhook_secret = os.getenv("RLS_WEBHOOK_SECRET", "")
         # Master key for at-rest artifact encryption (§12). Empty = store verbatim.
         self.encryption_key = os.getenv("RLS_ENCRYPTION_KEY", "")
+        # Cipher backend for the master key (§12): "hmac" (stdlib, dev), "aesgcm"
+        # (AES-256-GCM, needs the 'crypto' extra), or "kms" (AWS KMS envelope).
+        self.cipher_backend = os.getenv("RLS_CIPHER_BACKEND", "hmac")
+        # Key version, folded into key derivation: bump to rotate (old blobs then
+        # need re-encryption — a hard rotation). "0" keeps the legacy derivation.
+        self.cipher_key_version = os.getenv("RLS_CIPHER_KEY_VERSION", "0")
+        # KMS key id/ARN + region for the "kms" backend (region falls back to S3's).
+        self.kms_key_arn = os.getenv("RLS_KMS_KEY_ARN", "")
+        self.kms_region = os.getenv("RLS_KMS_REGION", "")
         # Job-queue backend (§4): "inprocess" (FastAPI BackgroundTasks) or "celery".
         self.queue_backend = os.getenv("RLS_QUEUE_BACKEND", "inprocess")
         self.celery_broker_url = os.getenv(

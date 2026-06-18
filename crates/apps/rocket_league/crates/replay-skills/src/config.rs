@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every [`crate::report::SkillReport`]; bump when the
 /// defaults below change so a detection result is always reproducible.
-pub const SKILL_CONFIG_VERSION: &str = "skcfg-v1";
+pub const SKILL_CONFIG_VERSION: &str = "skcfg-v2";
 
 /// Thresholds for the kinematic skill detectors. All distances are unreal units
 /// (uu), speeds uu/s, times seconds, boost a raw replicated byte (0..=255).
@@ -31,6 +31,11 @@ pub struct SkillConfig {
     pub air_dribble_window_s: f32,
     /// Min number of chained aerial touches to call it an air dribble.
     pub air_dribble_min_touches: usize,
+    /// Max gap between a player's two contacts to count as one double touch.
+    pub double_touch_window_s: f32,
+    /// Min ball height at the second contact for a double touch (excludes a
+    /// ground dribble's low micro-touches).
+    pub double_touch_min_ball_height: f32,
 
     // --- Wall / ceiling ---
     /// Distance from a wall plane (|x|=side, |y|=back) to be "on the wall".
@@ -104,6 +109,8 @@ impl Default for SkillConfig {
             aerial_min_ball_height: 250.0,
             air_dribble_window_s: 2.0,
             air_dribble_min_touches: 2,
+            double_touch_window_s: 0.8,
+            double_touch_min_ball_height: 300.0,
 
             wall_plane_tol: 150.0,
             wall_min_height: 300.0,

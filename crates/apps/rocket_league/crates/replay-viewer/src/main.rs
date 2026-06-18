@@ -19,7 +19,7 @@ use replay_skills::{detect_all, SkillConfig};
 use replay_viewer::{build_scene, html};
 
 const USAGE: &str = "usage: replay-viewer <file.replay> [--html <out.html>] [--json <scene.json>] \
-[--hz <rate>] [--offline] [--no-skills] [--no-roles] [--no-winprob] [--no-impact]";
+[--hz <rate>] [--offline] [--no-skills] [--no-roles] [--no-winprob] [--no-impact] [--no-player-stats]";
 
 fn main() -> ExitCode {
     match run() {
@@ -40,6 +40,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let mut roles = true;
     let mut winprob = true;
     let mut impact = true;
+    let mut player_stats = true;
     let mut offline = false;
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -58,6 +59,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             "--no-roles" => roles = false,
             "--no-winprob" => winprob = false,
             "--no-impact" => impact = false,
+            "--no-player-stats" => player_stats = false,
             "--offline" => offline = true,
             "-h" | "--help" => {
                 println!("{USAGE}");
@@ -114,6 +116,9 @@ fn run() -> Result<(), Box<dyn Error>> {
             &canonical,
             &replay_value::ValueConfig::default(),
         );
+    }
+    if player_stats {
+        replay_viewer::attach_player_stats(&mut scene, &canonical);
     }
     if let Some(target) = hz {
         replay_viewer::scene::downsample(&mut scene, target);

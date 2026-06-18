@@ -287,6 +287,71 @@ pub fn air_dribbles(
     out
 }
 
+/// Double touches: the same player contacts the ball twice in quick succession
+/// (within `double_touch_window_s`, no other player's touch between) with the
+/// ball elevated at the second contact (`double_touch_min_ball_height`) — a
+/// pop-and-strike, e.g. off the backboard. Emitted at the second touch.
+///
+/// This is kinematically separable (touch timing + ball height) and so, unlike
+/// the input-only mechanics the catalog deliberately omits (wave dash, half
+/// flip), it earns a detector. The ball-height gate keeps a ground dribble's low
+/// micro-touches out.
+pub fn double_touches(
+    resampled: &Resampled,
+    events: &[Event],
+    cfg: &SkillConfig,
+) -> Vec<SkillInstance> {
+    let touches: Vec<(f32, i32, Option<String>, Option<i32>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch {
+                t,
+                pri,
+                player,
+                team,
+            } => Some((*t, *pri, player.clone(), *team)),
+            _ => None,
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for w in touches.windows(2) {
+        let (t0, pri0, _, _) = &w[0];
+        let (t1, pri1, player, team) = &w[1];
+        if pri0 != pri1 {
+            continue; // an intervening opponent touch breaks the pair
+        }
+        let dt = t1 - t0;
+        if dt <= cfg.touch_frame_tol_s || dt > cfg.double_touch_window_s {
+            continue;
+        }
+        let Some(fi) = frame_at(&resampled.frames, *t1, cfg.touch_frame_tol_s) else {
+            continue;
+        };
+        let Some(ball) = resampled.frames[fi].ball else {
+            continue;
+        };
+        if ball.p.z < cfg.double_touch_min_ball_height {
+            continue;
+        }
+        out.push(SkillInstance {
+            skill: Skill::DoubleTouch,
+            t: *t1,
+            pri: *pri1,
+            player: player.clone(),
+            team: *team,
+            confidence: conf(
+                ball.p.z,
+                cfg.double_touch_min_ball_height,
+                cfg.double_touch_min_ball_height + 600.0,
+            ),
+            metric: dt,
+            detail: format!("gap={dt:.2}s ball_z={:.0}uu", ball.p.z),
+        });
+    }
+    out
+}
+
 /// Ceiling plays: one instance per contiguous run a car spends within
 /// `ceiling_tol` of the ceiling, lasting at least `ceiling_min_duration_s`.
 pub fn ceiling_plays(

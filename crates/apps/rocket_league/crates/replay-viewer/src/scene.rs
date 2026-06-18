@@ -121,6 +121,21 @@ pub struct ScenePadPickup {
     pub stolen: bool,
 }
 
+/// Compact per-player aggregates for the viewer's analysis strips, distilled from
+/// [`replay_analyzer::analyze::bcstats`]. Percents are 0–100. Keyed by `pri` so the
+/// viewer joins them to the roster rows. Filled by
+/// [`crate::playerstats::attach_player_stats`]; absent until.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScenePlayerStat {
+    pub pri: i32,
+    /// Movement time split: `[slow, boost-speed, supersonic]` as percents.
+    pub speed: [f32; 3],
+    /// Field occupancy: `[defensive, neutral, offensive]` third, as percents.
+    pub thirds: [f32; 3],
+    /// Share of time this player was the most-back on their team (percent).
+    pub most_back: f32,
+}
+
 /// The full viewer payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
@@ -151,6 +166,10 @@ pub struct Scene {
     /// unless attached.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub win_prob: Vec<f32>,
+    /// Per-player movement/positioning aggregates for the analysis strips. Empty
+    /// unless [`crate::playerstats::attach_player_stats`] ran.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub player_stats: Vec<ScenePlayerStat>,
 }
 
 fn round(x: f32, places: i32) -> f32 {
@@ -259,6 +278,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         events,
         pad_pickups,
         win_prob: Vec::new(),
+        player_stats: Vec::new(),
     }
 }
 
