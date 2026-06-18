@@ -15,8 +15,9 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_value::config::TrainConfig;
 use replay_value::dataset::{Dataset, Row};
+use replay_value::features::N_FEATURES;
 use replay_value::model::ValueModel;
-use replay_value::{build_dataset, ValueConfig};
+use replay_value::{build_dataset, GbtConfig, GbtModel, ValueConfig};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -48,9 +49,25 @@ fn base_rate_log_loss(rows: &[Row], p: f32) -> f32 {
     s / rows.len() as f32
 }
 
+/// Mean binary cross-entropy of a prediction fn over rows (held-out diagnostic).
+fn log_loss(predict: impl Fn(&[f32; N_FEATURES]) -> f32, rows: &[Row]) -> f32 {
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let eps = 1e-7;
+    let s: f32 = rows
+        .iter()
+        .map(|r| {
+            let p = predict(&r.x).clamp(eps, 1.0 - eps);
+            -(r.y * p.ln() + (1.0 - r.y) * (1.0 - p).ln())
+        })
+        .sum();
+    s / rows.len() as f32
+}
+
 /// Mann–Whitney AUC: P(model scores a random positive above a random negative).
-fn auc(model: &ValueModel, rows: &[Row]) -> f32 {
-    let mut scored: Vec<(f32, f32)> = rows.iter().map(|r| (model.predict(&r.x), r.y)).collect();
+fn auc(predict: impl Fn(&[f32; N_FEATURES]) -> f32, rows: &[Row]) -> f32 {
+    let mut scored: Vec<(f32, f32)> = rows.iter().map(|r| (predict(&r.x), r.y)).collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0));
     let (mut rank_sum, mut npos, mut i) = (0.0f64, 0usize, 0usize);
     // Average ranks for ties, 1-based.
@@ -197,14 +214,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         model.log_loss(&train_ds),
         base_rate_log_loss(&train_ds.rows, base)
     );
+
+    // Head-to-head on the SAME held-out split: logistic vs gradient-boosted trees.
+    // The spike question — does the heavier learner meaningfully beat the linear
+    // model? Ship the GBT into production only if it clearly wins here.
+    let gbt_cfg = GbtConfig::default();
+    let gbt = GbtModel::train(&train_ds, &gbt_cfg);
+    let base_ll = base_rate_log_loss(&val_ds.rows, base);
+    eprintln!("  VAL base-rate log_loss = {base_ll:.4}   [held-out: model < base ⇒ generalizes]");
+    eprintln!("  {:<10} {:>10} {:>10}", "model", "VAL_logloss", "VAL_AUC");
     eprintln!(
-        "  VAL   log_loss = {:.4}   (base {:.4})   [held-out: < base ⇒ generalizes]",
-        model.log_loss(&val_ds),
-        base_rate_log_loss(&val_ds.rows, base)
+        "  {:<10} {:>10.4} {:>10.4}",
+        "logistic",
+        log_loss(|x| model.predict(x), &val_ds.rows),
+        auc(|x| model.predict(x), &val_ds.rows),
     );
     eprintln!(
-        "  VAL   AUC      = {:.4}   [0.5 = chance]",
-        auc(&model, &val_ds.rows)
+        "  {:<10} {:>10.4} {:>10.4}   (rounds={}, depth={}, lr={})",
+        "gbt",
+        log_loss(|x| gbt.predict(x), &val_ds.rows),
+        auc(|x| gbt.predict(x), &val_ds.rows),
+        gbt_cfg.rounds,
+        gbt_cfg.max_depth,
+        gbt_cfg.learning_rate,
     );
 
     // Retrain on ALL replays for the shipped model (max data), and persist it.

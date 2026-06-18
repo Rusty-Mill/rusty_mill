@@ -19,6 +19,7 @@ pub mod config;
 pub mod dataset;
 pub mod eval;
 pub mod features;
+pub mod gbt;
 pub mod model;
 
 use replay_analyzer::model::CanonicalMatch;
@@ -26,6 +27,7 @@ use replay_analyzer::model::CanonicalMatch;
 pub use config::{ValueConfig, VALUE_CONFIG_VERSION};
 pub use dataset::{build_dataset, Dataset};
 pub use eval::{per_player_delta_v, per_touch_delta_v, PlayerValue, TouchValue};
+pub use gbt::{GbtConfig, GbtModel};
 pub use model::ValueModel;
 
 /// End-to-end value evaluation of one match: build the labeled dataset, fit the

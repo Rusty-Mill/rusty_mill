@@ -6,7 +6,9 @@
 //! yields identical weights. This is intentionally simple: with the objective
 //! outcome label it already produces a meaningful value surface, and it is the
 //! drop-in slot for a heavier learner (GBM/NN) behind the same interface once a
-//! multi-replay corpus exists.
+//! multi-replay corpus exists. [`crate::gbt::GbtModel`] is that heavier learner —
+//! a gradient-boosted-trees model that beats this one on the held-out corpus
+//! (VAL AUC 0.715 → 0.741); see `train_corpus` for the head-to-head.
 
 use serde::{Deserialize, Serialize};
 

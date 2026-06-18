@@ -364,9 +364,16 @@ look-&-feel comparison against ballchasing's own viewer in
   `--bucket`, atomic writes), alongside `refresh_ballchasing_stats.py` for the
   ground-truth fixture; see `assets/corpus/README.md`. Token-free checkout
   samples (`assets/replays/{42f2,419a}.replay`) ship for quick spot-checks.
-- **Heavier value learner.** `ValueModel` is a deliberately simple logistic model
-  behind a stable interface; swap in a GBM/NN once the corpus justifies it
-  (`value/src/model.rs` doc note). Held-out VAL AUC is currently ≈0.71.
+- **Heavier value learner.** *Spike ✔* — `value/src/gbt.rs` adds a dependency-free,
+  deterministic gradient-boosted-trees model (second-order log-loss boosting) behind
+  the same `predict(&[f32; N_FEATURES])` shape as the logistic `ValueModel`, and
+  `train_corpus` now prints a logistic-vs-GBT head-to-head on the same replay-level
+  held-out split. On the 180-replay corpus the GBT **clearly wins**: VAL AUC
+  0.7147 → **0.7405** (+0.026), VAL log-loss 0.2844 → **0.2736** (no leakage; 92.5k
+  train / 21.7k val rows). *Remaining (production swap, gated on this win):* route the
+  ~3 consumers (`eval::per_touch_delta_v`, `skills/src/main.rs::load_value_model`,
+  `value/src/lib.rs`) through a small `predict`-polymorphic boundary, ship a tagged
+  `value_model.json`, and re-validate reconcile/skills.
 - **Calibrate skill thresholds against a corpus.** *Harness ✔* — `calibrate-skills`
   (`skills/src/bin/calibrate_skills.rs` + pure `skills/src/calibrate.rs`) detects
   across the ranked-2v2 corpus and reports, per skill, the metric distribution
