@@ -231,6 +231,21 @@ toolchain (the scorer is faked behind a `Scorer` protocol); CI runs the suite
 These extend the workspace past `replay-scoring-service-spec.md`, driven by
 product direction rather than the milestone plan.
 
+- **Unified application + UI.** ✔ The `app` crate ships the `rleval` binary — a
+  **single unified application** that replaces juggling the separate
+  `replay-analyzer` / `replay-scoring` / `replay-skills` / `replay-value` /
+  `replay-viewer` executables. `rleval serve` runs a tiny dependency-free
+  (std-only `TcpListener`) HTTP server hosting a vanilla single-page UI: drop a
+  `.replay` (or pick a bundled sample) and one in-process `pipeline::analyze`
+  runs decode → score → skills → value → 3D scene, returning everything as one
+  bundle. The UI lays it out across tabs — **Overview** (per-player composite +
+  skills/min + impact ΔV), **3D Viewer** (the offline viewer doc in an iframe),
+  **Scoring** (the lobby report doc), **Skills** (per-player counts), and
+  **Impact** (per-player ΔV). `rleval analyze <replay> --out bundle.html` writes
+  the same UI as a static, self-contained file (analysis JSON inlined, no
+  server). Each engine runs at its default config — identical results to the
+  standalone CLIs (which stay for scripting/golden tests). Offline pipeline smoke
+  test + helper unit tests; fmt/clippy clean. Where: `app/` (this repo).
 - **Flesh out individual player skills.** *Proficiency profiles ✔* +
   *goal-outcome linking ✔* + *structured per-skill quality ✔* + *ΔV value link ✔* —
   `replay-skills` has `profile::profiles` (`--profile`): per-player `skills/min` +

@@ -5,8 +5,24 @@ into a neutral **canonical match model**, then derive higher-level views on top
 of it. The canonical model is the contract; every other crate is a pure consumer
 of it (no parsing, no I/O), so each is deterministic and golden-testable.
 
+For day-to-day use the **`rleval` app** (the `app` crate) ties the whole
+workspace into **one binary with a web UI** — drop a `.replay` and get the 3D
+viewer, the scoring report, the skills table and the value-impact analysis side
+by side, all computed in-process (no subprocess shelling). The individual crate
+CLIs below remain for scripting and golden tests.
+
+```sh
+cargo run -p rleval-app -- serve          # then open http://127.0.0.1:8080
+cargo run -p rleval-app -- analyze game.replay --out game.html   # one-shot bundle
+```
+
 ## Workspace crates
 
+- **`app`** (`rleval`) — the **unified application**: a single binary that serves
+  a single-page web UI (a tiny dependency-free HTTP server) and runs every engine
+  below in one in-process pipeline, returning the 3D viewer, scoring report,
+  skills and value-impact for a replay in one page. `rleval serve` (web UI) or
+  `rleval analyze <replay>` (a self-contained static HTML bundle).
 - **`replay-analyzer`** (root) — decode (`boxcars` adapter behind a swappable
   `ReplayParser` port) → reconstruct world state → coalesce identity-stable
   player tracks → fixed-rate resample → derive events (touches, possessions,
