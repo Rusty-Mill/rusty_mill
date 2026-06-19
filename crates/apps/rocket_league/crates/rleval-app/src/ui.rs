@@ -62,6 +62,10 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   iframe { width: 100%; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
   iframe.viewer { height: 78vh; }
   iframe.report { height: 80vh; background: #fff; }
+  .vtoolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+  /* In full screen the iframe owns the whole display — drop the chrome. */
+  iframe.viewer:fullscreen, iframe.viewer:-webkit-full-screen {
+    width: 100vw; height: 100vh; border: 0; border-radius: 0; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
   th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; }
@@ -272,7 +276,14 @@ function selectTab(name) {
   document.querySelectorAll(".tab").forEach(t =>
     t.classList.toggle("active", t.id === "tab-" + name));
   if (name === "viewer" && !viewerLoaded) {
-    $("tab-viewer").innerHTML = `<iframe class="viewer" srcdoc="${esc(DATA.viewer_html)}"></iframe>`;
+    $("tab-viewer").innerHTML = `
+      <div class="vtoolbar">
+        <button class="s" id="fsBtn" type="button">⛶ Full screen</button>
+        <span class="muted">Press Esc to exit full screen.</span>
+      </div>
+      <iframe class="viewer" id="viewerFrame" allow="fullscreen" allowfullscreen
+        srcdoc="${esc(DATA.viewer_html)}"></iframe>`;
+    $("fsBtn").onclick = enterViewerFullscreen;
     viewerLoaded = true;
   }
   if (name === "scoring" && !scoringLoaded) {
@@ -280,6 +291,17 @@ function selectTab(name) {
     scoringLoaded = true;
   }
 }
+
+// Take the 3D viewer iframe full screen (the canvas resizes to fill it).
+function enterViewerFullscreen() {
+  const frame = $("viewerFrame");
+  if (!frame) return;
+  const req = frame.requestFullscreen || frame.webkitRequestFullscreen || frame.msRequestFullscreen;
+  if (!req) { setStatus("Full screen isn't supported by this browser.", true); return; }
+  Promise.resolve(req.call(frame)).catch(err =>
+    setStatus("Full screen unavailable: " + esc(err.message || err), true));
+}
+
 document.querySelectorAll("nav.tabs button").forEach(b =>
   b.onclick = () => selectTab(b.dataset.tab));
 
