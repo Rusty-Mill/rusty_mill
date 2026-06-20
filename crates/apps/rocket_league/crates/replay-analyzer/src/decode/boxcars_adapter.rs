@@ -32,6 +32,13 @@ const OBJ_BOOST_REPL: &str = "TAGame.CarComponent_Boost_TA:ReplicatedBoost";
 /// Object strings carrying a demolition — base and extended encodings.
 const OBJ_DEMOLISH: &str = "TAGame.Car_TA:ReplicatedDemolish";
 const OBJ_DEMOLISH_EXT: &str = "TAGame.Car_TA:ReplicatedDemolishExtended";
+/// Object strings carrying a boost-pad pickup — base and "new" encodings. Both
+/// carry an `instigator` (the collecting car) and a picked-up flag; a real
+/// collection is one with `Some(instigator)`.
+const OBJ_PICKUP: &str = "TAGame.VehiclePickup_TA:ReplicatedPickupData";
+const OBJ_PICKUP_NEW: &str = "TAGame.VehiclePickup_TA:NewReplicatedPickupData";
+/// Object string carrying a car's replicated handbrake (powerslide) boolean.
+const OBJ_HANDBRAKE: &str = "TAGame.Vehicle_TA:bReplicatedHandbrake";
 
 /// The real, resolved `boxcars` version (injected by `build.rs`).
 pub const BOXCARS_VERSION: &str = env!("BOXCARS_VERSION");
@@ -229,6 +236,9 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
     let boost_repl_id = object_id(replay, OBJ_BOOST_REPL);
     let demolish_id = object_id(replay, OBJ_DEMOLISH);
     let demolish_ext_id = object_id(replay, OBJ_DEMOLISH_EXT);
+    let pickup_id = object_id(replay, OBJ_PICKUP);
+    let pickup_new_id = object_id(replay, OBJ_PICKUP_NEW);
+    let handbrake_id = object_id(replay, OBJ_HANDBRAKE);
 
     let classify = |obj: ObjectId| -> ActorClass {
         let n = replay
@@ -366,6 +376,30 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
                             victim_car: d.victim.actor.0,
                         });
                     }
+                }
+            } else if oid == pickup_id || oid == pickup_new_id {
+                // Both pickup encodings carry an `instigator` (the collecting car)
+                // and a picked-up flag; the *available-again* updates have no
+                // instigator. So a real collection is exactly an update whose
+                // instigator is present.
+                let instigator = match &ua.attribute {
+                    Attribute::Pickup(p) => p.instigator,
+                    Attribute::PickupNew(p) => p.instigator,
+                    _ => None,
+                };
+                if let Some(car) = instigator {
+                    if car.0 >= 0 {
+                        raw.updates.push(ActorUpdate::PickupBoost {
+                            instigator_car: car.0,
+                        });
+                    }
+                }
+            } else if oid == handbrake_id {
+                if let Attribute::Boolean(on) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::Handbrake {
+                        car: ua.actor_id.0,
+                        on: *on,
+                    });
                 }
             }
         }

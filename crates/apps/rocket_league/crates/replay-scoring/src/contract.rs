@@ -514,6 +514,8 @@ mod tests {
                 },
             ],
             features: vec![],
+            pickups: vec![],
+            powerslides: vec![],
         }
     }
 

@@ -44,6 +44,28 @@ condition, the recommended next threads, and the context/gotchas.
   - **Viewer** gained: boost-amount-above-car, playhead-driven scoreboard,
     **boost-pad pickup-map** (pads flash on collection, team-tinted), and a
     **pressure / ball-side strip**. (#43–#45)
+- **Ballchasing-analyzer reverse-engineering track (2026-06-20):**
+  - **Teardown spec** `docs/ballchasing-analyzer-teardown.md` — a mechanical
+    "how does ballchasing compute each stat from the bytes" companion to the
+    reference-vs-ours parity audit (pipeline, replay substrate, exact/inferred
+    stat definitions, REST schema, the two replicated attributes ballchasing uses).
+  - **Authoritative pad pickups + powerslide — two parity gaps closed.** The
+    decode port now surfaces `TAGame.VehiclePickup_TA:(New)ReplicatedPickupData`
+    (`ActorUpdate::PickupBoost`, real pickup ⟺ `Some(instigator)`) and
+    `bReplicatedHandbrake` (`ActorUpdate::Handbrake`). Reconstruction attributes
+    both to the instigator/car PRI → `CanonicalMatch::pickups` /
+    `::powerslides` (new `serde(default)` fields; golden digest unaffected).
+    `bcstats` prefers the authoritative pickup stream (exact counts; removes the
+    ~10–15% BPM undercount) and adds the powerslide block. `tests/pickups_powerslide.rs`.
+  - **`bc-clone` crate** — emits ballchasing's exact `GET /replays/{id}` JSON
+    schema, plus **`bc-validate`** which diffs that document field-by-field
+    against a real ballchasing doc (roster-paired, EXACT + 12%-CORE gates) — a
+    precise regression oracle. `scripts/ballchasing_fetch.py --full-stats`
+    captures the truth fixture (key-gated, never in CI).
+  - **Still open** (parity-doc backlog): per-pad boost **heatmaps**, surfacing
+    `bcstats` aggregates in the viewer roster, and the three `bc-clone`
+    `UNIMPLEMENTED` fields (`amount_used_while_supersonic`,
+    `time/percent_closest/farthest_to_ball`).
 - **Corpus is ranked-2v2-only — recorded and enforced** (#39): `manifest.json`
   carries `playlist`/`team_size`/`playlist_source`; `calibrate` + `train_corpus`
   filter to `ranked-doubles` + `team_size==2` and drop any non-2v2 decode.

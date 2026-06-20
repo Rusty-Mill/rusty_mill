@@ -174,10 +174,14 @@ fn print_summary(c: &CanonicalMatch) {
         );
     }
 
-    eprintln!("ballchasing-parity stats (--bc-stats for full JSON):");
+    eprintln!(
+        "ballchasing-parity stats ({} pickups, {} powerslides; --bc-stats for full JSON):",
+        c.pickups.len(),
+        c.powerslides.len()
+    );
     for s in replay_analyzer::analyze::bcstats::ballchasing_stats(c) {
         eprintln!(
-            "  - {:<20} team={:?} bpm={:>4.0} avg_boost={:>3.0}% super={:>4.1}% air={:>4.1}% def/neu/off={:>3.0}/{:>3.0}/{:>3.0}% dist_ball={:>5.0}",
+            "  - {:<20} team={:?} bpm={:>4.0} avg_boost={:>3.0}% super={:>4.1}% air={:>4.1}% def/neu/off={:>3.0}/{:>3.0}/{:>3.0}% dist_ball={:>5.0} ps={:>3}x/{:>4.1}s",
             s.player,
             s.team,
             s.boost.bpm,
@@ -188,6 +192,8 @@ fn print_summary(c: &CanonicalMatch) {
             s.positioning.percent_neutral_third,
             s.positioning.percent_offensive_third,
             s.positioning.avg_dist_to_ball,
+            s.movement.count_powerslide,
+            s.movement.time_powerslide_s,
         );
     }
 }

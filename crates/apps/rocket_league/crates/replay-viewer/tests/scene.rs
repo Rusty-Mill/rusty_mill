@@ -98,6 +98,8 @@ fn minimal_match() -> CanonicalMatch {
             },
         ],
         features: vec![],
+        pickups: vec![],
+        powerslides: vec![],
     }
 }
 

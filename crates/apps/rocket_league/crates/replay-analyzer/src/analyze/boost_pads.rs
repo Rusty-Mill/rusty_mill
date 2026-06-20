@@ -18,7 +18,7 @@
 //! boost regen would mis-read regen as pickups (we only target standard Soccar).
 
 use crate::field::{self, PadKind};
-use crate::model::PlayerTrack;
+use crate::model::{PadPickupEvent, PlayerTrack};
 
 /// Minimum boost-gauge gain (percent) to count a step as a pad pickup. The
 /// replicated gauge jitters by 1–2 bytes (≤0.8%) between observations; real
@@ -159,6 +159,40 @@ pub fn boost_economy(track: &PlayerTrack, sign: i32) -> BoostEconomy {
         collected,
         used: (collected - net).max(0.0),
     }
+}
+
+/// Aggregate the **authoritative** pad pickups for one player (by PRI) into the
+/// same [`PadStats`] shape as the inferred [`pad_stats`]. Unlike the gauge-step
+/// inference, these are the real `TAGame.VehiclePickup_TA` events, so the counts
+/// and `collected` (= big + small) are exact — this is the BPM-undercount fix.
+/// `sign` is the player's team attack sign, used to decide "stolen" (a pad in the
+/// opponent's half; mid-line pads at `y≈0` are not stolen).
+pub fn authoritative_pad_stats(pickups: &[PadPickupEvent], pri: i32, sign: i32) -> PadStats {
+    let mut s = PadStats::default();
+    for p in pickups.iter().filter(|p| p.pri == pri) {
+        let pad_y = if sign >= 0 { p.pad[1] } else { -p.pad[1] };
+        let stolen = pad_y > STOLEN_Y;
+        if p.big {
+            s.amount_collected_big += p.gain;
+            s.count_collected_big += 1;
+        } else {
+            s.amount_collected_small += p.gain;
+            s.count_collected_small += 1;
+        }
+        s.amount_overfill += p.overfill;
+        if stolen {
+            s.amount_stolen += p.gain;
+            s.amount_overfill_stolen += p.overfill;
+            if p.big {
+                s.amount_stolen_big += p.gain;
+                s.count_stolen_big += 1;
+            } else {
+                s.amount_stolen_small += p.gain;
+                s.count_stolen_small += 1;
+            }
+        }
+    }
+    s
 }
 
 /// Reduce a track's pickups to per-player totals.

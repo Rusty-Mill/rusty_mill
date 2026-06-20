@@ -151,6 +151,8 @@ fn delta_v_credits_a_touch_that_advances_the_ball() {
             team: Some(0),
         }],
         features: vec![],
+        pickups: vec![],
+        powerslides: vec![],
     };
 
     let pv = per_player_delta_v(&m, &ball_y_model(), &ValueConfig::default());

@@ -257,6 +257,41 @@ impl Event {
     }
 }
 
+/// An **authoritative** boost-pad pickup (T6), from the replicated
+/// `TAGame.VehiclePickup_TA` event — the real pickup the replay records, not the
+/// gauge-step inference in [`crate::analyze::boost_pads`]. Carries exact counts
+/// and (via `gain`) exact collected/BPM. Attributed to the collecting player.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PadPickupEvent {
+    pub t: f32,
+    /// Collecting player's stable PRI.
+    pub pri: i32,
+    /// World `(x, y)` of the pad (nearest pad to the collector at pickup time).
+    pub pad: [f32; 2],
+    /// Big pad (fills to 100) vs small pad (+12).
+    pub big: bool,
+    /// Boost actually added to the tank (percent; capped at the 100 tank).
+    pub gain: f32,
+    /// Boost wasted because the tank was already partly full (`nominal − gain`).
+    pub overfill: f32,
+}
+
+/// A maximal **powerslide** (handbrake-held) interval for a player (T6), from the
+/// replicated `TAGame.Vehicle_TA:bReplicatedHandbrake` boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PowerslideInterval {
+    pub pri: i32,
+    pub start: f32,
+    pub end: f32,
+}
+
+impl PowerslideInterval {
+    /// Duration of the powerslide in seconds.
+    pub fn duration(&self) -> f32 {
+        self.end - self.start
+    }
+}
+
 /// Per-player derived aggregate features (T5). Sample, scoring-agnostic stats
 /// computed from the reconstructed/resampled data — a first consumer-facing
 /// summary, not the scoring rubric.
@@ -304,4 +339,11 @@ pub struct CanonicalMatch {
     pub events: Vec<Event>,
     /// Per-player derived aggregate features (T5).
     pub features: Vec<PlayerFeatures>,
+    /// Authoritative boost-pad pickups (T6) from the replicated pickup events.
+    /// Empty for replays decoded before this layer existed (`serde(default)`).
+    #[serde(default)]
+    pub pickups: Vec<PadPickupEvent>,
+    /// Powerslide (handbrake) intervals (T6) from the replicated handbrake bool.
+    #[serde(default)]
+    pub powerslides: Vec<PowerslideInterval>,
 }

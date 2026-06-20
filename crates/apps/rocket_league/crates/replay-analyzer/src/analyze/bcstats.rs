@@ -13,13 +13,17 @@
 //! boost buckets use the documented thresholds below; positioning is computed in
 //! each team's attack-direction frame (every team attacks `+Y`).
 //!
-//! Boost-pad attribution (big/small/stolen/overfill) comes from
-//! [`crate::analyze::boost_pads`], which also supplies the jitter-free
-//! `amount_collected`/`amount_used`. Positioning covers possession-split
-//! distance-to-ball, most-back/most-forward, goals-against-while-last-defender,
-//! and `time_ball_in_side` (a team/ball stat denormalized onto each player).
-//! Not yet covered (tracked in `docs/ballchasing-parity.md`): per-pad boost
-//! heatmaps.
+//! Boost-pad attribution (big/small/stolen/overfill) prefers the **authoritative**
+//! pickup events on [`CanonicalMatch::pickups`] (the replicated
+//! `TAGame.VehiclePickup_TA` stream — exact counts and BPM), falling back to the
+//! gauge-step inference in [`crate::analyze::boost_pads`] for replays/fixtures
+//! that carry no pickup stream. Powerslide usage (`time_powerslide`/
+//! `count_powerslide`/`avg_powerslide_duration`) comes from the authoritative
+//! handbrake intervals on [`CanonicalMatch::powerslides`]. Positioning covers
+//! possession-split distance-to-ball, most-back/most-forward,
+//! goals-against-while-last-defender, and `time_ball_in_side` (a team/ball stat
+//! denormalized onto each player). Not yet covered (tracked in
+//! `docs/ballchasing-parity.md`): per-pad boost heatmaps.
 
 use crate::field;
 use crate::model::{CanonicalMatch, Event, GridFrame, Vec3};
@@ -106,6 +110,12 @@ pub struct BcMovement {
     pub percent_low_air: f32,
     pub time_high_air_s: f32,
     pub percent_high_air: f32,
+    /// Powerslide (handbrake) usage, from the authoritative replicated handbrake
+    /// boolean (`CanonicalMatch::powerslides`). Zero when the replay carried no
+    /// handbrake stream (e.g. a hand-built canonical fixture).
+    pub time_powerslide_s: f32,
+    pub count_powerslide: u32,
+    pub avg_powerslide_duration_s: f32,
 }
 
 /// Field occupancy, in the team's attack-direction frame (`+Y` = attacking).
@@ -456,6 +466,17 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
         }
     }
 
+    // Powerslide totals per PRI from the authoritative handbrake intervals.
+    let mut ps_by_pri: BTreeMap<i32, (f32, u32)> = BTreeMap::new();
+    for p in &m.powerslides {
+        let e = ps_by_pri.entry(p.pri).or_insert((0.0, 0));
+        e.0 += p.duration();
+        e.1 += 1;
+    }
+    // Use the authoritative pad-pickup stream (exact counts + BPM) when the replay
+    // carried it; fall back to the gauge-step inference otherwise.
+    let use_auth = !m.pickups.is_empty();
+
     let pct = |n: u64, d: u64| {
         if d > 0 {
             n as f32 / d as f32 * 100.0
@@ -478,7 +499,21 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
             // gives jitter-free collected/used plus the big/small/stolen split.
             let sign = t.team.and_then(|tm| signs.get(&tm).copied()).unwrap_or(1);
             let econ = crate::analyze::boost_pads::boost_economy(t, sign);
-            let (collected, used, pads) = (econ.collected, econ.used, econ.pads);
+            let (collected, used, pads) = if use_auth {
+                // Authoritative pickups give the exact collected total; `used`
+                // still falls out of conservation (`used = collected − net`), and
+                // the net gauge change is independent of the pickup model, so
+                // recover it from the inferred economy: net = econ.collected −
+                // econ.used ⇒ used = collected − net.
+                let pads =
+                    crate::analyze::boost_pads::authoritative_pad_stats(&m.pickups, t.pri, sign);
+                let collected = pads.amount_collected_big + pads.amount_collected_small;
+                let used = (econ.used + (collected - econ.collected)).max(0.0);
+                (collected, used, pads)
+            } else {
+                (econ.collected, econ.used, econ.pads)
+            };
+            let (ps_time, ps_count) = ps_by_pri.get(&t.pri).copied().unwrap_or((0.0, 0));
 
             BcPlayerStats {
                 pri: t.pri,
@@ -529,6 +564,13 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     percent_low_air: pct(a.low_air, a.present),
                     time_high_air_s: secs(a.high_air),
                     percent_high_air: pct(a.high_air, a.present),
+                    time_powerslide_s: ps_time,
+                    count_powerslide: ps_count,
+                    avg_powerslide_duration_s: if ps_count > 0 {
+                        ps_time / ps_count as f32
+                    } else {
+                        0.0
+                    },
                 },
                 positioning: BcPositioning {
                     avg_dist_to_ball: mean(a.ball_dist_sum, a.ball_frames),

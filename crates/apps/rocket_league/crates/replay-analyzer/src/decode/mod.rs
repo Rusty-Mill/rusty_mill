@@ -76,6 +76,14 @@ pub enum ActorUpdate {
     /// A car was demolished. Car actor ids (resolve to players via current
     /// binding); sourced from `ReplicatedDemolish`/`ReplicatedDemolishExtended`.
     Demolish { attacker_car: i32, victim_car: i32 },
+    /// A boost pad was **collected** (`TAGame.VehiclePickup_TA:(New)ReplicatedPickupData`).
+    /// `instigator_car` is the collecting car actor (resolve to a PRI). Emitted
+    /// only when an instigator is present — i.e. a real collection, not a pad
+    /// becoming available again.
+    PickupBoost { instigator_car: i32 },
+    /// A car's handbrake (powerslide) state toggled
+    /// (`TAGame.Vehicle_TA:bReplicatedHandbrake`).
+    Handbrake { car: i32, on: bool },
 }
 
 /// A new actor appearing in a frame, with its classification.

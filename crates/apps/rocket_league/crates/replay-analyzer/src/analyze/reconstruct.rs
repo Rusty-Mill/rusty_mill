@@ -8,7 +8,10 @@
 //! identity-stable [`PlayerTrack`]s.
 
 use crate::decode::{ActorClass, ActorUpdate, DecodedReplay};
-use crate::model::{CarState, FrameOut, PlayerTrack, Rot3, TrackSample, Vec3};
+use crate::field::{self, PadKind};
+use crate::model::{
+    CarState, FrameOut, PadPickupEvent, PlayerTrack, PowerslideInterval, Rot3, TrackSample, Vec3,
+};
 use std::collections::{HashMap, HashSet};
 
 use super::identity::{coalesce, IdentityResolver};
@@ -25,6 +28,10 @@ pub struct Reconstruction {
     pub ball_samples: Vec<TrackSample>,
     /// Demolitions captured with the players (PRIs) bound at the demo time.
     pub demos: Vec<DemoSample>,
+    /// Authoritative boost-pad pickups (T6), attributed to the collecting PRI.
+    pub pickups: Vec<PadPickupEvent>,
+    /// Powerslide (handbrake) intervals (T6), per PRI.
+    pub powerslides: Vec<PowerslideInterval>,
 }
 
 /// A demolition with attacker/victim resolved to their bound PRI at demo time.
@@ -58,6 +65,10 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut car_boost: HashMap<i32, u8> = HashMap::new();
     let mut ball_samples: Vec<TrackSample> = Vec::new();
     let mut demos: Vec<DemoSample> = Vec::new();
+    let mut pickups: Vec<PadPickupEvent> = Vec::new();
+    let mut powerslides: Vec<PowerslideInterval> = Vec::new();
+    // Car actor -> time its current powerslide (handbrake-held) began.
+    let mut handbrake_start: HashMap<i32, f32> = HashMap::new();
     let mut resolver = IdentityResolver::new();
 
     let mut frames: Vec<FrameOut> = Vec::with_capacity(decoded.frames.len());
@@ -91,6 +102,41 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                         attacker_pri: resolver.current_pri(*attacker_car),
                         victim_pri: resolver.current_pri(*victim_car),
                     });
+                }
+                ActorUpdate::PickupBoost { instigator_car } => {
+                    // The collector is sitting on the pad, so the nearest pad to
+                    // its current position identifies which pad (big vs small +
+                    // location); the gauge before the pickup gives the real gain.
+                    if let Some((p, _)) = car_pv.get(instigator_car) {
+                        let before = car_boost
+                            .get(instigator_car)
+                            .map(|b| field::boost_percent(*b))
+                            .unwrap_or(0.0);
+                        let (kind, pad, _d) = field::nearest_pad_any(*p);
+                        let nominal = field::pad_nominal(kind);
+                        let gain = nominal.min((100.0 - before).max(0.0));
+                        pickups.push(PadPickupEvent {
+                            t: frame.time,
+                            pri: resolver.current_pri(*instigator_car).unwrap_or(-1),
+                            pad: [pad.0, pad.1],
+                            big: matches!(kind, PadKind::Big),
+                            gain,
+                            overfill: (nominal - gain).max(0.0),
+                        });
+                    }
+                }
+                ActorUpdate::Handbrake { car, on } => {
+                    if *on {
+                        handbrake_start.entry(*car).or_insert(frame.time);
+                    } else if let Some(start) = handbrake_start.remove(car) {
+                        if frame.time > start {
+                            powerslides.push(PowerslideInterval {
+                                pri: resolver.current_pri(*car).unwrap_or(-1),
+                                start,
+                                end: frame.time,
+                            });
+                        }
+                    }
                 }
                 ActorUpdate::RigidBody {
                     actor, p, v, rot, ..
@@ -132,6 +178,16 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         }
 
         for da in &frame.deleted {
+            // Close an open powerslide before identity forgets this car's PRI.
+            if let Some(start) = handbrake_start.remove(da) {
+                if frame.time > start {
+                    powerslides.push(PowerslideInterval {
+                        pri: resolver.current_pri(*da).unwrap_or(-1),
+                        start,
+                        end: frame.time,
+                    });
+                }
+            }
             car_pv.remove(da);
             car_rot.remove(da);
             car_boost.remove(da);
@@ -160,6 +216,18 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
             ball,
             cars,
         });
+    }
+
+    // Close powerslides still held at the final frame (cars never deleted).
+    let last_t = decoded.frames.last().map(|f| f.time).unwrap_or(0.0);
+    for (car, start) in handbrake_start.drain() {
+        if last_t > start {
+            powerslides.push(PowerslideInterval {
+                pri: resolver.current_pri(car).unwrap_or(-1),
+                start,
+                end: last_t,
+            });
+        }
     }
 
     let (segments, pri_to_name) = resolver.finish();
@@ -199,6 +267,8 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         tracks,
         ball_samples,
         demos,
+        pickups,
+        powerslides,
     }
 }
 

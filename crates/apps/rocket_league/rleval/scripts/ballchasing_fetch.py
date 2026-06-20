@@ -143,12 +143,44 @@ def _player(p):
     }
 
 
-def sanitize(doc):
-    """Reduce the raw replay JSON to the committed-fixture schema.
+# The five stat groups carried verbatim in the --full-stats fixture (for the
+# bc-validate exact-match validator). These are match facts, not identity.
+FULL_STAT_GROUPS = ("core", "boost", "movement", "positioning", "demo")
+
+
+def _player_full(p):
+    """Keep a player's *whole* stat block (all five groups) for bc-validate.
+
+    Still drops identity: only `name` + `stats` survive, and the platform id is
+    nulled. Stat numbers pass through unchanged so they can be diffed field by
+    field against the clone's output.
+    """
+    stats = p.get("stats", {})
+    pid = p.get("id") or {}
+    return {
+        "name": p.get("name"),
+        "id": {"platform": pid.get("platform"), "id": None},
+        "stats": {g: stats.get(g, {}) for g in FULL_STAT_GROUPS},
+    }
+
+
+def _team_full(side):
+    """A team side with every player's full stat block (and the team stats)."""
+    return {
+        "stats": {g: side.get("stats", {}).get(g, {}) for g in FULL_STAT_GROUPS},
+        "players": [_player_full(p) for p in side.get("players", [])],
+    }
+
+
+def sanitize(doc, full=False):
+    """Reduce the raw replay JSON to a committed-fixture schema.
 
     Drops the `uploader` block entirely (our account identity) and nulls every
-    per-player platform id, so the fixture carries only match facts.
+    per-player platform id, so the fixture carries only match facts. With
+    `full=True` it keeps the whole per-player stat block (for `bc-validate`);
+    otherwise only the core cross-check fields (for the contract test).
     """
+    team = _team_full if full else _team
     return {
         "id": doc.get("id"),
         "status": doc.get("status"),
@@ -156,8 +188,8 @@ def sanitize(doc):
         "map_name": doc.get("map_name"),
         "team_size": doc.get("team_size"),
         "duration": doc.get("duration"),
-        "blue": _team(doc.get("blue", {})),
-        "orange": _team(doc.get("orange", {})),
+        "blue": team(doc.get("blue", {})),
+        "orange": team(doc.get("orange", {})),
     }
 
 
@@ -166,20 +198,27 @@ def main():
     ap.add_argument("replay", help="path to a .replay file")
     ap.add_argument("--out", required=True, help="where to write the sanitized fixture JSON")
     ap.add_argument("--id", help="skip upload; fetch an existing ballchasing replay id")
+    ap.add_argument(
+        "--full-stats",
+        action="store_true",
+        help="keep every per-player stat group (for bc-validate), not just core",
+    )
     args = ap.parse_args()
 
     key = _key()
     ping(key)
     replay_id = args.id or upload(args.replay, key)
     doc = poll(replay_id, key)
-    fixture = sanitize(doc)
+    fixture = sanitize(doc, full=args.full_stats)
 
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(fixture, fh, indent=2, sort_keys=True, ensure_ascii=False)
         fh.write("\n")
     n = len(fixture["blue"]["players"]) + len(fixture["orange"]["players"])
+    mode = "full per-player stats" if args.full_stats else "core fields only"
     print(f"wrote {args.out}: {n} players, map={fixture['map_code']} "
-          f"team_size={fixture['team_size']} (uploader + player ids stripped)", file=sys.stderr)
+          f"team_size={fixture['team_size']} ({mode}; uploader + player ids stripped)",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":

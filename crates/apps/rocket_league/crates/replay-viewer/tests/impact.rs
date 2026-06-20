@@ -108,6 +108,8 @@ fn match_with_touch() -> CanonicalMatch {
             },
         ],
         features: vec![],
+        pickups: vec![],
+        powerslides: vec![],
     }
 }
 

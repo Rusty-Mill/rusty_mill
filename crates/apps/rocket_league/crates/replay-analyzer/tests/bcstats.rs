@@ -50,6 +50,8 @@ fn match_with(frames: Vec<GridFrame>, events: Vec<Event>, track: PlayerTrack) ->
         },
         events,
         features: vec![],
+        pickups: vec![],
+        powerslides: vec![],
     }
 }
 

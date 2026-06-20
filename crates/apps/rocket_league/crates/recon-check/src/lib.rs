@@ -570,6 +570,8 @@ mod tests {
             },
             events: vec![],
             features: vec![],
+            pickups: vec![],
+            powerslides: vec![],
         }
     }
 

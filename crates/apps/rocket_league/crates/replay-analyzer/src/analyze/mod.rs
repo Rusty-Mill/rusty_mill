@@ -86,5 +86,7 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
         resampled,
         events: evs,
         features,
+        pickups: recon.pickups,
+        powerslides: recon.powerslides,
     }
 }
