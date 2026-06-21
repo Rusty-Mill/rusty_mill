@@ -142,6 +142,10 @@ fn fixture() -> DecodedReplay {
                 assists: 0,
                 saves: 0,
                 shots: 0,
+                car_id: None,
+                car_name: None,
+                camera: None,
+                steering_sensitivity: None,
             }],
             goals: Vec::new(),
         },
@@ -189,25 +193,33 @@ fn powerslide_interval_is_captured() {
 }
 
 #[test]
-fn bcstats_uses_authoritative_pickups_and_powerslide() {
+fn bcstats_boost_uses_gauge_not_pickup_events_and_powerslide() {
     let m = build_canonical(&fixture(), "bc-fixture");
+    // The fixture fires two authoritative pickup events, but the boost gauge never
+    // rises (it stays at byte 100), so the gauge-delta model — the actual stat
+    // source — reports no collection. This proves bcstats ignores the raw
+    // `VehiclePickup` events for the boost block (they over-count on real replays;
+    // see `docs/ballchasing-comparison.md`).
+    assert_eq!(m.pickups.len(), 2, "raw pickup events are still captured");
     let stats = ballchasing_stats(&m);
     let alice = stats.iter().find(|s| s.player == "Alice").expect("alice");
-
-    // Authoritative pad model: exactly one big + one small pickup.
-    assert_eq!(alice.boost.count_collected_big, 1);
-    assert_eq!(alice.boost.count_collected_small, 1);
-    // collected = big gain + small gain (≈60.8 + 12), not the gauge-step inference.
-    assert!(
-        (alice.boost.amount_collected - 72.78).abs() < 0.6,
-        "collected = {}",
-        alice.boost.amount_collected
+    assert_eq!(
+        alice.boost.count_collected_big, 0,
+        "no gauge rise → no collection"
     );
-    // Neither pad is in the opponent half here → nothing stolen.
-    assert_eq!(alice.boost.amount_stolen, 0.0);
+    assert_eq!(alice.boost.count_collected_small, 0);
+    assert_eq!(alice.boost.amount_collected, 0.0);
 
-    // Powerslide block from the authoritative handbrake interval.
+    // Powerslide comes from the authoritative handbrake interval [0.1, 0.5],
+    // ground-gated to the grid (the car sits at z=17, on the ground). Time is
+    // frame-quantized by the 30 Hz grid, so allow ~1.5 frames of slack.
     assert_eq!(alice.movement.count_powerslide, 1);
-    assert!((alice.movement.time_powerslide_s - 0.4).abs() < 1e-3);
-    assert!((alice.movement.avg_powerslide_duration_s - 0.4).abs() < 1e-3);
+    assert!(
+        (alice.movement.time_powerslide_s - 0.4).abs() < 0.05,
+        "time = {}",
+        alice.movement.time_powerslide_s
+    );
+    assert!(
+        (alice.movement.avg_powerslide_duration_s - alice.movement.time_powerslide_s).abs() < 1e-4
+    );
 }

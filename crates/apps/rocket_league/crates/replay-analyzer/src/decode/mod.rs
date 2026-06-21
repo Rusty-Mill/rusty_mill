@@ -76,6 +76,15 @@ pub enum ActorUpdate {
     /// A car was demolished. Car actor ids (resolve to players via current
     /// binding); sourced from `ReplicatedDemolish`/`ReplicatedDemolishExtended`.
     Demolish { attacker_car: i32, victim_car: i32 },
+    /// A per-player scoreboard counter replicated on the PRI
+    /// (`TAGame.PRI_TA:Match{Score,Goals,Saves,Assists,Shots}`). Authoritative and
+    /// present in the network stream even when the header `PlayerStats[]` array is
+    /// empty — the fallback source for per-player core stats.
+    PriStat {
+        pri: i32,
+        stat: PriStatKind,
+        value: i32,
+    },
     /// A boost pad was **collected** (`TAGame.VehiclePickup_TA:(New)ReplicatedPickupData`).
     /// `instigator_car` is the collecting car actor (resolve to a PRI). Emitted
     /// only when an instigator is present — i.e. a real collection, not a pad
@@ -84,6 +93,46 @@ pub enum ActorUpdate {
     /// A car's handbrake (powerslide) state toggled
     /// (`TAGame.Vehicle_TA:bReplicatedHandbrake`).
     Handbrake { car: i32, on: bool },
+    /// A PRI's chosen car-body product ids, from its loadout
+    /// (`TAGame.PRI_TA:ClientLoadout(s)` → `Loadout.body`). The team loadout
+    /// carries a body for each side; the player uses the one matching their team
+    /// (`blue_body` for team 0, `orange_body` for team 1 — usually identical). The
+    /// singular `ClientLoadout` sets both to the same value.
+    Loadout {
+        pri: i32,
+        blue_body: u32,
+        orange_body: u32,
+    },
+    /// A camera-settings actor reported its profile (`CamSettings`). Attributed to
+    /// a PRI via the [`ActorUpdate::CameraPri`] link on the same `cam_actor`.
+    /// `angle`/`swivel`/`transition` are ballchasing's `pitch`/`swivel_speed`/
+    /// `transition_speed`.
+    CameraSettings {
+        cam_actor: i32,
+        fov: f32,
+        height: f32,
+        angle: f32,
+        distance: f32,
+        stiffness: f32,
+        swivel: f32,
+        transition: f32,
+    },
+    /// A camera-settings actor was bound to its owning PRI
+    /// (`TAGame.CameraSettingsActor_TA:PRI`).
+    CameraPri { cam_actor: i32, pri: i32 },
+    /// A PRI's steering sensitivity (`TAGame.PRI_TA:SteeringSensitivity`, a float;
+    /// RL's default is `1.0`).
+    SteeringSensitivity { pri: i32, value: f32 },
+}
+
+/// Which per-player scoreboard counter a [`ActorUpdate::PriStat`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriStatKind {
+    Score,
+    Goals,
+    Saves,
+    Assists,
+    Shots,
 }
 
 /// A new actor appearing in a frame, with its classification.

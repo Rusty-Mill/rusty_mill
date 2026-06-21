@@ -9,8 +9,8 @@ use boxcars::attributes::ActiveActor;
 use boxcars::{Attribute, HeaderProp, ObjectId, ParserBuilder, Replay};
 
 use super::{
-    ActorClass, ActorUpdate, DecodeError, DecodedReplay, GoalInfo, NewActorEvent, RawFrame,
-    ReplayMeta, ReplayParser,
+    ActorClass, ActorUpdate, DecodeError, DecodedReplay, GoalInfo, NewActorEvent, PriStatKind,
+    RawFrame, ReplayMeta, ReplayParser,
 };
 use crate::model::PlayerMeta;
 use std::collections::BTreeMap;
@@ -39,6 +39,24 @@ const OBJ_PICKUP: &str = "TAGame.VehiclePickup_TA:ReplicatedPickupData";
 const OBJ_PICKUP_NEW: &str = "TAGame.VehiclePickup_TA:NewReplicatedPickupData";
 /// Object string carrying a car's replicated handbrake (powerslide) boolean.
 const OBJ_HANDBRAKE: &str = "TAGame.Vehicle_TA:bReplicatedHandbrake";
+/// Object strings carrying a PRI's loadout: `ClientLoadouts` is a per-team pair
+/// (`TeamLoadout`), `ClientLoadout` is a single `Loadout`. Both expose `body`.
+const OBJ_LOADOUTS: &str = "TAGame.PRI_TA:ClientLoadouts";
+const OBJ_LOADOUT: &str = "TAGame.PRI_TA:ClientLoadout";
+/// Object strings for the camera profile (`CamSettings` on a camera-settings
+/// actor), that actor's PRI link, and a PRI's steering sensitivity (a float).
+const OBJ_CAM_SETTINGS: &str = "TAGame.CameraSettingsActor_TA:ProfileSettings";
+const OBJ_CAM_PRI: &str = "TAGame.CameraSettingsActor_TA:PRI";
+const OBJ_STEER: &str = "TAGame.PRI_TA:SteeringSensitivity";
+/// Object strings carrying the per-player scoreboard counters on the PRI. These
+/// are replicated even when the header `PlayerStats[]` array is empty.
+const OBJ_PRI_MATCH: [(&str, PriStatKind); 5] = [
+    ("TAGame.PRI_TA:MatchScore", PriStatKind::Score),
+    ("TAGame.PRI_TA:MatchGoals", PriStatKind::Goals),
+    ("TAGame.PRI_TA:MatchSaves", PriStatKind::Saves),
+    ("TAGame.PRI_TA:MatchAssists", PriStatKind::Assists),
+    ("TAGame.PRI_TA:MatchShots", PriStatKind::Shots),
+];
 
 /// The real, resolved `boxcars` version (injected by `build.rs`).
 pub const BOXCARS_VERSION: &str = env!("BOXCARS_VERSION");
@@ -215,6 +233,11 @@ fn extract_players(replay: &Replay) -> Vec<PlayerMeta> {
             assists: get_i("Assists"),
             saves: get_i("Saves"),
             shots: get_i("Shots"),
+            // Car + camera come from the network stream, joined in `build_canonical`.
+            car_id: None,
+            car_name: None,
+            camera: None,
+            steering_sensitivity: None,
         });
     }
     out
@@ -239,6 +262,16 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
     let pickup_id = object_id(replay, OBJ_PICKUP);
     let pickup_new_id = object_id(replay, OBJ_PICKUP_NEW);
     let handbrake_id = object_id(replay, OBJ_HANDBRAKE);
+    let loadouts_id = object_id(replay, OBJ_LOADOUTS);
+    let loadout_id = object_id(replay, OBJ_LOADOUT);
+    let cam_settings_id = object_id(replay, OBJ_CAM_SETTINGS);
+    let cam_pri_id = object_id(replay, OBJ_CAM_PRI);
+    let steer_id = object_id(replay, OBJ_STEER);
+    // (object id, stat kind) for the per-player scoreboard counters present.
+    let pri_match_ids: Vec<(ObjectId, PriStatKind)> = OBJ_PRI_MATCH
+        .iter()
+        .filter_map(|(name, kind)| object_id(replay, name).map(|id| (id, *kind)))
+        .collect();
 
     let classify = |obj: ObjectId| -> ActorClass {
         let n = replay
@@ -399,6 +432,59 @@ fn extract_frames(replay: &Replay) -> Result<Vec<RawFrame>, DecodeError> {
                     raw.updates.push(ActorUpdate::Handbrake {
                         car: ua.actor_id.0,
                         on: *on,
+                    });
+                }
+            } else if oid == loadouts_id {
+                if let Attribute::TeamLoadout(t) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::Loadout {
+                        pri: ua.actor_id.0,
+                        blue_body: t.blue.body,
+                        orange_body: t.orange.body,
+                    });
+                }
+            } else if oid == loadout_id {
+                if let Attribute::Loadout(l) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::Loadout {
+                        pri: ua.actor_id.0,
+                        blue_body: l.body,
+                        orange_body: l.body,
+                    });
+                }
+            } else if oid == cam_settings_id {
+                if let Attribute::CamSettings(c) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::CameraSettings {
+                        cam_actor: ua.actor_id.0,
+                        fov: c.fov,
+                        height: c.height,
+                        angle: c.angle,
+                        distance: c.distance,
+                        stiffness: c.stiffness,
+                        swivel: c.swivel,
+                        transition: c.transition.unwrap_or(0.0),
+                    });
+                }
+            } else if oid == cam_pri_id {
+                if let Attribute::ActiveActor(ActiveActor { actor, .. }) = &ua.attribute {
+                    if actor.0 >= 0 {
+                        raw.updates.push(ActorUpdate::CameraPri {
+                            cam_actor: ua.actor_id.0,
+                            pri: actor.0,
+                        });
+                    }
+                }
+            } else if oid == steer_id {
+                if let Attribute::Float(v) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::SteeringSensitivity {
+                        pri: ua.actor_id.0,
+                        value: *v,
+                    });
+                }
+            } else if let Some((_, stat)) = pri_match_ids.iter().find(|(id, _)| Some(*id) == oid) {
+                if let Attribute::Int(v) = &ua.attribute {
+                    raw.updates.push(ActorUpdate::PriStat {
+                        pri: ua.actor_id.0,
+                        stat: *stat,
+                        value: *v,
                     });
                 }
             }

@@ -13,13 +13,18 @@
 //! boost buckets use the documented thresholds below; positioning is computed in
 //! each team's attack-direction frame (every team attacks `+Y`).
 //!
-//! Boost-pad attribution (big/small/stolen/overfill) prefers the **authoritative**
-//! pickup events on [`CanonicalMatch::pickups`] (the replicated
-//! `TAGame.VehiclePickup_TA` stream — exact counts and BPM), falling back to the
-//! gauge-step inference in [`crate::analyze::boost_pads`] for replays/fixtures
-//! that carry no pickup stream. Powerslide usage (`time_powerslide`/
-//! `count_powerslide`/`avg_powerslide_duration`) comes from the authoritative
-//! handbrake intervals on [`CanonicalMatch::powerslides`]. Positioning covers
+//! Boost-pad attribution (collected/big/small/stolen/overfill) uses the
+//! **gauge-delta** model in [`crate::analyze::boost_pads`] — the sum of positive
+//! boost-gauge steps (above the jitter floor), classified by step size. This
+//! matches ballchasing within ~1-3% on collected and ±1-2 on the big/small split
+//! (`docs/ballchasing-comparison.md`), because ballchasing's `amount_collected`
+//! and BPM are gauge-based. The authoritative `TAGame.VehiclePickup_TA` event
+//! stream on [`CanonicalMatch::pickups`] is deliberately **not** the stat source
+//! (it over-counts no-gain drive-overs / pad resets); it remains available as a
+//! raw, player-attributed pickup-timing stream for the viewer. Powerslide usage
+//! (`time_powerslide`/`count_powerslide`/`avg_powerslide_duration`) comes from the
+//! authoritative handbrake intervals on [`CanonicalMatch::powerslides`].
+//! Positioning covers
 //! possession-split distance-to-ball, most-back/most-forward,
 //! goals-against-while-last-defender, and `time_ball_in_side` (a team/ball stat
 //! denormalized onto each player). Not yet covered (tracked in
@@ -60,6 +65,10 @@ pub struct BcBoost {
     pub avg_amount: f32,
     pub amount_collected: f32,
     pub amount_used: f32,
+    /// Boost burned while supersonic on the ground (ballchasing's
+    /// `amount_used_while_supersonic`). **Approximate** — see
+    /// [`crate::analyze::boost_pads::BoostEconomy::used_supersonic`].
+    pub amount_used_while_supersonic: f32,
     pub bpm: f32,
     pub bcpm: f32,
     pub time_zero_s: f32,
@@ -152,6 +161,12 @@ pub struct BcPositioning {
     pub percent_most_back: f32,
     pub time_most_forward_s: f32,
     pub percent_most_forward: f32,
+    /// Time as the closest / farthest player of the team to the ball (ball
+    /// present), as seconds and as a percent of the player's positional time.
+    pub time_closest_to_ball_s: f32,
+    pub percent_closest_to_ball: f32,
+    pub time_farthest_from_ball_s: f32,
+    pub percent_farthest_from_ball: f32,
     /// Goals conceded while this player was the team's last defender (back-most).
     pub goals_against_while_last_defender: u32,
 }
@@ -199,6 +214,9 @@ struct Acc {
     off_half: u64,
     most_back: u64,
     most_forward: u64,
+    // closest / farthest to the ball among present teammates (ball present)
+    closest_ball: u64,
+    farthest_ball: u64,
     // behind/infront (team known AND ball present)
     behind: u64,
     infront: u64,
@@ -373,6 +391,37 @@ fn fold_frame(
             accs.entry(pri).or_default().most_forward += 1;
         }
     }
+
+    // Closest / farthest to the ball per team this frame (ball present). Ranked
+    // among the team's *present* cars, mirroring most-back/forward; ties keep the
+    // first car seen.
+    if let Some(ball) = &frame.ball {
+        let mut by_team_d: BTreeMap<i32, Vec<(i32, f64)>> = BTreeMap::new();
+        for c in &frame.cars {
+            if let Some(team) = c.team {
+                by_team_d
+                    .entry(team)
+                    .or_default()
+                    .push((c.pri, dist(c.p, ball.p)));
+            }
+        }
+        for cars in by_team_d.values() {
+            if let Some((pri, _)) = cars
+                .iter()
+                .copied()
+                .reduce(|a, b| if b.1 < a.1 { b } else { a })
+            {
+                accs.entry(pri).or_default().closest_ball += 1;
+            }
+            if let Some((pri, _)) = cars
+                .iter()
+                .copied()
+                .reduce(|a, b| if b.1 > a.1 { b } else { a })
+            {
+                accs.entry(pri).or_default().farthest_ball += 1;
+            }
+        }
+    }
 }
 
 /// The grid frame whose time is nearest `t` (for joining an event to positions).
@@ -466,17 +515,37 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
         }
     }
 
-    // Powerslide totals per PRI from the authoritative handbrake intervals.
+    // Powerslide totals per PRI from the authoritative handbrake intervals, gated
+    // to the **on-ground** portion: a powerslide is a grounded handbrake, so an
+    // airborne handbrake hold doesn't count (ballchasing agrees — un-gated counts
+    // ran ~1.23× high). Build a per-pri grounded timeline from the grid, then
+    // intersect each interval with it: count an interval only if it has a grounded
+    // frame, and accumulate only its grounded time.
+    let mut ground_tl: BTreeMap<i32, Vec<(f32, bool)>> = BTreeMap::new();
+    for f in &m.resampled.frames {
+        for c in &f.cars {
+            ground_tl
+                .entry(c.pri)
+                .or_default()
+                .push((f.t, c.p.z < GROUND_Z));
+        }
+    }
     let mut ps_by_pri: BTreeMap<i32, (f32, u32)> = BTreeMap::new();
     for p in &m.powerslides {
-        let e = ps_by_pri.entry(p.pri).or_insert((0.0, 0));
-        e.0 += p.duration();
-        e.1 += 1;
+        let Some(tl) = ground_tl.get(&p.pri) else {
+            continue;
+        };
+        let lo = tl.partition_point(|(t, _)| *t < p.start);
+        let hi = tl.partition_point(|(t, _)| *t <= p.end);
+        let grounded = tl[lo..hi].iter().filter(|(_, g)| *g).count();
+        if grounded > 0 {
+            let e = ps_by_pri.entry(p.pri).or_insert((0.0, 0));
+            e.0 += grounded as f32 * dt;
+            e.1 += 1;
+        }
     }
     // Use the authoritative pad-pickup stream (exact counts + BPM) when the replay
     // carried it; fall back to the gauge-step inference otherwise.
-    let use_auth = !m.pickups.is_empty();
-
     let pct = |n: u64, d: u64| {
         if d > 0 {
             n as f32 / d as f32 * 100.0
@@ -495,24 +564,17 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
             let minutes = secs(a.present) / 60.0;
             let per_min = |amt: f32| if minutes > 0.0 { amt / minutes } else { 0.0 };
             let behind_den = a.behind + a.infront;
-            // Pad-pickup attribution needs the player's attack sign; the economy
-            // gives jitter-free collected/used plus the big/small/stolen split.
+            // Boost economy: the **gauge-delta** model (sum of positive boost-gauge
+            // steps above the jitter floor) is the source for collected / counts /
+            // big-small / stolen / overfill, because ballchasing's `amount_collected`
+            // and BPM are themselves gauge-based — validated near-exact against
+            // ground truth (collected within ~1-3%, big/small split ±1-2). The
+            // authoritative `VehiclePickup` event stream (`m.pickups`) is *not* used
+            // here: it over-counts (it fires on no-gain drive-overs / pad resets) and
+            // its per-event gain/kind are unreliable. See `docs/ballchasing-comparison.md`.
             let sign = t.team.and_then(|tm| signs.get(&tm).copied()).unwrap_or(1);
             let econ = crate::analyze::boost_pads::boost_economy(t, sign);
-            let (collected, used, pads) = if use_auth {
-                // Authoritative pickups give the exact collected total; `used`
-                // still falls out of conservation (`used = collected − net`), and
-                // the net gauge change is independent of the pickup model, so
-                // recover it from the inferred economy: net = econ.collected −
-                // econ.used ⇒ used = collected − net.
-                let pads =
-                    crate::analyze::boost_pads::authoritative_pad_stats(&m.pickups, t.pri, sign);
-                let collected = pads.amount_collected_big + pads.amount_collected_small;
-                let used = (econ.used + (collected - econ.collected)).max(0.0);
-                (collected, used, pads)
-            } else {
-                (econ.collected, econ.used, econ.pads)
-            };
+            let (collected, used, pads) = (econ.collected, econ.used, econ.pads);
             let (ps_time, ps_count) = ps_by_pri.get(&t.pri).copied().unwrap_or((0.0, 0));
 
             BcPlayerStats {
@@ -523,6 +585,7 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     avg_amount: mean(a.boost_pct_sum, a.boost_frames),
                     amount_collected: collected,
                     amount_used: used,
+                    amount_used_while_supersonic: econ.used_supersonic,
                     bpm: per_min(collected),
                     bcpm: per_min(used),
                     time_zero_s: secs(a.b_zero),
@@ -597,6 +660,10 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     percent_most_back: pct(a.most_back, a.pos_frames),
                     time_most_forward_s: secs(a.most_forward),
                     percent_most_forward: pct(a.most_forward, a.pos_frames),
+                    time_closest_to_ball_s: secs(a.closest_ball),
+                    percent_closest_to_ball: pct(a.closest_ball, a.pos_frames),
+                    time_farthest_from_ball_s: secs(a.farthest_ball),
+                    percent_farthest_from_ball: pct(a.farthest_ball, a.pos_frames),
                     goals_against_while_last_defender: gawld.get(&t.pri).copied().unwrap_or(0),
                 },
                 demo: BcDemo {

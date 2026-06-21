@@ -20,6 +20,7 @@
 //! println!("{} coalesced player tracks", canonical.tracks.len());
 //! ```
 pub mod analyze;
+pub mod cars;
 pub mod decode;
 pub mod field;
 pub mod model;

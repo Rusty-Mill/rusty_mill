@@ -155,6 +155,7 @@ fn print_summary(c: &CanonicalMatch) {
             Event::Possession { .. } => "possession",
             Event::Demo { .. } => "demo",
             Event::Goal { .. } => "goal",
+            Event::Stat { .. } => "stat",
         };
         *counts.entry(k).or_default() += 1;
     }

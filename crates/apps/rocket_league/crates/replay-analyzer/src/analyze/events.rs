@@ -7,10 +7,11 @@
 //! Detectors are independent pure functions so each is unit-testable in
 //! isolation; [`super::build_canonical`] merges and time-sorts their output.
 
-use crate::model::{Event, GridFrame, PlayerTrack, Resampled};
+use crate::decode::PriStatKind;
+use crate::model::{Event, GridFrame, PlayerTrack, Resampled, StatKind};
 use std::collections::HashMap;
 
-use super::reconstruct::DemoSample;
+use super::reconstruct::{DemoSample, StatSample};
 
 /// Max ball-center-to-car-center distance for a touch (uu): ball radius plus a
 /// car body, with slack for the 30 Hz sampling step.
@@ -204,4 +205,108 @@ pub fn demos(samples: &[DemoSample], tracks: &[PlayerTrack]) -> Vec<Event> {
         });
     }
     out
+}
+
+/// Scoreboard counter increments (shots / saves / assists) as timestamped
+/// timeline markers, resolved to the player's name + team. Each [`StatSample`]
+/// already represents one unit gained on the counter's rising edge.
+pub fn stats(samples: &[StatSample], tracks: &[PlayerTrack]) -> Vec<Event> {
+    let lookup = pri_lookup(tracks);
+    samples
+        .iter()
+        .filter_map(|s| {
+            let kind = match s.kind {
+                PriStatKind::Shots => StatKind::Shot,
+                PriStatKind::Saves => StatKind::Save,
+                PriStatKind::Assists => StatKind::Assist,
+                // Score / Goals are not timeline stat markers.
+                _ => return None,
+            };
+            let (player, team) = match lookup.get(&s.pri) {
+                Some((n, tm)) => (Some(n.clone()), *tm),
+                None => (None, None),
+            };
+            Some(Event::Stat {
+                t: s.t,
+                pri: s.pri,
+                player,
+                team,
+                kind,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(pri: i32, name: &str, team: i32) -> PlayerTrack {
+        PlayerTrack {
+            player: name.into(),
+            pri,
+            team: Some(team),
+            num_segments: 0,
+            samples: Vec::new(),
+            gaps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn stats_maps_kinds_resolves_players_and_drops_score_goals() {
+        let tracks = [track(7, "Alice", 0), track(9, "Bob", 1)];
+        let samples = [
+            StatSample {
+                t: 10.0,
+                pri: 7,
+                kind: PriStatKind::Shots,
+            },
+            StatSample {
+                t: 11.0,
+                pri: 9,
+                kind: PriStatKind::Saves,
+            },
+            StatSample {
+                t: 12.0,
+                pri: 7,
+                kind: PriStatKind::Assists,
+            },
+            // Score / Goals never produce timeline markers.
+            StatSample {
+                t: 13.0,
+                pri: 7,
+                kind: PriStatKind::Score,
+            },
+            StatSample {
+                t: 14.0,
+                pri: 9,
+                kind: PriStatKind::Goals,
+            },
+        ];
+        let evs = stats(&samples, &tracks);
+        assert_eq!(evs.len(), 3, "only shot/save/assist surface");
+        assert!(matches!(
+            evs[0],
+            Event::Stat {
+                kind: StatKind::Shot,
+                team: Some(0),
+                ref player,
+                ..
+            } if player.as_deref() == Some("Alice")
+        ));
+        assert!(matches!(
+            evs[1],
+            Event::Stat {
+                kind: StatKind::Save,
+                ..
+            }
+        ));
+        assert!(matches!(
+            evs[2],
+            Event::Stat {
+                kind: StatKind::Assist,
+                ..
+            }
+        ));
+    }
 }

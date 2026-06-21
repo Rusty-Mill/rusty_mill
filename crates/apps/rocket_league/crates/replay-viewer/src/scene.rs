@@ -373,6 +373,20 @@ fn match_events(m: &CanonicalMatch) -> Vec<SceneEvent> {
                 label: format!("touch — {}", player.as_deref().unwrap_or("?")),
                 dv: None,
             },
+            Event::Stat {
+                t,
+                player,
+                team,
+                pri,
+                kind,
+            } => SceneEvent {
+                kind: "stat".into(),
+                t: round(*t, 2),
+                pri: Some(*pri),
+                team: *team,
+                label: format!("{kind:?} — {}", player.as_deref().unwrap_or("?")),
+                dv: None,
+            },
             Event::Possession { .. } => continue,
         };
         out.push(ev);

@@ -49,14 +49,17 @@ condition, the recommended next threads, and the context/gotchas.
     "how does ballchasing compute each stat from the bytes" companion to the
     reference-vs-ours parity audit (pipeline, replay substrate, exact/inferred
     stat definitions, REST schema, the two replicated attributes ballchasing uses).
-  - **Authoritative pad pickups + powerslide — two parity gaps closed.** The
-    decode port now surfaces `TAGame.VehiclePickup_TA:(New)ReplicatedPickupData`
-    (`ActorUpdate::PickupBoost`, real pickup ⟺ `Some(instigator)`) and
-    `bReplicatedHandbrake` (`ActorUpdate::Handbrake`). Reconstruction attributes
-    both to the instigator/car PRI → `CanonicalMatch::pickups` /
-    `::powerslides` (new `serde(default)` fields; golden digest unaffected).
-    `bcstats` prefers the authoritative pickup stream (exact counts; removes the
-    ~10–15% BPM undercount) and adds the powerslide block. `tests/pickups_powerslide.rs`.
+  - **Boost / powerslide / empty-header — validated against ground truth.** A
+    5-replay ballchasing comparison (`docs/ballchasing-comparison.md`) drove three
+    fixes: (1) **boost** uses the **gauge-delta** model (`analyze::boost_pads`) —
+    `amount_collected` 0.8%, counts ~4.5%, bpm 6.4% — NOT the authoritative
+    `VehiclePickup` event stream, which over-counts (a reverted regression; the raw
+    `CanonicalMatch::pickups` stream is kept for viewer timing only); (2)
+    **powerslide** from `bReplicatedHandbrake` is **ground-gated** to the grid
+    (count 0.0% error); (3) **empty-header scoreboard** reads the network
+    `PRI_TA:Match*` counters (`ActorUpdate::PriStat`) and synthesizes the roster in
+    `build_canonical` when `PlayerStats[]` is empty (was 0; now exact).
+    `tests/pickups_powerslide.rs`.
   - **`bc-clone` crate** — emits ballchasing's exact `GET /replays/{id}` JSON
     schema, plus **`bc-validate`** which diffs that document field-by-field
     against a real ballchasing doc (roster-paired, EXACT + 12%-CORE gates) — a

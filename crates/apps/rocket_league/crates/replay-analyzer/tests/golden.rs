@@ -317,6 +317,7 @@ fn digest(m: &CanonicalMatch) -> Digest {
                 });
                 "goal"
             }
+            Event::Stat { .. } => "stat",
         };
         *events_by_type.entry(key.to_string()).or_default() += 1;
     }

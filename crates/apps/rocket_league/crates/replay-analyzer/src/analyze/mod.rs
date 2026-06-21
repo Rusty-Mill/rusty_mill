@@ -50,6 +50,7 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
     evs.extend(possessions);
     evs.extend(events::kickoffs(&resampled));
     evs.extend(events::demos(&recon.demos, &recon.tracks));
+    evs.extend(events::stats(&recon.stat_events, &recon.tracks));
     for g in &decoded.meta.goals {
         // The header's goal frame can be one past the last index (a match-ending
         // goal); clamp to the final frame rather than collapsing to t=0.
@@ -70,6 +71,79 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
     // T5: per-player feature aggregates over the resampled grid + events.
     let features = features::player_features(&resampled, &recon.tracks, &evs);
 
+    // Per-player scoreboard: the header `PlayerStats[]` array is authoritative when
+    // present, but some replays ship it empty. In that case synthesize the roster
+    // from the coalesced tracks + the network `PRI_TA:Match*` counters (which carry
+    // the scoreboard even when the header doesn't) so core stats aren't lost.
+    let mut players: Vec<crate::model::PlayerMeta> = if decoded.meta.players.is_empty() {
+        recon
+            .tracks
+            .iter()
+            .map(|t| {
+                let s = recon.pri_scores.get(&t.pri).copied().unwrap_or_default();
+                crate::model::PlayerMeta {
+                    name: t.player.clone(),
+                    team: t.team.unwrap_or(0),
+                    score: s.score,
+                    goals: s.goals,
+                    assists: s.assists,
+                    saves: s.saves,
+                    shots: s.shots,
+                    car_id: None,
+                    car_name: None,
+                    camera: None,
+                    steering_sensitivity: None,
+                }
+            })
+            .collect()
+    } else {
+        decoded.meta.players.clone()
+    };
+
+    // Attach each player's car body from the loadout (`car_id` = the body the
+    // player used = `blue_body` on team 0, `orange_body` on team 1), joined to the
+    // scoreboard by name. Resolve the name via the bodies table.
+    let car_by_name: std::collections::HashMap<&str, u32> = recon
+        .tracks
+        .iter()
+        .filter_map(|t| {
+            recon.pri_body.get(&t.pri).map(|(blue, orange)| {
+                let body = if t.team == Some(1) { *orange } else { *blue };
+                (t.player.as_str(), body)
+            })
+        })
+        .collect();
+    for p in &mut players {
+        if let Some(&id) = car_by_name.get(p.name.as_str()) {
+            p.car_id = Some(id);
+            p.car_name = crate::cars::car_name(id).map(str::to_owned);
+        }
+    }
+
+    // Attach each player's camera profile + steering sensitivity, joined by name
+    // through the track's PRI. When the camera replicated but steering didn't,
+    // default to RL's 1.0 (ballchasing does the same).
+    let cam_by_name: std::collections::HashMap<&str, (Option<crate::model::Camera>, Option<f32>)> =
+        recon
+            .tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.player.as_str(),
+                    (
+                        recon.pri_camera.get(&t.pri).copied(),
+                        recon.pri_steer.get(&t.pri).copied(),
+                    ),
+                )
+            })
+            .collect();
+    for p in &mut players {
+        if let Some(&(cam, steer)) = cam_by_name.get(p.name.as_str()) {
+            p.camera = cam;
+            p.steering_sensitivity = steer.or(cam.map(|_| 1.0));
+        }
+    }
+
     CanonicalMatch {
         replay_id: replay_id.into(),
         parser_version: decoded.meta.parser_version.clone(),
@@ -80,7 +154,7 @@ pub fn build_canonical(decoded: &DecodedReplay, replay_id: impl Into<String>) ->
         num_frames: recon.frames.len(),
         duration_s,
         team_scores: decoded.meta.team_scores.clone(),
-        players: decoded.meta.players.clone(),
+        players,
         tracks: recon.tracks,
         frames: recon.frames,
         resampled,

@@ -43,7 +43,10 @@ Everything here is read directly. Per-frame items are sampled at the record rate
 From the header `PlayerStats[]` row and the `TAGame.PRI_TA` counters — these are
 the game's own tallies, not recomputed:
 - `Score` / `MatchScore`, `Goals`/`MatchGoals`, `Assists`/`MatchAssists`,
-  `Saves`/`MatchSaves`, `Shots`/`MatchShots`. **[A]**
+  `Saves`/`MatchSaves`, `Shots`/`MatchShots`. **[A]** — the network `Match*`
+  counters are **replicated incrementally** (each unit lands on its own frame), so
+  their rising edges give per-event *timing* for shots/saves/assists, not just
+  totals; this is what feeds the Game Timeline (`Event::Stat`).
 - `MatchMVP` (`bMatchMVP`), match `GameWinner`/`MatchWinner`/`MVP` (game-event). **[A]**
 - Demolition counters: `CarDemolitions`, `MatchDemolishes`, `SelfDemolitions`. **[A]**
 - Possession counters: `KeepUpPossessions`, `PossessionClears`,
@@ -107,7 +110,9 @@ Each car action is its own component with an active flag + impulse:
 
 ### A9 · Camera & view settings
 - **Camera profile** (`CameraSettings`/`ProfileSettings` → FOV, distance, height,
-  angle/pitch, stiffness, swivel speed, transition speed). **[A]**
+  angle/pitch, stiffness, swivel speed, transition speed). **[A]** — decoded onto
+  `PlayerMeta.camera` (+ `steering_sensitivity`); matches ballchasing's `camera`
+  object 25/26 players (the miss never replicates `ProfileSettings`).
 - **Ball-cam toggle over time** (`bUsingSecondaryCamera`), behind-view
   (`bUsingBehindView`), swivel/free-look (`bUsingSwivel`), mouse toggle. **[A]**
 - **Live look direction** (`CameraPitch`, `CameraYaw`). **[A]**
@@ -116,7 +121,9 @@ Each car action is its own component with an active flag + impulse:
 - Full **loadout** (`ClientLoadout(s)`/`…Online`): car body, decal/skin, wheels,
   boost, trail, goal explosion, antenna, topper, engine audio, banner,
   primary/accent paint colors, paint finishes; product attributes
-  (painted/certified/special-edition). **[A]**
+  (painted/certified/special-edition). **[A]** — the **car body** id is decoded
+  and named via `crate::cars` (ballchasing's `car_id`/`car_name`); the cosmetics
+  are available in the loadout but not surfaced.
 - **Team paint** (`TeamPaint`: team, primary/accent color, finish), club colors. **[A]**
 
 ### A11 · Mode-specific per-player items

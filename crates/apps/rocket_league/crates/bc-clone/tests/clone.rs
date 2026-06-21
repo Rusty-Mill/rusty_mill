@@ -55,9 +55,87 @@ fn document_has_ballchasing_shape() {
     assert!(p["movement"]["count_powerslide"].as_u64().unwrap() > 0);
     assert!(p["boost"]["bpm"].as_f64().unwrap() > 0.0);
     assert!(p["boost"]["count_collected_big"].as_u64().is_some());
+    // Closest/farthest-to-ball are computed (no longer stubbed at 0).
+    assert!(
+        p["positioning"]["percent_closest_to_ball"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    assert!(
+        p["positioning"]["percent_farthest_from_ball"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+    // Car body is decoded from the loadout (ballchasing's car_id/car_name).
+    assert!(blue[0]["car_id"].as_u64().unwrap() > 0);
+    assert!(blue[0]["car_name"].as_str().is_some_and(|s| !s.is_empty()));
+    // Camera profile + steering sensitivity decoded from the network stream.
+    assert!(blue[0]["camera"]["fov"].as_f64().unwrap() > 0.0);
+    assert!(blue[0]["camera"]["distance"].as_f64().unwrap() > 0.0);
+    assert!(blue[0]["steering_sensitivity"].as_f64().unwrap() > 0.0);
     // Field counts match the schema (28 boost, 27 positioning channels).
     assert_eq!(p["boost"].as_object().unwrap().len(), 28);
     assert_eq!(p["positioning"].as_object().unwrap().len(), 27);
+}
+
+#[test]
+fn html_dashboard_renders_self_contained() {
+    use replay_analyzer::analyze::build_canonical;
+    use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
+    use replay_analyzer::decode::ReplayParser;
+
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../assets/replays/419a.replay");
+    let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let decoded = BoxcarsParser::new().parse(&data).expect("decode");
+    let canonical = build_canonical(&decoded, "419a");
+    let doc = ballchasing_document(&canonical);
+    let page = bc_clone::html::render_html(&doc, &canonical);
+
+    // Self-contained: one HTML doc with inline CSS, no external assets / scripts.
+    assert!(page.starts_with("<!doctype html>"));
+    assert!(page.contains("<style>") && !page.contains("<script"));
+    assert!(!page.contains("http://") && !page.contains("https://"));
+    // The ballchasing-style tab set and a couple of section headings are present.
+    for s in [
+        "Overview",
+        "Core",
+        "Ball",
+        "Boost",
+        "Movement",
+        "Positioning",
+        "Heatmaps",
+        "Demos",
+    ] {
+        assert!(page.contains(&format!(">{s}</label>")), "missing tab {s}");
+    }
+    assert!(page.contains("Scoreboard") && page.contains("Team stats overview"));
+    assert!(page.contains("Positioning heatmaps") && page.contains("<svg"));
+    // The Overview tab carries the Game Timeline (lanes + score band + legend).
+    assert!(
+        page.contains("Game timeline") && page.contains("class=\"tl-score\""),
+        "game timeline missing"
+    );
+    // The Boost tab carries the per-player pad pickup maps.
+    assert!(page.contains("Pickup maps"), "boost pickup maps missing");
+    // The scoreboard shows the decoded car body.
+    assert!(
+        page.contains("<th>CAR</th>") && page.contains("Octane"),
+        "car column / name missing from scoreboard"
+    );
+    // The Overview carries the per-player camera & settings table.
+    assert!(
+        page.contains("Camera &amp; settings"),
+        "camera table missing"
+    );
+    // The Boost tab carries the (approximate) supersonic-boost column + caveat.
+    assert!(
+        page.contains("SS used*") && page.contains("boost burned while supersonic"),
+        "supersonic-boost column / caveat missing"
+    );
+    // A real player name from the sample shows up in the scoreboard.
+    assert!(page.contains("Nadir"), "player name missing from dashboard");
 }
 
 #[test]
@@ -72,13 +150,18 @@ fn team_aggregate_sums_and_means_correctly() {
         s.movement.percent_supersonic_speed = pct_super;
         Player {
             name: "x".into(),
+            car_id: None,
+            car_name: None,
+            camera: None,
+            steering_sensitivity: None,
             stats: s,
         }
     };
     let team = aggregate_side(&[mk(2, 100.0, 3, 10.0), mk(1, 300.0, 5, 20.0)]);
     assert_eq!(team.core.goals, 3, "goals sum");
     assert_eq!(team.boost.count_collected_big, 8, "counts sum");
-    assert!((team.boost.bpm - 200.0).abs() < 1e-3, "bpm averages");
+    // BPM is a per-minute rate that adds across teammates (ballchasing sums it).
+    assert!((team.boost.bpm - 400.0).abs() < 1e-3, "bpm sums");
     assert!(
         (team.movement.percent_supersonic_speed - 15.0).abs() < 1e-3,
         "percent averages"

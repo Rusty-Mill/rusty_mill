@@ -529,6 +529,10 @@ mod tests {
                     assists: 0,
                     saves: 0,
                     shots: 0,
+                    car_id: None,
+                    car_name: None,
+                    camera: None,
+                    steering_sensitivity: None,
                 },
                 PlayerMeta {
                     name: "Bob".into(),
@@ -538,6 +542,10 @@ mod tests {
                     assists: 0,
                     saves: 0,
                     shots: 0,
+                    car_id: None,
+                    car_name: None,
+                    camera: None,
+                    steering_sensitivity: None,
                 },
             ],
             tracks: vec![

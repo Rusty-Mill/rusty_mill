@@ -7,14 +7,27 @@
 //! pass it feeds the [`IdentityResolver`] so car segments can be coalesced into
 //! identity-stable [`PlayerTrack`]s.
 
-use crate::decode::{ActorClass, ActorUpdate, DecodedReplay};
+use crate::decode::{ActorClass, ActorUpdate, DecodedReplay, PriStatKind};
 use crate::field::{self, PadKind};
 use crate::model::{
-    CarState, FrameOut, PadPickupEvent, PlayerTrack, PowerslideInterval, Rot3, TrackSample, Vec3,
+    Camera, CarState, FrameOut, PadPickupEvent, PlayerTrack, PowerslideInterval, Rot3, TrackSample,
+    Vec3,
 };
 use std::collections::{HashMap, HashSet};
 
 use super::identity::{coalesce, IdentityResolver};
+
+/// Per-player scoreboard counters captured from the network `PRI_TA:Match*`
+/// attributes (keyed by PRI). Authoritative even when the header `PlayerStats[]`
+/// array is empty.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PriScore {
+    pub score: i32,
+    pub goals: i32,
+    pub saves: i32,
+    pub assists: i32,
+    pub shots: i32,
+}
 
 /// Output of a reconstruction pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +45,20 @@ pub struct Reconstruction {
     pub pickups: Vec<PadPickupEvent>,
     /// Powerslide (handbrake) intervals (T6), per PRI.
     pub powerslides: Vec<PowerslideInterval>,
+    /// Per-player scoreboard counters from the network `PRI_TA:Match*` attributes,
+    /// keyed by PRI — the fallback when the header `PlayerStats[]` is empty.
+    pub pri_scores: HashMap<i32, PriScore>,
+    /// Rising edges of the network `PRI_TA:Match{Shots,Saves,Assists}` counters,
+    /// one per unit increment, timestamped — the substrate for the Game Timeline.
+    pub stat_events: Vec<StatSample>,
+    /// Per-PRI car-body product ids from the loadout, as `(blue_body, orange_body)`
+    /// — pick by the player's team. Empty when the replay carries no loadout.
+    pub pri_body: HashMap<i32, (u32, u32)>,
+    /// Per-PRI camera profile (`Camera`), resolved through the camera-settings
+    /// actor → PRI link.
+    pub pri_camera: HashMap<i32, Camera>,
+    /// Per-PRI steering sensitivity (`TAGame.PRI_TA:SteeringSensitivity`).
+    pub pri_steer: HashMap<i32, f32>,
 }
 
 /// A demolition with attacker/victim resolved to their bound PRI at demo time.
@@ -40,6 +67,15 @@ pub struct DemoSample {
     pub t: f32,
     pub attacker_pri: Option<i32>,
     pub victim_pri: Option<i32>,
+}
+
+/// A single scoreboard-counter increment (one shot / save / assist) for a PRI,
+/// timestamped at the network update that raised it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StatSample {
+    pub t: f32,
+    pub pri: i32,
+    pub kind: PriStatKind,
 }
 
 /// Reconstruct per-frame world state and coalesced player tracks from a neutral
@@ -67,6 +103,15 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
     let mut demos: Vec<DemoSample> = Vec::new();
     let mut pickups: Vec<PadPickupEvent> = Vec::new();
     let mut powerslides: Vec<PowerslideInterval> = Vec::new();
+    let mut pri_scores: HashMap<i32, PriScore> = HashMap::new();
+    let mut stat_events: Vec<StatSample> = Vec::new();
+    let mut pri_body: HashMap<i32, (u32, u32)> = HashMap::new();
+    // Camera profile keyed by the camera-settings actor, plus that actor's PRI
+    // link and each PRI's steering sensitivity. Joined into pri_camera at the end
+    // (decoupled from frame ordering of the settings vs the PRI link).
+    let mut cam_actor_settings: HashMap<i32, Camera> = HashMap::new();
+    let mut cam_actor_pri: HashMap<i32, i32> = HashMap::new();
+    let mut pri_steer: HashMap<i32, f32> = HashMap::new();
     // Car actor -> time its current powerslide (handbrake-held) began.
     let mut handbrake_start: HashMap<i32, f32> = HashMap::new();
     let mut resolver = IdentityResolver::new();
@@ -124,6 +169,68 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
                             overfill: (nominal - gain).max(0.0),
                         });
                     }
+                }
+                ActorUpdate::PriStat { pri, stat, value } => {
+                    let e = pri_scores.entry(*pri).or_default();
+                    let prev = match stat {
+                        PriStatKind::Score => &mut e.score,
+                        PriStatKind::Goals => &mut e.goals,
+                        PriStatKind::Saves => &mut e.saves,
+                        PriStatKind::Assists => &mut e.assists,
+                        PriStatKind::Shots => &mut e.shots,
+                    };
+                    // Counters are cumulative and replicated on each change; emit a
+                    // timeline marker per unit gained on the rising edge (shots /
+                    // saves / assists only — goals come from the header).
+                    if matches!(
+                        stat,
+                        PriStatKind::Shots | PriStatKind::Saves | PriStatKind::Assists
+                    ) {
+                        for _ in *prev..*value {
+                            stat_events.push(StatSample {
+                                t: frame.time,
+                                pri: *pri,
+                                kind: *stat,
+                            });
+                        }
+                    }
+                    *prev = *value;
+                }
+                ActorUpdate::Loadout {
+                    pri,
+                    blue_body,
+                    orange_body,
+                } => {
+                    pri_body.insert(*pri, (*blue_body, *orange_body));
+                }
+                ActorUpdate::CameraSettings {
+                    cam_actor,
+                    fov,
+                    height,
+                    angle,
+                    distance,
+                    stiffness,
+                    swivel,
+                    transition,
+                } => {
+                    cam_actor_settings.insert(
+                        *cam_actor,
+                        Camera {
+                            fov: *fov,
+                            height: *height,
+                            pitch: *angle,
+                            distance: *distance,
+                            stiffness: *stiffness,
+                            swivel_speed: *swivel,
+                            transition_speed: *transition,
+                        },
+                    );
+                }
+                ActorUpdate::CameraPri { cam_actor, pri } => {
+                    cam_actor_pri.insert(*cam_actor, *pri);
+                }
+                ActorUpdate::SteeringSensitivity { pri, value } => {
+                    pri_steer.insert(*pri, *value);
                 }
                 ActorUpdate::Handbrake { car, on } => {
                     if *on {
@@ -262,6 +369,14 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
 
     let tracks = coalesce(segments, &pri_to_name, &pri_to_team, &name_to_team);
 
+    // Join each camera-settings actor's profile to its PRI.
+    let mut pri_camera: HashMap<i32, Camera> = HashMap::new();
+    for (cam_actor, cam) in &cam_actor_settings {
+        if let Some(&pri) = cam_actor_pri.get(cam_actor) {
+            pri_camera.insert(pri, *cam);
+        }
+    }
+
     Reconstruction {
         frames,
         tracks,
@@ -269,6 +384,11 @@ pub fn reconstruct(decoded: &DecodedReplay) -> Reconstruction {
         demos,
         pickups,
         powerslides,
+        pri_scores,
+        stat_events,
+        pri_body,
+        pri_camera,
+        pri_steer,
     }
 }
 

@@ -51,7 +51,7 @@ impl Rot3 {
 
 /// Header-sourced per-player metadata (from the replay's `PlayerStats` array).
 /// This is end-of-match summary truth, independent of frame reconstruction.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PlayerMeta {
     pub name: String,
     pub team: i32,
@@ -60,6 +60,35 @@ pub struct PlayerMeta {
     pub assists: i32,
     pub saves: i32,
     pub shots: i32,
+    /// Car-body product id from the player's loadout (ballchasing's `car_id`),
+    /// and its resolved name (`crate::cars`). `None` when the replay carries no
+    /// loadout or the id is unknown to the table.
+    #[serde(default)]
+    pub car_id: Option<u32>,
+    #[serde(default)]
+    pub car_name: Option<String>,
+    /// In-game camera profile and steering sensitivity (ballchasing's `camera`
+    /// object + `steering_sensitivity`), from the network camera-settings actor.
+    /// `None` when not replicated for this player.
+    #[serde(default)]
+    pub camera: Option<Camera>,
+    #[serde(default)]
+    pub steering_sensitivity: Option<f32>,
+}
+
+/// A player's in-game camera profile (mirrors ballchasing's `camera` object).
+/// Sourced from `TAGame.CameraSettingsActor_TA:ProfileSettings` (`CamSettings`),
+/// whose `angle`/`swivel`/`transition` ballchasing renames `pitch`/`swivel_speed`/
+/// `transition_speed`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Camera {
+    pub fov: f32,
+    pub height: f32,
+    pub pitch: f32,
+    pub distance: f32,
+    pub stiffness: f32,
+    pub swivel_speed: f32,
+    pub transition_speed: f32,
 }
 
 /// Per-frame state of a single car, keyed by the *raw* car actor id (which RL
@@ -242,6 +271,26 @@ pub enum Event {
         scorer: Option<String>,
         team: Option<i32>,
     },
+    /// A scoreboard counter increment (shot / save / assist) for a player,
+    /// timestamped at the network `PRI_TA:Match*` counter's rising edge. Goals
+    /// are tracked separately via [`Event::Goal`] (authoritative header), so they
+    /// do not appear here.
+    Stat {
+        t: f32,
+        pri: i32,
+        player: Option<String>,
+        team: Option<i32>,
+        kind: StatKind,
+    },
+}
+
+/// Which scoreboard counter a timeline [`Event::Stat`] marker carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatKind {
+    Shot,
+    Save,
+    Assist,
 }
 
 impl Event {
@@ -251,7 +300,8 @@ impl Event {
             Event::Kickoff { t }
             | Event::Touch { t, .. }
             | Event::Demo { t, .. }
-            | Event::Goal { t, .. } => *t,
+            | Event::Goal { t, .. }
+            | Event::Stat { t, .. } => *t,
             Event::Possession { start, .. } => *start,
         }
     }

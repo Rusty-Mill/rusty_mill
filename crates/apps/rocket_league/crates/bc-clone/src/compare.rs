@@ -61,13 +61,26 @@ const CORE: &[&str] = &[
 const CORE_REL_TOL: f32 = 0.12;
 
 /// True if a field is averaged (not summed) when aggregating a team from its
-/// players — rates, percentages, and the replicated per-side `*_against` values.
+/// players. Ballchasing's team row is the **sum** of its players for everything it
+/// displays — including `bpm`/`bcpm` (a per-minute rate adds across teammates) and
+/// even `avg_amount` (team "Avg" ≈ Σ player avgs). So only the genuinely intensive,
+/// non-summable fields are means here: percentages, the distance/speed averages
+/// (not shown at team level, kept sane), and the replicated per-side `*_against`
+/// values. `shooting_percentage` is recomputed from team totals (in `lib.rs`).
 fn is_mean(field: &str) -> bool {
     field.starts_with("percent_")
-        || field.starts_with("avg_")
         || matches!(
             field,
-            "bpm" | "bcpm" | "shots_against" | "goals_against" | "shooting_percentage"
+            "avg_speed"
+                | "avg_speed_percentage"
+                | "avg_powerslide_duration"
+                | "avg_distance_to_ball"
+                | "avg_distance_to_ball_possession"
+                | "avg_distance_to_ball_no_possession"
+                | "avg_distance_to_mates"
+                | "shots_against"
+                | "goals_against"
+                | "shooting_percentage"
         )
 }
 

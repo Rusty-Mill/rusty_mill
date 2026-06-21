@@ -76,6 +76,11 @@ fn recon() -> Reconstruction {
         demos: Vec::new(),
         pickups: Vec::new(),
         powerslides: Vec::new(),
+        pri_scores: Default::default(),
+        stat_events: Vec::new(),
+        pri_body: Default::default(),
+        pri_camera: Default::default(),
+        pri_steer: Default::default(),
     }
 }
 
@@ -152,6 +157,11 @@ fn empty_reconstruction_yields_empty_grid() {
         demos: Vec::new(),
         pickups: Vec::new(),
         powerslides: Vec::new(),
+        pri_scores: Default::default(),
+        stat_events: Vec::new(),
+        pri_body: Default::default(),
+        pri_camera: Default::default(),
+        pri_steer: Default::default(),
     };
     assert!(resample(&empty, 30.0).is_empty());
 }
