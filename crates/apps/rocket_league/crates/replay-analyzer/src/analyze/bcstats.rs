@@ -43,6 +43,13 @@ const GROUND_Z: f32 = 50.0;
 const HIGH_AIR_Z: f32 = 600.0;
 /// Boost gauge is "full" at this percent (raw byte 255).
 const FULL_BOOST_PCT: f32 = 100.0;
+/// Below this ground speed (uu/s) a car is treated as parked, so neither
+/// forward nor reverse "driving" is counted (kills orientation jitter at rest).
+const DRIVE_MIN_SPEED: f32 = 150.0;
+/// Facing cone half-angle: a car is "facing the ball" when the angle between its
+/// forward axis (yaw) and the horizontal vector to the ball is within this. Stored
+/// as the cosine (≈ cos 35°) for a cheap dot-product test.
+const FACING_CONE_COS: f32 = 0.819;
 
 /// Per-player ballchasing-shaped stat block.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -125,6 +132,14 @@ pub struct BcMovement {
     pub time_powerslide_s: f32,
     pub count_powerslide: u32,
     pub avg_powerslide_duration_s: f32,
+    /// Time driven **in reverse** (s) and its share of driving time: grounded,
+    /// moving above [`DRIVE_MIN_SPEED`], with the horizontal velocity pointing
+    /// *behind* the car's forward axis (yaw). Derived from per-frame orientation —
+    /// not a ballchasing stat. `percent_reverse` is over grounded driving frames
+    /// (forward + reverse), so it reads as "of the time you were driving, how much
+    /// was backwards". Zero when the replay carried no orientation.
+    pub time_reverse_s: f32,
+    pub percent_reverse: f32,
 }
 
 /// Field occupancy, in the team's attack-direction frame (`+Y` = attacking).
@@ -169,6 +184,13 @@ pub struct BcPositioning {
     pub percent_farthest_from_ball: f32,
     /// Goals conceded while this player was the team's last defender (back-most).
     pub goals_against_while_last_defender: u32,
+    /// Mean angle (degrees, 0 = dead-on) between the car's forward axis and the
+    /// horizontal direction to the ball, and the share of ball-present frames the
+    /// car was facing the ball within [`FACING_CONE_COS`]. Derived from per-frame
+    /// orientation — not a ballchasing stat. Zero when the replay carried no
+    /// orientation.
+    pub avg_facing_ball_deg: f32,
+    pub percent_facing_ball: f32,
 }
 
 /// Demolitions (from authoritative demo events).
@@ -189,6 +211,13 @@ struct Acc {
     ground: u64,
     low_air: u64,
     high_air: u64,
+    // reverse driving (grounded + moving; needs orientation)
+    drive: u64,
+    reverse: u64,
+    // facing the ball (ball present + orientation)
+    facing_frames: u64,
+    facing_deg_sum: f64,
+    facing_cone: u64,
     // boost
     boost_frames: u64,
     boost_pct_sum: f64,
@@ -226,6 +255,13 @@ struct Acc {
 
 fn speed(v: Vec3) -> f32 {
     (v.x * v.x + v.y * v.y + v.z * v.z).sqrt()
+}
+
+/// Unit forward axis of a car on the ground plane, from its yaw (Rocket League
+/// forward is `(cos yaw, sin yaw)`). Pitch/roll are ignored — these are
+/// plane-projected stats (reverse driving, facing the ball).
+fn forward_xy(r: crate::model::Rot3) -> (f32, f32) {
+    (r.yaw.cos(), r.yaw.sin())
 }
 
 fn dist(a: Vec3, b: Vec3) -> f64 {
@@ -295,6 +331,32 @@ fn fold_frame(
                 3
             };
             a.b_q[q] += 1;
+        }
+
+        // Orientation-derived: reverse driving (grounded + moving) and facing the
+        // ball. Both need the per-frame yaw; skip frames without it.
+        if let Some(rot) = c.rot {
+            let (fx, fy) = forward_xy(rot);
+            let hspeed = (c.v.x * c.v.x + c.v.y * c.v.y).sqrt();
+            if z < GROUND_Z && hspeed >= DRIVE_MIN_SPEED {
+                a.drive += 1;
+                // Velocity component along the forward axis; negative ⇒ reversing.
+                if c.v.x * fx + c.v.y * fy < 0.0 {
+                    a.reverse += 1;
+                }
+            }
+            if let Some(ball) = &frame.ball {
+                let (tx, ty) = (ball.p.x - c.p.x, ball.p.y - c.p.y);
+                let tlen = (tx * tx + ty * ty).sqrt();
+                if tlen > 1.0 {
+                    let cos = (fx * tx + fy * ty) / tlen; // forward · unit-to-ball
+                    a.facing_frames += 1;
+                    a.facing_deg_sum += cos.clamp(-1.0, 1.0).acos().to_degrees() as f64;
+                    if cos >= FACING_CONE_COS {
+                        a.facing_cone += 1;
+                    }
+                }
+            }
         }
 
         if let Some(ball) = &frame.ball {
@@ -634,6 +696,8 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     } else {
                         0.0
                     },
+                    time_reverse_s: secs(a.reverse),
+                    percent_reverse: pct(a.reverse, a.drive),
                 },
                 positioning: BcPositioning {
                     avg_dist_to_ball: mean(a.ball_dist_sum, a.ball_frames),
@@ -665,6 +729,8 @@ pub fn ballchasing_stats(m: &CanonicalMatch) -> Vec<BcPlayerStats> {
                     time_farthest_from_ball_s: secs(a.farthest_ball),
                     percent_farthest_from_ball: pct(a.farthest_ball, a.pos_frames),
                     goals_against_while_last_defender: gawld.get(&t.pri).copied().unwrap_or(0),
+                    avg_facing_ball_deg: mean(a.facing_deg_sum, a.facing_frames),
+                    percent_facing_ball: pct(a.facing_cone, a.facing_frames),
                 },
                 demo: BcDemo {
                     inflicted: demo_in.get(&t.pri).copied().unwrap_or(0),

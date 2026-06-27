@@ -132,8 +132,34 @@ pub struct ScenePlayerStat {
     pub speed: [f32; 3],
     /// Field occupancy: `[defensive, neutral, offensive]` third, as percents.
     pub thirds: [f32; 3],
+    /// Time airborne (low + high air), as a percent.
+    #[serde(default)]
+    pub air: f32,
     /// Share of time this player was the most-back on their team (percent).
     pub most_back: f32,
+    /// Boost collected per minute.
+    #[serde(default)]
+    pub bpm: f32,
+    /// Mean boost gauge held (0–100).
+    #[serde(default)]
+    pub avg_boost: f32,
+    /// Mean distance to the ball (uu).
+    #[serde(default)]
+    pub dist_to_ball: f32,
+    /// Share of driving time spent in reverse (percent).
+    #[serde(default)]
+    pub reverse: f32,
+    /// Share of ball-present time facing the ball (percent).
+    #[serde(default)]
+    pub facing: f32,
+    /// Powerslide count over the match.
+    #[serde(default)]
+    pub powerslides: u32,
+    /// Demolitions inflicted / taken.
+    #[serde(default)]
+    pub demos_for: u32,
+    #[serde(default)]
+    pub demos_against: u32,
 }
 
 /// The full viewer payload.

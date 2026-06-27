@@ -1,8 +1,10 @@
 //! Optional per-player analysis aggregates for the viewer's stat strips.
 //!
 //! A thin bridge to [`replay_analyzer::analyze::bcstats`]: it runs the
-//! ballchasing-shaped reducer over the match and keeps just the few channels the
-//! viewer's strips draw (speed buckets, thirds occupancy, most-back share). Kept
+//! ballchasing-shaped reducer over the match and keeps the channels the viewer's
+//! roster strips draw — speed buckets, thirds occupancy, air time, most-back
+//! share, boost economy (bpm / avg), distance-to-ball, reverse-driving and
+//! facing-ball shares, powerslides and demos. Kept
 //! separate from [`crate::scene`] so the core projection stays decoupled, mirroring
 //! [`crate::winprob`] / [`crate::impact`].
 
@@ -32,7 +34,16 @@ pub fn attach_player_stats(scene: &mut Scene, m: &CanonicalMatch) {
                 round1(s.positioning.percent_neutral_third),
                 round1(s.positioning.percent_offensive_third),
             ],
+            air: round1(s.movement.percent_low_air + s.movement.percent_high_air),
             most_back: round1(s.positioning.percent_most_back),
+            bpm: round1(s.boost.bpm),
+            avg_boost: round1(s.boost.avg_amount),
+            dist_to_ball: s.positioning.avg_dist_to_ball.round(),
+            reverse: round1(s.movement.percent_reverse),
+            facing: round1(s.positioning.percent_facing_ball),
+            powerslides: s.movement.count_powerslide,
+            demos_for: s.demo.inflicted,
+            demos_against: s.demo.taken,
         })
         .collect();
 }

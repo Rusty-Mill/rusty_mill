@@ -135,6 +135,9 @@ const TEMPLATE: &str = r##"<!doctype html>
   #pstats .bar { display:flex; height:9px; border-radius:3px; overflow:hidden; margin:2px 0; }
   #pstats .bar i { display:block; height:100%; }
   #pstats .cap { font-size:9px; color:#6e7681; }
+  #pstats .psg { display:grid; grid-template-columns:repeat(3,1fr); gap:2px 6px; margin-top:3px; }
+  #pstats .psg span { font-size:9px; color:#8b949e; white-space:nowrap; }
+  #pstats .psg span b { color:#e6edf3; font-weight:600; }
   #ticker .ev .d { font-weight:700; }
   #ticker { top: 10px; right: 10px; width: 244px; max-height: 44vh; overflow:hidden; }
   #ticker .ev { padding:1px 0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
@@ -1175,6 +1178,20 @@ function buildPlayerStats() {
     const s = statByPri.get(pl.pri), css = TEAM_CSS[pl.team] ?? '#9aa4b2';
     const sp = s ? s.speed : [0, 0, 0], th = s ? s.thirds : [0, 0, 0];
     const div = document.createElement('div'); div.className = 'ps';
+    // Compact key/value cells from the attached bcstats aggregates. `kv` skips a
+    // cell when the stat is missing so a partial fixture degrades cleanly.
+    const kv = (label, val, title) => val == null ? '' :
+      `<span title="${title}">${label} <b>${val}</b></span>`;
+    const grid = s ? `<div class="psg">` +
+      kv('bpm', Math.round(s.bpm), 'boost collected per minute') +
+      kv('boost', Math.round(s.avg_boost), 'average boost held (0–100)') +
+      kv('air', Math.round(s.air) + '%', 'share of time airborne (low + high air)') +
+      kv('ball', s.dist_to_ball >= 1 ? Math.round(s.dist_to_ball) : null, 'average distance to the ball (uu)') +
+      kv('face', s.facing ? Math.round(s.facing) + '%' : null, 'share of ball-present time facing the ball (±35°)') +
+      kv('rev', s.reverse ? Math.round(s.reverse) + '%' : null, 'share of driving time spent in reverse') +
+      kv('PS', s.powerslides || null, 'powerslides over the match') +
+      kv('demo', (s.demos_for || s.demos_against) ? `${s.demos_for}/${s.demos_against}` : null, 'demos inflicted / taken') +
+      `</div>` : '';
     div.innerHTML =
       `<div class="nm"><span class="dot" style="background:${css}"></span>${esc(pl.name)}` +
       (s && s.most_back ? `<span class="mb" title="share of time as the most-back defender">⬇ ${Math.round(s.most_back)}% back</span>` : '') + `</div>` +
@@ -1183,7 +1200,8 @@ function buildPlayerStats() {
         `<i style="width:${sp[0]}%;background:#3a4150"></i><i style="width:${sp[1]}%;background:#3b82f6"></i><i style="width:${sp[2]}%;background:#ffd166"></i></div>` +
       `<div class="bar" title="thirds: defensive / neutral / offensive">` +
         `<i style="width:${th[0]}%;background:#2f6f4f"></i><i style="width:${th[1]}%;background:#4a5568"></i><i style="width:${th[2]}%;background:#9a5b2f"></i></div>` +
-      `<div class="cap">boost · ${Math.round(sp[2])}% supersonic · ${Math.round(th[2])}% attacking</div>`;
+      `<div class="cap">boost · ${Math.round(sp[2])}% supersonic · ${Math.round(th[2])}% attacking</div>` +
+      grid;
     pstatsWrap.appendChild(div);
   }
   for (const cv of pstatsWrap.querySelectorAll('canvas.spark')) {

@@ -239,6 +239,50 @@ fn boost_flow_skips_respawn_gap() {
 }
 
 #[test]
+fn reverse_and_facing_from_orientation() {
+    use replay_analyzer::model::Rot3;
+    let yaw = |y: f32, vx: f32, z: f32| GridFrame {
+        t: 0.0,
+        ball: Some(Kin {
+            p: v(5000.0, 0.0, 93.0),
+            v: v(0.0, 0.0, 0.0),
+        }),
+        cars: vec![GridCar {
+            pri: 1,
+            team: Some(0),
+            p: v(0.0, 0.0, z),
+            v: v(vx, 0.0, 0.0),
+            boost: Some(50),
+            rot: Some(Rot3 {
+                pitch: 0.0,
+                yaw: y,
+                roll: 0.0,
+            }),
+        }],
+    };
+    let frames = vec![
+        yaw(0.0, 1000.0, 17.0),                     // grounded, forward, facing ball
+        yaw(0.0, -1000.0, 17.0),                    // grounded, reverse, facing ball
+        yaw(std::f32::consts::PI, 1000.0, 17.0),    // grounded, reverse, facing away
+        yaw(0.0, 1000.0, 700.0),                    // airborne (not driving), facing ball
+    ];
+    let mut f = frames;
+    for (i, fr) in f.iter_mut().enumerate() {
+        fr.t = i as f32 * 0.1;
+    }
+    let m = match_with(f, vec![], track());
+    let s = ballchasing_stats(&m);
+    let p = s.iter().find(|p| p.pri == 1).unwrap();
+
+    // Driving frames = grounded + moving = 3 (frames 0,1,2); reverse = 2 (1,2).
+    assert!(near(p.movement.percent_reverse, 66.667, 0.05));
+    assert!(near(p.movement.time_reverse_s, 0.2, 1e-4));
+    // Facing within ±35° on 3 of 4 ball-present frames; angles 0/0/180/0 → mean 45°.
+    assert!(near(p.positioning.percent_facing_ball, 75.0, 1e-3));
+    assert!(near(p.positioning.avg_facing_ball_deg, 45.0, 0.1));
+}
+
+#[test]
 fn ball_in_side_tracks_defensive_half() {
     // Ball in team 0's half (y<0) for 3 of 4 frames → 75%.
     let frames = vec![

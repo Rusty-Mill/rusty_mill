@@ -63,15 +63,17 @@ Tier-1 truth (`scoring/src/contract.rs`).
 | avg_speed, avg_speed_percentage | ✅ | BC; Viewer (live kph only) | ✅ |
 | total_distance | ✅ | BC | ✅ |
 | speed buckets: slow / boost / supersonic (time+%) | ✅ | BC, Viewer (bucket bar) | ✅ |
-| altitude: ground / low_air / high_air (time+%) | ✅ z-bands approximate | BC | ✅ |
-| time/count/avg_duration powerslide | ✅ | BC | ✅ |
+| altitude: ground / low_air / high_air (time+%) | ✅ z-bands approximate | BC, Viewer (air %) | ✅ |
+| time/count/avg_duration powerslide | ✅ | BC, Viewer (count) | ✅ |
+| time/percent **driven in reverse** | ✅ (derived from yaw vs. velocity) | Viewer (rev %) | ❌ |
 
 ### Positioning (27 fields)
 
 | Stat | Available | We show | Ballchasing |
 |---|---|---|---|
-| avg_distance_to_ball (+ possession / no-possession split) | ✅ | BC | ✅ |
+| avg_distance_to_ball (+ possession / no-possession split) | ✅ | BC, Viewer (ball dist) | ✅ |
 | avg_distance_to_mates | ✅ | BC | ✅ |
+| **facing-ball** angle / % facing | ✅ (derived from yaw vs. ball) | Viewer (face %) | ❌ |
 | thirds: def / neutral / off (time+%) | ✅ | BC, Viewer (thirds bar) | ✅ |
 | halves: def / off (time+%) | ✅ | BC | ✅ |
 | behind / in-front of ball (time+%) | ✅ | BC | ✅ |
@@ -123,12 +125,14 @@ differentiators — and most are **under-shown**.
 
 ## Gaps — computed but never shown
 
-1. **The 3D viewer roster is thin.** We compute the full 85-field
-   ballchasing block per player, but the roster shows only goals/assists/saves +
-   live speed + live boost, with an optional expandable panel adding just a boost
-   sparkline, speed-bucket bar, thirds bar, and most-back %. Distances, halves,
-   powerslide, boost economy, demo counts, behind-ball, etc. never reach the
-   viewer.
+1. **The 3D viewer roster — now expanded.** The roster shows
+   goals/assists/saves + live speed + live boost; the expandable "player stats"
+   panel (Settings → *player stats*) draws the boost sparkline, speed-bucket bar,
+   thirds bar and most-back %, **plus** a compact cell grid: bpm, avg boost, air
+   %, avg distance-to-ball, facing-ball %, reverse %, powerslide count and
+   demos for/against. Still viewer-absent (only in the BC dashboard): the boost
+   quartile histogram, stolen/overfill boost, halves, behind-ball, and
+   closest/farthest-to-ball.
 2. **The app Overview is a 6-column summary** (composite / licence / type /
    skills-per-min / ΔV / main-leak). None of the 85 ballchasing-class stats
    appear in the app's own tabs — they live only in the separate BC dashboard.
