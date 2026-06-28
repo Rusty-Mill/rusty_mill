@@ -7,12 +7,20 @@
 //! then reports how the rubric agrees with each independent ground truth. See
 //! [`replay_scoring::reconcile`] for what the correlations mean.
 //!
-//! Usage: `reconcile [manifest.json] [--gate]` (default manifest
-//! `assets/corpus/manifest.json`). Reads `fitted_config.json` and
-//! `value_model.json` from the manifest's dir. With `--gate` it exits non-zero on
-//! any rank-vs-impact **sign disagreement** — a regression gate that catches a
-//! future metric change that tracks the ranked cohort but not in-match value,
-//! mirroring `validate --gate`.
+//! Usage: `reconcile [manifest.json] [--gate] [--promote] [--min-rho <ρ>]`
+//! (default manifest `assets/corpus/manifest.json`). Reads `fitted_config.json`
+//! and `value_model.json` from the manifest's dir. With `--gate` it exits
+//! non-zero on any rank-vs-impact **sign disagreement** — a regression gate that
+//! catches a future metric change that tracks the ranked cohort but not in-match
+//! value, mirroring `validate --gate`.
+//!
+//! With `--promote` it graduates experimental **candidate** metrics that the
+//! value model vindicates ([`replay_scoring::reconcile::promote_candidates`]): any
+//! candidate whose ΔV correlation clears `--min-rho` (default 0.10) and matches
+//! its curve's good-direction has its `experimental` flag cleared and its weight
+//! set to ρ², then the updated config is written back to `fitted_config.json`.
+//! This is the impact-driven counterpart to `calibrate`'s rank fit; run it after
+//! `calibrate` (which writes the rank-fitted config this reads).
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -24,7 +32,7 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_scoring::calibrate::raws_from_report;
 use replay_scoring::config::ScoreConfig;
-use replay_scoring::reconcile::{reconcile, CrossSample};
+use replay_scoring::reconcile::{promote_candidates, reconcile, CrossSample};
 use replay_scoring::score_all;
 use replay_value::{per_player_delta_v, ValueConfig, ValuePredictor};
 use serde::Deserialize;
@@ -55,10 +63,21 @@ fn main() -> ExitCode {
 /// Returns `Ok(false)` when `--gate` is set and a sign disagreement is found.
 fn run() -> Result<bool, Box<dyn Error>> {
     let mut gate = false;
+    let mut promote = false;
+    let mut min_rho = 0.10f32;
     let mut manifest_arg: Option<String> = None;
-    for a in std::env::args().skip(1) {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "--gate" => gate = true,
+            "--promote" => promote = true,
+            "--min-rho" => {
+                min_rho = args
+                    .next()
+                    .ok_or("--min-rho needs a value")?
+                    .parse()
+                    .map_err(|_| "--min-rho needs a number")?;
+            }
             other if other.starts_with('-') => return Err(format!("unknown flag {other}").into()),
             other => manifest_arg = Some(other.to_string()),
         }
@@ -201,6 +220,55 @@ fn run() -> Result<bool, Box<dyn Error>> {
         println!("\nSign disagreements (track ranked cohort but not in-match impact):");
         for m in &dis {
             println!("  - {}", m.metric.key());
+        }
+    }
+
+    // Impact-driven promotion of experimental candidate metrics.
+    if promote {
+        let candidates: Vec<_> = cfg.metrics.iter().filter(|s| s.experimental).collect();
+        if candidates.is_empty() {
+            println!("\n--promote: no experimental candidate metrics in the config.");
+        } else {
+            let promoted = promote_candidates(&cfg, &rec, min_rho);
+            println!("\n=== candidate promotion (min |ρ_ΔV| = {min_rho:.2}) ===");
+            for spec in &candidates {
+                let ma = rec.metrics.iter().find(|m| m.metric == spec.metric);
+                let rv = ma.and_then(|m| m.rho_value);
+                let dir = ma.map(|m| m.good_dir).unwrap_or("?");
+                let graduated = promoted
+                    .metrics
+                    .iter()
+                    .find(|s| s.metric == spec.metric)
+                    .map(|s| !s.experimental)
+                    .unwrap_or(false);
+                let verdict = if graduated {
+                    format!("PROMOTED  weight={:.3}", rv.map(|r| r * r).unwrap_or(0.0))
+                } else if rv.map(|r| r.abs() < min_rho).unwrap_or(true) {
+                    "kept (no ΔV signal)".to_string()
+                } else {
+                    format!("kept (wrong sign for [{dir}])")
+                };
+                println!(
+                    "  {:<26} ρ_ΔV={:>7}  [{}]  -> {}",
+                    spec.metric.key(),
+                    show(rv),
+                    dir,
+                    verdict
+                );
+            }
+            let n_promoted = candidates.len()
+                - promoted.metrics.iter().filter(|s| s.experimental).count();
+            let mut out = promoted;
+            if n_promoted > 0 && !out.version.ends_with("+promoted") {
+                out.version = format!("{}+promoted", out.version);
+            }
+            let path = dir.join("fitted_config.json");
+            std::fs::write(&path, serde_json::to_vec_pretty(&out)?)?;
+            println!(
+                "\npromoted {n_promoted} candidate(s); wrote {} (version {})",
+                path.display(),
+                out.version
+            );
         }
     }
 
