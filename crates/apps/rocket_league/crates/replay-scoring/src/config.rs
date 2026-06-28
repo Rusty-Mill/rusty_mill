@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v4";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v5";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,31 +360,37 @@ impl Default for ScoreConfig {
                     0.20,
                     "Air system / aerial threat",
                 ),
-                // --- candidate metrics (experimental; bcstats-derived) ---
-                // Orientation toward the play: share of valid frames facing the ball.
-                mx(
+                // --- bcstats-derived metrics, graduated on corpus rank evidence ---
+                // Ball-watching is a *low-rank* habit: facing the ball more
+                // correlates with lower rank (ρ_rank ≈ −0.47 on the 723-player
+                // corpus), so the curve is "lower is better" — the opposite of the
+                // first experimental guess. Promoted on rank (its ΔV signal is ~0).
+                m(
                     Metric::FacingBallShare,
                     Role::General,
-                    Curve::Higher {
-                        zero: 0.30,
-                        full: 0.70,
+                    Curve::Lower {
+                        zero: 0.55,
+                        full: 0.30,
                     },
-                    0.10,
+                    0.20,
                     "Positioning / awareness",
                 ),
-                // Awkward recoveries: share of grounded driving spent in reverse.
-                mx(
+                // Time spent reversing on the ground is a strong negative rank
+                // signal (ρ_rank ≈ −0.61, one of the strongest in the rubric).
+                m(
                     Metric::ReverseDriving,
                     Role::General,
                     Curve::Lower {
                         zero: 0.20,
                         full: 0.02,
                     },
-                    0.10,
+                    0.20,
                     "Fundamentals / car control",
                 ),
+                // --- candidate metrics (experimental; bcstats-derived) ---
                 // Last-man load: share of time as the team's back-most player. Banded
-                // — you want to share the duty, not live there or abandon it.
+                // — you want to share the duty, not live there or abandon it. Kept
+                // experimental: no rank or ΔV signal on the corpus (ρ ≈ 0).
                 mx(
                     Metric::LastDefenderShare,
                     Role::General,

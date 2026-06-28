@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use replay_scoring::config::{Metric, ScoreConfig};
+use replay_scoring::config::{Curve, Metric, ScoreConfig};
 use replay_scoring::reconcile::{promote_candidates, reconcile, CrossSample, MetricAgreement};
 
 fn sample(metric: Metric, raw: f32, composite: f32, rank: Option<f32>, dv: f32) -> CrossSample {
@@ -77,7 +77,26 @@ fn promotes_candidates_that_track_value() {
     //  facing_ball_share  raw=+i, curve Higher  -> ρ_value ≈ +1, sign OK  -> promote
     //  reverse_driving    raw=+i, curve Lower   -> ρ_value ≈ +1, wrong way -> keep
     //  last_defender_share raw=-i, curve Band   -> ρ_value ≈ -1, band OK   -> promote
-    let cfg = ScoreConfig::default();
+    // Force a controlled candidate scenario (curves + experimental) so the test
+    // is independent of which metrics the shipped default config graduates.
+    let mut cfg = ScoreConfig::default();
+    for s in &mut cfg.metrics {
+        match s.metric {
+            Metric::FacingBallShare => {
+                s.experimental = true;
+                s.curve = Curve::Higher { zero: 0.0, full: 1.0 };
+            }
+            Metric::ReverseDriving => {
+                s.experimental = true;
+                s.curve = Curve::Lower { zero: 1.0, full: 0.0 };
+            }
+            Metric::LastDefenderShare => {
+                s.experimental = true;
+                s.curve = Curve::Band { lo: 0.3, hi: 0.6, falloff: 0.3 };
+            }
+            _ => {}
+        }
+    }
     let samples: Vec<CrossSample> = (0..8)
         .map(|i| {
             let raw = i as f32;
