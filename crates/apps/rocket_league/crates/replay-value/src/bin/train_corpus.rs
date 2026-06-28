@@ -176,6 +176,23 @@ fn main() -> Result<(), Box<dyn Error>> {
             .collect()
     });
 
+    // Refuse to ship a model trained on a near-empty corpus: missing `.replay`
+    // files are skipped above, so a token-less checkout would otherwise overwrite
+    // value_model.json with a model fit on the one or two sample replays. Require
+    // a real slice of the corpus to be present on disk.
+    const MIN_REPLAYS: usize = 10;
+    if per_replay.len() < MIN_REPLAYS {
+        return Err(format!(
+            "only {}/{} corpus replays are present on disk (need >= {}); fetch them first:\n  \
+             BC_TOKEN=<token> python assets/corpus/refresh_corpus_replays.py\n\
+             (or run scripts/retrain_value_model.sh, which does this for you)",
+            per_replay.len(),
+            entries.len(),
+            MIN_REPLAYS
+        )
+        .into());
+    }
+
     // Replay-level split: every 5th replay is held out.
     let (mut train, mut val) = (Vec::new(), Vec::new());
     for (i, rows) in per_replay.iter().enumerate() {

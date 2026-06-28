@@ -12,9 +12,14 @@ use replay_analyzer::model::{GridCar, GridFrame, Vec3};
 use std::collections::BTreeMap;
 
 /// Number of features in a state vector.
-pub const N_FEATURES: usize = 10;
+pub const N_FEATURES: usize = 18;
 
 /// Human-readable feature names, index-aligned with [`StateFeatures::x`].
+///
+/// Indices 0–9 are the v1 set (kept in place so old index-based references hold);
+/// 10–17 are the v2 additions — per-car velocity/orientation, numerical
+/// advantage, and boost extremes — all derivable from the attack-frame grid and
+/// team-symmetric, so they keep the mirror property the model relies on.
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "ball_y",            // toward opponent goal (+), normalized by half-length
     "ball_x_abs",        // lateral offset from centre (0 central .. 1 wall)
@@ -26,6 +31,15 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "att_ahead_frac",    // fraction of attackers ahead of the ball (committed)
     "def_goalside_frac", // fraction of defenders goal-side of the ball
     "boost_diff",        // mean attacker boost − mean defender boost (fraction)
+    // --- v2 additions ---
+    "man_advantage",   // (attackers alive − defenders alive) / 3 — demo/numerical edge
+    "ball_goal_dist",  // ball → opponent-goal-mouth distance (nonlinear shot proximity)
+    "min_att_closing", // nearest attacker's closing speed toward the ball (+ = onto it)
+    "min_def_closing", // nearest defender's closing speed toward the ball
+    "att_facing_ball", // nearest attacker's forward·(to-ball) alignment (−1..1)
+    "def_facing_ball", // nearest defender's forward·(to-ball) alignment (−1..1)
+    "max_att_boost",   // most boost held by any attacker (a loaded threat)
+    "max_def_boost",   // most boost held by any defender (can they challenge/clear)
 ];
 
 /// Velocity normalization scale (uu/s); a hard ball clear approaches this.
@@ -59,6 +73,47 @@ fn mean_boost(cars: &[&GridCar]) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Most boost (0–100) held by any car in the set; 0 if none carry a gauge.
+fn max_boost(cars: &[&GridCar]) -> f32 {
+    cars.iter()
+        .filter_map(|c| c.boost.map(boost_percent))
+        .fold(0.0, f32::max)
+}
+
+/// The car in `cars` nearest the ball, if any.
+fn nearest_to_ball<'a>(cars: &[&'a GridCar], ball: Vec3) -> Option<&'a GridCar> {
+    cars.iter()
+        .copied()
+        .min_by(|a, b| dist(a.p, ball).total_cmp(&dist(b.p, ball)))
+}
+
+/// Speed (uu/s, attack frame) at which `c` is approaching the ball: the component
+/// of its velocity along the unit vector toward the ball. Positive = closing in,
+/// negative = backing off. 0 when the car is on the ball (degenerate direction).
+fn closing_speed(c: &GridCar, ball: Vec3) -> f32 {
+    let (dx, dy, dz) = (ball.x - c.p.x, ball.y - c.p.y, ball.z - c.p.z);
+    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+    if len < 1.0 {
+        return 0.0;
+    }
+    (c.v.x * dx + c.v.y * dy + c.v.z * dz) / len
+}
+
+/// Cosine of the angle between `c`'s forward axis (from yaw) and the horizontal
+/// direction to the ball: +1 dead-on, −1 facing away, 0 broadside. 0 when the
+/// car carries no orientation or sits on the ball.
+fn facing_ball_cos(c: &GridCar, ball: Vec3) -> f32 {
+    let Some(rot) = c.rot else {
+        return 0.0;
+    };
+    let (tx, ty) = (ball.x - c.p.x, ball.y - c.p.y);
+    let len = (tx * tx + ty * ty).sqrt();
+    if len < 1.0 {
+        return 0.0;
+    }
+    (rot.yaw.cos() * tx + rot.yaw.sin() * ty) / len
 }
 
 /// Build features for `team` from an already attacking-frame-rotated grid frame.
@@ -99,6 +154,23 @@ pub fn features_from_attacking(af: &GridFrame, team: i32) -> Option<StateFeature
         def.iter().filter(|c| c.p.y > by).count() as f32 / def.len() as f32
     };
 
+    // v2: numerical edge (demos/respawns thin a team), shot proximity, and the
+    // velocity/orientation/boost of the car most likely to touch the ball next.
+    let man_advantage = ((att.len() as f32 - def.len() as f32) / 3.0).clamp(-1.0, 1.0);
+    // Opponent goal mouth sits at +Y in the attack frame (centre, on the floor).
+    let goal = Vec3 {
+        x: 0.0,
+        y: BACK_WALL_Y,
+        z: 0.0,
+    };
+    let ball_goal_dist = (dist(ball.p, goal) / FIELD_DIAG).min(1.0);
+    let near_att = nearest_to_ball(&att, ball.p);
+    let near_def = nearest_to_ball(&def, ball.p);
+    let min_att_closing = near_att.map(|c| closing_speed(c, ball.p)).unwrap_or(0.0) / SPEED_SCALE;
+    let min_def_closing = near_def.map(|c| closing_speed(c, ball.p)).unwrap_or(0.0) / SPEED_SCALE;
+    let att_facing = near_att.map(|c| facing_ball_cos(c, ball.p)).unwrap_or(0.0);
+    let def_facing = near_def.map(|c| facing_ball_cos(c, ball.p)).unwrap_or(0.0);
+
     Some(StateFeatures {
         t: af.t,
         team,
@@ -113,6 +185,14 @@ pub fn features_from_attacking(af: &GridFrame, team: i32) -> Option<StateFeature
             att_ahead,
             def_goalside,
             (mean_boost(&att) - mean_boost(&def)) / 100.0,
+            man_advantage,
+            ball_goal_dist,
+            min_att_closing,
+            min_def_closing,
+            att_facing,
+            def_facing,
+            max_boost(&att) / 100.0,
+            max_boost(&def) / 100.0,
         ],
     })
 }

@@ -65,6 +65,57 @@ fn featurizer_is_team_symmetric_and_correct() {
 }
 
 #[test]
+fn v2_features_swap_between_perspectives() {
+    // A 2v1 frame with motion + orientation so the v2 columns are non-trivial.
+    // The new per-car features are frame-invariant scalars, so one team's
+    // attacker view must equal the other team's defender view (and man-advantage
+    // negates). Indices: 10 man_adv, 11 goal_dist, 12/13 att/def closing,
+    // 14/15 att/def facing, 16/17 att/def max-boost.
+    let signs = BTreeMap::from([(0, 1), (1, -1)]);
+    let cv = |pri, team, p, vel, boost, yaw: f32| GridCar {
+        pri,
+        team: Some(team),
+        p,
+        v: vel,
+        boost: Some(boost),
+        rot: Some(replay_analyzer::model::Rot3 {
+            pitch: 0.0,
+            yaw,
+            roll: 0.0,
+        }),
+    };
+    let frame = GridFrame {
+        t: 1.0,
+        ball: Some(Kin {
+            p: v(0.0, 1000.0, 100.0),
+            v: v(0.0, 500.0, 0.0),
+        }),
+        cars: vec![
+            cv(1, 0, v(0.0, 500.0, 17.0), v(0.0, 800.0, 0.0), 200, std::f32::consts::FRAC_PI_2),
+            cv(2, 0, v(-1000.0, 0.0, 17.0), v(0.0, 0.0, 0.0), 100, 0.0),
+            cv(3, 1, v(0.0, 2000.0, 17.0), v(0.0, -300.0, 0.0), 50, -std::f32::consts::FRAC_PI_2),
+        ],
+    };
+    let s0 = state_features(&frame, 0, &signs).unwrap();
+    let s1 = state_features(&frame, 1, &signs).unwrap();
+    let eq = |a: f32, b: f32| (a - b).abs() < 1e-4;
+
+    // Man-advantage: team 0 is +1 up (2 vs 1), team 1 mirrors it.
+    assert!(eq(s0.x[10], 1.0 / 3.0) && eq(s1.x[10], -1.0 / 3.0));
+    // Shot proximity is a real distance in [0,1] for both.
+    assert!((0.0..=1.0).contains(&s0.x[11]) && (0.0..=1.0).contains(&s1.x[11]));
+    // Closing / facing / max-boost swap attacker↔defender across perspectives.
+    assert!(eq(s0.x[12], s1.x[13]) && eq(s0.x[13], s1.x[12]));
+    assert!(eq(s0.x[14], s1.x[15]) && eq(s0.x[15], s1.x[14]));
+    assert!(eq(s0.x[16], s1.x[17]) && eq(s0.x[17], s1.x[16]));
+    // The nearest attacker is driving onto the ball and facing it.
+    assert!(s0.x[12] > 0.0, "closing toward ball positive: {}", s0.x[12]);
+    assert!(s0.x[14] > 0.9, "facing the ball: {}", s0.x[14]);
+    // All v2 columns finite.
+    assert!(s0.x.iter().all(|f| f.is_finite()) && s1.x.iter().all(|f| f.is_finite()));
+}
+
+#[test]
 fn featurizer_needs_ball_and_own_car() {
     let signs = BTreeMap::from([(0, 1)]);
     // No ball -> no features.
