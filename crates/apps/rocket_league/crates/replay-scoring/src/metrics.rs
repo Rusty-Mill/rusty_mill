@@ -87,6 +87,17 @@ pub fn compute(
         recovery_speed(frames, target_pri, cfg),
     );
     out.insert(Metric::AerialPresence, aerial_presence(frames, target_pri));
+    // Candidate metrics (experimental in the default config): computed and
+    // reconciled against ΔV, but excluded from the composite until promoted.
+    out.insert(
+        Metric::FacingBallShare,
+        facing_ball_share(frames, target_pri),
+    );
+    out.insert(Metric::ReverseDriving, reverse_driving(frames, target_pri));
+    out.insert(
+        Metric::LastDefenderShare,
+        last_defender_share(frames, target_pri, target_team),
+    );
     out
 }
 
@@ -532,6 +543,78 @@ fn aerial_presence(frames: &[FrameView], pri: i32) -> Option<f32> {
             if c.airborne {
                 num += 1;
             }
+        }
+    }
+    ratio(num, den)
+}
+
+/// Candidate: fraction of valid frames the target is oriented toward the ball
+/// (heading within ~35° of the direction to the ball) — a spatial-awareness
+/// signal. Reads the same per-frame yaw the bcstats `percent_facing_ball` uses.
+fn facing_ball_share(frames: &[FrameView], pri: i32) -> Option<f32> {
+    const CONE_COS: f32 = 0.819; // cos 35°
+    let (mut num, mut den) = (0usize, 0usize);
+    for f in frames {
+        let (Some(c), Some(ball)) = (f.car(pri), f.ball) else {
+            continue;
+        };
+        if !c.valid_pos {
+            continue;
+        }
+        let to_ball = Vec3 {
+            x: ball.p.x - c.p.x,
+            y: ball.p.y - c.p.y,
+            z: 0.0,
+        };
+        let Some(align) = c.forward_align(to_ball) else {
+            continue;
+        };
+        den += 1;
+        if align >= CONE_COS {
+            num += 1;
+        }
+    }
+    ratio(num, den)
+}
+
+/// Candidate: fraction of grounded driving frames spent moving in reverse
+/// (horizontal velocity opposed to the car's heading) — a car-control signal.
+fn reverse_driving(frames: &[FrameView], pri: i32) -> Option<f32> {
+    const MIN_SPEED: f32 = 150.0; // ignore near-stationary jitter
+    let (mut num, mut den) = (0usize, 0usize);
+    for f in frames {
+        let Some(c) = f.car(pri) else { continue };
+        if c.airborne {
+            continue;
+        }
+        let hspeed = (c.v.x * c.v.x + c.v.y * c.v.y).sqrt();
+        if hspeed < MIN_SPEED {
+            continue;
+        }
+        let Some(align) = c.forward_align(c.v) else {
+            continue;
+        };
+        den += 1;
+        if align < 0.0 {
+            num += 1;
+        }
+    }
+    ratio(num, den)
+}
+
+/// Candidate: fraction of valid frames the target is the team's back-most player
+/// (last defender), by attacking-frame `y` — a rotation/structure signal.
+fn last_defender_share(frames: &[FrameView], pri: i32, team: i32) -> Option<f32> {
+    let (mut num, mut den) = (0usize, 0usize);
+    for f in frames {
+        let Some(c) = f.car(pri) else { continue };
+        if !c.valid_pos {
+            continue;
+        }
+        den += 1;
+        // Back-most = smallest attacking-frame y among the team's live cars.
+        if f.team_cars(team).all(|o| c.pa.y <= o.pa.y) {
+            num += 1;
         }
     }
     ratio(num, den)

@@ -20,8 +20,13 @@ pub struct MetricBreakdown {
     pub raw: Option<f32>,
     /// Calibrated 0–100 score.
     pub normalized: f32,
-    /// Effective composite weight = top_weight[role] · within-role weight.
+    /// Effective composite weight = top_weight[role] · within-role weight. Always
+    /// 0 for an experimental candidate (it does not feed the composite).
     pub effective_weight: f32,
+    /// A candidate metric shown for diagnostics only — reconciled against ΔV/rank
+    /// but excluded from sub-scores, the composite, and leak selection.
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 /// A full decision-discipline report for one target player.

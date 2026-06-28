@@ -50,6 +50,64 @@ fn raws_for(frames: &[FrameView], target: i32) -> std::collections::BTreeMap<Met
 }
 
 #[test]
+fn candidate_metrics_compute() {
+    // Ball at origin. Target (pri 1) sits behind (−Y), faces the ball (+Y), and
+    // drives *backward* (−Y); teammate (pri 2) is ahead (+Y). So the target is
+    // the back-most player, is facing the ball, and is in reverse — every frame.
+    let car = |pri, p: Vec3, vel: Vec3, yaw: f32, pay: f32| CarView {
+        pri,
+        team: 0,
+        p,
+        v: vel,
+        pa: v(0.0, pay, 17.0),
+        boost: Some(50),
+        valid_pos: true,
+        dist_to_ball: 0.0,
+        closing_speed: 0.0,
+        time_to_ball: 1.0,
+        goalside: true,
+        ball_third: Third::Mid,
+        rot: Some(Rot3 {
+            pitch: 0.0,
+            yaw,
+            roll: 0.0,
+        }),
+        airborne: false,
+        upright: true,
+        attack_sign: 1,
+    };
+    let frames: Vec<_> = (0..10)
+        .map(|i| FrameView {
+            t: i as f32 * 0.1,
+            ball: Some(Kin {
+                p: v(0.0, 0.0, 100.0),
+                v: v(0.0, 0.0, 0.0),
+            }),
+            cars: vec![
+                car(
+                    1,
+                    v(0.0, -1000.0, 17.0),
+                    v(0.0, -800.0, 0.0),
+                    std::f32::consts::FRAC_PI_2,
+                    -1000.0,
+                ),
+                car(
+                    2,
+                    v(0.0, 1000.0, 17.0),
+                    v(0.0, 0.0, 0.0),
+                    -std::f32::consts::FRAC_PI_2,
+                    1000.0,
+                ),
+            ],
+        })
+        .collect();
+    let raws = raws_for(&frames, 1);
+    assert_eq!(raws[&Metric::FacingBallShare], Some(1.0)); // yaw points at the ball
+    assert_eq!(raws[&Metric::ReverseDriving], Some(1.0)); // velocity opposes heading
+    assert_eq!(raws[&Metric::LastDefenderShare], Some(1.0)); // back-most every frame
+}
+
+#[test]
 fn double_commit_fires_when_both_press() {
     // Both cars pressuring (ttb < press_ttb=1.2) every frame -> rate 1.0.
     let frames: Vec<_> = (0..10)

@@ -87,6 +87,44 @@ impl Reconciliation {
     }
 }
 
+/// Promote experimental candidate metrics that the value model vindicates.
+///
+/// Any metric flagged `experimental` whose ΔV correlation (`rho_value`) is at
+/// least `min_rho` in magnitude **and** points the way its curve assumes
+/// (higher-is-better ⇒ positive, lower-is-better ⇒ negative; band accepts either)
+/// graduates into the composite: its `experimental` flag is cleared and its
+/// within-role weight is set to `rho_value²` — the same evidence rule
+/// [`crate::calibrate::fit_weights`] uses against rank, here driven by in-match
+/// impact instead. Candidates with no ΔV signal (or the wrong sign) stay
+/// experimental and out of the composite. Returns a new config; the input is
+/// unchanged. `top_weights` are left as-is (the engine renormalizes within role).
+pub fn promote_candidates(cfg: &ScoreConfig, recon: &Reconciliation, min_rho: f32) -> ScoreConfig {
+    let mut cfg = cfg.clone();
+    for ma in &recon.metrics {
+        let Some(rv) = ma.rho_value else { continue };
+        if rv.abs() < min_rho {
+            continue;
+        }
+        let dir_ok = match ma.good_dir {
+            "higher" => rv > 0.0,
+            "lower" => rv < 0.0,
+            _ => true, // band: either direction can carry signal
+        };
+        if !dir_ok {
+            continue;
+        }
+        if let Some(spec) = cfg
+            .metrics
+            .iter_mut()
+            .find(|s| s.metric == ma.metric && s.experimental)
+        {
+            spec.experimental = false;
+            spec.weight = rv * rv;
+        }
+    }
+    cfg
+}
+
 fn good_dir(curve: &Curve) -> &'static str {
     match curve {
         Curve::Higher { .. } => "higher",

@@ -19,7 +19,13 @@ pub fn breakdowns(cfg: &ScoreConfig, raws: &BTreeMap<Metric, Option<f32>>) -> Ve
                 role: spec.role,
                 raw,
                 normalized,
-                effective_weight: top_weight(cfg, spec.role) * spec.weight,
+                // Candidates never contribute to the composite.
+                effective_weight: if spec.experimental {
+                    0.0
+                } else {
+                    top_weight(cfg, spec.role) * spec.weight
+                },
+                experimental: spec.experimental,
             }
         })
         .collect()
@@ -39,7 +45,7 @@ fn top_weight(cfg: &ScoreConfig, role: Role) -> f32 {
 fn sub_score(cfg: &ScoreConfig, bds: &[MetricBreakdown], role: Role) -> Option<f32> {
     let (mut num, mut den) = (0.0f32, 0.0f32);
     for (spec, bd) in cfg.metrics.iter().zip(bds) {
-        if spec.role == role && bd.raw.is_some() {
+        if spec.role == role && !spec.experimental && bd.raw.is_some() {
             num += bd.normalized * spec.weight;
             den += spec.weight;
         }
@@ -120,7 +126,7 @@ pub fn pick_leak(cfg: &ScoreConfig, bds: &[MetricBreakdown]) -> (String, String)
     cfg.metrics
         .iter()
         .zip(bds)
-        .filter(|(_, bd)| bd.raw.is_some())
+        .filter(|(spec, bd)| !spec.experimental && bd.raw.is_some())
         .map(|(spec, bd)| {
             let impact = bd.effective_weight * (100.0 - bd.normalized);
             (impact, bd.key.clone(), spec.chapter.clone())

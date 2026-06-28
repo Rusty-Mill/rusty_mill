@@ -32,6 +32,7 @@ fn mk_report(name: &str, pri: i32, team: i32, composite: f32) -> Report {
             raw: Some(0.1),
             normalized: composite,
             effective_weight: 0.01,
+            experimental: false,
         }],
     }
 }

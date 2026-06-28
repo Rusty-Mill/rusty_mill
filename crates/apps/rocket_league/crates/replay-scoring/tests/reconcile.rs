@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use replay_scoring::config::{Metric, ScoreConfig};
-use replay_scoring::reconcile::{reconcile, CrossSample, MetricAgreement};
+use replay_scoring::reconcile::{promote_candidates, reconcile, CrossSample, MetricAgreement};
 
 fn sample(metric: Metric, raw: f32, composite: f32, rank: Option<f32>, dv: f32) -> CrossSample {
     let mut raws = BTreeMap::new();
@@ -69,6 +69,51 @@ fn flags_sign_disagreement() {
     // composite == raw, so it tracks rank up and ΔV down.
     assert!(rec.rho_composite_rank.unwrap() > 0.9);
     assert!(rec.rho_composite_dv_sum.unwrap() < -0.9);
+}
+
+#[test]
+fn promotes_candidates_that_track_value() {
+    // Three candidate metrics across players, vs ΔV = i:
+    //  facing_ball_share  raw=+i, curve Higher  -> ρ_value ≈ +1, sign OK  -> promote
+    //  reverse_driving    raw=+i, curve Lower   -> ρ_value ≈ +1, wrong way -> keep
+    //  last_defender_share raw=-i, curve Band   -> ρ_value ≈ -1, band OK   -> promote
+    let cfg = ScoreConfig::default();
+    let samples: Vec<CrossSample> = (0..8)
+        .map(|i| {
+            let raw = i as f32;
+            let mut raws = BTreeMap::new();
+            raws.insert(Metric::FacingBallShare, Some(raw));
+            raws.insert(Metric::ReverseDriving, Some(raw));
+            raws.insert(Metric::LastDefenderShare, Some(-raw));
+            CrossSample {
+                raws,
+                composite: raw,
+                rank: None,
+                dv_sum: raw,
+                dv_mean: raw,
+            }
+        })
+        .collect();
+
+    let rec = reconcile(&cfg, &samples);
+    let promoted = promote_candidates(&cfg, &rec, 0.5);
+    let spec = |c: &ScoreConfig, m: Metric| c.metrics.iter().find(|s| s.metric == m).unwrap().clone();
+
+    // Candidates were experimental to begin with.
+    assert!(spec(&cfg, Metric::FacingBallShare).experimental);
+
+    // Correctly-signed candidates graduate with a positive weight…
+    let f = spec(&promoted, Metric::FacingBallShare);
+    assert!(!f.experimental && f.weight > 0.5);
+    let l = spec(&promoted, Metric::LastDefenderShare);
+    assert!(!l.experimental && l.weight > 0.5);
+
+    // …the wrong-signed one (higher reverse ⇒ higher ΔV contradicts "lower is
+    // better") stays a candidate, out of the composite.
+    assert!(spec(&promoted, Metric::ReverseDriving).experimental);
+
+    // The input config is untouched.
+    assert!(spec(&cfg, Metric::FacingBallShare).experimental);
 }
 
 #[test]

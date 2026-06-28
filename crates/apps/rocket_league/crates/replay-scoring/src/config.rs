@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v3";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v4";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,6 +39,10 @@ pub enum Metric {
     TransitionReadiness,
     RecoverySpeed,
     AerialPresence,
+    // --- candidate metrics (bcstats-derived; experimental until ΔV-promoted) ---
+    FacingBallShare,
+    ReverseDriving,
+    LastDefenderShare,
 }
 
 impl Metric {
@@ -59,6 +63,9 @@ impl Metric {
             Metric::TransitionReadiness => "transition_readiness",
             Metric::RecoverySpeed => "recovery_speed",
             Metric::AerialPresence => "aerial_presence",
+            Metric::FacingBallShare => "facing_ball_share",
+            Metric::ReverseDriving => "reverse_driving",
+            Metric::LastDefenderShare => "last_defender_share",
         }
     }
 }
@@ -113,6 +120,14 @@ pub struct MetricSpec {
     pub curve: Curve,
     pub weight: f32,
     pub chapter: String,
+    /// A **candidate** metric: computed and cross-checked against ΔV/rank by
+    /// [`crate::reconcile`], but kept *out* of the composite, sub-scores, and leak
+    /// selection until it earns its place. Promote it (clear the flag, set a
+    /// weight) with [`crate::reconcile::promote_candidates`] once ΔV shows it
+    /// carries signal. Defaults to `false` so existing configs deserialize
+    /// unchanged.
+    #[serde(default)]
+    pub experimental: bool,
 }
 
 /// A player-type archetype centroid in normalized behavioral-feature space.
@@ -189,6 +204,14 @@ impl Default for ScoreConfig {
             curve,
             weight,
             chapter: chapter.to_string(),
+            experimental: false,
+        };
+        // A candidate metric: same shape, but flagged experimental (kept out of the
+        // composite until ΔV-promoted). The `weight` is the value it would take if
+        // promoted by hand; promotion normally overwrites it from the ΔV correlation.
+        let mx = |metric, role, curve, weight, chapter: &str| MetricSpec {
+            experimental: true,
+            ..m(metric, role, curve, weight, chapter)
         };
         ScoreConfig {
             version: SCORE_CONFIG_VERSION.to_string(),
@@ -336,6 +359,42 @@ impl Default for ScoreConfig {
                     },
                     0.20,
                     "Air system / aerial threat",
+                ),
+                // --- candidate metrics (experimental; bcstats-derived) ---
+                // Orientation toward the play: share of valid frames facing the ball.
+                mx(
+                    Metric::FacingBallShare,
+                    Role::General,
+                    Curve::Higher {
+                        zero: 0.30,
+                        full: 0.70,
+                    },
+                    0.10,
+                    "Positioning / awareness",
+                ),
+                // Awkward recoveries: share of grounded driving spent in reverse.
+                mx(
+                    Metric::ReverseDriving,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 0.20,
+                        full: 0.02,
+                    },
+                    0.10,
+                    "Fundamentals / car control",
+                ),
+                // Last-man load: share of time as the team's back-most player. Banded
+                // — you want to share the duty, not live there or abandon it.
+                mx(
+                    Metric::LastDefenderShare,
+                    Role::General,
+                    Curve::Band {
+                        lo: 0.30,
+                        hi: 0.60,
+                        falloff: 0.30,
+                    },
+                    0.10,
+                    "Defence structure / rotation",
                 ),
             ],
             top_weights: [0.35, 0.30, 0.35],
