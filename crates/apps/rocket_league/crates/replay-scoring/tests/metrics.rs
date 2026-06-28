@@ -53,7 +53,7 @@ fn raws_for(frames: &[FrameView], target: i32) -> std::collections::BTreeMap<Met
 fn candidate_metrics_compute() {
     // Ball at origin. Target (pri 1) sits behind (−Y), faces the ball (+Y), and
     // drives *backward* (−Y); teammate (pri 2) is ahead (+Y). So the target is
-    // the back-most player, is facing the ball, and is in reverse — every frame.
+    // facing the ball and is in reverse — every frame.
     let car = |pri, p: Vec3, vel: Vec3, yaw: f32, pay: f32| CarView {
         pri,
         team: 0,
@@ -104,7 +104,6 @@ fn candidate_metrics_compute() {
     let raws = raws_for(&frames, 1);
     assert_eq!(raws[&Metric::FacingBallShare], Some(1.0)); // yaw points at the ball
     assert_eq!(raws[&Metric::ReverseDriving], Some(1.0)); // velocity opposes heading
-    assert_eq!(raws[&Metric::LastDefenderShare], Some(1.0)); // back-most every frame
 }
 
 #[test]

@@ -73,10 +73,10 @@ fn flags_sign_disagreement() {
 
 #[test]
 fn promotes_candidates_that_track_value() {
-    // Three candidate metrics across players, vs ΔV = i:
-    //  facing_ball_share  raw=+i, curve Higher  -> ρ_value ≈ +1, sign OK  -> promote
+    // Three metrics forced experimental across players, vs ΔV = i:
+    //  facing_ball_share  raw=+i, curve Higher  -> ρ_value ≈ +1, sign OK   -> promote
     //  reverse_driving    raw=+i, curve Lower   -> ρ_value ≈ +1, wrong way -> keep
-    //  last_defender_share raw=-i, curve Band   -> ρ_value ≈ -1, band OK   -> promote
+    //  support_spacing    raw=-i, curve Band    -> ρ_value ≈ -1, band OK   -> promote
     // Force a controlled candidate scenario (curves + experimental) so the test
     // is independent of which metrics the shipped default config graduates.
     let mut cfg = ScoreConfig::default();
@@ -90,7 +90,7 @@ fn promotes_candidates_that_track_value() {
                 s.experimental = true;
                 s.curve = Curve::Lower { zero: 1.0, full: 0.0 };
             }
-            Metric::LastDefenderShare => {
+            Metric::SupportSpacing => {
                 s.experimental = true;
                 s.curve = Curve::Band { lo: 0.3, hi: 0.6, falloff: 0.3 };
             }
@@ -103,7 +103,7 @@ fn promotes_candidates_that_track_value() {
             let mut raws = BTreeMap::new();
             raws.insert(Metric::FacingBallShare, Some(raw));
             raws.insert(Metric::ReverseDriving, Some(raw));
-            raws.insert(Metric::LastDefenderShare, Some(-raw));
+            raws.insert(Metric::SupportSpacing, Some(-raw));
             CrossSample {
                 raws,
                 composite: raw,
@@ -124,7 +124,7 @@ fn promotes_candidates_that_track_value() {
     // Correctly-signed candidates graduate with a positive weight…
     let f = spec(&promoted, Metric::FacingBallShare);
     assert!(!f.experimental && f.weight > 0.5);
-    let l = spec(&promoted, Metric::LastDefenderShare);
+    let l = spec(&promoted, Metric::SupportSpacing);
     assert!(!l.experimental && l.weight > 0.5);
 
     // …the wrong-signed one (higher reverse ⇒ higher ΔV contradicts "lower is

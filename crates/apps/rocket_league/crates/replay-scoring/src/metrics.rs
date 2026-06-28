@@ -94,10 +94,6 @@ pub fn compute(
         facing_ball_share(frames, target_pri),
     );
     out.insert(Metric::ReverseDriving, reverse_driving(frames, target_pri));
-    out.insert(
-        Metric::LastDefenderShare,
-        last_defender_share(frames, target_pri, target_team),
-    );
     out
 }
 
@@ -602,20 +598,3 @@ fn reverse_driving(frames: &[FrameView], pri: i32) -> Option<f32> {
     ratio(num, den)
 }
 
-/// Candidate: fraction of valid frames the target is the team's back-most player
-/// (last defender), by attacking-frame `y` — a rotation/structure signal.
-fn last_defender_share(frames: &[FrameView], pri: i32, team: i32) -> Option<f32> {
-    let (mut num, mut den) = (0usize, 0usize);
-    for f in frames {
-        let Some(c) = f.car(pri) else { continue };
-        if !c.valid_pos {
-            continue;
-        }
-        den += 1;
-        // Back-most = smallest attacking-frame y among the team's live cars.
-        if f.team_cars(team).all(|o| c.pa.y <= o.pa.y) {
-            num += 1;
-        }
-    }
-    ratio(num, den)
-}

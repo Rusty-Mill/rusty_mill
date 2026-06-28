@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v5";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v6";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +39,9 @@ pub enum Metric {
     TransitionReadiness,
     RecoverySpeed,
     AerialPresence,
-    // --- candidate metrics (bcstats-derived; experimental until ΔV-promoted) ---
+    // --- bcstats-derived metrics (graduated on corpus rank evidence) ---
     FacingBallShare,
     ReverseDriving,
-    LastDefenderShare,
 }
 
 impl Metric {
@@ -65,7 +64,6 @@ impl Metric {
             Metric::AerialPresence => "aerial_presence",
             Metric::FacingBallShare => "facing_ball_share",
             Metric::ReverseDriving => "reverse_driving",
-            Metric::LastDefenderShare => "last_defender_share",
         }
     }
 }
@@ -205,13 +203,6 @@ impl Default for ScoreConfig {
             weight,
             chapter: chapter.to_string(),
             experimental: false,
-        };
-        // A candidate metric: same shape, but flagged experimental (kept out of the
-        // composite until ΔV-promoted). The `weight` is the value it would take if
-        // promoted by hand; promotion normally overwrites it from the ΔV correlation.
-        let mx = |metric, role, curve, weight, chapter: &str| MetricSpec {
-            experimental: true,
-            ..m(metric, role, curve, weight, chapter)
         };
         ScoreConfig {
             version: SCORE_CONFIG_VERSION.to_string(),
@@ -387,21 +378,11 @@ impl Default for ScoreConfig {
                     0.20,
                     "Fundamentals / car control",
                 ),
-                // --- candidate metrics (experimental; bcstats-derived) ---
-                // Last-man load: share of time as the team's back-most player. Banded
-                // — you want to share the duty, not live there or abandon it. Kept
-                // experimental: no rank or ΔV signal on the corpus (ρ ≈ 0).
-                mx(
-                    Metric::LastDefenderShare,
-                    Role::General,
-                    Curve::Band {
-                        lo: 0.30,
-                        hi: 0.60,
-                        falloff: 0.30,
-                    },
-                    0.10,
-                    "Defence structure / rotation",
-                ),
+                // No experimental candidates ship today. To add one, append a spec
+                // with `experimental: true` (e.g. `MetricSpec { experimental: true,
+                // ..m(metric, role, curve, weight, chapter) }`): it is computed and
+                // reconciled against ΔV/rank but stays out of the composite until
+                // `reconcile::promote_candidates` graduates it on evidence.
             ],
             top_weights: [0.35, 0.30, 0.35],
             tiers: vec![
