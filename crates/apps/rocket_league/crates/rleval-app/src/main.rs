@@ -21,10 +21,11 @@ use rleval_app::{admin, pipeline, ui};
 
 const USAGE: &str = "\
 usage:
-  rleval serve [--host <host>] [--port <port>] [--replays <dir>] [--corpus <dir>]
+  rleval serve [--host <host>] [--port <port>] [--replays <dir>] [--corpus <dir>] [--enable-admin-run]
   rleval analyze <file.replay> [--out <bundle.html>]
 
   serve    start the web UI (default http://127.0.0.1:8080; /admin shows model config)
+           --enable-admin-run lets /admin trigger retrain/recalibrate (localhost only)
   analyze  run the pipeline on one replay and write a self-contained HTML bundle";
 
 fn main() -> ExitCode {
@@ -57,6 +58,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut port: u16 = 8080;
     let mut replays = PathBuf::from("assets/replays");
     let mut corpus = PathBuf::from("assets/corpus");
+    let mut allow_run = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -64,6 +66,7 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
             "--port" => port = it.next().ok_or("--port needs a value")?.parse()?,
             "--replays" => replays = PathBuf::from(it.next().ok_or("--replays needs a dir")?),
             "--corpus" => corpus = PathBuf::from(it.next().ok_or("--corpus needs a dir")?),
+            "--enable-admin-run" => allow_run = true,
             other => return Err(format!("unknown flag {other}\n{USAGE}").into()),
         }
     }
@@ -73,20 +76,35 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         replays.display()
     );
     eprintln!("Open the URL in a browser, then drop a .replay file. Ctrl-C to stop.");
-    server::serve(&host, port, move |req| route(req, &replays, &corpus))?;
+    if allow_run {
+        eprintln!("admin maintenance endpoint ENABLED (/api/admin/run) — localhost only.");
+    }
+    server::serve(&host, port, move |req| {
+        route(req, &replays, &corpus, allow_run)
+    })?;
     Ok(())
 }
 
-fn route(req: &Request, replays: &Path, corpus: &Path) -> Response {
+fn route(req: &Request, replays: &Path, corpus: &Path, allow_run: bool) -> Response {
     match (req.method.as_str(), req.route()) {
         ("GET", "/") => Response::html(ui::INDEX_HTML),
         ("GET", "/admin") => Response::html(ui::ADMIN_HTML),
         ("GET", "/healthz") => Response::text(200, "ok"),
         ("GET", "/api/samples") => samples_response(replays),
-        ("GET", "/api/config") => match serde_json::to_vec(&admin::config_report(corpus)) {
+        ("GET", "/api/config") => match serde_json::to_vec(&admin::config_report(corpus, allow_run)) {
             Ok(json) => Response::json(json),
             Err(e) => Response::text(500, format!("serialize error: {e}")),
         },
+        ("POST", "/api/admin/run") => {
+            if !allow_run {
+                return Response::text(403, "admin run disabled — start with --enable-admin-run");
+            }
+            let action = query_param(&req.path, "action").unwrap_or_default();
+            match admin::run_action(&action, corpus) {
+                Some(r) => Response::json(serde_json::to_vec(&r).unwrap_or_default()),
+                None => Response::text(400, "unknown action"),
+            }
+        }
         ("POST", "/api/analyze") => {
             let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
             analyze_response(&req.body, &stem(&name))

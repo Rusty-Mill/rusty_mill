@@ -562,6 +562,16 @@ pub const ADMIN_HTML: &str = r##"<!doctype html>
   .bar > i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
   .note { margin:12px 0 0; padding:11px 16px; border-radius:12px; font-size:12.5px; color:var(--warn);
     background:linear-gradient(90deg,rgba(227,179,65,.12),transparent); border:1px solid rgba(227,179,65,.3); }
+  .imp { display:flex; align-items:center; gap:10px; margin:3px 0; }
+  .imp code { width:150px; }
+  .imp .bar { flex:1; }
+  .imp .pct { width:48px; text-align:right; font-variant-numeric:tabular-nums; font-family:var(--mono); color:var(--muted); }
+  .runbtn { background:var(--card-2); color:var(--fg); border:1px solid var(--line); border-radius:9px;
+    padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; transition:.15s; }
+  .runbtn:hover:not(:disabled) { border-color:var(--accent); color:#fff; background:rgba(91,157,255,.1); }
+  .runbtn:disabled { opacity:.45; cursor:not-allowed; }
+  #runout { margin-top:12px; padding:12px; background:#0a0d12; border:1px solid var(--line); border-radius:10px;
+    font:12px/1.5 var(--mono); color:#c7d3e0; max-height:340px; overflow:auto; white-space:pre-wrap; }
 </style>
 </head>
 <body>
@@ -584,6 +594,32 @@ function curveStr(cv) {
   if (cv.kind === "band")   return `band · [${num(cv.lo)}, ${num(cv.hi)}] ±${num(cv.falloff)}`;
   return esc(JSON.stringify(cv));
 }
+// Relative-age formatting for a Unix-epoch (seconds) mtime; >14 days reads stale.
+function ago(epoch) {
+  if (!epoch) return null;
+  const s = Date.now() / 1000 - epoch, d = s / 86400;
+  const t = s < 90 ? "just now" : s < 5400 ? Math.round(s/60) + "m ago"
+    : s < 172800 ? Math.round(s/3600) + "h ago" : Math.round(d) + "d ago";
+  return { text: t, stale: d > 14, date: new Date(epoch*1000).toISOString().slice(0,10) };
+}
+function modStr(o) {
+  const a = o && ago(o.modified_epoch);
+  if (!a) return "";
+  return ` · <span class="${a.stale?'warnc':'muted'}" title="${a.date}">updated ${a.text}${a.stale?' ⚠ stale':''}</span>`;
+}
+
+async function runAction(act) {
+  const out = document.getElementById("runout");
+  out.style.display = "block";
+  out.textContent = `Running ${act}… first run compiles in release mode — this can take a few minutes.`;
+  document.querySelectorAll(".runbtn").forEach(b => b.disabled = true);
+  try {
+    const r = await fetch("/api/admin/run?action=" + encodeURIComponent(act), { method: "POST" });
+    if (!r.ok) { out.textContent = "Error: " + esc(await r.text()); }
+    else { const j = await r.json(); out.textContent = (j.ok ? "✓ " : "✗ ") + j.command + "\n\n" + j.output; }
+  } catch (e) { out.textContent = "Error: " + esc(e.message || e); }
+  document.querySelectorAll(".runbtn").forEach(b => b.disabled = false);
+}
 function card(hint, inner) {
   return `<div class="card"><p class="hint">${hint}</p>${inner}</div>`;
 }
@@ -592,7 +628,7 @@ function renderScoring(s) {
   const c = s.config;
   const tw = c.top_weights || [];
   const onDisk = s.fitted
-    ? `<span class="status ok">● fitted on disk: <code>${esc(s.fitted.version)}</code> <span class="muted">(${esc(s.fitted.path)})</span></span>`
+    ? `<span class="status ok">● fitted on disk: <code>${esc(s.fitted.version)}</code> <span class="muted">(${esc(s.fitted.path)})</span>${modStr(s.fitted)}</span>`
     : `<span class="status warnc">● no fitted_config.json — CLI tools would fall back to defaults</span>`;
   const gap = (s.fitted && s.fitted.version.indexOf(s.active_version) !== 0)
     ? `<p class="note">The app runs the in-process default (<code>${esc(s.active_version)}</code>); the fitted config on disk (<code>${esc(s.fitted.version)}</code>) is used by the <code>reconcile</code>/CLI tools, not the live web analysis.</p>` : "";
@@ -620,20 +656,33 @@ function renderScoring(s) {
 }
 
 function renderValue(v) {
-  const feats = (v.feature_names||[]).map((f,i) => `<span class="chip">${i}. ${esc(f)}</span>`).join("");
+  const names = v.feature_names || [];
+  const feats = names.map((f,i) => `<span class="chip">${i}. ${esc(f)}</span>`).join("");
   const shipped = v.shipped
-    ? `<span class="status ok">● ${esc(v.shipped.kind)} · n_train <code>${v.shipped.n_train.toLocaleString()}</code> <span class="muted">(${esc(v.shipped.path)})</span></span>`
+    ? `<span class="status ok">● ${esc(v.shipped.kind)} · n_train <code>${v.shipped.n_train.toLocaleString()}</code> <span class="muted">(${esc(v.shipped.path)})</span>${modStr(v.shipped)}</span>`
     : `<span class="status warnc">● value_model.json not present</span>`;
+  // Shipped-GBT feature importance, sorted desc.
+  let impCard = "";
+  if (v.shipped && v.shipped.importance) {
+    const rows = v.shipped.importance.map((w,i) => ({ name: names[i] || ("f"+i), w }))
+      .sort((a,b) => b.w - a.w);
+    const max = rows.length ? rows[0].w : 1;
+    const bars = rows.map(r => `<div class="imp"><code>${esc(r.name)}</code>
+      <div class="bar"><i style="width:${max>0?Math.round(r.w/max*100):0}%"></i></div>
+      <span class="pct">${(r.w*100).toFixed(1)}%</span></div>`).join("");
+    impCard = card("Shipped GBT feature importance — share of tree splits using each feature (a coarse 'weight' importance; the model stores no per-split gain).",
+      `<div class="pad">${bars}</div>`);
+  }
   return `<h2>Value / impact model <span class="ver">${esc(v.config_version)}</span></h2>` +
     card(`Runtime: ${esc(v.runtime)}<br>Shipped corpus model: ${shipped}`,
-      `<div class="pad"><div class="kv"><div class="k">Features (${(v.feature_names||[]).length})</div>
-        <div class="chips">${feats}</div></div></div>`);
+      `<div class="pad"><div class="kv"><div class="k">Features (${names.length})</div>
+        <div class="chips">${feats}</div></div></div>`) + impCard;
 }
 
 function renderSkills(s) {
   const cat = (s.catalog||[]).map(c => `<span class="chip">${esc(c)}</span>`).join("");
   const onDisk = s.fitted
-    ? `<span class="status ok">● fitted: <code>${esc(s.fitted.version)}</code></span>`
+    ? `<span class="status ok">● fitted: <code>${esc(s.fitted.version)}</code>${modStr(s.fitted)}</span>`
     : `<span class="status muted">● no fitted skill config</span>`;
   return `<h2>Mechanical skills <span class="ver">${esc(s.active_version)}</span></h2>` +
     card(`Catalog of detectors. ${onDisk}`,
@@ -653,10 +702,28 @@ function renderCorpus(c) {
         <tbody>${rows}</tbody></table></div>`);
 }
 
+function renderMaintenance(c) {
+  const on = c.run_enabled;
+  const btn = (act, label) => `<button class="runbtn" data-act="${act}" ${on?"":"disabled"}>${label}</button>`;
+  const note = on
+    ? "Runs the corpus jobs on this machine and writes the artifacts above. First run compiles in release mode (can take minutes); calibration needs the corpus downloaded, and fetching needs BC_TOKEN in the server's environment."
+    : "Disabled. Restart the server with <code>--enable-admin-run</code> to turn these on (localhost only — it executes processes).";
+  return `<h2>Maintenance</h2>` + card(note,
+    `<div class="pad">
+       <div style="display:flex;gap:10px;flex-wrap:wrap">
+         ${btn("retrain-value","↻ Retrain value model")}
+         ${btn("calibrate-scoring","↻ Recalibrate scoring")}
+       </div>
+       <pre id="runout" style="display:none"></pre>
+     </div>`);
+}
+
 (async () => {
   try {
     const c = await (await fetch("/api/config")).json();
-    $("#root").innerHTML = renderScoring(c.scoring) + renderValue(c.value) + renderSkills(c.skills) + renderCorpus(c.corpus);
+    $("#root").innerHTML = renderScoring(c.scoring) + renderValue(c.value) +
+      renderSkills(c.skills) + renderCorpus(c.corpus) + renderMaintenance(c);
+    document.querySelectorAll(".runbtn").forEach(b => b.onclick = () => runAction(b.dataset.act));
   } catch (e) {
     $("#root").innerHTML = `<p class="warnc">Failed to load /api/config: ${esc(e.message||e)}</p>`;
   }

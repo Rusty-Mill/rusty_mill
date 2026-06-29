@@ -24,6 +24,9 @@ pub struct ConfigReport {
     pub value: ValueInfo,
     pub skills: SkillsInfo,
     pub corpus: CorpusInfo,
+    /// Whether the maintenance run endpoint is enabled (server started with
+    /// `--enable-admin-run`). The UI greys out the buttons when false.
+    pub run_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -65,11 +68,13 @@ pub struct CorpusInfo {
     pub per_bucket: Vec<(String, usize)>,
 }
 
-/// A calibrated artifact found on disk: its `version` string and path.
+/// A calibrated artifact found on disk: its `version` string, path, and last-
+/// modified time (seconds since the Unix epoch) so the UI can flag staleness.
 #[derive(Serialize)]
 pub struct OnDisk {
     pub version: String,
     pub path: String,
+    pub modified_epoch: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -77,6 +82,21 @@ pub struct ShippedModel {
     pub kind: String,
     pub n_train: usize,
     pub path: String,
+    pub modified_epoch: Option<u64>,
+    /// Per-feature importance, index-aligned with `feature_names` (gradient-boosted
+    /// split frequency); `None` for a logistic model.
+    pub importance: Option<Vec<f32>>,
+}
+
+/// File mtime as whole seconds since the Unix epoch, if available.
+fn mtime_epoch(path: &Path) -> Option<u64> {
+    std::fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 /// Read the `"version"` field out of a JSON config on disk (without binding to its
@@ -87,11 +107,13 @@ fn on_disk_version(path: &Path) -> Option<OnDisk> {
     Some(OnDisk {
         version: v.get("version")?.as_str()?.to_string(),
         path: path.display().to_string(),
+        modified_epoch: mtime_epoch(path),
     })
 }
 
 /// Build the admin snapshot, reading any calibrated artifacts from `corpus_dir`.
-pub fn config_report(corpus_dir: &Path) -> ConfigReport {
+/// `run_enabled` reflects whether the maintenance endpoint is turned on.
+pub fn config_report(corpus_dir: &Path, run_enabled: bool) -> ConfigReport {
     // Value model on disk (kind + training size).
     let model_path = corpus_dir.join("value_model.json");
     let shipped = std::fs::read(&model_path)
@@ -104,6 +126,8 @@ pub fn config_report(corpus_dir: &Path) -> ConfigReport {
             },
             n_train: m.n_train(),
             path: model_path.display().to_string(),
+            modified_epoch: mtime_epoch(&model_path),
+            importance: m.feature_importance().map(|imp| imp.to_vec()),
         });
 
     // Corpus manifest: total + per-bucket counts.
@@ -149,5 +173,84 @@ pub fn config_report(corpus_dir: &Path) -> ConfigReport {
             total,
             per_bucket,
         },
+        run_enabled,
     }
+}
+
+/// Result of a whitelisted maintenance command.
+#[derive(Serialize)]
+pub struct RunResult {
+    pub action: String,
+    pub command: String,
+    pub ok: bool,
+    pub output: String,
+}
+
+/// Run one **whitelisted** maintenance action by invoking the cargo binaries
+/// directly (cross-platform — no shell wrappers). No caller-supplied arguments
+/// reach the command line; the only inputs are the fixed action key and the
+/// server's corpus dir. Localhost dev convenience; the caller gates this behind
+/// `--enable-admin-run`. Returns `None` for an unknown action.
+pub fn run_action(action: &str, corpus_dir: &Path) -> Option<RunResult> {
+    let manifest = corpus_dir.join("manifest.json").to_string_lossy().to_string();
+    // (cargo package, args) steps run in sequence; stop on the first failure.
+    let steps: Vec<(&str, Vec<String>)> = match action {
+        "retrain-value" => vec![(
+            "replay-value",
+            vec!["--bin".into(), "train_corpus".into(), "--".into(), manifest.clone()],
+        )],
+        "calibrate-scoring" => vec![
+            (
+                "replay-scoring",
+                vec!["--bin".into(), "calibrate".into(), "--".into(), manifest.clone()],
+            ),
+            (
+                "replay-scoring",
+                vec![
+                    "--bin".into(),
+                    "reconcile".into(),
+                    "--".into(),
+                    manifest.clone(),
+                    "--promote".into(),
+                ],
+            ),
+        ],
+        _ => return None,
+    };
+
+    let mut out = String::new();
+    let mut cmds = Vec::new();
+    let mut ok = true;
+    for (pkg, args) in steps {
+        cmds.push(format!("cargo run --release -q -p {pkg} {}", args.join(" ")));
+        let mut cmd = std::process::Command::new("cargo");
+        cmd.args(["run", "--release", "-q", "-p", pkg]).args(&args);
+        match cmd.output() {
+            Ok(o) => {
+                out.push_str(&String::from_utf8_lossy(&o.stdout));
+                out.push_str(&String::from_utf8_lossy(&o.stderr));
+                if !o.status.success() {
+                    ok = false;
+                    break;
+                }
+            }
+            Err(e) => {
+                out.push_str(&format!("failed to spawn cargo: {e}\n"));
+                ok = false;
+                break;
+            }
+        }
+    }
+    // Calibration output is verbose — keep the tail.
+    const CAP: usize = 16_384;
+    if out.len() > CAP {
+        let tail = out.split_at(out.len() - CAP).1.to_string();
+        out = format!("…(truncated to last {CAP} bytes)…\n{tail}");
+    }
+    Some(RunResult {
+        action: action.to_string(),
+        command: cmds.join(" && "),
+        ok,
+        output: out,
+    })
 }

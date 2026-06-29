@@ -59,6 +59,16 @@ impl ValuePredictor {
         }
     }
 
+    /// Per-feature importance, index-aligned with [`crate::features::FEATURE_NAMES`].
+    /// `Some` only for the gradient-boosted model (split-frequency weight); `None`
+    /// for the logistic model (use its standardized coefficients instead).
+    pub fn feature_importance(&self) -> Option<[f32; N_FEATURES]> {
+        match self {
+            ValuePredictor::Gbt(m) => Some(m.feature_importance()),
+            ValuePredictor::Logistic(_) => None,
+        }
+    }
+
     /// Mean binary cross-entropy over a dataset (a diagnostic; either kind).
     pub fn log_loss(&self, ds: &Dataset) -> f32 {
         if ds.rows.is_empty() {

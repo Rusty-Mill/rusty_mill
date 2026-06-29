@@ -204,6 +204,38 @@ impl GbtModel {
     }
 
     /// `P(team scores next within horizon | state)` for raw (unscaled) features.
+    /// Per-feature split frequency across all trees, normalized to sum 1 — a
+    /// coarse "weight" importance (the model stores no per-split gain). Index-
+    /// aligned with [`crate::features::FEATURE_NAMES`]; all-zero when untrained or
+    /// when every tree is a bare leaf.
+    pub fn feature_importance(&self) -> [f32; N_FEATURES] {
+        fn walk(n: &Node, counts: &mut [u32; N_FEATURES]) {
+            if let Node::Split {
+                feature,
+                left,
+                right,
+                ..
+            } = n
+            {
+                counts[*feature] += 1;
+                walk(left, counts);
+                walk(right, counts);
+            }
+        }
+        let mut counts = [0u32; N_FEATURES];
+        for t in &self.trees {
+            walk(t, &mut counts);
+        }
+        let total: u32 = counts.iter().sum();
+        let mut out = [0.0f32; N_FEATURES];
+        if total > 0 {
+            for (o, &c) in out.iter_mut().zip(&counts) {
+                *o = c as f32 / total as f32;
+            }
+        }
+        out
+    }
+
     pub fn predict(&self, x: &[f32; N_FEATURES]) -> f32 {
         if self.n_train == 0 {
             return 0.5;
