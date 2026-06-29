@@ -11,7 +11,7 @@ use replay_analyzer::model::{CanonicalMatch, Event};
 use serde::Serialize;
 
 use crate::config::ValueConfig;
-use crate::features::{frame_index_at, state_features};
+use crate::features::{features_at, frame_index_at};
 use crate::predictor::Predict;
 
 /// One player's aggregated value contribution.
@@ -73,8 +73,8 @@ pub fn per_touch_delta_v<P: Predict>(
             continue;
         };
         let (Some(s0), Some(s1)) = (
-            state_features(&frames[i0], *team, signs),
-            state_features(&frames[i1], *team, signs),
+            features_at(frames, i0, *team, signs, &m.events),
+            features_at(frames, i1, *team, signs, &m.events),
         ) else {
             continue;
         };

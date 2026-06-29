@@ -1,8 +1,8 @@
 //! Featurizer behavior: correct values from a hand-built frame and exact
 //! team symmetry (the two perspectives mirror each other).
 
-use replay_analyzer::model::{GridCar, GridFrame, Kin, Vec3};
-use replay_value::features::{state_features, N_FEATURES};
+use replay_analyzer::model::{Event, GridCar, GridFrame, Kin, Vec3};
+use replay_value::features::{features_at, state_features, N_FEATURES};
 use std::collections::BTreeMap;
 
 fn v(x: f32, y: f32, z: f32) -> Vec3 {
@@ -113,6 +113,47 @@ fn v2_features_swap_between_perspectives() {
     assert!(s0.x[14] > 0.9, "facing the ball: {}", s0.x[14]);
     // All v2 columns finite.
     assert!(s0.x.iter().all(|f| f.is_finite()) && s1.x.iter().all(|f| f.is_finite()));
+}
+
+#[test]
+fn features_at_temporal_and_carry_are_correct_and_symmetric() {
+    let signs = BTreeMap::from([(0, 1), (1, -1)]);
+    // A team-0 car carrying the ball on its roof at +1000 Y; a team-1 car far away.
+    // Two frames 0.4 s apart so the trend look-back is exactly one frame; the ball's
+    // +Y velocity jumps 0 → 2000 between them.
+    let mk = |t: f32, vy: f32| GridFrame {
+        t,
+        ball: Some(Kin {
+            p: v(0.0, 1000.0, 180.0),
+            v: v(0.0, vy, 0.0),
+        }),
+        cars: vec![
+            car(1, 0, v(0.0, 1000.0, 17.0), 50), // under the ball → carrying
+            car(2, 1, v(0.0, -1000.0, 17.0), 50),
+        ],
+    };
+    let frames = vec![mk(0.0, 0.0), mk(0.4, 2000.0)];
+    // Team 0 touched at t=0.3; team 1 never.
+    let events = vec![Event::Touch {
+        t: 0.3,
+        player: None,
+        team: Some(0),
+        pri: 1,
+    }];
+
+    let s0 = features_at(&frames, 1, 0, &signs, &events).unwrap();
+    let s1 = features_at(&frames, 1, 1, &signs, &events).unwrap();
+    let eq = |a: f32, b: f32| (a - b).abs() < 1e-4;
+
+    // [18] momentum: (2000 − 0) / SPEED_SCALE(6000) ≈ +0.333; mirrors (negates) for
+    // team 1, since the ball heads toward team 0's goal (away from team 1's).
+    assert!(eq(s0.x[18], 2000.0 / 6000.0) && eq(s1.x[18], -2000.0 / 6000.0));
+    // [19] recency: team 0 touched 0.1 s ago → 0.01; team 1 never → 1.0.
+    assert!(eq(s0.x[19], 0.01) && eq(s1.x[19], 1.0));
+    // [20] att-carry / [21] def-carry: team 0 is carrying, so it swaps across views.
+    assert!(eq(s0.x[20], 1.0) && eq(s0.x[21], 0.0));
+    assert!(eq(s1.x[20], 0.0) && eq(s1.x[21], 1.0));
+    assert!(eq(s0.x[20], s1.x[21]) && eq(s0.x[21], s1.x[20]));
 }
 
 #[test]

@@ -37,6 +37,10 @@ impl Predict for GbtModel {
 /// (`{"kind": "gbt"|"logistic", "model": { … }}`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "model", rename_all = "snake_case")]
+// The two variants are inherently different sizes (logistic carries N_FEATURES
+// weights + scaler; the GBT is mostly a Vec of trees). Boxing to equalize them
+// isn't worth the indirection for a 2-variant model handle.
+#[allow(clippy::large_enum_variant)]
 pub enum ValuePredictor {
     Logistic(ValueModel),
     Gbt(GbtModel),

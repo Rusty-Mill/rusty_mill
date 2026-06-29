@@ -13,7 +13,7 @@ use replay_analyzer::model::{CanonicalMatch, Event};
 use serde::Serialize;
 
 use crate::config::ValueConfig;
-use crate::features::{state_features, N_FEATURES};
+use crate::features::{features_at, N_FEATURES};
 
 /// One labeled training row.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -76,13 +76,15 @@ pub fn build_dataset(m: &CanonicalMatch, cfg: &ValueConfig) -> Dataset {
         .collect();
 
     let stride = cfg.sample_stride.max(1);
+    let signs = &m.resampled.team_attack_sign;
     let mut rows = Vec::new();
-    for f in frames.iter().step_by(stride) {
+    for i in (0..frames.len()).step_by(stride) {
+        let t = frames[i].t;
         for &team in &teams {
-            let Some(y) = next_goal_label(&m.events, f.t, team, cfg.horizon_s, match_end) else {
+            let Some(y) = next_goal_label(&m.events, t, team, cfg.horizon_s, match_end) else {
                 continue;
             };
-            let Some(feat) = state_features(f, team, &m.resampled.team_attack_sign) else {
+            let Some(feat) = features_at(frames, i, team, signs, &m.events) else {
                 continue;
             };
             rows.push(Row {

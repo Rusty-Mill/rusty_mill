@@ -5,7 +5,7 @@
 //! model weights, and ΔV. Bump [`VALUE_CONFIG_VERSION`] when defaults change.
 
 /// Stamped onto exported datasets / evaluations; bump when defaults below change.
-pub const VALUE_CONFIG_VERSION: &str = "vcfg-v2";
+pub const VALUE_CONFIG_VERSION: &str = "vcfg-v3";
 
 /// Gradient-descent hyperparameters for the logistic value model. Fixed and
 /// deterministic (zero-initialized weights, full-batch, no shuffle).

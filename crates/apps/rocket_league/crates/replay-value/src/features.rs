@@ -8,11 +8,11 @@
 
 use replay_analyzer::analyze::normalize::attacking_frame;
 use replay_analyzer::field::{boost_percent, BACK_WALL_Y, CEILING_Z, SIDE_WALL_X};
-use replay_analyzer::model::{GridCar, GridFrame, Vec3};
+use replay_analyzer::model::{Event, GridCar, GridFrame, Vec3};
 use std::collections::BTreeMap;
 
 /// Number of features in a state vector.
-pub const N_FEATURES: usize = 18;
+pub const N_FEATURES: usize = 22;
 
 /// Human-readable feature names, index-aligned with [`StateFeatures::x`].
 ///
@@ -40,7 +40,20 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "def_facing_ball", // nearest defender's forward·(to-ball) alignment (−1..1)
     "max_att_boost",   // most boost held by any attacker (a loaded threat)
     "max_def_boost",   // most boost held by any defender (can they challenge/clear)
+    // --- v3: temporal / context (need the frame sequence + events) ---
+    "ball_vy_trend",        // ball y-velocity now − ~0.4s ago (momentum toward goal)
+    "time_since_att_touch", // seconds since the attacking team last touched (recency)
+    "att_ball_carry",       // an attacker is carrying/dribbling the ball
+    "def_ball_carry",       // a defender is carrying the ball
 ];
+
+/// Look-back for the momentum trend (s) and caps for the carry / recency features.
+const TREND_LAG_S: f32 = 0.4;
+const CARRY_RADIUS: f32 = 170.0; // car↔ball horizontal distance to count as a carry
+const CARRY_Z_LO: f32 = 80.0; // ball sitting above the car (roof) — lower bound
+const CARRY_Z_HI: f32 = 260.0; // …and upper bound
+const CARRY_Z_MAX: f32 = 450.0; // above this it's an aerial, not a ground carry
+const RECENCY_CAP_S: f32 = 10.0; // cap/scale for "time since last touch"
 
 /// Velocity normalization scale (uu/s); a hard ball clear approaches this.
 const SPEED_SCALE: f32 = 6000.0;
@@ -193,8 +206,88 @@ pub fn features_from_attacking(af: &GridFrame, team: i32) -> Option<StateFeature
             def_facing,
             max_boost(&att) / 100.0,
             max_boost(&def) / 100.0,
+            // v3 temporal/context slots — 0 for a bare single frame; filled by
+            // `features_at`, which has the frame sequence + events.
+            0.0, // ball_vy_trend
+            0.0, // time_since_att_touch
+            0.0, // att_ball_carry
+            0.0, // def_ball_carry
         ],
     })
+}
+
+/// True (1.0) if any car in `cars` is carrying the ball (balanced on its roof:
+/// close horizontally, ball sitting in the roof-height band, not an aerial).
+fn carrying(cars: &[&GridCar], ball: Vec3) -> f32 {
+    if ball.z > CARRY_Z_MAX {
+        return 0.0;
+    }
+    for c in cars {
+        let (dx, dy) = (ball.x - c.p.x, ball.y - c.p.y);
+        let horiz = (dx * dx + dy * dy).sqrt();
+        let dz = ball.z - c.p.z;
+        if horiz < CARRY_RADIUS && (CARRY_Z_LO..=CARRY_Z_HI).contains(&dz) {
+            return 1.0;
+        }
+    }
+    0.0
+}
+
+/// Full feature vector for `team` at grid frame `idx`: the single-frame base
+/// (0–17) plus the v3 temporal/context features (18–21) that need the frame
+/// sequence and the touch/goal events — momentum (`ball_vy_trend`), possession
+/// recency (`time_since_att_touch`), and ball-carry/dribble for either side.
+/// `None` when the base features are unavailable (no ball / no live car).
+pub fn features_at(
+    frames: &[GridFrame],
+    idx: usize,
+    team: i32,
+    signs: &BTreeMap<i32, i32>,
+    events: &[Event],
+) -> Option<StateFeatures> {
+    let af = attacking_frame(&frames[idx], team, signs);
+    let mut sf = features_from_attacking(&af, team)?;
+    let now = frames[idx].t;
+
+    if let Some(ball) = af.ball {
+        // Momentum: ball y-velocity (attack frame) now vs ~TREND_LAG_S ago.
+        let dt = frames.get(1).map(|f| f.t - frames[0].t).unwrap_or(0.0);
+        if dt > 0.0 {
+            let lag = ((TREND_LAG_S / dt).round() as usize).max(1);
+            if let Some(prev) = idx
+                .checked_sub(lag)
+                .and_then(|j| attacking_frame(&frames[j], team, signs).ball)
+            {
+                sf.x[18] = (ball.v.y - prev.v.y) / SPEED_SCALE;
+            }
+        }
+        // Ball-carry / dribble, either side.
+        let att: Vec<&GridCar> = af.cars.iter().filter(|c| c.team == Some(team)).collect();
+        let def: Vec<&GridCar> = af
+            .cars
+            .iter()
+            .filter(|c| c.team.is_some() && c.team != Some(team))
+            .collect();
+        sf.x[20] = carrying(&att, ball.p);
+        sf.x[21] = carrying(&def, ball.p);
+    }
+
+    // Possession recency: seconds since the attacking team's last touch (≤ now),
+    // capped and scaled to [0, 1]; 1.0 if they haven't touched yet.
+    let last_touch = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch { t, team: Some(tt), .. } if *tt == team && *t <= now => Some(*t),
+            _ => None,
+        })
+        .fold(f32::NEG_INFINITY, f32::max);
+    sf.x[19] = if last_touch.is_finite() {
+        ((now - last_touch).min(RECENCY_CAP_S)) / RECENCY_CAP_S
+    } else {
+        1.0
+    };
+
+    Some(sf)
 }
 
 /// Build features for `team` from a world-frame grid frame and the team signs.

@@ -33,7 +33,7 @@ pub fn attach_winprob(scene: &mut Scene, m: &CanonicalMatch, cfg: &ValueConfig) 
         let idx = if n > 1 { k * last / (n - 1) } else { 0 };
         // Guard against a non-finite prediction (e.g. a zero-variance scaler on a
         // degenerate match) so the curve is always valid `[0, 1]`.
-        let p = features::state_features(&frames[idx], 0, signs)
+        let p = features::features_at(frames, idx, 0, signs, &m.events)
             .map(|sf| ev.model.predict(&sf.x))
             .filter(|p| p.is_finite())
             .unwrap_or(0.5)
