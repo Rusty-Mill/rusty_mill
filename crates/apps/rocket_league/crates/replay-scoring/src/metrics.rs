@@ -99,6 +99,10 @@ pub fn compute(
     out.insert(Metric::Pace, pace(frames, target_pri));
     out.insert(Metric::Agility, agility(frames, target_pri));
     out.insert(Metric::BoostStarvation, boost_starvation(frames, target_pri));
+    out.insert(
+        Metric::PassCompletion,
+        pass_completion(events, target_pri, target_team),
+    );
     out
 }
 
@@ -267,6 +271,36 @@ fn possession_retention(events: &[Event], pri: i32, team: i32) -> Option<f32> {
         }
     }
     ratio(num, den)
+}
+
+/// Candidate: pass-completion rate. Of the target's "give-ups" (their touch
+/// followed by a *different* player's touch — self-dribbles excluded), the share
+/// that went to a teammate rather than the opponent. A teamplay signal, distinct
+/// from `possession_retention` (which counts dribbles as retained) and orthogonal
+/// to the individual mechanical metrics. Heuristic: touch detection is noisy and
+/// 2v2 has few passes per game, so expect a soft signal.
+fn pass_completion(events: &[Event], pri: i32, team: i32) -> Option<f32> {
+    let mut seq: Vec<(f32, i32, Option<i32>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch { t, pri, team, .. } => Some((*t, *pri, *team)),
+            _ => None,
+        })
+        .collect();
+    seq.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut completed, mut attempts) = (0usize, 0usize);
+    for w in seq.windows(2) {
+        let (_, toucher, _) = w[0];
+        let (_, next, next_team) = w[1];
+        if toucher != pri || next == pri {
+            continue; // not the target's touch, or a self-dribble (no give-up)
+        }
+        attempts += 1;
+        if next_team == Some(team) {
+            completed += 1; // ball reached a teammate
+        }
+    }
+    ratio(completed, attempts)
 }
 
 /// Mean chase-correlation: both teammates driving at the ball together.
