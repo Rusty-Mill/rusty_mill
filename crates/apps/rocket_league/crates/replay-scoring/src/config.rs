@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v11";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v12";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,9 +49,6 @@ pub enum Metric {
     // Pace/Agility: strong but redundant with the mechanical-tempo factor.
     Pace,
     Agility,
-    /// Pass-completion rate — a teamplay signal, orthogonal to the mechanical
-    /// metrics (under test for *independent* rank signal).
-    PassCompletion,
 }
 
 impl Metric {
@@ -77,7 +74,6 @@ impl Metric {
             Metric::Pace => "pace",
             Metric::Agility => "agility",
             Metric::BoostStarvation => "boost_starvation",
-            Metric::PassCompletion => "pass_completion",
         }
     }
 }
@@ -427,20 +423,9 @@ impl Default for ScoreConfig {
                     0.10,
                     "Mechanics / car control",
                 ),
-                // pass_completion: teamplay — share of give-ups that reach a
-                // teammate. Orthogonal to the mechanical factor; testing whether it
-                // carries independent rank signal (possession_retention, a related
-                // touch-sequence metric, is near-noise, so expectations are tempered).
-                mx(
-                    Metric::PassCompletion,
-                    Role::General,
-                    Curve::Higher {
-                        zero: 0.40,
-                        full: 0.75,
-                    },
-                    0.10,
-                    "Teamplay / passing",
-                ),
+                // Tested and dropped: pass_completion (teamplay) came back near-noise
+                // and inverted (ρ_rank≈−0.09) on the 996-replay corpus — touch-
+                // sequence teamplay metrics don't separate ranks (scfg-v11).
                 // boost_starvation (reframed): mean length of a zero-boost run, in
                 // seconds — sustained starvation, not a count of 0-touches. Graduated
                 // on corpus rank evidence: the reframe took it from ρ≈0 (frame count)

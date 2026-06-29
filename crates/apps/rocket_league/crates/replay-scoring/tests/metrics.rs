@@ -185,33 +185,6 @@ fn boost_starvation_measures_run_length_not_count() {
 }
 
 #[test]
-fn pass_completion_counts_giveups_to_teammates() {
-    // Target = pri 1, team 0. Touch sequence (self-dribbles skipped):
-    //   1→2 teammate (completed), 1→3 opponent (turnover), 1→1 self (skip),
-    //   1→2 teammate (completed)  ⇒ 2 completed of 3 give-ups = 0.667.
-    let touch = |t: f32, pri: i32, team: i32| Event::Touch {
-        t,
-        player: None,
-        team: Some(team),
-        pri,
-    };
-    let events = vec![
-        touch(0.0, 1, 0),
-        touch(0.1, 2, 0),
-        touch(0.2, 1, 0),
-        touch(0.3, 3, 1),
-        touch(0.4, 1, 0),
-        touch(0.5, 1, 0),
-        touch(0.6, 2, 0),
-    ];
-    let frames = vec![frame(0.0, vec![cv(1, 0.5, v(0.0, 0.0, 17.0), 0.0, true, Third::Mid)])];
-    let cfg = ScoreConfig::default();
-    let roles = roles::assign(&frames, &[0], &cfg);
-    let raws = metrics::compute(&frames, &roles, &events, 1, 0, &cfg);
-    assert!((raws[&Metric::PassCompletion].unwrap() - 2.0 / 3.0).abs() < 1e-4);
-}
-
-#[test]
 fn double_commit_fires_when_both_press() {
     // Both cars pressuring (ttb < press_ttb=1.2) every frame -> rate 1.0.
     let frames: Vec<_> = (0..10)
