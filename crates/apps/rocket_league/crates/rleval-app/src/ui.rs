@@ -203,12 +203,14 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     </div>
     <nav class="tabs" id="tabs">
       <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="stats">Stats</button>
       <button data-tab="viewer">3D Viewer</button>
       <button data-tab="scoring">Scoring</button>
       <button data-tab="skills">Skills</button>
       <button data-tab="impact">Impact</button>
     </nav>
     <div class="tab active" id="tab-overview"></div>
+    <div class="tab" id="tab-stats"></div>
     <div class="tab" id="tab-viewer"></div>
     <div class="tab" id="tab-scoring"></div>
     <div class="tab" id="tab-skills"></div>
@@ -298,6 +300,7 @@ function render() {
   $("nonstd").style.display = d.standard_map ? "none" : "flex";
 
   renderOverview(d);
+  renderStats(d);
   renderSkills(d);
   renderImpact(d);
   // The heavy iframes are filled lazily on first tab open.
@@ -340,6 +343,52 @@ function renderOverview(d) {
   $("tab-overview").innerHTML = cardTable(
     "One row per player — decision-discipline composite (scoring), mechanical activity (skills/min), and value impact (ΔV). Open the tabs for the full 3D replay, the scoring report, and per-skill detail.",
     head, rows, "No players scored.", 8);
+}
+
+function renderStats(d) {
+  const ps = d.bc_stats || [];
+  const nm = p => `<td>${nameCell(p.team, p.player)}</td><td><span class="badge t${p.team}">${teamName(p.team)}</span></td>`;
+  const n = (v, dd = 0) => `<td class="num">${fmt(v, dd)}</td>`;   // 0-dp default
+  const p1 = v => n(v, 1);                                         // 1-dp (percent)
+  const gap = `<div style="height:16px"></div>`;
+
+  // Boost economy.
+  const boostHead = `<th>Player</th><th>Team</th><th class="num">BPM</th><th class="num">BCPM</th>
+    <th class="num">Avg</th><th class="num">Collected</th><th class="num">Stolen</th>
+    <th class="num">Big</th><th class="num">Small</th><th class="num">Overfill</th>
+    <th class="num">0%</th><th class="num">100%</th>`;
+  const boostBody = ps.map(p => { const b = p.boost; return `<tr>${nm(p)}
+    ${n(b.bpm)}${n(b.bcpm)}${n(b.avg_amount)}${n(b.amount_collected)}${n(b.amount_stolen)}
+    ${n(b.count_collected_big)}${n(b.count_collected_small)}${n(b.amount_overfill)}
+    ${p1(b.percent_zero)}${p1(b.percent_full)}</tr>`; }).join("");
+
+  // Movement (+ demos).
+  const moveHead = `<th>Player</th><th>Team</th><th class="num">Avg spd</th><th class="num">Dist</th>
+    <th class="num">Slow%</th><th class="num">Boost%</th><th class="num">Super%</th>
+    <th class="num">Ground%</th><th class="num">Low air%</th><th class="num">High air%</th>
+    <th class="num">PS</th><th class="num">Rev%</th><th class="num">Demo +/−</th>`;
+  const moveBody = ps.map(p => { const m = p.movement, dm = p.demo; return `<tr>${nm(p)}
+    ${n(m.avg_speed)}${n(m.total_distance)}${p1(m.percent_slow)}${p1(m.percent_boost_speed)}
+    ${p1(m.percent_supersonic)}${p1(m.percent_ground)}${p1(m.percent_low_air)}${p1(m.percent_high_air)}
+    ${n(m.count_powerslide)}${p1(m.percent_reverse)}<td class="num">${dm.inflicted}/${dm.taken}</td></tr>`; }).join("");
+
+  // Positioning (team attack frame).
+  const posHead = `<th>Player</th><th>Team</th><th class="num">Dist ball</th><th class="num">Dist mates</th>
+    <th class="num">Def⅓</th><th class="num">Neut⅓</th><th class="num">Off⅓</th>
+    <th class="num">Behind%</th><th class="num">Most back%</th><th class="num">Facing%</th>
+    <th class="num">GA last-def</th>`;
+  const posBody = ps.map(p => { const q = p.positioning; return `<tr>${nm(p)}
+    ${n(q.avg_dist_to_ball)}${n(q.avg_dist_to_mates)}${p1(q.percent_defensive_third)}
+    ${p1(q.percent_neutral_third)}${p1(q.percent_offensive_third)}${p1(q.percent_behind_ball)}
+    ${p1(q.percent_most_back)}${p1(q.percent_facing_ball)}<td class="num">${q.goals_against_while_last_defender}</td></tr>`; }).join("");
+
+  $("tab-stats").innerHTML =
+    cardTable("Boost economy — collected/used per minute, average gauge, pads collected (big/small), boost stolen in the opponent half & overfill, and time at empty / full. Ballchasing-parity aggregates (analyze::bcstats).",
+      boostHead, boostBody, "No data.", 12) + gap +
+    cardTable("Movement — average speed & total distance, speed-bucket shares (slow / boost / supersonic), air vs ground, powerslides, reverse-driving share, and demos inflicted / taken.",
+      moveHead, moveBody, "No data.", 13) + gap +
+    cardTable("Positioning (in each team's attack frame) — distance to ball & teammates, field-third occupancy, time behind the ball, last-defender & facing-the-ball shares, and goals conceded while last defender.",
+      posHead, posBody, "No data.", 11);
 }
 
 function renderSkills(d) {

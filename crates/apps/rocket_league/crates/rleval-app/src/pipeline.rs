@@ -9,6 +9,7 @@
 
 use std::error::Error;
 
+use replay_analyzer::analyze::bcstats::{ballchasing_stats, BcPlayerStats};
 use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
@@ -49,6 +50,9 @@ pub struct Analysis {
     pub skill_profiles: Vec<PlayerSkillProfile>,
     /// Per-player value impact (ΔV) — the independent validator (`replay-value`).
     pub impact: ImpactSummary,
+    /// Ballchasing-parity aggregates per player — boost / movement / positioning /
+    /// demo (`analyze::bcstats`), the full stat surface for the Stats tab.
+    pub bc_stats: Vec<BcPlayerStats>,
 
     // ---- self-contained embeddable views ----
     /// The full 3D replay viewer as a self-contained (offline) HTML document.
@@ -103,7 +107,10 @@ pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>
         players: evaluation.players,
     };
 
-    // 5. 3D scene with every overlay (roles / win-prob / impact / player stats),
+    // 5. Ballchasing-parity aggregate block (boost / movement / positioning / demo).
+    let bc_stats = ballchasing_stats(&canonical);
+
+    // 6. 3D scene with every overlay (roles / win-prob / impact / player stats),
     //    serialized into a self-contained offline viewer document.
     let mut scene = build_scene(&canonical, &skill_report.instances);
     attach_roles(&mut scene, &canonical, &score_cfg);
@@ -126,6 +133,7 @@ pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>
         scores,
         skill_profiles,
         impact,
+        bc_stats,
         viewer_html,
         scoring_html,
     })
