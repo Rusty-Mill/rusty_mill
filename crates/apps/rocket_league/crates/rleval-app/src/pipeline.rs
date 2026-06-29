@@ -53,12 +53,31 @@ pub struct Analysis {
     /// Ballchasing-parity aggregates per player — boost / movement / positioning /
     /// demo (`analyze::bcstats`), the full stat surface for the Stats tab.
     pub bc_stats: Vec<BcPlayerStats>,
+    /// Core scoreboard stats per player (header truth + recomputed shooting %),
+    /// for the Stats tab's Core section.
+    pub core: Vec<CorePlayerStats>,
 
     // ---- self-contained embeddable views ----
     /// The full 3D replay viewer as a self-contained (offline) HTML document.
     pub viewer_html: String,
     /// The lobby scoring report as a self-contained HTML document.
     pub scoring_html: String,
+}
+
+/// Core scoreboard stats for one player — header truth (goals/assists/saves/
+/// shots/score) plus a recomputed shooting % (goals/shots). Keyed by `pri`.
+#[derive(Serialize)]
+pub struct CorePlayerStats {
+    pub pri: i32,
+    pub player: String,
+    pub team: Option<i32>,
+    pub goals: i32,
+    pub assists: i32,
+    pub saves: i32,
+    pub shots: i32,
+    pub score: i32,
+    /// goals / shots × 100; 0 when the player took no shots.
+    pub shooting_pct: f32,
 }
 
 /// Per-player value impact plus the model fit context.
@@ -110,6 +129,35 @@ pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>
     // 5. Ballchasing-parity aggregate block (boost / movement / positioning / demo).
     let bc_stats = ballchasing_stats(&canonical);
 
+    // Core scoreboard stats per player — header truth joined to the track's pri by
+    // name, plus a recomputed shooting %. Sorted team then pri (matches bc_stats).
+    let mut core: Vec<CorePlayerStats> = canonical
+        .tracks
+        .iter()
+        .map(|t| {
+            let m = canonical.players.iter().find(|p| p.name == t.player);
+            let (goals, assists, saves, shots, score) = m
+                .map(|p| (p.goals, p.assists, p.saves, p.shots, p.score))
+                .unwrap_or((0, 0, 0, 0, 0));
+            CorePlayerStats {
+                pri: t.pri,
+                player: t.player.clone(),
+                team: t.team,
+                goals,
+                assists,
+                saves,
+                shots,
+                score,
+                shooting_pct: if shots > 0 {
+                    goals as f32 / shots as f32 * 100.0
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect();
+    core.sort_by(|a, b| a.team.cmp(&b.team).then(a.pri.cmp(&b.pri)));
+
     // 6. 3D scene with every overlay (roles / win-prob / impact / player stats),
     //    serialized into a self-contained offline viewer document.
     let mut scene = build_scene(&canonical, &skill_report.instances);
@@ -134,6 +182,7 @@ pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>
         skill_profiles,
         impact,
         bc_stats,
+        core,
         viewer_html,
         scoring_html,
     })

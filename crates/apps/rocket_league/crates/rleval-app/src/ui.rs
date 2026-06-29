@@ -353,6 +353,12 @@ function renderStats(d) {
   const p1 = v => n(v, 1);                                         // 1-dp (percent)
   const gap = `<div style="height:16px"></div>`;
 
+  // Core scoreboard (header truth + recomputed shooting %).
+  const coreHead = `<th>Player</th><th>Team</th><th class="num">Goals</th><th class="num">Assists</th>
+    <th class="num">Saves</th><th class="num">Shots</th><th class="num">Shooting %</th><th class="num">Score</th>`;
+  const coreBody = (d.core || []).map(p => `<tr>${nm(p)}
+    ${n(p.goals)}${n(p.assists)}${n(p.saves)}${n(p.shots)}${p1(p.shooting_pct)}${n(p.score)}</tr>`).join("");
+
   // Boost economy.
   const boostHead = `<th>Player</th><th>Team</th><th class="num">BPM</th><th class="num">BCPM</th>
     <th class="num">Avg</th><th class="num">Collected</th><th class="num">Stolen</th>
@@ -384,6 +390,8 @@ function renderStats(d) {
     ${p1(q.percent_most_back)}${p1(q.percent_facing_ball)}<td class="num">${q.goals_against_while_last_defender}</td></tr>`; }).join("");
 
   $("tab-stats").innerHTML =
+    cardTable("Core scoreboard — goals/assists/saves/shots/score (header truth) plus shooting % (goals ÷ shots). These are game-credited outcomes, not reconstructed.",
+      coreHead, coreBody, "No data.", 8) + gap +
     cardTable("Boost economy — collected/used per minute, average gauge, pads collected (big/small), boost stolen in the opponent half & overfill, and time at empty / full. Ballchasing-parity aggregates (analyze::bcstats).",
       boostHead, boostBody, "No data.", 12) + gap +
     cardTable("Movement — average speed & total distance, speed-bucket shares (slow / boost / supersonic), air vs ground, powerslides, reverse-driving share, and demos inflicted / taken.",
