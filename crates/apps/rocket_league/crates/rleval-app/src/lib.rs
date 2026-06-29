@@ -5,6 +5,7 @@
 //! single-page web [`ui`] over a tiny dependency-free [`server`]. The `rleval`
 //! binary is a thin shell over these three modules.
 
+pub mod admin;
 pub mod pipeline;
 pub mod server;
 pub mod ui;

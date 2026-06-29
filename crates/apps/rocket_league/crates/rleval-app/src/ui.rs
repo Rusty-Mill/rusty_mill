@@ -172,6 +172,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <div class="logo">RL</div>
     <div class="brand">RLEval <small>unified replay analysis</small></div>
     <div class="spacer"></div>
+    <a href="/admin" style="font-size:13px;font-weight:600;margin-right:14px">Admin</a>
     <span class="pill-id" id="hdId"></span>
   </div>
 </header>
@@ -489,6 +490,177 @@ drop.addEventListener("drop", e => {
 });
 
 loadSamples();
+</script>
+</body>
+</html>
+"##;
+
+/// The model/config admin page, served at `/admin`. Read-only: fetches
+/// [`crate::admin::config_report`] from `/api/config` and renders the scoring
+/// rubric, value model, skills catalog, and corpus status.
+pub const ADMIN_HTML: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RLEval — Model Admin</title>
+<style>
+  :root {
+    --bg:#0b0e14; --bg-soft:#11151d; --card:#141a23; --card-2:#1a212c;
+    --line:#243040; --line-soft:#1b2330; --fg:#e8eef6; --muted:#93a1b5; --faint:#687586;
+    --accent:#5b9dff; --accent-2:#8a6bff; --blue:#4f9dfd; --orange:#ff9f45;
+    --good:#46d18b; --bad:#ff6b6b; --warn:#e3b341; --radius:14px;
+    --shadow:0 1px 0 rgba(255,255,255,.03), 0 10px 30px -16px rgba(0,0,0,.7);
+    --mono:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; color:var(--fg); font:14px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    background:radial-gradient(1100px 560px at 12% -12%,rgba(138,107,255,.12),transparent 60%),
+      radial-gradient(1000px 520px at 102% -4%,rgba(91,157,255,.12),transparent 56%),var(--bg);
+    background-attachment:fixed; }
+  a { color:var(--accent); text-decoration:none; }
+  header { position:sticky; top:0; z-index:30; background:rgba(11,14,20,.72); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line-soft); }
+  .hd { max-width:1180px; margin:0 auto; display:flex; align-items:center; gap:13px; padding:13px 22px; }
+  .logo { width:31px; height:31px; border-radius:9px; display:grid; place-items:center; font-weight:800;
+    font-size:12px; color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent-2));
+    box-shadow:0 6px 18px -6px var(--accent); }
+  .brand { font-weight:700; font-size:16px; } .brand small { color:var(--muted); font-weight:500; font-size:12px; margin-left:7px; }
+  .spacer { flex:1; }
+  .wrap { max-width:1180px; margin:0 auto; padding:26px 22px 64px; }
+  h2 { font-size:15px; margin:30px 0 12px; display:flex; align-items:center; gap:10px; }
+  h2 .ver { font:12px var(--mono); color:var(--accent); background:var(--card); border:1px solid var(--line);
+    padding:3px 9px; border-radius:999px; font-weight:500; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); overflow:hidden; margin-bottom:14px; }
+  .hint { padding:12px 18px; margin:0; color:var(--muted); font-size:12.5px;
+    border-bottom:1px solid var(--line-soft); background:var(--bg-soft); }
+  .tablewrap { overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  thead th { position:sticky; top:0; background:var(--card-2); color:var(--faint); font-weight:600;
+    font-size:11px; text-transform:uppercase; letter-spacing:.5px; text-align:left; padding:10px 14px;
+    border-bottom:1px solid var(--line); white-space:nowrap; }
+  tbody td { padding:9px 14px; border-bottom:1px solid var(--line-soft); }
+  tbody tr:last-child td { border-bottom:0; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; font-family:var(--mono); }
+  code { font-family:var(--mono); font-size:12.5px; color:#cfe2ff; }
+  .badge { font-size:11px; padding:2px 9px; border-radius:999px; font-weight:600; border:1px solid transparent; }
+  .b-first { color:var(--blue); background:rgba(79,157,253,.12); border-color:rgba(79,157,253,.25); }
+  .b-second { color:var(--accent-2); background:rgba(138,107,255,.12); border-color:rgba(138,107,255,.25); }
+  .b-general { color:var(--muted); background:rgba(147,161,181,.1); border-color:rgba(147,161,181,.22); }
+  .exp { color:var(--warn); background:rgba(227,179,65,.12); border:1px solid rgba(227,179,65,.3);
+    font-size:10px; padding:1px 7px; border-radius:999px; }
+  .pad { padding:14px 18px; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { background:var(--card-2); border:1px solid var(--line); border-radius:999px; padding:4px 11px;
+    font:12px var(--mono); color:var(--fg); }
+  .kv { display:grid; grid-template-columns:max-content 1fr; gap:6px 16px; font-size:13px; }
+  .kv .k { color:var(--faint); }
+  .status { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; }
+  .ok { color:var(--good); } .warnc { color:var(--warn); } .muted { color:var(--muted); }
+  .bar { height:8px; border-radius:999px; background:var(--line); overflow:hidden; min-width:120px; }
+  .bar > i { display:block; height:100%; background:linear-gradient(90deg,var(--accent),var(--accent-2)); }
+  .note { margin:12px 0 0; padding:11px 16px; border-radius:12px; font-size:12.5px; color:var(--warn);
+    background:linear-gradient(90deg,rgba(227,179,65,.12),transparent); border:1px solid rgba(227,179,65,.3); }
+</style>
+</head>
+<body>
+<header><div class="hd">
+  <div class="logo">RL</div>
+  <div class="brand">RLEval <small>model admin</small></div>
+  <div class="spacer"></div>
+  <a href="/">← Analyze</a>
+</div></header>
+<div class="wrap" id="root"><p class="muted">Loading model config…</p></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;" }[c]));
+const num = (v, d=2) => (v==null||isNaN(v)) ? "—" : Number(v).toFixed(d);
+
+function curveStr(cv) {
+  if (!cv) return "—";
+  if (cv.kind === "higher") return `higher · ${num(cv.zero)} → ${num(cv.full)}`;
+  if (cv.kind === "lower")  return `lower · ${num(cv.zero)} → ${num(cv.full)}`;
+  if (cv.kind === "band")   return `band · [${num(cv.lo)}, ${num(cv.hi)}] ±${num(cv.falloff)}`;
+  return esc(JSON.stringify(cv));
+}
+function card(hint, inner) {
+  return `<div class="card"><p class="hint">${hint}</p>${inner}</div>`;
+}
+
+function renderScoring(s) {
+  const c = s.config;
+  const tw = c.top_weights || [];
+  const onDisk = s.fitted
+    ? `<span class="status ok">● fitted on disk: <code>${esc(s.fitted.version)}</code> <span class="muted">(${esc(s.fitted.path)})</span></span>`
+    : `<span class="status warnc">● no fitted_config.json — CLI tools would fall back to defaults</span>`;
+  const gap = (s.fitted && s.fitted.version.indexOf(s.active_version) !== 0)
+    ? `<p class="note">The app runs the in-process default (<code>${esc(s.active_version)}</code>); the fitted config on disk (<code>${esc(s.fitted.version)}</code>) is used by the <code>reconcile</code>/CLI tools, not the live web analysis.</p>` : "";
+  const rows = (c.metrics || []).map(m => `<tr>
+    <td><code>${esc(m.metric)}</code></td>
+    <td><span class="badge b-${m.role}">${esc(m.role)}</span></td>
+    <td>${esc(curveStr(m.curve))}</td>
+    <td class="num">${num(m.weight, 2)}</td>
+    <td>${m.experimental ? '<span class="exp">candidate</span>' : ""}</td>
+    <td class="muted">${esc(m.chapter || "")}</td>
+  </tr>`).join("");
+  const metricTable = `<div class="tablewrap"><table>
+    <thead><tr><th>Metric</th><th>Sub-score</th><th>Curve</th><th class="num">Weight</th><th>Flag</th><th>Chapter</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+  const tiers = (c.tiers || []).map(t => `<span class="chip">${esc(t.name)} ≥ ${num(t.min_composite,0)}</span>`).join("");
+  const cents = (c.centroids || []).map(ct => `<span class="chip">${esc(ct.name)} [${(ct.vector||[]).map(v=>num(v,2)).join(", ")}]</span>`).join("");
+  return `<h2>Decision-discipline rubric <span class="ver">${esc(s.active_version)}</span></h2>` +
+    card(`Active in-app: <code>${esc(s.active_version)}</code> &nbsp;·&nbsp; ${onDisk}${gap}`, metricTable) +
+    card("Role weights (1st / 2nd / general) and licence bands.",
+      `<div class="pad"><div class="kv">
+        <div class="k">Role weights</div><div>1st <code>${num(tw[0],2)}</code> · 2nd <code>${num(tw[1],2)}</code> · general <code>${num(tw[2],2)}</code></div>
+        <div class="k">Licence bands</div><div class="chips">${tiers}</div>
+        <div class="k">Archetypes</div><div class="chips">${cents}</div>
+      </div></div>`);
+}
+
+function renderValue(v) {
+  const feats = (v.feature_names||[]).map((f,i) => `<span class="chip">${i}. ${esc(f)}</span>`).join("");
+  const shipped = v.shipped
+    ? `<span class="status ok">● ${esc(v.shipped.kind)} · n_train <code>${v.shipped.n_train.toLocaleString()}</code> <span class="muted">(${esc(v.shipped.path)})</span></span>`
+    : `<span class="status warnc">● value_model.json not present</span>`;
+  return `<h2>Value / impact model <span class="ver">${esc(v.config_version)}</span></h2>` +
+    card(`Runtime: ${esc(v.runtime)}<br>Shipped corpus model: ${shipped}`,
+      `<div class="pad"><div class="kv"><div class="k">Features (${(v.feature_names||[]).length})</div>
+        <div class="chips">${feats}</div></div></div>`);
+}
+
+function renderSkills(s) {
+  const cat = (s.catalog||[]).map(c => `<span class="chip">${esc(c)}</span>`).join("");
+  const onDisk = s.fitted
+    ? `<span class="status ok">● fitted: <code>${esc(s.fitted.version)}</code></span>`
+    : `<span class="status muted">● no fitted skill config</span>`;
+  return `<h2>Mechanical skills <span class="ver">${esc(s.active_version)}</span></h2>` +
+    card(`Catalog of detectors. ${onDisk}`,
+      `<div class="pad"><div class="chips">${cat}</div></div>`);
+}
+
+function renderCorpus(c) {
+  if (!c.present) return `<h2>Calibration corpus</h2>` +
+    card(`<span class="status warnc">● manifest not found at <code>${esc(c.manifest_path)}</code></span>`, "");
+  const max = (c.per_bucket||[]).reduce((m,[,n]) => Math.max(m,n), 0) || 1;
+  const rows = (c.per_bucket||[]).map(([b,n]) => `<tr>
+    <td>${esc(b)}</td><td class="num">${n}</td>
+    <td><div class="bar"><i style="width:${Math.round(n/max*100)}%"></i></div></td></tr>`).join("");
+  return `<h2>Calibration corpus <span class="ver">${c.total} replays</span></h2>` +
+    card(`Ranked-2v2 replays per rank tier (<code>${esc(c.manifest_path)}</code>). Replay files are gitignored; grow with <code>expand_manifest.py</code>.`,
+      `<div class="tablewrap"><table><thead><tr><th>Bucket</th><th class="num">Count</th><th>Distribution</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`);
+}
+
+(async () => {
+  try {
+    const c = await (await fetch("/api/config")).json();
+    $("#root").innerHTML = renderScoring(c.scoring) + renderValue(c.value) + renderSkills(c.skills) + renderCorpus(c.corpus);
+  } catch (e) {
+    $("#root").innerHTML = `<p class="warnc">Failed to load /api/config: ${esc(e.message||e)}</p>`;
+  }
+})();
 </script>
 </body>
 </html>

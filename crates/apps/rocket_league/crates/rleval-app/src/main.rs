@@ -17,14 +17,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use rleval_app::server::{self, Request, Response};
-use rleval_app::{pipeline, ui};
+use rleval_app::{admin, pipeline, ui};
 
 const USAGE: &str = "\
 usage:
-  rleval serve [--host <host>] [--port <port>] [--replays <dir>]
+  rleval serve [--host <host>] [--port <port>] [--replays <dir>] [--corpus <dir>]
   rleval analyze <file.replay> [--out <bundle.html>]
 
-  serve    start the web UI (default http://127.0.0.1:8080)
+  serve    start the web UI (default http://127.0.0.1:8080; /admin shows model config)
   analyze  run the pipeline on one replay and write a self-contained HTML bundle";
 
 fn main() -> ExitCode {
@@ -56,12 +56,14 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     let mut host = "127.0.0.1".to_string();
     let mut port: u16 = 8080;
     let mut replays = PathBuf::from("assets/replays");
+    let mut corpus = PathBuf::from("assets/corpus");
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--host" => host = it.next().ok_or("--host needs a value")?,
             "--port" => port = it.next().ok_or("--port needs a value")?.parse()?,
             "--replays" => replays = PathBuf::from(it.next().ok_or("--replays needs a dir")?),
+            "--corpus" => corpus = PathBuf::from(it.next().ok_or("--corpus needs a dir")?),
             other => return Err(format!("unknown flag {other}\n{USAGE}").into()),
         }
     }
@@ -71,15 +73,20 @@ fn serve(args: Vec<String>) -> Result<(), Box<dyn Error>> {
         replays.display()
     );
     eprintln!("Open the URL in a browser, then drop a .replay file. Ctrl-C to stop.");
-    server::serve(&host, port, move |req| route(req, &replays))?;
+    server::serve(&host, port, move |req| route(req, &replays, &corpus))?;
     Ok(())
 }
 
-fn route(req: &Request, replays: &Path) -> Response {
+fn route(req: &Request, replays: &Path, corpus: &Path) -> Response {
     match (req.method.as_str(), req.route()) {
         ("GET", "/") => Response::html(ui::INDEX_HTML),
+        ("GET", "/admin") => Response::html(ui::ADMIN_HTML),
         ("GET", "/healthz") => Response::text(200, "ok"),
         ("GET", "/api/samples") => samples_response(replays),
+        ("GET", "/api/config") => match serde_json::to_vec(&admin::config_report(corpus)) {
+            Ok(json) => Response::json(json),
+            Err(e) => Response::text(500, format!("serialize error: {e}")),
+        },
         ("POST", "/api/analyze") => {
             let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
             analyze_response(&req.body, &stem(&name))
