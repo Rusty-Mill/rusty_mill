@@ -98,6 +98,7 @@ pub fn compute(
     // redundant with the mechanical-tempo metrics, so out of the composite.
     out.insert(Metric::Pace, pace(frames, target_pri));
     out.insert(Metric::Agility, agility(frames, target_pri));
+    out.insert(Metric::BoostStarvation, boost_starvation(frames, target_pri));
     out
 }
 
@@ -588,6 +589,38 @@ fn pace(frames: &[FrameView], pri: i32) -> Option<f32> {
         }
     }
     (n > 0).then(|| sum / n as f32)
+}
+
+/// Candidate: mean duration (s) of a **zero-boost run** — how long the player
+/// stays stranded on empty each time, not how often they touch 0. A brief dip
+/// before grabbing a pad barely registers; being parked at 0 for seconds does.
+/// Lower is better. `0.0` when the player is never fully empty; gaps (demo/
+/// respawn absences) end a run rather than bridging it.
+fn boost_starvation(frames: &[FrameView], pri: i32) -> Option<f32> {
+    if frames.len() < 2 {
+        return None;
+    }
+    let dt = frames[1].t - frames[0].t;
+    if dt <= 0.0 {
+        return None;
+    }
+    let (mut runs, mut run) = (Vec::<u32>::new(), 0u32);
+    for f in frames {
+        if matches!(f.car(pri), Some(c) if c.boost == Some(0)) {
+            run += 1;
+        } else if run > 0 {
+            runs.push(run);
+            run = 0;
+        }
+    }
+    if run > 0 {
+        runs.push(run);
+    }
+    if runs.is_empty() {
+        return Some(0.0); // never stranded
+    }
+    let mean_frames = runs.iter().sum::<u32>() as f32 / runs.len() as f32;
+    Some(mean_frames * dt)
 }
 
 /// Candidate: mean horizontal acceleration magnitude (uu/s²) across consecutive

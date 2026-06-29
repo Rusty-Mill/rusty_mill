@@ -140,6 +140,51 @@ fn pace_and_agility_compute() {
 }
 
 #[test]
+fn boost_starvation_measures_run_length_not_count() {
+    let car = |boost: u8| CarView {
+        pri: 1,
+        team: 0,
+        p: v(0.0, 0.0, 17.0),
+        v: v(0.0, 0.0, 0.0),
+        pa: v(0.0, 0.0, 17.0),
+        boost: Some(boost),
+        valid_pos: true,
+        dist_to_ball: 0.0,
+        closing_speed: 0.0,
+        time_to_ball: 1.0,
+        goalside: true,
+        ball_third: Third::Mid,
+        rot: None,
+        airborne: false,
+        upright: true,
+        attack_sign: 1,
+    };
+    // Zero-boost runs of 3 frames and 1 frame → mean 2 frames × 0.1 s = 0.2 s.
+    let boosts = [50u8, 50, 0, 0, 0, 50, 0, 50, 50, 50];
+    let frames: Vec<_> = boosts
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| FrameView {
+            t: i as f32 * 0.1,
+            ball: Some(Kin { p: v(0.0, 0.0, 100.0), v: v(0.0, 0.0, 0.0) }),
+            cars: vec![car(b)],
+        })
+        .collect();
+    let raws = raws_for(&frames, 1);
+    assert!((raws[&Metric::BoostStarvation].unwrap() - 0.2).abs() < 1e-4);
+
+    // Never empty → 0.0 (not stranded), distinct from "frequently dips to 0".
+    let full: Vec<_> = (0..5)
+        .map(|i| FrameView {
+            t: i as f32 * 0.1,
+            ball: Some(Kin { p: v(0.0, 0.0, 100.0), v: v(0.0, 0.0, 0.0) }),
+            cars: vec![car(50)],
+        })
+        .collect();
+    assert_eq!(raws_for(&full, 1)[&Metric::BoostStarvation], Some(0.0));
+}
+
+#[test]
 fn double_commit_fires_when_both_press() {
     // Both cars pressuring (ttb < press_ttb=1.2) every frame -> rate 1.0.
     let frames: Vec<_> = (0..10)

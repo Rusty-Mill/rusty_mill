@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v8";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v9";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +46,9 @@ pub enum Metric {
     //     factor (kept as diagnostics, not in the composite) ---
     Pace,
     Agility,
+    /// Mean duration of a zero-boost run (s) — how long the player stays stranded
+    /// on empty, not how often they touch 0.
+    BoostStarvation,
 }
 
 impl Metric {
@@ -70,6 +73,7 @@ impl Metric {
             Metric::ReverseDriving => "reverse_driving",
             Metric::Pace => "pace",
             Metric::Agility => "agility",
+            Metric::BoostStarvation => "boost_starvation",
         }
     }
 }
@@ -418,6 +422,19 @@ impl Default for ScoreConfig {
                     },
                     0.10,
                     "Mechanics / car control",
+                ),
+                // boost_starvation (reframed): mean length of a zero-boost run, in
+                // seconds — sustained starvation, not a count of 0-touches. Lower is
+                // better; a brief dip before grabbing a pad shouldn't register.
+                mx(
+                    Metric::BoostStarvation,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 2.0,
+                        full: 0.3,
+                    },
+                    0.10,
+                    "Fundamentals / boost",
                 ),
             ],
             top_weights: [0.35, 0.30, 0.35],
