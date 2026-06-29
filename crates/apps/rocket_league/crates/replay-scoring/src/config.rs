@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v9";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v10";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,16 +39,16 @@ pub enum Metric {
     TransitionReadiness,
     RecoverySpeed,
     AerialPresence,
-    // --- bcstats-derived metrics (graduated on corpus rank evidence) ---
+    // --- metrics graduated on corpus rank evidence ---
     FacingBallShare,
     ReverseDriving,
+    /// Mean duration of a zero-boost run (s) — how long the player stays stranded
+    /// on empty, not how often they touch 0.
+    BoostStarvation,
     // --- experimental candidates: strong but redundant with the mechanical-tempo
     //     factor (kept as diagnostics, not in the composite) ---
     Pace,
     Agility,
-    /// Mean duration of a zero-boost run (s) — how long the player stays stranded
-    /// on empty, not how often they touch 0.
-    BoostStarvation,
 }
 
 impl Metric {
@@ -424,9 +424,11 @@ impl Default for ScoreConfig {
                     "Mechanics / car control",
                 ),
                 // boost_starvation (reframed): mean length of a zero-boost run, in
-                // seconds — sustained starvation, not a count of 0-touches. Lower is
-                // better; a brief dip before grabbing a pad shouldn't register.
-                mx(
+                // seconds — sustained starvation, not a count of 0-touches. Graduated
+                // on corpus rank evidence: the reframe took it from ρ≈0 (frame count)
+                // to ρ≈−0.29 (drought duration), stronger than several shipped
+                // metrics. Lower is better.
+                m(
                     Metric::BoostStarvation,
                     Role::General,
                     Curve::Lower {
