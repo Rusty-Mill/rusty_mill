@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v6";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v7";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,11 @@ pub enum Metric {
     // --- bcstats-derived metrics (graduated on corpus rank evidence) ---
     FacingBallShare,
     ReverseDriving,
+    // --- experimental "push the ceiling" candidates (untapped dimensions) ---
+    Pace,
+    BoostStarvation,
+    WallTime,
+    Agility,
 }
 
 impl Metric {
@@ -64,6 +69,10 @@ impl Metric {
             Metric::AerialPresence => "aerial_presence",
             Metric::FacingBallShare => "facing_ball_share",
             Metric::ReverseDriving => "reverse_driving",
+            Metric::Pace => "pace",
+            Metric::BoostStarvation => "boost_starvation",
+            Metric::WallTime => "wall_time",
+            Metric::Agility => "agility",
         }
     }
 }
@@ -203,6 +212,13 @@ impl Default for ScoreConfig {
             weight,
             chapter: chapter.to_string(),
             experimental: false,
+        };
+        // A candidate metric: same shape, flagged experimental so it is computed
+        // and reconciled against rank/ΔV but kept out of the composite until the
+        // corpus shows it earns a place (then `promote_candidates` graduates it).
+        let mx = |metric, role, curve, weight, chapter: &str| MetricSpec {
+            experimental: true,
+            ..m(metric, role, curve, weight, chapter)
         };
         ScoreConfig {
             version: SCORE_CONFIG_VERSION.to_string(),
@@ -378,11 +394,56 @@ impl Default for ScoreConfig {
                     0.20,
                     "Fundamentals / car control",
                 ),
-                // No experimental candidates ship today. To add one, append a spec
-                // with `experimental: true` (e.g. `MetricSpec { experimental: true,
-                // ..m(metric, role, curve, weight, chapter) }`): it is computed and
-                // reconciled against ΔV/rank but stays out of the composite until
-                // `reconcile::promote_candidates` graduates it on evidence.
+                // --- experimental "push the ceiling" candidates ---
+                // Probed against the corpus via `calibrate` (per-metric rank ρ) and
+                // `reconcile` (ρ vs ΔV); promote the winners with promote_candidates.
+                // Raw pace: higher ranks play faster.
+                mx(
+                    Metric::Pace,
+                    Role::General,
+                    Curve::Higher {
+                        zero: 1100.0,
+                        full: 1600.0,
+                    },
+                    0.10,
+                    "Speed / pace",
+                ),
+                // Boost starvation: share of time on an empty gauge (lower better),
+                // distinct from boost *collection* (boost_management).
+                mx(
+                    Metric::BoostStarvation,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 0.15,
+                        full: 0.02,
+                    },
+                    0.10,
+                    "Fundamentals / boost",
+                ),
+                // Wall mechanics: share of time up on a wall — a dimension nothing
+                // else in the rubric captures.
+                mx(
+                    Metric::WallTime,
+                    Role::General,
+                    Curve::Higher {
+                        zero: 0.0,
+                        full: 0.08,
+                    },
+                    0.10,
+                    "Mechanics / wall play",
+                ),
+                // Agility: mean acceleration magnitude — mechanical sharpness,
+                // independent of raw pace.
+                mx(
+                    Metric::Agility,
+                    Role::General,
+                    Curve::Higher {
+                        zero: 600.0,
+                        full: 1600.0,
+                    },
+                    0.10,
+                    "Mechanics / car control",
+                ),
             ],
             top_weights: [0.35, 0.30, 0.35],
             tiers: vec![
