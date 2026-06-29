@@ -217,6 +217,12 @@ pub fn fit_weights(
     let rho = metric_rank_rho(cfg, samples);
     let mut cfg = cfg.clone();
     for spec in &mut cfg.metrics {
+        // Experimental candidates don't feed the composite — keep them out of the
+        // weighting too (weight 0) until promoted.
+        if spec.experimental {
+            spec.weight = 0.0;
+            continue;
+        }
         let r = rho.get(&spec.metric).copied().unwrap_or(0.0).max(0.0);
         spec.weight = r * r;
     }
@@ -273,14 +279,19 @@ pub fn fit_weights_ridge(
     samples: &[(BTreeMap<Metric, Option<f32>>, f32)],
     lambda: f64,
 ) -> ScoreConfig {
-    let metrics: Vec<Metric> = cfg.metrics.iter().map(|s| s.metric).collect();
-    let m = metrics.len();
+    // Fit only over the metrics that actually feed the composite. Experimental
+    // candidates are excluded (they'd otherwise steal coefficient mass and, via
+    // the all-computable row filter, shrink the usable sample).
+    let active: Vec<usize> = (0..cfg.metrics.len())
+        .filter(|&i| !cfg.metrics[i].experimental)
+        .collect();
+    let m = active.len();
     let (mut rows, mut ys) = (Vec::<Vec<f64>>::new(), Vec::<f64>::new());
     for (raws, tier) in samples {
-        let vals: Option<Vec<f64>> = cfg
-            .metrics
+        let vals: Option<Vec<f64>> = active
             .iter()
-            .map(|spec| {
+            .map(|&i| {
+                let spec = &cfg.metrics[i];
                 raws.get(&spec.metric)
                     .and_then(|o| *o)
                     .map(|v| spec.curve.normalize(v) as f64)
@@ -341,10 +352,13 @@ pub fn fit_weights_ridge(
         return fit_weights(cfg, samples);
     };
     let mut cfg = cfg.clone();
-    for (spec, (&b, s)) in cfg.metrics.iter_mut().zip(beta.iter().zip(&std)) {
-        // β is per standardized unit; /std gives the coefficient on the
-        // normalized score. Keep only positive (rank-helping) contributions.
-        spec.weight = (b / s).max(0.0) as f32;
+    for spec in &mut cfg.metrics {
+        spec.weight = 0.0; // experimental metrics stay 0; active ones set below
+    }
+    for (k, &i) in active.iter().enumerate() {
+        // β is per standardized unit; /std gives the coefficient on the normalized
+        // score. Keep only positive (rank-helping) contributions.
+        cfg.metrics[i].weight = (beta[k] / std[k]).max(0.0) as f32;
     }
     let mass = |role: Role| {
         cfg.metrics

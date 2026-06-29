@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v7";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v8";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,10 +42,9 @@ pub enum Metric {
     // --- bcstats-derived metrics (graduated on corpus rank evidence) ---
     FacingBallShare,
     ReverseDriving,
-    // --- experimental "push the ceiling" candidates (untapped dimensions) ---
+    // --- experimental candidates: strong but redundant with the mechanical-tempo
+    //     factor (kept as diagnostics, not in the composite) ---
     Pace,
-    BoostStarvation,
-    WallTime,
     Agility,
 }
 
@@ -70,8 +69,6 @@ impl Metric {
             Metric::FacingBallShare => "facing_ball_share",
             Metric::ReverseDriving => "reverse_driving",
             Metric::Pace => "pace",
-            Metric::BoostStarvation => "boost_starvation",
-            Metric::WallTime => "wall_time",
             Metric::Agility => "agility",
         }
     }
@@ -394,10 +391,13 @@ impl Default for ScoreConfig {
                     0.20,
                     "Fundamentals / car control",
                 ),
-                // --- experimental "push the ceiling" candidates ---
-                // Probed against the corpus via `calibrate` (per-metric rank ρ) and
-                // `reconcile` (ρ vs ΔV); promote the winners with promote_candidates.
-                // Raw pace: higher ranks play faster.
+                // --- experimental candidates (diagnostics; not in the composite) ---
+                // A 996-replay corpus run showed both correlate with rank but are
+                // redundant with the mechanical-tempo factor already captured by
+                // aerial_presence / boost_management / reverse_driving, so promoting
+                // them doesn't lift the CV ρ. Kept experimental for visibility;
+                // boost_starvation (ρ≈0) and wall_time (ρ≈0.11) were dropped as noise.
+                // pace: mean speed — strong rank signal (ρ≈+0.61), redundant.
                 mx(
                     Metric::Pace,
                     Role::General,
@@ -408,32 +408,7 @@ impl Default for ScoreConfig {
                     0.10,
                     "Speed / pace",
                 ),
-                // Boost starvation: share of time on an empty gauge (lower better),
-                // distinct from boost *collection* (boost_management).
-                mx(
-                    Metric::BoostStarvation,
-                    Role::General,
-                    Curve::Lower {
-                        zero: 0.15,
-                        full: 0.02,
-                    },
-                    0.10,
-                    "Fundamentals / boost",
-                ),
-                // Wall mechanics: share of time up on a wall — a dimension nothing
-                // else in the rubric captures.
-                mx(
-                    Metric::WallTime,
-                    Role::General,
-                    Curve::Higher {
-                        zero: 0.0,
-                        full: 0.08,
-                    },
-                    0.10,
-                    "Mechanics / wall play",
-                ),
-                // Agility: mean acceleration magnitude — mechanical sharpness,
-                // independent of raw pace.
+                // agility: mean acceleration magnitude (ρ≈+0.39), redundant.
                 mx(
                     Metric::Agility,
                     Role::General,

@@ -249,3 +249,37 @@ fn fit_weights_ridge_favors_predictive_metric() {
         "the predictive metric should carry the most weight"
     );
 }
+
+#[test]
+fn experimental_metrics_are_excluded_from_weight_fitting() {
+    // Both weight fitters must leave experimental candidates at weight 0 (they're
+    // not in the composite, so they mustn't steal coefficient mass from it).
+    use replay_scoring::calibrate::{fit_weights, fit_weights_ridge};
+    use replay_scoring::config::{Metric, ScoreConfig};
+    use std::collections::BTreeMap;
+
+    let cfg = ScoreConfig::default();
+    let metrics: Vec<Metric> = cfg.metrics.iter().map(|s| s.metric).collect();
+    // 40 players, every metric raw = tier (well-determined, rank-correlated).
+    let samples: Vec<(BTreeMap<Metric, Option<f32>>, f32)> = (0..40)
+        .map(|i| {
+            let tier = i as f32;
+            (metrics.iter().map(|&m| (m, Some(tier))).collect(), tier)
+        })
+        .collect();
+
+    for fitted in [
+        fit_weights(&cfg, &samples),
+        fit_weights_ridge(&cfg, &samples, 5.0),
+    ] {
+        for spec in &fitted.metrics {
+            if spec.experimental {
+                assert_eq!(spec.weight, 0.0, "{:?} must stay weight 0", spec.metric);
+            }
+        }
+        assert!(
+            fitted.metrics.iter().any(|s| !s.experimental && s.weight > 0.0),
+            "a real metric should still earn weight"
+        );
+    }
+}

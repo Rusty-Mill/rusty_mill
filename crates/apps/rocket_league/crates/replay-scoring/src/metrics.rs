@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use replay_analyzer::field::{BACK_WALL_Y, SIDE_WALL_X, SUPERSONIC_SPEED};
+use replay_analyzer::field::SUPERSONIC_SPEED;
 use replay_analyzer::model::{Event, Vec3};
 
 use crate::config::{Metric, ScoreConfig};
@@ -94,12 +94,9 @@ pub fn compute(
         facing_ball_share(frames, target_pri),
     );
     out.insert(Metric::ReverseDriving, reverse_driving(frames, target_pri));
-    // Experimental "push the ceiling" candidates — untapped dimensions (pace,
-    // boost-starvation, wall mechanics, agility). Reconciled but out of the
-    // composite until the corpus shows they carry independent rank signal.
+    // Experimental candidates (diagnostics only): strong rank signals but
+    // redundant with the mechanical-tempo metrics, so out of the composite.
     out.insert(Metric::Pace, pace(frames, target_pri));
-    out.insert(Metric::BoostStarvation, boost_starvation(frames, target_pri));
-    out.insert(Metric::WallTime, wall_time(frames, target_pri));
     out.insert(Metric::Agility, agility(frames, target_pri));
     out
 }
@@ -591,44 +588,6 @@ fn pace(frames: &[FrameView], pri: i32) -> Option<f32> {
         }
     }
     (n > 0).then(|| sum / n as f32)
-}
-
-/// Candidate: fraction of frames with an empty boost gauge — a boost-starvation
-/// failure mode (lower is better), distinct from boost *collection* habits.
-fn boost_starvation(frames: &[FrameView], pri: i32) -> Option<f32> {
-    let (mut num, mut den) = (0usize, 0usize);
-    for f in frames {
-        if let Some(c) = f.car(pri) {
-            if let Some(b) = c.boost {
-                den += 1;
-                if b == 0 {
-                    num += 1;
-                }
-            }
-        }
-    }
-    ratio(num, den)
-}
-
-/// Candidate: fraction of valid frames on a wall (near a side/back wall and off
-/// the floor) — wall mechanics, a dimension the rubric doesn't otherwise capture.
-fn wall_time(frames: &[FrameView], pri: i32) -> Option<f32> {
-    const WALL_MARGIN: f32 = 150.0; // within this of a wall plane
-    const FLOOR: f32 = 150.0; // and at least this high (genuinely on the wall)
-    let (mut num, mut den) = (0usize, 0usize);
-    for f in frames {
-        let Some(c) = f.car(pri) else { continue };
-        if !c.valid_pos {
-            continue;
-        }
-        den += 1;
-        let on_wall = c.p.x.abs() >= SIDE_WALL_X - WALL_MARGIN
-            || c.p.y.abs() >= BACK_WALL_Y - WALL_MARGIN;
-        if on_wall && c.p.z >= FLOOR {
-            num += 1;
-        }
-    }
-    ratio(num, den)
 }
 
 /// Candidate: mean horizontal acceleration magnitude (uu/s²) across consecutive

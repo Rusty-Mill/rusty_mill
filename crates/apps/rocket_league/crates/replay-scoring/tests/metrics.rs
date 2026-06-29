@@ -107,16 +107,15 @@ fn candidate_metrics_compute() {
 }
 
 #[test]
-fn push_ceiling_candidates_compute() {
-    // Car parked on the side wall (x≈4096, z=500), empty boost, velocity ramping
-    // 0,300,…,1200 in +Y over 5 frames @ 0.1 s.
-    let car = |p: Vec3, vel: Vec3, boost: u8| CarView {
+fn pace_and_agility_compute() {
+    // Velocity ramps 0,300,…,1200 in +Y over 5 frames @ 0.1 s.
+    let car = |vel: Vec3| CarView {
         pri: 1,
         team: 0,
-        p,
+        p: v(0.0, 0.0, 17.0),
         v: vel,
         pa: v(0.0, 0.0, 17.0),
-        boost: Some(boost),
+        boost: Some(50),
         valid_pos: true,
         dist_to_ball: 0.0,
         closing_speed: 0.0,
@@ -132,12 +131,10 @@ fn push_ceiling_candidates_compute() {
         .map(|i| FrameView {
             t: i as f32 * 0.1,
             ball: Some(Kin { p: v(0.0, 0.0, 100.0), v: v(0.0, 0.0, 0.0) }),
-            cars: vec![car(v(4000.0, 0.0, 500.0), v(0.0, i as f32 * 300.0, 0.0), 0)],
+            cars: vec![car(v(0.0, i as f32 * 300.0, 0.0))],
         })
         .collect();
     let raws = raws_for(&frames, 1);
-    assert_eq!(raws[&Metric::BoostStarvation], Some(1.0)); // boost 0 every frame
-    assert_eq!(raws[&Metric::WallTime], Some(1.0)); // on the side wall, elevated
     assert!((raws[&Metric::Pace].unwrap() - 600.0).abs() < 1.0); // mean of 0..1200
     assert!((raws[&Metric::Agility].unwrap() - 3000.0).abs() < 1.0); // Δv 300 / dt 0.1
 }
