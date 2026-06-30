@@ -323,27 +323,47 @@ function cardTable(hint, head, body, empty, cols) {
 function renderOverview(d) {
   const impactByPri = {}; (d.impact.players || []).forEach(p => impactByPri[p.pri] = p);
   const skillByPri = {}; (d.skill_profiles || []).forEach(p => skillByPri[p.pri] = p);
+  // The rank-relative layer (if a norms artifact was applied) is lobby-wide:
+  // every report carries the same bracket. Use the first to label the column.
+  const rel0 = (d.scores || []).map(r => r.relative).find(Boolean);
   const rows = (d.scores || []).slice().sort((a, b) => b.composite - a.composite).map(r => {
     const imp = impactByPri[r.target_pri];
     const sk = skillByPri[r.target_pri];
     const dv = imp ? imp.sum_dv : null;
+    const rv = r.relative;
+    // "vs rank": where this player's composite sits within their bracket (0–100).
+    const relCell = rv
+      ? `<td class="num"><div class="big">${fmt(rv.composite_pct, 0)}<span class="muted" style="font-size:11px">&nbsp;pct</span></div>
+          <div class="meter"><i style="width:${clampPct(rv.composite_pct)}%"></i></div></td>`
+      : (rel0 ? `<td class="num muted">—</td>` : "");
+    // Main (absolute) leak, plus the rank-relative leak when it carries signal.
+    const relLeak = rv && rv.rank_relative_leak && rv.rank_relative_leak !== "none"
+      ? `<div class="muted" style="font-size:11px">vs rank: ${esc(rv.rank_relative_leak)}</div>` : "";
     return `<tr>
       <td>${nameCell(r.target_team, r.target_player)}</td>
       <td><span class="badge t${r.target_team}">${teamName(r.target_team)}</span></td>
       <td class="num"><div class="big">${fmt(r.composite)}</div>
         <div class="meter"><i style="width:${clampPct(r.composite)}%"></i></div></td>
       <td>${esc(r.licence)}</td>
+      ${relCell}
       <td>${esc(r.player_type)}</td>
       <td class="num">${sk ? fmt(sk.total_per_min, 1) : "—"}</td>
       <td class="num ${dv >= 0 ? "pos" : "neg"}">${dv == null ? "—" : signed(dv, 3)}</td>
-      <td class="muted">${esc(r.main_leak)}</td>
+      <td class="muted">${esc(r.main_leak)}${relLeak}</td>
     </tr>`;
   }).join("");
+  const relHead = rel0 ? `<th class="num">vs rank</th>` : "";
   const head = `<th>Player</th><th>Team</th><th class="num">Composite</th><th>Licence</th>
-    <th>Type</th><th class="num">Skills/min</th><th class="num">Impact ΔV</th><th>Main leak</th>`;
-  $("tab-overview").innerHTML = cardTable(
+    ${relHead}<th>Type</th><th class="num">Skills/min</th><th class="num">Impact ΔV</th><th>Main leak</th>`;
+  const banner = rel0
+    ? `<p class="hint">Rank-relative grading is on: this lobby is graded against <b>${esc(rel0.bracket)}</b> ` +
+      `(${esc(rel0.basis)}-inferred, mean tier ${fmt(rel0.bracket_tier_mean, 1)}). The absolute composite/licence ` +
+      `is unchanged; <b>vs rank</b> is your percentile within that bracket, and the <b>vs rank</b> leak is where you ` +
+      `most lag peers of your own level.</p>`
+    : "";
+  $("tab-overview").innerHTML = banner + cardTable(
     "One row per player — decision-discipline composite (scoring), mechanical activity (skills/min), and value impact (ΔV). Open the tabs for the full 3D replay, the scoring report, and per-skill detail.",
-    head, rows, "No players scored.", 8);
+    head, rows, "No players scored.", rel0 ? 9 : 8);
 }
 
 function renderStats(d) {
@@ -640,6 +660,10 @@ function renderScoring(s) {
     : `<span class="status warnc">● no fitted_config.json — CLI tools would fall back to defaults</span>`;
   const gap = (s.fitted && s.fitted.version.indexOf(s.active_version) !== 0)
     ? `<p class="note">The app runs the in-process default (<code>${esc(s.active_version)}</code>); the fitted config on disk (<code>${esc(s.fitted.version)}</code>) is used by the <code>reconcile</code>/CLI tools, not the live web analysis.</p>` : "";
+  // Rank-relative norms: the artifact the *live* app reads to grade vs rank.
+  const norms = s.rank_norms
+    ? `<span class="status ok">● rank norms: <code>${esc(s.rank_norms.version)}</code> <span class="muted">(${esc(s.rank_norms.path)})</span>${modStr(s.rank_norms)}</span>`
+    : `<span class="status warnc">● no rank_norms.json — the app scores absolute only (no “vs rank” view); run calibrate to build it</span>`;
   const rows = (c.metrics || []).map(m => `<tr>
     <td><code>${esc(m.metric)}</code></td>
     <td><span class="badge b-${m.role}">${esc(m.role)}</span></td>
@@ -654,7 +678,7 @@ function renderScoring(s) {
   const tiers = (c.tiers || []).map(t => `<span class="chip">${esc(t.name)} ≥ ${num(t.min_composite,0)}</span>`).join("");
   const cents = (c.centroids || []).map(ct => `<span class="chip">${esc(ct.name)} [${(ct.vector||[]).map(v=>num(v,2)).join(", ")}]</span>`).join("");
   return `<h2>Decision-discipline rubric <span class="ver">${esc(s.active_version)}</span></h2>` +
-    card(`Active in-app: <code>${esc(s.active_version)}</code> &nbsp;·&nbsp; ${onDisk}${gap}`, metricTable) +
+    card(`Active in-app: <code>${esc(s.active_version)}</code> &nbsp;·&nbsp; ${onDisk}<br>${norms}${gap}`, metricTable) +
     card("Role weights (1st / 2nd / general) and licence bands.",
       `<div class="pad"><div class="kv">
         <div class="k">Role weights</div><div>1st <code>${num(tw[0],2)}</code> · 2nd <code>${num(tw[1],2)}</code> · general <code>${num(tw[2],2)}</code></div>

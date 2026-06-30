@@ -34,6 +34,7 @@ fn mk_report(name: &str, pri: i32, team: i32, composite: f32) -> Report {
             effective_weight: 0.01,
             experimental: false,
         }],
+        relative: None,
     }
 }
 

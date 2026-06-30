@@ -38,6 +38,10 @@ pub struct ScoringInfo {
     /// The corpus-fitted config on disk, if present (used by the CLI tools, not
     /// the app). Surfaces the gap between "calibrated" and "what runs here".
     pub fitted: Option<OnDisk>,
+    /// The rank-relative norms artifact on disk, if present — the per-bracket
+    /// metric distributions the app uses to grade a player against their rank.
+    /// Absent ⇒ the app scores purely absolute (no "vs your rank" view).
+    pub rank_norms: Option<OnDisk>,
 }
 
 #[derive(Serialize)]
@@ -153,6 +157,7 @@ pub fn config_report(corpus_dir: &Path, run_enabled: bool) -> ConfigReport {
             active_version: SCORE_CONFIG_VERSION.to_string(),
             config: ScoreConfig::default(),
             fitted: on_disk_version(&corpus_dir.join("fitted_config.json")),
+            rank_norms: on_disk_version(&corpus_dir.join("rank_norms.json")),
         },
         value: ValueInfo {
             config_version: VALUE_CONFIG_VERSION.to_string(),

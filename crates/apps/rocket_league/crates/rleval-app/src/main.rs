@@ -107,7 +107,10 @@ fn route(req: &Request, replays: &Path, corpus: &Path, allow_run: bool) -> Respo
         }
         ("POST", "/api/analyze") => {
             let name = query_param(&req.path, "name").unwrap_or_else(|| "upload".to_string());
-            analyze_response(&req.body, &stem(&name))
+            // Optional explicit rank bracket override (?rank=diamond); absent ⇒
+            // the lobby's level is inferred.
+            let rank = query_param(&req.path, "rank");
+            analyze_response(&req.body, &stem(&name), corpus, rank.as_deref())
         }
         ("GET", path) if path.starts_with("/api/analyze/sample/") => {
             let name = path.trim_start_matches("/api/analyze/sample/");
@@ -116,8 +119,9 @@ fn route(req: &Request, replays: &Path, corpus: &Path, allow_run: bool) -> Respo
             if name.contains('/') || name.contains("..") {
                 return Response::text(400, "invalid sample name");
             }
+            let rank = query_param(&req.path, "rank");
             match std::fs::read(replays.join(&name)) {
-                Ok(bytes) => analyze_response(&bytes, &stem(&name)),
+                Ok(bytes) => analyze_response(&bytes, &stem(&name), corpus, rank.as_deref()),
                 Err(e) => Response::text(404, format!("sample not found: {e}")),
             }
         }
@@ -125,12 +129,22 @@ fn route(req: &Request, replays: &Path, corpus: &Path, allow_run: bool) -> Respo
     }
 }
 
-/// Run the pipeline and return the JSON bundle, isolating decoder panics.
-fn analyze_response(bytes: &[u8], replay_id: &str) -> Response {
+/// Run the pipeline and return the JSON bundle, isolating decoder panics. Loads
+/// the rank-relative norms from `corpus` (if present) so scores are graded
+/// against their bracket; `override_bracket` pins an explicit rank when known.
+fn analyze_response(
+    bytes: &[u8],
+    replay_id: &str,
+    corpus: &Path,
+    override_bracket: Option<&str>,
+) -> Response {
     if bytes.is_empty() {
         return Response::text(400, "empty request body — no replay bytes");
     }
-    let result = catch_unwind(AssertUnwindSafe(|| pipeline::analyze(bytes, replay_id)));
+    let norms = pipeline::load_rank_norms(corpus);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        pipeline::analyze(bytes, replay_id, norms.as_ref(), override_bracket)
+    }));
     match result {
         Ok(Ok(analysis)) => match serde_json::to_vec(&analysis) {
             Ok(json) => Response::json(json),
@@ -180,7 +194,10 @@ fn analyze_oneshot(args: Vec<String>) -> Result<(), Box<dyn Error>> {
     let replay = replay.ok_or(USAGE)?;
     let bytes = std::fs::read(&replay)?;
     let id = stem(&replay);
-    let analysis = pipeline::analyze(&bytes, &id)?;
+    // Use the default corpus norms if present, so the static bundle also carries
+    // the rank-relative layer; absent ⇒ purely absolute.
+    let norms = pipeline::load_rank_norms(Path::new("assets/corpus"));
+    let analysis = pipeline::analyze(&bytes, &id, norms.as_ref(), None)?;
 
     let out = out.unwrap_or_else(|| format!("{id}.html"));
     std::fs::write(&out, bundle_html(&analysis))?;

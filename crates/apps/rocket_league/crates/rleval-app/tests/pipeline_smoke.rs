@@ -18,7 +18,8 @@ use rleval_app::pipeline;
 #[test]
 fn analyzes_a_sample_into_every_view() {
     let bytes = sample("42f2.replay");
-    let a = pipeline::analyze(&bytes, "42f2").expect("pipeline should succeed");
+    // No norms ⇒ purely absolute scoring (the rank-relative layer is optional).
+    let a = pipeline::analyze(&bytes, "42f2", None, None).expect("pipeline should succeed");
 
     // Match summary is populated.
     assert_eq!(a.replay_id, "42f2");
@@ -53,6 +54,6 @@ fn analyzes_a_sample_into_every_view() {
 
 #[test]
 fn rejects_garbage_bytes() {
-    let err = pipeline::analyze(b"not a replay", "junk");
+    let err = pipeline::analyze(b"not a replay", "junk", None, None);
     assert!(err.is_err(), "a non-replay should not parse");
 }

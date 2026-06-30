@@ -19,6 +19,7 @@ pub mod heatmap;
 pub mod lobby;
 pub mod metrics;
 pub mod reconcile;
+pub mod relative;
 pub mod render;
 pub mod report;
 pub mod roles;
@@ -29,6 +30,7 @@ use replay_analyzer::model::CanonicalMatch;
 
 pub use config::{ScoreConfig, SCORE_CONFIG_VERSION};
 pub use contract::{cross_check, BallchasingReplay, CrossCheckReport};
+pub use relative::{attach_relative, BucketNorm, RankNorms, RelativeReport};
 pub use report::{Confidence, MetricBreakdown, Report};
 
 /// Score one target player (by stable PRI) against `cfg`.
@@ -95,6 +97,9 @@ pub fn score(m: &CanonicalMatch, target_pri: i32, cfg: &ScoreConfig) -> Report {
         focus_chapter,
         confidence,
         metrics: bds,
+        // Absolute by default; the rank-relative layer is attached separately
+        // (it needs the whole lobby + a corpus norms artifact).
+        relative: None,
     }
 }
 

@@ -1,6 +1,7 @@
 //! The scoring output: a per-player decision-discipline [`Report`].
 
 use crate::config::Role;
+use crate::relative::RelativeReport;
 use serde::{Deserialize, Serialize};
 
 /// Report confidence; `LowConfidence` suppresses leaderboard eligibility.
@@ -56,4 +57,11 @@ pub struct Report {
 
     pub confidence: Confidence,
     pub metrics: Vec<MetricBreakdown>,
+
+    /// Rank-relative companion view: how the player compares to peers of the same
+    /// bracket. `None` unless a [`RankNorms`](crate::relative::RankNorms) artifact
+    /// was applied (e.g. by [`crate::relative::attach_relative`]); the absolute
+    /// fields above are computed identically with or without it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative: Option<RelativeReport>,
 }

@@ -8,6 +8,7 @@
 //! viewer and the scoring report) the web UI embeds side by side.
 
 use std::error::Error;
+use std::path::Path;
 
 use replay_analyzer::analyze::bcstats::{ballchasing_stats, BcPlayerStats};
 use replay_analyzer::analyze::build_canonical;
@@ -18,7 +19,7 @@ use replay_analyzer::field::is_standard_geometry;
 use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
-use replay_scoring::{score_all, Report, ScoreConfig};
+use replay_scoring::{attach_relative, score_all, RankNorms, Report, ScoreConfig};
 
 use replay_skills::profile::{profiles, PlayerSkillProfile};
 use replay_skills::{detect_all, SkillConfig, SkillReport};
@@ -88,11 +89,29 @@ pub struct ImpactSummary {
     pub players: Vec<PlayerValue>,
 }
 
+/// Load the rank-relative norms artifact (`rank_norms.json`) from a corpus dir,
+/// or `None` if it is absent/unreadable — in which case scoring stays purely
+/// absolute (the rank-relative layer is simply omitted).
+pub fn load_rank_norms(corpus_dir: &Path) -> Option<RankNorms> {
+    let bytes = std::fs::read(corpus_dir.join("rank_norms.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// Run the whole pipeline on raw `.replay` bytes, returning the unified bundle.
 ///
 /// `replay_id` labels the match (normally the upload's file stem). Every engine
 /// runs at its default config — the same defaults the standalone CLIs use.
-pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>> {
+///
+/// `norms` (optional) enables the **rank-relative** layer: when present, each
+/// score is additionally graded against its rank bracket — the lobby's level by
+/// default, or `override_bracket` when the caller knows the rank. Passing `None`
+/// leaves every report purely absolute (`relative = None`), unchanged.
+pub fn analyze(
+    bytes: &[u8],
+    replay_id: &str,
+    norms: Option<&RankNorms>,
+    override_bracket: Option<&str>,
+) -> Result<Analysis, Box<dyn Error>> {
     // 1. Decode + reconstruct the neutral canonical model — the shared contract.
     let decoded = BoxcarsParser::new().parse(bytes)?;
     let canonical = build_canonical(&decoded, replay_id.to_string());
@@ -100,7 +119,12 @@ pub fn analyze(bytes: &[u8], replay_id: &str) -> Result<Analysis, Box<dyn Error>
 
     // 2. Decision-discipline scoring (per player) + the lobby report HTML.
     let score_cfg = ScoreConfig::default();
-    let scores = score_all(&canonical, &score_cfg);
+    let mut scores = score_all(&canonical, &score_cfg);
+    // Additive rank-relative layer: grade each player against their bracket. No
+    // norms ⇒ untouched (every report stays purely absolute).
+    if let Some(norms) = norms {
+        attach_relative(&mut scores, norms, &score_cfg, override_bracket);
+    }
     let lobby = assemble(&canonical, &score_cfg);
     let heatmaps: Vec<(i32, String)> = lobby
         .players

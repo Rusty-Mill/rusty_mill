@@ -25,7 +25,8 @@ use replay_scoring::calibrate::{
     composite_with, fit_tiers, fit_weights, fit_weights_ridge, join_ranks, raws_from_report,
     refit_config, spearman,
 };
-use replay_scoring::config::{Curve, Metric, ScoreConfig};
+use replay_scoring::config::{Curve, Metric, ScoreConfig, SCORE_CONFIG_VERSION};
+use replay_scoring::relative::{NormSample, RankNorms};
 use replay_scoring::{score_all, Confidence};
 use serde::Deserialize;
 
@@ -380,6 +381,33 @@ fn main() -> Result<(), Box<dyn Error>> {
     eprintln!(
         "\nwrote fitted config (curves+weights) -> {}",
         out_path.display()
+    );
+
+    // Rank-relative norms: per-bucket distribution of each raw metric (and the
+    // default-config composite, which the app/viewer score with) so a new replay
+    // can be graded against its own rank bracket. Additive — never feeds the
+    // absolute rubric. Composites here are the *default-config* ones the app
+    // produces, so a lobby's mean composite maps to the right bracket downstream.
+    let norm_samples: Vec<NormSample> = samples
+        .iter()
+        .map(|s| NormSample {
+            bucket: s.bucket.clone(),
+            tier: s.tier,
+            composite: s.composite_before,
+            raws: s.raws.clone(),
+        })
+        .collect();
+    let norms = RankNorms::build(
+        format!("{}/n={}", SCORE_CONFIG_VERSION, norm_samples.len()),
+        &norm_samples,
+        20,
+    );
+    let norms_path = corpus_dir.join("rank_norms.json");
+    std::fs::write(&norms_path, serde_json::to_vec_pretty(&norms)?)?;
+    eprintln!(
+        "wrote rank-relative norms ({} buckets) -> {}",
+        norms.buckets.len(),
+        norms_path.display()
     );
     Ok(())
 }
