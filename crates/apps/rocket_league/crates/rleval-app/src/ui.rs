@@ -379,6 +379,29 @@ function renderStats(d) {
   const coreBody = (d.core || []).map(p => `<tr>${nm(p)}
     ${n(p.goals)}${n(p.assists)}${n(p.saves)}${n(p.shots)}${p1(p.shooting_pct)}${n(p.score)}</tr>`).join("");
 
+  // Turnovers — possession-loss rate from the scoring touch sequence
+  // (1 − possession_retention) plus outcome-weighted giveaways from the value
+  // model's per-touch ΔV (a touch that moved your own team away from scoring).
+  const impByPri = {}; (d.impact.players || []).forEach(p => impByPri[p.pri] = p);
+  const posRet = r => { const mb = (r.metrics || []).find(x => x.key === "possession_retention"); return mb ? mb.raw : null; };
+  const toHead = `<th>Player</th><th>Team</th><th class="num">Turnover %</th><th class="num">Touches</th>
+    <th class="num">Giveaways</th><th class="num">Giveaway %</th><th class="num">P(goal) bled</th>`;
+  const toBody = (d.scores || []).slice()
+    .sort((a, b) => (a.target_team - b.target_team) || (a.target_pri - b.target_pri))
+    .map(r => {
+      const pr = posRet(r);
+      const to = (pr == null) ? "—" : fmt((1 - pr) * 100, 1);
+      const imp = impByPri[r.target_pri];
+      const tn = imp ? imp.touches : 0;
+      const gv = imp ? imp.giveaways : 0;
+      const gp = (imp && imp.touches > 0) ? fmt(gv / imp.touches * 100, 1) : "—";
+      const ld = imp ? imp.lost_dv : 0;
+      return `<tr><td>${nameCell(r.target_team, r.target_player)}</td>
+        <td><span class="badge t${r.target_team}">${teamName(r.target_team)}</span></td>
+        <td class="num">${to}</td><td class="num">${fmt(tn, 0)}</td><td class="num">${fmt(gv, 0)}</td>
+        <td class="num">${gp}</td><td class="num neg">${ld ? "−" + fmt(ld, 3) : fmt(0, 3)}</td></tr>`;
+    }).join("");
+
   // Boost economy.
   const boostHead = `<th>Player</th><th>Team</th><th class="num">BPM</th><th class="num">BCPM</th>
     <th class="num">Avg</th><th class="num">Collected</th><th class="num">Stolen</th>
@@ -412,6 +435,8 @@ function renderStats(d) {
   $("tab-stats").innerHTML =
     cardTable("Core scoreboard — goals/assists/saves/shots/score (header truth) plus shooting % (goals ÷ shots). These are game-credited outcomes, not reconstructed.",
       coreHead, coreBody, "No data.", 8) + gap +
+    cardTable("Turnovers — Turnover % is how often your touch is followed by an opponent touch (1 − possession retention). Giveaways are touches that lowered your own team's chance of scoring next (negative ΔV); P(goal) bled sums how much scoring probability those gave away. Turnover % is descriptive (near-noise for rank); the ΔV columns weight a turnover by how much it actually cost.",
+      toHead, toBody, "No data.", 7) + gap +
     cardTable("Boost economy — collected/used per minute, average gauge, pads collected (big/small), boost stolen in the opponent half & overfill, and time at empty / full. Ballchasing-parity aggregates (analyze::bcstats).",
       boostHead, boostBody, "No data.", 12) + gap +
     cardTable("Movement — average speed & total distance, speed-bucket shares (slow / boost / supersonic), air vs ground, powerslides, reverse-driving share, and demos inflicted / taken.",

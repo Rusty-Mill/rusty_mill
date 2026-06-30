@@ -26,6 +26,12 @@ pub struct PlayerValue {
     pub sum_dv: f32,
     /// Mean ΔV per credited touch.
     pub mean_dv: f32,
+    /// Touches whose ΔV was negative — **giveaways** (a touch that moved the
+    /// player's own team away from scoring next): the outcome-weighted turnover.
+    pub giveaways: usize,
+    /// Total scoring probability bled on those giveaways — the **magnitude** of the
+    /// negative swings, reported as a positive number (`Σ −min(dv, 0)`).
+    pub lost_dv: f32,
 }
 
 /// One touch's value swing — the building block [`per_player_delta_v`] sums.
@@ -99,17 +105,23 @@ pub fn per_player_delta_v<P: Predict>(
     let names: BTreeMap<i32, String> = m.tracks.iter().map(|t| (t.pri, t.player.clone())).collect();
     let teams: BTreeMap<i32, Option<i32>> = m.tracks.iter().map(|t| (t.pri, t.team)).collect();
 
-    // pri -> (touch count, ΔV sum), aggregated from the per-touch credits.
-    let mut acc: BTreeMap<i32, (usize, f32)> = BTreeMap::new();
+    // pri -> (touch count, ΔV sum, giveaway count, bled magnitude), from the
+    // per-touch credits. A negative-ΔV touch is a giveaway; its magnitude is the
+    // scoring probability handed to the opponent.
+    let mut acc: BTreeMap<i32, (usize, f32, usize, f32)> = BTreeMap::new();
     for tv in per_touch_delta_v(m, model, cfg) {
-        let entry = acc.entry(tv.pri).or_insert((0, 0.0));
+        let entry = acc.entry(tv.pri).or_insert((0, 0.0, 0, 0.0));
         entry.0 += 1;
         entry.1 += tv.dv;
+        if tv.dv < 0.0 {
+            entry.2 += 1;
+            entry.3 += -tv.dv;
+        }
     }
 
     let mut out: Vec<PlayerValue> = acc
         .into_iter()
-        .map(|(pri, (touches, sum_dv))| PlayerValue {
+        .map(|(pri, (touches, sum_dv, giveaways, lost_dv))| PlayerValue {
             pri,
             player: names.get(&pri).cloned(),
             team: teams.get(&pri).copied().flatten(),
@@ -120,6 +132,8 @@ pub fn per_player_delta_v<P: Predict>(
             } else {
                 0.0
             },
+            giveaways,
+            lost_dv,
         })
         .collect();
     // Most impactful first.
