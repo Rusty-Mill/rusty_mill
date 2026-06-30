@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v12";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v13";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,6 +49,9 @@ pub enum Metric {
     // Pace/Agility: strong but redundant with the mechanical-tempo factor.
     Pace,
     Agility,
+    /// Position-weighted turnover rate: giveaways weighted by how deep in your own
+    /// half they happened — the kinematic proxy for a value-costly turnover.
+    DangerousTurnover,
 }
 
 impl Metric {
@@ -74,6 +77,7 @@ impl Metric {
             Metric::Pace => "pace",
             Metric::Agility => "agility",
             Metric::BoostStarvation => "boost_starvation",
+            Metric::DangerousTurnover => "dangerous_turnover",
         }
     }
 }
@@ -440,6 +444,22 @@ impl Default for ScoreConfig {
                     },
                     0.10,
                     "Fundamentals / boost",
+                ),
+                // Candidate: position-weighted turnover rate. possession_retention
+                // treats every giveaway alike (and is near-noise for rank, ρ≈+0.05);
+                // this weights each turnover by how deep in your own half it
+                // happened — the kinematic stand-in for the value model's
+                // outcome-weighted giveaway. Experimental until the corpus shows it
+                // carries rank/ΔV signal the shipped metrics don't. Lower is better.
+                mx(
+                    Metric::DangerousTurnover,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 0.25,
+                        full: 0.02,
+                    },
+                    0.10,
+                    "Defence / risk management",
                 ),
             ],
             top_weights: [0.35, 0.30, 0.35],

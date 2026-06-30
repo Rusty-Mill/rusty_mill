@@ -508,3 +508,31 @@ fn aerial_presence_is_airborne_fraction() {
     let raws = metrics::compute(&frames, &roles, &[] as &[Event], 1, 0, &cfg);
     assert_eq!(raws[&Metric::AerialPresence], Some(0.3));
 }
+
+#[test]
+fn dangerous_turnover_weights_by_field_depth() {
+    use replay_analyzer::field::BACK_WALL_Y;
+    let cfg = ScoreConfig::default();
+    // A single car for pri 1 (team 0, attacking +Y). The metric only needs the
+    // ball position at each touch frame and the car's attack_sign.
+    let mk = |t: f32, ball_y: f32| FrameView {
+        t,
+        ball: Some(Kin { p: v(0.0, ball_y, 100.0), v: v(0.0, 0.0, 0.0) }),
+        cars: vec![cv(1, 1.0, v(0.0, 0.0, 17.0), 0.0, true, Third::Mid)],
+    };
+    // Two touches by pri 1 then an opponent touch (team 1) after each — both are
+    // turnovers. First giveaway is at the back wall (own half, max danger ~1),
+    // second at midfield (danger ~0).
+    let frames = vec![mk(0.0, -BACK_WALL_Y), mk(1.0, 0.0)];
+    let events = vec![
+        Event::Touch { t: 0.0, pri: 1, team: Some(0), player: None },
+        Event::Touch { t: 0.5, pri: 9, team: Some(1), player: None },
+        Event::Touch { t: 1.0, pri: 1, team: Some(0), player: None },
+        Event::Touch { t: 1.5, pri: 9, team: Some(1), player: None },
+    ];
+    let roles = roles::assign(&frames, &[0, 1], &cfg);
+    let raws = metrics::compute(&frames, &roles, &events, 1, 0, &cfg);
+    // 2 followed touches, both turnovers; danger ≈ (1.0 + 0.0) / 2 = 0.5.
+    let dt = raws[&Metric::DangerousTurnover].expect("computable");
+    assert!((dt - 0.5).abs() < 0.02, "expected ~0.5, got {dt}");
+}

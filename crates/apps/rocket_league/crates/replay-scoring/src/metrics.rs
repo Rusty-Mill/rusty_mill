@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use replay_analyzer::field::SUPERSONIC_SPEED;
+use replay_analyzer::field::{BACK_WALL_Y, SUPERSONIC_SPEED};
 use replay_analyzer::model::{Event, Vec3};
 
 use crate::config::{Metric, ScoreConfig};
@@ -64,6 +64,10 @@ pub fn compute(
     out.insert(
         Metric::PossessionRetention,
         possession_retention(events, target_pri, target_team),
+    );
+    out.insert(
+        Metric::DangerousTurnover,
+        dangerous_turnover(frames, events, target_pri, target_team),
     );
     out.insert(Metric::BallChaseIndex, ball_chase(frames, target_team));
     out.insert(
@@ -267,6 +271,48 @@ fn possession_retention(events: &[Event], pri: i32, team: i32) -> Option<f32> {
         }
     }
     ratio(num, den)
+}
+
+/// Position-weighted **dangerous-turnover** rate. Among the target's touches that
+/// hand the ball to the opponent (the next touch is a *known* other team), each is
+/// weighted by how deep in the target's own half the giveaway happened — a
+/// turnover at the back wall counts ~1, one at midfield ~0 — then divided by the
+/// player's total (followed) touches. This is the kinematic proxy for the value
+/// model's "giveaway that handed the opponent scoring probability": a turnover
+/// near your own net is far more costly than one in the offensive third, even
+/// though plain `possession_retention` treats them the same. Lower is better;
+/// `None` with no touches.
+fn dangerous_turnover(frames: &[FrameView], events: &[Event], pri: i32, team: i32) -> Option<f32> {
+    let seq: Vec<(i32, Option<i32>, f32)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch { pri, team, t, .. } => Some((*pri, *team, *t)),
+            _ => None,
+        })
+        .collect();
+
+    let (mut danger_sum, mut touches) = (0.0f32, 0usize);
+    for w in seq.windows(2) {
+        if w[0].0 != pri {
+            continue;
+        }
+        touches += 1;
+        // Turnover only if the next touch is a *known* opposing team.
+        if !matches!(w[1].1, Some(nt) if nt != team) {
+            continue;
+        }
+        let Some(i) = frame_at_time(frames, w[0].2) else {
+            continue;
+        };
+        let f = &frames[i];
+        let (Some(c), Some(ball)) = (f.car(pri), f.ball) else {
+            continue;
+        };
+        // Forward (+) is toward the opponent goal; the deep own half is negative.
+        let fwd = ball.p.y * c.attack_sign as f32;
+        danger_sum += (-fwd / BACK_WALL_Y).clamp(0.0, 1.0);
+    }
+    (touches > 0).then(|| danger_sum / touches as f32)
 }
 
 /// Mean chase-correlation: both teammates driving at the ball together.
