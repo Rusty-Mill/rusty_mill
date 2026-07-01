@@ -206,6 +206,11 @@ pub struct ScoreConfig {
     /// Boost-collection rate (units/s) that maps to a full collection score in
     /// the boost-management composite.
     pub boost_collect_scale: f32,
+    /// Lobby-completeness thresholds (§11: a missing/AFK player degrades
+    /// confidence for the whole lobby). Defaults so existing configs
+    /// deserialize unchanged.
+    #[serde(default)]
+    pub coverage: crate::coverage::CoverageConfig,
 }
 
 impl Default for ScoreConfig {
@@ -525,6 +530,7 @@ impl Default for ScoreConfig {
             boom_speed_uu: 4000.0,
             transition_window_s: 1.5,
             boost_collect_scale: 30.0,
+            coverage: crate::coverage::CoverageConfig::default(),
         }
     }
 }

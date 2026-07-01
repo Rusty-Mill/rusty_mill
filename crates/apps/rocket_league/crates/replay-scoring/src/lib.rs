@@ -13,6 +13,7 @@
 pub mod calibrate;
 pub mod config;
 pub mod contract;
+pub mod coverage;
 pub mod engine;
 pub mod features;
 pub mod heatmap;
@@ -67,12 +68,18 @@ pub fn score(m: &CanonicalMatch, target_pri: i32, cfg: &ScoreConfig) -> Report {
     let (main_leak, focus_chapter) = engine::pick_leak(cfg, &bds);
 
     // Low confidence if too few analyzable frames, any sub-score had no data
-    // (e.g. a missing/AFK teammate makes support metrics meaningless, §11), or
-    // the map is non-standard geometry (positional metrics assume standard Soccar).
+    // (e.g. a missing/AFK teammate makes support metrics meaningless, §11), the
+    // map is non-standard geometry (positional metrics assume standard Soccar),
+    // or a lobby-mate (either team) left/went AFK for a real stretch — that
+    // doesn't just wreck their own report, it turns part of the match into an
+    // unrepresentative man-advantage for everyone else in it too.
     let standard_map = replay_analyzer::field::is_standard_geometry(m.map.as_deref());
+    let fully_present =
+        coverage::lobby_fully_present(&m.tracks, &m.events, m.duration_s, &cfg.coverage);
     let confidence = if !standard_map
         || valid_frames < cfg.min_sample_frames
         || subs.iter().any(Option::is_none)
+        || !fully_present
     {
         Confidence::LowConfidence
     } else {
