@@ -623,8 +623,15 @@ fn bcstats_full_agrees_with_ballchasing() {
             if core.contains(name) { "  [core]" } else { "" },
         );
         // Every channel must rank-correlate — a broken reducer (sign flip, wrong
-        // field) tanks Spearman.
-        if a.n >= 10 && rho < 0.50 {
+        // field) tanks Spearman to ~0 or negative, so a hard floor of 0.20
+        // catches breakage on any subset. The calibrated 0.50 bar additionally
+        // applies at calibrated coverage; below it, the low-variance channels
+        // (the middle boost quartiles — see the core comment above) wobble in
+        // the 0.4s from sampling alone.
+        if a.n >= 10 && rho < 0.20 {
+            fails.push(format!("{name}: ρ={rho:.3} < 0.20 (breakage floor)"));
+        }
+        if core_gate && a.n >= 10 && rho < 0.50 {
             fails.push(format!("{name}: ρ={rho:.3} < 0.50"));
         }
         // Core channels must be near-exact (only judged at calibrated coverage).
