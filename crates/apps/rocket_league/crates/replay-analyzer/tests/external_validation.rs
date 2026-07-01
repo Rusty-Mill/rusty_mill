@@ -593,6 +593,20 @@ fn bcstats_full_agrees_with_ballchasing() {
         "pct_mostfwd",
     ];
 
+    // The near-exact core thresholds (ρ≥0.90, rel≤0.12) were calibrated on the
+    // full fixture — 96 players across every rank bucket. On a small subset
+    // (e.g. only one bucket's replays downloaded) the cross-player variance
+    // that carries ρ is range-restricted and the calibrated thresholds don't
+    // apply; the ρ≥0.50 broken-reducer tripwire below still runs regardless.
+    let core_gate = 2 * present >= truth.replays.len();
+    if !core_gate {
+        eprintln!(
+            "note: only {present}/{} fixture replays present — near-exact core \
+             gate skipped (range-restricted subset); broken-reducer tripwire still on",
+            truth.replays.len()
+        );
+    }
+
     eprintln!("bcstats full block vs ballchasing ({present} replays):");
     let mut fails = Vec::new();
     for (name, ..) in &channels {
@@ -613,8 +627,8 @@ fn bcstats_full_agrees_with_ballchasing() {
         if a.n >= 10 && rho < 0.50 {
             fails.push(format!("{name}: ρ={rho:.3} < 0.50"));
         }
-        // Core channels must be near-exact.
-        if core.contains(name) && (rho < 0.90 || a.median_rel_err > 0.12) {
+        // Core channels must be near-exact (only judged at calibrated coverage).
+        if core_gate && core.contains(name) && (rho < 0.90 || a.median_rel_err > 0.12) {
             fails.push(format!(
                 "core {name}: ρ={rho:.3} rel={:.3}",
                 a.median_rel_err
