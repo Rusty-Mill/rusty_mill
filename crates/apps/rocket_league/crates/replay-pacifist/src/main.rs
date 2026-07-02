@@ -7,6 +7,7 @@ use replay_analyzer::decode::ReplayParser;
 use replay_pacifist::bridge::{possession_spans, timeline_from_canonical};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::scoring::Analyzer;
+use replay_pacifist::severity::Severity;
 use replay_pacifist::{roster, team_sizes, Team, PACIFIST_CONFIG_VERSION};
 use std::error::Error;
 use std::path::Path;
@@ -70,11 +71,22 @@ fn run() -> Result<(), Box<dyn Error>> {
         let name = entry.name.as_deref().unwrap_or("<unknown>");
         match score.value {
             Some(v) => eprintln!(
-                "\n== {name} ({side}) ==  pacifist score {:.1}  (confidence {:.2})",
+                "\n== {name} ({side}) ==  pacifist score {:.1}  (confidence {:.2})  {} ({} minor, {} major)",
                 v.get(),
-                score.confidence.get()
+                score.confidence.get(),
+                score.faults.verdict.label(),
+                score.faults.minors,
+                score.faults.majors,
             ),
             None => eprintln!("\n== {name} ({side}) ==  no scoreable evidence"),
+        }
+        for f in score
+            .faults
+            .faults
+            .iter()
+            .filter(|f| f.severity == Severity::Major)
+        {
+            eprintln!("  MAJOR @{:>6.1}s  [{}] {}", f.t, f.criterion, f.detail);
         }
         for d in &score.breakdown {
             eprintln!(

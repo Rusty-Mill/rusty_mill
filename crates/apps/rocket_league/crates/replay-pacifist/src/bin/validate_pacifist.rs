@@ -27,6 +27,7 @@ use replay_pacifist::bridge::{possession_spans, timeline_from_canonical};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::metrics::DimensionId;
 use replay_pacifist::scoring::Analyzer;
+use replay_pacifist::severity::Verdict;
 use replay_pacifist::{roster, team_sizes, Team, PACIFIST_CONFIG_VERSION};
 use replay_scoring::calibrate::{join_ranks, spearman};
 use replay_scoring::coverage::{lobby_fully_present, CoverageConfig};
@@ -52,6 +53,9 @@ struct Row {
     tier: f32,
     value: f32,
     dimensions: Vec<(DimensionId, f32, f32)>, // (id, value, confidence)
+    minors: u32,
+    majors: u32,
+    pass: bool,
 }
 
 const BUCKETS: [&str; 7] = [
@@ -182,6 +186,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                     .iter()
                                     .map(|d| (d.dimension, d.value.get(), d.confidence.get()))
                                     .collect(),
+                                minors: score.faults.minors,
+                                majors: score.faults.majors,
+                                pass: score.faults.verdict == Verdict::Pass,
                             });
                         }
                     }
@@ -237,8 +244,21 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
-    // Per-bucket means + within-bucket Spearman.
-    eprintln!("\nper-bucket   n     mean   p50    within-bucket rho(value, tier)");
+    // FM-1 severity: do the fault counts / the driving-test verdict track rank?
+    let minors: Vec<f32> = rows.iter().map(|r| r.minors as f32).collect();
+    let majors: Vec<f32> = rows.iter().map(|r| r.majors as f32).collect();
+    let passed = rows.iter().filter(|r| r.pass).count();
+    eprintln!("\n=== FM-1 severity (Major/Minor faults, driving-test verdict) ===");
+    eprintln!("  minors vs tier : {}", show(spearman(&minors, &tiers)));
+    eprintln!("  majors vs tier : {}", show(spearman(&majors, &tiers)));
+    eprintln!(
+        "  overall verdict: {passed}/{} pass ({:.1}%)",
+        rows.len(),
+        passed as f32 / rows.len().max(1) as f32 * 100.0
+    );
+
+    // Per-bucket means + within-bucket Spearman + fault profile.
+    eprintln!("\nper-bucket   n     mean   p50    within-rho   minors  majors  %pass");
     for b in BUCKETS {
         let sub: Vec<&Row> = rows.iter().filter(|r| r.bucket == b).collect();
         if sub.is_empty() {
@@ -252,13 +272,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             &sub.iter().map(|r| r.value).collect::<Vec<_>>(),
             &sub.iter().map(|r| r.tier).collect::<Vec<_>>(),
         );
+        let n = sub.len() as f32;
+        let mean_minors = sub.iter().map(|r| r.minors as f32).sum::<f32>() / n;
+        let mean_majors = sub.iter().map(|r| r.majors as f32).sum::<f32>() / n;
+        let pass_pct = sub.iter().filter(|r| r.pass).count() as f32 / n * 100.0;
         eprintln!(
-            "  {:<16} {:<5} {:>5.1}  {:>5.1}   {}",
+            "  {:<16} {:<5} {:>5.1}  {:>5.1}   {:>7}   {:>6.1}  {:>6.2}  {:>5.1}",
             b,
             sub.len(),
             mean,
             p50,
-            show(within)
+            show(within),
+            mean_minors,
+            mean_majors,
+            pass_pct
         );
     }
     Ok(())

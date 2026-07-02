@@ -167,11 +167,93 @@ per-bucket        n     mean    p50   within-bucket ρ      v0 mean
 
 ## Remaining work this baseline motivates
 
-- **FM-1 severity model**: Major faults (the F17 last-man dive that
-  concedes, FM-2's 0-boost corner flip) should gate/cap rather than
-  average — the guide's 15-minor/1-major framing is a different aggregate
-  shape than the current weighted mean.
+- **FM-1 severity model** *(shipped as `pcfg-v1.1` — next section)*: Major
+  faults (the F17 last-man dive that concedes, FM-2's 0-boost corner flip)
+  should gate/cap rather than average — the guide's 15-minor/1-major framing
+  is a different aggregate shape than the current weighted mean.
 - The **five unbuilt dimensions**, now on the episode primitive.
 - **Threshold calibration** (enter/exit radii, double radius, empty-boost)
   against labeled "very Pacifist vs very not" replays, per the design doc —
   rank is deliberately *not* the calibration target given (2).
+
+---
+
+# v1.1 (`pcfg-v1.1`): the FM-1 severity model — re-run results
+
+The guide's aggregate is not a weighted mean (criteria spec FM-1: *"up to 15
+Minor faults; one Major fault = instant failure"*), so v1.1 adds a severity
+ledger alongside the dimension averages, classified from the same engagement
+episodes the v1 dimensions score:
+
+- **Major** — the FM-2-shaped compound dive, all three conditions at the
+  commit: last man (no teammate goalside) + a ball the team does not own +
+  an empty tank. One Major fails the verdict and **caps the headline value
+  at 40** (the cap is an invented threshold — the guide only says "instant
+  failure" — and is documented as such in `SeverityConfig`).
+- **Minor** — the single-condition faults: F17 (fueled last-man dive), F4
+  (covered-but-empty engagement), F9 (double-commit). Minors accumulate
+  toward the guide's allowance of 15 and flip the verdict past it, but
+  deliberately do **not** touch the number — the dimension averages already
+  price each penalised episode in, so subtracting again would double-count.
+
+Identical harness, gate, and join (same 3,548 rank-joined players):
+
+```
+pacifist value vs tier : ρ = +0.069     (v1: +0.068 — the Major cap costs no rank signal)
+
+FM-1 severity (Major/Minor faults, driving-test verdict)
+  minors vs tier : ρ = −0.023
+  majors vs tier : ρ = −0.121
+  overall verdict: 224/3548 pass (6.3%)
+
+per-bucket        n     mean    p50   within-ρ   minors  majors   %pass
+  bronze          90    44.6   40.0    +0.095     33.7    2.13     5.6
+  silver          218   49.7   40.0    −0.036     29.1    1.16    12.8
+  gold            416   49.8   40.0    +0.062     30.3    1.14     6.0
+  platinum        444   52.1   40.0    +0.077     27.9    0.82     8.3
+  diamond         680   53.9   58.9    +0.071     28.1    0.72     6.2
+  champion        847   53.1   53.9    −0.003     28.0    0.74     4.7
+  grand-champion  853   52.0   50.9    −0.002     29.6    0.73     5.5
+```
+
+(The per-dimension rows are unchanged from v1 to the third decimal — the
+severity pass reads the same episodes without touching the extractors, so
+this is the expected consistency check.)
+
+## Reading the v1.1 result
+
+1. **The Major count is the strongest single severity signal the instrument
+   has produced.** Majors-vs-tier ρ = −0.121 (more rank, fewer Majors), and
+   the per-bucket means fall ~3× from Bronze to Diamond (2.13 → 0.72 per
+   match) — then go *flat* through GC. The FM-2 compound dive is a
+   low-ladder failure that bottoms out at Diamond; the residual ~0.7 per
+   match above it is consistent with the rank series' finding that top
+   brackets challenge as last man deliberately. Minors, by contrast, carry
+   almost nothing (−0.023): as raw per-match counts they are dominated by
+   how often a player engages at all, which is the exposure the dimension
+   *rates* already normalize away.
+
+2. **The driving-test verdict at guide strictness is a near-universal
+   fail.** 6.3% of the ladder passes, `%pass` has no rank structure (Silver's
+   12.8% is the maximum, Champion's 4.7% the minimum), and the average
+   player carries ~28–34 minors — roughly double the allowance — so the
+   verdict usually fails on minors alone before any Major lands. Two honest
+   readings: as a *discriminator* the verdict is useless, and the small pass
+   set is confounded with exposure (few episodes → few chances to fault);
+   as a *product statement* it is exactly the guide's point — almost nobody
+   on the ranked ladder plays inside the Pacifist system's tolerances for a
+   full match. It belongs in the coaching read ("FAIL — 31 minors, 2
+   majors"), not in a leaderboard.
+
+3. **The cap compresses the bottom of the ladder onto 40.0 exactly.** The
+   Bronze-through-Platinum medians sit *at* the cap — the median player
+   there carries at least one Major — while Diamond and above escape it
+   (medians 58.9 / 53.9 / 50.9). Despite that compression, the headline ρ
+   is unchanged (+0.068 → +0.069) and the inverted U persists (peak at
+   Diamond, dip at GC), so the severity shape adds the verdict and the
+   fault ledger without costing the v1 baseline anything.
+
+What remains is unchanged from v1: the five unbuilt dimensions on the
+episode primitive, and threshold calibration against labeled-adherence
+replays — now including `major_cap` and whether the 15-minor allowance
+should scale with match length.

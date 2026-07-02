@@ -211,11 +211,14 @@ pub mod bridge;
 pub mod context;
 pub mod metrics;
 pub mod scoring;
+pub mod severity;
 
 /// Version stamp for the extractor semantics + default thresholds, bumped when
 /// either changes so corpus baselines are comparable (`pcfg-v0` was the
-/// per-frame-fraction rubric measured in `docs/pacifist-score-validation.md`).
-pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v1";
+/// per-frame-fraction rubric, `pcfg-v1` the per-opportunity rework — both
+/// measured in `docs/pacifist-score-validation.md`; `pcfg-v1.1` adds the FM-1
+/// severity ledger, verdict, and Major cap).
+pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v1.1";
 
 // ---------------------------------------------------------------------------
 // Match format

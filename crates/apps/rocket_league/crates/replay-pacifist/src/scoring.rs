@@ -23,6 +23,7 @@ use crate::metrics::{
     BoostEconomy, CommitmentDiscipline, Confidence, DimensionId, DimensionScore, Evidence,
     MetricExtractor, OverExtension, Score,
 };
+use crate::severity::{self, FaultSummary, SeverityConfig};
 use crate::{PlayerId, Timeline};
 
 // ---------------------------------------------------------------------------
@@ -91,16 +92,38 @@ pub struct DimensionBreakdown {
 /// `value` is `None` when no weighted dimension had any backing evidence
 /// (`Σ(w·c) == 0`) — there is no honest number to report, so we don't invent one.
 /// `confidence` is the weighted coverage of the rubric. `breakdown` is sorted by
-/// `influence`, highest first.
+/// `influence`, highest first. `faults` is the FM-1 severity ledger — counts,
+/// the driving-test verdict, and the timestamped fault list; when a Major is
+/// present the headline `value` is capped (see [`aggregate_with_faults`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacifistScore {
     pub value: Option<Score>,
     pub confidence: Confidence,
     pub breakdown: Vec<DimensionBreakdown>,
+    pub faults: FaultSummary,
 }
 
-/// Blend per-dimension scores into a [`PacifistScore`] using `config`'s weights.
+/// Blend per-dimension scores into a [`PacifistScore`] using `config`'s weights,
+/// with an empty fault ledger (verdict `Pass`, no cap). Callers that ran a
+/// severity pass use [`aggregate_with_faults`] instead.
 pub fn aggregate(scores: Vec<DimensionScore>, config: &ScoringConfig) -> PacifistScore {
+    aggregate_with_faults(scores, config, FaultSummary::empty(), f32::INFINITY)
+}
+
+/// Blend per-dimension scores and attach the FM-1 fault ledger.
+///
+/// The severity model changes the *shape* of the aggregate, per the guide:
+/// **Majors cap** the headline value at `major_cap` (an instant failure should
+/// never read as a good match, however clean the averages); **Minors do not**
+/// touch the number — the dimension averages already price each penalised
+/// episode in, so subtracting again would double-count. Minors show up in the
+/// counts and the verdict instead.
+pub fn aggregate_with_faults(
+    scores: Vec<DimensionScore>,
+    config: &ScoringConfig,
+    faults: FaultSummary,
+    major_cap: f32,
+) -> PacifistScore {
     let mut sum_w = 0.0_f32;
     let mut sum_wc = 0.0_f32;
     let mut sum_wcv = 0.0_f32;
@@ -125,7 +148,14 @@ pub fn aggregate(scores: Vec<DimensionScore>, config: &ScoringConfig) -> Pacifis
         })
         .collect();
 
-    let value = (sum_wc > 0.0).then(|| Score::new(sum_wcv / sum_wc));
+    let value = (sum_wc > 0.0).then(|| {
+        let mean = sum_wcv / sum_wc;
+        Score::new(if faults.majors > 0 {
+            mean.min(major_cap)
+        } else {
+            mean
+        })
+    });
     let confidence = if sum_w > 0.0 {
         Confidence::new(sum_wc / sum_w)
     } else {
@@ -155,6 +185,7 @@ pub fn aggregate(scores: Vec<DimensionScore>, config: &ScoringConfig) -> Pacifis
         value,
         confidence,
         breakdown,
+        faults,
     }
 }
 
@@ -170,10 +201,12 @@ pub struct Analyzer {
     extractors: Vec<Box<dyn MetricExtractor>>,
     config: ScoringConfig,
     context_config: ContextConfig,
+    severity: SeverityConfig,
 }
 
 impl Analyzer {
-    /// Build an analyzer from an explicit set of extractors and configs.
+    /// Build an analyzer from an explicit set of extractors and configs, with
+    /// the default severity thresholds (override via [`Analyzer::with_severity`]).
     pub fn new(
         extractors: Vec<Box<dyn MetricExtractor>>,
         config: ScoringConfig,
@@ -183,7 +216,14 @@ impl Analyzer {
             extractors,
             config,
             context_config,
+            severity: SeverityConfig::default(),
         }
+    }
+
+    /// Replace the FM-1 severity thresholds.
+    pub fn with_severity(mut self, severity: SeverityConfig) -> Self {
+        self.severity = severity;
+        self
     }
 
     /// The context-derivation config, so a caller can derive a matching
@@ -199,16 +239,20 @@ impl Analyzer {
         self.score_player_in(&ctx, player)
     }
 
-    /// Run every extractor against a pre-derived context for `player` and
-    /// aggregate. Use this to score several players without re-deriving the
-    /// context each time.
+    /// Run every extractor against a pre-derived context for `player`, run the
+    /// FM-1 severity pass, and aggregate. Use this to score several players
+    /// without re-deriving the context each time.
     pub fn score_player_in(&self, ctx: &MatchContext, player: PlayerId) -> PacifistScore {
         let scores = self
             .extractors
             .iter()
             .map(|extractor| extractor.extract(ctx, player))
             .collect();
-        aggregate(scores, &self.config)
+        let ledger = FaultSummary::from_faults(
+            severity::faults(ctx, player, &self.severity),
+            self.severity.minor_allowance,
+        );
+        aggregate_with_faults(scores, &self.config, ledger, self.severity.major_cap)
     }
 }
 
@@ -426,5 +470,79 @@ mod tests {
         // Empty timeline: nothing applies, so no value, but all three are reported.
         assert_eq!(result.value, None);
         assert_eq!(result.breakdown.len(), 3);
+        assert_eq!(result.faults, FaultSummary::empty(), "no play, no faults");
+    }
+
+    // -- FM-1 severity shape ---------------------------------------------------
+
+    use crate::severity::{Fault, Severity, Verdict};
+
+    fn ledger(minors: u32, majors: u32) -> FaultSummary {
+        let faults = (0..minors)
+            .map(|i| Fault {
+                t: i as f32,
+                severity: Severity::Minor,
+                criterion: "F17",
+                detail: String::new(),
+            })
+            .chain((0..majors).map(|i| Fault {
+                t: 100.0 + i as f32,
+                severity: Severity::Major,
+                criterion: "FM-2",
+                detail: String::new(),
+            }))
+            .collect();
+        FaultSummary::from_faults(faults, 15)
+    }
+
+    #[test]
+    fn a_major_caps_the_headline_value() {
+        let cfg = config(&[(DimensionId::OverExtension, 1.0)]);
+        let result = aggregate_with_faults(
+            vec![score(DimensionId::OverExtension, 90.0, 1.0)],
+            &cfg,
+            ledger(0, 1),
+            40.0,
+        );
+        assert_eq!(result.value, Some(Score::new(40.0)), "capped, not averaged");
+        assert_eq!(result.faults.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn a_major_below_the_cap_leaves_the_value_alone() {
+        let cfg = config(&[(DimensionId::OverExtension, 1.0)]);
+        let result = aggregate_with_faults(
+            vec![score(DimensionId::OverExtension, 25.0, 1.0)],
+            &cfg,
+            ledger(0, 1),
+            40.0,
+        );
+        assert_eq!(result.value, Some(Score::new(25.0)), "min, not floor");
+    }
+
+    #[test]
+    fn minors_never_touch_the_number_only_the_verdict() {
+        let cfg = config(&[(DimensionId::OverExtension, 1.0)]);
+        let result = aggregate_with_faults(
+            vec![score(DimensionId::OverExtension, 90.0, 1.0)],
+            &cfg,
+            ledger(16, 0),
+            40.0,
+        );
+        assert_eq!(
+            result.value,
+            Some(Score::new(90.0)),
+            "already priced into the dimension averages"
+        );
+        assert_eq!(result.faults.verdict, Verdict::Fail, "16 > the allowance");
+    }
+
+    #[test]
+    fn plain_aggregate_carries_an_empty_passing_ledger() {
+        let cfg = config(&[(DimensionId::OverExtension, 1.0)]);
+        let result = aggregate(vec![score(DimensionId::OverExtension, 90.0, 1.0)], &cfg);
+        assert_eq!(result.value, Some(Score::new(90.0)));
+        assert_eq!(result.faults.verdict, Verdict::Pass);
+        assert!(result.faults.faults.is_empty());
     }
 }
