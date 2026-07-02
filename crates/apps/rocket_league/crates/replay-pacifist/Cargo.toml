@@ -1,0 +1,16 @@
+[package]
+name = "replay-pacifist"
+version = "0.1.0"
+edition = "2021"
+description = "Pacifist System scoring over the canonical match model (consolidated from PacifistScore)"
+
+[lib]
+name = "replay_pacifist"
+path = "src/lib.rs"
+
+[[bin]]
+name = "replay-pacifist"
+path = "src/main.rs"
+
+[dependencies]
+replay-analyzer = { path = ".." }
