@@ -3,6 +3,7 @@ name = "replay-pacifist"
 version = "0.1.0"
 edition = "2021"
 description = "Pacifist System scoring over the canonical match model (consolidated from PacifistScore)"
+default-run = "replay-pacifist"
 
 [lib]
 name = "replay_pacifist"
@@ -12,5 +13,19 @@ path = "src/lib.rs"
 name = "replay-pacifist"
 path = "src/main.rs"
 
+# Corpus validation harness — needs the scoring crate's rank-join/Spearman/
+# coverage-gate primitives, so it is feature-gated to keep the lib lean:
+#   cargo run --release -p replay-pacifist --features corpus-validate --bin validate_pacifist
+[[bin]]
+name = "validate_pacifist"
+path = "src/bin/validate_pacifist.rs"
+required-features = ["corpus-validate"]
+
+[features]
+corpus-validate = ["dep:replay-scoring", "dep:serde", "dep:serde_json"]
+
 [dependencies]
 replay-analyzer = { path = ".." }
+replay-scoring = { path = "../scoring", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }

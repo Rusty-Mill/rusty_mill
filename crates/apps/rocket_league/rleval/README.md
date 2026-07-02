@@ -43,8 +43,10 @@ cargo run -p rleval-app -- analyze game.replay --out game.html   # one-shot bund
   Pacifist 2v2 coaching system — 3 of 8 dimensions implemented (over-extension,
   commitment discipline, boost economy) over per-frame role/possession context,
   bridged from the canonical model (`replay-pacifist`). See
-  [`docs/pacifist-score-design.md`](docs/pacifist-score-design.md) and
-  [`docs/pacifist-assessment-criteria.md`](docs/pacifist-assessment-criteria.md).
+  [`docs/pacifist-score-design.md`](docs/pacifist-score-design.md),
+  [`docs/pacifist-assessment-criteria.md`](docs/pacifist-assessment-criteria.md),
+  and [`docs/pacifist-score-validation.md`](docs/pacifist-score-validation.md)
+  (corpus ground-truth baseline).
 - **`bc-clone`** — a reverse-engineered **clone of ballchasing.com's analyzer**:
   emits the exact `GET /replays/{id}` JSON schema (`blue`/`orange` → per-player
   `core`/`boost`/`movement`/`positioning`/`demo`) from a replay, plus a
