@@ -7,14 +7,19 @@ of it (no parsing, no I/O), so each is deterministic and golden-testable.
 
 For day-to-day use the **`rleval` app** (the `app` crate) ties the whole
 workspace into **one binary with a web UI** — drop a `.replay` and get the 3D
-viewer, the scoring report, the skills table and the value-impact analysis side
-by side, all computed in-process (no subprocess shelling). The individual crate
-CLIs below remain for scripting and golden tests.
+viewer, the scoring report, the skills table, the value-impact analysis, and the
+Pacifist system-adherence score side by side, all computed in-process (no
+subprocess shelling). The individual crate CLIs below remain for scripting and
+golden tests.
 
 ```sh
 cargo run -p rleval-app -- serve          # then open http://127.0.0.1:8080
 cargo run -p rleval-app -- analyze game.replay --out game.html   # one-shot bundle
 ```
+
+See [`docs/app-guide.md`](docs/app-guide.md) for the full run/use/calibrate
+walkthrough, including getting the calibration corpus and refitting each
+engine.
 
 ## Workspace crates
 
@@ -40,9 +45,10 @@ cargo run -p rleval-app -- analyze game.replay --out game.html   # one-shot bund
   scoring rubric (two-track reconciliation).
 - **`pacifist`** — **Pacifist System scoring** (consolidated from the standalone
   PacifistScore repo): a confidence-weighted, dimension-based rubric of the
-  Pacifist 2v2 coaching system — 3 of 8 dimensions implemented (over-extension,
-  commitment discipline, boost economy) over per-frame role/possession context,
-  bridged from the canonical model (`replay-pacifist`). See
+  Pacifist 2v2 coaching system — all 8 design dimensions implemented on a
+  shared engagement-episode primitive, plus an FM-1 Major/Minor severity ledger
+  and driving-test verdict, bridged from the canonical model
+  (`replay-pacifist`). See
   [`docs/pacifist-score-design.md`](docs/pacifist-score-design.md),
   [`docs/pacifist-assessment-criteria.md`](docs/pacifist-assessment-criteria.md),
   and [`docs/pacifist-score-validation.md`](docs/pacifist-score-validation.md)
