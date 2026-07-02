@@ -750,17 +750,31 @@ impl MetricExtractor for ChallengeTiming {
 // ---------------------------------------------------------------------------
 
 /// Penalises drifting cover: for each of the teammate's engagement episodes at
-/// which the player was the 2nd man, the player is penalised if they were
-/// goalside of the ball for less than `min_goalside_share` of the episode.
-/// Distinct from [`CommitmentDiscipline`]: that punishes *joining* the
-/// challenge, this punishes covering it from the wrong side of the ball — a
-/// patient but upfield 2nd man passes the first and fails this one.
+/// which the player was the 2nd man, the player is penalised if either
+///
+/// - they were goalside of the ball for less than `min_goalside_share` of the
+///   episode (the wrong side of the ball to help), or
+/// - their mean distance to the engaging teammate exceeded `max_trail_uu` —
+///   the guide's "string theory" spacing (O2-1/O2-2: trail the 1st man by a
+///   couple of pad-lengths, "close enough that the imaginary string stays
+///   tight… not so far it snaps") broke, leaving no immediate step-in if the
+///   challenge is lost.
+///
+/// `max_trail_uu` is a documented approximation of the guide's pad-length
+/// language, not a literal unit conversion — like the engagement radii, it is
+/// an uncalibrated starting point. Distinct from [`CommitmentDiscipline`]:
+/// that punishes *joining* the challenge (too close), this punishes covering
+/// it from the wrong side or too loose a line — a patient but upfield or
+/// over-detached 2nd man passes the first and fails this one.
 #[derive(Debug, Clone, Copy)]
 pub struct ShadowQuality {
     pub engagement: EngagementConfig,
     /// Minimum fraction of the teammate's episode the player must spend
     /// goalside of the ball.
     pub min_goalside_share: f32,
+    /// Mean distance (uu) to the engaging teammate beyond which the cover
+    /// man's string-theory spacing has snapped.
+    pub max_trail_uu: f32,
     /// Teammate episodes at which confidence reaches 1.0.
     pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
@@ -772,6 +786,7 @@ impl Default for ShadowQuality {
         Self {
             engagement: EngagementConfig::default(),
             min_goalside_share: 0.5,
+            max_trail_uu: 4000.0,
             saturation_episodes: 12.0,
             max_evidence: 25,
         }
@@ -807,21 +822,37 @@ impl MetricExtractor for ShadowQuality {
                 if me.role != Role::SecondMan {
                     continue;
                 }
-                let (mut present, mut goalside) = (0usize, 0usize);
+                let (mut present, mut goalside, mut trail_sum) = (0usize, 0usize, 0.0_f32);
                 for idx in ep.enter_idx..=ep.exit_idx {
-                    if let Some(f) = ctx.frame(idx).and_then(|(_, f)| f.player(player).copied()) {
-                        present += 1;
-                        goalside += usize::from(f.goalside);
+                    let Some((snapshot, frame)) = ctx.frame(idx) else {
+                        continue;
+                    };
+                    let Some(f) = frame.player(player) else {
+                        continue;
+                    };
+                    present += 1;
+                    goalside += usize::from(f.goalside);
+                    let subject = snapshot.players.iter().find(|p| p.player == player);
+                    let teammate = snapshot.players.iter().find(|p| p.player == mate);
+                    if let (Some(subject), Some(teammate)) = (subject, teammate) {
+                        trail_sum += subject.pose.position.distance(teammate.pose.position);
                     }
                 }
                 if present == 0 {
                     continue; // demolished for the whole episode — no line to hold
                 }
                 opportunities += 1;
-                if (goalside as f32 / present as f32) < self.min_goalside_share {
+                let goalside_share = goalside as f32 / present as f32;
+                let mean_trail = trail_sum / present as f32;
+                if goalside_share < self.min_goalside_share {
                     penalised.push(Evidence {
                         t: ep.t_enter,
                         detail: "covered the challenge from upfield of the ball".into(),
+                    });
+                } else if mean_trail > self.max_trail_uu {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "string theory spacing snapped: too far back to step in".into(),
                     });
                 }
             }
@@ -1340,8 +1371,10 @@ mod tests {
 
     #[test]
     fn goalside_cover_holds_the_line() {
+        // Goalside of the ball and within the string-theory trail band
+        // (~3256uu from the engaging teammate at (0,2600)).
         let timeline: Timeline = (0..10)
-            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, -2000.0))
+            .map(|i| teammate_engaged(i as f32 * 0.1, 600.0, -600.0))
             .collect();
         let result = ShadowQuality::default().extract(&ctx(&timeline), PlayerId(0));
         assert_eq!(result.value, Score::new(100.0));
@@ -1360,6 +1393,19 @@ mod tests {
         assert_eq!(shadow.value, Score::new(0.0));
         let commitment = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(0));
         assert_eq!(commitment.value, Score::new(100.0));
+    }
+
+    #[test]
+    fn hanging_back_too_far_breaks_the_string() {
+        // Goalside (so the first condition passes clean) but ~8621uu from the
+        // engaging teammate — the O2-1/O2-2 trail band snapped.
+        let timeline: Timeline = (0..10)
+            .map(|i| teammate_engaged(i as f32 * 0.1, 600.0, -6000.0))
+            .collect();
+        let result = ShadowQuality::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.evidence[0].detail.contains("string theory"));
     }
 
     // -- shot selection ------------------------------------------------------------

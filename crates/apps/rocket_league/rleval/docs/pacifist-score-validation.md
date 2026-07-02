@@ -1,4 +1,4 @@
-# Pacifist score — corpus validation (v0 baseline → v2)
+# Pacifist score — corpus validation (v0 baseline → v2.2)
 
 The first ground-truth run of the consolidated Pacifist analyzer
 (`replay-pacifist`, ported in the PacifistScore consolidation): the three
@@ -397,3 +397,56 @@ Diamond peak 57.6) with the same inverted-U shape and cap dynamics.
 Remaining from the v2 list: line-quality measures for positioning fit and
 shadow quality, threshold calibration against labeled-adherence replays,
 and surfacing the score in the app.
+
+---
+
+# v2.2: shadow quality gets a line-quality fault (guide-grounded, not calibrated)
+
+The v2 diagnosis for shadow quality's flatness (+0.028) was that a goalside
+boolean restates a ladder invariant. The fix doesn't need labeled-replay
+calibration — the criteria doc's mapping table already carries a
+guide-stated number for exactly this gap: O2-1/O2-2 ("string theory")
+specify that the 2nd man should trail the engaging teammate by a couple of
+pad-lengths — close enough to step in immediately, far enough not to
+double-commit. Shadow quality now penalises a **second, independent**
+failure mode alongside the goalside test: mean distance to the engaging
+teammate exceeding `max_trail_uu` (4000uu, a documented approximation of
+the guide's pad-length language, not a literal unit conversion — the same
+status as the engagement radii). A patient-but-detached 2nd man now fails
+on this condition even when goalside.
+
+Identical harness; every other dimension reproduces v2.1 exactly:
+
+```
+pacifist value vs tier : ρ = +0.103     (v2.1: +0.085 — best yet)
+
+  shadow-quality            +0.175    3548     (v2.1: +0.028)
+
+per-bucket        n     mean    p50   within-ρ    v2.1 mean
+  bronze          90    45.9   40.0    +0.083        46.4
+  silver          218   51.6   40.0    -0.051        52.7
+  gold            416   51.9   40.0    +0.063        52.8
+  platinum        444   54.5   40.0    +0.091        55.6
+  diamond         680   56.4   65.9    +0.078        57.6
+  champion        847   55.8   62.0    +0.016        56.8
+  grand-champion  853   55.6   62.5    +0.034        56.3
+```
+
+Shadow quality moves from the flattest dimension to the second-strongest
+(+0.175, behind only rotation-soundness's +0.209) — a 6× gain from one
+guide-grounded condition. Holding line *distance*, not just line *side*,
+turns out to carry real rank signal: the goalside boolean was catching
+players parked on the wrong side of the ball, but missing the more common
+mid-ladder failure of a 2nd man who is technically goalside yet too
+detached to react. Headline rises to +0.103, the inverted-U shape and cap
+dynamics unchanged.
+
+Positioning fit is still flat (+0.004) and still needs its own
+line-quality measure; unlike shadow quality's O2-1/O2-2, the design doc's
+mapping table gives positioning fit's analogous guide numbers (D2-25's
+"~2 car lengths off centre" hybrid-shadow offset) in terms of field
+landmarks (centre line, no-man's-land edge, goal line) that
+`FieldGeometry` does not yet model beyond `goal_y` — a larger, riskier
+lift than shadow quality's direct teammate-to-teammate distance, left for
+a follow-up. Threshold calibration against labeled-adherence replays
+remains the standing item everything else defers to.

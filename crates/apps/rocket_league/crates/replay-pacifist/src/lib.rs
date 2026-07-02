@@ -219,8 +219,9 @@ pub mod severity;
 /// the FM-1 severity ledger — all measured in
 /// `docs/pacifist-score-validation.md`; `pcfg-v2` completes the eight-dimension
 /// rubric on the episode primitive; `pcfg-v2.1` re-grounds challenge timing in
-/// touch-stream race outcomes).
-pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v2.1";
+/// touch-stream race outcomes; `pcfg-v2.2` adds a guide-grounded trail-distance
+/// fault to shadow quality).
+pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v2.2";
 
 // ---------------------------------------------------------------------------
 // Match format
