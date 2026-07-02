@@ -16,6 +16,11 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_analyzer::field::is_standard_geometry;
 
+use replay_pacifist::bridge as pacifist_bridge;
+use replay_pacifist::context::MatchContext as PacifistContext;
+use replay_pacifist::scoring::Analyzer as PacifistAnalyzer;
+use replay_pacifist::severity::{Severity, Verdict};
+
 use replay_scoring::heatmap::{occupancy, render_svg, touch_points};
 use replay_scoring::lobby::assemble;
 use replay_scoring::render::html as scoring_html;
@@ -57,6 +62,9 @@ pub struct Analysis {
     /// Core scoreboard stats per player (header truth + recomputed shooting %),
     /// for the Stats tab's Core section.
     pub core: Vec<CorePlayerStats>,
+    /// Pacifist system-adherence scores per player (`replay-pacifist`) — the
+    /// eight-dimension rubric plus the FM-1 fault ledger and verdict.
+    pub pacifist: PacifistSummary,
 
     // ---- self-contained embeddable views ----
     /// The full 3D replay viewer as a self-contained (offline) HTML document.
@@ -87,6 +95,51 @@ pub struct ImpactSummary {
     pub base_rate: f32,
     pub log_loss: f32,
     pub players: Vec<PlayerValue>,
+}
+
+/// The Pacifist tab's data: config version + one row per player.
+#[derive(Serialize)]
+pub struct PacifistSummary {
+    /// `PACIFIST_CONFIG_VERSION` — surfaced so the UI can label the rubric.
+    pub config_version: String,
+    pub players: Vec<PacifistPlayer>,
+}
+
+/// One player's Pacifist score, verdict, and breakdown, flattened for the UI.
+#[derive(Serialize)]
+pub struct PacifistPlayer {
+    pub player: String,
+    pub team: i32,
+    /// Headline 0–100 (Major-capped); `None` when nothing applied.
+    pub value: Option<f32>,
+    pub confidence: f32,
+    /// FM-1 driving-test verdict: `"PASS"` / `"FAIL"`.
+    pub verdict: String,
+    pub minors: u32,
+    pub majors: u32,
+    /// The Major faults only — each one is an instant failure, so each is
+    /// worth a timestamped line in the UI. Minors surface as the count.
+    pub major_faults: Vec<PacifistFault>,
+    pub dimensions: Vec<PacifistDimension>,
+}
+
+/// A timestamped fault, labeled by its criteria-spec row (e.g. `"FM-2"`).
+#[derive(Serialize)]
+pub struct PacifistFault {
+    pub t: f32,
+    pub criterion: String,
+    pub detail: String,
+}
+
+/// One dimension row of a player's breakdown.
+#[derive(Serialize)]
+pub struct PacifistDimension {
+    pub label: String,
+    pub value: f32,
+    pub confidence: f32,
+    /// Share of the headline this dimension drove, `0.0..=1.0`.
+    pub influence: f32,
+    pub evidence_count: usize,
 }
 
 /// Load the rank-relative norms artifact (`rank_norms.json`) from a corpus dir,
@@ -182,7 +235,68 @@ pub fn analyze(
         .collect();
     core.sort_by(|a, b| a.team.cmp(&b.team).then(a.pri.cmp(&b.pri)));
 
-    // 6. 3D scene with every overlay (roles / win-prob / impact / player stats),
+    // 6. Pacifist system-adherence scores — bridge the canonical model into the
+    //    pacifist domain (touch-decoded possession, shots, touches) and run the
+    //    eight-dimension rubric + FM-1 severity for every rostered player.
+    let pacifist = {
+        let timeline = pacifist_bridge::timeline_from_canonical(&canonical);
+        let analyzer = PacifistAnalyzer::default();
+        let spans = pacifist_bridge::possession_spans(&canonical);
+        let pctx =
+            PacifistContext::derive_with_possession(&timeline, analyzer.context_config(), &spans)
+                .with_shots(pacifist_bridge::shots(&canonical))
+                .with_touches(pacifist_bridge::touches(&canonical));
+        let mut players: Vec<PacifistPlayer> = replay_pacifist::roster(&timeline)
+            .iter()
+            .map(|entry| {
+                let score = analyzer.score_player_in(&pctx, entry.player);
+                PacifistPlayer {
+                    player: entry.name.clone().unwrap_or_else(|| "—".into()),
+                    team: match entry.team {
+                        replay_pacifist::Team::Blue => 0,
+                        replay_pacifist::Team::Orange => 1,
+                    },
+                    value: score.value.map(|v| v.get()),
+                    confidence: score.confidence.get(),
+                    verdict: match score.faults.verdict {
+                        Verdict::Pass => "PASS".into(),
+                        Verdict::Fail => "FAIL".into(),
+                    },
+                    minors: score.faults.minors,
+                    majors: score.faults.majors,
+                    major_faults: score
+                        .faults
+                        .faults
+                        .iter()
+                        .filter(|f| f.severity == Severity::Major)
+                        .map(|f| PacifistFault {
+                            t: f.t,
+                            criterion: f.criterion.to_string(),
+                            detail: f.detail.clone(),
+                        })
+                        .collect(),
+                    dimensions: score
+                        .breakdown
+                        .iter()
+                        .map(|d| PacifistDimension {
+                            label: d.dimension.label().to_string(),
+                            value: d.value.get(),
+                            confidence: d.confidence.get(),
+                            influence: d.influence,
+                            evidence_count: d.evidence.len(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        players.sort_by(|a, b| a.team.cmp(&b.team).then_with(|| a.player.cmp(&b.player)));
+        PacifistSummary {
+            config_version: replay_pacifist::PACIFIST_CONFIG_VERSION.to_string(),
+            players,
+        }
+    };
+
+    // 7. 3D scene with every overlay (roles / win-prob / impact / player stats),
     //    serialized into a self-contained offline viewer document.
     let mut scene = build_scene(&canonical, &skill_report.instances);
     attach_roles(&mut scene, &canonical, &score_cfg);
@@ -207,6 +321,7 @@ pub fn analyze(
         impact,
         bc_stats,
         core,
+        pacifist,
         viewer_html,
         scoring_html,
     })

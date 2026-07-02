@@ -209,6 +209,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       <button data-tab="scoring">Scoring</button>
       <button data-tab="skills">Skills</button>
       <button data-tab="impact">Impact</button>
+      <button data-tab="pacifist">Pacifist</button>
     </nav>
     <div class="tab active" id="tab-overview"></div>
     <div class="tab" id="tab-stats"></div>
@@ -216,6 +217,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <div class="tab" id="tab-scoring"></div>
     <div class="tab" id="tab-skills"></div>
     <div class="tab" id="tab-impact"></div>
+    <div class="tab" id="tab-pacifist"></div>
   </div>
 </div>
 
@@ -304,6 +306,7 @@ function render() {
   renderStats(d);
   renderSkills(d);
   renderImpact(d);
+  renderPacifist(d);
   // The heavy iframes are filled lazily on first tab open.
   viewerLoaded = scoringLoaded = false;
   $("tab-viewer").innerHTML = $("tab-scoring").innerHTML = "";
@@ -488,6 +491,72 @@ function renderImpact(d) {
   $("tab-impact").innerHTML = cardTable(
     `Value model (ΔV): each player's summed per-touch swing in P(their team scores next). Trained in-process on this match; an independent cross-check on the scoring rubric. Base rate ${fmt(d.impact.base_rate, 3)}, log-loss ${fmt(d.impact.log_loss, 3)}.`,
     head, rows, "No value data.", 5);
+}
+
+function renderPacifist(d) {
+  const pac = d.pacifist || { players: [] };
+  const players = pac.players || [];
+  const gap = `<div style="height:16px"></div>`;
+
+  // Headline: score + FM-1 verdict per player.
+  const sumHead = `<th>Player</th><th>Team</th><th class="num">Pacifist score</th>
+    <th class="num">Confidence</th><th>Verdict</th><th class="num">Minors</th><th class="num">Majors</th>`;
+  const sumBody = players.map(p => {
+    const val = p.value == null
+      ? `<span class="muted">—</span>`
+      : `<div class="big">${fmt(p.value)}</div><div class="meter"><i style="width:${clampPct(p.value)}%"></i></div>`;
+    const verdict = p.verdict === "PASS"
+      ? `<b class="pos">PASS</b>`
+      : `<b class="neg">FAIL</b>`;
+    return `<tr>
+      <td>${nameCell(p.team, p.player)}</td>
+      <td><span class="badge t${p.team}">${teamName(p.team)}</span></td>
+      <td class="num">${val}</td>
+      <td class="num">${fmt(p.confidence * 100, 0)}%</td>
+      <td>${verdict}</td>
+      <td class="num">${p.minors}</td>
+      <td class="num ${p.majors > 0 ? "neg" : ""}">${p.majors}</td>
+    </tr>`;
+  }).join("");
+
+  // Dimension matrix: one column per rubric dimension, zero-confidence cells dimmed.
+  const dims = [];
+  players.forEach(p => (p.dimensions || []).forEach(x => { if (!dims.includes(x.label)) dims.push(x.label); }));
+  const dimHead = `<th>Player</th><th>Team</th>` + dims.map(c => `<th class="num">${esc(c)}</th>`).join("");
+  const dimBody = players.map(p => {
+    const byLabel = {}; (p.dimensions || []).forEach(x => byLabel[x.label] = x);
+    const cells = dims.map(c => {
+      const x = byLabel[c];
+      if (!x || x.confidence <= 0) return `<td class="num"><span class="kc off">·</span></td>`;
+      return `<td class="num">${fmt(x.value, 0)}</td>`;
+    }).join("");
+    return `<tr><td>${nameCell(p.team, p.player)}</td>
+      <td><span class="badge t${p.team}">${teamName(p.team)}</span></td>${cells}</tr>`;
+  }).join("");
+
+  // Major faults — each one is an instant verdict failure, so each gets a line.
+  const mfHead = `<th>Player</th><th>Team</th><th class="num">Time</th><th>Criterion</th><th>What happened</th>`;
+  const mfBody = players.flatMap(p => (p.major_faults || []).map(f => `<tr>
+    <td>${nameCell(p.team, p.player)}</td>
+    <td><span class="badge t${p.team}">${teamName(p.team)}</span></td>
+    <td class="num">${fmt(f.t, 1)}s</td>
+    <td><b class="neg">${esc(f.criterion)}</b></td>
+    <td class="muted">${esc(f.detail)}</td>
+  </tr>`)).join("");
+
+  $("tab-pacifist").innerHTML =
+    cardTable(
+      `Pacifist system adherence (${esc(pac.config_version || "")}) — how closely each player follows the Pacifist positional system: ` +
+      `a confidence-weighted blend of eight discipline dimensions, judged per opportunity (engagements, covers, challenges, shots). ` +
+      `The verdict is the guide's FM-1 driving test: up to 15 Minor faults pass; one Major fault fails and caps the score. ` +
+      `This measures adherence to a specific system, not rank.`,
+      sumHead, sumBody, "No Pacifist data.", 7) + gap +
+    cardTable(
+      "Per-dimension values (0–100, higher = more disciplined). A dot means the dimension never applied to this player — no opportunities, so it carries no weight.",
+      dimHead, dimBody, "No dimension data.", dims.length + 2) + gap +
+    cardTable(
+      "Major faults — the FM-2 shape: committed as last man, on an empty tank, against a ball the team does not own. Each is an instant verdict failure.",
+      mfHead, mfBody, "No Major faults — nobody committed the unrecoverable dive.", 5);
 }
 
 // ---- tabs (lazy iframes for the heavy HTML views) ----

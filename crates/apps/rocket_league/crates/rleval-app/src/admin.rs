@@ -169,7 +169,10 @@ pub fn config_report(corpus_dir: &Path, run_enabled: bool) -> ConfigReport {
         },
         skills: SkillsInfo {
             active_version: SKILL_CONFIG_VERSION.to_string(),
-            catalog: Skill::ALL.iter().map(|s| s.display_name().to_string()).collect(),
+            catalog: Skill::ALL
+                .iter()
+                .map(|s| s.display_name().to_string())
+                .collect(),
             fitted: on_disk_version(&corpus_dir.join("fitted_skill_config.json")),
         },
         corpus: CorpusInfo {
@@ -197,17 +200,30 @@ pub struct RunResult {
 /// server's corpus dir. Localhost dev convenience; the caller gates this behind
 /// `--enable-admin-run`. Returns `None` for an unknown action.
 pub fn run_action(action: &str, corpus_dir: &Path) -> Option<RunResult> {
-    let manifest = corpus_dir.join("manifest.json").to_string_lossy().to_string();
+    let manifest = corpus_dir
+        .join("manifest.json")
+        .to_string_lossy()
+        .to_string();
     // (cargo package, args) steps run in sequence; stop on the first failure.
     let steps: Vec<(&str, Vec<String>)> = match action {
         "retrain-value" => vec![(
             "replay-value",
-            vec!["--bin".into(), "train_corpus".into(), "--".into(), manifest.clone()],
+            vec![
+                "--bin".into(),
+                "train_corpus".into(),
+                "--".into(),
+                manifest.clone(),
+            ],
         )],
         "calibrate-scoring" => vec![
             (
                 "replay-scoring",
-                vec!["--bin".into(), "calibrate".into(), "--".into(), manifest.clone()],
+                vec![
+                    "--bin".into(),
+                    "calibrate".into(),
+                    "--".into(),
+                    manifest.clone(),
+                ],
             ),
             (
                 "replay-scoring",
@@ -227,7 +243,10 @@ pub fn run_action(action: &str, corpus_dir: &Path) -> Option<RunResult> {
     let mut cmds = Vec::new();
     let mut ok = true;
     for (pkg, args) in steps {
-        cmds.push(format!("cargo run --release -q -p {pkg} {}", args.join(" ")));
+        cmds.push(format!(
+            "cargo run --release -q -p {pkg} {}",
+            args.join(" ")
+        ));
         let mut cmd = std::process::Command::new("cargo");
         cmd.args(["run", "--release", "-q", "-p", pkg]).args(&args);
         match cmd.output() {

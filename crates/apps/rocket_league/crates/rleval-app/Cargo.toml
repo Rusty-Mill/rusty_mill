@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 replay-analyzer = { path = ".." }
+replay-pacifist = { path = "../pacifist" }
 replay-scoring = { path = "../scoring" }
 replay-skills = { path = "../skills" }
 replay-value = { path = "../value" }

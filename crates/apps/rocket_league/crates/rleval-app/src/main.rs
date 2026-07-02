@@ -91,10 +91,12 @@ fn route(req: &Request, replays: &Path, corpus: &Path, allow_run: bool) -> Respo
         ("GET", "/admin") => Response::html(ui::ADMIN_HTML),
         ("GET", "/healthz") => Response::text(200, "ok"),
         ("GET", "/api/samples") => samples_response(replays),
-        ("GET", "/api/config") => match serde_json::to_vec(&admin::config_report(corpus, allow_run)) {
-            Ok(json) => Response::json(json),
-            Err(e) => Response::text(500, format!("serialize error: {e}")),
-        },
+        ("GET", "/api/config") => {
+            match serde_json::to_vec(&admin::config_report(corpus, allow_run)) {
+                Ok(json) => Response::json(json),
+                Err(e) => Response::text(500, format!("serialize error: {e}")),
+            }
+        }
         ("POST", "/api/admin/run") => {
             if !allow_run {
                 return Response::text(403, "admin run disabled — start with --enable-admin-run");

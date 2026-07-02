@@ -32,6 +32,18 @@ fn analyzes_a_sample_into_every_view() {
     assert!(!a.scores.is_empty(), "scoring produced reports");
     assert!(!a.skill_profiles.is_empty(), "skills produced profiles");
     assert!(!a.impact.players.is_empty(), "value produced impact rows");
+    assert!(!a.pacifist.players.is_empty(), "pacifist produced rows");
+    assert!(
+        a.pacifist.players.iter().all(|p| p.dimensions.len() == 8),
+        "every player carries the full rubric"
+    );
+    assert!(
+        a.pacifist
+            .players
+            .iter()
+            .all(|p| p.verdict == "PASS" || p.verdict == "FAIL"),
+        "every player gets an FM-1 verdict"
+    );
 
     // The two embeddable HTML views are self-contained documents.
     assert!(a.viewer_html.contains("<html"), "viewer is a full document");
