@@ -1,4 +1,4 @@
-# Pacifist score — corpus validation (v0 baseline → v2.2)
+# Pacifist score — corpus validation (v0 baseline → v2.3)
 
 The first ground-truth run of the consolidated Pacifist analyzer
 (`replay-pacifist`, ported in the PacifistScore consolidation): the three
@@ -450,3 +450,60 @@ landmarks (centre line, no-man's-land edge, goal line) that
 lift than shadow quality's direct teammate-to-teammate distance, left for
 a follow-up. Threshold calibration against labeled-adherence replays
 remains the standing item everything else defers to.
+
+---
+
+# v2.3: positioning fit gets depth/lateral faults — the strongest dimension yet
+
+The feared blocker turned out not to block much. Positioning fit's
+guide-stated line quality (D2-24: "do not sit locked in net — use a hybrid
+shadow"; D2-25/D2-26: hold "the edge of no-man's-land," "stay mostly
+central," biased only "around two car lengths" toward the ball side) needs
+field landmarks — but only `own_goal_y`, which `FieldGeometry` already
+provides. No new field geometry was needed after all: the two new
+thresholds (`min_depth_from_goal_uu`, `max_lateral_offset_uu`) are
+extractor-local config, the same status as shadow quality's
+`max_trail_uu` — documented approximations, not calibrated.
+
+The dimension now checks, in order, at most one fault per opponent-commit
+opportunity: **not goalside** (unchanged from v2), then **parked in net**
+(within 700uu of the own goal line instead of holding a forward shadow
+depth), then **too wide off centre** (lateral offset beyond 2500uu instead
+of staying centrally biased).
+
+Identical harness; every other dimension reproduces v2.2 exactly:
+
+```
+pacifist value vs tier : ρ = +0.127     (v2.2: +0.103 — best yet)
+
+  positioning-fit           +0.261    3548     (v2.2: +0.004)
+
+per-bucket        n     mean    p50   within-ρ    v2.2 mean
+  bronze          90    44.7   40.0    +0.098        45.9
+  silver          218   49.4   40.0    -0.051        51.6
+  gold            416   49.9   40.0    +0.071        51.9
+  platinum        444   52.2   40.0    +0.096        54.5
+  diamond         680   54.0   61.0    +0.088        56.4
+  champion        847   53.6   58.5    +0.029        55.8
+  grand-champion  853   53.5   57.0    +0.038        55.6
+```
+
+Positioning fit moves from the flattest dimension in the instrument to the
+**strongest** — clear of rotation-soundness's +0.209 and shadow quality's
++0.175. Two guide-grounded line-quality upgrades in a row have now each
+outperformed every threshold that shipped with the original v2 rubric,
+which says more about the diagnosis than about either fix being
+special: a pure goalside/goalside-adjacent boolean was always going to
+restate the v0-established ladder invariant, and *any* independent
+distance-based fault condition was likely to add fresh signal once the
+possession and engagement primitives were already right. That predicts
+where to look next if more gains are wanted — any remaining dimension
+still reducible to a single positional boolean is a candidate.
+
+Headline reaches +0.127 (from +0.010 at v0 — an order of magnitude), the
+inverted-U shape holds (peak Diamond, dip at Champion/GC), and the capped
+medians stay pinned at 40.0 through Platinum. Remaining work is unchanged:
+threshold calibration against labeled-adherence replays is still the one
+item everything else defers to, now with two more guide-approximated
+constants (`min_depth_from_goal_uu`, `max_lateral_offset_uu`) added to the
+list of thresholds calibration would refine.

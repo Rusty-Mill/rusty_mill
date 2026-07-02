@@ -472,15 +472,35 @@ fn team_of(ctx: &MatchContext, player: PlayerId) -> Option<Team> {
         .find_map(|(_, frame)| frame.player(player).map(|f| f.team))
 }
 
-/// Penalises the back man caught upfield when the **opponent** commits: for
-/// each opposing player's engagement entry at which `player` was the 2nd man,
-/// the player is penalised if they were not goalside of the ball at that
-/// moment. The situation (an opponent attacking the ball) × the role (you are
-/// the cover) demands the goalside area; the 1st man's job at that moment is
-/// to pressure, so only 2nd-man entries are opportunities.
+/// Penalises the back man's area at the **opponent's** commit — for each
+/// opposing player's engagement entry at which `player` was the 2nd man, one
+/// of three independent faults (checked in this order, at most one per
+/// opportunity):
+///
+/// 1. **Not goalside** — the plain wrong-side-of-the-ball case.
+/// 2. **Parked in net** (D2-24: "do not sit locked in net — use a hybrid
+///    shadow") — within `min_depth_from_goal_uu` of the own goal line instead
+///    of holding forward at the guide's "edge of no-man's-land."
+/// 3. **Too wide off centre** (D2-25/D2-26: "stay mostly central," biased only
+///    "around two car lengths" toward the ball side) — lateral offset beyond
+///    `max_lateral_offset_uu`.
+///
+/// The situation (an opponent attacking the ball) × the role (you are the
+/// cover) is what the guide is describing; the 1st man's job at that moment
+/// is to pressure, so only 2nd-man entries are opportunities. `field` and both
+/// distance thresholds are documented approximations of the guide's car- and
+/// pad-length language (like [`ShadowQuality::max_trail_uu`]), not calibrated
+/// against labeled play.
 #[derive(Debug, Clone, Copy)]
 pub struct PositioningFit {
     pub engagement: EngagementConfig,
+    pub field: FieldGeometry,
+    /// Distance (uu) from the own goal line inside which the back man counts
+    /// as parked in net rather than holding a forward shadow depth.
+    pub min_depth_from_goal_uu: f32,
+    /// Lateral distance (uu) from the centre line beyond which the back man
+    /// has drifted wide instead of staying centrally biased.
+    pub max_lateral_offset_uu: f32,
     /// Opponent episodes at which confidence reaches 1.0.
     pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
@@ -491,6 +511,9 @@ impl Default for PositioningFit {
     fn default() -> Self {
         Self {
             engagement: EngagementConfig::default(),
+            field: FieldGeometry::default(),
+            min_depth_from_goal_uu: 700.0,
+            max_lateral_offset_uu: 2500.0,
             saturation_episodes: 12.0,
             max_evidence: 25,
         }
@@ -506,6 +529,7 @@ impl MetricExtractor for PositioningFit {
         let Some(my_team) = team_of(ctx, player) else {
             return episode_score(DimensionId::PositioningFit, 0, &[], 1.0, 0);
         };
+        let own_goal_y = self.field.own_goal_y(my_team);
 
         let mut opponents: Vec<PlayerId> = Vec::new();
         for (_, frame) in ctx.frames() {
@@ -520,7 +544,7 @@ impl MetricExtractor for PositioningFit {
         let mut penalised = Vec::new();
         for opp in opponents {
             for ep in engagements(ctx, opp, &self.engagement) {
-                let Some((_, entry_frame)) = ctx.frame(ep.enter_idx) else {
+                let Some((snapshot, entry_frame)) = ctx.frame(ep.enter_idx) else {
                     continue;
                 };
                 let Some(me) = entry_frame.player(player) else {
@@ -529,11 +553,25 @@ impl MetricExtractor for PositioningFit {
                 if me.role != Role::SecondMan {
                     continue;
                 }
+                let Some(subject) = snapshot.players.iter().find(|p| p.player == player) else {
+                    continue;
+                };
                 opportunities += 1;
                 if !me.goalside {
                     penalised.push(Evidence {
                         t: ep.t_enter,
                         detail: "caught upfield as the back man at the opponent's commit".into(),
+                    });
+                } else if (subject.pose.position.y - own_goal_y).abs() < self.min_depth_from_goal_uu
+                {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "parked in net instead of holding a hybrid-shadow depth".into(),
+                    });
+                } else if subject.pose.position.x.abs() > self.max_lateral_offset_uu {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "drifted too wide off centre as the last line".into(),
                     });
                 }
             }
@@ -1242,6 +1280,55 @@ mod tests {
         let timeline = opponent_attack_timeline(-2000.0);
         let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(1));
         assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    /// Like [`opponent_attacks`] but the cover man's `x` is also controllable,
+    /// to isolate the depth/lateral faults from the goalside one.
+    fn opponent_attacks_at(t: f32, opp_y: f32, cover_x: f32, cover_y: f32) -> WorldState {
+        WorldState {
+            t,
+            ball: Some(ball_at(0.0, 3000.0)),
+            players: vec![
+                player(0, Team::Blue, pos(cover_x, cover_y)),
+                player(1, Team::Blue, pos(0.0, 2000.0)),
+                player(2, Team::Orange, pos(0.0, opp_y)),
+                player(3, Team::Orange, pos(3000.0, 4800.0)),
+            ],
+        }
+    }
+
+    fn opponent_attack_timeline_at(cover_x: f32, cover_y: f32) -> Timeline {
+        let ys = [
+            5500.0, 4600.0, 4000.0, 3600.0, 3400.0, 3600.0, 4000.0, 4600.0,
+        ];
+        ys.iter()
+            .enumerate()
+            .map(|(i, y)| opponent_attacks_at(i as f32 * 0.1, *y, cover_x, cover_y))
+            .collect()
+    }
+
+    #[test]
+    fn parked_in_net_is_penalised_even_when_goalside() {
+        // Goalside (y=-5000, deep behind the ball) but glued to the own goal
+        // line (blue's goal at y=-5120 -> depth 120uu, well under the 700uu
+        // hybrid-shadow buffer) — D2-24's "do not sit locked in net."
+        let timeline = opponent_attack_timeline_at(0.0, -5000.0);
+        let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.evidence[0].detail.contains("parked in net"));
+    }
+
+    #[test]
+    fn drifted_too_wide_is_penalised_even_when_goalside_and_deep_enough() {
+        // Goalside and comfortably off the goal line (depth 2620uu), but
+        // x=3200 is past the 2500uu central band — D2-25/D2-26's "stay mostly
+        // central."
+        let timeline = opponent_attack_timeline_at(3200.0, -2500.0);
+        let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+        assert!(result.evidence[0].detail.contains("too wide"));
     }
 
     // -- rotation soundness ----------------------------------------------------
