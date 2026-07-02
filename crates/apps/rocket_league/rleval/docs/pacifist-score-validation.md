@@ -353,3 +353,47 @@ race-outcome data (it has the most raw signal to reclaim), give positioning
 fit and shadow quality a line-quality measure, then the standing items —
 threshold calibration against labeled-adherence replays (rank is still not
 the target), and surfacing the score in the app.
+
+---
+
+# v2.1 (`pcfg-v2.1`): challenge timing re-grounded in race outcomes
+
+The one change this version makes: challenge timing no longer judges
+entry-time kinematics. The canonical touch stream is bridged into the
+context (`bridge::touches` → `MatchContext::with_touches`), and the
+dimension now judges **what actually happened**:
+
+- An opportunity is a **realized challenge** — an engagement against a
+  non-owned ball in which the player *touches* it. Shadowing and
+  containment (closing in without contact) are no longer judged at all,
+  which is precisely the elite behavior the kinematic test was
+  mis-penalising.
+- A challenge is penalised as a **second-strike commit** when an opponent
+  won the first touch after the player's commit by more than an even-50/50
+  margin (0.25 s).
+
+Identical harness; every other dimension and the severity block reproduce
+v2 exactly:
+
+```
+pacifist value vs tier : ρ = +0.085     (v2: +0.073, v1.1: +0.069)
+
+  challenge-timing          -0.015    3548     (v2 kinematic: -0.317)
+```
+
+The inversion is gone — a 0.30 swing in ρ from one definitional change —
+and the headline gains what the inverted drag was costing. The residual is
+essentially zero, and that flatness is *structural*, not a failure: in a
+rank-matched lobby, realized challenges are contests between equals, so
+first-strike win rates hover near symmetric at every bracket — an
+outcome-symmetric metric cannot carry rank across the ladder. What it
+*can* carry is the per-player, per-moment evidence ("second-strike commit
+at 3:41") that the coaching read wants, at an honest weight (0.4, the
+design doc's Low–Med tier).
+
+Bucket means shift up ~1 point across the board (Bronze 46.4 → GC 56.3,
+Diamond peak 57.6) with the same inverted-U shape and cap dynamics.
+
+Remaining from the v2 list: line-quality measures for positioning fit and
+shadow quality, threshold calibration against labeled-adherence replays,
+and surfacing the score in the app.

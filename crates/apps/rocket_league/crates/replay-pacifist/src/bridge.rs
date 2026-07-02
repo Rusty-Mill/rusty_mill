@@ -115,6 +115,24 @@ pub fn possession_spans(m: &CanonicalMatch) -> Vec<crate::context::PossessionSpa
         .collect()
 }
 
+/// Per-player ball touches from the canonical touch decode (`Event::Touch`),
+/// for [`crate::context::MatchContext::with_touches`] — the same touch model
+/// the possession runs are built from.
+pub fn touches(m: &CanonicalMatch) -> Vec<crate::context::TouchEvent> {
+    m.events
+        .iter()
+        .filter_map(|e| match e {
+            replay_analyzer::model::Event::Touch { t, pri, .. } => {
+                Some(crate::context::TouchEvent {
+                    t: *t,
+                    player: PlayerId(u32::try_from(*pri).ok()?),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// Per-player shot events from the canonical scoreboard counters
 /// (`Event::Stat { kind: Shot }`), for [`crate::context::MatchContext::with_shots`].
 /// The counter's rising edge timestamps the shot; goals are tracked separately
@@ -236,6 +254,24 @@ mod tests {
             tl[0].players[0].boost, SPAWN_BOOST,
             "unobserved -> spawn value"
         );
+    }
+
+    #[test]
+    fn touches_map_touch_events() {
+        let mut m = canonical(Vec::new());
+        m.events = vec![
+            replay_analyzer::model::Event::Touch {
+                t: 5.0,
+                pri: 3,
+                player: None,
+                team: Some(0),
+            },
+            replay_analyzer::model::Event::Kickoff { t: 0.0 },
+        ];
+        let ts = touches(&m);
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].t, 5.0);
+        assert_eq!(ts[0].player, PlayerId(3));
     }
 
     #[test]

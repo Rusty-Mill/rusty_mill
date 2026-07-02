@@ -163,6 +163,7 @@ pub struct MatchContext<'t> {
     timeline: &'t Timeline,
     frames: Vec<FrameContext>,
     shots: Vec<ShotEvent>,
+    touches: Vec<TouchEvent>,
 }
 
 impl<'t> MatchContext<'t> {
@@ -210,6 +211,7 @@ impl<'t> MatchContext<'t> {
             timeline,
             frames,
             shots: Vec::new(),
+            touches: Vec::new(),
         }
     }
 
@@ -224,6 +226,19 @@ impl<'t> MatchContext<'t> {
     /// attached them via [`MatchContext::with_shots`].
     pub fn shots(&self) -> &[ShotEvent] {
         &self.shots
+    }
+
+    /// Attach ball-touch events (sorted by time) — see [`TouchEvent`].
+    pub fn with_touches(mut self, mut touches: Vec<TouchEvent>) -> Self {
+        touches.sort_by(|a, b| a.t.total_cmp(&b.t));
+        self.touches = touches;
+        self
+    }
+
+    /// The attached touch events, sorted by time. Empty unless the caller
+    /// attached them via [`MatchContext::with_touches`].
+    pub fn touches(&self) -> &[TouchEvent] {
+        &self.touches
     }
 
     /// Iterate `(raw snapshot, derived facts)` pairs in frame order.
@@ -282,6 +297,16 @@ pub struct PossessionSpan {
 /// which case shot-conditional dimensions simply never apply.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShotEvent {
+    pub t: f32,
+    pub player: PlayerId,
+}
+
+/// One ball touch by `player` at time `t`, from the canonical touch decode
+/// (see [`crate::bridge::touches`]). Attached via
+/// [`MatchContext::with_touches`]; empty for synthetic/domain-only callers,
+/// in which case touch-conditional dimensions simply never apply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TouchEvent {
     pub t: f32,
     pub player: PlayerId,
 }

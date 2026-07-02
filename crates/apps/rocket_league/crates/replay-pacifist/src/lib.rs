@@ -218,8 +218,9 @@ pub mod severity;
 /// per-frame-fraction rubric, `pcfg-v1` the per-opportunity rework, `pcfg-v1.1`
 /// the FM-1 severity ledger — all measured in
 /// `docs/pacifist-score-validation.md`; `pcfg-v2` completes the eight-dimension
-/// rubric on the episode primitive).
-pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v2";
+/// rubric on the episode primitive; `pcfg-v2.1` re-grounds challenge timing in
+/// touch-stream race outcomes).
+pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v2.1";
 
 // ---------------------------------------------------------------------------
 // Match format

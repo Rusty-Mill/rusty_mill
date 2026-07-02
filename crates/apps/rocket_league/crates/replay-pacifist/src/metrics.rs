@@ -27,7 +27,7 @@
 //! (episodes), not frames.
 
 use crate::context::{MatchContext, RelativePossession, Role};
-use crate::{BallState, FieldGeometry, PlayerId, PlayerState, Team};
+use crate::{FieldGeometry, PlayerId, Team};
 
 // ---------------------------------------------------------------------------
 // Shared scoring types
@@ -641,37 +641,33 @@ impl MetricExtractor for RotationSoundness {
 // Challenge timing — engaging on the right beat
 // ---------------------------------------------------------------------------
 
-/// Estimated seconds to the ball: distance over closing speed (velocity
-/// projected onto the direction to the ball), floored so a stationary or
-/// retreating car yields a large finite time. Mirrors the context's
-/// time-to-ball role metric.
-fn time_to_ball(p: &PlayerState, ball: &BallState) -> f32 {
-    const CLOSING_SPEED_FLOOR: f32 = 1.0;
-    let dist = p.pose.position.distance(ball.pose.position);
-    if dist <= f32::EPSILON {
-        return 0.0;
-    }
-    let inv = 1.0 / dist;
-    let dir_x = (ball.pose.position.x - p.pose.position.x) * inv;
-    let dir_y = (ball.pose.position.y - p.pose.position.y) * inv;
-    let dir_z = (ball.pose.position.z - p.pose.position.z) * inv;
-    let closing = p.velocity.x * dir_x + p.velocity.y * dir_y + p.velocity.z * dir_z;
-    dist / closing.max(CLOSING_SPEED_FLOOR)
-}
-
-/// Penalises mistimed challenges: engagements against a ball the team does not
-/// own where, at the commit, the best-placed opponent's estimated time-to-ball
-/// (scaled by `beaten_ratio`) is still shorter than the player's own — diving
-/// into a ball the opponent decisively reaches first. The design doc names
-/// this signal (time-to-ball vs opponent) and rates it Low–Med confidence; the
-/// default weight reflects that.
+/// Penalises second-strike commits, judged by the **race outcome** in the
+/// touch stream ([`crate::context::MatchContext::touches`]) rather than
+/// entry-time kinematics.
+///
+/// The first cut of this dimension compared time-to-ball estimates at the
+/// commit and came out strongly *inverted* on the corpus (ρ = −0.317):
+/// deliberately slowing an approach to contain, fake, or hold a challenge is
+/// elite technique, and a kinematic "beaten to the ball" test penalises
+/// exactly that. So v2.1 re-grounds it in what actually happened:
+///
+/// - An **opportunity** is a realized challenge — an engagement against a
+///   ball the team does not own in which the player *touches* the ball.
+///   Shadowing and containment (closing in without contact) are not
+///   challenges and are never judged here.
+/// - A challenge is **penalised** when an opponent got the first strike:
+///   they touched after the player's commit and more than `even_margin_s`
+///   before the player's own first touch. A near-simultaneous 50/50 is not a
+///   timing fault.
+///
+/// With no touch data attached the dimension never applies.
 #[derive(Debug, Clone, Copy)]
 pub struct ChallengeTiming {
     pub engagement: EngagementConfig,
-    /// The player is penalised when `own_tt > opponent_tt · beaten_ratio` at
-    /// entry — the margin keeps near-even races out of the penalty.
-    pub beaten_ratio: f32,
-    /// Episodes at which confidence reaches 1.0.
+    /// An opponent's first strike within this many seconds of the player's
+    /// own first touch counts as an even challenge, not a lost race.
+    pub even_margin_s: f32,
+    /// Realized challenges at which confidence reaches 1.0.
     pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
     pub max_evidence: usize,
@@ -681,7 +677,7 @@ impl Default for ChallengeTiming {
     fn default() -> Self {
         Self {
             engagement: EngagementConfig::default(),
-            beaten_ratio: 1.5,
+            even_margin_s: 0.25,
             saturation_episodes: 12.0,
             max_evidence: 25,
         }
@@ -694,6 +690,15 @@ impl MetricExtractor for ChallengeTiming {
     }
 
     fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let Some(my_team) = team_of(ctx, player) else {
+            return episode_score(DimensionId::ChallengeTiming, 0, &[], 1.0, 0);
+        };
+        let opponent_of = |id: PlayerId| {
+            ctx.frames()
+                .find_map(|(_, f)| f.player(id).map(|facts| facts.team != my_team))
+                .unwrap_or(false)
+        };
+
         let mut opportunities = 0usize;
         let mut penalised = Vec::new();
 
@@ -701,30 +706,31 @@ impl MetricExtractor for ChallengeTiming {
             if ep.possession_at_entry == RelativePossession::Ours {
                 continue; // playing your own ball is not a challenge
             }
-            let Some((snapshot, _)) = ctx.frame(ep.enter_idx) else {
+            let Some((exit_snapshot, _)) = ctx.frame(ep.exit_idx) else {
                 continue;
             };
-            let Some(ball) = snapshot.ball.as_ref() else {
-                continue;
-            };
-            let Some(me) = snapshot
-                .players
+            let window = ep.t_enter..=exit_snapshot.t;
+
+            // My first touch inside the episode — no touch, no challenge.
+            let Some(my_touch_t) = ctx
+                .touches()
                 .iter()
-                .find(|p| p.player == player && !p.demolished)
+                .find(|touch| touch.player == player && window.contains(&touch.t))
+                .map(|touch| touch.t)
             else {
                 continue;
             };
             opportunities += 1;
-            let best_opponent = snapshot
-                .players
-                .iter()
-                .filter(|p| p.team != me.team && !p.demolished)
-                .map(|p| time_to_ball(p, ball))
-                .fold(f32::INFINITY, f32::min);
-            if time_to_ball(me, ball) > best_opponent * self.beaten_ratio {
+
+            let first_strike_lost = ctx.touches().iter().any(|touch| {
+                window.contains(&touch.t)
+                    && touch.t < my_touch_t - self.even_margin_s
+                    && opponent_of(touch.player)
+            });
+            if first_strike_lost {
                 penalised.push(Evidence {
                     t: ep.t_enter,
-                    detail: "committed while clearly beaten to the ball".into(),
+                    detail: "second-strike commit: the opponent won the first touch".into(),
                 });
             }
         }
@@ -1262,46 +1268,72 @@ mod tests {
 
     // -- challenge timing --------------------------------------------------------
 
-    /// Player 0 inside challenge range with the given closing velocity; the
-    /// opponent bearing down on the same ball with theirs.
-    fn race_timeline(my_vy: f32, opp_vy: f32) -> Timeline {
-        (0..3)
-            .map(|i| {
-                let mut me = player(0, Team::Blue, pos(0.0, 2400.0));
-                me.velocity = Vec3::new(0.0, my_vy, 0.0);
-                let mut opp = player(2, Team::Orange, pos(0.0, 4000.0));
-                opp.velocity = Vec3::new(0.0, opp_vy, 0.0);
-                WorldState {
-                    t: i as f32 * 0.1,
-                    ball: Some(ball_at(0.0, 3000.0)),
-                    players: vec![
-                        me,
-                        player(1, Team::Blue, pos(2000.0, -2000.0)),
-                        opp,
-                        player(3, Team::Orange, pos(3000.0, 4800.0)),
-                    ],
-                }
+    use crate::context::TouchEvent;
+
+    /// Player 0's approach arc (entry at t=0.3, episode through t=0.7) with an
+    /// opponent on the field, judged under the given touch stream.
+    fn challenge_result(touches: Vec<TouchEvent>) -> DimensionScore {
+        let ys = [
+            -1000.0, 500.0, 1800.0, 2400.0, 2600.0, 2700.0, 2600.0, 2400.0, 800.0, -1000.0,
+        ];
+        let timeline: Timeline = ys
+            .iter()
+            .enumerate()
+            .map(|(i, y)| WorldState {
+                t: i as f32 * 0.1,
+                ball: Some(ball_at(0.0, 3000.0)),
+                players: vec![
+                    player(0, Team::Blue, pos(0.0, *y)),
+                    player(1, Team::Blue, pos(2000.0, -2000.0)),
+                    player(2, Team::Orange, pos(3000.0, 4800.0)),
+                ],
             })
-            .collect()
+            .collect();
+        let c = MatchContext::derive(&timeline, ContextConfig::default()).with_touches(touches);
+        ChallengeTiming::default().extract(&c, PlayerId(0))
+    }
+
+    fn touch(t: f32, id: u32) -> TouchEvent {
+        TouchEvent {
+            t,
+            player: PlayerId(id),
+        }
     }
 
     #[test]
-    fn winning_the_race_to_the_ball_scores_high() {
-        // I close at 2000 uu/s; the opponent is parked.
-        let timeline = race_timeline(2000.0, 0.0);
-        let result = ChallengeTiming::default().extract(&ctx(&timeline), PlayerId(0));
+    fn winning_the_first_touch_scores_high() {
+        let result = challenge_result(vec![touch(0.5, 0)]);
         assert_eq!(result.value, Score::new(100.0));
-        assert!(result.confidence.get() > 0.0);
+        assert!(result.confidence.get() > 0.0, "a realized challenge counts");
     }
 
     #[test]
-    fn committing_while_beaten_to_the_ball_is_penalised() {
-        // I creep at 100 uu/s; the opponent closes at 2000 uu/s and gets there
-        // decisively first.
-        let timeline = race_timeline(100.0, -2000.0);
-        let result = ChallengeTiming::default().extract(&ctx(&timeline), PlayerId(0));
+    fn losing_the_first_strike_is_penalised() {
+        // The opponent touches at 0.4, well before my 0.7 contact.
+        let result = challenge_result(vec![touch(0.4, 2), touch(0.7, 0)]);
         assert_eq!(result.value, Score::new(0.0));
         assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn an_even_fifty_fifty_is_not_a_timing_fault() {
+        // The opponent's touch lands inside the even margin of mine.
+        let result = challenge_result(vec![touch(0.55, 2), touch(0.7, 0)]);
+        assert_eq!(result.value, Score::new(100.0));
+    }
+
+    #[test]
+    fn containment_without_contact_is_not_a_challenge() {
+        // I close in but never touch: shadowing, not a challenge — and with no
+        // touch of mine, the opponent's touches don't create opportunities.
+        let result = challenge_result(vec![touch(0.4, 2)]);
+        assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    #[test]
+    fn no_touch_data_means_the_dimension_never_applies() {
+        let result = challenge_result(Vec::new());
+        assert_eq!(result.confidence, Confidence::new(0.0));
     }
 
     // -- shadow quality ----------------------------------------------------------

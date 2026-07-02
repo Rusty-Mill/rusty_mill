@@ -4,7 +4,7 @@
 use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_pacifist::bridge::{possession_spans, shots, timeline_from_canonical};
+use replay_pacifist::bridge::{possession_spans, shots, timeline_from_canonical, touches};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::scoring::Analyzer;
 use replay_pacifist::severity::Severity;
@@ -48,7 +48,8 @@ fn run() -> Result<(), Box<dyn Error>> {
     let analyzer = Analyzer::default();
     let spans = possession_spans(&canonical);
     let ctx = MatchContext::derive_with_possession(&timeline, analyzer.context_config(), &spans)
-        .with_shots(shots(&canonical));
+        .with_shots(shots(&canonical))
+        .with_touches(touches(&canonical));
 
     eprintln!(
         "config={PACIFIST_CONFIG_VERSION}  possession=touch-decoded ({} runs)",

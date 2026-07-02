@@ -23,7 +23,7 @@ use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::analyze::validate::GroundTruth;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_pacifist::bridge::{possession_spans, shots, timeline_from_canonical};
+use replay_pacifist::bridge::{possession_spans, shots, timeline_from_canonical, touches};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::metrics::DimensionId;
 use replay_pacifist::scoring::Analyzer;
@@ -173,7 +173,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                             analyzer.context_config(),
                             &spans,
                         )
-                        .with_shots(shots(&canonical));
+                        .with_shots(shots(&canonical))
+                        .with_touches(touches(&canonical));
                         for (entry, tier) in players.iter().zip(&tiers) {
                             let Some(tier) = tier else { continue };
                             let score = analyzer.score_player_in(&ctx, entry.player);
