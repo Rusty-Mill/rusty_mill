@@ -52,6 +52,6 @@ fn bridged_timeline_is_sane_and_every_player_scores() {
             .unwrap_or_else(|| panic!("{:?} has scoreable evidence", entry.name));
         assert!((0.0..=100.0).contains(&value.get()));
         assert!(score.confidence.get() > 0.0, "real match backs the score");
-        assert_eq!(score.breakdown.len(), 3, "all three dimensions reported");
+        assert_eq!(score.breakdown.len(), 8, "the full rubric reported");
     }
 }

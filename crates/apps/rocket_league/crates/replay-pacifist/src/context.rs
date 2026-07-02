@@ -162,6 +162,7 @@ impl Default for ContextConfig {
 pub struct MatchContext<'t> {
     timeline: &'t Timeline,
     frames: Vec<FrameContext>,
+    shots: Vec<ShotEvent>,
 }
 
 impl<'t> MatchContext<'t> {
@@ -205,7 +206,24 @@ impl<'t> MatchContext<'t> {
                 frame
             })
             .collect();
-        Self { timeline, frames }
+        Self {
+            timeline,
+            frames,
+            shots: Vec::new(),
+        }
+    }
+
+    /// Attach shot events (sorted by time) — see [`ShotEvent`].
+    pub fn with_shots(mut self, mut shots: Vec<ShotEvent>) -> Self {
+        shots.sort_by(|a, b| a.t.total_cmp(&b.t));
+        self.shots = shots;
+        self
+    }
+
+    /// The attached shot events, sorted by time. Empty unless the caller
+    /// attached them via [`MatchContext::with_shots`].
+    pub fn shots(&self) -> &[ShotEvent] {
+        &self.shots
     }
 
     /// Iterate `(raw snapshot, derived facts)` pairs in frame order.
@@ -256,6 +274,16 @@ pub struct PossessionSpan {
     pub team: Team,
     pub start: f32,
     pub end: f32,
+}
+
+/// One shot on goal by `player` at time `t`, from the replay's scoreboard
+/// counters (see [`crate::bridge::shots`]). Attached to the context via
+/// [`MatchContext::with_shots`]; empty for synthetic/domain-only callers, in
+/// which case shot-conditional dimensions simply never apply.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotEvent {
+    pub t: f32,
+    pub player: PlayerId,
 }
 
 // ---------------------------------------------------------------------------

@@ -20,8 +20,9 @@ use std::collections::HashMap;
 
 use crate::context::{ContextConfig, MatchContext};
 use crate::metrics::{
-    BoostEconomy, CommitmentDiscipline, Confidence, DimensionId, DimensionScore, Evidence,
-    MetricExtractor, OverExtension, Score,
+    BoostEconomy, ChallengeTiming, CommitmentDiscipline, Confidence, DimensionId, DimensionScore,
+    Evidence, MetricExtractor, OverExtension, PositioningFit, RotationSoundness, Score,
+    ShadowQuality, ShotSelection,
 };
 use crate::severity::{self, FaultSummary, SeverityConfig};
 use crate::{PlayerId, Timeline};
@@ -58,13 +59,21 @@ impl ScoringConfig {
 
 impl Default for ScoringConfig {
     fn default() -> Self {
-        // The three implemented, high-confidence dimensions. Over-extension and
-        // commitment discipline are the core positional-discipline ethos and get
-        // equal top billing; boost economy is a supporting signal.
+        // The full eight-dimension rubric, weighted by the design doc's own
+        // confidence tiers: the High-confidence core ethos leads (over-extension
+        // and commitment discipline at top billing, boost economy supporting),
+        // the Med-confidence positional dimensions follow, and the proxy-heavy
+        // Low tier (challenge timing, shot selection) trails so its noise can't
+        // swing the headline.
         let weights = HashMap::from([
             (DimensionId::OverExtension, 1.0),
             (DimensionId::CommitmentDiscipline, 1.0),
             (DimensionId::BoostEconomy, 0.6),
+            (DimensionId::PositioningFit, 0.8),
+            (DimensionId::RotationSoundness, 0.8),
+            (DimensionId::ShadowQuality, 0.8),
+            (DimensionId::ChallengeTiming, 0.4),
+            (DimensionId::ShotSelection, 0.3),
         ]);
         Self::new(weights)
     }
@@ -257,7 +266,7 @@ impl Analyzer {
 }
 
 impl Default for Analyzer {
-    /// The standard analyzer: the three implemented dimensions at their default
+    /// The standard analyzer: the full eight-dimension rubric at its default
     /// settings, with the default scoring weights and context derivation.
     fn default() -> Self {
         Self::new(
@@ -265,6 +274,11 @@ impl Default for Analyzer {
                 Box::new(OverExtension::default()),
                 Box::new(CommitmentDiscipline::default()),
                 Box::new(BoostEconomy::default()),
+                Box::new(PositioningFit::default()),
+                Box::new(RotationSoundness::default()),
+                Box::new(ShadowQuality::default()),
+                Box::new(ChallengeTiming::default()),
+                Box::new(ShotSelection::default()),
             ],
             ScoringConfig::default(),
             ContextConfig::default(),
@@ -464,12 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn default_analyzer_registers_the_three_dimensions() {
+    fn default_analyzer_registers_the_full_rubric() {
         let analyzer = Analyzer::default();
         let result = analyzer.score_player(&Vec::new(), PlayerId(0));
-        // Empty timeline: nothing applies, so no value, but all three are reported.
+        // Empty timeline: nothing applies, so no value, but all eight are reported.
         assert_eq!(result.value, None);
-        assert_eq!(result.breakdown.len(), 3);
+        assert_eq!(result.breakdown.len(), 8);
         assert_eq!(result.faults, FaultSummary::empty(), "no play, no faults");
     }
 

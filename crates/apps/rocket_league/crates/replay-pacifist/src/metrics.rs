@@ -27,7 +27,7 @@
 //! (episodes), not frames.
 
 use crate::context::{MatchContext, RelativePossession, Role};
-use crate::PlayerId;
+use crate::{BallState, FieldGeometry, PlayerId, PlayerState, Team};
 
 // ---------------------------------------------------------------------------
 // Shared scoring types
@@ -50,15 +50,20 @@ pub enum DimensionId {
     CommitmentDiscipline,
     /// *Implemented.* Punishes engaging with an empty tank (F4/FM-2).
     BoostEconomy,
-    /// The right area for the situation × role. Not yet implemented.
+    /// *Implemented.* Punishes the back man caught upfield at the opponent's
+    /// commit — the wrong area for the situation × role.
     PositioningFit,
-    /// Back-post / out-of-the-way recovery to cover. Not yet implemented.
+    /// *Implemented.* Punishes failing to recover goalside after an
+    /// engagement ends (ball-chasing instead of rotating out).
     RotationSoundness,
-    /// 1st man engaging on the right beat. Not yet implemented.
+    /// *Implemented.* Punishes challenges the opponent clearly wins to —
+    /// committing when beaten to the ball.
     ChallengeTiming,
-    /// 2nd man holding a covering line/distance. Not yet implemented.
+    /// *Implemented.* Punishes the cover man not holding a goalside line
+    /// while the teammate's engagement is live.
     ShadowQuality,
-    /// High-percentage shot selection over hero gambles. Not yet implemented.
+    /// *Implemented.* Punishes low-percentage hero shots (long range or wide
+    /// angle), from the replay's scoreboard shot events.
     ShotSelection,
 }
 
@@ -458,6 +463,461 @@ impl MetricExtractor for BoostEconomy {
 }
 
 // ---------------------------------------------------------------------------
+// Positioning fit (back man, defensive) — the right area for situation × role
+// ---------------------------------------------------------------------------
+
+/// The team `player` appears on, from the first frame carrying their facts.
+fn team_of(ctx: &MatchContext, player: PlayerId) -> Option<Team> {
+    ctx.frames()
+        .find_map(|(_, frame)| frame.player(player).map(|f| f.team))
+}
+
+/// Penalises the back man caught upfield when the **opponent** commits: for
+/// each opposing player's engagement entry at which `player` was the 2nd man,
+/// the player is penalised if they were not goalside of the ball at that
+/// moment. The situation (an opponent attacking the ball) × the role (you are
+/// the cover) demands the goalside area; the 1st man's job at that moment is
+/// to pressure, so only 2nd-man entries are opportunities.
+#[derive(Debug, Clone, Copy)]
+pub struct PositioningFit {
+    pub engagement: EngagementConfig,
+    /// Opponent episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
+    /// Cap on collected evidence entries.
+    pub max_evidence: usize,
+}
+
+impl Default for PositioningFit {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            saturation_episodes: 12.0,
+            max_evidence: 25,
+        }
+    }
+}
+
+impl MetricExtractor for PositioningFit {
+    fn id(&self) -> DimensionId {
+        DimensionId::PositioningFit
+    }
+
+    fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let Some(my_team) = team_of(ctx, player) else {
+            return episode_score(DimensionId::PositioningFit, 0, &[], 1.0, 0);
+        };
+
+        let mut opponents: Vec<PlayerId> = Vec::new();
+        for (_, frame) in ctx.frames() {
+            for f in frame.facts() {
+                if f.team != my_team && !opponents.contains(&f.player) {
+                    opponents.push(f.player);
+                }
+            }
+        }
+
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+        for opp in opponents {
+            for ep in engagements(ctx, opp, &self.engagement) {
+                let Some((_, entry_frame)) = ctx.frame(ep.enter_idx) else {
+                    continue;
+                };
+                let Some(me) = entry_frame.player(player) else {
+                    continue;
+                };
+                if me.role != Role::SecondMan {
+                    continue;
+                }
+                opportunities += 1;
+                if !me.goalside {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "caught upfield as the back man at the opponent's commit".into(),
+                    });
+                }
+            }
+        }
+
+        episode_score(
+            DimensionId::PositioningFit,
+            opportunities,
+            &penalised,
+            self.saturation_episodes,
+            self.max_evidence,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rotation soundness — recovery to cover after a challenge
+// ---------------------------------------------------------------------------
+
+/// Penalises failing to rotate out: after each of the player's own engagement
+/// episodes ends, they should recover **goalside of the ball** within
+/// `recovery_window_s` (the guide's back-post/out-of-the-way recovery, reduced
+/// to its measurable core). Episodes whose window runs past the end of the
+/// timeline are not judged — there is no full window to fail in.
+#[derive(Debug, Clone, Copy)]
+pub struct RotationSoundness {
+    pub engagement: EngagementConfig,
+    /// Seconds after the episode ends within which the player must register
+    /// goalside of the ball.
+    pub recovery_window_s: f32,
+    /// Episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
+    /// Cap on collected evidence entries.
+    pub max_evidence: usize,
+}
+
+impl Default for RotationSoundness {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            recovery_window_s: 4.0,
+            saturation_episodes: 12.0,
+            max_evidence: 25,
+        }
+    }
+}
+
+impl MetricExtractor for RotationSoundness {
+    fn id(&self) -> DimensionId {
+        DimensionId::RotationSoundness
+    }
+
+    fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let Some(last_t) = ctx
+            .len()
+            .checked_sub(1)
+            .and_then(|i| ctx.frame(i))
+            .map(|(s, _)| s.t)
+        else {
+            return episode_score(DimensionId::RotationSoundness, 0, &[], 1.0, 0);
+        };
+
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+        for ep in engagements(ctx, player, &self.engagement) {
+            let Some((exit_snapshot, _)) = ctx.frame(ep.exit_idx) else {
+                continue;
+            };
+            let deadline = exit_snapshot.t + self.recovery_window_s;
+            if last_t < deadline {
+                continue; // truncated window — nothing to judge
+            }
+            opportunities += 1;
+            let mut recovered = false;
+            let mut idx = ep.exit_idx + 1;
+            while let Some((snapshot, frame)) = ctx.frame(idx) {
+                if snapshot.t > deadline {
+                    break;
+                }
+                if frame.player(player).is_some_and(|f| f.goalside) {
+                    recovered = true;
+                    break;
+                }
+                idx += 1;
+            }
+            if !recovered {
+                penalised.push(Evidence {
+                    t: ep.t_enter,
+                    detail: "never recovered goalside after the challenge".into(),
+                });
+            }
+        }
+
+        episode_score(
+            DimensionId::RotationSoundness,
+            opportunities,
+            &penalised,
+            self.saturation_episodes,
+            self.max_evidence,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Challenge timing — engaging on the right beat
+// ---------------------------------------------------------------------------
+
+/// Estimated seconds to the ball: distance over closing speed (velocity
+/// projected onto the direction to the ball), floored so a stationary or
+/// retreating car yields a large finite time. Mirrors the context's
+/// time-to-ball role metric.
+fn time_to_ball(p: &PlayerState, ball: &BallState) -> f32 {
+    const CLOSING_SPEED_FLOOR: f32 = 1.0;
+    let dist = p.pose.position.distance(ball.pose.position);
+    if dist <= f32::EPSILON {
+        return 0.0;
+    }
+    let inv = 1.0 / dist;
+    let dir_x = (ball.pose.position.x - p.pose.position.x) * inv;
+    let dir_y = (ball.pose.position.y - p.pose.position.y) * inv;
+    let dir_z = (ball.pose.position.z - p.pose.position.z) * inv;
+    let closing = p.velocity.x * dir_x + p.velocity.y * dir_y + p.velocity.z * dir_z;
+    dist / closing.max(CLOSING_SPEED_FLOOR)
+}
+
+/// Penalises mistimed challenges: engagements against a ball the team does not
+/// own where, at the commit, the best-placed opponent's estimated time-to-ball
+/// (scaled by `beaten_ratio`) is still shorter than the player's own — diving
+/// into a ball the opponent decisively reaches first. The design doc names
+/// this signal (time-to-ball vs opponent) and rates it Low–Med confidence; the
+/// default weight reflects that.
+#[derive(Debug, Clone, Copy)]
+pub struct ChallengeTiming {
+    pub engagement: EngagementConfig,
+    /// The player is penalised when `own_tt > opponent_tt · beaten_ratio` at
+    /// entry — the margin keeps near-even races out of the penalty.
+    pub beaten_ratio: f32,
+    /// Episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
+    /// Cap on collected evidence entries.
+    pub max_evidence: usize,
+}
+
+impl Default for ChallengeTiming {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            beaten_ratio: 1.5,
+            saturation_episodes: 12.0,
+            max_evidence: 25,
+        }
+    }
+}
+
+impl MetricExtractor for ChallengeTiming {
+    fn id(&self) -> DimensionId {
+        DimensionId::ChallengeTiming
+    }
+
+    fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+
+        for ep in engagements(ctx, player, &self.engagement) {
+            if ep.possession_at_entry == RelativePossession::Ours {
+                continue; // playing your own ball is not a challenge
+            }
+            let Some((snapshot, _)) = ctx.frame(ep.enter_idx) else {
+                continue;
+            };
+            let Some(ball) = snapshot.ball.as_ref() else {
+                continue;
+            };
+            let Some(me) = snapshot
+                .players
+                .iter()
+                .find(|p| p.player == player && !p.demolished)
+            else {
+                continue;
+            };
+            opportunities += 1;
+            let best_opponent = snapshot
+                .players
+                .iter()
+                .filter(|p| p.team != me.team && !p.demolished)
+                .map(|p| time_to_ball(p, ball))
+                .fold(f32::INFINITY, f32::min);
+            if time_to_ball(me, ball) > best_opponent * self.beaten_ratio {
+                penalised.push(Evidence {
+                    t: ep.t_enter,
+                    detail: "committed while clearly beaten to the ball".into(),
+                });
+            }
+        }
+
+        episode_score(
+            DimensionId::ChallengeTiming,
+            opportunities,
+            &penalised,
+            self.saturation_episodes,
+            self.max_evidence,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shadow quality — the cover man holding a goalside line
+// ---------------------------------------------------------------------------
+
+/// Penalises drifting cover: for each of the teammate's engagement episodes at
+/// which the player was the 2nd man, the player is penalised if they were
+/// goalside of the ball for less than `min_goalside_share` of the episode.
+/// Distinct from [`CommitmentDiscipline`]: that punishes *joining* the
+/// challenge, this punishes covering it from the wrong side of the ball — a
+/// patient but upfield 2nd man passes the first and fails this one.
+#[derive(Debug, Clone, Copy)]
+pub struct ShadowQuality {
+    pub engagement: EngagementConfig,
+    /// Minimum fraction of the teammate's episode the player must spend
+    /// goalside of the ball.
+    pub min_goalside_share: f32,
+    /// Teammate episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
+    /// Cap on collected evidence entries.
+    pub max_evidence: usize,
+}
+
+impl Default for ShadowQuality {
+    fn default() -> Self {
+        Self {
+            engagement: EngagementConfig::default(),
+            min_goalside_share: 0.5,
+            saturation_episodes: 12.0,
+            max_evidence: 25,
+        }
+    }
+}
+
+impl MetricExtractor for ShadowQuality {
+    fn id(&self) -> DimensionId {
+        DimensionId::ShadowQuality
+    }
+
+    fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+
+        let mut teammates: Vec<PlayerId> = Vec::new();
+        for (_, frame) in ctx.frames() {
+            for f in frame.teammates_of(player) {
+                if !teammates.contains(&f.player) {
+                    teammates.push(f.player);
+                }
+            }
+        }
+
+        for mate in teammates {
+            for ep in engagements(ctx, mate, &self.engagement) {
+                let Some((_, entry_frame)) = ctx.frame(ep.enter_idx) else {
+                    continue;
+                };
+                let Some(me) = entry_frame.player(player) else {
+                    continue;
+                };
+                if me.role != Role::SecondMan {
+                    continue;
+                }
+                let (mut present, mut goalside) = (0usize, 0usize);
+                for idx in ep.enter_idx..=ep.exit_idx {
+                    if let Some(f) = ctx.frame(idx).and_then(|(_, f)| f.player(player).copied()) {
+                        present += 1;
+                        goalside += usize::from(f.goalside);
+                    }
+                }
+                if present == 0 {
+                    continue; // demolished for the whole episode — no line to hold
+                }
+                opportunities += 1;
+                if (goalside as f32 / present as f32) < self.min_goalside_share {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "covered the challenge from upfield of the ball".into(),
+                    });
+                }
+            }
+        }
+
+        episode_score(
+            DimensionId::ShadowQuality,
+            opportunities,
+            &penalised,
+            self.saturation_episodes,
+            self.max_evidence,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shot selection — high-percentage over hero gambles
+// ---------------------------------------------------------------------------
+
+/// Penalises low-percentage hero shots: each of the player's scoreboard shot
+/// events ([`crate::context::MatchContext::shots`]) is judged by the ball's
+/// position at the shot — farther than `max_range_uu` from the goal mouth, or
+/// wider than `max_off_angle_deg` off the goal axis, is a gamble. Both
+/// thresholds are uncalibrated starting points; the design doc rates this
+/// dimension Low confidence, and the default weight reflects that. With no
+/// shot events attached the dimension never applies.
+#[derive(Debug, Clone, Copy)]
+pub struct ShotSelection {
+    pub field: FieldGeometry,
+    /// Shots from farther than this (uu, ball to goal-mouth center in the
+    /// ground plane) count as low-percentage.
+    pub max_range_uu: f32,
+    /// Shots from wider than this off the straight-at-goal axis (degrees)
+    /// count as low-percentage.
+    pub max_off_angle_deg: f32,
+    /// Shots at which confidence reaches 1.0 — lower than the episode
+    /// dimensions because shots are rare.
+    pub saturation_shots: f32,
+    /// Cap on collected evidence entries.
+    pub max_evidence: usize,
+}
+
+impl Default for ShotSelection {
+    fn default() -> Self {
+        Self {
+            field: FieldGeometry::default(),
+            max_range_uu: 4000.0,
+            max_off_angle_deg: 60.0,
+            saturation_shots: 6.0,
+            max_evidence: 25,
+        }
+    }
+}
+
+impl MetricExtractor for ShotSelection {
+    fn id(&self) -> DimensionId {
+        DimensionId::ShotSelection
+    }
+
+    fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
+        let Some(my_team) = team_of(ctx, player) else {
+            return episode_score(DimensionId::ShotSelection, 0, &[], 1.0, 0);
+        };
+        let opponent_goal_y = -self.field.own_goal_y(my_team);
+
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+        // Shots and frames are both time-sorted; walk them with one cursor.
+        let mut idx = 0usize;
+        for shot in ctx.shots().iter().filter(|s| s.player == player) {
+            while idx + 1 < ctx.len() && ctx.frame(idx).is_some_and(|(s, _)| s.t < shot.t) {
+                idx += 1;
+            }
+            let Some(ball) = ctx.frame(idx).and_then(|(s, _)| s.ball.as_ref()) else {
+                continue;
+            };
+            opportunities += 1;
+            let dx = ball.pose.position.x;
+            let dy = opponent_goal_y - ball.pose.position.y;
+            let range = (dx * dx + dy * dy).sqrt();
+            let off_angle = dx.abs().atan2(dy.abs()).to_degrees();
+            if range > self.max_range_uu || off_angle > self.max_off_angle_deg {
+                penalised.push(Evidence {
+                    t: shot.t,
+                    detail: format!(
+                        "low-percentage shot: {range:.0}uu out, {off_angle:.0}° off the goal axis"
+                    ),
+                });
+            }
+        }
+
+        episode_score(
+            DimensionId::ShotSelection,
+            opportunities,
+            &penalised,
+            self.saturation_shots,
+            self.max_evidence,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — synthetic timelines built by hand.
 // ---------------------------------------------------------------------------
 
@@ -688,6 +1148,236 @@ mod tests {
     fn never_engaging_is_zero_confidence() {
         let timeline = approach_timeline(-2000.0, 0);
         let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(1));
+        assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    // -- positioning fit -------------------------------------------------------
+
+    /// Orange 2 (their 1st man) at `(0, opp_y)` attacking the ball at (0,3000);
+    /// blue 1 parked at (0,2000) is blue's 1st man; blue 0 covers at
+    /// `(2000, cover_y)`; orange 3 parked deep.
+    fn opponent_attacks(t: f32, opp_y: f32, cover_y: f32) -> WorldState {
+        WorldState {
+            t,
+            ball: Some(ball_at(0.0, 3000.0)),
+            players: vec![
+                player(0, Team::Blue, pos(2000.0, cover_y)),
+                player(1, Team::Blue, pos(0.0, 2000.0)),
+                player(2, Team::Orange, pos(0.0, opp_y)),
+                player(3, Team::Orange, pos(3000.0, 4800.0)),
+            ],
+        }
+    }
+
+    fn opponent_attack_timeline(cover_y: f32) -> Timeline {
+        let ys = [
+            5500.0, 4600.0, 4000.0, 3600.0, 3400.0, 3600.0, 4000.0, 4600.0,
+        ];
+        ys.iter()
+            .enumerate()
+            .map(|(i, y)| opponent_attacks(i as f32 * 0.1, *y, cover_y))
+            .collect()
+    }
+
+    #[test]
+    fn goalside_back_man_at_opponent_commit_scores_high() {
+        let timeline = opponent_attack_timeline(-2000.0);
+        let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(
+            result.confidence.get() > 0.0,
+            "the opponent's episode counts"
+        );
+    }
+
+    #[test]
+    fn upfield_back_man_at_opponent_commit_is_penalised() {
+        let timeline = opponent_attack_timeline(4500.0); // upfield of the ball
+        let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn first_man_gets_no_positioning_opportunities() {
+        // Blue 1 is blue's 1st man during the opponent's attack — their job is
+        // pressure, so the dimension never applies to them here.
+        let timeline = opponent_attack_timeline(-2000.0);
+        let result = PositioningFit::default().extract(&ctx(&timeline), PlayerId(1));
+        assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    // -- rotation soundness ----------------------------------------------------
+
+    /// Player 0 challenges a ball in their own defensive zone (0,-3000), then
+    /// ends up at the given post-exit ys; teammate parked far upfield.
+    fn defense_timeline(post_exit_ys: [f32; 3]) -> Timeline {
+        let mut ys = vec![1000.0, -500.0, -1800.0, -2400.0, -2600.0, -2600.0, -2400.0];
+        ys.extend(post_exit_ys);
+        ys.iter()
+            .enumerate()
+            .map(|(i, y)| WorldState {
+                t: i as f32 * 0.1,
+                ball: Some(ball_at(0.0, -3000.0)),
+                players: vec![
+                    player(0, Team::Blue, pos(0.0, *y)),
+                    player(1, Team::Blue, pos(2000.0, 4000.0)),
+                ],
+            })
+            .collect()
+    }
+
+    fn quick_recovery() -> RotationSoundness {
+        RotationSoundness {
+            recovery_window_s: 0.2,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn recovering_goalside_after_the_challenge_scores_high() {
+        // Exits the challenge toward their own goal (goalside of the ball).
+        let timeline = defense_timeline([-4600.0, -4800.0, -5000.0]);
+        let result = quick_recovery().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(result.confidence.get() > 0.0);
+    }
+
+    #[test]
+    fn drifting_upfield_after_the_challenge_is_penalised() {
+        // Exits the challenge upfield of the ball and stays there.
+        let timeline = defense_timeline([-1200.0, -1000.0, -800.0]);
+        let result = quick_recovery().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn truncated_recovery_window_is_not_judged() {
+        // Default 4s window runs past this ~1s timeline: no opportunity.
+        let timeline = defense_timeline([-1200.0, -1000.0, -800.0]);
+        let result = RotationSoundness::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    // -- challenge timing --------------------------------------------------------
+
+    /// Player 0 inside challenge range with the given closing velocity; the
+    /// opponent bearing down on the same ball with theirs.
+    fn race_timeline(my_vy: f32, opp_vy: f32) -> Timeline {
+        (0..3)
+            .map(|i| {
+                let mut me = player(0, Team::Blue, pos(0.0, 2400.0));
+                me.velocity = Vec3::new(0.0, my_vy, 0.0);
+                let mut opp = player(2, Team::Orange, pos(0.0, 4000.0));
+                opp.velocity = Vec3::new(0.0, opp_vy, 0.0);
+                WorldState {
+                    t: i as f32 * 0.1,
+                    ball: Some(ball_at(0.0, 3000.0)),
+                    players: vec![
+                        me,
+                        player(1, Team::Blue, pos(2000.0, -2000.0)),
+                        opp,
+                        player(3, Team::Orange, pos(3000.0, 4800.0)),
+                    ],
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn winning_the_race_to_the_ball_scores_high() {
+        // I close at 2000 uu/s; the opponent is parked.
+        let timeline = race_timeline(2000.0, 0.0);
+        let result = ChallengeTiming::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(result.confidence.get() > 0.0);
+    }
+
+    #[test]
+    fn committing_while_beaten_to_the_ball_is_penalised() {
+        // I creep at 100 uu/s; the opponent closes at 2000 uu/s and gets there
+        // decisively first.
+        let timeline = race_timeline(100.0, -2000.0);
+        let result = ChallengeTiming::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    // -- shadow quality ----------------------------------------------------------
+
+    #[test]
+    fn goalside_cover_holds_the_line() {
+        let timeline: Timeline = (0..10)
+            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, -2000.0))
+            .collect();
+        let result = ShadowQuality::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(result.confidence.get() > 0.0);
+    }
+
+    #[test]
+    fn upfield_cover_fails_the_line_but_not_commitment() {
+        // Patient (never near the ball) but covering from upfield of it: passes
+        // commitment discipline, fails shadow quality — the dimensions are
+        // measuring different faults.
+        let timeline: Timeline = (0..10)
+            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, 4500.0))
+            .collect();
+        let shadow = ShadowQuality::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(shadow.value, Score::new(0.0));
+        let commitment = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(commitment.value, Score::new(100.0));
+    }
+
+    // -- shot selection ------------------------------------------------------------
+
+    use crate::context::ShotEvent;
+
+    fn shot_result(ball_x: f32, ball_y: f32) -> DimensionScore {
+        let timeline: Timeline = (0..5)
+            .map(|i| WorldState {
+                t: i as f32,
+                ball: Some(ball_at(ball_x, ball_y)),
+                players: vec![player(0, Team::Blue, pos(0.0, 0.0))],
+            })
+            .collect();
+        let c =
+            MatchContext::derive(&timeline, ContextConfig::default()).with_shots(vec![ShotEvent {
+                t: 2.0,
+                player: PlayerId(0),
+            }]);
+        ShotSelection::default().extract(&c, PlayerId(0))
+    }
+
+    #[test]
+    fn close_central_shot_scores_high() {
+        // Blue shoots at the orange goal (+y): ball at (0,4000) is 1120uu out,
+        // dead central.
+        let result = shot_result(0.0, 4000.0);
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(result.confidence.get() > 0.0);
+    }
+
+    #[test]
+    fn long_range_hero_shot_is_penalised() {
+        // From the wrong half of the pitch: 7120uu out.
+        let result = shot_result(0.0, -2000.0);
+        assert_eq!(result.value, Score::new(0.0));
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn wide_angle_shot_is_penalised() {
+        // Near the corner: inside range but ~85° off the goal axis.
+        let result = shot_result(3800.0, 4800.0);
+        assert_eq!(result.value, Score::new(0.0));
+    }
+
+    #[test]
+    fn no_shots_means_the_dimension_never_applies() {
+        let timeline = approach_timeline(-2000.0, 60);
+        let result = ShotSelection::default().extract(&ctx(&timeline), PlayerId(0));
         assert_eq!(result.confidence, Confidence::new(0.0));
     }
 }

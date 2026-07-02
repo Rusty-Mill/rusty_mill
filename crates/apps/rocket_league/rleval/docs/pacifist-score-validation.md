@@ -1,4 +1,4 @@
-# Pacifist score — corpus validation (v0 baseline → v1)
+# Pacifist score — corpus validation (v0 baseline → v2)
 
 The first ground-truth run of the consolidated Pacifist analyzer
 (`replay-pacifist`, ported in the PacifistScore consolidation): the three
@@ -257,3 +257,99 @@ What remains is unchanged from v1: the five unbuilt dimensions on the
 episode primitive, and threshold calibration against labeled-adherence
 replays — now including `major_cap` and whether the 15-minor allowance
 should scale with match length.
+
+---
+
+# v2 (`pcfg-v2`): the full eight-dimension rubric — re-run results
+
+The five remaining dimensions, each built on the existing primitives with a
+distinct opportunity type so none restates another:
+
+- **positioning-fit** — the back man judged at the *opponent's* engagement
+  entries: penalised if not goalside at their commit (the right area for the
+  situation × role).
+- **rotation-soundness** — the player's own episodes: penalised if they
+  never recover goalside within 4 s of the episode ending (ball-chasing
+  instead of rotating out).
+- **challenge-timing** — the player's challenges: penalised when clearly
+  beaten to the ball at the commit (estimated time-to-ball vs the best
+  opponent, the design doc's named signal).
+- **shadow-quality** — teammate episodes covered as 2nd man: penalised if
+  goalside of the ball for less than half the episode (distinct from
+  commitment discipline, which only punishes *joining*).
+- **shot-selection** — the replay's per-player scoreboard shot events,
+  newly bridged: penalised for long-range (>4000 uu) or wide-angle (>60°)
+  hero shots.
+
+Default weights follow the design doc's confidence tiers: the High core
+stays 1.0/1.0/0.6, the Med positional trio gets 0.8, and the proxy-heavy
+Low tier (challenge-timing 0.4, shot-selection 0.3) trails. Identical
+harness, gate, and join (same 3,548 rank-joined players; the severity block
+and the three v1 dimension correlations reproduce the v1.1 run exactly, as
+they must — that code is untouched):
+
+```
+pacifist value vs tier : ρ = +0.073     (v1.1: +0.069)
+
+per-dimension Spearman(value, rank)      n       v1
+  over-extension            -0.083    3548    -0.083
+  commitment-discipline     +0.116    3548    +0.116
+  boost-economy             +0.122    3548    +0.122
+  positioning-fit           +0.004    3548      new
+  rotation-soundness        +0.209    3548      new
+  shadow-quality            +0.028    3548      new
+  challenge-timing          -0.317    3548      new
+  shot-selection            +0.055    3327      new
+
+per-bucket        n     mean    p50   within-ρ    v1.1 mean
+  bronze          90    46.3   40.0    +0.081        44.6
+  silver          218   52.2   40.0    -0.047        49.7
+  gold            416   52.2   40.0    +0.058        49.8
+  platinum        444   54.7   40.0    +0.082        52.1
+  diamond         680   56.5   65.7    +0.077        53.9
+  champion        847   55.7   62.8    +0.003        53.1
+  grand-champion  853   55.2   61.7    +0.030        52.0
+```
+
+## Reading the v2 result
+
+1. **Rotation soundness is the best-behaved dimension in the instrument**
+   (+0.209, nearly double the previous best). Whether a player recovers
+   goalside after their challenge ends is the one place the per-opportunity
+   framing found a discipline behavior that climbs the whole ladder — it is
+   also the rank series' abandonment/recovery story measured from the
+   Pacifist side.
+
+2. **Challenge timing is strongly inverted (−0.317), and the sign is
+   diagnostic, not broken.** The time-to-ball proxy penalises a slow
+   approach into a ball the opponent reaches first — but deliberately
+   slowing the approach to contain, fake, or hold a challenge is *elite*
+   technique, so the penalty rate rises with rank. The magnitude (largest
+   of any dimension) says the proxy measures something real about pace;
+   the sign says it isn't discipline. The design doc rated this dimension
+   Low–Med confidence and the 0.4 weight contains the damage; fixing the
+   polarity likely needs the outcome of the race (did the opponent actually
+   take the ball?) rather than entry-time kinematics alone.
+
+3. **Positioning fit and shadow quality are flat** (+0.004, +0.028) — both
+   reduce to a goalside boolean, and goalside/behind-ball share was already
+   established as a ladder invariant in the v0 diagnosis. Moving to
+   per-opportunity framing did not rescue a condition that everyone
+   satisfies at the same rate; these two need *line quality* (depth,
+   back-post vs ball-side) rather than a goalside test to discriminate.
+
+4. **The headline holds its shape.** +0.073 overall (CT's inversion at
+   weight 0.4 roughly cancels RS's gain at 0.8), the inverted U persists
+   (peak Diamond 56.5, GC 55.2), the capped medians stay pinned at 40.0
+   through Platinum, and the uncapped Diamond+ medians rise ~7–11 points as
+   the new dimensions add mostly-high values for disciplined mid-ladder
+   play.
+
+## What this run re-orders
+
+The rubric is now complete; further headline gains are calibration, not
+coverage. In priority order: fix challenge-timing's polarity with
+race-outcome data (it has the most raw signal to reclaim), give positioning
+fit and shadow quality a line-quality measure, then the standing items —
+threshold calibration against labeled-adherence replays (rank is still not
+the target), and surfacing the score in the app.

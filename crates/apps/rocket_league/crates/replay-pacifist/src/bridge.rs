@@ -115,6 +115,28 @@ pub fn possession_spans(m: &CanonicalMatch) -> Vec<crate::context::PossessionSpa
         .collect()
 }
 
+/// Per-player shot events from the canonical scoreboard counters
+/// (`Event::Stat { kind: Shot }`), for [`crate::context::MatchContext::with_shots`].
+/// The counter's rising edge timestamps the shot; goals are tracked separately
+/// upstream and do not appear here.
+pub fn shots(m: &CanonicalMatch) -> Vec<crate::context::ShotEvent> {
+    m.events
+        .iter()
+        .filter_map(|e| match e {
+            replay_analyzer::model::Event::Stat {
+                t,
+                pri,
+                kind: replay_analyzer::model::StatKind::Shot,
+                ..
+            } => Some(crate::context::ShotEvent {
+                t: *t,
+                player: PlayerId(u32::try_from(*pri).ok()?),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +236,36 @@ mod tests {
             tl[0].players[0].boost, SPAWN_BOOST,
             "unobserved -> spawn value"
         );
+    }
+
+    #[test]
+    fn shots_map_stat_shot_events_only() {
+        let mut m = canonical(Vec::new());
+        m.events = vec![
+            replay_analyzer::model::Event::Stat {
+                t: 12.5,
+                pri: 3,
+                player: None,
+                team: Some(0),
+                kind: replay_analyzer::model::StatKind::Shot,
+            },
+            replay_analyzer::model::Event::Stat {
+                t: 20.0,
+                pri: 3,
+                player: None,
+                team: Some(0),
+                kind: replay_analyzer::model::StatKind::Save,
+            },
+            replay_analyzer::model::Event::Goal {
+                t: 30.0,
+                scorer: None,
+                team: Some(0),
+            },
+        ];
+        let s = shots(&m);
+        assert_eq!(s.len(), 1, "saves and goals are not shots");
+        assert_eq!(s[0].t, 12.5);
+        assert_eq!(s[0].player, PlayerId(3));
     }
 
     #[test]
