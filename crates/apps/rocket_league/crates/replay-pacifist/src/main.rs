@@ -4,10 +4,10 @@
 use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_pacifist::bridge::timeline_from_canonical;
+use replay_pacifist::bridge::{possession_spans, timeline_from_canonical};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::scoring::Analyzer;
-use replay_pacifist::{roster, team_sizes, Team};
+use replay_pacifist::{roster, team_sizes, Team, PACIFIST_CONFIG_VERSION};
 use std::error::Error;
 use std::path::Path;
 use std::process::ExitCode;
@@ -45,12 +45,17 @@ fn run() -> Result<(), Box<dyn Error>> {
     }
 
     let analyzer = Analyzer::default();
-    let ctx = MatchContext::derive(&timeline, analyzer.context_config());
+    let spans = possession_spans(&canonical);
+    let ctx = MatchContext::derive_with_possession(&timeline, analyzer.context_config(), &spans);
 
+    eprintln!(
+        "config={PACIFIST_CONFIG_VERSION}  possession=touch-decoded ({} runs)",
+        spans.len()
+    );
     let counts = ctx.possession_counts();
     let total = (counts.blue + counts.orange + counts.contested).max(1) as f32;
     eprintln!(
-        "possession (positional proxy): blue {:.0}%  orange {:.0}%  contested {:.0}%",
+        "possession: blue {:.0}%  orange {:.0}%  contested {:.0}%",
         counts.blue as f32 / total * 100.0,
         counts.orange as f32 / total * 100.0,
         counts.contested as f32 / total * 100.0,

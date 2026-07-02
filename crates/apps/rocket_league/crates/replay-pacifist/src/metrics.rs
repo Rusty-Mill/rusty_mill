@@ -6,24 +6,28 @@
 //! (built in [`crate::scoring`]) confidence-weights the dimensions so weak
 //! signals don't swing the headline number.
 //!
-//! Extractors read the *enriched* context — per-frame [`Role`], distances, and
-//! goalside facts derived once in [`crate::context`] — rather than re-deriving
-//! geometry from raw positions. That keeps each extractor a thin, role-aware
-//! reader. Three high-confidence dimensions are implemented:
+//! **v1 (`pcfg-v1`): per-opportunity event rates.** The first corpus validation
+//! (`docs/pacifist-score-validation.md`) showed the v0 per-frame-fraction
+//! versions of these dimensions don't discriminate — their penalised conditions
+//! are near-invariant by frame count across the whole ladder. The v1 extractors
+//! instead count discrete **engagement episodes** (a player, as 1st man,
+//! entering challenge range of the ball — the "commit" moment the guide's rules
+//! are written about) and penalise episodes by their entry-time facts:
 //!
-//! - **over-extension** (1st man) — diving in as the clear 1st man with no cover
-//!   behind. Blames the player who committed.
-//! - **commitment discipline** (2nd man) — the cover man leaving the net, pushing
-//!   up-field of the ball instead of holding goalside. The role-attributed
-//!   counterpart to over-extension: it blames the man who should have stayed.
-//! - **boost economy** — arriving at the decisive moment (the engaging man, near
-//!   the ball) empty.
+//! - **over-extension** — criteria F17/T-1: an engagement begun against
+//!   opposition possession with no teammate goalside behind (a last-man dive).
+//! - **commitment discipline** — the double-commit (FM-1's counting model, the
+//!   2nd-man side): the cover man joining the ball while their teammate's
+//!   engagement is still live.
+//! - **boost economy** — criteria F4/FM-2: an engagement begun with an
+//!   effectively empty tank ("do not be aggressive with 0 boost").
 //!
 //! Each is oriented so a higher score means *more* Pacifist (more discipline,
-//! less over-commit).
+//! less over-commit). Confidence saturates with the number of *opportunities*
+//! (episodes), not frames.
 
-use crate::context::{FrameContext, MatchContext, Role};
-use crate::{PlayerId, WorldState};
+use crate::context::{MatchContext, RelativePossession, Role};
+use crate::PlayerId;
 
 // ---------------------------------------------------------------------------
 // Shared scoring types
@@ -38,11 +42,13 @@ use crate::{PlayerId, WorldState};
 /// until their extractor lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DimensionId {
-    /// *Implemented.* Punishes diving in as the clear 1st man with no cover behind.
+    /// *Implemented.* Punishes last-man dives: engaging against opposition
+    /// possession with no cover behind (F17).
     OverExtension,
-    /// *Implemented.* Punishes the 2nd man leaving the net (pushing up-field).
+    /// *Implemented.* Punishes double-commits: the 2nd man joining the ball
+    /// while the teammate's engagement is live (F9/FM-1).
     CommitmentDiscipline,
-    /// *Implemented.* Rewards arriving at the decisive moment with boost on hand.
+    /// *Implemented.* Punishes engaging with an empty tank (F4/FM-2).
     BoostEconomy,
     /// The right area for the situation × role. Not yet implemented.
     PositioningFit,
@@ -125,95 +131,139 @@ pub trait MetricExtractor {
 }
 
 // ---------------------------------------------------------------------------
-// Shared tally
+// Engagement episodes — the shared per-opportunity primitive
 // ---------------------------------------------------------------------------
 
-/// Roll a per-frame binary classifier into a [`DimensionScore`].
-///
-/// For each frame `classify` returns `Some(penalised)` when the frame is
-/// *relevant* to the dimension (`penalised = true` for a frame that counts
-/// against the player) or `None` when the dimension doesn't apply that frame.
-/// The score rewards a low penalised fraction:
-///
-/// ```text
-/// value = 100 * (1 - penalised_frames / relevant_frames)
-/// ```
-///
-/// Confidence rises with the number of relevant frames, saturating at
-/// `saturation_frames`. A player with no relevant frames gets value 100 and
-/// confidence 0 — the dimension simply doesn't apply to them, so it drops out of
-/// the aggregate entirely. Evidence is collected on penalised frames, capped at
-/// `max_evidence`.
-fn tally<F>(
-    ctx: &MatchContext,
-    dimension: DimensionId,
-    saturation_frames: f32,
-    max_evidence: usize,
-    evidence_detail: &str,
-    mut classify: F,
-) -> DimensionScore
-where
-    F: FnMut(&WorldState, &FrameContext) -> Option<bool>,
-{
-    let mut relevant: u32 = 0;
-    let mut penalised: u32 = 0;
-    let mut evidence = Vec::new();
+/// Geometry for episode extraction. Enter/exit radii are hysteretic so one
+/// challenge doesn't fragment into several episodes at the boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EngagementConfig {
+    /// Distance (uu) at which a 1st man crossing toward the ball begins an
+    /// engagement — challenge range.
+    pub enter_radius_uu: f32,
+    /// Distance (uu) beyond which a live engagement ends.
+    pub exit_radius_uu: f32,
+}
 
-    for (snapshot, frame) in ctx.frames() {
-        let Some(is_penalised) = classify(snapshot, frame) else {
-            continue;
-        };
-        relevant += 1;
-        if is_penalised {
-            penalised += 1;
-            if evidence.len() < max_evidence {
-                evidence.push(Evidence {
-                    t: snapshot.t,
-                    detail: evidence_detail.to_string(),
-                });
-            }
+impl Default for EngagementConfig {
+    fn default() -> Self {
+        Self {
+            enter_radius_uu: 900.0,
+            exit_radius_uu: 1500.0,
         }
     }
+}
 
-    if relevant == 0 {
+/// One engagement episode: `player` was the 1st man and closed inside
+/// `enter_radius_uu` of the ball, holding the ball area until the exit radius.
+/// Entry-time facts are what the Pacifist rules judge — the decision was made
+/// at the commit, not during the scramble that follows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Engagement {
+    /// Frame index of the entry (into [`MatchContext::frame`]).
+    pub enter_idx: usize,
+    /// Frame index of the last frame of the episode.
+    pub exit_idx: usize,
+    /// Time of the entry frame (seconds).
+    pub t_enter: f32,
+    /// Boost carried at entry, `0..=100`.
+    pub boost_at_entry: u8,
+    /// True when some teammate was goalside of the ball at entry.
+    pub covered_at_entry: bool,
+    /// Possession at entry, from the engaging player's point of view.
+    pub possession_at_entry: RelativePossession,
+}
+
+/// Extract `player`'s engagement episodes from the context.
+///
+/// State machine over frames: an episode opens on a frame where the player is
+/// the 1st man within `enter_radius_uu` of the ball (having been outside — or
+/// absent — before), and closes when they leave `exit_radius_uu`, lose their
+/// facts (demolished / ball-less frame), or the timeline ends. Role flapping
+/// *inside* a live episode does not close it; the commit already happened.
+pub fn engagements(
+    ctx: &MatchContext,
+    player: PlayerId,
+    cfg: &EngagementConfig,
+) -> Vec<Engagement> {
+    let mut out = Vec::new();
+    let mut live: Option<Engagement> = None;
+
+    for (idx, (snapshot, frame)) in ctx.frames().enumerate() {
+        let me = frame.player(player);
+        match (&mut live, me) {
+            (Some(ep), Some(f)) if f.dist_to_ball <= cfg.exit_radius_uu => {
+                ep.exit_idx = idx; // still engaged
+            }
+            (Some(_), _) => {
+                // Left the ball area, was demolished, or the ball vanished.
+                out.push(live.take().expect("live episode"));
+            }
+            (None, Some(f))
+                if f.role == Role::FirstMan && f.dist_to_ball <= cfg.enter_radius_uu =>
+            {
+                let covered = frame.teammates_of(player).any(|t| t.goalside);
+                live = Some(Engagement {
+                    enter_idx: idx,
+                    exit_idx: idx,
+                    t_enter: snapshot.t,
+                    boost_at_entry: f.boost,
+                    covered_at_entry: covered,
+                    possession_at_entry: frame.possession().relative_to(f.team),
+                });
+            }
+            _ => {}
+        }
+    }
+    if let Some(ep) = live {
+        out.push(ep);
+    }
+    out
+}
+
+/// Roll penalised-vs-total episode counts into a [`DimensionScore`]:
+/// `value = 100·(1 − penalised/total)`, confidence saturating at
+/// `saturation_episodes`. No episodes → value 100 at confidence 0 (the
+/// dimension didn't apply, so it drops out of the aggregate).
+fn episode_score(
+    dimension: DimensionId,
+    total: usize,
+    penalised: &[Evidence],
+    saturation_episodes: f32,
+    max_evidence: usize,
+) -> DimensionScore {
+    if total == 0 {
         return DimensionScore {
             dimension,
             value: Score::new(100.0),
             confidence: Confidence::new(0.0),
-            evidence,
+            evidence: Vec::new(),
         };
     }
-
-    let penalised_fraction = penalised as f32 / relevant as f32;
+    let fraction = penalised.len() as f32 / total as f32;
+    let mut evidence = penalised.to_vec();
+    evidence.truncate(max_evidence);
     DimensionScore {
         dimension,
-        value: Score::new(100.0 * (1.0 - penalised_fraction)),
-        confidence: Confidence::new(relevant as f32 / saturation_frames),
+        value: Score::new(100.0 * (1.0 - fraction)),
+        confidence: Confidence::new(total as f32 / saturation_episodes),
         evidence,
     }
 }
 
 // ---------------------------------------------------------------------------
-// Over-extension (1st man)
+// Over-extension (1st man) — F17 / T-1
 // ---------------------------------------------------------------------------
 
-/// Penalises committing as 1st man with no cover behind.
-///
-/// For each frame in which `player` is the *clear* 1st man — the role-derived 1st
-/// man, and closer to the ball than the next teammate by at least
-/// `clear_margin_uu` — it checks whether any teammate is goalside of the ball.
-/// Frames where no teammate covers are "exposed" (see [`tally`]).
-///
-/// High-confidence (positions only) and a direct expression of the
-/// patience-and-control ethos. A player who is never the clear 1st man gets
-/// confidence 0.
+/// Penalises last-man dives: engagement episodes begun **against opposition or
+/// contested possession** (challenging a ball your own team controls is just
+/// playing it — T-1's polarity) with **no teammate goalside** at the commit
+/// (F17: "do not dive in as last man").
 #[derive(Debug, Clone, Copy)]
 pub struct OverExtension {
-    /// How much closer to the ball the 1st man must be than the next teammate to
-    /// count as the *clear* 1st man. `0.0` means "strictly closest".
-    pub clear_margin_uu: f32,
-    /// Number of 1st-man frames at which confidence reaches 1.0.
-    pub confidence_saturation_frames: f32,
+    pub engagement: EngagementConfig,
+    /// Episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
     pub max_evidence: usize,
 }
@@ -221,8 +271,8 @@ pub struct OverExtension {
 impl Default for OverExtension {
     fn default() -> Self {
         Self {
-            clear_margin_uu: 0.0,
-            confidence_saturation_frames: 300.0,
+            engagement: EngagementConfig::default(),
+            saturation_episodes: 12.0,
             max_evidence: 25,
         }
     }
@@ -234,51 +284,49 @@ impl MetricExtractor for OverExtension {
     }
 
     fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
-        tally(
-            ctx,
+        let episodes = engagements(ctx, player, &self.engagement);
+        let opportunities: Vec<&Engagement> = episodes
+            .iter()
+            .filter(|e| e.possession_at_entry != RelativePossession::Ours)
+            .collect();
+        let penalised: Vec<Evidence> = opportunities
+            .iter()
+            .filter(|e| !e.covered_at_entry)
+            .map(|e| Evidence {
+                t: e.t_enter,
+                detail: "committed as last man: no teammate goalside at the challenge".into(),
+            })
+            .collect();
+        episode_score(
             DimensionId::OverExtension,
-            self.confidence_saturation_frames,
+            opportunities.len(),
+            &penalised,
+            self.saturation_episodes,
             self.max_evidence,
-            "1st man committed with no teammate goalside of the ball",
-            |_snapshot, frame| {
-                let me = frame.player(player)?;
-                if me.role != Role::FirstMan {
-                    return None;
-                }
-                // Clear 1st man: closer than the next teammate by the margin.
-                let nearest_mate = frame
-                    .teammates_of(player)
-                    .map(|t| t.dist_to_ball)
-                    .fold(f32::INFINITY, f32::min);
-                if me.dist_to_ball + self.clear_margin_uu >= nearest_mate {
-                    return None;
-                }
-                let covered = frame.teammates_of(player).any(|t| t.goalside);
-                Some(!covered)
-            },
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// Commitment discipline (2nd man)
+// Commitment discipline (2nd man) — F9 / FM-1 double-commit counting
 // ---------------------------------------------------------------------------
 
-/// Penalises the 2nd man for leaving the net — pushing up-field of the ball
-/// instead of holding a covering position goalside of it.
+/// Penalises double-commits from the cover man's side: for each of the
+/// **teammate's** engagement episodes, the player (the 2nd man while that
+/// episode is live) is penalised if they also close inside `double_radius_uu`
+/// of the ball before the episode ends — both cars on the ball, net open. The
+/// opportunity count is the teammate's episodes, so a patient 2nd man scores
+/// 100 across many chances rather than by default.
 ///
-/// For each frame in which `player` is the 2nd man, it is penalised when they are
-/// *not* goalside of the ball (see [`tally`]). This is the role-attributed
-/// counterpart to [`OverExtension`]: over-extension blames the 1st man who dove,
-/// commitment discipline blames the cover man who failed to stay back — together
-/// they account for a double-commit from both sides.
-///
-/// Semantics are 2v2-tuned: the 1st/2nd-man split assumes two players per side,
-/// so this maps cleanly onto 2s and not onto three-deep rotation.
+/// Semantics are 2v2-tuned: the 1st/2nd-man split assumes two players per side.
 #[derive(Debug, Clone, Copy)]
 pub struct CommitmentDiscipline {
-    /// Number of 2nd-man frames at which confidence reaches 1.0.
-    pub confidence_saturation_frames: f32,
+    pub engagement: EngagementConfig,
+    /// The 2nd man closing inside this ball radius (uu) during the teammate's
+    /// live episode counts as a double-commit.
+    pub double_radius_uu: f32,
+    /// Teammate episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
     pub max_evidence: usize,
 }
@@ -286,7 +334,9 @@ pub struct CommitmentDiscipline {
 impl Default for CommitmentDiscipline {
     fn default() -> Self {
         Self {
-            confidence_saturation_frames: 300.0,
+            engagement: EngagementConfig::default(),
+            double_radius_uu: 1100.0,
+            saturation_episodes: 12.0,
             max_evidence: 25,
         }
     }
@@ -298,45 +348,75 @@ impl MetricExtractor for CommitmentDiscipline {
     }
 
     fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
-        tally(
-            ctx,
-            DimensionId::CommitmentDiscipline,
-            self.confidence_saturation_frames,
-            self.max_evidence,
-            "2nd man pushed up-field of the ball, leaving the net open",
-            |_snapshot, frame| {
-                let me = frame.player(player)?;
-                if me.role != Role::SecondMan {
-                    return None;
+        let mut opportunities = 0usize;
+        let mut penalised = Vec::new();
+
+        // The teammates whose engagements we cover (2v2 → one, but stay general).
+        let mut teammates: Vec<PlayerId> = Vec::new();
+        for (_, frame) in ctx.frames() {
+            for f in frame.teammates_of(player) {
+                if !teammates.contains(&f.player) {
+                    teammates.push(f.player);
                 }
-                Some(!me.goalside)
-            },
+            }
+        }
+
+        for mate in teammates {
+            for ep in engagements(ctx, mate, &self.engagement) {
+                // Only episodes where the player was actually the cover man at
+                // the commit (alive, on the field, and not the engaging one).
+                let Some((_, entry_frame)) = ctx.frame(ep.enter_idx) else {
+                    continue;
+                };
+                let Some(me) = entry_frame.player(player) else {
+                    continue;
+                };
+                if me.role != Role::SecondMan {
+                    continue;
+                }
+                opportunities += 1;
+                let joined = (ep.enter_idx..=ep.exit_idx).any(|idx| {
+                    ctx.frame(idx)
+                        .and_then(|(_, f)| f.player(player).map(|m| m.dist_to_ball))
+                        .is_some_and(|d| d <= self.double_radius_uu)
+                });
+                if joined {
+                    penalised.push(Evidence {
+                        t: ep.t_enter,
+                        detail: "double-commit: joined the ball during the teammate's challenge"
+                            .into(),
+                    });
+                }
+            }
+        }
+
+        episode_score(
+            DimensionId::CommitmentDiscipline,
+            opportunities,
+            &penalised,
+            self.saturation_episodes,
+            self.max_evidence,
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// Boost economy
+// Boost economy — F4 / FM-2
 // ---------------------------------------------------------------------------
 
-/// Rewards arriving at the decisive moment with boost on hand.
-///
-/// A "decisive moment" is the frame where `player` is the 1st man (the engaging
-/// man) and within `engage_radius_uu` of the ball. In such a frame the player is
-/// "empty" if their boost is below `empty_boost`. The score rewards a low empty
-/// fraction (see [`tally`]); higher means better boost economy.
-///
-/// Needs only positions and boost, so it is high-confidence. A player who is
-/// never the engaging man gets confidence 0.
+/// Penalises engaging with an effectively empty tank: of the player's
+/// engagement episodes, those entered with boost at or below `empty_boost`
+/// (F4: "do not be aggressive with 0 boost"; FM-2 names the 0-boost corner
+/// flip as the guide's canonical Major fault).
 #[derive(Debug, Clone, Copy)]
 pub struct BoostEconomy {
-    /// How close to the ball (replay units) the 1st man must be for a frame to
-    /// count as a decisive moment.
-    pub engage_radius_uu: f32,
-    /// Boost level below which the player counts as "arriving empty", `0..=100`.
+    pub engagement: EngagementConfig,
+    /// Boost level (`0..=100`) at or below which an engagement counts as
+    /// entered empty. The guide says zero; a small allowance absorbs the
+    /// byte→percent rounding and the last sliver of a burned tank.
     pub empty_boost: u8,
-    /// Number of engaged frames at which confidence reaches 1.0.
-    pub confidence_saturation_frames: f32,
+    /// Episodes at which confidence reaches 1.0.
+    pub saturation_episodes: f32,
     /// Cap on collected evidence entries.
     pub max_evidence: usize,
 }
@@ -344,9 +424,9 @@ pub struct BoostEconomy {
 impl Default for BoostEconomy {
     fn default() -> Self {
         Self {
-            engage_radius_uu: 1200.0,
-            empty_boost: 12,
-            confidence_saturation_frames: 200.0,
+            engagement: EngagementConfig::default(),
+            empty_boost: 5,
+            saturation_episodes: 12.0,
             max_evidence: 25,
         }
     }
@@ -358,19 +438,21 @@ impl MetricExtractor for BoostEconomy {
     }
 
     fn extract(&self, ctx: &MatchContext, player: PlayerId) -> DimensionScore {
-        tally(
-            ctx,
+        let episodes = engagements(ctx, player, &self.engagement);
+        let penalised: Vec<Evidence> = episodes
+            .iter()
+            .filter(|e| e.boost_at_entry <= self.empty_boost)
+            .map(|e| Evidence {
+                t: e.t_enter,
+                detail: "engaged the ball with an empty tank".into(),
+            })
+            .collect();
+        episode_score(
             DimensionId::BoostEconomy,
-            self.confidence_saturation_frames,
+            episodes.len(),
+            &penalised,
+            self.saturation_episodes,
             self.max_evidence,
-            "engaged the ball with little to no boost",
-            |_snapshot, frame| {
-                let me = frame.player(player)?;
-                if me.role != Role::FirstMan || me.dist_to_ball > self.engage_radius_uu {
-                    return None;
-                }
-                Some(me.boost < self.empty_boost)
-            },
         )
     }
 }
@@ -382,8 +464,8 @@ impl MetricExtractor for BoostEconomy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{ContextConfig, MatchContext};
-    use crate::{BallState, PlayerState, Pose, Quat, Team, Timeline, Vec3};
+    use crate::context::{ContextConfig, MatchContext, PossessionSpan};
+    use crate::{BallState, PlayerState, Pose, Quat, Team, Timeline, Vec3, WorldState};
 
     fn pos(x: f32, y: f32) -> Pose {
         Pose {
@@ -418,338 +500,194 @@ mod tests {
         }
     }
 
-    /// player 0 near the ball (1st man), player 1 parked far (2nd man), both blue.
-    fn frame(t: f32, ball_y: f32, challenger_y: f32, teammate_y: f32) -> WorldState {
+    /// Ball fixed at y=3000; player 0 (blue) at `challenger_y`, teammate parked
+    /// at `(2000, teammate_y)`.
+    fn frame(t: f32, challenger_y: f32, teammate_y: f32, challenger_boost: u8) -> WorldState {
         WorldState {
             t,
-            ball: Some(ball_at(0.0, ball_y)),
+            ball: Some(ball_at(0.0, 3000.0)),
             players: vec![
-                player(0, Team::Blue, pos(0.0, challenger_y)),
+                player_with_boost(0, Team::Blue, pos(0.0, challenger_y), challenger_boost),
                 player(1, Team::Blue, pos(2000.0, teammate_y)),
             ],
         }
+    }
+
+    /// An approach → challenge → retreat arc for player 0: far, closing, inside
+    /// challenge range for a few frames, then away again. One episode.
+    fn approach_timeline(teammate_y: f32, boost: u8) -> Timeline {
+        let ys = [
+            -1000.0, 500.0, 1800.0, 2400.0, 2600.0, 2700.0, 2600.0, 2400.0, 800.0, -1000.0,
+        ];
+        ys.iter()
+            .enumerate()
+            .map(|(i, y)| frame(i as f32 * 0.1, *y, teammate_y, boost))
+            .collect()
     }
 
     fn ctx(timeline: &Timeline) -> MatchContext<'_> {
         MatchContext::derive(timeline, ContextConfig::default())
     }
 
-    // -- over-extension (1st man) -------------------------------------------
+    // -- engagement extraction ----------------------------------------------
 
     #[test]
-    fn committed_with_cover_scores_high() {
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, -2000.0))
-            .collect();
-        let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(0));
+    fn one_approach_is_one_episode_with_entry_facts() {
+        let timeline = approach_timeline(-2000.0, 60);
+        let eps = engagements(&ctx(&timeline), PlayerId(0), &EngagementConfig::default());
 
-        assert_eq!(result.value, Score::new(100.0), "always covered");
+        assert_eq!(eps.len(), 1, "hysteresis holds one challenge together");
+        let ep = &eps[0];
+        // Entry happens at y=2400 (600uu from the ball), frame index 3.
+        assert_eq!(ep.enter_idx, 3);
+        assert!(ep.exit_idx > ep.enter_idx, "episode spans the close frames");
+        assert_eq!(ep.boost_at_entry, 60);
+        assert!(
+            ep.covered_at_entry,
+            "teammate at -2000 is goalside of the ball at 3000"
+        );
+    }
+
+    #[test]
+    fn far_player_has_no_episodes() {
+        let timeline = approach_timeline(-2000.0, 60);
+        let eps = engagements(&ctx(&timeline), PlayerId(1), &EngagementConfig::default());
+        assert!(eps.is_empty(), "the parked cover man never engages");
+    }
+
+    #[test]
+    fn two_separated_approaches_are_two_episodes() {
+        let mut timeline = approach_timeline(-2000.0, 60);
+        let second: Timeline = approach_timeline(-2000.0, 60)
+            .into_iter()
+            .map(|mut w| {
+                w.t += 10.0;
+                w
+            })
+            .collect();
+        timeline.extend(second);
+        let eps = engagements(&ctx(&timeline), PlayerId(0), &EngagementConfig::default());
+        assert_eq!(eps.len(), 2);
+    }
+
+    // -- over-extension ------------------------------------------------------
+
+    #[test]
+    fn covered_challenge_scores_high() {
+        let timeline = approach_timeline(-2000.0, 60); // teammate goalside
+        let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
         assert!(result.confidence.get() > 0.0);
         assert!(result.evidence.is_empty());
     }
 
     #[test]
-    fn committed_without_cover_scores_low() {
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0))
-            .collect();
+    fn last_man_dive_scores_low() {
+        let timeline = approach_timeline(4000.0, 60); // teammate upfield of the ball
         let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(0.0), "never covered");
-        assert_eq!(result.evidence.len(), 10);
+        assert_eq!(
+            result.value,
+            Score::new(0.0),
+            "the guide's named Major shape"
+        );
+        assert_eq!(result.evidence.len(), 1);
     }
 
     #[test]
-    fn half_covered_scores_in_between() {
-        let mut timeline: Timeline = (0..4)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, -2000.0))
-            .collect();
-        timeline.extend((4..8).map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0)));
-        let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(50.0));
-        assert_eq!(result.evidence.len(), 4);
-    }
-
-    #[test]
-    fn never_first_man_is_zero_confidence() {
-        // Player 1 is always the far man → never the 1st man.
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, -2000.0))
-            .collect();
-        let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(1));
-
+    fn challenges_on_own_possession_do_not_count() {
+        // Same last-man dive geometry, but a possession span says blue controls
+        // the ball throughout — playing your own ball is not an over-extension.
+        let timeline = approach_timeline(4000.0, 60);
+        let spans = [PossessionSpan {
+            team: Team::Blue,
+            start: 0.0,
+            end: 10.0,
+        }];
+        let c = MatchContext::derive_with_possession(&timeline, ContextConfig::default(), &spans);
+        let result = OverExtension::default().extract(&c, PlayerId(0));
         assert_eq!(
             result.confidence,
             Confidence::new(0.0),
-            "metric doesn't apply"
+            "no opportunities against opposition possession"
         );
     }
 
-    #[test]
-    fn ball_less_and_demolished_frames_are_skipped() {
-        let mut timeline: Timeline = Vec::new();
-        timeline.push(WorldState {
-            t: 0.0,
-            ball: None,
-            players: vec![player(0, Team::Blue, pos(0.0, 2900.0))],
-        });
-        let mut demo = frame(1.0, 3000.0, 2900.0, 3500.0);
-        demo.players[0].demolished = true;
-        timeline.push(demo);
-        timeline.push(frame(2.0, 3000.0, 2900.0, 3500.0));
+    // -- commitment discipline ------------------------------------------------
 
-        let result = OverExtension::default().extract(&ctx(&timeline), PlayerId(0));
-        assert_eq!(result.value, Score::new(0.0));
-        assert_eq!(result.evidence.len(), 1);
-        assert_eq!(result.evidence[0].t, 2.0);
-    }
-
-    #[test]
-    fn orange_orientation_is_mirrored() {
-        let make = |t: f32, teammate_y: f32| WorldState {
-            t,
-            ball: Some(ball_at(0.0, -3000.0)),
-            players: vec![
-                player(2, Team::Orange, pos(0.0, -2900.0)),
-                player(3, Team::Orange, pos(2000.0, teammate_y)),
-            ],
-        };
-        let covered: Timeline = (0..5).map(|i| make(i as f32, 2000.0)).collect();
-        let exposed: Timeline = (0..5).map(|i| make(i as f32, -3500.0)).collect();
-
-        assert_eq!(
-            OverExtension::default()
-                .extract(&ctx(&covered), PlayerId(2))
-                .value,
-            Score::new(100.0)
-        );
-        assert_eq!(
-            OverExtension::default()
-                .extract(&ctx(&exposed), PlayerId(2))
-                .value,
-            Score::new(0.0)
-        );
-    }
-
-    #[test]
-    fn evidence_is_capped() {
-        let cfg = OverExtension {
-            max_evidence: 3,
-            ..OverExtension::default()
-        };
-        let timeline: Timeline = (0..20)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0))
-            .collect();
-        let result = cfg.extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(0.0));
-        assert_eq!(
-            result.evidence.len(),
-            3,
-            "evidence capped, score unaffected"
-        );
-    }
-
-    // -- commitment discipline (2nd man) ------------------------------------
-
-    #[test]
-    fn cover_man_goalside_scores_high() {
-        // Player 1 is the 2nd man, sitting goalside (-2000, behind the ball).
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, -2000.0))
-            .collect();
-        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(1));
-
-        assert_eq!(result.value, Score::new(100.0), "cover man always holds");
-        assert!(result.confidence.get() > 0.0);
-        assert!(result.evidence.is_empty());
-    }
-
-    #[test]
-    fn cover_man_up_field_scores_low() {
-        // Player 1 (2nd man) pushed up to +3500, ahead of the ball at +3000.
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0))
-            .collect();
-        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(1));
-
-        assert_eq!(result.value, Score::new(0.0), "cover man never holds");
-        assert_eq!(result.evidence.len(), 10);
-    }
-
-    #[test]
-    fn cover_man_half_holding_scores_in_between() {
-        let mut timeline: Timeline = (0..4)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, -2000.0))
-            .collect();
-        timeline.extend((4..8).map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0)));
-        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(1));
-
-        assert_eq!(result.value, Score::new(50.0));
-        assert_eq!(result.evidence.len(), 4);
-    }
-
-    #[test]
-    fn first_man_does_not_get_a_commitment_score() {
-        // Player 0 is the 1st man, so this 2nd-man metric doesn't apply.
-        let timeline: Timeline = (0..10)
-            .map(|i| frame(i as f32, 3000.0, 2900.0, 3500.0))
-            .collect();
-        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(
-            result.confidence,
-            Confidence::new(0.0),
-            "1st man isn't the cover man"
-        );
-    }
-
-    #[test]
-    fn commitment_orange_orientation_is_mirrored() {
-        // Orange attacks -y; player 2 on the ball (1st man), player 3 the cover man.
-        let make = |t: f32, teammate_y: f32| WorldState {
-            t,
-            ball: Some(ball_at(0.0, -3000.0)),
-            players: vec![
-                player(2, Team::Orange, pos(0.0, -2900.0)),
-                player(3, Team::Orange, pos(2000.0, teammate_y)),
-            ],
-        };
-        // Cover man goalside (+2000, behind the ball for orange) → holds.
-        let held: Timeline = (0..5).map(|i| make(i as f32, 2000.0)).collect();
-        // Cover man up-field (-3500, ahead of the ball) → left the net.
-        let left: Timeline = (0..5).map(|i| make(i as f32, -3500.0)).collect();
-
-        assert_eq!(
-            CommitmentDiscipline::default()
-                .extract(&ctx(&held), PlayerId(3))
-                .value,
-            Score::new(100.0)
-        );
-        assert_eq!(
-            CommitmentDiscipline::default()
-                .extract(&ctx(&left), PlayerId(3))
-                .value,
-            Score::new(0.0)
-        );
-    }
-
-    #[test]
-    fn commitment_skips_ball_less_and_demolished_frames() {
-        let mut timeline: Timeline = Vec::new();
-        // No ball → skipped.
-        timeline.push(WorldState {
-            t: 0.0,
-            ball: None,
-            players: vec![
-                player(0, Team::Blue, pos(0.0, 2900.0)),
-                player(1, Team::Blue, pos(2000.0, 3500.0)),
-            ],
-        });
-        // Player 1 demolished → skipped.
-        let mut demo = frame(1.0, 3000.0, 2900.0, 3500.0);
-        demo.players[1].demolished = true;
-        timeline.push(demo);
-        // One real up-field frame for the cover man.
-        timeline.push(frame(2.0, 3000.0, 2900.0, 3500.0));
-
-        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(1));
-        assert_eq!(result.value, Score::new(0.0));
-        assert_eq!(result.evidence.len(), 1);
-        assert_eq!(result.evidence[0].t, 2.0);
-    }
-
-    // -- boost economy ------------------------------------------------------
-
-    /// Player 0 sits on the ball (1st man), teammate parked far away.
-    fn boost_frame(t: f32, boost: u8) -> WorldState {
+    /// Teammate (player 1) sits engaged on the ball; player 0 covers at
+    /// `(cover_x, cover_y)`.
+    fn teammate_engaged(t: f32, cover_x: f32, cover_y: f32) -> WorldState {
         WorldState {
             t,
-            ball: Some(ball_at(0.0, 0.0)),
+            ball: Some(ball_at(0.0, 3000.0)),
             players: vec![
-                player_with_boost(0, Team::Blue, pos(0.0, 100.0), boost),
-                player(1, Team::Blue, pos(0.0, 3000.0)),
+                player(0, Team::Blue, pos(cover_x, cover_y)),
+                player(1, Team::Blue, pos(0.0, 2600.0)),
             ],
         }
     }
 
     #[test]
-    fn boost_engaged_with_boost_scores_high() {
-        let timeline: Timeline = (0..10).map(|i| boost_frame(i as f32, 60)).collect();
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(100.0), "never empty");
-        assert!(result.confidence.get() > 0.0);
-        assert!(result.evidence.is_empty());
-    }
-
-    #[test]
-    fn boost_engaged_empty_scores_low() {
-        let timeline: Timeline = (0..10).map(|i| boost_frame(i as f32, 0)).collect();
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(0.0), "always empty");
-        assert_eq!(result.evidence.len(), 10);
-    }
-
-    #[test]
-    fn boost_half_empty_scores_in_between() {
-        let mut timeline: Timeline = (0..4).map(|i| boost_frame(i as f32, 80)).collect();
-        timeline.extend((4..8).map(|i| boost_frame(i as f32, 0)));
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
-
-        assert_eq!(result.value, Score::new(50.0));
-        assert_eq!(result.evidence.len(), 4);
-    }
-
-    #[test]
-    fn boost_never_engaged_is_zero_confidence() {
-        // Player 1 is always the far man → never the engaging 1st man.
-        let timeline: Timeline = (0..10).map(|i| boost_frame(i as f32, 0)).collect();
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(1));
-
-        assert_eq!(result.confidence, Confidence::new(0.0), "never engaged");
-    }
-
-    #[test]
-    fn boost_out_of_engage_radius_does_not_apply() {
-        // 1st man, but parked well beyond engage radius.
+    fn patient_cover_man_scores_high() {
         let timeline: Timeline = (0..10)
-            .map(|i| WorldState {
-                t: i as f32,
-                ball: Some(ball_at(0.0, 0.0)),
-                players: vec![
-                    player_with_boost(0, Team::Blue, pos(0.0, 3000.0), 0),
-                    player(1, Team::Blue, pos(0.0, 5000.0)),
-                ],
-            })
+            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, -2000.0))
             .collect();
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
-
+        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(0));
         assert_eq!(
-            result.confidence,
-            Confidence::new(0.0),
-            "too far to be a decisive moment"
+            result.value,
+            Score::new(100.0),
+            "held position all challenge"
+        );
+        assert!(
+            result.confidence.get() > 0.0,
+            "the teammate's episode is the opportunity"
         );
     }
 
     #[test]
-    fn boost_skips_ball_less_and_demolished_frames() {
-        let mut timeline: Timeline = Vec::new();
-        timeline.push(WorldState {
-            t: 0.0,
-            ball: None,
-            players: vec![player_with_boost(0, Team::Blue, pos(0.0, 100.0), 0)],
-        });
-        let mut demo = boost_frame(1.0, 0);
-        demo.players[0].demolished = true;
-        timeline.push(demo);
-        timeline.push(boost_frame(2.0, 0));
-
-        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
-        assert_eq!(result.value, Score::new(0.0));
+    fn joining_the_challenge_is_a_double_commit() {
+        // Cover man starts patient, then drives onto the ball mid-episode.
+        let mut timeline: Timeline = (0..4)
+            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, -2000.0))
+            .collect();
+        timeline.extend((4..10).map(|i| teammate_engaged(i as f32 * 0.1, 300.0, 2900.0)));
+        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0), "both cars on the ball");
         assert_eq!(result.evidence.len(), 1);
-        assert_eq!(result.evidence[0].t, 2.0);
+    }
+
+    #[test]
+    fn engaging_player_gets_no_commitment_opportunities() {
+        let timeline: Timeline = (0..10)
+            .map(|i| teammate_engaged(i as f32 * 0.1, 2000.0, -2000.0))
+            .collect();
+        // Player 1 is the engaged 1st man — the dimension judges the cover man.
+        let result = CommitmentDiscipline::default().extract(&ctx(&timeline), PlayerId(1));
+        assert_eq!(result.confidence, Confidence::new(0.0));
+    }
+
+    // -- boost economy ---------------------------------------------------------
+
+    #[test]
+    fn engaging_with_boost_scores_high() {
+        let timeline = approach_timeline(-2000.0, 60);
+        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(100.0));
+        assert!(result.confidence.get() > 0.0);
+    }
+
+    #[test]
+    fn engaging_empty_scores_low() {
+        let timeline = approach_timeline(-2000.0, 0);
+        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(0));
+        assert_eq!(result.value, Score::new(0.0), "the guide's F4");
+        assert_eq!(result.evidence.len(), 1);
+    }
+
+    #[test]
+    fn never_engaging_is_zero_confidence() {
+        let timeline = approach_timeline(-2000.0, 0);
+        let result = BoostEconomy::default().extract(&ctx(&timeline), PlayerId(1));
+        assert_eq!(result.confidence, Confidence::new(0.0));
     }
 }

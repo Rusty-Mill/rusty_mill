@@ -23,11 +23,11 @@ use replay_analyzer::analyze::build_canonical;
 use replay_analyzer::analyze::validate::GroundTruth;
 use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
-use replay_pacifist::bridge::timeline_from_canonical;
+use replay_pacifist::bridge::{possession_spans, timeline_from_canonical};
 use replay_pacifist::context::MatchContext;
 use replay_pacifist::metrics::DimensionId;
 use replay_pacifist::scoring::Analyzer;
-use replay_pacifist::{roster, team_sizes, Team};
+use replay_pacifist::{roster, team_sizes, Team, PACIFIST_CONFIG_VERSION};
 use replay_scoring::calibrate::{join_ranks, spearman};
 use replay_scoring::coverage::{lobby_fully_present, CoverageConfig};
 use serde::Deserialize;
@@ -80,9 +80,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         .filter(|e| e.team_size == Some(2) && e.playlist.as_deref() == Some("ranked-doubles"))
         .collect();
     eprintln!(
-        "corpus: {} ranked-doubles 2v2 entries from {}",
+        "corpus: {} ranked-doubles 2v2 entries from {}  (config {})",
         entries.len(),
-        manifest_path.display()
+        manifest_path.display(),
+        PACIFIST_CONFIG_VERSION
     );
 
     let ground_truth: Option<GroundTruth> =
@@ -162,7 +163,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                             });
                         let tiers = join_ranks(&joinable, &e.ranks, gt_players.as_deref());
 
-                        let ctx = MatchContext::derive(&timeline, analyzer.context_config());
+                        let spans = possession_spans(&canonical);
+                        let ctx = MatchContext::derive_with_possession(
+                            &timeline,
+                            analyzer.context_config(),
+                            &spans,
+                        );
                         for (entry, tier) in players.iter().zip(&tiers) {
                             let Some(tier) = tier else { continue };
                             let score = analyzer.score_player_in(&ctx, entry.player);

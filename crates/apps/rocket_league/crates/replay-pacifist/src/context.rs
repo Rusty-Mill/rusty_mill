@@ -165,11 +165,45 @@ pub struct MatchContext<'t> {
 }
 
 impl<'t> MatchContext<'t> {
-    /// Derive the context for `timeline` under `config`.
+    /// Derive the context for `timeline` under `config`, with the positional
+    /// possession proxy (see the module docs — a v1 placeholder).
     pub fn derive(timeline: &'t Timeline, config: ContextConfig) -> Self {
+        Self::derive_inner(timeline, config, None)
+    }
+
+    /// Derive the context with **authoritative possession spans** (touch-decoded
+    /// runs, e.g. the canonical model's possession events via
+    /// [`crate::bridge::possession_spans`]) instead of the positional proxy.
+    ///
+    /// Spans are authoritative: a frame inside a span belongs to that span's
+    /// team, and a frame outside every span is [`Possession::Contested`] — the
+    /// touch model already treats between-runs as loose, so the proxy is not
+    /// consulted as a fallback.
+    pub fn derive_with_possession(
+        timeline: &'t Timeline,
+        config: ContextConfig,
+        spans: &[PossessionSpan],
+    ) -> Self {
+        Self::derive_inner(timeline, config, Some(spans))
+    }
+
+    fn derive_inner(
+        timeline: &'t Timeline,
+        config: ContextConfig,
+        spans: Option<&[PossessionSpan]>,
+    ) -> Self {
         let frames = timeline
             .iter()
-            .map(|snapshot| derive_frame(snapshot, &config))
+            .map(|snapshot| {
+                let mut frame = derive_frame(snapshot, &config);
+                if let Some(spans) = spans {
+                    frame.possession = spans
+                        .iter()
+                        .find(|s| s.start <= snapshot.t && snapshot.t <= s.end)
+                        .map_or(Possession::Contested, |s| Possession::Team(s.team));
+                }
+                frame
+            })
             .collect();
         Self { timeline, frames }
     }
@@ -177,6 +211,11 @@ impl<'t> MatchContext<'t> {
     /// Iterate `(raw snapshot, derived facts)` pairs in frame order.
     pub fn frames(&self) -> impl Iterator<Item = (&WorldState, &FrameContext)> {
         self.timeline.iter().zip(self.frames.iter())
+    }
+
+    /// The `(raw snapshot, derived facts)` pair at frame `idx`, if in range.
+    pub fn frame(&self, idx: usize) -> Option<(&WorldState, &FrameContext)> {
+        Some((self.timeline.get(idx)?, self.frames.get(idx)?))
     }
 
     pub fn len(&self) -> usize {
@@ -207,6 +246,16 @@ pub struct PossessionCounts {
     pub blue: usize,
     pub orange: usize,
     pub contested: usize,
+}
+
+/// One touch-decoded possession run: `team` controlled the ball from `start`
+/// to `end` (seconds, inclusive). The authoritative replacement for the
+/// positional proxy — see [`MatchContext::derive_with_possession`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PossessionSpan {
+    pub team: Team,
+    pub start: f32,
+    pub end: f32,
 }
 
 // ---------------------------------------------------------------------------

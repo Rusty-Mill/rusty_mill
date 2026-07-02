@@ -1,4 +1,4 @@
-# Pacifist score — first corpus validation (v0: honest null result)
+# Pacifist score — corpus validation (v0 baseline → v1)
 
 The first ground-truth run of the consolidated Pacifist analyzer
 (`replay-pacifist`, ported in the PacifistScore consolidation): the three
@@ -97,3 +97,81 @@ re-orders the work:
 
 The harness itself is the durable artifact: any future dimension gets the
 same 3,500-player, seven-bucket, leaver-gated evaluation for one command.
+
+---
+
+# v1 (`pcfg-v1`): per-opportunity event rates — re-run results
+
+The rework the v0 diagnosis prescribed, re-measured with the identical
+harness, gate, and join (same 3,548 rank-joined players):
+
+- **Possession**: touch-decoded canonical possession runs fed through the
+  bridge (`bridge::possession_spans` →
+  `MatchContext::derive_with_possession`); the positional proxy remains only
+  as the default for synthetic/domain-only callers. Contested share on real
+  play drops ~69% → ~49%.
+- **Dimensions**: rebuilt around a shared **engagement episode** primitive
+  (1st man crossing into challenge range — hysteretic radii, entry-time
+  facts). Over-extension = last-man commits against non-owned possession
+  with no cover (F17/T-1); commitment discipline = the cover man joining
+  the teammate's live engagement (F9/FM-1 double-commit counting); boost
+  economy = engagements entered with an effectively empty tank (F4/FM-2).
+  Confidence saturates on episodes, not frames.
+
+```
+pacifist value vs tier : ρ = +0.068         (v0: +0.010)
+
+per-dimension Spearman(value, rank)      n        v0
+  over-extension            -0.083    3548    +0.006
+  commitment-discipline     +0.116    3548    +0.012
+  boost-economy             +0.122    3548    -0.042
+
+per-bucket        n     mean    p50   within-bucket ρ      v0 mean
+  bronze          90    55.7   55.0   +0.051                 70.9
+  silver          218   60.3   59.9   -0.091                 73.4
+  gold            416   61.3   61.2   +0.113                 74.4
+  platinum        444   63.3   63.5   -0.002                 75.4
+  diamond         680   64.3   64.2   +0.053                 74.6
+  champion        847   64.0   64.1   -0.072                 74.2
+  grand-champion  853   62.0   62.1   -0.046                 74.2
+```
+
+## Reading the v1 result
+
+1. **Every dimension moved in the diagnosed direction.** Boost economy's
+   inversion is fixed (−0.042 → +0.122) — judging the tank *at the commit*
+   instead of near-ball frame shares separates deliberate lean play from
+   empty dives. Commitment discipline strengthened 10× (+0.012 → +0.116).
+   Bracket-mean spread doubled (4.5 → 8.6 points) and gained structure.
+
+2. **The structure is an inverted U, and that is the finding.** Means rise
+   monotonically Bronze → Diamond (55.7 → 64.3), flatten at Champion, and
+   *fall* at GC (62.0). This is exactly the "textbook boundary" the
+   rank-assessment series measured from the other direction: inside GC,
+   double-commits invert (+0.158 — coordinated double-pressure), spacing
+   tightens, and deliberate last-man challenges are routine at SSL pace.
+   `over-extension`'s negative overall ρ (−0.083) is that phenomenon, not a
+   defect: the top of the ladder *does* commit as last man more, on
+   purpose. A Pacifist-adherence score **should** peak where the book's own
+   curriculum peaks — its rank blueprints stop at Champ–GC — and v1 now
+   measures real behavior well enough to reproduce that shape from the
+   data. Consequence for product use: surface the Pacifist score as
+   *system adherence with a mid-ladder target audience*, not as a rank
+   proxy; the overall-ladder ρ is structurally capped by the U-turn.
+
+3. **Within-bracket ρ remains ≈ 0 everywhere** — one match yields only
+   5–15 episodes per player per dimension, so single-match divisional
+   resolution is likely beyond this instrument regardless of definition
+   quality; multi-match aggregation (the service layer's per-account view)
+   is the realistic path to stable per-player placement.
+
+## Remaining work this baseline motivates
+
+- **FM-1 severity model**: Major faults (the F17 last-man dive that
+  concedes, FM-2's 0-boost corner flip) should gate/cap rather than
+  average — the guide's 15-minor/1-major framing is a different aggregate
+  shape than the current weighted mean.
+- The **five unbuilt dimensions**, now on the episode primitive.
+- **Threshold calibration** (enter/exit radii, double radius, empty-boost)
+  against labeled "very Pacifist vs very not" replays, per the design doc —
+  rank is deliberately *not* the calibration target given (2).

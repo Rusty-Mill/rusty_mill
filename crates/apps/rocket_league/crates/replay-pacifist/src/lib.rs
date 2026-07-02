@@ -212,6 +212,11 @@ pub mod context;
 pub mod metrics;
 pub mod scoring;
 
+/// Version stamp for the extractor semantics + default thresholds, bumped when
+/// either changes so corpus baselines are comparable (`pcfg-v0` was the
+/// per-frame-fraction rubric measured in `docs/pacifist-score-validation.md`).
+pub const PACIFIST_CONFIG_VERSION: &str = "pcfg-v1";
+
 // ---------------------------------------------------------------------------
 // Match format
 // ---------------------------------------------------------------------------

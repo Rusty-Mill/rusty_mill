@@ -95,6 +95,26 @@ fn vec3(v: replay_analyzer::model::Vec3) -> Vec3 {
     Vec3::new(v.x, v.y, v.z)
 }
 
+/// Touch-decoded possession runs from the canonical events, for
+/// [`crate::context::MatchContext::derive_with_possession`] — the authoritative
+/// replacement for the domain's positional possession proxy (which the first
+/// corpus validation measured as ~69% contested on real play).
+pub fn possession_spans(m: &CanonicalMatch) -> Vec<crate::context::PossessionSpan> {
+    m.events
+        .iter()
+        .filter_map(|e| match e {
+            replay_analyzer::model::Event::Possession {
+                team, start, end, ..
+            } => Some(crate::context::PossessionSpan {
+                team: Team::from_side(u8::try_from(*team).ok()?)?,
+                start: *start,
+                end: *end,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
