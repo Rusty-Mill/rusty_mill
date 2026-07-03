@@ -507,3 +507,92 @@ threshold calibration against labeled-adherence replays is still the one
 item everything else defers to, now with two more guide-approximated
 constants (`min_depth_from_goal_uu`, `max_lateral_offset_uu`) added to the
 list of thresholds calibration would refine.
+
+---
+
+# Multi-match aggregation: the v1 hypothesis, tested
+
+Every version above measures single-match resolution, and the v1 section
+(above) flagged its ceiling explicitly: within-bracket ρ sits near 0
+everywhere because one match yields only 5–15 episodes per dimension —
+"multi-match aggregation… is the realistic path to stable per-player
+placement." That was a prediction, not yet a result. This corpus happens to
+carry enough repetition to test it directly: **159 named players recur
+across ≥3 corpus replays** (64 across ≥5, 23 across ≥8) — different ranked
+lobbies the same account appears in across the manifest's ballchasing scrape.
+
+## The instrument
+
+`replay_pacifist::history::aggregate_history` combines a player's
+already-scored `PacifistScore`s into one `PlayerHistory`, reusing
+`scoring::aggregate` one level up: each dimension's multi-match value is the
+**opportunity-weighted mean** across matches (weighted by
+`DimensionScore::opportunities`, a new field — the raw per-match count
+`confidence` saturates from, which a single match's already-saturated
+confidence can't reconstruct on its own), fed back through the identical
+weighted-mean formula for the headline. One deliberate asymmetry, locked in
+by a unit test: the aggregate headline is **not** capped by Majors the way
+one match's value is — capping an N-match view on a single incident would
+make it exactly as volatile as its worst match, defeating the reason to
+aggregate. Severity instead surfaces through per-match totals and a pass
+**rate**, and the `trend` field keeps each match's own capped value visible.
+
+A `pacifist_history` CLI (`cargo run --release -p replay-pacifist --bin
+pacifist_history -- "<name>" file1.replay file2.replay …`) makes this usable
+today, outside any corpus context — hand it a coached player's match history
+and get their aggregated profile back.
+
+## The experiment
+
+For players recurring ≥N times, `validate_pacifist` now compares two
+readings of the *same population*: (a) **per-match ρ** — every one of their
+individual matches treated as an independent sample (restricted to this
+cohort, not the full 3,548, so it's an apples-to-apples comparison), against
+(b) **aggregated ρ** — one `history::aggregate_history` row per player,
+tier taken as the median across their matches (a corpus snapshot can catch
+someone mid-rank-change).
+
+```
+min-matches  players  matches   per-match ρ   aggregated ρ
+>= 3         134      682         +0.142         +0.340
+>= 5         52       407         +0.246         +0.453
+>= 8         17       210         +0.274         +0.789
+```
+
+## Reading the result
+
+1. **The hypothesis holds, and the effect strengthens exactly as predicted
+   with more matches per player.** Aggregation roughly **doubles to
+   triples** ρ at every threshold (2.4× at ≥3, 1.8× at ≥5, 2.9× at ≥8). This
+   is the clearest confirmation this validation series has produced that the
+   Pacifist instrument's ceiling is a *sample-size* problem, not a
+   *measurement* problem — the same dimensions that read as near-zero
+   within-bracket in a single match separate real players once given enough
+   matches to average over.
+2. **The ≥8 cohort's ρ = 0.789 is in the same neighborhood as the scoring
+   crate's own fitted composite** (CV ρ 0.809, the workspace's most mature,
+   calibrated rank instrument) — a striking number for a rubric built on
+   guide-approximated, uncalibrated thresholds. Read it as a ceiling
+   estimate, not a claim: **17 players** is a small, noisy cohort (one or two
+   reclassified players would move this substantially), and it is the
+   *easiest* case — the players ballchasing-searchable enough to appear 8+
+   times in one scrape are plausibly a biased, more-engaged subsample, not
+   representative of the whole ladder. The monotone trend across all three
+   thresholds (682 → 407 → 210 matches, ρ climbing at every step) is the
+   more trustworthy part of this result than any single cohort's number.
+3. **Known limitation carried over from every name-joined analysis in this
+   corpus**: there is no persistent platform ID, only a display name.
+   Generic or reused names (a handful of entries like `"."` recur across
+   what could plausibly be different real accounts) are a source of noise
+   this experiment inherits rather than introduces — the same risk the rank
+   calibration's `join_ranks` already accepts.
+
+## What this changes going forward
+
+The Pacifist score's product framing should lead with the aggregated,
+multi-match view once a real per-account history exists (the M2 service
+layer in `docs/backlog.md`, not yet built) — a single-match Pacifist tab is
+an honest instant read, but this result says the *stable* read a player
+would actually trust needs their history, not one game. Until that service
+layer exists, `pacifist_history` is the manual path: run it across a
+player's own uploaded replays for the closest thing to that read today.

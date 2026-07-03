@@ -12,6 +12,13 @@
 //! gate rather than re-deriving them; replays failing the gate are excluded
 //! exactly like the rank-assessment series excluded them.
 //!
+//! Also tests the multi-match aggregation hypothesis
+//! (`replay_pacifist::history`): for named players who recur across several
+//! corpus replays, does collapsing their matches into one
+//! [`history::aggregate_history`] row raise correlation with rank versus
+//! treating each of their matches as an independent sample? See the
+//! "multi-match aggregation" section of `docs/pacifist-score-validation.md`.
+//!
 //! Usage: `cargo run --release -p replay-pacifist --features corpus-validate
 //! --bin validate_pacifist [manifest.json]`
 
@@ -25,8 +32,9 @@ use replay_analyzer::decode::boxcars_adapter::BoxcarsParser;
 use replay_analyzer::decode::ReplayParser;
 use replay_pacifist::bridge::{possession_spans, shots, timeline_from_canonical, touches};
 use replay_pacifist::context::MatchContext;
+use replay_pacifist::history::{self, HistoryConfig, MatchRecord};
 use replay_pacifist::metrics::DimensionId;
-use replay_pacifist::scoring::Analyzer;
+use replay_pacifist::scoring::{Analyzer, PacifistScore};
 use replay_pacifist::severity::Verdict;
 use replay_pacifist::{roster, team_sizes, Team, PACIFIST_CONFIG_VERSION};
 use replay_scoring::calibrate::{join_ranks, spearman};
@@ -56,6 +64,15 @@ struct Row {
     minors: u32,
     majors: u32,
     pass: bool,
+    /// Player name (the rank-join key) and the replay's file stem — together
+    /// the identity the multi-match aggregation experiment groups matches by.
+    /// A name collision across different real accounts is the same risk the
+    /// rank join already accepts; the corpus carries no persistent player ID.
+    name: String,
+    replay_id: String,
+    /// The full score, kept so the multi-match section can run it through
+    /// [`history::aggregate_history`] exactly as any other caller would.
+    full: PacifistScore,
 }
 
 const BUCKETS: [&str; 7] = [
@@ -191,6 +208,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 minors: score.faults.minors,
                                 majors: score.faults.majors,
                                 pass: score.faults.verdict == Verdict::Pass,
+                                name: entry.name.clone().unwrap_or_default(),
+                                replay_id: stem.to_string(),
+                                full: score,
                             });
                         }
                     }
@@ -293,6 +313,70 @@ fn main() -> Result<(), Box<dyn Error>> {
             mean_minors,
             mean_majors,
             pass_pct
+        );
+    }
+
+    // === Multi-match aggregation: does collapsing repeat players raise ρ? ===
+    // Group rows by player name; for players who recur across >= N corpus
+    // replays, compare (a) treating each of their matches as an independent
+    // sample — restricted to this cohort, so it's the same population as (b)
+    // — against (b) one `history::aggregate_history` row per player.
+    eprintln!("\n=== multi-match aggregation: does it raise correlation with rank? ===");
+    let analyzer = Analyzer::default();
+    let scoring_cfg = analyzer.scoring_config();
+    let hist_cfg = HistoryConfig::default();
+
+    let mut by_name: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, r) in rows.iter().enumerate() {
+        by_name.entry(&r.name).or_default().push(i);
+    }
+
+    eprintln!("  min-matches  players  matches   per-match rho   aggregated rho");
+    for min_matches in [3usize, 5, 8] {
+        let cohort: Vec<&Vec<usize>> = by_name
+            .values()
+            .filter(|idxs| idxs.len() >= min_matches)
+            .collect();
+        if cohort.is_empty() {
+            eprintln!("  {min_matches:<11}  no players recur that often in this corpus");
+            continue;
+        }
+
+        let mut per_match_vals = Vec::new();
+        let mut per_match_tiers = Vec::new();
+        let mut agg_vals = Vec::new();
+        let mut agg_tiers = Vec::new();
+        for idxs in &cohort {
+            for &i in idxs.iter() {
+                per_match_vals.push(rows[i].value);
+                per_match_tiers.push(rows[i].tier);
+            }
+            // Median tier as this player's ground truth — a corpus snapshot
+            // can catch someone mid-rank-change across their matches.
+            let mut tiers: Vec<f32> = idxs.iter().map(|&i| rows[i].tier).collect();
+            tiers.sort_by(f32::total_cmp);
+            let median_tier = tiers[tiers.len() / 2];
+
+            let records: Vec<MatchRecord> = idxs
+                .iter()
+                .map(|&i| MatchRecord {
+                    label: rows[i].replay_id.clone(),
+                    score: rows[i].full.clone(),
+                })
+                .collect();
+            if let Some(v) = history::aggregate_history(&records, scoring_cfg, &hist_cfg).value {
+                agg_vals.push(v.get());
+                agg_tiers.push(median_tier);
+            }
+        }
+
+        eprintln!(
+            "  >= {:<8}  {:<7}  {:<7}  {:>13}   {:>14}",
+            min_matches,
+            cohort.len(),
+            per_match_vals.len(),
+            show(spearman(&per_match_vals, &per_match_tiers)),
+            show(spearman(&agg_vals, &agg_tiers)),
         );
     }
     Ok(())

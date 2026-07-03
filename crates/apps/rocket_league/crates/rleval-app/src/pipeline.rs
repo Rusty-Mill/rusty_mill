@@ -140,6 +140,8 @@ pub struct PacifistDimension {
     /// Share of the headline this dimension drove, `0.0..=1.0`.
     pub influence: f32,
     pub evidence_count: usize,
+    /// How many opportunities backed this dimension this match.
+    pub opportunities: usize,
 }
 
 /// Load the rank-relative norms artifact (`rank_norms.json`) from a corpus dir,
@@ -284,6 +286,7 @@ pub fn analyze(
                             confidence: d.confidence.get(),
                             influence: d.influence,
                             evidence_count: d.evidence.len(),
+                            opportunities: d.opportunities,
                         })
                         .collect(),
                 }

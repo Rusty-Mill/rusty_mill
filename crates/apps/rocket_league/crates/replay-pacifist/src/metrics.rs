@@ -127,6 +127,13 @@ pub struct DimensionScore {
     pub value: Score,
     pub confidence: Confidence,
     pub evidence: Vec<Evidence>,
+    /// How many opportunities this dimension had this match (episodes,
+    /// teammate episodes, or shots — whatever the dimension counts). `0` when
+    /// the dimension never applied. This is the raw count `confidence`
+    /// saturates from within one match; [`crate::history`] reuses it to
+    /// weight a dimension across many matches, where a single match's
+    /// saturated `confidence` alone would lose how much evidence backed it.
+    pub opportunities: usize,
 }
 
 /// A scoring dimension: read the enriched context, score one player.
@@ -243,6 +250,7 @@ fn episode_score(
             value: Score::new(100.0),
             confidence: Confidence::new(0.0),
             evidence: Vec::new(),
+            opportunities: 0,
         };
     }
     let fraction = penalised.len() as f32 / total as f32;
@@ -250,6 +258,7 @@ fn episode_score(
     evidence.truncate(max_evidence);
     DimensionScore {
         dimension,
+        opportunities: total,
         value: Score::new(100.0 * (1.0 - fraction)),
         confidence: Confidence::new(total as f32 / saturation_episodes),
         evidence,

@@ -148,6 +148,25 @@ A true calibration pass needs a small set of replays labeled "very Pacifist" vs.
 "very not," then tuning the thresholds against that judgment — there's no
 shortcut for that part; it's a human-judgment input, not more engineering.
 
+### 3.5 Pacifist multi-match aggregation
+
+A single match's Pacifist read is noisy (5–15 episodes per dimension); a
+corpus experiment confirmed aggregating a player's matches roughly doubles to
+triples rank correlation, strengthening with more matches per player (see
+[`docs/pacifist-score-validation.md`](pacifist-score-validation.md)'s
+"multi-match aggregation" section). There's no per-account history yet (that
+needs the M2 service layer in `docs/backlog.md`), but you can get the
+aggregated read for one player manually:
+
+```sh
+# Oldest replay first — the trend line and "most recent Major" both read that order.
+cargo run --release -p replay-pacifist --bin pacifist_history -- \
+  "PlayerName" match1.replay match2.replay match3.replay
+```
+
+Matches a replay's roster by exact display name; a file where the name
+doesn't appear is skipped with a warning rather than failing the run.
+
 ## 4. One-off CLI usage (no server)
 
 ```sh

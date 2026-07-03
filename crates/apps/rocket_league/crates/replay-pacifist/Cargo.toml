@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "replay-pacifist"
 path = "src/main.rs"
 
+[[bin]]
+name = "pacifist_history"
+path = "src/bin/pacifist_history.rs"
+
 # Corpus validation harness — needs the scoring crate's rank-join/Spearman/
 # coverage-gate primitives, so it is feature-gated to keep the lib lean:
 #   cargo run --release -p replay-pacifist --features corpus-validate --bin validate_pacifist

@@ -94,6 +94,9 @@ pub struct DimensionBreakdown {
     pub weight: f32,
     pub influence: f32,
     pub evidence: Vec<Evidence>,
+    /// How many opportunities this dimension had this match — see
+    /// [`crate::metrics::DimensionScore::opportunities`].
+    pub opportunities: usize,
 }
 
 /// A player's headline Pacifist Score plus the per-dimension breakdown.
@@ -179,6 +182,7 @@ pub fn aggregate_with_faults(
             confidence: row.score.confidence,
             weight: row.weight,
             influence: if sum_wc > 0.0 { row.wc / sum_wc } else { 0.0 },
+            opportunities: row.score.opportunities,
             evidence: row.score.evidence,
         })
         .collect();
@@ -233,6 +237,13 @@ impl Analyzer {
     pub fn with_severity(mut self, severity: SeverityConfig) -> Self {
         self.severity = severity;
         self
+    }
+
+    /// The dimension-weight config, so a caller combining several matches'
+    /// [`PacifistScore`]s (e.g. [`crate::history::aggregate_history`]) can
+    /// reuse the same weights this analyzer scored them with.
+    pub fn scoring_config(&self) -> &ScoringConfig {
+        &self.config
     }
 
     /// The context-derivation config, so a caller can derive a matching
@@ -300,6 +311,7 @@ mod tests {
             value: Score::new(value),
             confidence: Confidence::new(confidence),
             evidence: Vec::new(),
+            opportunities: 0,
         }
     }
 

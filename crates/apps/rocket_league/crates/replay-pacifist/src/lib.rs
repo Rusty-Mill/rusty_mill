@@ -209,6 +209,7 @@ pub fn roster(timeline: &Timeline) -> Vec<RosterEntry> {
 
 pub mod bridge;
 pub mod context;
+pub mod history;
 pub mod metrics;
 pub mod scoring;
 pub mod severity;
