@@ -167,6 +167,32 @@ cargo run --release -p replay-pacifist --bin pacifist_history -- \
 Matches a replay's roster by exact display name; a file where the name
 doesn't appear is skipped with a warning rather than failing the run.
 
+### 3.6 Fetching one player's full match history (case studies)
+
+To go beyond whatever replays you happen to have and pull one named
+player's **complete** ranked-doubles history from ballchasing:
+
+```sh
+BC_TOKEN=<token> python assets/corpus/fetch_player_history.py "PlayerName"
+```
+
+Writes a chronological, ballchasing-dated manifest to
+`assets/case-studies/<slug>/manifest.json` (kept, unlike the `.replay` files
+alongside it) and downloads the replays. Deliberately separate from the
+calibration corpus — this is every match one specific account appears in,
+which would bias a rank-stratified sample if mixed in. Then:
+
+```sh
+cargo build --release -p replay-pacifist --features corpus-validate --bin case_study
+./target/release/case_study assets/case-studies/<slug>/manifest.json "PlayerName"
+```
+
+prints, per match in date order, that player's scoring composite and
+Pacifist score side by side, plus a per-bucket mean summary — the direct
+"did either number move with this player's real rank change" check. See
+[`docs/case-study-player-progression.md`](case-study-player-progression.md)
+for what this found (short version: not yet, and it's an open question why).
+
 ## 4. One-off CLI usage (no server)
 
 ```sh

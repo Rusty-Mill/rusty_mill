@@ -25,6 +25,13 @@ name = "validate_pacifist"
 path = "src/bin/validate_pacifist.rs"
 required-features = ["corpus-validate"]
 
+# Per-player case study (assets/case-studies/, fetch_player_history.py) — same
+# feature gate as validate_pacifist, for the same reason (needs replay-scoring).
+[[bin]]
+name = "case_study"
+path = "src/bin/case_study.rs"
+required-features = ["corpus-validate"]
+
 [features]
 corpus-validate = ["dep:replay-scoring", "dep:serde", "dep:serde_json"]
 
