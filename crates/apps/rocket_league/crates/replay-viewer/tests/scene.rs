@@ -226,6 +226,21 @@ fn attach_roles_tags_cars_with_a_man_role() {
 }
 
 #[test]
+fn attach_roles_fills_support_spacing_band_from_config() {
+    let m = minimal_match();
+    let mut s = build_scene(&m, &[]);
+    assert_eq!(
+        s.support_spacing_band, None,
+        "build_scene leaves the band unset"
+    );
+    replay_viewer::attach_roles(&mut s, &m, &replay_scoring::ScoreConfig::default());
+    let [lo, hi] = s
+        .support_spacing_band
+        .expect("default config bands support_spacing");
+    assert!(lo > 0.0 && hi > lo, "a sane [lo, hi] uu band: [{lo}, {hi}]");
+}
+
+#[test]
 fn attach_winprob_fills_a_valid_momentum_curve() {
     let m = minimal_match();
     let mut s = build_scene(&m, &[]);

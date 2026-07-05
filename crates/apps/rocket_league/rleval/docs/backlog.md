@@ -330,6 +330,19 @@ look-&-feel comparison against ballchasing's own viewer in
 - [x] Heatmap floor projection (toggle; occupancy of the ball or followed player, binned in-viewer from the grid)
 - [x] Win-probability / momentum strip above the timeline (P(blue scores next) from `replay-value`; model is basic, read as rough momentum)
 - [x] Impact (ΔV) overlay — per-player roster impact chip + per-touch swing in the ticker + ball-contact skill callouts tinted by swing (from `replay-value`'s `per_touch_delta_v`; `--no-impact` omits)
+- [x] **Distance tool** — a `↔ distance` panel (key `m`): pick any two anchors
+  (a player, the ball, or a team's goal) for a live-updating 3D line + label and
+  a side-panel readout (uu), tracking playback/scrubbing; add several at once,
+  each with its own colour and a remove button (`render.rs`'s `ANCHORS` /
+  `updateMeasurements`). A same-team player pair is additionally checked against
+  `replay_scoring`'s calibrated `support_spacing` band (`Scene::support_spacing_band`,
+  attached in `viewer::roles::attach_roles` — reads the live `ScoreConfig`, so a
+  rubric recalibration updates the hint for free) — green in-band, amber
+  too-close (double-commit) / too-far (unreachable). This is the first
+  "measure → coaching cue" bridge in the viewer: a step toward the tool
+  suggesting improvements, not just displaying numbers. *Remaining:* pick anchors by
+  clicking in 3D (currently dropdown-only), and a calibrated band for ball/goal
+  distances (none exists in the rubric yet, unlike teammate spacing).
 
 **Correctness**
 - [x] Map-aware drawn field — non-standard maps draw via `geometry_for_map` + a warning banner (Phase 1; see the map-geometry follow-up)

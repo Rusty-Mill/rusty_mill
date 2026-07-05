@@ -2,9 +2,9 @@
 
 > Play a reconstructed match back in 3D in the browser — a broadcast-grade render
 > (shadows, painted pitch, goal nets) with analysis overlays (1st/2nd-man roles,
-> skills, heatmap, momentum, per-touch impact), coaching tools (field overlays + a
-> telestrator), and
-> the usual scrubable timeline, camera presets, and event/skill ticker.
+> skills, heatmap, momentum, per-touch impact), coaching tools (field overlays, a
+> telestrator, and a live distance tool with a positioning-band coaching cue),
+> and the usual scrubable timeline, camera presets, and event/skill ticker.
 
 Like `scoring`, `skills`, and `value`, this is a **pure consumer** of the
 canonical match model — no parsing, no I/O in the core. It splits cleanly into a
@@ -37,7 +37,8 @@ uses). `--hz <rate>` thins the playback grid to shrink the payload.
 
 Spacebar play/pause · drag the timeline to scrub · ◀/▶ ±1 s · `n`/`p` next/prev
 goal · `k`/`j` next/prev kickoff · speed (0.25–4×) · loop · `s` save PNG ·
-`?` help · mouse drag orbits, scroll zooms, right-drag pans (touch works too).
+`m` distance tool · `?` help · mouse drag orbits, scroll zooms, right-drag pans
+(touch works too).
 
 **Camera:** `overview` / `goal` / `ball` / `tv` (broadcast) presets with eased
 transitions, or click a player row to lock onto that car (`0` returns to free
@@ -95,6 +96,16 @@ a rolling ball, boost flames, and a demo burst — a broadcast-grade render.
   colour/width and `pen` / `arrow` / `line`, and annotate. Strokes persist on
   screen until `clear`; `undo` (key `z`) removes the last. Drawing pauses playback
   and frees the mouse from the camera.
+- **Distance tool** — the `↔ distance` panel (key `m`): pick any two anchors —
+  a player, the ball, or a team's goal — and add a live-updating measurement (a
+  3D line + label between them, plus a side-panel readout in uu that tracks
+  playback/scrubbing). Add as many pairs as you like; each gets its own colour
+  and a `✕` to remove it. A **same-team player pair** additionally gets a
+  coaching verdict against `replay_scoring`'s calibrated `support_spacing`
+  target band (~1200–2600 uu): green "in band", amber "too close" (double-commit
+  risk) or "too far" (may be unreachable) — turning a raw measurement into an
+  actionable positioning cue, not just a number. Ball/goal and cross-team pairs
+  stay a plain distance (no equivalent calibrated band exists for those yet).
 
 ## Coordinates
 
@@ -117,5 +128,8 @@ CI runs it (`.github/workflows/ci.yml`); locally, `npm i puppeteer` then
 ## Follow-ups
 
 Tracked in `backlog.md` (Viewer improvements). Remaining: validate car
-orientation against footage; and map-aware field geometry (Phase 2) for
-non-standard arenas.
+orientation against footage; map-aware field geometry (Phase 2) for
+non-standard arenas; and, for the distance tool, picking anchors by clicking
+directly on a car/ball/goal in the 3D view (currently dropdown-only) and
+calibrated reference bands for ball/goal distances (only teammate spacing has
+one today, from `support_spacing`).

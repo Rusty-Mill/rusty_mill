@@ -159,14 +159,29 @@ const TEMPLATE: &str = r##"<!doctype html>
   #setOverlay { position:fixed; inset:0; z-index:6; display:none; align-items:center;
     justify-content:center; background:rgba(0,0,0,.45); }
   #setPanel { min-width:300px; max-width:390px; cursor:default; }
-  #setPanel .sethead { display:flex; align-items:center; justify-content:space-between; margin-bottom:9px; }
-  #setPanel .sethead button { padding:1px 8px; }
+  #setPanel .sethead, #measPanel .sethead { display:flex; align-items:center; justify-content:space-between; margin-bottom:9px; }
+  #setPanel .sethead button, #measPanel .sethead button { padding:1px 8px; }
   #setPanel .setgrid { display:grid; grid-template-columns:1fr 1fr; gap:7px 14px; }
   #setPanel label { color:#c9d1d9; display:flex; align-items:center; gap:5px; user-select:none; }
   #setPanel .setrow { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
     margin-top:11px; padding-top:9px; border-top:1px solid #1f2937; color:#8b949e; }
   #setPanel select, #setPanel .setrow button { height:24px; padding:0 6px; }
   #setPanel input[type=range] { width:92px; }
+  #measPanel { min-width:300px; max-width:360px; cursor:default; }
+  #measAddRow { display:flex; align-items:center; gap:6px; }
+  #measAddRow select { flex:1; min-width:0; height:24px; padding:0 4px; background:#21262d;
+    color:#e6edf3; border:1px solid #30363d; border-radius:6px; }
+  #measAddRow span { color:#6e7681; }
+  #measAddRow button { height:24px; padding:0 10px; }
+  #measList { margin-top:8px; max-height:220px; overflow:auto; }
+  #measList:empty::before { content:'no measurements yet'; color:#6e7681; font-size:11px; }
+  .measRow { display:flex; align-items:center; gap:6px; padding:3px 0; font-size:11px; }
+  .measRow .sw2 { width:10px; height:10px; border-radius:50%; flex:none; }
+  .measRow .mlbl { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#c9d1d9; }
+  .measRow .mdist { font-weight:700; white-space:nowrap; }
+  .measRow .mx { padding:0 6px; font-size:11px; line-height:1.6; }
+  #measHint { margin-top:8px; padding-top:7px; border-top:1px solid #1f2937; color:#6e7681;
+    font-size:10px; line-height:1.5; }
   #help { left:10px; bottom:10px; color:#6e7681; font-size:11px; }
   #bar { left: 50%; bottom: 14px; transform: translateX(-50%); display:flex;
     align-items:center; gap:10px; width: min(900px, 92vw); }
@@ -208,11 +223,12 @@ const TEMPLATE: &str = r##"<!doctype html>
 <div id="helpOverlay"><div class="panel">
   <b>Keyboard</b><br>
   space play/pause · ◀ ▶ ±1s · n / p next·prev goal · k / j next·prev kickoff<br>
-  i / o set an A–B loop · x clear it · 0 free cam · t top-down cam · g settings · d draw · z undo · s save PNG · ? help<br><br>
+  i / o set an A–B loop · x clear it · 0 free cam · t top-down cam · g settings · d draw · z undo · s save PNG · m distance · ? help<br><br>
   <b>Mouse</b><br>
   drag orbit · scroll zoom · right-drag pan · click a player row to follow it<br><br>
   <b>Tools</b><br>
-  overlay: thirds / lanes / grid, or drop an image on the field · telestrator: arrows / lines / pen · heatmap toggle<br><br>
+  overlay: thirds / lanes / grid, or drop an image on the field · telestrator: arrows / lines / pen · heatmap toggle ·
+  distance: pick any two of player / ball / goal for a live-updating measurement<br><br>
   <span style="color:#6e7681">press ? or click to close</span>
 </div></div>
 <div id="top" class="panel"><span id="scoreboard"></span><small id="mapline"></small><span id="poss"></span></div>
@@ -228,7 +244,19 @@ const TEMPLATE: &str = r##"<!doctype html>
     <button data-cam="broadcast">tv</button>
   </div>
   <button id="setBtn" class="panel" title="settings (g)">⚙ settings</button>
+  <button id="measBtn" class="panel" title="distance tool (m)">↔ distance</button>
 </div>
+<div id="measOverlay"><div id="measPanel" class="panel">
+  <div class="sethead"><b>Distance tool</b><button id="measClose" title="close (m / esc)">✕</button></div>
+  <div id="measAddRow">
+    <select id="measFrom"></select>
+    <span>→</span>
+    <select id="measTo"></select>
+    <button id="measAddBtn">add</button>
+  </div>
+  <div id="measList"></div>
+  <div id="measHint">green = within the ~support-spacing coaching band · amber = too close/far (teammate pairs only)</div>
+</div></div>
 <div id="setOverlay"><div id="setPanel" class="panel">
   <div class="sethead"><b>Settings</b><button id="setClose" title="close (g / esc)">✕</button></div>
   <div class="setgrid">
@@ -257,7 +285,7 @@ const TEMPLATE: &str = r##"<!doctype html>
   </div>
 </div></div>
 <canvas id="minimap" class="panel"></canvas>
-<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · g settings · d draw · ? help</div>
+<div id="help" class="panel">space play · ◀▶ ±1s · n/p goal · k/j kickoff · click player to follow · g settings · d draw · m distance · ? help</div>
 <div id="bar" class="panel">
   <button id="play" class="icon" title="play/pause (space)"></button>
   <span id="clock" title="click: RL game clock / elapsed">0:00.0</span>
@@ -1261,6 +1289,144 @@ function updateHud(t, st) {
   }
 }
 
+// --- distance tool: pick any two anchors (a player, the ball, or a goal) for a
+// live-updating 3D line + label plus a side-panel readout. The only pair with an
+// actual coaching reference is two same-team players — `support_spacing_band`
+// (from `replay_scoring`'s target band, when the scene carries one) flags
+// too-close (double-commit risk) / too-far (unreachable) in amber, in-band in
+// green; ball/goal pairs and cross-team pairs stay a plain distance.
+const ANCHORS = [
+  ...S.players.map(p => ({ id: 'p:' + p.pri, label: p.name, kind: 'player', pri: p.pri, team: p.team })),
+  { id: 'ball', label: 'Ball', kind: 'ball' },
+  { id: 'goal:0', label: 'Blue goal', kind: 'goal', team: 0 },
+  { id: 'goal:1', label: 'Orange goal', kind: 'goal', team: 1 },
+];
+const anchorById = new Map(ANCHORS.map(a => [a.id, a]));
+function attackSign(team) {
+  const v = S.attack_sign && S.attack_sign[team];
+  return v != null ? v : (team === 0 ? 1 : -1);
+}
+function anchorPos(id, st) {
+  const a = anchorById.get(id);
+  if (!a) return null;
+  if (a.kind === 'ball') return st.ball ? new THREE.Vector3(...st.ball) : null;
+  if (a.kind === 'goal') return new THREE.Vector3(0, -attackSign(a.team) * F.back_wall_y, F.goal_height / 2);
+  const c = st.cars.get(a.pri);
+  return c ? new THREE.Vector3(...c.p) : null;
+}
+function spacingNote(fromId, toId, d) {
+  const band = S.support_spacing_band;
+  if (!band) return null;
+  const a = anchorById.get(fromId), b = anchorById.get(toId);
+  if (!a || !b || a.kind !== 'player' || b.kind !== 'player') return null;
+  if (a.team == null || a.team !== b.team) return null;
+  const [lo, hi] = band;
+  if (d < lo) return { color: '#f0b429', title: `closer than the ${Math.round(lo)}–${Math.round(hi)} uu support band — double-commit risk` };
+  if (d > hi) return { color: '#f0b429', title: `farther than the ${Math.round(lo)}–${Math.round(hi)} uu support band — may be unreachable` };
+  return { color: '#3fb950', title: `within the ${Math.round(lo)}–${Math.round(hi)} uu support-spacing band` };
+}
+
+const measGroup = new THREE.Group(); scene.add(measGroup);
+const MEAS_COLORS = ['#56d4dd', '#a78bfa', '#38bdf8', '#f472b6', '#eab676'];
+const measurements = []; // { id, from, to, color, line, label }
+let measSeq = 0;
+function makeMeasureLabel() {
+  const cv = document.createElement('canvas'); cv.width = 260; cv.height = 60;
+  const tex = new THREE.CanvasTexture(cv);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  spr.scale.set(300, 70, 1); spr.userData = { cv, tex, text: null };
+  return spr;
+}
+// Redraw the label canvas only when the (text, colour) pair actually changes —
+// same trick as `setBoostPill`, since the distance updates most frames.
+function setMeasureLabel(spr, text, color) {
+  const u = spr.userData, key = text + '|' + color;
+  if (u.text === key) return;
+  u.text = key;
+  const x = u.cv.getContext('2d'), W = u.cv.width, H = u.cv.height;
+  x.clearRect(0, 0, W, H);
+  x.fillStyle = 'rgba(8,14,20,.82)'; x.fillRect(0, 0, W, H);
+  x.strokeStyle = color; x.lineWidth = 3; x.strokeRect(2, 2, W - 4, H - 4);
+  x.font = 'bold 24px sans-serif'; x.fillStyle = '#e6edf3';
+  x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.fillText(text, W / 2, H / 2);
+  u.tex.needsUpdate = true;
+}
+const measListEl = document.getElementById('measList');
+const measRowEls = new Map(); // id -> { dist }
+function renderMeasureList() {
+  measListEl.innerHTML = '';
+  measRowEls.clear();
+  for (const m of measurements) {
+    const row = document.createElement('div'); row.className = 'measRow';
+    row.innerHTML = `<span class="sw2" style="background:${m.color}"></span>` +
+      `<span class="mlbl">${esc(anchorById.get(m.from)?.label ?? m.from)} ↔ ${esc(anchorById.get(m.to)?.label ?? m.to)}</span>` +
+      `<span class="mdist">–</span><button class="mx" title="remove">✕</button>`;
+    row.querySelector('.mx').onclick = () => removeMeasurement(m.id);
+    measListEl.appendChild(row);
+    measRowEls.set(m.id, { dist: row.querySelector('.mdist') });
+  }
+}
+function addMeasurement(from, to) {
+  if (!from || !to || from === to) return;
+  if (measurements.some(m => (m.from === from && m.to === to) || (m.from === to && m.to === from))) return;
+  const color = MEAS_COLORS[measSeq % MEAS_COLORS.length]; measSeq++;
+  const geom = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
+  const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color, transparent: true, opacity: .85 }));
+  line.frustumCulled = false;
+  const label = makeMeasureLabel();
+  measGroup.add(line); measGroup.add(label);
+  measurements.push({ id: 'm' + measSeq, from, to, color, line, label });
+  renderMeasureList();
+}
+function removeMeasurement(id) {
+  const i = measurements.findIndex(m => m.id === id); if (i < 0) return;
+  const m = measurements[i];
+  measGroup.remove(m.line); m.line.geometry.dispose(); m.line.material.dispose();
+  measGroup.remove(m.label); m.label.material.map.dispose(); m.label.material.dispose();
+  measurements.splice(i, 1);
+  renderMeasureList();
+}
+function updateMeasurements(st) {
+  for (const m of measurements) {
+    const a = anchorPos(m.from, st), b = anchorPos(m.to, st);
+    const ok = !!(a && b);
+    m.line.visible = ok; m.label.visible = ok;
+    const row = measRowEls.get(m.id);
+    if (!ok) { if (row) { row.dist.textContent = '–'; row.dist.title = ''; } continue; }
+    const arr = m.line.geometry.attributes.position.array;
+    arr[0] = a.x; arr[1] = a.y; arr[2] = a.z + 6;
+    arr[3] = b.x; arr[4] = b.y; arr[5] = b.z + 6;
+    m.line.geometry.attributes.position.needsUpdate = true;
+    const d = a.distanceTo(b);
+    m.label.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2 + 60);
+    const note = spacingNote(m.from, m.to, d);
+    const lineColor = note ? note.color : m.color;
+    m.line.material.color.set(lineColor);
+    setMeasureLabel(m.label, Math.round(d) + ' uu', lineColor);
+    if (row) {
+      row.dist.textContent = Math.round(d) + ' uu';
+      row.dist.style.color = note ? note.color : '#c9d1d9';
+      row.dist.title = note ? note.title : '';
+    }
+  }
+}
+
+// Distance-tool panel: same open/close pattern as Settings.
+const measOverlayEl = document.getElementById('measOverlay');
+function toggleMeasPanel(show) {
+  const on = show ?? measOverlayEl.style.display !== 'flex';
+  measOverlayEl.style.display = on ? 'flex' : 'none';
+}
+document.getElementById('measBtn').onclick = () => toggleMeasPanel(true);
+document.getElementById('measClose').onclick = () => toggleMeasPanel(false);
+measOverlayEl.onclick = e => { if (e.target === measOverlayEl) toggleMeasPanel(false); };
+const measFromEl = document.getElementById('measFrom'), measToEl = document.getElementById('measTo');
+const anchorOptionsHtml = ANCHORS.map(a => `<option value="${a.id}">${esc(a.label)}</option>`).join('');
+measFromEl.innerHTML = anchorOptionsHtml; measToEl.innerHTML = anchorOptionsHtml;
+measToEl.value = 'ball';
+document.getElementById('measAddBtn').onclick = () => addMeasurement(measFromEl.value, measToEl.value);
+
 // timeline event markers (goals / demos / kickoffs)
 const marksEl = document.getElementById('marks');
 for (const e of S.events) {
@@ -1358,10 +1524,11 @@ function jump(kind, dir) {
   else { const p = [...ts].reverse().find(x => x < T - 0.05); if (p != null) { seek(p); setPlaying(false); } }
 }
 addEventListener('keydown', e => {
-  if (e.key === 'Escape') { toggleSettings(false); helpEl.style.display = 'none'; return; } // always, even from inputs
+  if (e.key === 'Escape') { toggleSettings(false); toggleMeasPanel(false); helpEl.style.display = 'none'; return; } // always, even from inputs
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.key === 'g') toggleSettings();
+  else if (e.key === 'm') toggleMeasPanel();
   else if (e.code === 'ArrowRight') seek(T + 1);
   else if (e.code === 'ArrowLeft') seek(T - 1);
   else if (e.key === 'n') jump('goal', 1);
@@ -1391,6 +1558,7 @@ function animate(now) {
   applyState(st);
   updatePads(T);
   updateHud(T, st);
+  updateMeasurements(st);
   updateCallouts(T, st);
   updateKickoff(T, st);
   drawMinimap(st);

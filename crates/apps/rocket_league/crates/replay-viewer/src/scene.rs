@@ -196,6 +196,13 @@ pub struct Scene {
     /// unless [`crate::playerstats::attach_player_stats`] ran.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_stats: Vec<ScenePlayerStat>,
+    /// Reference band (uu, `[lo, hi]`) for teammate separation while one is 2nd
+    /// man — `replay_scoring`'s `support_spacing` metric target, straight off the
+    /// live `ScoreConfig`. Powers the viewer's distance-tool coaching hint
+    /// (too-close ⇒ double-commit risk, too-far ⇒ unreachable). `None` unless
+    /// [`crate::roles::attach_roles`] ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support_spacing_band: Option<[f32; 2]>,
 }
 
 fn round(x: f32, places: i32) -> f32 {
@@ -305,6 +312,7 @@ pub fn build_scene(m: &CanonicalMatch, skills: &[SkillInstance]) -> Scene {
         pad_pickups,
         win_prob: Vec::new(),
         player_stats: Vec::new(),
+        support_spacing_band: None,
     }
 }
 
