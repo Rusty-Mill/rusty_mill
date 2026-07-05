@@ -120,7 +120,19 @@ pub struct PacifistPlayer {
     /// The Major faults only — each one is an instant failure, so each is
     /// worth a timestamped line in the UI. Minors surface as the count.
     pub major_faults: Vec<PacifistFault>,
+    /// The most frequent Minor-fault criterion this match (criterion + count),
+    /// or `None` if there were no Minors. Unlike Majors, individual Minors
+    /// aren't itemized (there can be many), but this gives the "Improve" tab
+    /// something more specific than a bare count to point at.
+    pub top_minor_fault: Option<PacifistFaultCount>,
     pub dimensions: Vec<PacifistDimension>,
+}
+
+/// How many times one fault criterion (e.g. `"F9"`) fired at Minor severity.
+#[derive(Serialize)]
+pub struct PacifistFaultCount {
+    pub criterion: String,
+    pub count: u32,
 }
 
 /// A timestamped fault, labeled by its criteria-spec row (e.g. `"FM-2"`).
@@ -277,6 +289,7 @@ pub fn analyze(
                             detail: f.detail.clone(),
                         })
                         .collect(),
+                    top_minor_fault: top_minor_fault(&score.faults.faults),
                     dimensions: score
                         .breakdown
                         .iter()
@@ -328,4 +341,60 @@ pub fn analyze(
         viewer_html,
         scoring_html,
     })
+}
+
+/// The most frequent Minor-severity fault criterion in `faults`, or `None` if
+/// there were no Minors (ties broken by whichever criterion was seen first —
+/// there are only a handful of implemented criteria, so this rarely matters).
+fn top_minor_fault(faults: &[replay_pacifist::severity::Fault]) -> Option<PacifistFaultCount> {
+    let mut counts: Vec<(&str, u32)> = Vec::new();
+    for f in faults.iter().filter(|f| f.severity == Severity::Minor) {
+        match counts.iter_mut().find(|(c, _)| *c == f.criterion) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((f.criterion, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(criterion, count)| PacifistFaultCount {
+            criterion: criterion.to_string(),
+            count,
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use replay_pacifist::severity::Fault;
+
+    fn fault(t: f32, severity: Severity, criterion: &'static str) -> Fault {
+        Fault {
+            t,
+            severity,
+            criterion,
+            detail: String::new(),
+        }
+    }
+
+    #[test]
+    fn top_minor_fault_is_none_without_minors() {
+        assert!(top_minor_fault(&[]).is_none());
+        let majors_only = [fault(1.0, Severity::Major, "FM-2")];
+        assert!(top_minor_fault(&majors_only).is_none());
+    }
+
+    #[test]
+    fn top_minor_fault_picks_the_most_frequent_criterion() {
+        let faults = [
+            fault(1.0, Severity::Minor, "F9"),
+            fault(2.0, Severity::Minor, "F4"),
+            fault(3.0, Severity::Minor, "F9"),
+            fault(4.0, Severity::Major, "FM-2"), // majors don't count toward this
+            fault(5.0, Severity::Minor, "F9"),
+        ];
+        let top = top_minor_fault(&faults).expect("has minors");
+        assert_eq!(top.criterion, "F9");
+        assert_eq!(top.count, 3);
+    }
 }

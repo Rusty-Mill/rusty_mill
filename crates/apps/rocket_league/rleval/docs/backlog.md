@@ -239,13 +239,38 @@ product direction rather than the milestone plan.
   `.replay` (or pick a bundled sample) and one in-process `pipeline::analyze`
   runs decode → score → skills → value → 3D scene, returning everything as one
   bundle. The UI lays it out across tabs — **Overview** (per-player composite +
-  skills/min + impact ΔV), **3D Viewer** (the offline viewer doc in an iframe),
+  skills/min + impact ΔV), **Improve** (per-player "what to work on" notes —
+  see below), **3D Viewer** (the offline viewer doc in an iframe),
   **Scoring** (the lobby report doc), **Skills** (per-player counts), and
   **Impact** (per-player ΔV). `rleval analyze <replay> --out bundle.html` writes
   the same UI as a static, self-contained file (analysis JSON inlined, no
   server). Each engine runs at its default config — identical results to the
   standalone CLIs (which stay for scripting/golden tests). Offline pipeline smoke
   test + helper unit tests; fmt/clippy clean. Where: `app/` (this repo).
+- **"Improve" tab — assess, then suggest.** ✔ The system computed a leak
+  (`main_leak`/`focus_chapter`) and a Pacifist fault ledger well before this,
+  but only ever reported *that* something was off, never what to actually
+  change (the spec's own scope line: "coaching text generation beyond
+  templated leak→chapter mapping" is explicitly out — a richer *templated* map
+  is in). The Improve tab (`app/src/ui.rs`'s `renderImprove`) turns those same
+  signals into a short, per-player, priority-ordered list: Pacifist Major
+  faults (grouped by criterion with a count + times, each mapped to the
+  guide's own criteria text — `docs/pacifist-assessment-criteria.md`, not
+  invented), the scoring leak, a runner-up weak metric (same impact formula as
+  the leak selector, over the 2nd-place metric), a rolled-up note on the most
+  frequent Minor fault, and one "strength" callout so it isn't only ever
+  criticism. Deliberately templated (fixed `METRIC_TIPS`/`FAULT_TIPS` JS maps
+  keyed by existing metric/criterion strings), not generated. One small,
+  pure-function Rust addition backs it — `PacifistPlayer::top_minor_fault`
+  (`app/src/pipeline.rs`'s `top_minor_fault`, unit-tested) — since 3 of the 4
+  implemented fault criteria are Minor-severity and weren't itemized at all
+  before. Everything else is computed client-side from the existing
+  `Analysis` JSON, matching the Stats tab's existing pattern of deriving new
+  views from `r.metrics` without new Rust fields. Verified end-to-end in a
+  real headless browser (not just the Rust pipeline smoke test) against both
+  bundled samples. *Remaining:* click-through anchors into the Scoring/Pacifist
+  tabs' exact rows; a calibrated coaching band for more metrics (today only
+  `support_spacing` — see the viewer's distance tool — has one).
 - **Flesh out individual player skills.** *Proficiency profiles ✔* +
   *goal-outcome linking ✔* + *structured per-skill quality ✔* + *ΔV value link ✔* —
   `replay-skills` has `profile::profiles` (`--profile`): per-player `skills/min` +

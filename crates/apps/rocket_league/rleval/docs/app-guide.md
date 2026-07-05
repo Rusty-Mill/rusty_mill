@@ -37,6 +37,12 @@ build is noticeably slower per replay.
 - Tabs across the top:
   - **Overview** — one row per player: decision-discipline composite, licence
     band, skills/min, value-impact ΔV, main leak.
+  - **Improve** — turns the scoring leak, Pacifist faults, and the next-worst
+    metric into short, concrete "what to work on" notes per player: templated
+    from the same rubric definitions the scores come from (not generated), so
+    the app doesn't just report a leak/fault happened but says what to do
+    about it. A prioritized way into the Scoring and Pacifist tabs, not a
+    replacement for them.
   - **Stats** — core scoreboard, turnovers, boost economy, movement,
     positioning (ballchasing-parity aggregates).
   - **3D Viewer** — the full replay, scrubbable, with role/win-prob/impact

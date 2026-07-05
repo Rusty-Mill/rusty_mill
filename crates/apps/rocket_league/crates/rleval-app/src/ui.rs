@@ -153,6 +153,18 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
   .pos { color: var(--good); } .neg { color: var(--bad); }
   .muted { color: var(--muted); }
 
+  /* ---- Improve tab: per-player recommendation cards ---- */
+  .reco { padding: 13px 18px; border-bottom: 1px solid var(--line-soft); border-left: 3px solid var(--line); }
+  .reco:last-child { border-bottom: 0; }
+  .reco-major { border-left-color: var(--bad); }
+  .reco-leak { border-left-color: var(--warn); }
+  .reco-secondary { border-left-color: var(--accent); }
+  .reco-note { border-left-color: var(--line); }
+  .reco-strength { border-left-color: var(--good); }
+  .reco-h { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+  .reco-tag { font-size: 10px; text-transform: uppercase; letter-spacing: .6px; color: var(--faint); font-weight: 700; }
+  .reco-tip { color: var(--muted); font-size: 13px; line-height: 1.5; }
+
   /* ---- iframes (viewer / report) ---- */
   .vtoolbar { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
   .btn { display: inline-flex; align-items: center; gap: 8px; background: var(--card-2); color: var(--fg);
@@ -204,6 +216,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     </div>
     <nav class="tabs" id="tabs">
       <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="improve">Improve</button>
       <button data-tab="stats">Stats</button>
       <button data-tab="viewer">3D Viewer</button>
       <button data-tab="scoring">Scoring</button>
@@ -212,6 +225,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       <button data-tab="pacifist">Pacifist</button>
     </nav>
     <div class="tab active" id="tab-overview"></div>
+    <div class="tab" id="tab-improve"></div>
     <div class="tab" id="tab-stats"></div>
     <div class="tab" id="tab-viewer"></div>
     <div class="tab" id="tab-scoring"></div>
@@ -303,6 +317,7 @@ function render() {
   $("nonstd").style.display = d.standard_map ? "none" : "flex";
 
   renderOverview(d);
+  renderImprove(d);
   renderStats(d);
   renderSkills(d);
   renderImpact(d);
@@ -367,6 +382,140 @@ function renderOverview(d) {
   $("tab-overview").innerHTML = banner + cardTable(
     "One row per player — decision-discipline composite (scoring), mechanical activity (skills/min), and value impact (ΔV). Open the tabs for the full 3D replay, the scoring report, and per-skill detail.",
     head, rows, "No players scored.", rel0 ? 9 : 8);
+}
+
+// ---- Improve tab: turn existing signals into a short "what to work on" list.
+//
+// Deliberately templated, not generated — every tip below is a fixed string
+// keyed by an existing metric key or Pacifist fault criterion, the same
+// "config over code" spirit as the leak→chapter map already in `replay-scoring`
+// (chapter labels here match `scoring::config::ScoreConfig`'s `chapter` field).
+// This is the assess-vs-suggest gap: the scoring/Pacifist tabs already compute
+// the single worst metric (`main_leak`) and the fault list, but only report
+// *that* something is off, not what to actually change.
+const METRIC_TIPS = {
+  overcommit_rate: ["Controlled counterattacks", "You're crossing the ball/midline as 1st man without keeping possession too often, and your 2nd man isn't covering when you do. Hold shape — don't commit past the ball unless you have it or your partner has rotated to cover."],
+  goalside_discipline_1st: ["Core game states / defence", "As 1st man in defence, you're getting caught up-field of the ball too often. Stay goal-side — you can't challenge or recover if the ball beats you to the space behind you."],
+  challenge_timing: ["Trigger discipline", "Your 50/50 challenges are arriving late, low on boost, or out of control too often. Arrive with boost, on the ground, and on time — a rushed challenge loses the ball as often as it wins it."],
+  first_touch_value: ["Ground control / stop booming", "Your first touches as 1st man trend toward blind clears (\"booms\") rather than controlled advances. Take the extra half-second to redirect toward space or a teammate instead of blasting it away."],
+  support_spacing: ["Central support", "Your spacing from your teammate drifts outside the healthy support range — either stacking on the same ball (double-commit risk) or too far away to help. The 3D viewer's distance tool shows this live."],
+  central_support_fraction: ["Central support", "As 2nd man you're drifting wide or ball-watching instead of holding central, goal-side support. Stay central so you're one rotation away from either the ball or the net."],
+  double_commit_rate: ["Central support", "You and your teammate are both pressuring the ball at the same time too often. When your partner commits, hang back — a double commit leaves the net empty if it goes wrong."],
+  transition_readiness: ["Core game states / transitions", "When possession flips, you're not consistently positioned to step up into 1st man. Stay goal-side and facing play so a turnover doesn't catch you rotating the wrong way."],
+  boost_management: ["Fundamentals / boost", "You're running on empty too often. Route through big pads on your rotations rather than chasing small pads mid-play, and treat 0 boost as an emergency, not a steady state."],
+  possession_retention: ["Ground control / stop booming", "Too many of your touches are \"booms\" — high-power clears with no target — instead of keeping possession. Look for a teammate or open space before you commit to power."],
+  ball_chase_index: ["Positioning", "You and your teammate are both closing on the ball at once too often — a sign of ball-chasing rather than rotation. One of you should peel off to cover while the other commits."],
+  goalside_discipline_team: ["Defence structure", "There are stretches on defence where neither of you is goal-side of the ball. At least one player should always sit between the ball and your net."],
+  recovery_speed: ["Air system / recovery", "Your recoveries after aerials/challenges are taking too long. Prioritize getting wheels-down and facing the ball over a stylish landing — every extra second is a second you're out of the play."],
+  aerial_presence: ["Air system / aerial threat", "You're rarely leaving the ground. Getting comfortable contesting 50/50s in the air creates a threat your opponents have to respect, not just a defensive option."],
+  facing_ball_share: ["Positioning / awareness", "You're facing/staring at the ball a lot of the time — often a sign of ball-watching rather than scanning for rotations and open space. Good positioning means checking around you, not fixating on the ball."],
+  reverse_driving: ["Fundamentals / car control", "You're spending a lot of time driving in reverse. Reverse is slower and harder to aim — look for a powerslide turn instead of backing up."],
+  boost_starvation: ["Fundamentals / boost", "When you hit 0 boost you're staying stranded there a while before refilling. Path toward a pad as soon as you're empty rather than continuing to play boostless."],
+};
+// Grounded in the Pacifist guide's own criteria text (docs/pacifist-assessment-criteria.md),
+// not invented — FM-2 is the only Major-severity criterion implemented today;
+// F4/F9/F17 are Minor (see the rolled-up minor-fault note below).
+const FAULT_TIPS = {
+  "FM-2": ["Full-speed, empty-tank flip into the corner", "As 2nd man, never flip full-speed into the opponent's corner with 0 boost — the guide's textbook Major mistake. Contain instead of committing when you're empty."],
+  "F17": ["Dove in as last man", "When you're the deepest defender with no teammate goal-side behind you, don't dive into a full commit — contain and wait for support instead."],
+  "F4": ["Aggressive play on empty boost", "With 0 boost, avoid challenges, dives, or aggressive forward pushes — recover position and collect boost first."],
+  "F9": ["Early forward commit as 2nd man", "As 2nd man, hold your support position until the 1st man rotates out or a clear turn arrives, rather than hunting for early involvement."],
+};
+
+// Same impact formula scoring's leak selector uses (`effective_weight * (100 −
+// normalized)`), but over the runner-up rather than the argmax, so a player
+// gets more than one thing to work on. Excludes the primary leak, experimental
+// (unpromoted) metrics, and anything already close to a perfect score.
+function secondWeakMetric(r) {
+  const impact = (m) => m.effective_weight * (100 - m.normalized);
+  const candidates = (r.metrics || []).filter(m =>
+    !m.experimental && m.raw != null && m.key !== r.main_leak && m.normalized < 85);
+  if (!candidates.length) return null;
+  return candidates.reduce((a, b) => (impact(b) > impact(a) ? b : a));
+}
+// The best-performing weighted metric, to close each card on what's working —
+// suggesting improvements shouldn't mean only ever pointing out faults.
+function bestMetric(r) {
+  const good = (r.metrics || []).filter(m =>
+    !m.experimental && m.effective_weight > 0 && m.raw != null && m.normalized >= 60);
+  if (!good.length) return null;
+  return good.reduce((a, b) => (b.normalized > a.normalized ? b : a));
+}
+// Major faults are itemized per instant (like the Pacifist tab's table), but
+// the same criterion can recur several times a match — group by criterion so
+// a player who repeats one mistake gets one card with a count and times, not
+// N visually-identical blocks.
+function groupedMajorFaults(pac) {
+  const byCriterion = new Map();
+  for (const f of (pac ? pac.major_faults : []) || []) {
+    const g = byCriterion.get(f.criterion) || { criterion: f.criterion, count: 0, times: [], detail: f.detail };
+    g.count++;
+    g.times.push(f.t);
+    byCriterion.set(f.criterion, g);
+  }
+  return [...byCriterion.values()];
+}
+function playerImprovements(r, pac) {
+  const items = [];
+  groupedMajorFaults(pac).forEach(g => {
+    const t = FAULT_TIPS[g.criterion];
+    const times = g.times.map(x => fmt(x, 0) + "s").join(", ");
+    items.push({
+      sev: "major",
+      label: `${g.criterion}${g.count > 1 ? ` × ${g.count}` : ""} — ${t ? t[0] : "Major fault"}`,
+      tip: `${t ? t[1] : g.detail} (at ${times})`,
+    });
+  });
+  if (r.main_leak && r.main_leak !== "none") {
+    const t = METRIC_TIPS[r.main_leak];
+    if (t) items.push({ sev: "leak", label: r.main_leak, chapter: t[0], tip: t[1] });
+  }
+  const second = secondWeakMetric(r);
+  if (second) {
+    const t = METRIC_TIPS[second.key];
+    if (t) items.push({ sev: "secondary", label: second.key, chapter: t[0], tip: t[1] });
+  }
+  if (pac && pac.top_minor_fault) {
+    const { criterion, count } = pac.top_minor_fault;
+    const t = FAULT_TIPS[criterion];
+    items.push({
+      sev: "note",
+      label: `${criterion} × ${count}${t ? ` — ${t[0]}` : ""} (most common Minor fault)`,
+      tip: (t ? t[1] + " " : "") + "Minors don't cap the Pacifist score (only a Major does), but they're worth trimming — see the Pacifist tab's dimension breakdown for the full pattern.",
+    });
+  }
+  return { items, strength: bestMetric(r) };
+}
+function renderImprove(d) {
+  const pacByName = {};
+  ((d.pacifist || {}).players || []).forEach(p => { pacByName[p.player] = p; });
+  const scores = (d.scores || []).slice()
+    .sort((a, b) => (a.target_team - b.target_team) || (a.target_pri - b.target_pri));
+  const SEV_LABEL = { major: "Major fault", leak: "Leak", secondary: "Also work on", note: "Note" };
+  const cards = scores.map(r => {
+    const { items, strength } = playerImprovements(r, pacByName[r.target_player]);
+    const rows = items.length
+      ? items.map(it => `<div class="reco reco-${it.sev}">
+          <div class="reco-h"><span class="reco-tag">${esc(SEV_LABEL[it.sev] || "")}</span>
+            <b>${esc(it.label)}</b>${it.chapter ? `<span class="muted"> — ${esc(it.chapter)}</span>` : ""}</div>
+          <div class="reco-tip">${esc(it.tip)}</div>
+        </div>`).join("")
+      : `<div class="reco muted">Nothing flagged — clean report this game.</div>`;
+    const strengthRow = strength
+      ? `<div class="reco reco-strength">
+          <div class="reco-h"><span class="reco-tag">Strength</span><b>${esc(strength.key)}</b>
+            <span class="muted"> — ${fmt(strength.normalized, 0)}/100</span></div>
+          <div class="reco-tip">Best area this game — keep leaning on it.</div>
+        </div>`
+      : "";
+    return `<div class="card"><p class="hint">${nameCell(r.target_team, r.target_player)}</p>${rows}${strengthRow}</div>`;
+  }).join(`<div style="height:16px"></div>`);
+  $("tab-improve").innerHTML =
+    `<p class="muted" style="margin:0 0 16px;font-size:12.5px">Turns the existing scoring leak, ` +
+    `Pacifist faults, and the next-worst metric into short, concrete "what to work on" notes per ` +
+    `player — templated from the same rubric definitions the scores come from, not generated. A ` +
+    `prioritized way into the Scoring and Pacifist tabs, not a replacement for them.</p>` +
+    (cards || `<div class="card"><div class="reco muted">No players scored.</div></div>`);
 }
 
 function renderStats(d) {
