@@ -536,3 +536,83 @@ fn dangerous_turnover_weights_by_field_depth() {
     let dt = raws[&Metric::DangerousTurnover].expect("computable");
     assert!((dt - 0.5).abs() < 0.02, "expected ~0.5, got {dt}");
 }
+
+#[test]
+fn shot_angle_measures_off_target_degrees() {
+    let cfg = ScoreConfig::default();
+    // A single car for pri 1 (team 0, attacking +Y); the metric reads the ball's
+    // position/velocity at each touch frame and the car's attack_sign.
+    let mk = |t: f32, bp: Vec3, bv: Vec3| FrameView {
+        t,
+        ball: Some(Kin { p: bp, v: bv }),
+        cars: vec![cv(1, 1.0, v(0.0, 0.0, 17.0), 0.0, true, Third::Mid)],
+    };
+    let diag = std::f32::consts::FRAC_1_SQRT_2 * 2000.0;
+    let frames = vec![
+        // Strike 1: offensive half, dead centre, straight at goal -> 0°.
+        mk(0.0, v(0.0, 2560.0, 100.0), v(0.0, 2000.0, 0.0)),
+        // Strike 2: same spot, 45° wide of the goal line -> 45°.
+        mk(1.0, v(0.0, 2560.0, 100.0), v(diag, diag, 0.0)),
+        // Defensive-half clear: fast and goalward but never a shot.
+        mk(2.0, v(0.0, -2560.0, 100.0), v(0.0, 3000.0, 0.0)),
+        // Soft goalward tap: below the strike floor.
+        mk(3.0, v(0.0, 2560.0, 100.0), v(0.0, 800.0, 0.0)),
+    ];
+    let touch = |t: f32| Event::Touch {
+        t,
+        pri: 1,
+        team: Some(0),
+        player: None,
+    };
+    let events = vec![touch(0.0), touch(1.0), touch(2.0), touch(3.0)];
+    let roles = roles::assign(&frames, &[0], &cfg);
+    let raws = metrics::compute(&frames, &roles, &events, 1, 0, &cfg);
+    // Only the two real strikes qualify; mean of 0° and 45° = 22.5°.
+    let sa = raws[&Metric::ShotAngle].expect("computable");
+    assert!((sa - 22.5).abs() < 0.1, "expected ~22.5°, got {sa}");
+}
+
+#[test]
+fn whiff_rate_counts_missed_swings() {
+    let cfg = ScoreConfig::default();
+    let ball = Kin {
+        p: v(0.0, 0.0, 100.0),
+        v: v(0.0, 0.0, 0.0),
+    };
+    // The car's distance-to-ball and approach reads are set directly; a swing is
+    // judged off the frame that enters striking range (dist ≤ 320).
+    let mk = |t: f32, dist: f32, closing: f32| {
+        let mut c = mkcar(1, 0, v(0.0, -dist, 17.0));
+        c.dist_to_ball = dist;
+        c.closing_speed = closing;
+        c.v = v(0.0, closing, 0.0);
+        framed(t, Some(ball), vec![c])
+    };
+    let frames = vec![
+        // Swing 1: fast ball-directed entry, touch lands at t=0.3 -> hit.
+        mk(0.0, 500.0, 1000.0),
+        mk(0.1, 500.0, 1000.0),
+        mk(0.2, 300.0, 1000.0),
+        mk(0.3, 150.0, 1000.0),
+        mk(0.4, 300.0, 1000.0),
+        mk(0.5, 500.0, 1000.0),
+        // Swing 2: same approach, no touch -> a whiff.
+        mk(1.0, 300.0, 1000.0),
+        mk(1.1, 200.0, 1000.0),
+        mk(1.2, 500.0, 1000.0),
+        // Slow drift into range (closing below the floor): not an attempt.
+        mk(2.0, 310.0, 200.0),
+        mk(2.1, 250.0, 200.0),
+        mk(2.2, 500.0, 200.0),
+    ];
+    let events = vec![Event::Touch {
+        t: 0.3,
+        pri: 1,
+        team: Some(0),
+        player: None,
+    }];
+    let roles = roles::assign(&frames, &[0], &cfg);
+    let raws = metrics::compute(&frames, &roles, &events, 1, 0, &cfg);
+    // Two real swings, one missed; the slow drift never counts -> 1/2.
+    assert_eq!(raws[&Metric::WhiffRate], Some(0.5));
+}

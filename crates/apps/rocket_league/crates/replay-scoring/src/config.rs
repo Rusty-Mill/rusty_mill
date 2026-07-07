@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Version stamped onto every report; bump when the defaults below change.
-pub const SCORE_CONFIG_VERSION: &str = "scfg-v13";
+pub const SCORE_CONFIG_VERSION: &str = "scfg-v14";
 
 /// Which sub-score a metric feeds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +52,12 @@ pub enum Metric {
     /// Position-weighted turnover rate: giveaways weighted by how deep in your own
     /// half they happened — the kinematic proxy for a value-costly turnover.
     DangerousTurnover,
+    /// Mean shooting angle (deg): how far the player's offensive-half strikes
+    /// deviate from the line to the opponent's goal mouth.
+    ShotAngle,
+    /// Fraction of strike attempts (fast, ball-directed entries into striking
+    /// range) that never made contact — swings that missed.
+    WhiffRate,
 }
 
 impl Metric {
@@ -78,6 +84,8 @@ impl Metric {
             Metric::Agility => "agility",
             Metric::BoostStarvation => "boost_starvation",
             Metric::DangerousTurnover => "dangerous_turnover",
+            Metric::ShotAngle => "shot_angle",
+            Metric::WhiffRate => "whiff_rate",
         }
     }
 }
@@ -465,6 +473,38 @@ impl Default for ScoreConfig {
                     },
                     0.10,
                     "Defence / risk management",
+                ),
+                // Candidate: shooting angle. Over strikes taken from the offensive
+                // half (post-touch speed above a strike floor, moving goalward),
+                // the mean XY angle between the shot and the line to the opponent
+                // goal mouth — finishing quality, which the shipped positional/
+                // rotational metrics don't see at all. Experimental until the
+                // corpus shows rank/ΔV signal. Lower is better.
+                mx(
+                    Metric::ShotAngle,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 45.0,
+                        full: 10.0,
+                    },
+                    0.10,
+                    "Striking / shot placement",
+                ),
+                // Candidate: whiff rate. Of the player's strike attempts — fast,
+                // ball-directed entries into striking range — the fraction that
+                // made no contact. Motion-only, so deliberate fakes and beaten
+                // challenges also read as misses (the guide's D1-15 counts both
+                // as failed challenges). Experimental until the corpus vindicates
+                // it. Lower is better.
+                mx(
+                    Metric::WhiffRate,
+                    Role::General,
+                    Curve::Lower {
+                        zero: 0.35,
+                        full: 0.05,
+                    },
+                    0.10,
+                    "Striking / clean contact",
                 ),
             ],
             top_weights: [0.35, 0.30, 0.35],

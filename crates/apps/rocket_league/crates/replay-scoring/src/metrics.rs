@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use replay_analyzer::analyze::normalize::flip_xy;
 use replay_analyzer::field::{BACK_WALL_Y, SUPERSONIC_SPEED};
 use replay_analyzer::model::{Event, Vec3};
 
@@ -103,6 +104,8 @@ pub fn compute(
     out.insert(Metric::Pace, pace(frames, target_pri));
     out.insert(Metric::Agility, agility(frames, target_pri));
     out.insert(Metric::BoostStarvation, boost_starvation(frames, target_pri));
+    out.insert(Metric::ShotAngle, shot_angle(frames, events, target_pri));
+    out.insert(Metric::WhiffRate, whiff_rate(frames, events, target_pri));
     out
 }
 
@@ -695,6 +698,114 @@ fn agility(frames: &[FrameView], pri: i32) -> Option<f32> {
         }
     }
     (n > 0).then(|| sum / n as f32)
+}
+
+/// Candidate: mean **shooting angle** (deg) over the target's strikes from the
+/// offensive half — the XY angle between the outgoing ball velocity and the line
+/// from the ball to the centre of the opponent's goal mouth. Low = strikes lined
+/// up with the goal; high = sprayed wide of it. A touch qualifies only as a real
+/// strike (post-touch ball speed above a floor) that moves goalward from the
+/// offensive half, so defensive clears never count; a hard centring pass that
+/// drifts goalward still does — the corpus decides whether the signal survives
+/// that. Lower is better; `None` with no qualifying strikes.
+fn shot_angle(frames: &[FrameView], events: &[Event], pri: i32) -> Option<f32> {
+    const MIN_STRIKE_SPEED: f32 = 1400.0; // a real strike, not a dribble tap
+
+    let (mut sum, mut n) = (0.0f32, 0usize);
+    for e in events {
+        let Event::Touch { t, pri: tp, .. } = e else {
+            continue;
+        };
+        if *tp != pri {
+            continue;
+        }
+        let Some(i) = frame_at_time(frames, *t) else {
+            continue;
+        };
+        let f = &frames[i];
+        let (Some(c), Some(ball)) = (f.car(pri), f.ball) else {
+            continue;
+        };
+        // Attacking frame: the opponent goal mouth centre is at (0, +BACK_WALL_Y).
+        let bp = flip_xy(ball.p, c.attack_sign);
+        let bv = flip_xy(ball.v, c.attack_sign);
+        if speed(ball.v) < MIN_STRIKE_SPEED || bv.y <= 0.0 || bp.y <= 0.0 {
+            continue;
+        }
+        let (gx, gy) = (-bp.x, BACK_WALL_Y - bp.y);
+        let shot_n = (bv.x * bv.x + bv.y * bv.y).sqrt();
+        let goal_n = (gx * gx + gy * gy).sqrt();
+        if shot_n < f32::EPSILON || goal_n < f32::EPSILON {
+            continue;
+        }
+        let cos = ((bv.x * gx + bv.y * gy) / (shot_n * goal_n)).clamp(-1.0, 1.0);
+        sum += cos.acos().to_degrees();
+        n += 1;
+    }
+    (n > 0).then(|| sum / n as f32)
+}
+
+/// Candidate: **whiff rate** — of the target's strike attempts, the fraction that
+/// never made contact. An attempt is a maximal run of valid frames inside
+/// striking range of the ball, entered with real speed aimed squarely at it
+/// (closing-speed floor + closing fraction, so a drive-by past the ball doesn't
+/// count); it is a whiff when no touch by the player lands within the run (± a
+/// grid step of slack). Motion-only caveats: a deliberate fake is
+/// indistinguishable from a miss and counts, and so does being beaten to the
+/// ball mid-swing — both read as failed challenges (the guide's "whiffed or
+/// beaten" signal, D1-15). Lower is better; `None` with no attempts.
+fn whiff_rate(frames: &[FrameView], events: &[Event], pri: i32) -> Option<f32> {
+    const NEAR_UU: f32 = 320.0; // striking range (touch pairing uses ~300)
+    const MIN_ENTRY_CLOSING: f32 = 500.0; // uu/s toward the ball at zone entry
+    const MIN_CLOSING_FRAC: f32 = 0.70; // velocity mostly at the ball, not past it
+    const TOUCH_TOL_S: f32 = 0.15; // grid/touch timing slack
+
+    let touches: Vec<f32> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::Touch { t, pri: tp, .. } if *tp == pri => Some(*t),
+            _ => None,
+        })
+        .collect();
+
+    // Maximal near-ball runs: (start_t, last_t, entered_as_a_swing).
+    let mut runs: Vec<(f32, f32, bool)> = Vec::new();
+    let mut open: Option<(f32, f32, bool)> = None;
+    for f in frames {
+        let near = f
+            .car(pri)
+            .filter(|c| c.valid_pos && c.dist_to_ball <= NEAR_UU);
+        if let Some(c) = near {
+            match open.as_mut() {
+                Some((_, last, _)) => *last = f.t,
+                None => {
+                    let swing = c.closing_speed >= MIN_ENTRY_CLOSING
+                        && c.closing_speed >= MIN_CLOSING_FRAC * speed(c.v);
+                    open = Some((f.t, f.t, swing));
+                }
+            }
+        } else if let Some(run) = open.take() {
+            runs.push(run);
+        }
+    }
+    if let Some(run) = open {
+        runs.push(run);
+    }
+
+    let (mut whiffs, mut attempts) = (0usize, 0usize);
+    for (start, last, swing) in runs {
+        if !swing {
+            continue;
+        }
+        attempts += 1;
+        let hit = touches
+            .iter()
+            .any(|&t| t >= start - TOUCH_TOL_S && t <= last + TOUCH_TOL_S);
+        if !hit {
+            whiffs += 1;
+        }
+    }
+    ratio(whiffs, attempts)
 }
 
 /// Candidate: fraction of grounded driving frames spent moving in reverse
