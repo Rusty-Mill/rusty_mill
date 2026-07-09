@@ -1023,6 +1023,7 @@ dependencies = [
  "ts-control",
  "ts-derp",
  "ts-key",
+ "ts-tun",
  "ts-types",
  "ts-wg",
 ]
@@ -1062,6 +1063,12 @@ version = "0.0.1"
 [[package]]
 name = "ts-tun"
 version = "0.0.1"
+dependencies = [
+ "libc",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "ts-types"

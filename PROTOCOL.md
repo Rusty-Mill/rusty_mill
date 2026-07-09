@@ -252,6 +252,31 @@ opaque** — DERP never sees inside the WireGuard payload.
   ICMP echo** responder/initiator over the tunnel so two nodes can prove
   relayed connectivity by pinging each other's `100.64.x.y` without root.
 
+## TUN, routes, MagicDNS (Phase 4)
+
+- **TUN device** (`ts-tun`): created with pure ioctls on `/dev/net/tun`
+  (`TUNSETIFF`, `IFF_TUN | IFF_NO_PI`), then configured via a datagram socket
+  (`SIOCSIFADDR`, `SIOCSIFNETMASK`, `SIOCSIFMTU`, `SIOCSIFFLAGS`). No
+  `iproute2` dependency. Assigning the tailnet address with a **`/10`
+  netmask** makes the kernel auto-install the connected route
+  `100.64.0.0/10 dev ts0`, so no route command is needed. MTU 1280
+  (Tailscale's default) avoids fragmentation over WireGuard+DERP. Async I/O
+  via tokio `AsyncFd` on the non-blocking fd; one packet per `read`.
+- **Checksum offload**: packets the local kernel routes into a TUN can carry
+  an incomplete transport checksum (`CHECKSUM_PARTIAL` — only the
+  pseudo-header sum), expecting hardware to finish it. The engine recomputes
+  the TCP/UDP checksum in userspace before relaying (`ts-engine::l4`). ICMP
+  is unaffected (always fully summed), which is why ping needs no fixup but
+  TCP does on offloading stacks.
+- **MagicDNS** (hosts stub): the engine renders netmap peer `DNSName`s +
+  tailnet IPs into a managed block (delimited by `# BEGIN/END tailscale-rs
+  MagicDNS`) in a hosts file, rewritten idempotently. A resolver on
+  100.100.100.100:53 is a later refinement.
+- **Proactive handshake**: on learning a peer from the netmap the engine
+  initiates the WireGuard handshake immediately (encapsulating an empty
+  packet), so the first real connection doesn't drop packets waiting for the
+  handshake — matching tailscaled.
+
 ## Rust implementation decisions
 
 - **Hand-rolled Noise IK** over `x25519-dalek` + `chacha20poly1305` +

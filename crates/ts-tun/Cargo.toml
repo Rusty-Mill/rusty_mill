@@ -7,3 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+tokio = { workspace = true, features = ["net", "rt", "macros"] }
+libc.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

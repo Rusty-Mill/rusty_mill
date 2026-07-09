@@ -77,10 +77,13 @@ tree.
 | `h2`, `http`, `bytes` | ts-control | HTTP/2 over the Noise channel, mirroring Go's `x/net/http2`. |
 | `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
 | `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
+| `libc` | ts-tun | TUN device creation/config via raw ioctls; syscall bindings only, no iproute2. |
 
 Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
 rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted
-control plane), `tun` (Phase 4), `smoltcp` (ts-net only, Phase 7).
+control plane), `smoltcp` (ts-net only, Phase 7). The `tun` crate was
+considered for Phase 4 and passed over in favor of hand-rolled ioctls (see
+Phase 4 decisions); it may return for the Windows `wintun` adapter.
 
 **Deliberately not used:** `clap` (the CLI has four subcommands and two flags;
 ~60 lines of hand-rolled argv parsing beats a large dependency for now — may be
@@ -213,6 +216,51 @@ First real connectivity. Full protocol notes in `PROTOCOL.md`; decisions here.
 - **No DERP reconnection yet.** If the relay connection drops the engine logs
   and stops; automatic reconnection with backoff is a robustness item for the
   daemon-hardening phase (Phase 6).
+
+## Phase 4 decisions (TUN, routes, MagicDNS)
+
+Real apps across the tailnet. Full protocol notes in `PROTOCOL.md`.
+
+- **Hand-rolled TUN via ioctls, not the `tun` crate.** The `tun` crate pulls
+  Windows bindings and a wider surface; TUN on Linux is a small, stable set
+  of ioctls (`TUNSETIFF` + `SIOCSIF*`). `ts-tun` does them directly over
+  `libc` — pure syscalls, in the sovereign-stack spirit, one dependency
+  (`libc`). The `tun` crate remains the likely choice for the Windows
+  (`wintun`) adapter in Phase 7.
+- **No route command: the `/10` netmask trick.** Assigning the TUN address
+  as `100.64.x.y/10` makes the kernel auto-install the connected route for
+  the whole CGNAT range, so we never shell out to `ip route` or hand-roll
+  netlink route management. Verified on a real device.
+- **Userspace L4 checksum fixup.** Kept the Phase-3 userspace ICMP path for
+  no-TUN mode, but TUN mode hands decrypted packets to the OS. Locally
+  generated TCP/UDP can arrive at the TUN with `CHECKSUM_PARTIAL`; the engine
+  recomputes the transport checksum (`ts-engine::l4`) before relaying.
+  Idempotent for already-correct checksums, so it's a safe always-on
+  correctness net. (This environment's TUN happened to deliver complete
+  checksums, but real offloading NICs/stacks need it.)
+- **Proactive WireGuard handshake on peer discovery**, so the first
+  connection succeeds instead of dropping its SYN during the handshake —
+  what tailscaled does. Made `apply_netmap` async to relay the handshake
+  datagrams.
+- **MagicDNS = hosts-file stub** (as the plan specifies "hosts-style stub
+  first"): a managed, marker-delimited block written to a configurable hosts
+  file (`--hosts-file`), rebuilt from the netmap. A real resolver on
+  100.100.100.100:53 is deferred to daemon hardening (Phase 6).
+- **Engine data path stays behind the ports**: the TUN is `Option<Tun>` in
+  the engine; absent → Phase-3 userspace ICMP (unprivileged), present →
+  Phase-4 OS datapath (needs `CAP_NET_ADMIN`). The `ts_wg::WgPeer` and DERP
+  seams are unchanged — only local delivery/origination swapped.
+
+### Phase 4 verification harness
+
+`interop/tun_netns_test.sh`: a bridge (`br-ts`, 10.0.0.1) with two network
+namespaces (`ns-a`, `ns-b`), each a veth to the bridge and a `ts-daemon` with
+a real TUN, all joined to the host's Headscale (`server_url`
+`http://10.0.0.1:8080`) and its embedded DERP. Runs `python -m http.server`
+bound to ns-b's tailnet IP and `curl`s it from ns-a. **Verified**: ICMP ping
+(3/3, ~1.4 ms) and TCP `curl` both succeed across the tailnet, relayed via
+DERP, through real TUN devices — proving real apps work. (This is the
+embryo of the `xtask` netns harness the plan calls for.)
 
 ## Interop environment (manual until xtask lands)
 

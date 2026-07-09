@@ -29,7 +29,11 @@ options:
   --derp-server <url>    DERP relay base URL (default: same as --login-server)
   --state-dir <dir>      identity state directory (default: ./ts-rs-state)
   --hostname <name>      node hostname (default: system hostname)
-  --ping <ip>            ping a peer's tailnet IP over the relay, then exit";
+  --tun <name>           create a TUN device (needs CAP_NET_ADMIN); real OS
+                         traffic then rides the tailnet
+  --hosts-file <path>    write MagicDNS peer names into this hosts file
+  --ping <ip>            userspace-ping a peer's tailnet IP, then exit
+                         (no-TUN mode only)";
 
 struct Args {
     login_server: String,
@@ -37,6 +41,8 @@ struct Args {
     authkey: String,
     state_dir: PathBuf,
     hostname: Option<String>,
+    tun: Option<String>,
+    hosts_file: Option<PathBuf>,
     ping: Option<Ipv4Addr>,
 }
 
@@ -46,6 +52,8 @@ fn parse_args() -> Result<Args, String> {
     let mut authkey = None;
     let mut state_dir = PathBuf::from("ts-rs-state");
     let mut hostname = None;
+    let mut tun = None;
+    let mut hosts_file = None;
     let mut ping = None;
 
     let mut it = std::env::args().skip(1);
@@ -57,6 +65,8 @@ fn parse_args() -> Result<Args, String> {
             "--authkey" => authkey = Some(next()?),
             "--state-dir" => state_dir = PathBuf::from(next()?),
             "--hostname" => hostname = Some(next()?),
+            "--tun" => tun = Some(next()?),
+            "--hosts-file" => hosts_file = Some(PathBuf::from(next()?)),
             "--ping" => {
                 let v = next()?;
                 ping = Some(v.parse().map_err(|_| format!("invalid --ping IP {v:?}"))?);
@@ -71,6 +81,8 @@ fn parse_args() -> Result<Args, String> {
         authkey: authkey.ok_or("--authkey is required")?,
         state_dir,
         hostname,
+        tun,
+        hosts_file,
         ping,
     })
 }
@@ -117,6 +129,7 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let hostname = args.hostname.unwrap_or_else(default_hostname);
     tracing::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
+    let tun_mode = args.tun.is_some();
     let config = EngineConfig {
         derp_url: args
             .derp_server
@@ -124,6 +137,8 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         control_url: args.login_server,
         authkey: args.authkey,
         hostname,
+        tun_name: args.tun,
+        magic_dns_hosts: args.hosts_file,
     };
 
     let engine = Engine::start(config, state).await?;
@@ -131,7 +146,11 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match args.ping {
         Some(target) => cmd_ping(&engine, target).await,
         None => {
-            println!("ts-daemon: data plane up (DERP-only). Ctrl-C to stop.");
+            if tun_mode {
+                println!("ts-daemon: data plane up (TUN, relayed via DERP). Ctrl-C to stop.");
+            } else {
+                println!("ts-daemon: data plane up (userspace DERP-only). Ctrl-C to stop.");
+            }
             tokio::signal::ctrl_c().await.ok();
             Ok(ExitCode::SUCCESS)
         }

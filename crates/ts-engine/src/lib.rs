@@ -13,6 +13,7 @@
 //! seams in later phases.
 
 pub mod icmp;
+mod l4;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
@@ -22,6 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
 use ts_key::NodeState;
+use ts_tun::Tun;
 use ts_types::NodePublic;
 use ts_types::tailcfg::{Hostinfo, MapResponse};
 use ts_wg::{BoringWgPeer, WgAction, WgPeer};
@@ -30,6 +32,18 @@ use ts_wg::{BoringWgPeer, WgAction, WgPeer};
 const TICK_INTERVAL: Duration = Duration::from_millis(200);
 /// Pending pings older than this are pruned.
 const PING_EXPIRY: Duration = Duration::from_secs(15);
+/// Prefix length of the tailnet CGNAT range (`100.64.0.0/10`). Assigning the
+/// TUN address with this prefix installs the connected route for the whole
+/// range, so peers are reachable without an explicit route command.
+const TAILNET_PREFIX_LEN: u8 = 10;
+
+/// Awaits the next TUN packet, or never resolves when there is no device.
+async fn recv_tun(tun: &Option<Tun>) -> Option<std::io::Result<Vec<u8>>> {
+    match tun {
+        Some(t) => Some(t.recv().await),
+        None => std::future::pending().await,
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
@@ -57,6 +71,14 @@ pub struct EngineConfig {
     pub derp_url: String,
     pub authkey: String,
     pub hostname: String,
+    /// If set, create a TUN device with this name once the netmap yields our
+    /// tailnet IP; real OS traffic then rides the tunnel (Phase 4). If
+    /// `None`, the engine runs the userspace ICMP data plane (Phase 3), which
+    /// needs no root.
+    pub tun_name: Option<String>,
+    /// If set, write MagicDNS peer name→IP mappings into this hosts file
+    /// (managed block).
+    pub magic_dns_hosts: Option<std::path::PathBuf>,
 }
 
 /// A handle to a running engine.
@@ -120,6 +142,13 @@ pub struct Engine {
     pending: HashMap<u16, PendingPing>,
     netmap_rx: mpsc::UnboundedReceiver<MapResponse>,
     cmd_rx: mpsc::Receiver<Command>,
+    /// TUN device (Phase 4). Created lazily once we learn our tailnet IP.
+    tun: Option<Tun>,
+    tun_name: Option<String>,
+    /// MagicDNS: hosts file to manage, and the peer name→IP mappings we've
+    /// written (to avoid rewriting when unchanged).
+    magic_dns_hosts: Option<std::path::PathBuf>,
+    dns_entries: std::collections::BTreeMap<Ipv4Addr, String>,
 }
 
 impl Engine {
@@ -179,6 +208,10 @@ impl Engine {
             pending: HashMap::new(),
             netmap_rx,
             cmd_rx,
+            tun: None,
+            tun_name: config.tun_name,
+            magic_dns_hosts: config.magic_dns_hosts,
+            dns_entries: std::collections::BTreeMap::new(),
         };
         tokio::spawn(engine.run());
         Ok(EngineHandle { cmd_tx })
@@ -188,8 +221,12 @@ impl Engine {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            // Clone the TUN handle (cheap Arc, or None) so the read future
+            // borrows a local rather than `self`, leaving the other branches
+            // free to take `&mut self`.
+            let tun = self.tun.clone();
             tokio::select! {
-                Some(resp) = self.netmap_rx.recv() => self.apply_netmap(resp),
+                Some(resp) = self.netmap_rx.recv() => self.apply_netmap(resp).await,
                 maybe_pkt = self.derp.recv() => match maybe_pkt {
                     Some(pkt) => self.on_derp_packet(pkt.peer, pkt.payload).await,
                     None => {
@@ -199,22 +236,58 @@ impl Engine {
                 },
                 Some(cmd) = self.cmd_rx.recv() => self.on_command(cmd).await,
                 _ = tick.tick() => self.on_tick().await,
+                res = recv_tun(&tun), if tun.is_some() => match res {
+                    Some(Ok(pkt)) => self.on_tun_packet(pkt).await,
+                    Some(Err(e)) => tracing::warn!("engine: TUN read error: {e}"),
+                    None => {}
+                },
                 else => break,
             }
         }
     }
 
-    /// Applies a netmap frame: learns our own IPs and ensures a WireGuard
-    /// session + IP mapping for every peer.
-    fn apply_netmap(&mut self, resp: MapResponse) {
+    /// Handles an outbound IP packet the kernel routed into our TUN: find the
+    /// peer owning the destination address, encrypt, and relay it.
+    async fn on_tun_packet(&mut self, mut packet: Vec<u8>) {
+        let Some(ip) = icmp::parse_ipv4(&packet) else {
+            return; // IPv6 / non-IP: not handled in Phase 4
+        };
+        let Some(&key) = self.ip_to_key.get(&ip.dst) else {
+            tracing::trace!(dst = %ip.dst, "engine: no peer for TUN packet, dropping");
+            return;
+        };
+        // Complete any offloaded (CHECKSUM_PARTIAL) TCP/UDP checksum before
+        // the packet leaves this host, or the peer's stack will drop it.
+        l4::fix_ipv4_transport_checksum(&mut packet);
+        let actions = self.ensure_session(key).encapsulate(&packet);
+        for a in actions {
+            if let WgAction::ToPeer(dg) = a {
+                self.send_to_peer(key, dg).await;
+            }
+        }
+    }
+
+    /// Applies a netmap frame: learns our own IPs (creating the TUN device on
+    /// first sight), ensures a WireGuard session + IP mapping for every peer,
+    /// and refreshes MagicDNS.
+    async fn apply_netmap(&mut self, resp: MapResponse) {
+        let mut dns_changed = false;
+        let mut new_peers: Vec<NodePublic> = Vec::new();
         if let Some(node) = resp.node {
             for ip in ipv4_addrs(&node.addresses) {
                 if !self.our_ips.contains(&ip) {
                     self.our_ips.push(ip);
                     tracing::info!(%ip, "engine: local tailnet address");
+                    self.ensure_tun(ip);
                 }
             }
+            if let (Some(ip), false) = (self.our_ips.first().copied(), node.name.is_empty())
+                && self.record_dns(ip, &node.name)
+            {
+                dns_changed = true;
+            }
         }
+
         let mut incoming = Vec::new();
         if let Some(peers) = resp.peers {
             incoming.extend(peers);
@@ -224,10 +297,93 @@ impl Engine {
         }
         for peer in incoming {
             let Some(key) = peer.key else { continue };
-            self.ensure_session(key);
-            for ip in ipv4_addrs(&peer.addresses) {
-                self.ip_to_key.insert(ip, key);
+            if !self.sessions.contains_key(&key) {
+                new_peers.push(key);
             }
+            self.ensure_session(key);
+            let peer_ips = ipv4_addrs(&peer.addresses);
+            for ip in &peer_ips {
+                self.ip_to_key.insert(*ip, key);
+            }
+            if let (Some(ip), false) = (peer_ips.first().copied(), peer.name.is_empty())
+                && self.record_dns(ip, &peer.name)
+            {
+                dns_changed = true;
+            }
+        }
+
+        if dns_changed {
+            self.write_magic_dns();
+        }
+
+        // Proactively start the WireGuard handshake with each newly learned
+        // peer so the first real connection doesn't have to wait for (and
+        // possibly drop packets during) the handshake — matching tailscaled,
+        // which handshakes on learning a peer rather than on first traffic.
+        for key in new_peers {
+            self.initiate_handshake(key).await;
+        }
+    }
+
+    /// Kicks off a WireGuard handshake with `key` by encapsulating an empty
+    /// packet (boringtun emits a handshake initiation when no session
+    /// exists) and relaying the result over DERP.
+    async fn initiate_handshake(&mut self, key: NodePublic) {
+        let actions = self.ensure_session(key).encapsulate(&[]);
+        for a in actions {
+            if let WgAction::ToPeer(dg) = a {
+                self.send_to_peer(key, dg).await;
+            }
+        }
+    }
+
+    /// Creates the TUN device (Phase 4) if configured and not yet created,
+    /// bound to our tailnet IP with the `100.64.0.0/10` connected route.
+    fn ensure_tun(&mut self, ip: Ipv4Addr) {
+        if self.tun.is_some() {
+            return;
+        }
+        let Some(name) = self.tun_name.clone() else {
+            return;
+        };
+        match Tun::create(&name, ip, TAILNET_PREFIX_LEN, ts_tun::DEFAULT_MTU) {
+            Ok(tun) => {
+                tracing::info!(device = %name, %ip, "engine: TUN device up");
+                self.tun = Some(tun);
+            }
+            Err(e) => tracing::error!("engine: failed to create TUN {name}: {e}"),
+        }
+    }
+
+    /// Records a name→IP mapping; returns true if it changed.
+    fn record_dns(&mut self, ip: Ipv4Addr, dns_name: &str) -> bool {
+        if self.magic_dns_hosts.is_none() {
+            return false;
+        }
+        let fqdn = dns_name.trim_end_matches('.').to_string();
+        match self.dns_entries.get(&ip) {
+            Some(existing) if *existing == fqdn => false,
+            _ => {
+                self.dns_entries.insert(ip, fqdn);
+                true
+            }
+        }
+    }
+
+    /// Rewrites the managed MagicDNS block in the configured hosts file.
+    fn write_magic_dns(&self) {
+        let Some(path) = &self.magic_dns_hosts else {
+            return;
+        };
+        let entries: Vec<ts_tun::magicdns::HostEntry> = self
+            .dns_entries
+            .iter()
+            .filter_map(|(ip, fqdn)| ts_tun::magicdns::HostEntry::from_dns_name(*ip, fqdn))
+            .collect();
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        let merged = ts_tun::magicdns::merge_into(&existing, &entries);
+        if let Err(e) = std::fs::write(path, merged) {
+            tracing::warn!("engine: failed to write MagicDNS hosts {path:?}: {e}");
         }
     }
 
@@ -248,7 +404,17 @@ impl Engine {
         for action in actions {
             match action {
                 WgAction::ToPeer(dg) => self.send_to_peer(peer, dg).await,
-                WgAction::ToLocal(ip_pkt) => self.handle_ip(peer, ip_pkt).await,
+                WgAction::ToLocal(ip_pkt) => {
+                    if let Some(tun) = &self.tun {
+                        // Phase 4: hand the decrypted packet to the OS stack.
+                        if let Err(e) = tun.send(&ip_pkt).await {
+                            tracing::warn!("engine: TUN write error: {e}");
+                        }
+                    } else {
+                        // Phase 3 fallback: userspace ICMP echo.
+                        self.handle_ip(peer, ip_pkt).await;
+                    }
+                }
             }
         }
     }
