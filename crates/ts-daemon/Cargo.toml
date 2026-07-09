@@ -7,3 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+ts-control.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
