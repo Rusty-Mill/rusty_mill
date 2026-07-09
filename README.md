@@ -5,16 +5,17 @@ WireGuard data plane, NAT traversal, and an embeddable library — no Go
 binaries at runtime. Targets [Headscale](https://github.com/juanfont/headscale)
 first; the hosted control plane is a later milestone.
 
-**Status: Phase 6** — daemon surface + ACL filter. On top of the Phase-5
-direct-path data plane, `ts-daemon` now serves the **LocalAPI** over a Unix
-socket, so the Phase-1 **`ts-cli` drives our own daemon unmodified**
-(`status`, `up`/`down`, `ping`). The engine assembles a live status snapshot
-(self + peers + DERP-vs-direct path), gates traffic on `WantRunning`, and
-**enforces the netmap packet filter (ACLs)** on inbound traffic. A hardened
-[systemd unit](packaging/tailscale-rs.service) ships for daily use. See
+**Status: Phase 7** — embeddable node + hardening. On top of the Phase-6
+daemon, `ts-net` provides a **fully userspace TCP/IP stack (smoltcp) on the
+tailnet — no TUN device and no root**. An application `bind`s a port on its
+tailnet IP and serves connections as ordinary `tokio` streams, so a plain
+`cargo run` becomes a tailnet service. Verified end-to-end: the
+[`serve_http` example](crates/ts-net/examples/serve_http.rs) serves a page
+that another node fetches with `curl`, entirely in userspace. The wire
+parsers gain randomized panic-free fuzz-smoke harnesses. See
 [DESIGN.md](DESIGN.md) for the phase plan and every decision, and
-[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN + ACL
-notes.
+[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN + ACL +
+netstack notes.
 
 ## Layout
 
@@ -25,8 +26,8 @@ WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-stun` (STUN
 client), `ts-disco` (disco codec), `ts-magicsock` (direct/DERP path mux),
 `ts-filter` (netmap ACL enforcement), `ts-engine` (control → WG → magicsock
 → TUN orchestration), `ts-localapi` (HTTP-over-UDS LocalAPI server), `ts-cli`
-(LocalAPI CLI), `ts-daemon` (the daemon). Placeholder filling in by phase:
-`ts-net`.
+(LocalAPI CLI), `ts-daemon` (the daemon), `ts-net` (embeddable userspace
+netstack over smoltcp). All 15 crates are now live.
 
 ## Build & test
 
@@ -143,6 +144,39 @@ pong from rusty-a (100.64.0.19) via DERP(derp) in 1ms
 
 Inbound traffic is checked against the tailnet **ACL** (the netmap packet
 filter): with a restrictive policy the daemon drops packets no rule permits.
+
+## Embed a tailnet service — no TUN, no root (Phase 7)
+
+`ts-net` runs a userspace TCP/IP stack (smoltcp) fed directly by the engine's
+decrypted WireGuard packets, so an application serves on the tailnet without a
+TUN device or any privileges:
+
+```rust
+let node = ts_net::Node::new(config).await?;
+let ip = node.wait_ip().await.unwrap();          // our 100.64.x.y
+let mut listener = node.bind(8080).await?;        // TCP listener on the tailnet
+while let Some(mut stream) = listener.accept().await {
+    // stream: AsyncRead + AsyncWrite, like a std TcpStream
+    tokio::spawn(async move { /* serve HTTP, etc. */ });
+}
+```
+
+The [`serve_http` example](crates/ts-net/examples/serve_http.rs) is a complete
+tailnet web server:
+
+```console
+$ cargo run -p ts-net --example serve_http -- \
+    --login-server http://127.0.0.1:8080 --authkey "$KEY" --hostname rusty-web
+ts-net: serving http://100.64.0.7:8080/ on the tailnet (no TUN, no root)
+
+# from any other node on the tailnet:
+$ curl http://100.64.0.7:8080/
+Hello from tailscale-rs (ts-net), served with no TUN and no root!
+```
+
+[`interop/ts_net_test.sh`](interop/ts_net_test.sh) stands up the ts-net server
+in one namespace and a TUN client in another, and proves a `curl` reaches the
+userspace server across the tailnet.
 
 ## Run under systemd
 
