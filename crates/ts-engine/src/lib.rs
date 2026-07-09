@@ -1,28 +1,28 @@
-//! Engine: orchestrates control (netmap) → per-peer WireGuard → DERP
-//! transport into a working, relayed data plane.
+//! Engine: orchestrates control (netmap) → per-peer WireGuard →
+//! magicsock (direct/DERP) → TUN into a working data plane.
 //!
-//! Phase 3 is DERP-only: every WireGuard datagram rides a DERP frame keyed
-//! by the peer's node public key — no direct paths, no path selection (that
-//! is Phase 5's magicsock). There is no TUN device either (Phase 4): the
-//! engine answers and originates ICMP echoes in userspace so two nodes can
-//! prove relayed connectivity by pinging each other's `100.64.x.y`.
-//!
-//! Ports the engine speaks to (per the ports-and-adapters design):
-//! `ts_control::ControlClient`, `ts_derp::DerpClient`, and the
-//! `ts_wg::WgPeer` trait. Direct UDP and a real TUN slot into the same
-//! seams in later phases.
+//! WireGuard datagrams are handed to `ts_magicsock`, which sends them over a
+//! verified direct UDP path when one exists (Phase 5) or the DERP relay
+//! otherwise (Phase 3); decrypted packets go to a real TUN device (Phase 4)
+//! or, without one, a userspace ICMP responder. Every layer is reached
+//! through a port (`ts_control::ControlClient`, `ts_derp::DerpClient`,
+//! `ts_magicsock::MagicSock`, `ts_wg::WgPeer`, `ts_tun::Tun`) so the domain
+//! logic stays testable and the adapters are swappable.
 
 pub mod icmp;
 mod l4;
 
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
 use ts_key::NodeState;
+use ts_magicsock::{MagicSock, PathKind, UdpInput};
 use ts_tun::Tun;
 use ts_types::NodePublic;
 use ts_types::tailcfg::{Hostinfo, MapResponse};
@@ -51,6 +51,8 @@ pub enum EngineError {
     Control(#[from] ts_control::ClientError),
     #[error("DERP error: {0}")]
     Derp(#[from] ts_derp::DerpError),
+    #[error("magicsock I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -79,6 +81,13 @@ pub struct EngineConfig {
     /// If set, write MagicDNS peer name→IP mappings into this hosts file
     /// (managed block).
     pub magic_dns_hosts: Option<std::path::PathBuf>,
+    /// Enable direct-path discovery (magicsock/disco). When true the engine
+    /// binds a UDP socket, runs disco, and upgrades peers from DERP to direct
+    /// paths (Phase 5). When false, all traffic stays on DERP (Phase 3/4).
+    pub enable_direct: bool,
+    /// Optional `host:port` STUN server for reflexive-endpoint discovery
+    /// (needed for NAT traversal; unnecessary on a flat network).
+    pub stun_server: Option<String>,
 }
 
 /// A handle to a running engine.
@@ -149,6 +158,12 @@ pub struct Engine {
     /// written (to avoid rewriting when unchanged).
     magic_dns_hosts: Option<std::path::PathBuf>,
     dns_entries: std::collections::BTreeMap<Ipv4Addr, String>,
+    /// Direct-path multiplexer (Phase 5). When present, WireGuard datagrams
+    /// go through it (direct or DERP); when absent, straight to DERP.
+    magicsock: Option<MagicSock>,
+    /// The disco key we've registered per peer, to detect changes (Headscale
+    /// may send a zero disco key until the peer reports endpoints).
+    peer_disco: HashMap<NodePublic, ts_types::DiscoPublic>,
 }
 
 impl Engine {
@@ -173,12 +188,60 @@ impl Engine {
         control.register(node_key, &config.authkey).await?;
         tracing::info!("engine: registered with control server");
 
+        let derp = DerpClient::connect(&config.derp_url, &state.node).await?;
+        let derp_tx = derp.sender();
+        tracing::info!(server_key = %derp.server_key(), "engine: connected to DERP");
+
+        // Resolve the control server's IP for local-endpoint discovery.
+        let control_ip = resolve_host_ip(&config.control_url);
+
+        // Bring up the direct-path multiplexer, if enabled. Do this *before*
+        // starting the netmap poll so we can report our endpoints in the map
+        // request — the control server needs them to propagate our disco key
+        // to peers.
+        let magicsock = if config.enable_direct {
+            let mut ms = MagicSock::new(0, state.disco.clone(), derp.sender()).await?;
+            let reflexive = match &config.stun_server {
+                Some(s) => ms.discover_reflexive(s).await,
+                None => None,
+            };
+            if let Some(cip) = control_ip {
+                ms.set_local_endpoints(cip, reflexive);
+            }
+            tracing::info!(
+                udp_port = ms.port(),
+                "engine: magicsock up (direct paths enabled)"
+            );
+            Some(ms)
+        } else {
+            None
+        };
+        let endpoints = magicsock
+            .as_ref()
+            .map(|m| m.local_endpoints())
+            .unwrap_or_default();
+
+        // Report our disco key + endpoints via a lite map request so the
+        // control server persists them and propagates our disco key to peers
+        // (a prerequisite for NAT traversal). Headscale ignores these on the
+        // streaming poll.
+        if !endpoints.is_empty() {
+            if let Err(e) = control
+                .update_endpoints(node_key, disco_key, endpoints.clone())
+                .await
+            {
+                tracing::warn!("engine: endpoint update failed: {e}");
+            } else {
+                tracing::info!(?endpoints, "engine: reported endpoints to control");
+            }
+        }
+
         // Stream the netmap into an unbounded channel (the poll handler is
         // sync; unbounded send never blocks it).
         let (netmap_tx, netmap_rx) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let r = control
-                .poll_netmap(node_key, disco_key, move |resp| {
+                .poll_netmap(node_key, disco_key, endpoints, move |resp| {
                     if netmap_tx.send(resp).is_err() {
                         std::ops::ControlFlow::Break(())
                     } else {
@@ -190,10 +253,6 @@ impl Engine {
                 tracing::warn!("engine: netmap poll ended: {e}");
             }
         });
-
-        let derp = DerpClient::connect(&config.derp_url, &state.node).await?;
-        let derp_tx = derp.sender();
-        tracing::info!(server_key = %derp.server_key(), "engine: connected to DERP");
 
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let engine = Engine {
@@ -212,6 +271,8 @@ impl Engine {
             tun_name: config.tun_name,
             magic_dns_hosts: config.magic_dns_hosts,
             dns_entries: std::collections::BTreeMap::new(),
+            magicsock,
+            peer_disco: HashMap::new(),
         };
         tokio::spawn(engine.run());
         Ok(EngineHandle { cmd_tx })
@@ -221,10 +282,11 @@ impl Engine {
         let mut tick = tokio::time::interval(TICK_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            // Clone the TUN handle (cheap Arc, or None) so the read future
-            // borrows a local rather than `self`, leaving the other branches
-            // free to take `&mut self`.
+            // Clone the TUN handle and UDP socket (cheap Arc, or None) so the
+            // read futures borrow locals rather than `self`, leaving the other
+            // branches free to take `&mut self`.
             let tun = self.tun.clone();
+            let udp = self.magicsock.as_ref().map(|m| m.udp());
             tokio::select! {
                 Some(resp) = self.netmap_rx.recv() => self.apply_netmap(resp).await,
                 maybe_pkt = self.derp.recv() => match maybe_pkt {
@@ -241,8 +303,26 @@ impl Engine {
                     Some(Err(e)) => tracing::warn!("engine: TUN read error: {e}"),
                     None => {}
                 },
+                res = recv_udp(&udp), if udp.is_some() => match res {
+                    Some(Ok((buf, src))) => self.on_udp_packet(buf, src).await,
+                    Some(Err(e)) => tracing::trace!("engine: UDP read error: {e}"),
+                    None => {}
+                },
                 else => break,
             }
+        }
+    }
+
+    /// Handles an inbound UDP datagram: magicsock dispatches disco itself and
+    /// reports WireGuard packets for us to decapsulate (their WG output may in
+    /// turn go back over the newly discovered direct path).
+    async fn on_udp_packet(&mut self, buf: Vec<u8>, src: SocketAddr) {
+        let input = match &mut self.magicsock {
+            Some(ms) => ms.handle_udp(buf, src).await,
+            None => return,
+        };
+        if let UdpInput::WireGuard { peer, payload } = input {
+            self.deliver_wg(peer, &payload).await;
         }
     }
 
@@ -295,6 +375,7 @@ impl Engine {
         if let Some(changed) = resp.peers_changed {
             incoming.extend(changed);
         }
+        let mut new_disco: Vec<(NodePublic, ts_types::DiscoPublic)> = Vec::new();
         for peer in incoming {
             let Some(key) = peer.key else { continue };
             if !self.sessions.contains_key(&key) {
@@ -304,6 +385,16 @@ impl Engine {
             let peer_ips = ipv4_addrs(&peer.addresses);
             for ip in &peer_ips {
                 self.ip_to_key.insert(*ip, key);
+            }
+            // Register/update the peer's disco key when it's non-zero and has
+            // changed (Headscale sends a zero key until the peer reports
+            // endpoints).
+            if let Some(disco) = peer.disco_key
+                && disco != ts_types::DiscoPublic([0u8; 32])
+                && self.peer_disco.get(&key) != Some(&disco)
+            {
+                self.peer_disco.insert(key, disco);
+                new_disco.push((key, disco));
             }
             if let (Some(ip), false) = (peer_ips.first().copied(), peer.name.is_empty())
                 && self.record_dns(ip, &peer.name)
@@ -322,6 +413,18 @@ impl Engine {
         // which handshakes on learning a peer rather than on first traffic.
         for key in new_peers {
             self.initiate_handshake(key).await;
+        }
+
+        // Register each peer's disco key with magicsock and invite it to
+        // ping us, kicking off direct-path discovery (Phase 5).
+        if let Some(ms) = &mut self.magicsock {
+            for (node, disco) in &new_disco {
+                tracing::debug!(peer = %node, peer_disco = %disco, our_disco = %self.state.disco.public(), "engine: registering peer disco key");
+                ms.add_peer(*node, *disco);
+            }
+            for (node, _) in &new_disco {
+                ms.send_call_me_maybe(*node).await;
+            }
         }
     }
 
@@ -398,9 +501,23 @@ impl Engine {
         self.sessions.get_mut(&key).expect("just inserted")
     }
 
-    /// Handles a WireGuard datagram relayed to us from `peer`.
+    /// Handles a packet relayed to us over DERP from `peer`: a disco control
+    /// message (handed to magicsock) or a WireGuard datagram.
     async fn on_derp_packet(&mut self, peer: NodePublic, payload: Vec<u8>) {
-        let actions = self.ensure_session(peer).decapsulate(&payload);
+        if ts_disco::is_disco(&payload) {
+            if let Some(ms) = &mut self.magicsock {
+                ms.on_derp_disco(peer, &payload).await;
+            }
+            return;
+        }
+        self.deliver_wg(peer, &payload).await;
+    }
+
+    /// Decapsulates a WireGuard datagram from `peer` (arriving via DERP or a
+    /// direct UDP path) and dispatches its output: reply datagrams back to the
+    /// peer, decrypted IP packets to the TUN (or userspace ICMP).
+    async fn deliver_wg(&mut self, peer: NodePublic, payload: &[u8]) {
+        let actions = self.ensure_session(peer).decapsulate(payload);
         for action in actions {
             match action {
                 WgAction::ToPeer(dg) => self.send_to_peer(peer, dg).await,
@@ -512,13 +629,68 @@ impl Engine {
         }
         self.pending
             .retain(|_, p| p.started.elapsed() < PING_EXPIRY);
-    }
 
-    async fn send_to_peer(&self, peer: NodePublic, datagram: Vec<u8>) {
-        if let Err(e) = self.derp_tx.send(peer, datagram).await {
-            tracing::debug!(peer = %peer, "engine: DERP send failed: {e}");
+        // Heartbeat disco: keep NAT mappings open and detect path loss.
+        if let Some(ms) = &mut self.magicsock {
+            ms.tick().await;
         }
     }
+
+    /// Sends a WireGuard datagram to `peer` over its best path: through
+    /// magicsock (direct if a path is up, else DERP) when direct paths are
+    /// enabled, otherwise straight over DERP.
+    async fn send_to_peer(&self, peer: NodePublic, datagram: Vec<u8>) {
+        match &self.magicsock {
+            Some(ms) => ms.send_wg(peer, datagram).await,
+            None => {
+                if let Err(e) = self.derp_tx.send(peer, datagram).await {
+                    tracing::debug!(peer = %peer, "engine: DERP send failed: {e}");
+                }
+            }
+        }
+    }
+
+    /// The current path (direct or relay) for a peer, for status reporting.
+    pub fn path_for(&self, peer: &NodePublic) -> PathKind {
+        self.magicsock
+            .as_ref()
+            .map(|m| m.path_for(peer))
+            .unwrap_or(PathKind::Relay)
+    }
+}
+
+/// Awaits the next UDP datagram from the magicsock socket, or never resolves
+/// when direct paths are disabled.
+async fn recv_udp(udp: &Option<Arc<UdpSocket>>) -> Option<std::io::Result<(Vec<u8>, SocketAddr)>> {
+    match udp {
+        Some(sock) => {
+            let mut buf = vec![0u8; 65_536];
+            let r = sock.recv_from(&mut buf).await.map(|(n, src)| {
+                buf.truncate(n);
+                (buf, src)
+            });
+            Some(r)
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Resolves a `http://host:port` control URL's host to an IP for
+/// local-endpoint discovery.
+fn resolve_host_ip(control_url: &str) -> Option<IpAddr> {
+    use std::net::ToSocketAddrs;
+    let host = control_url
+        .strip_prefix("http://")
+        .or_else(|| control_url.strip_prefix("https://"))
+        .unwrap_or(control_url);
+    let authority = host.split(['/', '?']).next().unwrap_or(host);
+    // Ensure there's a port for ToSocketAddrs.
+    let with_port = if authority.contains(':') {
+        authority.to_string()
+    } else {
+        format!("{authority}:80")
+    };
+    with_port.to_socket_addrs().ok()?.next().map(|sa| sa.ip())
 }
 
 /// Extracts IPv4 addresses from a list of tailnet prefixes.

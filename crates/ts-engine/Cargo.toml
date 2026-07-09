@@ -13,6 +13,8 @@ ts-control.workspace = true
 ts-derp.workspace = true
 ts-wg.workspace = true
 ts-tun.workspace = true
+ts-magicsock.workspace = true
+ts-disco.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
 thiserror.workspace = true
 tracing.workspace = true

@@ -277,6 +277,72 @@ opaque** — DERP never sees inside the WireGuard payload.
   packet), so the first real connection doesn't drop packets waiting for the
   handshake — matching tailscaled.
 
+## Direct paths: disco, STUN, magicsock (Phase 5)
+
+Ground truth: Go `disco/disco.go`, `net/stun/stun.go`, `wgengine/magicsock`.
+
+### STUN (RFC 5389, `ts-stun`)
+
+Binding request: `00 01`, 2-byte length, magic cookie `21 12 A4 42`, 12-byte
+transaction id (we send the minimal form — no SOFTWARE/FINGERPRINT). The
+success response (`01 01`) carries `XOR-MAPPED-ADDRESS` (attr `0x0020`):
+port XORed with `0x2112`, address XORed with the cookie (+ txid for IPv6).
+Gives the node its server-reflexive (public) endpoint for NAT traversal.
+
+### disco (`ts-disco`)
+
+Wire: `magic "TS💬" (54 53 f0 9f 92 ac)` + 32B sender disco public key +
+24B nonce + NaCl box. The box is `crypto_box` (X25519 + XSalsa20-Poly1305)
+between the two disco keys; plaintext is `msgType(1) || version(1) || data`.
+Only the ClientInfo-style header key is cleartext, so a receiver can route
+before decrypting. Message types:
+- **Ping** (`0x01`): 12B tx id + 32B node key. Probes a candidate path.
+- **Pong** (`0x02`): 12B tx id + 16B src IP (v4-mapped) + 2B port. Echoes
+  the tx id and reports the source the ponger saw (so the pinger learns its
+  reflexive address).
+- **CallMeMaybe** (`0x03`): N × (16B IP + 2B port). "Here are my endpoints —
+  ping me." Sent over DERP to bootstrap hole punching.
+
+### magicsock (`ts-magicsock`)
+
+One UDP socket multiplexing direct endpoints and DERP. Per-peer typed path
+state (`Relay` ↔ `Direct(addr)`). Receive path classifies each datagram:
+disco magic → handle disco; else → WireGuard (mapped to a peer by source
+endpoint). Discovery/upgrade:
+1. Report local + STUN-reflexive endpoints to control (see below), which
+   propagates them + our disco key to peers.
+2. Send **CallMeMaybe** over DERP with our endpoints (re-sent every 2 s until
+   a direct path is up — the first can race the peer's DERP registration).
+3. On CallMeMaybe, disco-**Ping** each of the peer's endpoints over UDP.
+4. On an inbound Ping, **Pong** to its source and ping that source back
+   (verify both directions); on a **Pong** matching one of our pings, mark
+   that endpoint verified and **migrate** the peer's WireGuard traffic from
+   DERP to direct. Heartbeat re-pings keep NAT mappings alive; a path with no
+   pong for 15 s falls back to DERP. The WireGuard session is untouched by
+   the migration.
+
+### Control interaction (the disco-key gotcha)
+
+The control server only advertises a node's disco key to peers **after the
+node reports its endpoints**. Headscale ignores endpoints/disco on the
+long-poll (streaming) map request — they must be sent via a separate
+**lite** map request (`Stream=false`, `OmitPeers=true`). Without it, peers
+receive a zero disco key and NAT traversal never starts. (Discovered
+empirically; `ts-control::update_endpoints` sends the lite update at
+startup.)
+
+### Rust decisions
+
+- STUN and disco reuse `crypto_box` (already in the tree for DERP). No new
+  crypto dependency.
+- magicsock is single-task-owned (no locks); the UDP socket is shared via
+  `Arc` so the engine's `select!` loop can receive while magicsock sends.
+- Verified on a flat L2 (both nodes' local endpoints reachable): two nodes
+  upgrade DERP→direct and carry real TCP over the direct path, WG session
+  intact. Two-distinct-NAT hole punching (esp. symmetric NAT — Linux
+  MASQUERADE) is the empirically-hard case the plan flags; `interop/
+  stun_server.py` and the `--stun` path exist for that harness.
+
 ## Rust implementation decisions
 
 - **Hand-rolled Noise IK** over `x25519-dalek` + `chacha20poly1305` +

@@ -32,6 +32,10 @@ options:
   --tun <name>           create a TUN device (needs CAP_NET_ADMIN); real OS
                          traffic then rides the tailnet
   --hosts-file <path>    write MagicDNS peer names into this hosts file
+  --direct               enable direct-path discovery (magicsock/disco);
+                         peers upgrade from DERP to direct UDP when possible
+  --stun <host:port>     STUN server for reflexive-endpoint discovery
+                         (for NAT traversal; implies --direct)
   --ping <ip>            userspace-ping a peer's tailnet IP, then exit
                          (no-TUN mode only)";
 
@@ -43,6 +47,8 @@ struct Args {
     hostname: Option<String>,
     tun: Option<String>,
     hosts_file: Option<PathBuf>,
+    direct: bool,
+    stun: Option<String>,
     ping: Option<Ipv4Addr>,
 }
 
@@ -54,6 +60,8 @@ fn parse_args() -> Result<Args, String> {
     let mut hostname = None;
     let mut tun = None;
     let mut hosts_file = None;
+    let mut direct = false;
+    let mut stun = None;
     let mut ping = None;
 
     let mut it = std::env::args().skip(1);
@@ -67,6 +75,8 @@ fn parse_args() -> Result<Args, String> {
             "--hostname" => hostname = Some(next()?),
             "--tun" => tun = Some(next()?),
             "--hosts-file" => hosts_file = Some(PathBuf::from(next()?)),
+            "--direct" => direct = true,
+            "--stun" => stun = Some(next()?),
             "--ping" => {
                 let v = next()?;
                 ping = Some(v.parse().map_err(|_| format!("invalid --ping IP {v:?}"))?);
@@ -83,6 +93,8 @@ fn parse_args() -> Result<Args, String> {
         hostname,
         tun,
         hosts_file,
+        direct,
+        stun,
         ping,
     })
 }
@@ -139,6 +151,8 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         hostname,
         tun_name: args.tun,
         magic_dns_hosts: args.hosts_file,
+        enable_direct: args.direct || args.stun.is_some(),
+        stun_server: args.stun,
     };
 
     let engine = Engine::start(config, state).await?;
