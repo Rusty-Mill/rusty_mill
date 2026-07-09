@@ -1012,6 +1012,13 @@ dependencies = [
 [[package]]
 name = "ts-disco"
 version = "0.0.1"
+dependencies = [
+ "crypto_box",
+ "serde_json",
+ "thiserror",
+ "ts-key",
+ "ts-types",
+]
 
 [[package]]
 name = "ts-engine"
@@ -1022,7 +1029,9 @@ dependencies = [
  "tracing",
  "ts-control",
  "ts-derp",
+ "ts-disco",
  "ts-key",
+ "ts-magicsock",
  "ts-tun",
  "ts-types",
  "ts-wg",
@@ -1051,6 +1060,17 @@ version = "0.0.1"
 [[package]]
 name = "ts-magicsock"
 version = "0.0.1"
+dependencies = [
+ "rand_core",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "ts-derp",
+ "ts-disco",
+ "ts-key",
+ "ts-stun",
+ "ts-types",
+]
 
 [[package]]
 name = "ts-net"
@@ -1059,6 +1079,11 @@ version = "0.0.1"
 [[package]]
 name = "ts-stun"
 version = "0.0.1"
+dependencies = [
+ "rand_core",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "ts-tun"

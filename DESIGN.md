@@ -78,6 +78,8 @@ tree.
 | `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
 | `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
 | `libc` | ts-tun | TUN device creation/config via raw ioctls; syscall bindings only, no iproute2. |
+| `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
+| `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
 
 Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
 rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted
@@ -261,6 +263,45 @@ bound to ns-b's tailnet IP and `curl`s it from ns-a. **Verified**: ICMP ping
 (3/3, ~1.4 ms) and TCP `curl` both succeed across the tailnet, relayed via
 DERP, through real TUN devices — proving real apps work. (This is the
 embryo of the `xtask` netns harness the plan calls for.)
+
+## Phase 5 decisions (direct paths — the hard one)
+
+Endpoint discovery, disco, and live DERP→direct migration. Protocol in
+`PROTOCOL.md`.
+
+- **STUN and disco reuse `crypto_box`** (already in-tree for DERP); no new
+  crypto dependency. `ts-stun` sends the minimal RFC-5389 binding request
+  (no SOFTWARE/FINGERPRINT), which real servers answer.
+- **magicsock is single-task-owned, no locks.** It lives inside the engine's
+  event loop (`&mut self`); the UDP socket is shared via `Arc` so the loop
+  can `recv_from` in one `select!` arm while magicsock sends from others.
+  Typed per-peer path state (`Relay` ↔ `Direct(addr)`) so an unverified path
+  can't be used.
+- **The disco-key gotcha (empirical).** Headscale only propagates a node's
+  disco key to peers after the node reports endpoints — and it *ignores*
+  endpoints/disco on the streaming map request. They must be sent via a
+  separate **lite** map request (`Stream=false`, `OmitPeers=true`);
+  `ts-control::update_endpoints` does this at startup. Without it, peers see
+  a zero disco key and the disco box fails to open, so NAT traversal never
+  begins. This cost real debugging time (the plan warned Phase 5 would).
+- **The Docker FORWARD-DROP gotcha (empirical).** Docker sets the host
+  iptables `FORWARD` policy to `DROP`, and `br_netfilter` routes bridged
+  traffic through it — silently dropping the direct node↔node UDP path (all
+  earlier phases' traffic went *through* the host, so this only surfaced
+  now). The harness adds `iptables -I FORWARD -i br-ts -o br-ts -j ACCEPT`.
+- **Path liveness**: a verified direct path with no pong for 15 s falls back
+  to DERP; heartbeat re-pings every 5 s keep NAT mappings open. call-me-maybe
+  is re-sent every 2 s until a direct path exists (the first can race the
+  peer's DERP registration).
+- **Scope of verification.** On a flat L2 (both nodes' local endpoints
+  mutually reachable) two nodes reliably upgrade DERP→direct (3/3 runs) and
+  carry real TCP (`curl`) over the direct path with the WireGuard session
+  intact — the complete mechanism: discovery → disco handshake → upgrade →
+  live migration. **Deferred**: a full two-distinct-NAT harness (netns
+  routers + masquerade + STUN server) and symmetric-NAT hole punching — the
+  empirically hardest case (Linux `MASQUERADE` is symmetric; cone NAT needs
+  special setup). The code path for it exists (`--stun`, reflexive discovery,
+  `interop/stun_server.py`); wiring the NAT harness is the next increment.
 
 ## Interop environment (manual until xtask lands)
 

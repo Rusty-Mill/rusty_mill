@@ -133,6 +133,39 @@ impl ControlClient {
         Ok(resp)
     }
 
+    /// Reports our disco key and endpoints to the control server via a
+    /// non-streaming "lite" map request (`Stream=false`, `OmitPeers=true`) —
+    /// the update Tailscale sends when its endpoints change. Headscale
+    /// persists the disco key + endpoints from this and propagates them to
+    /// peers (it does not persist them from the streaming poll). The response
+    /// netmap is discarded.
+    pub async fn update_endpoints(
+        &self,
+        node_key: ts_types::NodePublic,
+        disco_key: ts_types::DiscoPublic,
+        endpoints: Vec<std::net::SocketAddr>,
+    ) -> Result<(), ClientError> {
+        let req = MapRequest {
+            version: CURRENT_CAPABILITY_VERSION,
+            compress: String::new(),
+            keep_alive: false,
+            node_key,
+            disco_key,
+            stream: false,
+            hostinfo: self.hostinfo.clone(),
+            endpoints,
+            omit_peers: true,
+            read_only: false,
+        };
+        let body = serde_json::to_vec(&req)?;
+        let mut session = self.open_h2().await?;
+        // The lite response (a single netmap frame) is not needed.
+        let _ = session
+            .request(self.machine_url("/machine/map"), body)
+            .await?;
+        Ok(())
+    }
+
     /// Opens the streaming netmap long-poll. Each yielded [`MapResponse`] is
     /// one frame from the server (including keep-alive heartbeats). The
     /// stream lives until the connection drops or `handler` returns
@@ -141,11 +174,16 @@ impl ControlClient {
         &self,
         node_key: ts_types::NodePublic,
         disco_key: ts_types::DiscoPublic,
+        endpoints: Vec<std::net::SocketAddr>,
         mut handler: F,
     ) -> Result<(), ClientError>
     where
         F: FnMut(MapResponse) -> std::ops::ControlFlow<()>,
     {
+        // Reporting our endpoints (and disco key) is what makes the control
+        // server advertise us as reachable for direct paths and propagate our
+        // disco key to peers. Without endpoints, Headscale sends a zero disco
+        // key to peers and NAT traversal can't start.
         let req = MapRequest {
             version: CURRENT_CAPABILITY_VERSION,
             compress: String::new(),
@@ -154,7 +192,7 @@ impl ControlClient {
             disco_key,
             stream: true,
             hostinfo: self.hostinfo.clone(),
-            endpoints: Vec::new(),
+            endpoints,
             omit_peers: false,
             read_only: false,
         };

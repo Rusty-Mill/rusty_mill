@@ -5,24 +5,25 @@ WireGuard data plane, NAT traversal, and an embeddable library — no Go
 binaries at runtime. Targets [Headscale](https://github.com/juanfont/headscale)
 first; the hosted control plane is a later milestone.
 
-**Status: Phase 4** — real apps across the tailnet. Two `ts-daemon` nodes
-register with Headscale (pure-Rust ts2021: Noise IK + HTTP/2, no Go),
-connect to DERP, bring up real **TUN devices**, and carry actual traffic —
-`ping` and `curl` between nodes' `100.64.x.y` both work, relayed via DERP
-(no direct paths yet — that's Phase 5). MagicDNS resolves peer names via a
-hosts stub. `ts-cli` still speaks LocalAPI to a real `tailscaled`. See
+**Status: Phase 5** — direct paths. On top of the Phase-4 TUN data plane,
+two `ts-daemon` nodes now discover each other's endpoints (local + STUN
+reflexive), run **disco** (ping/pong/call-me-maybe) over DERP and UDP, and
+**upgrade from the DERP relay to a direct UDP path** — migrating the live
+WireGuard session without dropping it. Verified end-to-end: two namespaced
+nodes upgrade DERP→direct and carry real TCP over the direct path. See
 [DESIGN.md](DESIGN.md) for the phase plan and every decision, and
-[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN wire notes.
+[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN notes.
 
 ## Layout
 
 Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
 `ts-types` (wire/API types), `ts-key` (keys), `ts-control` (ts2021 Noise IK
 + register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
-WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-engine`
-(control → WG → DERP → TUN orchestration), `ts-cli` (LocalAPI CLI),
-`ts-daemon` (the daemon). Placeholders filling in by phase: `ts-stun`,
-`ts-disco`, `ts-magicsock`, `ts-filter`, `ts-localapi`, `ts-net`.
+WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-stun` (STUN
+client), `ts-disco` (disco codec), `ts-magicsock` (direct/DERP path mux),
+`ts-engine` (control → WG → magicsock → TUN orchestration), `ts-cli`
+(LocalAPI CLI), `ts-daemon` (the daemon). Placeholders filling in by phase:
+`ts-filter`, `ts-localapi`, `ts-net`.
 
 ## Build & test
 
@@ -104,6 +105,21 @@ The [`interop/tun_netns_test.sh`](interop/tun_netns_test.sh) harness stands
 up two namespaced daemons and proves `ping` + `curl` across the tailnet over
 the relay end-to-end. TUN mode needs `CAP_NET_ADMIN`; the userspace
 (`--ping`) mode above needs no privileges.
+
+## Direct paths (Phase 5)
+
+Add `--direct` (and optionally `--stun host:port`) to enable direct-path
+discovery: the daemon runs disco and upgrades peers from the DERP relay to a
+direct UDP path when one is reachable, migrating the live WireGuard session.
+
+```console
+$ ts-daemon … --tun ts0 --direct --stun 10.0.0.1:3479
+INFO magicsock: direct path UP (DERP→direct) peer=nodekey:… endpoint=10.0.0.20:34753
+```
+
+[`interop/direct_path_test.sh`](interop/direct_path_test.sh) stands up two
+namespaced nodes and verifies they upgrade DERP→direct and carry TCP over
+the direct path.
 
 ## Interop test environment
 
