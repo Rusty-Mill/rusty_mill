@@ -7,3 +7,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ts-types.workspace = true
+ts-key.workspace = true
+ts-control.workspace = true
+ts-derp.workspace = true
+ts-wg.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
