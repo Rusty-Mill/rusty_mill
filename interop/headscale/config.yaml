@@ -1,7 +1,7 @@
 # Minimal Headscale 0.26 config for the local interop environment.
 # The tailnet is fully local: no external DERP relays are configured, so the
 # two same-host tailscaled nodes establish direct (LAN) paths via disco.
-server_url: http://127.0.0.1:8080
+server_url: http://10.0.0.1:8080
 listen_addr: 0.0.0.0:8080
 metrics_listen_addr: 127.0.0.1:9090
 grpc_listen_addr: 127.0.0.1:50443

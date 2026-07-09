@@ -5,23 +5,24 @@ WireGuard data plane, NAT traversal, and an embeddable library — no Go
 binaries at runtime. Targets [Headscale](https://github.com/juanfont/headscale)
 first; the hosted control plane is a later milestone.
 
-**Status: Phase 3** — first real connectivity. Two `ts-daemon` nodes
+**Status: Phase 4** — real apps across the tailnet. Two `ts-daemon` nodes
 register with Headscale (pure-Rust ts2021: Noise IK + HTTP/2, no Go),
-connect to DERP, and **ping each other's `100.64.x.y` entirely over the
-relay** — WireGuard (boringtun) tunnelled through DERP, no direct paths
-(Phase 5), no TUN/root (Phase 4). `ts-cli` still speaks LocalAPI to a real
-`tailscaled`. See [DESIGN.md](DESIGN.md) for the phase plan and every design
-decision, and [PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP wire notes.
+connect to DERP, bring up real **TUN devices**, and carry actual traffic —
+`ping` and `curl` between nodes' `100.64.x.y` both work, relayed via DERP
+(no direct paths yet — that's Phase 5). MagicDNS resolves peer names via a
+hosts stub. `ts-cli` still speaks LocalAPI to a real `tailscaled`. See
+[DESIGN.md](DESIGN.md) for the phase plan and every decision, and
+[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN wire notes.
 
 ## Layout
 
 Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
 `ts-types` (wire/API types), `ts-key` (keys), `ts-control` (ts2021 Noise IK
 + register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
-WireGuard adapter), `ts-engine` (control → WG → DERP orchestration),
-`ts-cli` (LocalAPI CLI), `ts-daemon` (the daemon). Placeholders filling in
-by phase: `ts-stun`, `ts-disco`, `ts-magicsock`, `ts-tun`, `ts-filter`,
-`ts-localapi`, `ts-net`.
+WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-engine`
+(control → WG → DERP → TUN orchestration), `ts-cli` (LocalAPI CLI),
+`ts-daemon` (the daemon). Placeholders filling in by phase: `ts-stun`,
+`ts-disco`, `ts-magicsock`, `ts-filter`, `ts-localapi`, `ts-net`.
 
 ## Build & test
 
@@ -83,6 +84,26 @@ pong from 100.64.0.4 via DERP relay in 6.4ms
 
 The daemon in the default (no `--ping`) mode registers, streams the netmap,
 and serves as a pingable node.
+
+## Real apps across the tailnet with a TUN device (Phase 4)
+
+With `--tun`, the daemon brings up a real `100.64/10` TUN interface, so the
+OS routes normal traffic across the tailnet (relayed via DERP):
+
+```console
+$ sudo cargo run -p ts-daemon -- --login-server http://10.0.0.1:8080 \
+    --authkey "$KEY" --tun ts0 --hosts-file /etc/hosts
+INFO engine: TUN device up device=ts0 ip=100.64.0.14
+
+# from another node, real tools just work:
+$ ping 100.64.0.14
+$ curl http://rusty-a.tailnet.test:8000     # name via MagicDNS hosts stub
+```
+
+The [`interop/tun_netns_test.sh`](interop/tun_netns_test.sh) harness stands
+up two namespaced daemons and proves `ping` + `curl` across the tailnet over
+the relay end-to-end. TUN mode needs `CAP_NET_ADMIN`; the userspace
+(`--ping`) mode above needs no privileges.
 
 ## Interop test environment
 
