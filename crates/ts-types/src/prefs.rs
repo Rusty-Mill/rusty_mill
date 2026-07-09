@@ -2,7 +2,7 @@
 //! v1.86. Only the fields the Phase-1 CLI reads are modeled; unknown fields
 //! are ignored on decode.
 
-use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeMap};
 
 use crate::{IpPrefix, null_default};
 
@@ -55,6 +55,23 @@ impl Serialize for MaskedPrefs {
     }
 }
 
+impl<'de> Deserialize<'de> for MaskedPrefs {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        /// The wire form: each field paired with a `<Field>Set` mask flag; a
+        /// field is applied only when its flag is true. Unknown fields ignored.
+        #[derive(Default, Deserialize)]
+        #[serde(default, rename_all = "PascalCase")]
+        struct Wire {
+            want_running: bool,
+            want_running_set: bool,
+        }
+        let w = Wire::deserialize(d)?;
+        Ok(MaskedPrefs {
+            want_running: w.want_running_set.then_some(w.want_running),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MaskedPrefs;
@@ -72,5 +89,25 @@ mod tests {
             serde_json::to_string(&MaskedPrefs::default()).unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    fn masked_prefs_round_trip() {
+        for mp in [
+            MaskedPrefs {
+                want_running: Some(true),
+            },
+            MaskedPrefs {
+                want_running: Some(false),
+            },
+            MaskedPrefs::default(),
+        ] {
+            let json = serde_json::to_string(&mp).unwrap();
+            let back: MaskedPrefs = serde_json::from_str(&json).unwrap();
+            assert_eq!(mp, back, "round-trip via {json}");
+        }
+        // An unset field (mask flag absent) decodes to None.
+        let only_value: MaskedPrefs = serde_json::from_str(r#"{"WantRunning":true}"#).unwrap();
+        assert_eq!(only_value.want_running, None);
     }
 }

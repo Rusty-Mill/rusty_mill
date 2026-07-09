@@ -116,12 +116,54 @@ pub struct MapResponse {
     pub peers: Option<Vec<Node>>,
     pub peers_changed: Option<Vec<Node>>,
     pub peers_removed: Option<Vec<NodeID>>,
+    /// User profiles referenced by nodes' `User` field. Delta: `None` means
+    /// unchanged, so accumulate across frames.
+    pub user_profiles: Option<Vec<crate::UserProfile>>,
     pub domain: String,
     #[serde(rename = "DERPMap")]
     pub derp_map: Option<serde_json::Value>,
     #[serde(rename = "DNSConfig")]
     pub dns_config: Option<serde_json::Value>,
-    pub packet_filter: Option<serde_json::Value>,
+    /// Legacy flat packet filter (`tailcfg.MapResponse.PacketFilter`). Older
+    /// control servers send this; modern Headscale sends `PacketFilters`.
+    pub packet_filter: Option<Vec<FilterRule>>,
+    /// Named packet-filter sets (`tailcfg.MapResponse.PacketFilters`), e.g.
+    /// `{"base": [rule, …]}`. The effective filter is the union of all sets.
+    pub packet_filters: Option<std::collections::BTreeMap<String, Vec<FilterRule>>>,
+}
+
+/// One ACL rule in the compiled packet filter (`tailcfg.FilterRule`).
+///
+/// An allow-list entry: a packet is permitted if its source matches one of
+/// `src_ips` and its destination matches one of `dst_ports` (and, if
+/// `ip_proto` is non-empty, its protocol is listed).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct FilterRule {
+    #[serde(rename = "SrcIPs")]
+    pub src_ips: Vec<String>,
+    pub dst_ports: Vec<NetPortRange>,
+    /// IP protocol numbers this rule applies to; empty means all protocols.
+    #[serde(rename = "IPProto")]
+    pub ip_proto: Vec<i32>,
+}
+
+/// A destination CIDR + port range (`tailcfg.NetPortRange`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct NetPortRange {
+    /// Destination CIDR, bare IP, or `"*"` for any.
+    #[serde(rename = "IP")]
+    pub ip: String,
+    pub ports: PortRange,
+}
+
+/// An inclusive port range (`tailcfg.PortRange`); `{0, 65535}` means all ports.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct PortRange {
+    pub first: u16,
+    pub last: u16,
 }
 
 /// A node in the netmap (`tailcfg.Node`); Phase-2 subset.
@@ -138,6 +180,8 @@ pub struct Node {
     pub key_expiry: Rfc3339,
     pub machine: Option<MachinePublic>,
     pub disco_key: Option<DiscoPublic>,
+    /// Host metadata (OS, hostname). Absent on some frames.
+    pub hostinfo: Option<Hostinfo>,
     #[serde(deserialize_with = "crate::null_default")]
     pub addresses: Vec<IpPrefix>,
     #[serde(rename = "AllowedIPs", deserialize_with = "crate::null_default")]
@@ -214,6 +258,32 @@ mod tests {
         assert_eq!(peers[0].primary_ip().unwrap().to_string(), "100.64.0.2");
         assert_eq!(peers[0].online, Some(true));
         assert_eq!(mr.domain, "ts.test");
+    }
+
+    #[test]
+    fn parses_headscale_packet_filters_and_user_profiles() {
+        // The exact shape a live Headscale (no ACL policy) sends, captured
+        // from the /machine/map stream.
+        let frame = r#"{
+            "Node": {"ID": 1, "Name": "self.ts.", "Addresses": ["100.64.0.1/32"]},
+            "PacketFilters": {"base": [
+                {"SrcIPs": ["*"], "DstPorts": [{"IP": "*", "Ports": {"First": 0, "Last": 65535}}]}
+            ]},
+            "UserProfiles": [{"ID": 1, "LoginName": "interop", "DisplayName": "Interop"}]
+        }"#;
+        let mr: MapResponse = serde_json::from_str(frame).unwrap();
+        let filters = mr.packet_filters.expect("PacketFilters present");
+        let base = &filters["base"];
+        assert_eq!(base.len(), 1);
+        assert_eq!(base[0].src_ips, vec!["*".to_string()]);
+        assert_eq!(base[0].dst_ports[0].ip, "*");
+        assert_eq!(base[0].dst_ports[0].ports.last, 65535);
+        assert!(base[0].ip_proto.is_empty(), "no proto restriction");
+        assert!(mr.packet_filter.is_none(), "legacy field absent");
+
+        let users = mr.user_profiles.expect("UserProfiles present");
+        assert_eq!(users[0].id, UserID(1));
+        assert_eq!(users[0].login_name, "interop");
     }
 
     #[test]

@@ -5,14 +5,16 @@ WireGuard data plane, NAT traversal, and an embeddable library — no Go
 binaries at runtime. Targets [Headscale](https://github.com/juanfont/headscale)
 first; the hosted control plane is a later milestone.
 
-**Status: Phase 5** — direct paths. On top of the Phase-4 TUN data plane,
-two `ts-daemon` nodes now discover each other's endpoints (local + STUN
-reflexive), run **disco** (ping/pong/call-me-maybe) over DERP and UDP, and
-**upgrade from the DERP relay to a direct UDP path** — migrating the live
-WireGuard session without dropping it. Verified end-to-end: two namespaced
-nodes upgrade DERP→direct and carry real TCP over the direct path. See
+**Status: Phase 6** — daemon surface + ACL filter. On top of the Phase-5
+direct-path data plane, `ts-daemon` now serves the **LocalAPI** over a Unix
+socket, so the Phase-1 **`ts-cli` drives our own daemon unmodified**
+(`status`, `up`/`down`, `ping`). The engine assembles a live status snapshot
+(self + peers + DERP-vs-direct path), gates traffic on `WantRunning`, and
+**enforces the netmap packet filter (ACLs)** on inbound traffic. A hardened
+[systemd unit](packaging/tailscale-rs.service) ships for daily use. See
 [DESIGN.md](DESIGN.md) for the phase plan and every decision, and
-[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN notes.
+[PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN + ACL
+notes.
 
 ## Layout
 
@@ -21,9 +23,10 @@ Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
 + register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
 WireGuard adapter), `ts-tun` (TUN device + MagicDNS), `ts-stun` (STUN
 client), `ts-disco` (disco codec), `ts-magicsock` (direct/DERP path mux),
-`ts-engine` (control → WG → magicsock → TUN orchestration), `ts-cli`
-(LocalAPI CLI), `ts-daemon` (the daemon). Placeholders filling in by phase:
-`ts-filter`, `ts-localapi`, `ts-net`.
+`ts-filter` (netmap ACL enforcement), `ts-engine` (control → WG → magicsock
+→ TUN orchestration), `ts-localapi` (HTTP-over-UDS LocalAPI server), `ts-cli`
+(LocalAPI CLI), `ts-daemon` (the daemon). Placeholder filling in by phase:
+`ts-net`.
 
 ## Build & test
 
@@ -120,6 +123,33 @@ INFO magicsock: direct path UP (DERP→direct) peer=nodekey:… endpoint=10.0.0.
 [`interop/direct_path_test.sh`](interop/direct_path_test.sh) stands up two
 namespaced nodes and verifies they upgrade DERP→direct and carry TCP over
 the direct path.
+
+## Drive the daemon with `ts-cli` (Phase 6)
+
+`ts-daemon` serves the LocalAPI on a Unix socket (`--socket`, default
+`/var/run/tailscale/tailscaled.sock`), so the Phase-1 CLI talks to our own
+daemon exactly as it does to `tailscaled`:
+
+```console
+$ ts-daemon … --socket /run/tailscale/tailscaled.sock &
+$ ts-cli --socket /run/tailscale/tailscaled.sock status
+100.64.0.41     rusty-localapi   -          linux   -
+100.64.0.19     rusty-a          interop@   linux   active; relay "derp"
+$ ts-cli --socket … down     # WantRunning=false: traffic stops, tunnel survives
+$ ts-cli --socket … up
+$ ts-cli --socket … ping 100.64.0.19
+pong from rusty-a (100.64.0.19) via DERP(derp) in 1ms
+```
+
+Inbound traffic is checked against the tailnet **ACL** (the netmap packet
+filter): with a restrictive policy the daemon drops packets no rule permits.
+
+## Run under systemd
+
+[`packaging/tailscale-rs.service`](packaging/tailscale-rs.service) is a
+hardened unit (`CAP_NET_ADMIN` only, `NoNewPrivileges`, `ProtectSystem`); it
+reads the auth key from `/etc/tailscale-rs/env` so it never lands in the unit
+file or the process table. `ts-daemon` shuts down cleanly on `SIGTERM`.
 
 ## Interop test environment
 
