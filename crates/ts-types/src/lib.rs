@@ -22,6 +22,7 @@ mod ipnstate;
 mod key;
 mod net;
 mod prefs;
+pub mod tailcfg;
 mod time;
 
 pub use ids::{StableNodeID, UserID};

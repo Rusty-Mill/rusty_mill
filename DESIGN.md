@@ -124,6 +124,50 @@ revisited if the CLI surface grows), `hex` (two 30-line functions in ts-types),
 - **No connection reuse in the CLI**: one request per invocation, HTTP/1.1,
   `Connection: close` semantics. Simplest correct thing.
 
+## Phase 2 decisions (control client)
+
+Full protocol notes are in `PROTOCOL.md` (the Phase-0 recon artifact); the
+*decisions* live here.
+
+- **Hand-rolled Noise IK, not `snow`.** The plan said to verify snow could
+  express Tailscale's exact IK pattern and framing in Phase 0, else
+  hand-roll. Verdict: hand-roll. The handshake is standard IK, but the
+  transport uses Tailscale's own record framing (`[type][BE len][ct]`, 4 KiB
+  cap) and **big-endian** record nonces (Noise mandates little-endian), so
+  snow's transport is unusable and its handshake value shrinks below the
+  framing we'd still own. Built on `x25519-dalek` + `chacha20poly1305` +
+  `blake2`/`hkdf`. Verified **byte-exact** against the real Go `controlbase`
+  package via a tiny Go echo server (`interop/noise-server-go/`,
+  `crates/ts-control/tests/go_interop.rs`) — the strongest interop signal
+  short of Headscale itself.
+- **HTTP/2 over Noise via the `h2` crate**, mirroring Go's `x/net/http2` on
+  the noise conn. Prior-knowledge h2c directly on the secured stream: no
+  TLS, no ALPN, no h2c upgrade — the server speaks h2 immediately. Our
+  `controlbase::Conn` implements tokio `AsyncRead`/`AsyncWrite` so `h2` sits
+  straight on top.
+- **Compression off** (`MapRequest.Compress = ""`). We skip zstd for now:
+  the map stream stays plain length-prefixed JSON, which keeps the frame
+  reader trivial and fuzzable. Revisit if a real tailnet's netmap size makes
+  it worth a `zstd` dependency.
+- **Map stream framing**: 4-byte **little-endian** length + JSON per frame
+  (note the endianness flip vs. the big-endian Noise records — both are
+  mirrored from Go and easy to get wrong). Keep-alive frames
+  (`{"KeepAlive":true}`) are surfaced but carry no map data.
+- **Early payload handled but unused.** We read the optional
+  `\xff\xff\xffTS`-prefixed early payload (node-key challenge) off the
+  plaintext stream before starting h2, and discard it — preauth-key
+  registration doesn't need the challenge. Headscale sends none; the code
+  path exists so a hosted-control-plane connection won't desync.
+- **Our own state file**, `ts-rs.state.json` (0600), holding the three
+  private keys as `privkey:<hex>`. Go-state-file compatibility is a
+  non-goal; identities are per-daemon.
+- **Registration is preauth-key only.** Interactive login (`AuthURL`
+  visit / followup polling) is surfaced as a typed error but not driven;
+  it belongs with the LocalAPI/IPN-bus work in Phase 6.
+- **Deferred to the hosted-control-plane milestone**: HTTPS (:443) dialing,
+  the 80/443 race, DNS bootstrap, and OS-root-store TLS. Phase 2 targets
+  Headscale over plain HTTP only.
+
 ## Interop environment (manual until xtask lands)
 
 - Headscale 0.26 runs in Docker (`headscale/headscale:0.26`), config in

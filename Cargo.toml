@@ -18,6 +18,17 @@ hyper = { version = "1", default-features = false }
 hyper-util = { version = "0.1", default-features = false }
 http-body-util = "0.1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1"
+# Phase 2 (control client) — justified in DESIGN.md:
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+blake2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+rand_core = { version = "0.6", features = ["getrandom"] }
+h2 = "0.4"
+http = "1"
 
 # Intra-workspace crates
 ts-types = { path = "crates/ts-types" }
