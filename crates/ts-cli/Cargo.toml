@@ -13,3 +13,4 @@ tokio = { workspace = true, features = ["rt", "net", "macros"] }
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 http-body-util.workspace = true
+thiserror.workspace = true

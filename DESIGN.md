@@ -133,6 +133,15 @@ revisited if the CLI surface grows), `hex` (two 30-line functions in ts-types),
   per node, joined via preauth keys to the local Headscale.
 - This gives a real tailnet (2+ nodes) whose LocalAPI socket Phase 1 is
   verified against, and whose traffic Phase 0 captures.
+- Headscale refuses to start with an empty DERP map, so its embedded DERP
+  server is enabled (region 999, STUN on :3478). Observed: tailscaled 1.86
+  cannot connect to it over the plain-HTTP `server_url` (health warning
+  "could not connect to the 'Headscale Embedded DERP' relay server") — the
+  DERP client wants TLS. Harmless for Phases 1–2: the two same-host nodes
+  establish *direct* paths from netmap endpoints alone (verified:
+  `tailscale ping` reports `via 192.0.2.2:41642`, ~1–2 ms). Phase 3
+  (DERP-only data plane) must fix this — likely TLS in front of Headscale or
+  a standalone `derper`-equivalent test relay.
 
 ## Deviations from Go behavior
 

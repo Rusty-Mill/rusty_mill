@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 serde.workspace = true
-thiserror.workspace = true
-
-[dev-dependencies]
+# Regular (not dev) dependency: CapMap values are arbitrary JSON.
 serde_json.workspace = true
+thiserror.workspace = true
