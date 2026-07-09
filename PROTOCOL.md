@@ -181,6 +181,77 @@ empty = "explicitly empty"): `Node` (self), `Peers` (full set replace),
 canonicalized to `HomeDERP`), `Hostinfo`, `Created`, `Online`,
 `MachineAuthorized`, `Expired`.
 
+## DERP relay protocol (Phase 3)
+
+Ground truth: Go `derp/derp.go`, `derp/derp_client.go`,
+`derp/derphttp/derphttp_client.go`. DERP relays opaque packets between nodes
+that lack a direct path; it is also the disco side channel (Phase 5). The
+**routing key is the node public key** (`key.NodePublic`, the WireGuard
+static) — the same key WireGuard uses, so a node addresses a peer on DERP by
+that peer's node key.
+
+### Connection / HTTP upgrade (`derphttp`)
+
+`GET /derp` with `Upgrade: DERP`, `Connection: Upgrade`. Server replies
+`101 Switching Protocols` (headers include `Derp-Version: 2` and
+`Derp-Public-Key: nodekey:…`). Production uses HTTPS; **Headscale's embedded
+DERP also accepts the upgrade over plain HTTP on its `server_url` port**
+(verified: region 999 on `:8080`), so Phase 3 needs no separate TLS relay.
+
+### Frames
+
+`[1B frameType][4B BE length][payload]`. `MaxPacketSize = 64 KiB`.
+
+| type | name | payload |
+|------|------|---------|
+| 0x01 | ServerKey | 8B magic `DERP🔑` (`44 45 52 50 f0 9f 94 91`) + 32B server node pub |
+| 0x02 | ClientInfo | 32B client node pub + 24B nonce + NaCl-box(json) |
+| 0x03 | ServerInfo | 24B nonce + NaCl-box(json) |
+| 0x04 | SendPacket | 32B dst node pub + packet |
+| 0x05 | RecvPacket | (v2) 32B src node pub + packet |
+| 0x06 | KeepAlive | none |
+| 0x08 | PeerGone | 32B peer node pub + 1B reason |
+| 0x09 | PeerPresent | 32B peer node pub + … |
+| 0x12 | Ping | 8B opaque (echo in Pong) |
+| 0x13 | Pong | 8B opaque |
+| 0x14 | Health | UTF-8 problem string (empty = healthy) |
+| 0x15 | Restarting | 2×4B BE (reconnect hints) |
+
+### Handshake
+
+1. Read ServerKey → server node public key.
+2. Send ClientInfo: 32B our node public key, then a **NaCl box** (`crypto_box`
+   = X25519 + XSalsa20-Poly1305) of the JSON `{"version":2,"CanAckPings":…}`
+   sealed to the server key with our node private key. Box wire form is
+   `24B random nonce || ciphertext+tag` (matches Go `key.NodePrivate.SealTo`).
+3. Read ServerInfo (NaCl box, openable with our key) — validated, contents
+   unused in Phase 3.
+
+Only ClientInfo/ServerInfo are boxed; **relayed packets (Send/Recv) are
+opaque** — DERP never sees inside the WireGuard payload.
+
+### Rust decisions
+
+- NaCl box via the RustCrypto `crypto_box` crate (`SalsaBox`) — DERP's
+  control frames require exactly this construction; hand-rolling
+  XSalsa20-Poly1305 is not worth the risk. Only the handshake needs it.
+- DERP over plain TCP for Phase 3 (Headscale embedded DERP). `rustls` for
+  HTTPS DERP arrives with the direct-path/hosted milestones.
+
+## WireGuard data plane (Phase 3)
+
+- **boringtun** `Tunn` per peer: node private key = WG static; peer node
+  public key = peer static. `encapsulate(ip_pkt) → wg_pkt` and
+  `decapsulate(wg_pkt) → ip_pkt`; a periodic `update_timers` tick drives
+  handshakes/keepalives. Output is normally UDP-bound; in DERP-only mode
+  every `wg_pkt` is carried in a DERP SendPacket frame keyed by the peer
+  node key, and inbound RecvPacket frames are fed straight to
+  `decapsulate`. WireGuard is oblivious to the path — the "magic socket"
+  abstraction, minus path selection (Phase 5).
+- No TUN in Phase 3 (that's Phase 4): the engine runs a tiny **userspace
+  ICMP echo** responder/initiator over the tunnel so two nodes can prove
+  relayed connectivity by pinging each other's `100.64.x.y` without root.
+
 ## Rust implementation decisions
 
 - **Hand-rolled Noise IK** over `x25519-dalek` + `chacha20poly1305` +

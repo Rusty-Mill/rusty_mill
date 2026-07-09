@@ -5,20 +5,23 @@ WireGuard data plane, NAT traversal, and an embeddable library — no Go
 binaries at runtime. Targets [Headscale](https://github.com/juanfont/headscale)
 first; the hosted control plane is a later milestone.
 
-**Status: Phase 2** — `ts-daemon` registers with a real Headscale server
-over a pure-Rust ts2021 control channel (Noise IK + HTTP/2, no Go) and
-streams the live netmap. `ts-cli` speaks LocalAPI to a real `tailscaled`.
-No data plane yet (Phase 3). See [DESIGN.md](DESIGN.md) for the full phase
-plan and every design decision, and [PROTOCOL.md](PROTOCOL.md) for the
-ts2021 wire protocol notes.
+**Status: Phase 3** — first real connectivity. Two `ts-daemon` nodes
+register with Headscale (pure-Rust ts2021: Noise IK + HTTP/2, no Go),
+connect to DERP, and **ping each other's `100.64.x.y` entirely over the
+relay** — WireGuard (boringtun) tunnelled through DERP, no direct paths
+(Phase 5), no TUN/root (Phase 4). `ts-cli` still speaks LocalAPI to a real
+`tailscaled`. See [DESIGN.md](DESIGN.md) for the phase plan and every design
+decision, and [PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP wire notes.
 
 ## Layout
 
-Cargo workspace, one crate per subsystem under [`crates/`](crates/):
-`ts-types` (wire/API types), `ts-key` (key management), `ts-control`
-(ts2021 Noise IK + register + netmap), `ts-cli` (LocalAPI CLI), and
-`ts-daemon` (the daemon) are live; the rest (`ts-derp`, `ts-magicsock`,
-`ts-wg`, …) are placeholders that fill in phase by phase.
+Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
+`ts-types` (wire/API types), `ts-key` (keys), `ts-control` (ts2021 Noise IK
++ register + netmap), `ts-derp` (DERP relay client), `ts-wg` (boringtun
+WireGuard adapter), `ts-engine` (control → WG → DERP orchestration),
+`ts-cli` (LocalAPI CLI), `ts-daemon` (the daemon). Placeholders filling in
+by phase: `ts-stun`, `ts-disco`, `ts-magicsock`, `ts-tun`, `ts-filter`,
+`ts-localapi`, `ts-net`.
 
 ## Build & test
 
@@ -60,9 +63,26 @@ netmap: 2 peer(s)
   peer: 100.64.0.2      node2.tailnet.test.      offline
 ```
 
-The daemon keeps the netmap long-poll open and prints deltas
-(`peer changed`, `peer removed`) as the tailnet changes. `--once` registers
-and prints one netmap, then exits.
+## Ping another node over the DERP relay (Phase 3)
+
+Start one node's data plane, then ping it from a second node — all traffic
+is WireGuard tunnelled over DERP, no direct path, no TUN:
+
+```console
+# node A: register + run the data plane, stay up
+$ cargo run -p ts-daemon -- --login-server http://127.0.0.1:8080 \
+    --authkey "$KEY_A" --state-dir /tmp/a --hostname rusty-a
+ts-daemon: data plane up (DERP-only). Ctrl-C to stop.
+INFO engine: local tailnet address ip=100.64.0.4
+
+# node B: register, then ping A's tailnet IP over the relay
+$ cargo run -p ts-daemon -- --login-server http://127.0.0.1:8080 \
+    --authkey "$KEY_B" --state-dir /tmp/b --hostname rusty-b --ping 100.64.0.4
+pong from 100.64.0.4 via DERP relay in 6.4ms
+```
+
+The daemon in the default (no `--ping`) mode registers, streams the netmap,
+and serves as a pingable node.
 
 ## Interop test environment
 

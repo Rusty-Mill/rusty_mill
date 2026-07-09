@@ -72,12 +72,15 @@ tree.
 | `tokio` | ts-cli (net) | Async runtime decision fixed at project start; hyper requires it. |
 | `hyper` + `hyper-util` + `http-body-util` | ts-cli | LocalAPI is HTTP/1.1 over a Unix socket. Hand-rolled HTTP parsing is error-prone (chunked encoding, header edge cases); hyper is the audited standard. `hyper-util` only for the `TokioIo` adapter; no connection pool — one conn per CLI invocation. |
 | `thiserror` | all | Error ergonomics, zero runtime cost. |
-| `tracing` | daemon/engine later | Structured logging; standard. |
+| `tracing` | daemon/engine | Structured logging; standard. |
+| `x25519-dalek`, `chacha20poly1305`, `blake2`, `hkdf` | ts-control | Noise IK primitives (hand-rolled controlbase); see Phase 2 decisions. |
+| `h2`, `http`, `bytes` | ts-control | HTTP/2 over the Noise channel, mirroring Go's `x/net/http2`. |
+| `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
+| `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
 
-Approved for later phases (not yet in tree): `boringtun`, `snow` (verify it can
-express Tailscale's exact IK pattern + framing in Phase 0, else hand-roll over
-`x25519-dalek` + `chacha20poly1305`), `x25519-dalek`, `chacha20poly1305`,
-`blake2`/`sha2`, `rustls`, `tun`, `smoltcp` (ts-net only).
+Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
+rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted
+control plane), `tun` (Phase 4), `smoltcp` (ts-net only, Phase 7).
 
 **Deliberately not used:** `clap` (the CLI has four subcommands and two flags;
 ~60 lines of hand-rolled argv parsing beats a large dependency for now — may be
@@ -167,6 +170,49 @@ Full protocol notes are in `PROTOCOL.md` (the Phase-0 recon artifact); the
 - **Deferred to the hosted-control-plane milestone**: HTTPS (:443) dialing,
   the 80/443 race, DNS bootstrap, and OS-root-store TLS. Phase 2 targets
   Headscale over plain HTTP only.
+
+## Phase 3 decisions (DERP-only data plane)
+
+First real connectivity. Full protocol notes in `PROTOCOL.md`; decisions here.
+
+- **DERP over plain HTTP against Headscale's embedded relay.** Headscale's
+  embedded DERP (region 999) accepts the `GET /derp` + `Upgrade: DERP`
+  handshake over plain HTTP on its `server_url` port, and the greeting frame
+  carries the server's node key — so Phase 3 needs **no separate TLS relay**
+  and no `rustls` yet. (This is also why the Phase-2 note about tailscaled
+  refusing plain-HTTP DERP doesn't block us: *our* client has no such
+  restriction.) `rustls`/HTTPS DERP arrives with the hosted-control-plane and
+  direct-path milestones.
+- **NaCl box via `crypto_box`.** DERP's ClientInfo/ServerInfo frames use
+  `crypto_box` (X25519 + XSalsa20-Poly1305, 24-byte nonce prepended). Added
+  the RustCrypto `crypto_box` crate rather than hand-roll XSalsa20-Poly1305 —
+  it's exactly this construction and only the handshake needs it. Relayed
+  Send/Recv frames are opaque (WireGuard already encrypted them), so the hot
+  path is pure framing.
+- **boringtun for WireGuard, behind the `WgPeer` trait.** `ts-engine` depends
+  only on `ts_wg::WgPeer`; `BoringWgPeer` wraps boringtun's per-peer `Tunn`.
+  The node key is the WG static, the peer node key is the peer static — the
+  same key DERP routes by, so no key mapping is needed. The kernel-WG netlink
+  adapter will implement the same seam later.
+- **The "magic socket" is trivial in Phase 3.** WireGuard is oblivious to the
+  path: the engine takes each `WgAction::ToPeer(datagram)` and ships it in a
+  DERP SendPacket frame keyed by the peer node key; inbound RecvPacket frames
+  feed straight into `decapsulate`. Path discovery and direct-path migration
+  are Phase 5 — this is deliberately the dumbest possible transport so WG and
+  session bugs surface in isolation.
+- **Userspace ICMP instead of a TUN device.** Phase 4 owns TUN; to prove
+  relayed connectivity now, the engine answers ICMP echo requests to its own
+  tailnet IP and originates echo requests for `EngineHandle::ping`, all in
+  userspace (`ts-engine::icmp`, panic-free, checksum-verified). No root, no
+  TUN. Verified: two `ts-daemon` nodes on a Headscale tailnet ping each
+  other's `100.64.x.y` over the relay (`pong … via DERP relay in ~6 ms`).
+- **DERP URL derived from the control URL.** For Phase 3 the daemon defaults
+  `--derp-server` to `--login-server` (Headscale's embedded DERP shares the
+  host). Real DERP-map region selection from the netmap `DERPMap` is a
+  Phase-5 concern; the `--derp-server` flag is the escape hatch until then.
+- **No DERP reconnection yet.** If the relay connection drops the engine logs
+  and stops; automatic reconnection with backoff is a robustness item for the
+  daemon-hardening phase (Phase 6).
 
 ## Interop environment (manual until xtask lands)
 
