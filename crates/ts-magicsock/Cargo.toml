@@ -1,0 +1,9 @@
+[package]
+name = "ts-magicsock"
+description = "Path multiplexer: direct UDP and DERP, path upgrade and live migration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

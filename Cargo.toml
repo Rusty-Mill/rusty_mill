@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_tail"
+
+[workspace.dependencies]
+# Each dependency is justified in DESIGN.md before entering the tree.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", default-features = false }
+hyper = { version = "1", default-features = false }
+hyper-util = { version = "0.1", default-features = false }
+http-body-util = "0.1"
+tracing = "0.1"
+
+# Intra-workspace crates
+ts-types = { path = "crates/ts-types" }
+ts-key = { path = "crates/ts-key" }
+ts-control = { path = "crates/ts-control" }
+ts-derp = { path = "crates/ts-derp" }
+ts-stun = { path = "crates/ts-stun" }
+ts-disco = { path = "crates/ts-disco" }
+ts-magicsock = { path = "crates/ts-magicsock" }
+ts-wg = { path = "crates/ts-wg" }
+ts-tun = { path = "crates/ts-tun" }
+ts-filter = { path = "crates/ts-filter" }
+ts-engine = { path = "crates/ts-engine" }
+ts-localapi = { path = "crates/ts-localapi" }
+ts-net = { path = "crates/ts-net" }

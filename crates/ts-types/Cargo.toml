@@ -1,0 +1,13 @@
+[package]
+name = "ts-types"
+description = "Core wire and API types: keys, node/peer status, netmap, DERP map (serde)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+# Regular (not dev) dependency: CapMap values are arbitrary JSON.
+serde_json.workspace = true
+thiserror.workspace = true

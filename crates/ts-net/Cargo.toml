@@ -1,0 +1,9 @@
+[package]
+name = "ts-net"
+description = "Embeddable node: smoltcp userspace netstack, no TUN, no root"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

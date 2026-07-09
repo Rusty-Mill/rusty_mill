@@ -1,0 +1,9 @@
+[package]
+name = "ts-daemon"
+description = "tailscaled-equivalent daemon binary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

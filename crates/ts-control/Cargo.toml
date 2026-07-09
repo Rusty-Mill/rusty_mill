@@ -1,0 +1,9 @@
+[package]
+name = "ts-control"
+description = "ts2021 control-plane client: Noise IK channel, registration, netmap long-poll"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

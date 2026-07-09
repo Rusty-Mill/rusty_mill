@@ -1,0 +1,9 @@
+[package]
+name = "ts-key"
+description = "Node, disco, and machine key generation, persistence, and rotation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
