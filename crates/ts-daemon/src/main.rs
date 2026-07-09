@@ -167,6 +167,7 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
         magic_dns_hosts: args.hosts_file,
         enable_direct: args.direct || args.stun.is_some(),
         stun_server: args.stun,
+        stack_io: None,
     };
 
     let engine = Engine::start(config, state).await?;

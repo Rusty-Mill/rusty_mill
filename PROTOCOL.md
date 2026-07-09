@@ -396,6 +396,38 @@ first line of defence until that check lands. `WantRunning` (via
 `MaskedPrefs`) toggles the data plane: `Stopped` drops user traffic but keeps
 WireGuard handshakes alive so a down/up cycle doesn't re-handshake.
 
+## Userspace netstack (`ts-net`, Phase 7)
+
+No new wire protocol — this is where our own decrypted IP packets terminate in
+a userspace TCP/IP stack instead of the OS kernel.
+
+- **Data path.** The engine hands each decrypted inbound IP packet to smoltcp
+  as a received frame (medium = IP, no Ethernet/ARP); smoltcp's TCP sockets
+  produce reply packets, which the engine encapsulates in WireGuard and sends
+  to the peer over the best path (direct or DERP) — the same pipeline the TUN
+  uses. Checksums are computed/verified by smoltcp (`Checksum::Both`), so no
+  offload fixup is needed on this path.
+- **Addressing.** Our tailnet address is assigned with the `100.64.0.0/10`
+  prefix, making all peers on-link; no gateway/route is required.
+- **MTU** = 1280 (matches the TUN path), comfortably under the physical MTU
+  after WireGuard + DERP framing.
+- **Accept model.** A pool of smoltcp listen sockets (backlog) per bound port;
+  when one leaves `LISTEN` (a SYN arrived) it is promoted to a connection and
+  replaced, so the port keeps accepting. Each connection is a tokio
+  `AsyncRead + AsyncWrite` stream over bounded channels (TCP backpressure when
+  the app reads slowly).
+
+## Fuzzing the wire parsers (Phase 7)
+
+Every parser that consumes untrusted bytes has a `tests/fuzz_smoke.rs` that
+feeds it hundreds of thousands of pseudo-random and structure-mutated inputs
+and asserts it neither panics nor over-allocates: STUN responses
+(`ts-stun`), the disco receive path (`is_disco`/`source_key`/`open`,
+`ts-disco`), and the DERP frame reader (`read_frame`, `ts-derp`), alongside
+the existing panic-free tests for the IPv4/ICMP and ACL parsers. They run on
+stable via a deterministic xorshift PRNG (reproducible from the seed); the
+entry points are exactly what a `cargo-fuzz`/libfuzzer target would drive.
+
 ## Rust implementation decisions
 
 - **Hand-rolled Noise IK** over `x25519-dalek` + `chacha20poly1305` +

@@ -46,6 +46,22 @@ async fn recv_tun(tun: &Option<Tun>) -> Option<std::io::Result<Vec<u8>>> {
     }
 }
 
+/// Awaits the next packet from an optional channel. Never resolves when the
+/// channel is absent; on close it disables itself (sets `rx` to `None`) and
+/// then pends, so the caller's `select!` arm neither busy-loops nor fires.
+async fn recv_opt(rx: &mut Option<mpsc::UnboundedReceiver<Vec<u8>>>) -> Option<Vec<u8>> {
+    match rx {
+        Some(r) => match r.recv().await {
+            Some(v) => Some(v),
+            None => {
+                *rx = None;
+                std::future::pending().await
+            }
+        },
+        None => std::future::pending().await,
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(transparent)]
@@ -89,6 +105,20 @@ pub struct EngineConfig {
     /// Optional `host:port` STUN server for reflexive-endpoint discovery
     /// (needed for NAT traversal; unnecessary on a flat network).
     pub stun_server: Option<String>,
+    /// If set, route decrypted inbound IP packets to a userspace network
+    /// stack instead of a TUN device, and encapsulate packets the stack emits
+    /// (Phase 7, `ts-net`). Mutually exclusive with `tun_name`; needs no root.
+    pub stack_io: Option<StackIo>,
+}
+
+/// Channel endpoints connecting the engine to a userspace network stack
+/// (`ts-net`). The engine keeps the halves inside this struct; the stack keeps
+/// the mirror halves it created.
+pub struct StackIo {
+    /// Engine → stack: decrypted inbound IP packets destined for us.
+    pub inbound: mpsc::UnboundedSender<Vec<u8>>,
+    /// Stack → engine: IP packets the stack wants sent onto the tailnet.
+    pub outbound: mpsc::UnboundedReceiver<Vec<u8>>,
 }
 
 /// A handle to a running engine.
@@ -225,6 +255,10 @@ pub struct Engine {
     /// Starts permissive so startup traffic isn't black-holed before the
     /// first netmap arrives.
     filter: Filter,
+    /// Userspace-stack endpoints (Phase 7). When present, decrypted inbound
+    /// packets go to `stack_tx` and packets from `stack_rx` are encapsulated.
+    stack_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    stack_rx: Option<mpsc::UnboundedReceiver<Vec<u8>>>,
 }
 
 impl Engine {
@@ -341,6 +375,8 @@ impl Engine {
             users: HashMap::new(),
             want_running: true,
             filter: Filter::allow_all(),
+            stack_tx: config.stack_io.as_ref().map(|s| s.inbound.clone()),
+            stack_rx: config.stack_io.map(|s| s.outbound),
         };
         tokio::spawn(engine.run());
         Ok(EngineHandle { cmd_tx })
@@ -376,6 +412,7 @@ impl Engine {
                     Some(Err(e)) => tracing::trace!("engine: UDP read error: {e}"),
                     None => {}
                 },
+                Some(pkt) = recv_opt(&mut self.stack_rx) => self.route_outbound(pkt, false).await,
                 else => break,
             }
         }
@@ -394,22 +431,33 @@ impl Engine {
         }
     }
 
-    /// Handles an outbound IP packet the kernel routed into our TUN: find the
-    /// peer owning the destination address, encrypt, and relay it.
-    async fn on_tun_packet(&mut self, mut packet: Vec<u8>) {
+    /// Handles an outbound IP packet the kernel routed into our TUN: complete
+    /// any offloaded checksum, then route it onto the tailnet.
+    async fn on_tun_packet(&mut self, packet: Vec<u8>) {
+        // TUN packets may carry an offloaded (CHECKSUM_PARTIAL) L4 checksum.
+        self.route_outbound(packet, true).await;
+    }
+
+    /// Routes an outbound IPv4 packet onto the tailnet: find the peer owning
+    /// the destination address, (optionally) complete its L4 checksum,
+    /// encrypt, and relay it. Used for both TUN packets (`fix_checksum`) and
+    /// userspace-stack packets (`ts-net`, checksums already complete).
+    async fn route_outbound(&mut self, mut packet: Vec<u8>, fix_checksum: bool) {
         if !self.want_running {
             return; // data plane stopped (`tailscale down`)
         }
         let Some(ip) = icmp::parse_ipv4(&packet) else {
-            return; // IPv6 / non-IP: not handled in Phase 4
+            return; // IPv6 / non-IP: not handled
         };
         let Some(&key) = self.ip_to_key.get(&ip.dst) else {
-            tracing::trace!(dst = %ip.dst, "engine: no peer for TUN packet, dropping");
+            tracing::trace!(dst = %ip.dst, "engine: no peer for outbound packet, dropping");
             return;
         };
-        // Complete any offloaded (CHECKSUM_PARTIAL) TCP/UDP checksum before
-        // the packet leaves this host, or the peer's stack will drop it.
-        l4::fix_ipv4_transport_checksum(&mut packet);
+        if fix_checksum {
+            // Complete any offloaded (CHECKSUM_PARTIAL) TCP/UDP checksum before
+            // the packet leaves this host, or the peer's stack will drop it.
+            l4::fix_ipv4_transport_checksum(&mut packet);
+        }
         let actions = self.ensure_session(key).encapsulate(&packet);
         for a in actions {
             if let WgAction::ToPeer(dg) = a {
@@ -659,7 +707,12 @@ impl Engine {
                         tracing::debug!("engine: inbound packet denied by ACL");
                         continue;
                     }
-                    if let Some(tun) = &self.tun {
+                    if let Some(stack_tx) = &self.stack_tx {
+                        // Phase 7: hand the packet to the userspace netstack.
+                        if stack_tx.send(ip_pkt).is_err() {
+                            tracing::debug!("engine: userspace stack gone; dropping");
+                        }
+                    } else if let Some(tun) = &self.tun {
                         // Phase 4: hand the decrypted packet to the OS stack.
                         if let Err(e) = tun.send(&ip_pkt).await {
                             tracing::warn!("engine: TUN write error: {e}");

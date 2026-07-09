@@ -80,10 +80,11 @@ tree.
 | `libc` | ts-tun | TUN device creation/config via raw ioctls; syscall bindings only, no iproute2. |
 | `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
 | `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
+| `smoltcp` | ts-net | Audited pure-Rust userspace TCP/IP stack; hand-rolling TCP is not a good use of risk budget. `default-features = false`, only `medium-ip`/`proto-ipv4`/`socket-tcp`. |
 
 Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
 rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted
-control plane), `smoltcp` (ts-net only, Phase 7). The `tun` crate was
+control plane). The `tun` crate was
 considered for Phase 4 and passed over in favor of hand-rolled ioctls (see
 Phase 4 decisions); it may return for the Windows `wintun` adapter.
 
@@ -361,6 +362,59 @@ enforcement, and init integration.
   and rides with the other Phase-7 items. The identity is already persisted
   (`ts-key::NodeState::load_or_generate`), so a rotation flow slots in without
   disturbing the data plane.
+
+## Phase 7 decisions (embeddable node + hardening)
+
+The payoff phase: make the whole stack usable as a *library* — an app serves
+on the tailnet from a plain `cargo run`, with no TUN and no root — and harden
+the wire parsers.
+
+- **`smoltcp` for the userspace TCP/IP stack.** Writing a correct TCP is not a
+  good use of risk budget; smoltcp is the audited, `no_std`-capable, pure-Rust
+  stack the ecosystem already trusts (it's what `boringtun`-based userspace
+  Tailscale-likes use too). Pulled in for `ts-net` only, behind
+  `default-features = false` with just `medium-ip`, `proto-ipv4`,
+  `socket-tcp`. It adopted `core::net` address types, so our engine's
+  `Ipv4Addr`s pass straight through.
+- **The engine grew one more local sink, not a fork.** Phase 3 delivered
+  decrypted packets to a userspace ICMP responder, Phase 4 to a TUN device;
+  Phase 7 adds a third: an optional `StackIo` channel pair
+  (`EngineConfig.stack_io`). When set, inbound packets go to the stack and the
+  stack's outbound packets are encapsulated via the same `route_outbound` used
+  for TUN — so `ts-net` reuses the entire control/WireGuard/magicsock/ACL
+  pipeline unchanged. TUN checksum-offload fixup is skipped for stack packets
+  (smoltcp emits complete checksums).
+- **One task owns smoltcp; everyone else uses a channel.** smoltcp is
+  single-threaded and lock-free by design, so the stack lives in one tokio
+  task. Control ops (`SetAddr`, `Bind`) and per-connection app→net traffic
+  (`Data`, `Close`) all travel a single `Request` queue — there is never a
+  second owner of a socket. Each accepted connection is bridged to a tokio
+  `AsyncRead + AsyncWrite` `TcpStream` via bounded channels, so slow readers
+  exert real TCP backpressure (the stack stops draining smoltcp's rx buffer).
+- **On-link `/10`, no gateway.** Assigning our tailnet address with the
+  `100.64.0.0/10` prefix makes every peer on-link; in IP medium there is no
+  ARP, so smoltcp transmits straight to the engine with no route table to
+  maintain.
+- **Verification is a real service, end-to-end.** `interop/ts_net_test.sh`
+  runs the `serve_http` example (userspace stack, no TUN) in one namespace and
+  a TUN `ts-daemon` client in another; an ordinary `curl` fetches the page
+  across the tailnet, relayed via DERP. A hermetic unit test drives a full
+  SYN → SYN-ACK → ACK → data → accept → read handshake with no engine and no
+  network, so the stack is covered in CI without root.
+- **Panic-free parsers, now fuzzed.** The non-negotiable "wire parsers never
+  panic" gets randomized coverage: `fuzz_smoke` harnesses feed each
+  hostile-input parser (STUN response, disco receive path, DERP frame reader)
+  hundreds of thousands of pseudo-random / structure-mutated inputs and assert
+  no panic and no over-allocation. They run on **stable** (a deterministic
+  xorshift PRNG, reproducible from the seed) because this environment has no
+  nightly/`cargo-fuzz`; the entry points are exactly what a libfuzzer target
+  would call, so a `fuzz/` crate can wrap them later unchanged.
+- **Deferred (documented, not done).** A Windows `wintun` TUN adapter and
+  hosted-control-plane (`login.tailscale.com`) compatibility remain: both are
+  substantial and neither is on the path to the Phase-7 exit criterion
+  (embeddable node on Headscale). Key rotation (carried over from Phase 6) and
+  a two-distinct-NAT hole-punching harness (from Phase 5) likewise stay as the
+  known next increments; the code paths they need already exist.
 
 ## Interop environment (manual until xtask lands)
 
