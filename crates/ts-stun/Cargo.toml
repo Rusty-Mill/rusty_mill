@@ -1,0 +1,9 @@
+[package]
+name = "ts-stun"
+description = "Minimal STUN (RFC 5389) binding requests for endpoint discovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "ts-tun"
+description = "TUN device, routes, and DNS platform adapters"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]

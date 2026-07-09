@@ -1,0 +1,9 @@
+[package]
+name = "ts-wg"
+description = "WireGuard data-plane adapter (boringtun now, kernel WireGuard later)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
