@@ -10,11 +10,14 @@
 //!             [--derp-server URL] [--state-dir DIR] [--hostname NAME] \
 //!             [--ping 100.64.0.2]
 
+mod backend;
+
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use backend::DaemonBackend;
 use ts_engine::{Engine, EngineConfig, PingError};
 use ts_key::NodeState;
 
@@ -36,8 +39,14 @@ options:
                          peers upgrade from DERP to direct UDP when possible
   --stun <host:port>     STUN server for reflexive-endpoint discovery
                          (for NAT traversal; implies --direct)
+  --socket <path>        serve the LocalAPI on this Unix socket so ts-cli can
+                         query status/prefs/ping (default:
+                         /var/run/tailscale/tailscaled.sock)
   --ping <ip>            userspace-ping a peer's tailnet IP, then exit
                          (no-TUN mode only)";
+
+/// Default LocalAPI socket path (matches the Go daemon and ts-cli default).
+const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 struct Args {
     login_server: String,
@@ -49,6 +58,7 @@ struct Args {
     hosts_file: Option<PathBuf>,
     direct: bool,
     stun: Option<String>,
+    socket: PathBuf,
     ping: Option<Ipv4Addr>,
 }
 
@@ -62,6 +72,7 @@ fn parse_args() -> Result<Args, String> {
     let mut hosts_file = None;
     let mut direct = false;
     let mut stun = None;
+    let mut socket = PathBuf::from(DEFAULT_SOCKET);
     let mut ping = None;
 
     let mut it = std::env::args().skip(1);
@@ -77,6 +88,7 @@ fn parse_args() -> Result<Args, String> {
             "--hosts-file" => hosts_file = Some(PathBuf::from(next()?)),
             "--direct" => direct = true,
             "--stun" => stun = Some(next()?),
+            "--socket" => socket = PathBuf::from(next()?),
             "--ping" => {
                 let v = next()?;
                 ping = Some(v.parse().map_err(|_| format!("invalid --ping IP {v:?}"))?);
@@ -95,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
         hosts_file,
         direct,
         stun,
+        socket,
         ping,
     })
 }
@@ -142,13 +155,14 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
     tracing::info!(node_key = %state.node.public(), hostname = %hostname, "identity loaded");
 
     let tun_mode = args.tun.is_some();
+    let control_url = args.login_server.clone();
     let config = EngineConfig {
         derp_url: args
             .derp_server
             .unwrap_or_else(|| args.login_server.clone()),
         control_url: args.login_server,
         authkey: args.authkey,
-        hostname,
+        hostname: hostname.clone(),
         tun_name: args.tun,
         magic_dns_hosts: args.hosts_file,
         enable_direct: args.direct || args.stun.is_some(),
@@ -160,14 +174,50 @@ async fn run(args: Args) -> Result<ExitCode, Box<dyn std::error::Error>> {
     match args.ping {
         Some(target) => cmd_ping(&engine, target).await,
         None => {
-            if tun_mode {
-                println!("ts-daemon: data plane up (TUN, relayed via DERP). Ctrl-C to stop.");
+            // Serve the LocalAPI so ts-cli (status/up/down/ping) can drive us.
+            let backend = DaemonBackend::new(engine.clone(), control_url, hostname);
+            let socket = args.socket.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ts_localapi::serve(&socket, backend).await {
+                    tracing::error!("localapi: {e}");
+                }
+            });
+
+            let mode = if tun_mode {
+                "TUN, relayed via DERP"
             } else {
-                println!("ts-daemon: data plane up (userspace DERP-only). Ctrl-C to stop.");
-            }
-            tokio::signal::ctrl_c().await.ok();
+                "userspace DERP-only"
+            };
+            println!(
+                "ts-daemon: data plane up ({mode}); LocalAPI at {}. Ctrl-C to stop.",
+                args.socket.display()
+            );
+            wait_for_shutdown().await;
+            tracing::info!("ts-daemon: shutting down");
+            // Best-effort: remove the LocalAPI socket so a restart binds cleanly.
+            let _ = std::fs::remove_file(&args.socket);
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Blocks until the process receives SIGINT (Ctrl-C) or SIGTERM (the signal
+/// `systemctl stop` sends), so the daemon shuts down cleanly under an init
+/// system as well as interactively.
+async fn wait_for_shutdown() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            // Fall back to Ctrl-C only if we can't install the SIGTERM handler.
+            tracing::warn!("ts-daemon: cannot handle SIGTERM ({e}); Ctrl-C only");
+            tokio::signal::ctrl_c().await.ok();
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
     }
 }
 

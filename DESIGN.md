@@ -303,6 +303,65 @@ Endpoint discovery, disco, and live DERP→direct migration. Protocol in
   special setup). The code path for it exists (`--stun`, reflexive discovery,
   `interop/stun_server.py`); wiring the NAT harness is the next increment.
 
+## Phase 6 decisions (daemon surface + ACL filter)
+
+Turning the data plane into a daemon you can actually run day-to-day: a
+LocalAPI server, a status/prefs surface, `up`/`down`, packet-filter
+enforcement, and init integration.
+
+- **`ts-localapi` is a port, not the engine.** The crate serves HTTP/1.1 over
+  the Unix socket (via `hyper`, already in-tree for the CLI) and dispatches to
+  a `LocalBackend` trait; `ts-daemon` supplies the adapter that bridges the
+  three operations (`status`, `edit_prefs`, `ping`) to `EngineHandle`. The
+  server never touches the engine and the engine never learns about HTTP —
+  the same ports-and-adapters split as every other subsystem. The payoff is a
+  free end-to-end test: the **Phase-1 `ts-cli` runs unmodified** against our
+  own daemon (verified: `status`, `status --json`, `up`/`down`, and a live
+  `ping` that returns a real pong over DERP).
+- **`WantRunning` gates user traffic, not the tunnel.** `down` drops inbound
+  and outbound *IP* traffic and reports `BackendState=Stopped`, but WireGuard
+  handshakes/keepalives still answer at the peer layer so the session survives
+  a down/up cycle without a fresh handshake. Status is assembled on demand
+  from netmap-derived metadata (`peers_meta`, `users`) plus live path state
+  from `magicsock.path_for()` (`cur_addr`/`relay`), so it reflects the real
+  DERP-vs-direct choice.
+- **The packet filter is inbound-only, and permissive before the first
+  netmap.** `ts-filter` compiles the netmap ACL into an allow-list matcher the
+  engine consults for every decrypted inbound packet; a denied packet is
+  dropped before it reaches the TUN (or the userspace ICMP responder). We
+  enforce the *inbound* direction — what remote peers may do to us, the
+  security-relevant one — and trust our own host's outbound traffic (matching
+  the threat model of a host firewall). The engine starts with
+  `Filter::allow_all()` so startup traffic isn't black-holed before the ACL
+  arrives; an empty ruleset is deny-all.
+- **The `PacketFilters` wire gotcha (empirical).** Modern Headscale does *not*
+  send the legacy flat `tailcfg.MapResponse.PacketFilter`; it sends
+  `PacketFilters`, a **named map** (`{"base": [rule, …]}`). The effective
+  filter is the union of all named sets. We model both and prefer whichever
+  the server sends. Confirmed by capturing a live `/machine/map` frame: the
+  default (no ACL policy) is a single `SrcIPs:["*"] → *:0-65535` rule.
+- **Port-less protocols follow Go's "all-ports = any-proto" rule.** ICMP has
+  no port, so it is permitted only by a destination whose range is the full
+  `0–65535` (or a rule that lists its protocol in `IPProto`). A narrow TCP
+  rule (`:8000`) therefore does *not* leak ICMP. Verified end-to-end against a
+  real Headscale ACL policy: with `accept tcp *:8000`, an ICMP ping between two
+  rusty nodes is dropped (`denied by ACL`) and times out, while the default
+  allow-all policy passes it — the same node code, only the server ACL
+  changed.
+- **Daemon lifecycle for init systems.** `ts-daemon` handles `SIGTERM` (what
+  `systemctl stop` sends) as well as `SIGINT`, and removes its LocalAPI socket
+  on exit so a restart binds cleanly. `packaging/tailscale-rs.service` is a
+  hardened unit (`CAP_NET_ADMIN` only, `NoNewPrivileges`, `ProtectSystem`,
+  `RuntimeDirectory`/`StateDirectory`), with the auth key supplied via an
+  `EnvironmentFile` so it never lands in the unit or the process table.
+- **Key rotation is deferred to Phase 7 (hardening), deliberately.** Under
+  Headscale, node keys don't expire by default, so rotation isn't on the
+  path to "drop-in for daily use"; re-authentication UX (detecting
+  `NodeKeyExpired`, minting/prompting for a fresh key) is a hardening concern
+  and rides with the other Phase-7 items. The identity is already persisted
+  (`ts-key::NodeState::load_or_generate`), so a rotation flow slots in without
+  disturbing the data plane.
+
 ## Interop environment (manual until xtask lands)
 
 - Headscale 0.26 runs in Docker (`headscale/headscale:0.26`), config in

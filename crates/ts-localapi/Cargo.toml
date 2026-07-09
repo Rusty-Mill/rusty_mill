@@ -7,3 +7,18 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ts-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "macros"] }
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+http-body-util.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "net", "macros", "rt-multi-thread", "time"] }
+hyper = { workspace = true, features = ["client"] }
+http-body-util.workspace = true

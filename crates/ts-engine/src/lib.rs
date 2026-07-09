@@ -21,6 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
+use ts_filter::Filter;
 use ts_key::NodeState;
 use ts_magicsock::{MagicSock, PathKind, UdpInput};
 use ts_tun::Tun;
@@ -121,6 +122,28 @@ impl EngineHandle {
         }
         rx.await.unwrap_or_default()
     }
+
+    /// A snapshot of tailnet status (self + peers + connection state),
+    /// LocalAPI-compatible.
+    pub async fn status(&self) -> Option<ts_types::Status> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx.send(Command::Status { reply }).await.ok()?;
+        rx.await.ok()
+    }
+
+    /// Sets whether the data plane is running (`up`/`down`).
+    pub async fn set_want_running(&self, want: bool) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(Command::SetWantRunning { want, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.is_ok()
+    }
 }
 
 enum Command {
@@ -131,11 +154,31 @@ enum Command {
     PeerIps {
         reply: oneshot::Sender<Vec<Ipv4Addr>>,
     },
+    Status {
+        reply: oneshot::Sender<ts_types::Status>,
+    },
+    SetWantRunning {
+        want: bool,
+        reply: oneshot::Sender<()>,
+    },
 }
 
 struct PendingPing {
     started: Instant,
     reply: oneshot::Sender<Result<Duration, PingError>>,
+}
+
+/// Netmap-derived metadata about a peer, for status reporting.
+#[derive(Default, Clone)]
+struct PeerMeta {
+    stable_id: ts_types::StableNodeID,
+    host_name: String,
+    dns_name: String,
+    os: String,
+    ips: Vec<std::net::IpAddr>,
+    allowed_ips: Vec<ts_types::IpPrefix>,
+    user_id: ts_types::UserID,
+    online: bool,
 }
 
 /// The engine's owned state, driven by a single event-loop task.
@@ -164,6 +207,24 @@ pub struct Engine {
     /// The disco key we've registered per peer, to detect changes (Headscale
     /// may send a zero disco key until the peer reports endpoints).
     peer_disco: HashMap<NodePublic, ts_types::DiscoPublic>,
+    /// Our own hostname, for status.
+    hostname: String,
+    /// Our own DNS name (from the netmap self node).
+    self_dns_name: String,
+    /// Our own stable node ID (from the netmap self node).
+    self_stable_id: ts_types::StableNodeID,
+    /// Per-peer netmap metadata, for status.
+    peers_meta: HashMap<NodePublic, PeerMeta>,
+    /// User profiles by ID (from the netmap), for status ownership column.
+    users: HashMap<ts_types::UserID, ts_types::UserProfile>,
+    /// Whether the data plane is active (`tailscale up`/`down`). When false,
+    /// inbound and outbound tunnel traffic is dropped and status reports
+    /// `Stopped`.
+    want_running: bool,
+    /// Inbound ACL enforcement, compiled from the netmap packet filter.
+    /// Starts permissive so startup traffic isn't black-holed before the
+    /// first netmap arrives.
+    filter: Filter,
 }
 
 impl Engine {
@@ -273,6 +334,13 @@ impl Engine {
             dns_entries: std::collections::BTreeMap::new(),
             magicsock,
             peer_disco: HashMap::new(),
+            hostname: config.hostname,
+            self_dns_name: String::new(),
+            self_stable_id: ts_types::StableNodeID::default(),
+            peers_meta: HashMap::new(),
+            users: HashMap::new(),
+            want_running: true,
+            filter: Filter::allow_all(),
         };
         tokio::spawn(engine.run());
         Ok(EngineHandle { cmd_tx })
@@ -329,6 +397,9 @@ impl Engine {
     /// Handles an outbound IP packet the kernel routed into our TUN: find the
     /// peer owning the destination address, encrypt, and relay it.
     async fn on_tun_packet(&mut self, mut packet: Vec<u8>) {
+        if !self.want_running {
+            return; // data plane stopped (`tailscale down`)
+        }
         let Some(ip) = icmp::parse_ipv4(&packet) else {
             return; // IPv6 / non-IP: not handled in Phase 4
         };
@@ -353,7 +424,7 @@ impl Engine {
     async fn apply_netmap(&mut self, resp: MapResponse) {
         let mut dns_changed = false;
         let mut new_peers: Vec<NodePublic> = Vec::new();
-        if let Some(node) = resp.node {
+        if let Some(node) = &resp.node {
             for ip in ipv4_addrs(&node.addresses) {
                 if !self.our_ips.contains(&ip) {
                     self.our_ips.push(ip);
@@ -361,11 +432,44 @@ impl Engine {
                     self.ensure_tun(ip);
                 }
             }
+            if !node.name.is_empty() {
+                self.self_dns_name = node.name.clone();
+            }
+            if !node.stable_id.0.is_empty() {
+                self.self_stable_id = node.stable_id.clone();
+            }
             if let (Some(ip), false) = (self.our_ips.first().copied(), node.name.is_empty())
                 && self.record_dns(ip, &node.name)
             {
                 dns_changed = true;
             }
+        }
+
+        // Accumulate user profiles (delta stream: absent means unchanged).
+        if let Some(profiles) = &resp.user_profiles {
+            for p in profiles {
+                self.users.insert(p.id, p.clone());
+            }
+        }
+
+        // Recompile the packet filter when the netmap carries one. Modern
+        // Headscale sends the named `PacketFilters` map; older servers the
+        // flat `PacketFilter`. The effective ruleset is the union.
+        if resp.packet_filter.is_some() || resp.packet_filters.is_some() {
+            let mut rules = Vec::new();
+            if let Some(pf) = &resp.packet_filter {
+                rules.extend(pf.iter().cloned());
+            }
+            if let Some(pfs) = &resp.packet_filters {
+                for set in pfs.values() {
+                    rules.extend(set.iter().cloned());
+                }
+            }
+            self.filter = Filter::new(&rules);
+            tracing::info!(
+                rules = self.filter.rule_count(),
+                "engine: packet filter updated"
+            );
         }
 
         let mut incoming = Vec::new();
@@ -385,6 +489,28 @@ impl Engine {
             let peer_ips = ipv4_addrs(&peer.addresses);
             for ip in &peer_ips {
                 self.ip_to_key.insert(*ip, key);
+            }
+            // Capture netmap metadata for status reporting.
+            let meta = self.peers_meta.entry(key).or_default();
+            if !peer.stable_id.0.is_empty() {
+                meta.stable_id = peer.stable_id.clone();
+            }
+            if !peer.name.is_empty() {
+                meta.dns_name = peer.name.clone();
+            }
+            if let Some(hi) = &peer.hostinfo {
+                if !hi.hostname.is_empty() {
+                    meta.host_name = hi.hostname.clone();
+                }
+                if !hi.os.is_empty() {
+                    meta.os = hi.os.clone();
+                }
+            }
+            meta.ips = peer.addresses.iter().map(|p| p.addr).collect();
+            meta.allowed_ips = peer.allowed_ips.clone();
+            meta.user_id = peer.user;
+            if let Some(online) = peer.online {
+                meta.online = online;
             }
             // Register/update the peer's disco key when it's non-zero and has
             // changed (Headscale sends a zero key until the peer reports
@@ -520,8 +646,19 @@ impl Engine {
         let actions = self.ensure_session(peer).decapsulate(payload);
         for action in actions {
             match action {
+                // Always answer the peer at the WireGuard layer (handshakes,
+                // keepalives) so the tunnel survives a `down`; only inbound
+                // *user* traffic is gated below.
                 WgAction::ToPeer(dg) => self.send_to_peer(peer, dg).await,
+                WgAction::ToLocal(_) if !self.want_running => {}
                 WgAction::ToLocal(ip_pkt) => {
+                    // Enforce the inbound ACL: drop packets the packet filter
+                    // doesn't permit (Phase 6). Non-IPv4 is passed through to
+                    // the OS (we don't yet parse IPv6 for filtering).
+                    if !self.filter_allows_inbound(&ip_pkt) {
+                        tracing::debug!("engine: inbound packet denied by ACL");
+                        continue;
+                    }
                     if let Some(tun) = &self.tun {
                         // Phase 4: hand the decrypted packet to the OS stack.
                         if let Err(e) = tun.send(&ip_pkt).await {
@@ -534,6 +671,29 @@ impl Engine {
                 }
             }
         }
+    }
+
+    /// Checks a decrypted inbound IPv4 packet against the packet filter.
+    /// Non-IPv4 packets are allowed (IPv6 filtering isn't implemented yet).
+    fn filter_allows_inbound(&self, ip_pkt: &[u8]) -> bool {
+        let Some(view) = icmp::parse_ipv4(ip_pkt) else {
+            return true; // not IPv4 (or too short): don't filter here
+        };
+        // Destination L4 port for port-bearing protocols (TCP/UDP/SCTP live at
+        // bytes 2..4 of the transport header); 0 for port-less protocols.
+        let dst_port = match view.protocol {
+            6 | 17 | 132 => ip_pkt
+                .get(view.payload_offset + 2..view.payload_offset + 4)
+                .map(|b| u16::from_be_bytes([b[0], b[1]]))
+                .unwrap_or(0),
+            _ => 0,
+        };
+        self.filter.allows(
+            IpAddr::V4(view.src),
+            IpAddr::V4(view.dst),
+            view.protocol,
+            dst_port,
+        )
     }
 
     /// Handles a decrypted inbound IP packet: answer ICMP echo requests,
@@ -575,6 +735,86 @@ impl Engine {
             Command::PeerIps { reply } => {
                 let _ = reply.send(self.ip_to_key.keys().copied().collect());
             }
+            Command::Status { reply } => {
+                let _ = reply.send(self.build_status());
+            }
+            Command::SetWantRunning { want, reply } => {
+                if self.want_running != want {
+                    self.want_running = want;
+                    tracing::info!(want_running = want, "engine: WantRunning changed");
+                }
+                let _ = reply.send(());
+            }
+        }
+    }
+
+    /// Assembles a LocalAPI-compatible [`ts_types::Status`] snapshot from the
+    /// current netmap-derived metadata plus live path state from magicsock.
+    fn build_status(&self) -> ts_types::Status {
+        use ts_types::{PeerStatus, Status};
+
+        let version = format!("tailscale-rs-{}", env!("CARGO_PKG_VERSION"));
+        let backend_state = if self.want_running {
+            "Running"
+        } else {
+            "Stopped"
+        }
+        .to_string();
+
+        let self_ips: Vec<IpAddr> = self.our_ips.iter().map(|v4| IpAddr::V4(*v4)).collect();
+        let self_status = PeerStatus {
+            id: self.self_stable_id.clone(),
+            public_key: Some(self.state.node.public()),
+            host_name: self.hostname.clone(),
+            dns_name: self.self_dns_name.clone(),
+            os: std::env::consts::OS.to_string(),
+            tailscale_ips: self_ips.clone(),
+            online: true,
+            in_network_map: true,
+            in_magic_sock: true,
+            in_engine: true,
+            ..Default::default()
+        };
+
+        let mut peer_map = std::collections::BTreeMap::new();
+        for (key, meta) in &self.peers_meta {
+            let path = self.path_for(key);
+            let (cur_addr, relay) = match path {
+                PathKind::Direct(addr) => (addr.to_string(), String::new()),
+                PathKind::Relay => (String::new(), "derp".to_string()),
+            };
+            let active = self.sessions.contains_key(key);
+            let ps = PeerStatus {
+                id: meta.stable_id.clone(),
+                public_key: Some(*key),
+                host_name: meta.host_name.clone(),
+                dns_name: meta.dns_name.clone(),
+                os: meta.os.clone(),
+                user_id: meta.user_id,
+                tailscale_ips: meta.ips.clone(),
+                allowed_ips: meta.allowed_ips.clone(),
+                cur_addr,
+                relay,
+                online: meta.online,
+                active: active && meta.online,
+                in_network_map: true,
+                in_magic_sock: self.peer_disco.contains_key(key),
+                in_engine: active,
+                ..Default::default()
+            };
+            peer_map.insert(*key, ps);
+        }
+
+        Status {
+            version,
+            tun: self.tun.is_some(),
+            backend_state,
+            have_node_key: true,
+            tailscale_ips: self_ips,
+            self_: Some(self_status),
+            peer: peer_map,
+            user: self.users.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            ..Default::default()
         }
     }
 

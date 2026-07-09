@@ -343,6 +343,59 @@ startup.)
   MASQUERADE) is the empirically-hard case the plan flags; `interop/
   stun_server.py` and the `--stun` path exist for that harness.
 
+## Packet filter (ACL) + LocalAPI (Phase 6)
+
+### Packet filter in the netmap (`ts-filter`)
+
+The control server compiles the tailnet ACL into a flat allow-list and ships
+it in the `/machine/map` response. Two wire shapes exist:
+
+- **Legacy**: `MapResponse.PacketFilter` — a flat `[]FilterRule`.
+- **Modern (Headscale)**: `MapResponse.PacketFilters` — a **named map**,
+  e.g. `{"base": [rule, …]}`. The effective filter is the union of all named
+  sets. Captured from a live Headscale (no ACL policy):
+
+  ```json
+  "PacketFilters": {"base": [
+    {"SrcIPs": ["*"], "DstPorts": [{"IP": "*", "Ports": {"First": 0, "Last": 65535}}]}
+  ]}
+  ```
+
+`FilterRule` = `{SrcIPs: []string, DstPorts: [{IP, Ports:{First,Last}}],
+IPProto: []int}`. `SrcIPs`/`IP` are CIDRs, bare IPs, or `"*"`. A packet is
+**allowed** iff some rule matches: source in one of `SrcIPs`, destination in
+one of `DstPorts`, and — if `IPProto` is non-empty — the protocol is listed.
+
+- **Port-bearing protocols** (TCP=6, UDP=17, SCTP=132): the destination port
+  must fall in `[First, Last]`.
+- **Port-less protocols** (ICMP=1, …): matched only by a **full-range**
+  (`0–65535`) destination — Go's compiler treats "all ports" as "any
+  protocol", so a narrow TCP rule does not leak ICMP. Verified end-to-end:
+  with a Headscale `accept tcp *:8000` policy, ICMP between two rusty nodes is
+  dropped; the default allow-all passes it.
+
+Enforcement is **inbound-only** (what peers may send us), checked in the
+engine on each decrypted packet before it reaches the TUN; the engine starts
+`allow_all` so startup isn't black-holed, and an empty ruleset is deny-all.
+The netmap also carries `UserProfiles: []UserProfile` (for the status owner
+column) — a delta field, accumulated across frames.
+
+### LocalAPI (`ts-localapi`)
+
+HTTP/1.1 over a Unix socket, byte-for-byte the endpoints the Go CLI uses:
+
+| Method + path | Request | Response |
+|---|---|---|
+| `GET /localapi/v0/status` | — | `ipnstate.Status` (JSON) |
+| `PATCH /localapi/v0/prefs` | `ipn.MaskedPrefs` (each field paired with a `<Field>Set` mask flag) | `ipn.Prefs` |
+| `POST /localapi/v0/ping?ip=…&type=disco` | — | `ipnstate.PingResult` |
+
+The `Host` header is `local-tailscaled.sock`; on Linux the Go daemon
+authenticates by socket peer credentials — we bind the socket `0o600` as a
+first line of defence until that check lands. `WantRunning` (via
+`MaskedPrefs`) toggles the data plane: `Stopped` drops user traffic but keeps
+WireGuard handshakes alive so a down/up cycle doesn't re-handshake.
+
 ## Rust implementation decisions
 
 - **Hand-rolled Noise IK** over `x25519-dalek` + `chacha20poly1305` +

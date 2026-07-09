@@ -10,5 +10,7 @@ repository.workspace = true
 ts-key.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "signal", "time"] }
 ts-engine.workspace = true
+ts-localapi.workspace = true
+ts-types.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

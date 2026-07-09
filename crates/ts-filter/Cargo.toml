@@ -7,3 +7,5 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+ts-types.workspace = true
+tracing.workspace = true
