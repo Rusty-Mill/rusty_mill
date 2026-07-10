@@ -71,6 +71,8 @@ pub struct Analysis {
     pub viewer_html: String,
     /// The lobby scoring report as a self-contained HTML document.
     pub scoring_html: String,
+    /// Self-contained ballchasing-style stats dashboard (bc-clone).
+    pub ballchasing_html: String,
 }
 
 /// Core scoreboard stats for one player — header truth (goals/assists/saves/
@@ -321,6 +323,10 @@ pub fn analyze(
     attach_player_stats(&mut scene, &canonical);
     let viewer_html = html_offline(&scene);
 
+    // 6. Ballchasing-parity dashboard (same canonical model, bc-clone renderer).
+    let ballchasing_html =
+        bc_clone::html::render_html(&bc_clone::ballchasing_document(&canonical), &canonical);
+
     Ok(Analysis {
         replay_id: canonical.replay_id.clone(),
         map: canonical.map.clone(),
@@ -340,6 +346,7 @@ pub fn analyze(
         pacifist,
         viewer_html,
         scoring_html,
+        ballchasing_html,
     })
 }
 

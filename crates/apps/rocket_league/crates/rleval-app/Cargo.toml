@@ -19,5 +19,6 @@ replay-scoring = { path = "../scoring" }
 replay-skills = { path = "../skills" }
 replay-value = { path = "../value" }
 replay-viewer = { path = "../viewer" }
+bc-clone = { path = "../bc-clone" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

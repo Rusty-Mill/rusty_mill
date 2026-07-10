@@ -223,6 +223,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
       <button data-tab="skills">Skills</button>
       <button data-tab="impact">Impact</button>
       <button data-tab="pacifist">Pacifist</button>
+      <button data-tab="ballchasing">Ballchasing</button>
     </nav>
     <div class="tab active" id="tab-overview"></div>
     <div class="tab" id="tab-improve"></div>
@@ -232,6 +233,7 @@ pub const INDEX_HTML: &str = r##"<!doctype html>
     <div class="tab" id="tab-skills"></div>
     <div class="tab" id="tab-impact"></div>
     <div class="tab" id="tab-pacifist"></div>
+    <div class="tab" id="tab-ballchasing"></div>
   </div>
 </div>
 
@@ -323,7 +325,7 @@ function render() {
   renderImpact(d);
   renderPacifist(d);
   // The heavy iframes are filled lazily on first tab open.
-  viewerLoaded = scoringLoaded = false;
+  viewerLoaded = scoringLoaded = ballchasingLoaded = false;
   $("tab-viewer").innerHTML = $("tab-scoring").innerHTML = "";
   selectTab("overview");
 }
@@ -709,7 +711,7 @@ function renderPacifist(d) {
 }
 
 // ---- tabs (lazy iframes for the heavy HTML views) ----
-let viewerLoaded = false, scoringLoaded = false;
+let viewerLoaded = false, scoringLoaded = false, ballchasingLoaded = false;
 function selectTab(name) {
   document.querySelectorAll("nav.tabs button").forEach(b =>
     b.classList.toggle("active", b.dataset.tab === name));
@@ -729,6 +731,10 @@ function selectTab(name) {
   if (name === "scoring" && !scoringLoaded) {
     $("tab-scoring").innerHTML = `<iframe class="report" srcdoc="${esc(DATA.scoring_html)}"></iframe>`;
     scoringLoaded = true;
+  }
+  if (name === "ballchasing" && !ballchasingLoaded) {
+    $("tab-ballchasing").innerHTML = `<iframe class="report" srcdoc="${esc(DATA.ballchasing_html)}"></iframe>`;
+    ballchasingLoaded = true;
   }
 }
 
