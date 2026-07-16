@@ -30,8 +30,9 @@
 //!                  ├─ finalization    (crate::finalization)  sync/control/font
 //!                  ├─ input            (crate::input)  keyboard / mouse events
 //!                  └─ output           (crate::output)  bitmap / palette updates
-//!                       └─ RLE decode   (crate::rle)  interleaved bitmap codec
-//!                            └─ pixel unpack / fast-path ...  (future)
+//!                       ├─ RLE decode   (crate::rle)  interleaved bitmap codec
+//!                       └─ pixel unpack (crate::pixel)  native format → RGBA
+//!                            └─ pointer updates / fast-path ...  (future)
 //! ```
 //!
 //! ## Design
@@ -81,6 +82,7 @@ pub mod nego;
 pub mod output;
 pub mod pdu;
 pub mod per;
+pub mod pixel;
 pub mod rle;
 pub mod security;
 pub mod tpkt;
@@ -480,5 +482,65 @@ mod integration_tests {
             assert_eq!(rects[0].dest_left, 5);
             assert_eq!(rects[0].width, 2);
         }
+    }
+
+    /// Capstone: a server RLE-compressed bitmap update travels the full wire
+    /// stack, and the client decodes it to a top-down RGBA framebuffer.
+    #[test]
+    fn compressed_bitmap_to_rgba_over_wire() {
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+        use crate::output::{BitmapData, UpdatePdu, BITMAP_COMPRESSION, NO_BITMAP_COMPRESSION_HDR};
+
+        // A 2x2 16bpp rectangle, RLE-compressed (headerless):
+        //   line 0 (bottom): colour run of red   (0xF800), 2 px
+        //   line 1 (top):    colour run of green (0x07E0), 2 px
+        // Colour run order 0x61 (len 1) but count needs 2 → use 0x62.
+        let stream = vec![
+            0x62, 0x00, 0xF8, // colour run, len 2, red (LE)
+            0x62, 0xE0, 0x07, // colour run, len 2, green (LE)
+        ];
+        let rect = BitmapData {
+            dest_left: 0,
+            dest_top: 0,
+            dest_right: 1,
+            dest_bottom: 1,
+            width: 2,
+            height: 2,
+            bits_per_pixel: 16,
+            flags: BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR,
+            data: stream,
+        };
+        let update = UpdatePdu::Bitmap(vec![rect]);
+
+        let rdp = update.encode(0x0001_00EA, 1002).unwrap();
+        let mcs = DomainPdu::SendDataIndication {
+            initiator: 1002,
+            channel_id: MCS_GLOBAL_CHANNEL_ID,
+            user_data: &rdp,
+        };
+        let packet = Tpkt::new(&X224::data(&mcs.to_vec().unwrap()).to_vec().unwrap())
+            .to_vec()
+            .unwrap();
+
+        // Client: peel the layers, then decode the rectangle to RGBA.
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let X224::Data(inner) = X224::decode(tpkt.payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataIndication { user_data, .. } = DomainPdu::decode(inner).unwrap()
+        else {
+            panic!("expected Send Data Indication");
+        };
+        let (_, _, decoded) = UpdatePdu::decode(user_data).unwrap();
+        let UpdatePdu::Bitmap(rects) = decoded else {
+            panic!("expected bitmap update");
+        };
+        let rgba = rects[0].to_rgba(None).unwrap();
+
+        // Top-down RGBA: row 0 is the green line, row 1 the red line.
+        assert_eq!(&rgba[0..4], &[0, 255, 0, 255]); // top-left green
+        assert_eq!(&rgba[4..8], &[0, 255, 0, 255]); // top-right green
+        assert_eq!(&rgba[8..12], &[255, 0, 0, 255]); // bottom-left red
+        assert_eq!(&rgba[12..16], &[255, 0, 0, 255]); // bottom-right red
     }
 }

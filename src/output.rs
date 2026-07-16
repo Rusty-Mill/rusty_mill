@@ -124,6 +124,24 @@ impl BitmapData {
         }
     }
 
+    /// Decode this rectangle to a top-down RGBA8888 buffer.
+    ///
+    /// Decompresses if needed, then unpacks the native pixel format
+    /// ([`crate::pixel`]). `palette` supplies the color table for 8bpp data.
+    /// RDP scanlines are bottom-up, so the result is vertically flipped to
+    /// top-down display order.
+    pub fn to_rgba(&self, palette: Option<&[PaletteEntry]>) -> Result<Vec<u8>> {
+        let pixels = self.decompressed()?;
+        crate::pixel::to_rgba(
+            &pixels,
+            self.width as usize,
+            self.height as usize,
+            self.bits_per_pixel,
+            palette,
+            true,
+        )
+    }
+
     fn encode(&self, w: &mut Writer) -> Result<()> {
         if self.data.len() > u16::MAX as usize {
             return Err(Error::Overflow {
