@@ -28,8 +28,9 @@
 //!             └─ Share Control/Data   (crate::pdu)   session PDU framing
 //!                  ├─ capabilities    (crate::capabilities)  Demand/Confirm Active
 //!                  ├─ finalization    (crate::finalization)  sync/control/font
-//!                  └─ input            (crate::input)  keyboard / mouse events
-//!                       └─ output (bitmap updates) ...  (future)
+//!                  ├─ input            (crate::input)  keyboard / mouse events
+//!                  └─ output           (crate::output)  bitmap / palette updates
+//!                       └─ bitmap RLE decode / fast-path ...  (future)
 //! ```
 //!
 //! ## Design
@@ -76,6 +77,7 @@ pub mod input;
 pub mod license;
 pub mod mcs;
 pub mod nego;
+pub mod output;
 pub mod pdu;
 pub mod per;
 pub mod security;
@@ -438,5 +440,43 @@ mod integration_tests {
         let (_, sid, recovered) = InputPdu::decode(user_data).unwrap();
         assert_eq!(sid, share_id);
         assert_eq!(recovered, pdu);
+    }
+
+    /// Output: a server bitmap update travels as a Send Data Indication over
+    /// the full stack and the client recovers the pixel rectangle.
+    #[test]
+    fn bitmap_update_over_wire() {
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+        use crate::output::{BitmapData, UpdatePdu};
+
+        let share_id = 0x0001_00EA;
+        let pixels = vec![0x00, 0xF8, 0xE0, 0x07]; // two 16bpp pixels
+        let update = UpdatePdu::Bitmap(vec![BitmapData::uncompressed(5, 7, 2, 1, 16, pixels)]);
+
+        let rdp = update.encode(share_id, 1002).unwrap();
+        let mcs = DomainPdu::SendDataIndication {
+            initiator: 1002,
+            channel_id: MCS_GLOBAL_CHANNEL_ID,
+            user_data: &rdp,
+        };
+        let packet = Tpkt::new(&X224::data(&mcs.to_vec().unwrap()).to_vec().unwrap())
+            .to_vec()
+            .unwrap();
+
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let X224::Data(inner) = X224::decode(tpkt.payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataIndication { user_data, .. } = DomainPdu::decode(inner).unwrap()
+        else {
+            panic!("expected Send Data Indication");
+        };
+        let (_, sid, recovered) = UpdatePdu::decode(user_data).unwrap();
+        assert_eq!(sid, share_id);
+        assert_eq!(recovered, update);
+        if let UpdatePdu::Bitmap(rects) = recovered {
+            assert_eq!(rects[0].dest_left, 5);
+            assert_eq!(rects[0].width, 2);
+        }
     }
 }

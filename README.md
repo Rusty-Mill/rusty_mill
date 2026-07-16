@@ -27,6 +27,7 @@ Early foundation. Implemented so far, bottom-up:
 | Capabilities | `capabilities` | Demand Active / Confirm Active PDUs and the core capability sets (general, bitmap, pointer, input, share; others preserved raw). |
 | Finalization | `finalization` | Synchronize / Control / Font List / Font Map PDUs and the client finalization sequence. |
 | Input | `input` | Client Input Event PDU with scancode / Unicode / mouse / extended-mouse / sync events. |
+| Output | `output` | Server graphics Update PDUs: bitmap (rectangles + verbatim data stream), palette, synchronize; orders kept raw. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
