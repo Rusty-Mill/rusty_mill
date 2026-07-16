@@ -1,32 +1,34 @@
-//! Connect to an RDP server and drive the deterministic connection sequence.
+//! Connect to an RDP server and establish a full standard-RDP session.
 //!
 //! ```sh
-//! cargo run --example connect -- 192.0.2.10:3389 alice
+//! cargo run --example connect -- 192.0.2.10:3389 CORP alice s3cret
 //! ```
 //!
-//! This performs the X.224 security negotiation and, when the server selects
-//! standard RDP security, continues through the GCC/MCS connect and channel
-//! setup, printing each step. The security-dependent PDUs (Security Exchange,
-//! Client Info, capabilities) are intentionally not driven here — this example
-//! exercises the parts that need no cryptographic handshake against the server.
+//! Arguments: `host:port` (default `127.0.0.1:3389`), then optional `domain`,
+//! `username`, and `password`. The example drives the whole standard-RDP
+//! connection sequence — negotiation, MCS connect, channel setup, the RSA
+//! security exchange, the encrypted Client Info PDU, licensing, the capability
+//! exchange, and connection finalization — and reports the active session.
+//!
+//! Standard RDP security only: a server that requires TLS/CredSSP (most modern
+//! Windows hosts) will reject the RDP-only negotiation, and the example prints
+//! that. An `xrdp` server configured for RDP security is the realistic target.
 
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::ExitCode;
 
-use rusty_rdp::gcc::{
-    ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData, ServerNetworkData,
-    UserDataBlock, ENCRYPTION_METHOD_128BIT, ENCRYPTION_METHOD_40BIT,
-};
-use rusty_rdp::mcs::MCS_GLOBAL_CHANNEL_ID;
-use rusty_rdp::nego::SecurityProtocols;
-use rusty_rdp::net::RdpTransport;
+use rusty_rdp::net::{EstablishConfig, RdpTransport};
+use rusty_rdp::security::RANDOM_LEN;
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:3389".to_string());
-    let username = args.next();
+    let domain = args.next().unwrap_or_default();
+    let username = args.next().unwrap_or_else(|| "user".to_string());
+    let password = args.next().unwrap_or_default();
 
-    match run(&addr, username.as_deref()) {
+    match run(&addr, &domain, &username, &password) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -35,66 +37,39 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(addr: &str, username: Option<&str>) -> std::io::Result<()> {
+fn run(addr: &str, domain: &str, username: &str, password: &str) -> std::io::Result<()> {
     println!("connecting to {addr} ...");
     let stream = TcpStream::connect(addr)?;
     let mut rdp = RdpTransport::new(stream);
 
-    // 1. X.224 security negotiation. Offer everything we can frame; the server
-    // picks one.
-    let requested = SecurityProtocols::RDP | SecurityProtocols::SSL | SecurityProtocols::HYBRID;
-    let selected = rdp.negotiate(requested, username)?;
-    println!("negotiated security: {selected:?}");
+    let config = EstablishConfig::new(1024, 768, domain, username, password);
+    let client_random = client_random();
 
-    if selected != SecurityProtocols::RDP {
-        println!(
-            "server selected TLS/CredSSP ({selected:?}); this example only drives the \
-             standard-RDP path further, so stopping here."
-        );
-        return Ok(());
-    }
-
-    // 2. MCS connect: send our client settings, read the server's back.
-    let client_blocks = vec![
-        UserDataBlock::ClientCore(ClientCoreData::new(1024, 768, "rusty-rdp")),
-        UserDataBlock::ClientSecurity(ClientSecurityData {
-            encryption_methods: ENCRYPTION_METHOD_40BIT | ENCRYPTION_METHOD_128BIT,
-            ext_encryption_methods: 0,
-        }),
-        UserDataBlock::ClientNetwork(ClientNetworkData { channels: vec![] }),
-        UserDataBlock::ClientCluster(ClientClusterData {
-            flags: 0x0D,
-            redirected_session_id: 0,
-        }),
-    ];
-    let server_blocks = rdp.mcs_connect(&client_blocks)?;
-    println!(
-        "MCS connect complete; server sent {} block(s)",
-        server_blocks.len()
-    );
-
-    let io_channel = server_blocks
-        .iter()
-        .find_map(|b| match b {
-            UserDataBlock::ServerNetwork(ServerNetworkData { io_channel_id, .. }) => {
-                Some(*io_channel_id)
-            }
-            _ => None,
-        })
-        .unwrap_or(MCS_GLOBAL_CHANNEL_ID);
-
-    // 3. Channel setup.
-    rdp.erect_domain()?;
-    let user_id = rdp.attach_user()?;
-    println!("attached as MCS user {user_id}");
-
-    rdp.join_channel(user_id, user_id)?;
-    rdp.join_channel(user_id, io_channel)?;
-    println!("joined user channel {user_id} and I/O channel {io_channel}");
-
-    println!(
-        "connection sequence up to channel setup complete. The security \
-         commencement, Client Info, and capability exchange come next."
-    );
+    let session = rdp.establish(&config, &client_random)?;
+    println!("session active:");
+    println!("  MCS user id     : {}", session.user_id);
+    println!("  I/O channel     : {}", session.io_channel);
+    println!("  share id        : {:#010x}", session.share_id);
+    println!("  server channel  : {}", session.server_channel);
+    println!("handshake complete — the session is ready for input and updates.");
     Ok(())
+}
+
+/// Generate a 32-byte client random.
+///
+/// Uses the OS CSPRNG via `/dev/urandom` where available; falls back to a
+/// fixed value elsewhere (insecure, for demonstration only).
+fn client_random() -> [u8; RANDOM_LEN] {
+    let mut buf = [0u8; RANDOM_LEN];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return buf;
+        }
+    }
+    // Deterministic fallback: NOT secure, only so the example runs anywhere.
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+    }
+    let _ = std::io::stderr().write_all(b"warning: using an insecure fixed client random\n");
+    buf
 }
