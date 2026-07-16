@@ -27,8 +27,9 @@
 //!             └─ licensing            (crate::license)   license exchange
 //!             └─ Share Control/Data   (crate::pdu)   session PDU framing
 //!                  ├─ capabilities    (crate::capabilities)  Demand/Confirm Active
-//!                  └─ finalization    (crate::finalization)  sync/control/font
-//!                       └─ input / output ...  (future)
+//!                  ├─ finalization    (crate::finalization)  sync/control/font
+//!                  └─ input            (crate::input)  keyboard / mouse events
+//!                       └─ output (bitmap updates) ...  (future)
 //! ```
 //!
 //! ## Design
@@ -71,6 +72,7 @@ pub mod cursor;
 pub mod error;
 pub mod finalization;
 pub mod gcc;
+pub mod input;
 pub mod license;
 pub mod mcs;
 pub mod nego;
@@ -398,5 +400,43 @@ mod integration_tests {
             })
         ));
         assert!(matches!(decoded[3], FinalizationPdu::FontList(_)));
+    }
+
+    /// Input: a click-and-type burst travels as a single Input PDU over the
+    /// full MCS/X.224/TPKT stack and decodes back to the same events.
+    #[test]
+    fn input_events_over_wire() {
+        use crate::input::{InputEvent, InputPdu};
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+
+        let share_id = 0x0001_00EA;
+        let pdu = InputPdu::new(vec![
+            InputEvent::mouse_move(320, 240),
+            InputEvent::left_button_down(320, 240),
+            InputEvent::left_button_up(320, 240),
+            InputEvent::key_press(0x1E), // 'a'
+            InputEvent::key_release(0x1E),
+        ]);
+
+        let rdp = pdu.encode(share_id, 1007).unwrap();
+        let mcs = DomainPdu::SendDataRequest {
+            initiator: 1007,
+            channel_id: MCS_GLOBAL_CHANNEL_ID,
+            user_data: &rdp,
+        };
+        let packet = Tpkt::new(&X224::data(&mcs.to_vec().unwrap()).to_vec().unwrap())
+            .to_vec()
+            .unwrap();
+
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let X224::Data(inner) = X224::decode(tpkt.payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataRequest { user_data, .. } = DomainPdu::decode(inner).unwrap() else {
+            panic!("expected Send Data Request");
+        };
+        let (_, sid, recovered) = InputPdu::decode(user_data).unwrap();
+        assert_eq!(sid, share_id);
+        assert_eq!(recovered, pdu);
     }
 }

@@ -26,6 +26,7 @@ Early foundation. Implemented so far, bottom-up:
 | Session framing | `pdu` | Share Control / Share Data headers with the `PDUTYPE` / `PDUTYPE2` constants. |
 | Capabilities | `capabilities` | Demand Active / Confirm Active PDUs and the core capability sets (general, bitmap, pointer, input, share; others preserved raw). |
 | Finalization | `finalization` | Synchronize / Control / Font List / Font Map PDUs and the client finalization sequence. |
+| Input | `input` | Client Input Event PDU with scancode / Unicode / mouse / extended-mouse / sync events. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -35,9 +36,11 @@ negotiation all the way through the logon and licensing exchange: the BER
 `Connect-Initial`/`Response`, the GCC conference settings blocks, the PER
 domain PDUs, the RSA/RC4 security handshake, the encrypted Client Info PDU, and
 the licensing round trip, the Share Control / Share Data framing that every
-session PDU rides in, and the capability exchange (Demand / Confirm Active).
-The connection-finalization sequence (synchronize, control, font list/map) and
-the display/input PDUs build on top without disturbing what is here.
+session PDU rides in, the capability exchange (Demand / Confirm Active), the
+connection-finalization sequence (synchronize, control, font list/map), and
+client input events (keyboard and mouse). The server-to-client display path —
+bitmap and pointer updates, with the RLE decompressor — and fast-path framing
+build on top without disturbing what is here.
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
