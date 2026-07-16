@@ -26,7 +26,8 @@
 //!             └─ Client Info          (crate::client_info)  logon
 //!             └─ licensing            (crate::license)   license exchange
 //!             └─ Share Control/Data   (crate::pdu)   session PDU framing
-//!                  └─ capabilities / input / output ...  (future)
+//!                  └─ capabilities     (crate::capabilities)  Demand/Confirm Active
+//!                       └─ input / output / finalization ...  (future)
 //! ```
 //!
 //! ## Design
@@ -62,6 +63,7 @@
 //! ```
 
 pub mod ber;
+pub mod capabilities;
 pub mod client_info;
 pub mod crypto;
 pub mod cursor;
@@ -280,5 +282,70 @@ mod integration_tests {
             LicensePdu::ErrorAlert(msg) => assert!(msg.is_valid_client()),
             other => panic!("expected ErrorAlert, got {other:?}"),
         }
+    }
+
+    /// Capability exchange: the server's Demand Active advertises a bitmap
+    /// capability, the client echoes the share id in a Confirm Active, and
+    /// both PDUs travel the full MCS/X.224/TPKT stack.
+    #[test]
+    fn capability_exchange_over_wire() {
+        use crate::capabilities::{
+            client_capability_sets, BitmapCapabilitySet, CapabilitySet, ConfirmActive,
+            DemandActive, GeneralCapabilitySet,
+        };
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+
+        // Helper: wrap RDP bytes as a server Send Data Indication over the wire.
+        fn frame(payload: &[u8], indication: bool) -> Vec<u8> {
+            let mcs = if indication {
+                DomainPdu::SendDataIndication {
+                    initiator: 1002,
+                    channel_id: MCS_GLOBAL_CHANNEL_ID,
+                    user_data: payload,
+                }
+            } else {
+                DomainPdu::SendDataRequest {
+                    initiator: 1007,
+                    channel_id: MCS_GLOBAL_CHANNEL_ID,
+                    user_data: payload,
+                }
+            };
+            Tpkt::new(&X224::data(&mcs.to_vec().unwrap()).to_vec().unwrap())
+                .to_vec()
+                .unwrap()
+        }
+        fn unwrap_mcs(packet: &[u8]) -> Vec<u8> {
+            let tpkt = Tpkt::decode(packet).unwrap();
+            let X224::Data(inner) = X224::decode(tpkt.payload).unwrap() else {
+                panic!("expected Data TPDU");
+            };
+            match DomainPdu::decode(inner).unwrap() {
+                DomainPdu::SendDataIndication { user_data, .. }
+                | DomainPdu::SendDataRequest { user_data, .. } => user_data.to_vec(),
+                other => panic!("expected Send Data, got {other:?}"),
+            }
+        }
+
+        // Server → client Demand Active.
+        let demand = DemandActive {
+            share_id: 0x0001_00EA,
+            source_descriptor: b"RDP\0".to_vec(),
+            capability_sets: vec![
+                CapabilitySet::General(GeneralCapabilitySet::default()),
+                CapabilitySet::Bitmap(BitmapCapabilitySet::new(1024, 768, 16)),
+            ],
+            session_id: 0,
+        };
+        let demand_packet = frame(&demand.encode(1002).unwrap(), true);
+        let (_, recv_demand) = DemandActive::decode(&unwrap_mcs(&demand_packet)).unwrap();
+        assert_eq!(recv_demand, demand);
+
+        // Client → server Confirm Active echoing the share id.
+        let confirm =
+            ConfirmActive::new(recv_demand.share_id, client_capability_sets(1024, 768, 16));
+        let confirm_packet = frame(&confirm.encode(1007).unwrap(), false);
+        let (_, recv_confirm) = ConfirmActive::decode(&unwrap_mcs(&confirm_packet)).unwrap();
+        assert_eq!(recv_confirm.share_id, demand.share_id);
+        assert_eq!(recv_confirm, confirm);
     }
 }
