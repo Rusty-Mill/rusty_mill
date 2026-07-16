@@ -383,6 +383,51 @@ pub fn decode_security_exchange(buf: &[u8]) -> Result<Vec<u8>> {
     Ok(r.read_bytes(length)?.to_vec())
 }
 
+/// Wrap a PDU body with a Basic Security Header for transmission.
+///
+/// When `session` is `Some`, the payload is MAC'd and RC4-encrypted and
+/// `SEC_ENCRYPT` is added to `base_flags` (the 8-byte signature precedes the
+/// ciphertext). When `None`, the payload is emitted in the clear under just
+/// the header.
+pub fn wrap_pdu(session: Option<&mut Rc4Session>, base_flags: u16, payload: &[u8]) -> Vec<u8> {
+    let mut w = Writer::new();
+    match session {
+        Some(rc4) => {
+            let (signature, ciphertext) = rc4.encrypt(payload);
+            BasicSecurityHeader::new(base_flags | SEC_ENCRYPT).encode(&mut w);
+            w.write_bytes(&signature);
+            w.write_bytes(&ciphertext);
+        }
+        None => {
+            BasicSecurityHeader::new(base_flags).encode(&mut w);
+            w.write_bytes(payload);
+        }
+    }
+    w.into_vec()
+}
+
+/// Unwrap a Basic Security Header PDU, returning `(flags, body)`.
+///
+/// When the header sets `SEC_ENCRYPT`, the MAC is verified and the body
+/// decrypted with `session` (which must be `Some`); otherwise the body is
+/// returned verbatim.
+pub fn unwrap_pdu(session: Option<&mut Rc4Session>, buf: &[u8]) -> Result<(u16, Vec<u8>)> {
+    let mut r = Reader::new(buf);
+    let header = BasicSecurityHeader::decode(&mut r)?;
+    if header.flags & SEC_ENCRYPT != 0 {
+        let signature = r.read_bytes(8)?.to_vec();
+        let ciphertext = r.peek_remaining();
+        let rc4 = session.ok_or(Error::InvalidValue {
+            field: "security session",
+            value: "required to decrypt SEC_ENCRYPT PDU".to_string(),
+        })?;
+        let plaintext = rc4.decrypt(&signature, ciphertext)?;
+        Ok((header.flags, plaintext))
+    } else {
+        Ok((header.flags, r.peek_remaining().to_vec()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,5 +576,49 @@ mod tests {
         h.encode(&mut w);
         let mut r = Reader::new(w.as_slice());
         assert_eq!(BasicSecurityHeader::decode(&mut r).unwrap(), h);
+    }
+
+    fn mirror_sessions() -> (Rc4Session, Rc4Session) {
+        let keys = derive_session_keys(
+            &[7u8; RANDOM_LEN],
+            &[8u8; RANDOM_LEN],
+            ENCRYPTION_METHOD_128BIT,
+        );
+        let peer = SessionKeys {
+            mac_key: keys.mac_key.clone(),
+            encrypt_key: keys.decrypt_key.clone(),
+            decrypt_key: keys.encrypt_key.clone(),
+        };
+        (Rc4Session::new(&keys), Rc4Session::new(&peer))
+    }
+
+    #[test]
+    fn wrap_unwrap_encrypted_roundtrip() {
+        let (mut sender, mut receiver) = mirror_sessions();
+        let wrapped = wrap_pdu(Some(&mut sender), SEC_INFO_PKT, b"TS_INFO_PACKET");
+        // The header must advertise encryption.
+        let flags = u16::from_le_bytes([wrapped[0], wrapped[1]]);
+        assert!(flags & SEC_ENCRYPT != 0);
+        assert!(flags & SEC_INFO_PKT != 0);
+        let (out_flags, body) = unwrap_pdu(Some(&mut receiver), &wrapped).unwrap();
+        assert_eq!(out_flags, flags);
+        assert_eq!(body, b"TS_INFO_PACKET");
+    }
+
+    #[test]
+    fn wrap_unwrap_plaintext_roundtrip() {
+        let wrapped = wrap_pdu(None, SEC_LICENSE_PKT, b"license");
+        let flags = u16::from_le_bytes([wrapped[0], wrapped[1]]);
+        assert!(flags & SEC_ENCRYPT == 0);
+        let (out_flags, body) = unwrap_pdu(None, &wrapped).unwrap();
+        assert_eq!(out_flags, SEC_LICENSE_PKT);
+        assert_eq!(body, b"license");
+    }
+
+    #[test]
+    fn unwrap_encrypted_without_session_errors() {
+        let (mut sender, _) = mirror_sessions();
+        let wrapped = wrap_pdu(Some(&mut sender), SEC_INFO_PKT, b"x");
+        assert!(unwrap_pdu(None, &wrapped).is_err());
     }
 }

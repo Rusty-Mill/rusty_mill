@@ -30,7 +30,7 @@ Early foundation. Implemented so far, bottom-up:
 | Output | `output` | Server graphics Update PDUs: bitmap (rectangles + verbatim data stream), palette, synchronize; orders kept raw. |
 | Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
-| TCP driver | `net` | Blocking `RdpTransport<S>`: TPKT framing, X.224 negotiation, MCS connect and channel setup, I/O-channel send/recv. The one module that touches a socket. |
+| TCP driver | `net` | Blocking `RdpTransport<S>`: TPKT framing, X.224 negotiation, MCS connect and channel setup, security exchange, encrypted logon (Client Info), and secure I/O-channel send/recv. The one module that touches a socket. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -103,9 +103,10 @@ cargo run --example connect -- 192.0.2.10:3389 alice
 
 It prints the negotiated security protocol and, when the server accepts
 standard RDP security, continues through the MCS connect and channel join. The
-security commencement, Client Info, and capability exchange are built in the
-`security`, `client_info`, and `capabilities` modules but not yet driven
-end to end by the example.
+driver also has `security_exchange`, `send_client_info`, and `send_secure` /
+`recv_secure` for the encrypted phase; the capability exchange and connection
+finalization are built in the `capabilities` and `finalization` modules and are
+the remaining step to chain end to end.
 
 ## License
 

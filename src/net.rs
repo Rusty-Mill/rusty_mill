@@ -10,23 +10,65 @@
 //!    `Connect-Response` exchange.
 //! 3. [`RdpTransport::erect_domain`], [`RdpTransport::attach_user`],
 //!    [`RdpTransport::join_channel`] — MCS channel setup.
-//! 4. [`RdpTransport::send_data`] / [`RdpTransport::recv_data`] — I/O-channel
-//!    traffic once the session is up.
+//! 4. [`RdpTransport::security_exchange`] — RSA-encrypt the client random for
+//!    standard RDP security, then [`RdpTransport::send_client_info`] and
+//!    [`RdpTransport::send_secure`] / [`RdpTransport::recv_secure`] carry the
+//!    encrypted, MAC'd PDUs.
+//! 5. [`RdpTransport::send_data`] / [`RdpTransport::recv_data`] — raw
+//!    I/O-channel traffic.
 //!
-//! Everything here stays on the standard library, so the crate remains
-//! dependency-free. The later, security-dependent PDUs (Security Exchange,
-//! Client Info, capabilities) are built with the [`crate::security`],
-//! [`crate::client_info`], and [`crate::capabilities`] modules and sent with
-//! [`RdpTransport::send_data`]; driving them end to end against a live server
-//! is left to the caller.
+//! [`server_crypto`] pulls the server's RSA key and random out of the MCS
+//! Connect-Response so the caller can derive session keys
+//! ([`crate::security::derive_session_keys`]) and build an
+//! [`Rc4Session`]. Everything here stays on the standard library, so the crate
+//! remains dependency-free. The capability exchange and connection
+//! finalization are built with the [`crate::capabilities`] and
+//! [`crate::finalization`] modules and sent with [`RdpTransport::send_secure`];
+//! chaining them end to end against a live server is the remaining step.
 
 use std::io::{self, Read, Write};
 
+use crate::client_info::{ClientInfo, INFO_UNICODE};
 use crate::gcc::{self, UserDataBlock};
 use crate::mcs::{ConnectInitial, ConnectResponse, DomainPdu, McsResult};
 use crate::nego::{Negotiation, SecurityProtocols};
+use crate::security::{self, Rc4Session, RsaPublicKey, SEC_INFO_PKT};
 use crate::tpkt::{Tpkt, TPKT_HEADER_LEN};
 use crate::x224::{ConnectionPdu, Cookie, X224};
+
+/// The server's cryptographic parameters, extracted from `TS_UD_SC_SEC1`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCrypto {
+    /// The negotiated `encryptionMethod`.
+    pub encryption_method: u32,
+    /// The server random used in key derivation.
+    pub server_random: Vec<u8>,
+    /// The server's RSA public key.
+    pub public_key: RsaPublicKey,
+}
+
+/// Extract the server's crypto parameters from the MCS Connect-Response
+/// settings blocks.
+///
+/// Returns `Ok(None)` when the server selected no encryption (or sent no
+/// `SC_SECURITY` block); an error if the certificate cannot be parsed.
+pub fn server_crypto(blocks: &[UserDataBlock]) -> io::Result<Option<ServerCrypto>> {
+    for block in blocks {
+        if let UserDataBlock::ServerSecurity(sec) = block {
+            if sec.encryption_method == 0 || sec.server_certificate.is_empty() {
+                return Ok(None);
+            }
+            let public_key =
+                security::parse_server_certificate(&sec.server_certificate).map_err(to_io)?;
+            return Ok(Some(ServerCrypto {
+                encryption_method: sec.encryption_method,
+                server_random: sec.server_random.clone(),
+                public_key,
+            }));
+        }
+    }
+    Ok(None)
+}
 
 /// Map a codec [`crate::Error`] into an [`io::Error`] for the transport layer.
 fn to_io(e: crate::Error) -> io::Error {
@@ -240,6 +282,65 @@ impl<S: Read + Write> RdpTransport<S> {
             ))),
         }
     }
+
+    // --- Security commencement and encrypted PDUs ------------------------
+
+    /// Send the Security Exchange PDU: RSA-encrypt `client_random` with the
+    /// server's public key and ship it on the I/O channel.
+    ///
+    /// This PDU is never encrypted — it is what establishes the session keys.
+    pub fn security_exchange(
+        &mut self,
+        user_id: u16,
+        io_channel: u16,
+        key: &RsaPublicKey,
+        client_random: &[u8],
+    ) -> io::Result<()> {
+        let encrypted = key.encrypt(client_random).map_err(to_io)?;
+        let pdu = security::encode_security_exchange(&encrypted);
+        self.send_data(user_id, io_channel, &pdu)
+    }
+
+    /// Send a PDU under a Basic Security Header on the I/O channel, encrypting
+    /// with `session` when present.
+    pub fn send_secure(
+        &mut self,
+        session: Option<&mut Rc4Session>,
+        user_id: u16,
+        io_channel: u16,
+        base_flags: u16,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let wrapped = security::wrap_pdu(session, base_flags, payload);
+        self.send_data(user_id, io_channel, &wrapped)
+    }
+
+    /// Receive a security-wrapped PDU on the I/O channel, returning
+    /// `(channel_id, security_flags, body)` and decrypting with `session` when
+    /// the header sets `SEC_ENCRYPT`.
+    pub fn recv_secure(
+        &mut self,
+        session: Option<&mut Rc4Session>,
+    ) -> io::Result<(u16, u16, Vec<u8>)> {
+        let (channel, data) = self.recv_data()?;
+        let (flags, body) = security::unwrap_pdu(session, &data).map_err(to_io)?;
+        Ok((channel, flags, body))
+    }
+
+    /// Send the Client Info PDU (logon data) on the I/O channel, encrypting
+    /// with `session` when present.
+    pub fn send_client_info(
+        &mut self,
+        session: Option<&mut Rc4Session>,
+        user_id: u16,
+        io_channel: u16,
+        info: &ClientInfo,
+    ) -> io::Result<()> {
+        // The info PDU always uses the Unicode string form here.
+        let mut info = info.clone();
+        info.flags |= INFO_UNICODE;
+        self.send_secure(session, user_id, io_channel, SEC_INFO_PKT, &info.to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -403,6 +504,141 @@ mod tests {
         let (channel, data) = t.recv_data().unwrap();
         assert_eq!(channel, 1003);
         assert_eq!(data, [0xAA, 0xBB, 0xCC]);
+    }
+
+    #[test]
+    fn security_exchange_sends_encrypted_random() {
+        // No server response needed; we only inspect what the client writes.
+        let mut t = RdpTransport::new(MockStream::new(Vec::new()));
+        // Tiny RSA key so the encrypt succeeds on a short "random".
+        let key = RsaPublicKey {
+            modulus_le: vec![0xA1, 0x0C],
+            exponent: 17,
+        };
+        t.security_exchange(1007, 1003, &key, &[42]).unwrap();
+
+        let out = t.into_inner().outbound;
+        // Peel TPKT → X.224 Data → MCS Send Data Request → Security Exchange.
+        let payload = Tpkt::decode(&out).unwrap().payload.to_vec();
+        let X224::Data(mcs) = X224::decode(&payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataRequest { user_data, .. } = DomainPdu::decode(mcs).unwrap() else {
+            panic!("expected Send Data Request");
+        };
+        // Security Exchange header flags = SEC_EXCHANGE_PKT.
+        assert_eq!(u16::from_le_bytes([user_data[0], user_data[1]]), 0x0001);
+    }
+
+    #[test]
+    fn client_info_is_encrypted_when_session_present() {
+        use crate::security::{derive_session_keys, RANDOM_LEN, SEC_ENCRYPT};
+
+        let keys = derive_session_keys(&[1u8; RANDOM_LEN], &[2u8; RANDOM_LEN], 0x02);
+        let mut session = Rc4Session::new(&keys);
+        let mut t = RdpTransport::new(MockStream::new(Vec::new()));
+        let info = ClientInfo::new("CORP", "alice", "secret");
+        t.send_client_info(Some(&mut session), 1007, 1003, &info)
+            .unwrap();
+
+        let out = t.into_inner().outbound;
+        let payload = Tpkt::decode(&out).unwrap().payload.to_vec();
+        let X224::Data(mcs) = X224::decode(&payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataRequest { user_data, .. } = DomainPdu::decode(mcs).unwrap() else {
+            panic!("expected Send Data Request");
+        };
+        let flags = u16::from_le_bytes([user_data[0], user_data[1]]);
+        assert!(flags & SEC_INFO_PKT != 0);
+        assert!(flags & SEC_ENCRYPT != 0);
+    }
+
+    #[test]
+    fn recv_secure_decrypts_indication() {
+        use crate::security::{derive_session_keys, SessionKeys, RANDOM_LEN};
+
+        // Server-side keys are the mirror of the client's.
+        let client_keys = derive_session_keys(&[3u8; RANDOM_LEN], &[4u8; RANDOM_LEN], 0x02);
+        let server_keys = SessionKeys {
+            mac_key: client_keys.mac_key.clone(),
+            encrypt_key: client_keys.decrypt_key.clone(),
+            decrypt_key: client_keys.encrypt_key.clone(),
+        };
+        let mut server_session = Rc4Session::new(&server_keys);
+        let mut client_session = Rc4Session::new(&client_keys);
+
+        // Server wraps a licensing-ish payload encrypted and frames it.
+        let wrapped = security::wrap_pdu(Some(&mut server_session), 0, b"server-payload");
+        let indication = X224::data(
+            &DomainPdu::SendDataIndication {
+                initiator: 1002,
+                channel_id: 1003,
+                user_data: &wrapped,
+            }
+            .to_vec()
+            .unwrap(),
+        )
+        .to_vec()
+        .unwrap();
+
+        let mut t = RdpTransport::new(MockStream::new(framed(indication)));
+        let (channel, _flags, body) = t.recv_secure(Some(&mut client_session)).unwrap();
+        assert_eq!(channel, 1003);
+        assert_eq!(body, b"server-payload");
+    }
+
+    #[test]
+    fn server_crypto_extracts_key() {
+        use crate::gcc::{ServerSecurityData, ENCRYPTION_METHOD_128BIT};
+        use crate::security::RsaPublicKey;
+
+        // Build a minimal proprietary certificate for a 64-bit key.
+        let modulus = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let mut cert = crate::cursor::Writer::new();
+        cert.write_u32_le(1); // CERT_TYPE_PROPRIETARY
+        cert.write_u32_le(1);
+        cert.write_u32_le(1);
+        cert.write_u16_le(0x0006);
+        cert.write_u16_le(0);
+        cert.write_u32_le(0x3141_5352); // "RSA1"
+        cert.write_u32_le(modulus.len() as u32 + 8);
+        cert.write_u32_le(modulus.len() as u32 * 8);
+        cert.write_u32_le(modulus.len() as u32 - 1);
+        cert.write_u32_le(65537);
+        cert.write_bytes(&modulus);
+        cert.write_bytes(&[0u8; 8]);
+        cert.write_u16_le(0x0008);
+        cert.write_u16_le(0);
+
+        let blocks = vec![UserDataBlock::ServerSecurity(ServerSecurityData {
+            encryption_method: ENCRYPTION_METHOD_128BIT,
+            encryption_level: 2,
+            server_random: vec![0xAB; 32],
+            server_certificate: cert.into_vec(),
+        })];
+        let crypto = server_crypto(&blocks).unwrap().unwrap();
+        assert_eq!(crypto.encryption_method, ENCRYPTION_METHOD_128BIT);
+        assert_eq!(crypto.server_random, vec![0xAB; 32]);
+        assert_eq!(
+            crypto.public_key,
+            RsaPublicKey {
+                modulus_le: modulus.to_vec(),
+                exponent: 65537,
+            }
+        );
+    }
+
+    #[test]
+    fn server_crypto_none_when_no_encryption() {
+        use crate::gcc::ServerSecurityData;
+        let blocks = vec![UserDataBlock::ServerSecurity(ServerSecurityData {
+            encryption_method: 0,
+            encryption_level: 0,
+            server_random: Vec::new(),
+            server_certificate: Vec::new(),
+        })];
+        assert_eq!(server_crypto(&blocks).unwrap(), None);
     }
 
     #[test]
