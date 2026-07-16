@@ -26,8 +26,9 @@
 //!             └─ Client Info          (crate::client_info)  logon
 //!             └─ licensing            (crate::license)   license exchange
 //!             └─ Share Control/Data   (crate::pdu)   session PDU framing
-//!                  └─ capabilities     (crate::capabilities)  Demand/Confirm Active
-//!                       └─ input / output / finalization ...  (future)
+//!                  ├─ capabilities    (crate::capabilities)  Demand/Confirm Active
+//!                  └─ finalization    (crate::finalization)  sync/control/font
+//!                       └─ input / output ...  (future)
 //! ```
 //!
 //! ## Design
@@ -68,6 +69,7 @@ pub mod client_info;
 pub mod crypto;
 pub mod cursor;
 pub mod error;
+pub mod finalization;
 pub mod gcc;
 pub mod license;
 pub mod mcs;
@@ -347,5 +349,54 @@ mod integration_tests {
         let (_, recv_confirm) = ConfirmActive::decode(&unwrap_mcs(&confirm_packet)).unwrap();
         assert_eq!(recv_confirm.share_id, demand.share_id);
         assert_eq!(recv_confirm, confirm);
+    }
+
+    /// Connection finalization: the client's four PDUs each round-trip as a
+    /// Share Data PDU over the full MCS/X.224/TPKT stack, in order.
+    #[test]
+    fn finalization_sequence_over_wire() {
+        use crate::finalization::{client_finalization_sequence, ControlPdu, FinalizationPdu};
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+
+        let share_id = 0x0001_00EA;
+        let seq = client_finalization_sequence(1002);
+
+        let mut decoded = Vec::new();
+        for pdu in seq {
+            let rdp = pdu.encode(share_id, 1007).unwrap();
+            let mcs = DomainPdu::SendDataRequest {
+                initiator: 1007,
+                channel_id: MCS_GLOBAL_CHANNEL_ID,
+                user_data: &rdp,
+            };
+            let packet = Tpkt::new(&X224::data(&mcs.to_vec().unwrap()).to_vec().unwrap())
+                .to_vec()
+                .unwrap();
+
+            // Peel TPKT → X.224 → MCS → Share Data → finalization PDU.
+            let tpkt = Tpkt::decode(&packet).unwrap();
+            let X224::Data(inner) = X224::decode(tpkt.payload).unwrap() else {
+                panic!("expected Data TPDU");
+            };
+            let DomainPdu::SendDataRequest { user_data, .. } = DomainPdu::decode(inner).unwrap()
+            else {
+                panic!("expected Send Data Request");
+            };
+            let (_, sid, fin) = FinalizationPdu::decode(user_data).unwrap();
+            assert_eq!(sid, share_id);
+            assert_eq!(fin, pdu);
+            decoded.push(fin);
+        }
+
+        // The order is Synchronize, Cooperate, Request Control, Font List.
+        assert!(matches!(decoded[0], FinalizationPdu::Synchronize(_)));
+        assert!(matches!(
+            decoded[2],
+            FinalizationPdu::Control(ControlPdu {
+                action: crate::finalization::CTRLACTION_REQUEST_CONTROL,
+                ..
+            })
+        ));
+        assert!(matches!(decoded[3], FinalizationPdu::FontList(_)));
     }
 }
