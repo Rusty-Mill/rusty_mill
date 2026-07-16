@@ -123,6 +123,111 @@ pub fn read_choice(r: &mut Reader<'_>) -> Result<u8> {
     r.read_u8()
 }
 
+/// Write a single-byte SELECTION (bit map of present optional fields).
+pub fn write_selection(w: &mut Writer, selection: u8) {
+    w.write_u8(selection);
+}
+
+/// Read a single-byte SELECTION.
+pub fn read_selection(r: &mut Reader<'_>) -> Result<u8> {
+    r.read_u8()
+}
+
+/// Write the "number of sets" count that precedes a `SET OF` (single byte in
+/// this subset).
+pub fn write_number_of_sets(w: &mut Writer, count: u8) {
+    w.write_u8(count);
+}
+
+/// Read the "number of sets" count.
+pub fn read_number_of_sets(r: &mut Reader<'_>) -> Result<u8> {
+    r.read_u8()
+}
+
+/// Write `n` zero padding bytes.
+pub fn write_padding(w: &mut Writer, n: usize) {
+    for _ in 0..n {
+        w.write_u8(0);
+    }
+}
+
+/// Skip `n` padding bytes.
+pub fn read_padding(r: &mut Reader<'_>, n: usize) -> Result<()> {
+    r.skip(n)
+}
+
+/// Write a constrained OCTET STRING whose length is at least `min`.
+///
+/// Only the amount above `min` is encoded in the length determinant, so a
+/// fixed-size 4-byte field with `min == 4` emits a zero length byte followed
+/// by the four content bytes.
+pub fn write_octet_string(w: &mut Writer, data: &[u8], min: usize) -> Result<()> {
+    write_length(w, data.len().saturating_sub(min))?;
+    w.write_bytes(data);
+    Ok(())
+}
+
+/// Read a constrained OCTET STRING written by [`write_octet_string`].
+pub fn read_octet_string<'a>(r: &mut Reader<'a>, min: usize) -> Result<&'a [u8]> {
+    let mlength = read_length(r)?;
+    r.read_bytes(mlength + min)
+}
+
+/// Write the six-tuple OBJECT IDENTIFIER form GCC uses (`{0 0 20 124 0 1}`).
+///
+/// The first two arcs pack into a single byte; the remaining four are one
+/// byte each, giving a fixed five-byte body.
+pub fn write_object_identifier(w: &mut Writer, oid: &[u8; 6]) -> Result<()> {
+    write_length(w, 5)?;
+    w.write_u8((oid[0] << 4) | (oid[1] & 0x0F));
+    w.write_u8(oid[2]);
+    w.write_u8(oid[3]);
+    w.write_u8(oid[4]);
+    w.write_u8(oid[5]);
+    Ok(())
+}
+
+/// Read the OBJECT IDENTIFIER form written by [`write_object_identifier`].
+pub fn read_object_identifier(r: &mut Reader<'_>) -> Result<[u8; 6]> {
+    let len = read_length(r)?;
+    if len != 5 {
+        return Err(Error::InvalidLength {
+            field: "PER object identifier",
+            length: len,
+        });
+    }
+    let b = r.read_bytes(5)?;
+    Ok([b[0] >> 4, b[0] & 0x0F, b[1], b[2], b[3], b[4]])
+}
+
+/// Write a NumericString (ASCII digits) constrained with lower bound `min`.
+///
+/// Each digit is stored as its value in a nibble, two digits per byte; an odd
+/// final digit is padded with a zero nibble.
+pub fn write_numeric_string(w: &mut Writer, digits: &[u8], min: usize) -> Result<()> {
+    write_length(w, digits.len().saturating_sub(min))?;
+    let mut i = 0;
+    while i < digits.len() {
+        let hi = digits[i].wrapping_sub(b'0');
+        let lo = if i + 1 < digits.len() {
+            digits[i + 1].wrapping_sub(b'0')
+        } else {
+            0
+        };
+        w.write_u8((hi << 4) | (lo & 0x0F));
+        i += 2;
+    }
+    Ok(())
+}
+
+/// Skip a NumericString written by [`write_numeric_string`], given the same
+/// lower bound `min`. The value itself is not needed by RDP.
+pub fn read_numeric_string(r: &mut Reader<'_>, min: usize) -> Result<()> {
+    let mlength = read_length(r)?;
+    let chars = mlength + min;
+    r.skip((chars + 1) / 2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

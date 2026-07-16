@@ -21,7 +21,8 @@
 //!             └─ MCS                  (crate::mcs)   Connect + domain PDUs
 //!                  ├─ BER codec       (crate::ber)   Connect-Initial/Response
 //!                  ├─ PER codec       (crate::per)   domain PDUs
-//!                  └─ GCC user data ...              (future)
+//!                  └─ GCC             (crate::gcc)   T.124 conference + blocks
+//!                       └─ security / capabilities ...  (future)
 //! ```
 //!
 //! ## Design
@@ -59,6 +60,7 @@
 pub mod ber;
 pub mod cursor;
 pub mod error;
+pub mod gcc;
 pub mod mcs;
 pub mod nego;
 pub mod per;
@@ -114,5 +116,41 @@ mod integration_tests {
             other => panic!("expected Data TPDU, got {other:?}"),
         };
         assert_eq!(DomainPdu::decode(inner).unwrap(), mcs);
+    }
+
+    /// The client's MCS Connect-Initial: GCC settings blocks wrapped in a
+    /// Conference Create Request, wrapped in Connect-Initial, wrapped in an
+    /// X.224 Data TPDU, wrapped in TPKT. Build it and peel it fully back.
+    #[test]
+    fn connect_initial_full_stack() {
+        use crate::gcc::{
+            self, ClientCoreData, ClientSecurityData, UserDataBlock, ENCRYPTION_METHOD_128BIT,
+        };
+        use crate::mcs::ConnectInitial;
+
+        let blocks = vec![
+            UserDataBlock::ClientCore(ClientCoreData::new(1280, 800, "rusty-rdp")),
+            UserDataBlock::ClientSecurity(ClientSecurityData {
+                encryption_methods: ENCRYPTION_METHOD_128BIT,
+                ext_encryption_methods: 0,
+            }),
+        ];
+
+        // Build bottom-up.
+        let user_data = gcc::encode_user_data(&blocks).unwrap();
+        let ccr = gcc::encode_conference_create_request(&user_data).unwrap();
+        let connect_initial = ConnectInitial::new(ccr).to_vec();
+        let tpdu = X224::data(&connect_initial).to_vec().unwrap();
+        let packet = Tpkt::new(&tpdu).to_vec().unwrap();
+
+        // Peel top-down.
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let inner = match X224::decode(tpkt.payload).unwrap() {
+            X224::Data(payload) => payload,
+            other => panic!("expected Data TPDU, got {other:?}"),
+        };
+        let ci = ConnectInitial::decode(inner).unwrap();
+        let gcc_blocks = gcc::decode_conference_create_request(&ci.user_data).unwrap();
+        assert_eq!(gcc::parse_user_data(&gcc_blocks).unwrap(), blocks);
     }
 }

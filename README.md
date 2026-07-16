@@ -18,17 +18,19 @@ Early foundation. Implemented so far, bottom-up:
 | X.224 Class 0 | `x224` | Connection Request / Confirm / Data TPDUs, cookie parsing. |
 | RDP negotiation | `nego` | `RDP_NEG_REQ` / `RSP` / `FAILURE` security selection. |
 | MCS (T.125) | `mcs` | `Connect-Initial` / `Connect-Response` and the domain PDUs (erect domain, attach user, channel join, send data). |
+| GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
-| PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs need. |
+| PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
 
-This is enough to build and parse the RDP connection handshake through MCS
-channel setup: the X.224 negotiation, the BER `Connect-Initial`/`Response`
-exchange, and the PER attach-user / channel-join / send-data domain PDUs. The
-GCC (T.124) user data carried inside `Connect-Initial`/`Response` — the
-client/server core, security, and network settings — is kept opaque for now
-and is the next layer to decode. Security, capability exchange, and the
-display/input channels build on top without disturbing what is here.
+This is enough to build and parse the RDP connection sequence through channel
+setup and settings exchange: the X.224 negotiation, the BER
+`Connect-Initial`/`Response` exchange, the GCC conference settings blocks
+carried inside them, and the PER attach-user / channel-join / send-data domain
+PDUs. The server certificate inside `TS_UD_SC_SEC1` is kept as an opaque blob
+for the security layer. Security commencement (the RSA/RC4 handshake),
+capability exchange, and the display/input channels build on top without
+disturbing what is here.
 
 ## Design principles
 
