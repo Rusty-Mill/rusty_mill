@@ -40,7 +40,9 @@
 //! * **No I/O in the codec.** Every type encodes to and decodes from byte
 //!   slices, so the same code works with blocking sockets, async runtimes,
 //!   or in-memory tests. [`tpkt::Tpkt::peek_total_len`] lets a caller frame a
-//!   TCP stream without committing to a runtime.
+//!   TCP stream without committing to a runtime. The one module that does
+//!   touch a socket, [`net`], is a thin blocking driver kept separate from
+//!   the codec.
 //! * **Explicit endianness.** [`cursor::Reader`] / [`cursor::Writer`] make
 //!   every big/little-endian access visible at the call site, because RDP
 //!   mixes the two.
@@ -79,6 +81,7 @@ pub mod input;
 pub mod license;
 pub mod mcs;
 pub mod nego;
+pub mod net;
 pub mod output;
 pub mod pdu;
 pub mod per;
