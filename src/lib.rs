@@ -30,7 +30,8 @@
 //!                  ├─ finalization    (crate::finalization)  sync/control/font
 //!                  ├─ input            (crate::input)  keyboard / mouse events
 //!                  └─ output           (crate::output)  bitmap / palette updates
-//!                       └─ bitmap RLE decode / fast-path ...  (future)
+//!                       └─ RLE decode   (crate::rle)  interleaved bitmap codec
+//!                            └─ pixel unpack / fast-path ...  (future)
 //! ```
 //!
 //! ## Design
@@ -80,6 +81,7 @@ pub mod nego;
 pub mod output;
 pub mod pdu;
 pub mod per;
+pub mod rle;
 pub mod security;
 pub mod tpkt;
 pub mod x224;

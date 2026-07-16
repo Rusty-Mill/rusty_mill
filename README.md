@@ -28,6 +28,7 @@ Early foundation. Implemented so far, bottom-up:
 | Finalization | `finalization` | Synchronize / Control / Font List / Font Map PDUs and the client finalization sequence. |
 | Input | `input` | Client Input Event PDU with scancode / Unicode / mouse / extended-mouse / sync events. |
 | Output | `output` | Server graphics Update PDUs: bitmap (rectangles + verbatim data stream), palette, synchronize; orders kept raw. |
+| Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -39,9 +40,10 @@ domain PDUs, the RSA/RC4 security handshake, the encrypted Client Info PDU, and
 the licensing round trip, the Share Control / Share Data framing that every
 session PDU rides in, the capability exchange (Demand / Confirm Active), the
 connection-finalization sequence (synchronize, control, font list/map), and
-client input events (keyboard and mouse). The server-to-client display path —
-bitmap and pointer updates, with the RLE decompressor — and fast-path framing
-build on top without disturbing what is here.
+client input events (keyboard and mouse), and the server-to-client bitmap,
+palette, and RLE-decompressed display updates. Pixel-format unpacking to RGB,
+pointer updates, and fast-path framing build on top without disturbing what is
+here.
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to

@@ -106,6 +106,24 @@ impl BitmapData {
         }
     }
 
+    /// Return the raw little-endian pixel bytes for this rectangle,
+    /// RLE-decompressing when necessary.
+    ///
+    /// For an uncompressed rectangle this clones `data`; for a compressed one
+    /// it runs the interleaved RLE decoder ([`crate::rle`]) over the payload.
+    pub fn decompressed(&self) -> Result<Vec<u8>> {
+        if self.is_compressed() {
+            crate::rle::decompress_bitmap(
+                self.compressed_payload(),
+                self.width as usize,
+                self.height as usize,
+                self.bits_per_pixel,
+            )
+        } else {
+            Ok(self.data.clone())
+        }
+    }
+
     fn encode(&self, w: &mut Writer) -> Result<()> {
         if self.data.len() > u16::MAX as usize {
             return Err(Error::Overflow {
@@ -343,6 +361,29 @@ mod tests {
         assert!(rect.is_compressed());
         assert!(!rect.has_compression_header());
         assert_eq!(rect.compressed_payload(), &[0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn decompressed_uncompressed_is_clone() {
+        let rect = BitmapData::uncompressed(0, 0, 2, 1, 8, vec![0xAA, 0xBB]);
+        assert_eq!(rect.decompressed().unwrap(), [0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn decompressed_runs_rle() {
+        // A headerless compressed rectangle: colour run of 0x77, 3 pixels.
+        let rect = BitmapData {
+            dest_left: 0,
+            dest_top: 0,
+            dest_right: 2,
+            dest_bottom: 0,
+            width: 3,
+            height: 1,
+            bits_per_pixel: 8,
+            flags: BITMAP_COMPRESSION | NO_BITMAP_COMPRESSION_HDR,
+            data: vec![0x63, 0x77], // colour run, len 3
+        };
+        assert_eq!(rect.decompressed().unwrap(), [0x77, 0x77, 0x77]);
     }
 
     #[test]
