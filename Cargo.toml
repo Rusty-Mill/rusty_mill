@@ -1,0 +1,19 @@
+[package]
+name = "rusty_rdp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A minimal, dependency-free implementation of the Remote Desktop Protocol (RDP) wire format in Rust."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_rdp"
+keywords = ["rdp", "remote-desktop", "protocol", "no-deps"]
+categories = ["network-programming", "encoding"]
+
+# Intentionally zero dependencies. The whole point of this crate is a
+# std-only RDP codec. Anything that would need a third-party crate
+# (TLS, RSA, etc.) lives behind a future feature flag, never in the core.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
