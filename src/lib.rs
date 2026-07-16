@@ -58,12 +58,14 @@
 //! ```
 
 pub mod ber;
+pub mod crypto;
 pub mod cursor;
 pub mod error;
 pub mod gcc;
 pub mod mcs;
 pub mod nego;
 pub mod per;
+pub mod security;
 pub mod tpkt;
 pub mod x224;
 
@@ -152,5 +154,70 @@ mod integration_tests {
         let ci = ConnectInitial::decode(inner).unwrap();
         let gcc_blocks = gcc::decode_conference_create_request(&ci.user_data).unwrap();
         assert_eq!(gcc::parse_user_data(&gcc_blocks).unwrap(), blocks);
+    }
+
+    /// Standard-security commencement: encrypt a client random with the
+    /// server's RSA key, ship it in a Security Exchange PDU over the wire
+    /// stack, then derive matching keys on both ends and exchange one
+    /// encrypted, MAC'd PDU.
+    #[test]
+    fn security_commencement_end_to_end() {
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+        use crate::security::{
+            self, derive_session_keys, Rc4Session, RsaPublicKey, SessionKeys, RANDOM_LEN,
+        };
+
+        // A tiny RSA key (n = 3233, e = 17) stands in for the server's; the
+        // wire path is identical to a real 2048-bit key.
+        let rsa = RsaPublicKey {
+            modulus_le: vec![0xA1, 0x0C],
+            exponent: 17,
+        };
+        let client_random = [0x5Au8; RANDOM_LEN];
+        let server_random = [0xA5u8; RANDOM_LEN];
+
+        // Client encrypts a one-byte "random" (small enough for the toy key)
+        // and frames the Security Exchange PDU through MCS/X.224/TPKT.
+        let encrypted = rsa.encrypt(&[42]).unwrap();
+        let sec_pdu = security::encode_security_exchange(&encrypted);
+        let mcs = DomainPdu::SendDataRequest {
+            initiator: 1007,
+            channel_id: MCS_GLOBAL_CHANNEL_ID,
+            user_data: &sec_pdu,
+        }
+        .to_vec()
+        .unwrap();
+        let packet = Tpkt::new(&X224::data(&mcs).to_vec().unwrap())
+            .to_vec()
+            .unwrap();
+
+        // Server peels the layers and recovers the Security Exchange payload.
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let X224::Data(x224_inner) = X224::decode(tpkt.payload).unwrap() else {
+            panic!("expected Data TPDU");
+        };
+        let DomainPdu::SendDataRequest { user_data, .. } = DomainPdu::decode(x224_inner).unwrap()
+        else {
+            panic!("expected Send Data Request");
+        };
+        let recovered = security::decode_security_exchange(user_data).unwrap();
+        assert_eq!(&recovered[..encrypted.len()], &encrypted[..]);
+
+        // Both sides derive the (mirror-image) session keys and exchange one
+        // encrypted, authenticated PDU.
+        let client_keys = derive_session_keys(&client_random, &server_random, 0x02);
+        let server_keys = SessionKeys {
+            mac_key: client_keys.mac_key.clone(),
+            encrypt_key: client_keys.decrypt_key.clone(),
+            decrypt_key: client_keys.encrypt_key.clone(),
+        };
+        let mut client = Rc4Session::new(&client_keys);
+        let mut server = Rc4Session::new(&server_keys);
+
+        let (sig, ciphertext) = client.encrypt(b"TS_INFO_PACKET");
+        assert_eq!(
+            server.decrypt(&sig, &ciphertext).unwrap(),
+            b"TS_INFO_PACKET"
+        );
     }
 }
