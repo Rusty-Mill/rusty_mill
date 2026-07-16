@@ -31,6 +31,7 @@ use std::io::{self, Read, Write};
 use crate::capabilities::{client_capability_sets, ConfirmActive, DemandActive};
 use crate::client_info::{ClientInfo, INFO_UNICODE};
 use crate::finalization::client_finalization_sequence;
+use crate::finalization::FinalizationPdu;
 use crate::gcc::{
     self, ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData,
     ServerNetworkData, UserDataBlock, ENCRYPTION_METHOD_128BIT, ENCRYPTION_METHOD_40BIT,
@@ -38,7 +39,11 @@ use crate::gcc::{
 use crate::license::LicensePdu;
 use crate::mcs::{ConnectInitial, ConnectResponse, DomainPdu, McsResult, MCS_GLOBAL_CHANNEL_ID};
 use crate::nego::{Negotiation, SecurityProtocols};
-use crate::pdu::{ShareControlHeader, PDUTYPE_DEMANDACTIVEPDU};
+use crate::output::{BitmapData, PaletteUpdate, UpdatePdu};
+use crate::pdu::{
+    ShareControlHeader, ShareDataHeader, PDUTYPE2_CONTROL, PDUTYPE2_FONTMAP, PDUTYPE2_SYNCHRONIZE,
+    PDUTYPE2_UPDATE, PDUTYPE_DEACTIVATEALLPDU, PDUTYPE_DEMANDACTIVEPDU,
+};
 use crate::security::{
     self, derive_session_keys, Rc4Session, RsaPublicKey, RANDOM_LEN, SEC_INFO_PKT, SEC_LICENSE_PKT,
 };
@@ -91,6 +96,30 @@ pub struct RdpSession {
     pub share_id: u32,
     /// The server's MCS channel id (the Demand Active `pduSource`).
     pub server_channel: u16,
+}
+
+/// A server-to-client event read after the session is active.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RdpEvent {
+    /// A bitmap update: one or more pixel rectangles.
+    Bitmap(Vec<BitmapData>),
+    /// A palette update (8bpp color table).
+    Palette(PaletteUpdate),
+    /// An update-synchronize marker.
+    UpdateSynchronize,
+    /// Raw drawing orders (not decoded here).
+    Orders(Vec<u8>),
+    /// A server connection-finalization PDU (synchronize / control / font).
+    Finalization(FinalizationPdu),
+    /// The server asked to deactivate the share (a reactivation may follow).
+    DeactivateAll,
+    /// A share PDU this driver does not model.
+    Other {
+        /// The Share Control `pduType`.
+        pdu_type: u16,
+        /// The Share Data `pduType2`, when the PDU is a Data PDU.
+        pdu_type2: Option<u8>,
+    },
 }
 
 /// The server's cryptographic parameters, extracted from `TS_UD_SC_SEC1`.
@@ -591,6 +620,47 @@ impl<S: Read + Write> RdpTransport<S> {
             "did not receive a Demand Active PDU during activation",
         ))
     }
+
+    /// Receive and classify one server-to-client PDU once the session is
+    /// active (after [`establish`](Self::establish)).
+    ///
+    /// Decrypts the PDU with the stored session, decodes the Share Control /
+    /// Share Data framing, and returns a typed [`RdpEvent`]. Graphics updates
+    /// come back as [`RdpEvent::Bitmap`] / [`RdpEvent::Palette`]; anything not
+    /// modelled is reported as [`RdpEvent::Other`] rather than an error.
+    pub fn recv_event(&mut self) -> io::Result<RdpEvent> {
+        let (_flags, body) = self.recv_wrapped()?;
+        let (control, _payload) = ShareControlHeader::decode(&body).map_err(to_io)?;
+        match control.pdu_type {
+            PDUTYPE_DEACTIVATEALLPDU => Ok(RdpEvent::DeactivateAll),
+            crate::pdu::PDUTYPE_DATAPDU => {
+                let (_source, header, _data) = ShareDataHeader::decode(&body).map_err(to_io)?;
+                match header.pdu_type2 {
+                    PDUTYPE2_UPDATE => {
+                        let (_s, _sid, update) = UpdatePdu::decode(&body).map_err(to_io)?;
+                        Ok(match update {
+                            UpdatePdu::Bitmap(rects) => RdpEvent::Bitmap(rects),
+                            UpdatePdu::Palette(palette) => RdpEvent::Palette(palette),
+                            UpdatePdu::Synchronize => RdpEvent::UpdateSynchronize,
+                            UpdatePdu::Orders(data) => RdpEvent::Orders(data),
+                        })
+                    }
+                    PDUTYPE2_SYNCHRONIZE | PDUTYPE2_CONTROL | PDUTYPE2_FONTMAP => {
+                        let (_s, _sid, fin) = FinalizationPdu::decode(&body).map_err(to_io)?;
+                        Ok(RdpEvent::Finalization(fin))
+                    }
+                    other => Ok(RdpEvent::Other {
+                        pdu_type: control.pdu_type,
+                        pdu_type2: Some(other),
+                    }),
+                }
+            }
+            other => Ok(RdpEvent::Other {
+                pdu_type: other,
+                pdu_type2: None,
+            }),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -889,6 +959,56 @@ mod tests {
             server_certificate: Vec::new(),
         })];
         assert_eq!(server_crypto(&blocks).unwrap(), None);
+    }
+
+    #[test]
+    fn recv_event_decodes_encrypted_bitmap_update() {
+        use crate::output::{BitmapData, UpdatePdu};
+        use crate::security::{derive_session_keys, SessionKeys, RANDOM_LEN};
+
+        // Mirror sessions, as after a security exchange.
+        let client_keys = derive_session_keys(&[3u8; RANDOM_LEN], &[4u8; RANDOM_LEN], 0x02);
+        let server_keys = SessionKeys {
+            mac_key: client_keys.mac_key.clone(),
+            encrypt_key: client_keys.decrypt_key.clone(),
+            decrypt_key: client_keys.encrypt_key.clone(),
+        };
+        let mut server_session = Rc4Session::new(&server_keys);
+
+        // Server encodes a bitmap update, encrypts it, frames it.
+        let update = UpdatePdu::Bitmap(vec![BitmapData::uncompressed(
+            2,
+            3,
+            1,
+            1,
+            16,
+            vec![0x00, 0xF8],
+        )]);
+        let share = update.encode(0x1234, 1002).unwrap();
+        let wrapped = security::wrap_pdu(Some(&mut server_session), 0, &share);
+        let indication = X224::data(
+            &DomainPdu::SendDataIndication {
+                initiator: 1002,
+                channel_id: 1003,
+                user_data: &wrapped,
+            }
+            .to_vec()
+            .unwrap(),
+        )
+        .to_vec()
+        .unwrap();
+
+        let mut t = RdpTransport::new(MockStream::new(framed(indication)));
+        t.session = Some(Rc4Session::new(&client_keys));
+
+        match t.recv_event().unwrap() {
+            RdpEvent::Bitmap(rects) => {
+                assert_eq!(rects.len(), 1);
+                assert_eq!(rects[0].dest_left, 2);
+                assert_eq!(rects[0].dest_top, 3);
+            }
+            other => panic!("expected Bitmap, got {other:?}"),
+        }
     }
 
     #[test]

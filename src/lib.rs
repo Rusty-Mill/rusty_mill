@@ -31,7 +31,8 @@
 //!                  ├─ input            (crate::input)  keyboard / mouse events
 //!                  └─ output           (crate::output)  bitmap / palette updates
 //!                       ├─ RLE decode   (crate::rle)  interleaved bitmap codec
-//!                       └─ pixel unpack (crate::pixel)  native format → RGBA
+//!                       ├─ pixel unpack (crate::pixel)  native format → RGBA
+//!                       └─ framebuffer  (crate::display)  blit rects to a surface
 //!                            └─ pointer updates / fast-path ...  (future)
 //! ```
 //!
@@ -74,6 +75,7 @@ pub mod capabilities;
 pub mod client_info;
 pub mod crypto;
 pub mod cursor;
+pub mod display;
 pub mod error;
 pub mod finalization;
 pub mod gcc;
