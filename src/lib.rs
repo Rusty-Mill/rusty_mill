@@ -18,7 +18,10 @@
 //!   └─ TPKT           (crate::tpkt)   4-byte length framing
 //!        └─ X.224     (crate::x224)   Class 0 CR / CC / Data TPDUs
 //!             └─ RDP negotiation      (crate::nego)  security selection
-//!             └─ MCS / PDUs ...       (future)
+//!             └─ MCS                  (crate::mcs)   Connect + domain PDUs
+//!                  ├─ BER codec       (crate::ber)   Connect-Initial/Response
+//!                  ├─ PER codec       (crate::per)   domain PDUs
+//!                  └─ GCC user data ...              (future)
 //! ```
 //!
 //! ## Design
@@ -53,9 +56,12 @@
 //! assert_eq!(X224::decode(tpkt.payload).unwrap(), x224);
 //! ```
 
+pub mod ber;
 pub mod cursor;
 pub mod error;
+pub mod mcs;
 pub mod nego;
+pub mod per;
 pub mod tpkt;
 pub mod x224;
 
@@ -82,5 +88,31 @@ mod integration_tests {
         assert_eq!(Tpkt::peek_total_len(&packet).unwrap(), Some(packet.len()));
         let tpkt = Tpkt::decode(&packet).unwrap();
         assert_eq!(X224::decode(tpkt.payload).unwrap(), x224);
+    }
+
+    /// After the X.224 handshake, RDP PDUs ride as MCS domain PDUs inside
+    /// X.224 Data TPDUs inside TPKT. Exercise that whole nesting.
+    #[test]
+    fn mcs_send_data_over_x224_over_tpkt() {
+        use crate::mcs::{DomainPdu, MCS_GLOBAL_CHANNEL_ID};
+
+        let rdp_payload = [0x11, 0x22, 0x33, 0x44];
+        let mcs = DomainPdu::SendDataRequest {
+            initiator: 1007,
+            channel_id: MCS_GLOBAL_CHANNEL_ID,
+            user_data: &rdp_payload,
+        };
+        let mcs_bytes = mcs.to_vec().unwrap();
+        let tpdu = X224::data(&mcs_bytes).to_vec().unwrap();
+        let packet = Tpkt::new(&tpdu).to_vec().unwrap();
+
+        // Peel the layers back off.
+        let tpkt = Tpkt::decode(&packet).unwrap();
+        let x224 = X224::decode(tpkt.payload).unwrap();
+        let inner = match x224 {
+            X224::Data(payload) => payload,
+            other => panic!("expected Data TPDU, got {other:?}"),
+        };
+        assert_eq!(DomainPdu::decode(inner).unwrap(), mcs);
     }
 }
