@@ -21,17 +21,21 @@ Early foundation. Implemented so far, bottom-up:
 | GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
 | Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. |
 | Crypto primitives | `crypto` | Hand-rolled MD5, SHA-1, RC4, and a minimal bignum for RSA — no crypto crate. |
+| Client Info | `client_info` | `TS_INFO_PACKET` logon data (domain/user/password/shell, extended info). |
+| Licensing | `license` | Licensing preamble and the License Error Message (`STATUS_VALID_CLIENT` detection). |
+| Session framing | `pdu` | Share Control / Share Data headers with the `PDUTYPE` / `PDUTYPE2` constants. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
 
-This is enough to build and parse the RDP connection sequence through channel
-setup, settings exchange, and standard-security commencement: the X.224
-negotiation, the BER `Connect-Initial`/`Response` exchange, the GCC conference
-settings blocks, the PER domain PDUs, and the RSA/RC4 security handshake
-(certificate parsing, client-random encryption, key derivation, and MAC'd RC4
-I/O). Capability exchange, the Client Info / licensing PDUs, and the
-display/input channels build on top without disturbing what is here.
+This is enough to build and parse the RDP connection sequence from the X.224
+negotiation all the way through the logon and licensing exchange: the BER
+`Connect-Initial`/`Response`, the GCC conference settings blocks, the PER
+domain PDUs, the RSA/RC4 security handshake, the encrypted Client Info PDU, and
+the licensing round trip — plus the Share Control / Share Data framing that
+every session PDU rides in. The capability exchange (Demand / Confirm Active),
+the connection-finalization PDUs, and the display/input channels build on top
+without disturbing what is here.
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to

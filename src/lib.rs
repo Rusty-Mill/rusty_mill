@@ -22,7 +22,11 @@
 //!                  ├─ BER codec       (crate::ber)   Connect-Initial/Response
 //!                  ├─ PER codec       (crate::per)   domain PDUs
 //!                  └─ GCC             (crate::gcc)   T.124 conference + blocks
-//!                       └─ security / capabilities ...  (future)
+//!             └─ security             (crate::security)  standard RC4/RSA
+//!             └─ Client Info          (crate::client_info)  logon
+//!             └─ licensing            (crate::license)   license exchange
+//!             └─ Share Control/Data   (crate::pdu)   session PDU framing
+//!                  └─ capabilities / input / output ...  (future)
 //! ```
 //!
 //! ## Design
@@ -58,12 +62,15 @@
 //! ```
 
 pub mod ber;
+pub mod client_info;
 pub mod crypto;
 pub mod cursor;
 pub mod error;
 pub mod gcc;
+pub mod license;
 pub mod mcs;
 pub mod nego;
+pub mod pdu;
 pub mod per;
 pub mod security;
 pub mod tpkt;
@@ -219,5 +226,59 @@ mod integration_tests {
             server.decrypt(&sig, &ciphertext).unwrap(),
             b"TS_INFO_PACKET"
         );
+    }
+
+    /// The Client Info PDU: encode logon info, MAC + RC4 it under a Basic
+    /// Security Header, and confirm the server side recovers the credentials.
+    #[test]
+    fn client_info_encrypted_exchange() {
+        use crate::client_info::ClientInfo;
+        use crate::cursor::Writer;
+        use crate::security::{
+            derive_session_keys, BasicSecurityHeader, Rc4Session, SessionKeys, RANDOM_LEN,
+            SEC_ENCRYPT, SEC_INFO_PKT,
+        };
+
+        let keys = derive_session_keys(&[7u8; RANDOM_LEN], &[9u8; RANDOM_LEN], 0x02);
+        let server_keys = SessionKeys {
+            mac_key: keys.mac_key.clone(),
+            encrypt_key: keys.decrypt_key.clone(),
+            decrypt_key: keys.encrypt_key.clone(),
+        };
+        let mut client = Rc4Session::new(&keys);
+        let mut server = Rc4Session::new(&server_keys);
+
+        // Client builds and encrypts the Client Info PDU.
+        let info = ClientInfo::new("CORP", "alice", "s3cret");
+        let (sig, ciphertext) = client.encrypt(&info.to_vec());
+        let mut w = Writer::new();
+        BasicSecurityHeader::new(SEC_INFO_PKT | SEC_ENCRYPT).encode(&mut w);
+        w.write_bytes(&sig);
+        w.write_bytes(&ciphertext);
+        let pdu = w.into_vec();
+
+        // Server splits header / signature / ciphertext and decrypts.
+        let mut r = crate::cursor::Reader::new(&pdu);
+        let header = BasicSecurityHeader::decode(&mut r).unwrap();
+        assert!(header.flags & SEC_INFO_PKT != 0);
+        let read_sig = r.read_bytes(8).unwrap();
+        let recovered = server.decrypt(read_sig, r.peek_remaining()).unwrap();
+        let decoded = ClientInfo::decode(&recovered).unwrap();
+        assert_eq!(decoded.username, "alice");
+        assert_eq!(decoded.domain, "CORP");
+    }
+
+    /// Licensing: a server "no license needed" alert round-trips and is
+    /// recognised as the go-ahead to capability exchange.
+    #[test]
+    fn licensing_valid_client_detected() {
+        use crate::license::{LicenseErrorMessage, LicensePdu};
+
+        let pdu = LicensePdu::ErrorAlert(LicenseErrorMessage::valid_client());
+        let bytes = pdu.to_vec().unwrap();
+        match LicensePdu::decode(&bytes).unwrap() {
+            LicensePdu::ErrorAlert(msg) => assert!(msg.is_valid_client()),
+            other => panic!("expected ErrorAlert, got {other:?}"),
+        }
     }
 }
