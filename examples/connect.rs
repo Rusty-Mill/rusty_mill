@@ -67,6 +67,7 @@ fn run(addr: &str, domain: &str, username: &str, password: &str) -> std::io::Res
     let mut framebuffer = Framebuffer::new(WIDTH as usize, HEIGHT as usize);
     let mut palette: Option<Vec<PaletteEntry>> = None;
     let mut rectangles = 0usize;
+    let mut pointer_updates = 0usize;
 
     loop {
         match rdp.recv_event() {
@@ -77,6 +78,7 @@ fn run(addr: &str, domain: &str, username: &str, password: &str) -> std::io::Res
                 }
             }
             Ok(RdpEvent::Palette(update)) => palette = Some(update.entries),
+            Ok(RdpEvent::Pointer(_)) => pointer_updates += 1,
             Ok(RdpEvent::DeactivateAll) => {
                 println!("server deactivated the share; stopping.");
                 break;
@@ -93,7 +95,7 @@ fn run(addr: &str, domain: &str, username: &str, password: &str) -> std::io::Res
         }
     }
 
-    println!("applied {rectangles} bitmap rectangle(s).");
+    println!("applied {rectangles} bitmap rectangle(s), {pointer_updates} pointer update(s).");
     if rectangles > 0 {
         std::fs::write("screen.ppm", framebuffer.to_ppm())?;
         println!("wrote screen.ppm ({WIDTH}x{HEIGHT}).");

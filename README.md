@@ -28,6 +28,7 @@ Early foundation. Implemented so far, bottom-up:
 | Finalization | `finalization` | Synchronize / Control / Font List / Font Map PDUs and the client finalization sequence. |
 | Input | `input` | Client Input Event PDU with scancode / Unicode / mouse / extended-mouse / sync events. |
 | Output | `output` | Server graphics Update PDUs: bitmap (rectangles + verbatim data stream), palette, synchronize; orders kept raw. |
+| Pointer | `pointer` | Server cursor updates: system / position / color / new / cached, with `ColorPointer::to_rgba()` for cursor rendering. |
 | Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
 | Framebuffer | `display` | RGBA desktop surface with clipped blit, `apply_bitmap`, and a PPM dump; assembles server bitmap updates. |

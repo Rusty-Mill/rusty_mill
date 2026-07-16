@@ -88,6 +88,7 @@ pub mod output;
 pub mod pdu;
 pub mod per;
 pub mod pixel;
+pub mod pointer;
 pub mod rle;
 pub mod security;
 pub mod tpkt;

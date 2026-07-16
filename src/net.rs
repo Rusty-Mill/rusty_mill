@@ -41,9 +41,10 @@ use crate::mcs::{ConnectInitial, ConnectResponse, DomainPdu, McsResult, MCS_GLOB
 use crate::nego::{Negotiation, SecurityProtocols};
 use crate::output::{BitmapData, PaletteUpdate, UpdatePdu};
 use crate::pdu::{
-    ShareControlHeader, ShareDataHeader, PDUTYPE2_CONTROL, PDUTYPE2_FONTMAP, PDUTYPE2_SYNCHRONIZE,
-    PDUTYPE2_UPDATE, PDUTYPE_DEACTIVATEALLPDU, PDUTYPE_DEMANDACTIVEPDU,
+    ShareControlHeader, ShareDataHeader, PDUTYPE2_CONTROL, PDUTYPE2_FONTMAP, PDUTYPE2_POINTER,
+    PDUTYPE2_SYNCHRONIZE, PDUTYPE2_UPDATE, PDUTYPE_DEACTIVATEALLPDU, PDUTYPE_DEMANDACTIVEPDU,
 };
+use crate::pointer::PointerUpdate;
 use crate::security::{
     self, derive_session_keys, Rc4Session, RsaPublicKey, RANDOM_LEN, SEC_INFO_PKT, SEC_LICENSE_PKT,
 };
@@ -105,6 +106,8 @@ pub enum RdpEvent {
     Bitmap(Vec<BitmapData>),
     /// A palette update (8bpp color table).
     Palette(PaletteUpdate),
+    /// A pointer/cursor update (shape, position, or system cursor).
+    Pointer(PointerUpdate),
     /// An update-synchronize marker.
     UpdateSynchronize,
     /// Raw drawing orders (not decoded here).
@@ -645,6 +648,10 @@ impl<S: Read + Write> RdpTransport<S> {
                             UpdatePdu::Orders(data) => RdpEvent::Orders(data),
                         })
                     }
+                    PDUTYPE2_POINTER => {
+                        let (_s, _sid, pointer) = PointerUpdate::decode(&body).map_err(to_io)?;
+                        Ok(RdpEvent::Pointer(pointer))
+                    }
                     PDUTYPE2_SYNCHRONIZE | PDUTYPE2_CONTROL | PDUTYPE2_FONTMAP => {
                         let (_s, _sid, fin) = FinalizationPdu::decode(&body).map_err(to_io)?;
                         Ok(RdpEvent::Finalization(fin))
@@ -1008,6 +1015,45 @@ mod tests {
                 assert_eq!(rects[0].dest_top, 3);
             }
             other => panic!("expected Bitmap, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recv_event_decodes_encrypted_pointer_position() {
+        use crate::pointer::PointerUpdate;
+        use crate::security::{derive_session_keys, SessionKeys, RANDOM_LEN};
+
+        let client_keys = derive_session_keys(&[5u8; RANDOM_LEN], &[6u8; RANDOM_LEN], 0x02);
+        let server_keys = SessionKeys {
+            mac_key: client_keys.mac_key.clone(),
+            encrypt_key: client_keys.decrypt_key.clone(),
+            decrypt_key: client_keys.encrypt_key.clone(),
+        };
+        let mut server_session = Rc4Session::new(&server_keys);
+
+        let share = PointerUpdate::Position { x: 100, y: 200 }
+            .encode(0x1234, 1002)
+            .unwrap();
+        let wrapped = security::wrap_pdu(Some(&mut server_session), 0, &share);
+        let indication = X224::data(
+            &DomainPdu::SendDataIndication {
+                initiator: 1002,
+                channel_id: 1003,
+                user_data: &wrapped,
+            }
+            .to_vec()
+            .unwrap(),
+        )
+        .to_vec()
+        .unwrap();
+
+        let mut t = RdpTransport::new(MockStream::new(framed(indication)));
+        t.session = Some(Rc4Session::new(&client_keys));
+        match t.recv_event().unwrap() {
+            RdpEvent::Pointer(PointerUpdate::Position { x, y }) => {
+                assert_eq!((x, y), (100, 200));
+            }
+            other => panic!("expected Pointer position, got {other:?}"),
         }
     }
 
