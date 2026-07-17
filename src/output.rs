@@ -161,7 +161,8 @@ impl BitmapData {
         Ok(())
     }
 
-    fn decode(r: &mut Reader<'_>) -> Result<BitmapData> {
+    /// Read one `TS_BITMAP_DATA` rectangle from `r` (also used by fast-path).
+    pub fn read(r: &mut Reader<'_>) -> Result<BitmapData> {
         let dest_left = r.read_u16_le()?;
         let dest_top = r.read_u16_le()?;
         let dest_right = r.read_u16_le()?;
@@ -184,6 +185,39 @@ impl BitmapData {
             data,
         })
     }
+}
+
+/// Parse a bitmap update body: `numberRectangles` then that many
+/// `TS_BITMAP_DATA` rectangles.
+///
+/// This is the bitmap update payload without the leading `updateType`, as
+/// carried by fast-path updates ([`crate::fastpath`]).
+pub fn parse_bitmap_rectangles(data: &[u8]) -> Result<Vec<BitmapData>> {
+    let mut r = Reader::new(data);
+    let count = r.read_u16_le()? as usize;
+    let mut rects = Vec::with_capacity(count);
+    for _ in 0..count {
+        rects.push(BitmapData::read(&mut r)?);
+    }
+    Ok(rects)
+}
+
+/// Parse a palette update body: `pad2Octets`, `numberColors`, then the RGB
+/// entries (the bytes after any `updateType`).
+pub fn parse_palette(data: &[u8]) -> Result<PaletteUpdate> {
+    let mut r = Reader::new(data);
+    let _pad = r.read_u16_le()?;
+    let count = r.read_u32_le()? as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let rgb = r.read_bytes(3)?;
+        entries.push(PaletteEntry {
+            red: rgb[0],
+            green: rgb[1],
+            blue: rgb[2],
+        });
+    }
+    Ok(PaletteUpdate { entries })
 }
 
 /// A palette entry (`TS_PALETTE_ENTRY`).
@@ -284,7 +318,7 @@ impl UpdatePdu {
                 let count = r.read_u16_le()? as usize;
                 let mut rects = Vec::with_capacity(count);
                 for _ in 0..count {
-                    rects.push(BitmapData::decode(&mut r)?);
+                    rects.push(BitmapData::read(&mut r)?);
                 }
                 UpdatePdu::Bitmap(rects)
             }

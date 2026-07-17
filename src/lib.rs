@@ -30,10 +30,12 @@
 //!                  ├─ finalization    (crate::finalization)  sync/control/font
 //!                  ├─ input            (crate::input)  keyboard / mouse events
 //!                  └─ output           (crate::output)  bitmap / palette updates
+//!                  ├─ pointer         (crate::pointer)  cursor updates
+//!                  └─ output           (crate::output)  bitmap / palette updates
 //!                       ├─ RLE decode   (crate::rle)  interleaved bitmap codec
 //!                       ├─ pixel unpack (crate::pixel)  native format → RGBA
 //!                       └─ framebuffer  (crate::display)  blit rects to a surface
-//!                            └─ pointer updates / fast-path ...  (future)
+//!             └─ fast-path            (crate::fastpath)  compact input/output framing
 //! ```
 //!
 //! ## Design
@@ -77,6 +79,7 @@ pub mod crypto;
 pub mod cursor;
 pub mod display;
 pub mod error;
+pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
 pub mod input;

@@ -29,6 +29,7 @@ Early foundation. Implemented so far, bottom-up:
 | Input | `input` | Client Input Event PDU with scancode / Unicode / mouse / extended-mouse / sync events. |
 | Output | `output` | Server graphics Update PDUs: bitmap (rectangles + verbatim data stream), palette, synchronize; orders kept raw. |
 | Pointer | `pointer` | Server cursor updates: system / position / color / new / cached, with `ColorPointer::to_rgba()` for cursor rendering. |
+| Fast-path | `fastpath` | The compact framing servers use for most traffic: output update parsing (bitmap/palette/pointer) and tight input event encoding. |
 | Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
 | Framebuffer | `display` | RGBA desktop surface with clipped blit, `apply_bitmap`, and a PPM dump; assembles server bitmap updates. |
@@ -106,9 +107,11 @@ cargo run --example connect -- 192.0.2.10:3389 alice
 `RdpTransport::establish()` drives the whole standard-RDP bring-up
 (negotiation → MCS → security exchange → encrypted logon → licensing →
 capabilities → finalization) and returns an active session. The example then
-pumps server updates with `recv_event()` into a `Framebuffer` until the stream
-goes quiet and writes the result to `screen.ppm`. Standard RDP security only —
-a server that requires TLS/CredSSP will reject the RDP-only negotiation.
+pumps server updates with `recv_event()` — which accepts both slow-path and
+fast-path framing — into a `Framebuffer` until the stream goes quiet and writes
+the result to `screen.ppm`; `send_input()` sends keyboard/mouse events over
+fast-path. Standard RDP security only — a server that requires TLS/CredSSP will
+reject the RDP-only negotiation.
 
 ## License
 

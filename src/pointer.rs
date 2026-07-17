@@ -71,7 +71,8 @@ impl ColorPointer {
         w.write_bytes(&self.and_mask);
     }
 
-    fn decode(r: &mut Reader<'_>) -> Result<ColorPointer> {
+    /// Read a `TS_COLORPOINTERATTRIBUTE` from `r` (also used by fast-path).
+    pub fn read(r: &mut Reader<'_>) -> Result<ColorPointer> {
         let cache_index = r.read_u16_le()?;
         let hotspot_x = r.read_u16_le()?;
         let hotspot_y = r.read_u16_le()?;
@@ -224,12 +225,12 @@ impl PointerUpdate {
                 x: r.read_u16_le()?,
                 y: r.read_u16_le()?,
             },
-            TS_PTRMSGTYPE_COLOR => PointerUpdate::Color(ColorPointer::decode(&mut r)?),
+            TS_PTRMSGTYPE_COLOR => PointerUpdate::Color(ColorPointer::read(&mut r)?),
             TS_PTRMSGTYPE_POINTER => {
                 let xor_bpp = r.read_u16_le()?;
                 PointerUpdate::New {
                     xor_bpp,
-                    pointer: ColorPointer::decode(&mut r)?,
+                    pointer: ColorPointer::read(&mut r)?,
                 }
             }
             TS_PTRMSGTYPE_CACHED => PointerUpdate::Cached(r.read_u16_le()?),
