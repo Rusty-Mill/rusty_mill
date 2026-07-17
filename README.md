@@ -37,6 +37,7 @@ Early foundation. Implemented so far, bottom-up:
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
 | Framebuffer | `display` | RGBA desktop surface with clipped blit, `apply_bitmap`, and a PPM dump; assembles server bitmap updates. |
 | TCP driver | `net` | Blocking `RdpTransport<S>` with `establish()` — the full standard-RDP bring-up (negotiation → MCS → security → logon → licensing → capabilities → finalization) — plus `establish_enhanced()` for the TLS path, the individual steps, and secure I/O-channel send/recv. The one module that touches a socket. |
+| Dynamic virtual channels | `dvc` | MS-RDPEDYC PDU framing for the `DRDYNVC` channel that RDPGFX, clipboard, and other redirection protocols multiplex over: create/data/close and the version 1–3 capability exchange. The prerequisite for the roadmap's RemoteFX/GFX and channel-redirection items below; not yet wired into `net`. |
 | TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
@@ -90,11 +91,16 @@ the order they'd add the most value:
 - **RemoteFX / GFX codec support.** Only uncompressed and interleaved-RLE
   bitmap updates are implemented today (`rle`, `pixel`). The RDP GFX pipeline
   (RemoteFX, AVC420/444, NSCodec) is what modern servers actually send by
-  default and would replace the naive bitmap path for real deployments.
+  default and would replace the naive bitmap path for real deployments. The
+  dynamic-virtual-channel framing it rides on (`dvc`) is now in place; still
+  needed: wiring `dvc` into `net`'s receive loop, the RDPGFX capability
+  negotiation and surface/cache PDUs (MS-RDPEGFX), and the codecs themselves
+  (RemoteFX's RLGR entropy coding + DWT is the biggest remaining chunk).
 - **Channels: clipboard, audio, drive, USB, smartcard, and printer
-  redirection.** Virtual channel plumbing exists at the MCS layer
-  (`ClientNetworkData` / channel join), but none of the redirection protocols
-  that ride on top are implemented.
+  redirection.** Static virtual channel plumbing exists at the MCS layer
+  (`ClientNetworkData` / channel join), and the dynamic-channel framing
+  (`dvc`) most of these ride on is implemented, but none of the redirection
+  protocols themselves (CLIPRDR, RDPDR, etc.) are.
 - **Server-side RDP.** The crate only drives the client half of the connection
   sequence (`RdpTransport::establish*`). A server role would reuse the same
   codecs but needs its own connection state machine (Connection Confirm,

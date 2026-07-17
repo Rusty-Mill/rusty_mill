@@ -36,6 +36,7 @@
 //!                       ├─ pixel unpack (crate::pixel)  native format → RGBA
 //!                       └─ framebuffer  (crate::display)  blit rects to a surface
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
+//!             └─ dynamic channels     (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -86,6 +87,7 @@ pub mod credssp;
 pub mod crypto;
 pub mod cursor;
 pub mod display;
+pub mod dvc;
 pub mod error;
 pub mod fastpath;
 pub mod finalization;
