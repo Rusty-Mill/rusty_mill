@@ -39,6 +39,7 @@
 //!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
+//!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -95,6 +96,7 @@ pub mod error;
 pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
+pub mod gfx;
 pub mod input;
 pub mod krb5;
 pub mod license;
