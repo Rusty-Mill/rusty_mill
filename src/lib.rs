@@ -38,6 +38,7 @@
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
 //!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
 //!                  └─ clipboard         (crate::cliprdr)  MS-RDPECLIP redirection PDUs
+//!                  └─ audio             (crate::rdpsnd)  MS-RDPEA redirection PDUs
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
@@ -112,6 +113,7 @@ pub mod pdu;
 pub mod per;
 pub mod pixel;
 pub mod pointer;
+pub mod rdpsnd;
 pub mod rfx;
 pub mod rle;
 pub mod security;
