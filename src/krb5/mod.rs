@@ -23,11 +23,13 @@
 //! * [`gss`] — the GSS-API / SPNEGO wrapping (RFC 2743 / 4178) that carries the
 //!   Kerberos `AP-REQ` inside CredSSP's `negoTokens`: DER OID encoding, the
 //!   `InitialContextToken` framing, and SPNEGO `NegTokenInit` / `NegTokenResp`.
+//! * [`cfx`] — the RFC 4121 per-message tokens: [`cfx::wrap`] / [`cfx::unwrap`]
+//!   (sealing) and [`cfx::mic`] / [`cfx::verify_mic`] (integrity), which
+//!   protect the CredSSP public key and credentials with the Kerberos session
+//!   key the way NTLM's `EncryptMessage` does.
 //!
-//! Still to come: the KDC transport (the AS/TGS round trips over the network),
-//! the RFC 4121 per-message Wrap tokens that seal the CredSSP public key and
-//! credentials with the Kerberos session key, and wiring it all into
-//! [`crate::credssp`].
+//! Still to come: the KDC transport (the AS/TGS round trips over the network)
+//! and wiring the Kerberos path into [`crate::credssp`] alongside NTLM.
 //!
 //! ## Security warning
 //!
@@ -36,6 +38,7 @@
 
 pub mod aes;
 pub mod asn1;
+pub mod cfx;
 pub mod crypto;
 pub mod gss;
 pub mod messages;
