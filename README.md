@@ -40,7 +40,8 @@ Early foundation. Implemented so far, bottom-up:
 | Virtual channel chunking | `vchan` | MS-RDPBCGR 2.2.6.1 `CHANNEL_PDU_HEADER` framing shared by every static virtual channel: splits outbound messages into chunks and reassembles inbound ones. What `net` uses to receive traffic on any channel beyond the I/O channel. |
 | Dynamic virtual channels | `dvc` | MS-RDPEDYC PDU framing for the `DRDYNVC` channel that RDPGFX, clipboard, and other redirection protocols multiplex over: create/data/close, the version 1–3 capability exchange, and `fragment()` for outbound message splitting. |
 | DVC session management | `dvcman` | `DvcManager` — tracks open dynamic channels, auto-accepts `Create` requests and echoes `Capabilities` requests, and reassembles a channel's own fragmented messages into `DvcEvent::{ChannelOpened, Data, ChannelClosed}`. The layer a caller drives with `net`'s `RdpEvent::ChannelData` to reach a named DVC-based protocol (e.g. RDPGFX) without hand-parsing `dvc` PDUs. |
-| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), and the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`). `bitmapData` is opaque bytes — codec decoding (RemoteFX, AVC, ClearCodec) is still to come. |
+| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), and the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`). |
+| RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 entropy decoding, the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`. RLGR3, the auxiliary control PDUs (`TS_RFX_SYNC`/`CONTEXT`/`CHANNELS`/`REGION`/`FRAME_BEGIN`/`END`), and encoding are not implemented. |
 | TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
@@ -91,19 +92,18 @@ transport that fetches the ticket in the first place.
 Known gaps versus full-featured implementations (FreeRDP, IronRDP), roughly in
 the order they'd add the most value:
 
-- **RemoteFX / GFX codec support.** Only uncompressed and interleaved-RLE
-  bitmap updates are implemented today (`rle`, `pixel`). The RDP GFX pipeline
-  (RemoteFX, AVC420/444, NSCodec) is what modern servers actually send by
-  default and would replace the naive bitmap path for real deployments. The
-  channel plumbing it rides on is wired end to end, including a session
-  manager (`dvcman`) that opens named channels and reassembles their traffic,
-  and the MS-RDPEGFX capability negotiation and surface/frame PDUs (`gfx`)
-  built on top of it; still needed: the cache PDUs (`SURFACETOCACHE`,
-  `CACHETOSURFACE`, `CACHEIMPORTOFFER`/`REPLY`), surface composition
-  (`SOLIDFILL`, `SURFACETOSURFACE`), output mapping (`RESETGRAPHICS`,
-  `MAPSURFACETO*`), and the codecs themselves — `gfx` carries `bitmapData` as
-  opaque bytes, with RemoteFX's RLGR entropy coding + DWT the biggest
-  remaining chunk.
+- **RemoteFX / GFX codec support.** The channel plumbing (`vchan`, `dvc`,
+  `dvcman`) and the MS-RDPEGFX capability negotiation and surface/frame PDUs
+  (`gfx`) are wired end to end, and the RemoteFX tile codec itself is now
+  implemented (`rfx`): RLGR1 entropy decoding, the 3-level 5/3 inverse DWT,
+  dequantization, and YCbCr→RGB, decoding a `TS_RFX_TILESET` straight to
+  RGB pixels. Still needed: RLGR3, the auxiliary control PDUs (`TS_RFX_SYNC`,
+  `TS_RFX_CONTEXT`, `TS_RFX_CHANNELS`, `TS_RFX_REGION`, `TS_RFX_FRAME_BEGIN`/
+  `END`) that wrap a tile set on the wire, the cache PDUs (`SURFACETOCACHE`,
+  `CACHETOSURFACE`, `CACHEIMPORTOFFER`/`REPLY`) and surface composition
+  (`SOLIDFILL`, `SURFACETOSURFACE`) in `gfx`, and the other GFX codecs
+  (AVC420/444, ClearCodec, Planar) — `gfx` still carries their `bitmapData`
+  as opaque bytes.
 - **Channels: clipboard, audio, drive, USB, smartcard, and printer
   redirection.** The static/dynamic virtual channel plumbing all of these
   ride on (`vchan`, `dvc`, `dvcman`, and `net`'s generic channel routing) is
