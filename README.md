@@ -82,6 +82,24 @@ transport that fetches the ticket in the first place.
 > man-in-the-middle — bring your own verified `rustls` stream and use
 > `establish_enhanced()` if you need that.
 
+## Roadmap
+
+Known gaps versus full-featured implementations (FreeRDP, IronRDP), roughly in
+the order they'd add the most value:
+
+- **RemoteFX / GFX codec support.** Only uncompressed and interleaved-RLE
+  bitmap updates are implemented today (`rle`, `pixel`). The RDP GFX pipeline
+  (RemoteFX, AVC420/444, NSCodec) is what modern servers actually send by
+  default and would replace the naive bitmap path for real deployments.
+- **Channels: clipboard, audio, drive, USB, smartcard, and printer
+  redirection.** Virtual channel plumbing exists at the MCS layer
+  (`ClientNetworkData` / channel join), but none of the redirection protocols
+  that ride on top are implemented.
+- **Server-side RDP.** The crate only drives the client half of the connection
+  sequence (`RdpTransport::establish*`). A server role would reuse the same
+  codecs but needs its own connection state machine (Connection Confirm,
+  Connect-Response, license issuance, Demand Active, etc.).
+
 ## Design principles
 
 - **No I/O in the codec.** The codec types encode to and decode from byte
