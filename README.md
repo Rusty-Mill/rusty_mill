@@ -43,6 +43,7 @@ Early foundation. Implemented so far, bottom-up:
 | Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), and the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`). |
 | RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 entropy decoding, the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`. RLGR3, the auxiliary control PDUs (`TS_RFX_SYNC`/`CONTEXT`/`CHANNELS`/`REGION`/`FRAME_BEGIN`/`END`), and encoding are not implemented. |
 | Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), and data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`). File copy/paste and the Short Format Name variant are not implemented. |
+| Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), and wave playback (`encode_wave`/`decode_wave` hiding the WaveInfo/Wave PDU split, `WaveConfirmPdu`), plus `ClosePdu`. Volume/pitch control, `SNDC_WAVE2`, encryption, and the UDP transport variants are not implemented. |
 | TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
@@ -105,13 +106,14 @@ the order they'd add the most value:
   (`SOLIDFILL`, `SURFACETOSURFACE`) in `gfx`, and the other GFX codecs
   (AVC420/444, ClearCodec, Planar) — `gfx` still carries their `bitmapData`
   as opaque bytes.
-- **Channels: audio, drive, USB, smartcard, and printer redirection.** The
+- **Channels: drive, USB, smartcard, and printer redirection.** The
   static/dynamic virtual channel plumbing all of these ride on (`vchan`,
   `dvc`, `dvcman`, and `net`'s generic channel routing) is implemented end
-  to end, and clipboard redirection (CLIPRDR, `cliprdr`) is now implemented
-  for text; still needed: clipboard file copy/paste, and the other
-  redirection protocols themselves (RDPDR for drive/USB/smartcard/printer,
-  RDPSND/RDPEA for audio) aren't.
+  to end, and both clipboard redirection (CLIPRDR, `cliprdr`, text only)
+  and audio redirection (RDPEA, `rdpsnd`, PCM/format negotiation and wave
+  playback) are now implemented; still needed: clipboard file copy/paste,
+  audio volume/pitch/encryption, and RDPDR (drive/USB/smartcard/printer
+  redirection), which isn't implemented at all yet.
 - **Server-side RDP.** The crate only drives the client half of the connection
   sequence (`RdpTransport::establish*`). A server role would reuse the same
   codecs but needs its own connection state machine (Connection Confirm,
