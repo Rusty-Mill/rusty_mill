@@ -8,6 +8,10 @@
 //!   crate's MD4/MD5/HMAC-MD5/RC4 primitives. The string-to-key is the NTLM NT
 //!   hash, so a Kerberos ticket for a workgroup-style account shares its key
 //!   material with NTLM.
+//! * [`aes`] — the modern AES encryption profiles (etypes 17/18,
+//!   `aes*-cts-hmac-sha1-96`): n-fold, DK/DR key derivation, the PBKDF2
+//!   string-to-key, AES-CBC-CTS, and the HMAC-SHA1-96 checksum. These are what
+//!   current KDCs prefer.
 //! * [`asn1`] — the Kerberos DER building blocks (`[APPLICATION]`/context tags,
 //!   signed `Int32`, `GeneralString`, `KerberosTime`, `KerberosFlags`) and the
 //!   small shared structures ([`asn1::PrincipalName`], [`asn1::EncryptedData`],
@@ -17,18 +21,21 @@
 //!   ([`messages::KdcReq`] / [`messages::KdcRep`] with [`messages::PaData`]),
 //!   [`messages::EncKdcRepPart`], and [`messages::KrbError`].
 //!
-//! Still to come: the KDC transport, the AES encryption types (17/18), and the
-//! SPNEGO + GSS-API wrapping that plugs Kerberos into [`crate::credssp`].
+//! Still to come: the KDC transport (the AS/TGS round trips over the network)
+//! and the SPNEGO + GSS-API wrapping that plugs Kerberos into
+//! [`crate::credssp`].
 //!
 //! ## Security warning
 //!
-//! Only RC4-HMAC is implemented so far; it is deprecated and weak. It exists
-//! for interoperability with deployments that still accept it.
+//! RC4-HMAC (etype 23) is deprecated and weak; it exists only for
+//! interoperability. Prefer the AES profiles.
 
+pub mod aes;
 pub mod asn1;
 pub mod crypto;
 pub mod messages;
 
+pub use aes::{AesKey, ETYPE_AES128_CTS_HMAC_SHA1_96, ETYPE_AES256_CTS_HMAC_SHA1_96};
 pub use asn1::{Checksum, EncryptedData, EncryptionKey, KerberosTime, PrincipalName};
 pub use crypto::{CKSUMTYPE_HMAC_MD5, ETYPE_RC4_HMAC};
 pub use messages::{ApReq, Authenticator, KdcRep, KdcReq, KrbError, Ticket};
