@@ -19,6 +19,11 @@
 //! The public-key binding uses the version 5+ nonce hash (SHA-256 of a client
 //! nonce and the server key) when the server advertises CredSSP ≥ 5, and the
 //! legacy "public key + 1" scheme otherwise.
+//!
+//! [`KerberosCredSspClient`] is the Kerberos counterpart: it carries the
+//! SPNEGO-wrapped `AP-REQ` in `negoTokens` and seals the public key and
+//! credentials with the Kerberos session key (RFC 4121 Wrap tokens,
+//! [`crate::krb5::cfx`]) instead of the NTLM context.
 
 use crate::ber::{
     expect_tag, read_integer, read_octet_string, write_integer, write_octet_string, write_tlv,
@@ -419,6 +424,139 @@ pub fn peek_version(buf: &[u8]) -> Result<u32> {
     read_integer(&mut r)
 }
 
+// ---------------------------------------------------------------------------
+// CredSSP over Kerberos
+// ---------------------------------------------------------------------------
+
+/// Drives CredSSP using a Kerberos ticket instead of NTLM.
+///
+/// The Kerberos GSS context is set up by the client's `AP-REQ` (carried in the
+/// first message's SPNEGO token) and the server's `AP-REP`; the CredSSP public
+/// key and credentials are then sealed with the shared session key using the
+/// RFC 4121 Wrap tokens ([`crate::krb5::cfx`]). This is the same three-leg
+/// shape as the NTLM path, one round shorter.
+///
+/// Obtaining the ticket and session key from a KDC is out of scope here — pass
+/// an already-built `AP-REQ` and the matching AES session key (e.g. from a
+/// credential cache). The nonce and per-message confounders are injected so
+/// the exchange is testable; real callers pass OS randomness.
+pub struct KerberosCredSspClient {
+    session_key: crate::krb5::aes::AesKey,
+    ap_req: Vec<u8>,
+    public_key: Vec<u8>,
+    nonce: [u8; 32],
+    domain: String,
+    user: String,
+    password: String,
+    seq: u64,
+}
+
+impl KerberosCredSspClient {
+    /// Create a client from a Kerberos AP-REQ, its session key, and the
+    /// server's TLS `SubjectPublicKeyInfo`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session_key: crate::krb5::aes::AesKey,
+        ap_req: Vec<u8>,
+        public_key: Vec<u8>,
+        nonce: [u8; 32],
+        domain: &str,
+        user: &str,
+        password: &str,
+    ) -> Self {
+        KerberosCredSspClient {
+            session_key,
+            ap_req,
+            public_key,
+            nonce,
+            domain: domain.to_string(),
+            user: user.to_string(),
+            password: password.to_string(),
+            seq: 0,
+        }
+    }
+
+    /// Leg 1: the `TSRequest` carrying the SPNEGO/AP-REQ token and the sealed
+    /// public-key binding. `confounder` is 16 bytes of randomness.
+    pub fn initial_request(&mut self, confounder: &[u8]) -> Vec<u8> {
+        let spnego = crate::krb5::gss::spnego_init_kerberos(&self.ap_req);
+        let binding = hash_binding(CLIENT_TO_SERVER_MAGIC, &self.nonce, &self.public_key);
+        let pub_key_auth = crate::krb5::cfx::wrap(
+            &self.session_key,
+            crate::krb5::cfx::KG_USAGE_INITIATOR_SEAL,
+            self.seq,
+            false,
+            true,
+            &binding,
+            confounder,
+        );
+        self.seq += 1;
+        TsRequest {
+            version: CLIENT_VERSION,
+            nego_tokens: vec![spnego],
+            pub_key_auth: Some(pub_key_auth),
+            client_nonce: Some(self.nonce.to_vec()),
+            ..Default::default()
+        }
+        .to_vec()
+    }
+
+    /// Leg 3: verify the server's `AP-REP` and sealed public-key confirmation,
+    /// then return the `TSRequest` carrying the sealed credentials.
+    pub fn finish(&mut self, server_msg: &[u8], confounder: &[u8]) -> Result<Vec<u8>> {
+        let request = TsRequest::decode(server_msg)?;
+        check_error(&request)?;
+
+        // The server's SPNEGO reply should not be a rejection.
+        if let Some(token) = request.nego_tokens.first() {
+            let resp = crate::krb5::gss::NegTokenResp::decode(token)?;
+            if resp.neg_state == Some(crate::krb5::gss::NEG_STATE_REJECT) {
+                return Err(Error::InvalidValue {
+                    field: "SPNEGO negState",
+                    value: "reject".to_string(),
+                });
+            }
+        }
+
+        // Verify the server's sealed public-key binding.
+        let pk = request.pub_key_auth.ok_or(Error::InvalidValue {
+            field: "CredSSP server response",
+            value: "missing pubKeyAuth".to_string(),
+        })?;
+        let received = crate::krb5::cfx::unwrap(
+            &self.session_key,
+            crate::krb5::cfx::KG_USAGE_ACCEPTOR_SEAL,
+            &pk,
+        )?;
+        let expected = hash_binding(SERVER_TO_CLIENT_MAGIC, &self.nonce, &self.public_key);
+        if received != expected {
+            return Err(Error::InvalidValue {
+                field: "CredSSP public key confirmation",
+                value: "mismatch".to_string(),
+            });
+        }
+
+        // Seal and delegate the credentials.
+        let credentials = encode_ts_credentials(&self.domain, &self.user, &self.password);
+        let auth_info = crate::krb5::cfx::wrap(
+            &self.session_key,
+            crate::krb5::cfx::KG_USAGE_INITIATOR_SEAL,
+            self.seq,
+            false,
+            true,
+            &credentials,
+            confounder,
+        );
+        self.seq += 1;
+        Ok(TsRequest {
+            version: CLIENT_VERSION,
+            auth_info: Some(auth_info),
+            ..Default::default()
+        }
+        .to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +710,125 @@ mod tests {
     /// its server-direction keys equal the client's client-direction keys.
     fn mirror_context(esk: &[u8; 16]) -> NtlmContext {
         NtlmContext::mirror_for_test(esk)
+    }
+
+    #[test]
+    fn full_kerberos_credssp_exchange_against_mock_server() {
+        // End-to-end CredSSP over Kerberos: the client and a mock acceptor
+        // share the AES session key (as they would after AP-REQ/AP-REP), so
+        // the acceptor can open the client's Wrap tokens and seal its own.
+        use crate::krb5::aes::{AesKey, ETYPE_AES256_CTS_HMAC_SHA1_96};
+        use crate::krb5::cfx;
+        use crate::krb5::gss::{self, NegTokenResp, NEG_STATE_ACCEPT_COMPLETED};
+        use crate::krb5::messages::{ApReq, Ticket, AP_OPT_MUTUAL_REQUIRED};
+        use crate::krb5::{EncryptedData, PrincipalName};
+
+        let public_key = vec![0x30, 0x82, 0x01, 0x0A, 0xCA, 0xFE, 0xBA, 0xBE];
+        let nonce = [0x66u8; 32];
+
+        // The GSS session key (in reality the AP-REQ authenticator subkey).
+        let session_key =
+            AesKey::from_password(ETYPE_AES256_CTS_HMAC_SHA1_96, "s3cr3t", b"EXAMPLE.COMalice")
+                .unwrap();
+        // A plausible AP-REQ (the mock never decrypts it).
+        let princ = |t, parts: &[&str]| PrincipalName {
+            name_type: t,
+            name_string: parts.iter().map(|s| s.to_string()).collect(),
+        };
+        let ticket = Ticket {
+            realm: "EXAMPLE.COM".to_string(),
+            sname: princ(2, &["TERMSRV", "host.example.com"]),
+            enc_part: EncryptedData {
+                etype: 18,
+                kvno: Some(2),
+                cipher: vec![0xAB; 32],
+            },
+        };
+        let authenticator = EncryptedData {
+            etype: 18,
+            kvno: None,
+            cipher: vec![0xCD; 48],
+        };
+        let ap_req = ApReq {
+            ap_options: AP_OPT_MUTUAL_REQUIRED,
+            ticket,
+            authenticator,
+        }
+        .encode();
+
+        let mut client = KerberosCredSspClient::new(
+            AesKey::from_key(ETYPE_AES256_CTS_HMAC_SHA1_96, session_key.key().to_vec()).unwrap(),
+            ap_req.clone(),
+            public_key.clone(),
+            nonce,
+            "EXAMPLE.COM",
+            "alice",
+            "s3cr3t",
+        );
+
+        // Leg 1: SPNEGO/AP-REQ + sealed client binding.
+        let leg1 = client.initial_request(&[0x01u8; 16]);
+        let req1 = TsRequest::decode(&leg1).unwrap();
+        assert_eq!(req1.nego_tokens.len(), 1);
+        assert!(req1.client_nonce.is_some());
+
+        // The mock acceptor verifies the SPNEGO carries the Kerberos AP-REQ.
+        let init = gss::NegTokenInit::decode(&req1.nego_tokens[0]).unwrap();
+        assert_eq!(init.mech_types[0], gss::KRB5_OID);
+        let (mech_oid, inner) =
+            gss::unwrap_initial_context_token(init.mech_token.as_ref().unwrap()).unwrap();
+        assert_eq!(mech_oid, gss::KRB5_OID);
+        assert_eq!(&inner[..2], &[0x01, 0x00]);
+        assert_eq!(&inner[2..], &ap_req[..]);
+
+        // The acceptor opens the client's sealed public-key binding.
+        let client_binding = cfx::unwrap(
+            &session_key,
+            cfx::KG_USAGE_INITIATOR_SEAL,
+            req1.pub_key_auth.as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            client_binding,
+            hash_binding(CLIENT_TO_SERVER_MAGIC, &nonce, &public_key)
+        );
+
+        // Leg 2: the acceptor replies with an AP-REP token and its own sealed
+        // binding, keyed with the acceptor-seal usage.
+        let server_binding = hash_binding(SERVER_TO_CLIENT_MAGIC, &nonce, &public_key);
+        let server_pub_key_auth = cfx::wrap(
+            &session_key,
+            cfx::KG_USAGE_ACCEPTOR_SEAL,
+            0,
+            true,
+            true,
+            &server_binding,
+            &[0x02u8; 16],
+        );
+        let ap_rep_token = NegTokenResp {
+            neg_state: Some(NEG_STATE_ACCEPT_COMPLETED),
+            supported_mech: Some(gss::KRB5_OID.to_vec()),
+            response_token: Some(vec![0x02, 0x00, 0x11, 0x22]), // stand-in AP-REP
+            mech_list_mic: None,
+        }
+        .to_vec();
+        let leg2 = TsRequest {
+            version: 6,
+            nego_tokens: vec![ap_rep_token],
+            pub_key_auth: Some(server_pub_key_auth),
+            ..Default::default()
+        }
+        .to_vec();
+
+        // Leg 3: the client verifies and delegates its credentials.
+        let leg3 = client.finish(&leg2, &[0x03u8; 16]).unwrap();
+        let req3 = TsRequest::decode(&leg3).unwrap();
+        let auth_info = req3.auth_info.unwrap();
+        let credentials =
+            cfx::unwrap(&session_key, cfx::KG_USAGE_INITIATOR_SEAL, &auth_info).unwrap();
+        assert_eq!(
+            credentials,
+            encode_ts_credentials("EXAMPLE.COM", "alice", "s3cr3t")
+        );
     }
 }

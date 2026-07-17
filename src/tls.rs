@@ -35,7 +35,8 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
-use crate::credssp::CredSspClient;
+use crate::credssp::{CredSspClient, KerberosCredSspClient};
+use crate::krb5::aes::AesKey;
 use crate::nego::SecurityProtocols;
 use crate::net::{EstablishConfig, RdpSession, RdpTransport};
 
@@ -158,6 +159,100 @@ fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> 
     let leg4 = read_ts_request(tls)?;
     let leg5 = client.finish(&leg4).map_err(to_io)?;
     tls.write_all(&leg5)?;
+    tls.flush()?;
+    Ok(())
+}
+
+/// Connect to an RDP server over TLS using a Kerberos ticket for NLA.
+///
+/// Same as [`connect_tls`] but authenticates with Kerberos instead of NTLM:
+/// negotiates `HYBRID`, upgrades to TLS, runs the CredSSP exchange with the
+/// caller-provided `AP-REQ` and its `session_key` (obtain these from a KDC or
+/// a credential cache — fetching them is out of scope), and finishes with
+/// [`RdpTransport::establish_enhanced`].
+///
+/// The server certificate is **not** verified — see the [module
+/// docs](self#certificate-verification).
+pub fn connect_tls_kerberos(
+    addr: &str,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+
+    // Negotiate HYBRID on the raw TCP connection.
+    let tcp = TcpStream::connect(addr)?;
+    let mut pre = RdpTransport::new(tcp);
+    let selected = pre.negotiate(SecurityProtocols::HYBRID, Some(&config.username))?;
+    if selected != SecurityProtocols::HYBRID && selected != SecurityProtocols::HYBRID_EX {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("server did not select CredSSP/HYBRID (got {selected:?})"),
+        ));
+    }
+    let tcp = pre.into_inner();
+
+    let tls_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+        .with_no_client_auth();
+    let server_name = ServerName::try_from(host.to_string()).map_err(|e| {
+        io::Error::new(io::ErrorKind::InvalidInput, format!("bad server name: {e}"))
+    })?;
+    let conn = ClientConnection::new(Arc::new(tls_config), server_name)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("TLS setup failed: {e}")))?;
+    let mut tls = StreamOwned::new(conn, tcp);
+
+    run_credssp_kerberos(&mut tls, config, ap_req, session_key)?;
+
+    let mut transport = RdpTransport::new_enhanced(tls);
+    let session = transport.establish_enhanced(config, selected)?;
+    Ok((transport, session))
+}
+
+/// Run the Kerberos CredSSP exchange over an established TLS stream.
+fn run_credssp_kerberos(
+    tls: &mut TlsStream,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+) -> io::Result<()> {
+    while tls.conn.is_handshaking() {
+        if tls.conn.complete_io(&mut tls.sock)?.0 == 0 && tls.conn.is_handshaking() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "TLS handshake stalled",
+            ));
+        }
+    }
+    let public_key = server_public_key(tls)?;
+
+    // Nonce plus two 16-byte GSS confounders.
+    let mut seed = [0u8; 64];
+    File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    let mut nonce = [0u8; 32];
+    nonce.copy_from_slice(&seed[..32]);
+    let conf1 = &seed[32..48];
+    let conf2 = &seed[48..64];
+
+    let mut client = KerberosCredSspClient::new(
+        session_key,
+        ap_req,
+        public_key,
+        nonce,
+        &config.domain,
+        &config.username,
+        &config.password,
+    );
+
+    // Leg 1: SPNEGO/AP-REQ + sealed public key.
+    tls.write_all(&client.initial_request(conf1))?;
+    tls.flush()?;
+    // Leg 2 → Leg 3: AP-REP + server public key in, sealed credentials out.
+    let leg2 = read_ts_request(tls)?;
+    let leg3 = client.finish(&leg2, conf2).map_err(to_io)?;
+    tls.write_all(&leg3)?;
     tls.flush()?;
     Ok(())
 }
