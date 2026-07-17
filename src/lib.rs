@@ -36,7 +36,8 @@
 //!                       ├─ pixel unpack (crate::pixel)  native format → RGBA
 //!                       └─ framebuffer  (crate::display)  blit rects to a surface
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
-//!             └─ dynamic channels     (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
+//!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
+//!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -109,6 +110,7 @@ pub mod security;
 #[cfg(feature = "tls")]
 pub mod tls;
 pub mod tpkt;
+pub mod vchan;
 pub mod x224;
 
 pub use error::{Error, Result};

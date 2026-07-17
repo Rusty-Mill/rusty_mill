@@ -35,6 +35,11 @@
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
 
+/// The static virtual channel name that carries all dynamic-channel traffic —
+/// request this via [`crate::net::EstablishConfig::extra_channels`] to enable
+/// DVC-based protocols (RDPGFX, redirection).
+pub const DRDYNVC_CHANNEL_NAME: &str = "DRDYNVC";
+
 // Cmd values (MS-RDPEDYC 2.2, the header's high nibble).
 /// `DYNVC_CREATE_REQ` / `DYNVC_CREATE_RSP`.
 pub const CMD_CREATE: u8 = 0x01;
