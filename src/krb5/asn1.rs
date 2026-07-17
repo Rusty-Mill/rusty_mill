@@ -7,7 +7,7 @@
 //! [`EncryptionKey`], [`Checksum`] — that the message-level PDUs build on. It
 //! layers on the definite-length TLV helpers in [`crate::ber`].
 
-use crate::ber::{expect_tag, write_tlv, TAG_INTEGER, TAG_SEQUENCE};
+use crate::ber::{expect_tag, read_integer, write_integer, write_tlv, TAG_INTEGER, TAG_SEQUENCE};
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
 
@@ -17,6 +17,8 @@ pub const TAG_GENERAL_STRING: &[u8] = &[0x1B];
 pub const TAG_GENERALIZED_TIME: &[u8] = &[0x18];
 /// `OCTET STRING` universal tag.
 pub const TAG_OCTET_STRING: &[u8] = &[0x04];
+/// `BIT STRING` universal tag (used by `KerberosFlags`).
+pub const TAG_BIT_STRING: &[u8] = &[0x03];
 
 /// The `[APPLICATION n]` (constructed) tag byte for `n < 31`.
 pub fn application_tag(n: u8) -> [u8; 1] {
@@ -94,6 +96,77 @@ pub fn write_context_int32(w: &mut Writer, n: u8, value: i32) {
 pub fn read_context_int32(r: &mut Reader<'_>, n: u8) -> Result<i32> {
     expect_context(r, n)?;
     read_int32(r)
+}
+
+/// Write a context-tagged `[n]` unsigned integer (`UInt32`).
+pub fn write_context_uint32(w: &mut Writer, n: u8, value: u32) {
+    let mut inner = Writer::new();
+    write_integer(&mut inner, value);
+    write_context(w, n, inner.as_slice());
+}
+
+/// Read a context-tagged `[n]` unsigned integer (`UInt32`).
+pub fn read_context_uint32(r: &mut Reader<'_>, n: u8) -> Result<u32> {
+    expect_context(r, n)?;
+    read_integer(r)
+}
+
+// ---------------------------------------------------------------------------
+// KerberosFlags (BIT STRING)
+// ---------------------------------------------------------------------------
+
+/// Write a 32-bit `KerberosFlags` value as a DER BIT STRING (no unused bits,
+/// four bytes, most-significant bit first).
+pub fn write_flags(w: &mut Writer, flags: u32) {
+    let mut content = Vec::with_capacity(5);
+    content.push(0x00); // unused bits
+    content.extend_from_slice(&flags.to_be_bytes());
+    write_tlv(w, TAG_BIT_STRING, &content);
+}
+
+/// Read a `KerberosFlags` BIT STRING into a 32-bit value (right-padded with
+/// zeros if fewer than four bytes are present).
+pub fn read_flags(r: &mut Reader<'_>) -> Result<u32> {
+    let len = expect_tag(r, TAG_BIT_STRING)?;
+    if len == 0 {
+        return Err(Error::InvalidLength {
+            field: "KerberosFlags",
+            length: len,
+        });
+    }
+    let content = r.read_bytes(len)?;
+    // content[0] is the count of unused trailing bits; ignore it here.
+    let mut bytes = [0u8; 4];
+    for (i, b) in content[1..].iter().take(4).enumerate() {
+        bytes[i] = *b;
+    }
+    Ok(u32::from_be_bytes(bytes))
+}
+
+/// Write a context-tagged `[n]` `KerberosFlags`.
+pub fn write_context_flags(w: &mut Writer, n: u8, flags: u32) {
+    let mut inner = Writer::new();
+    write_flags(&mut inner, flags);
+    write_context(w, n, inner.as_slice());
+}
+
+/// Read a context-tagged `[n]` `KerberosFlags`.
+pub fn read_context_flags(r: &mut Reader<'_>, n: u8) -> Result<u32> {
+    expect_context(r, n)?;
+    read_flags(r)
+}
+
+/// Write a context-tagged `[n]` `KerberosTime`.
+pub fn write_context_time(w: &mut Writer, n: u8, time: &KerberosTime) {
+    let mut inner = Writer::new();
+    time.write(&mut inner);
+    write_context(w, n, inner.as_slice());
+}
+
+/// Read a context-tagged `[n]` `KerberosTime`.
+pub fn read_context_time(r: &mut Reader<'_>, n: u8) -> Result<KerberosTime> {
+    expect_context(r, n)?;
+    KerberosTime::read(r)
 }
 
 // ---------------------------------------------------------------------------
