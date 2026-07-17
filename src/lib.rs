@@ -38,6 +38,13 @@
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
 //! ```
 //!
+//! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
+//! raw TCP connection and the stream is upgraded to TLS; NTLMv2
+//! ([`crate::ntlm`]) and CredSSP ([`crate::credssp`]) then authenticate inside
+//! the tunnel before the MCS sequence. The TLS bytes are the one thing behind
+//! an optional feature (`tls`); every codec and the NTLM/CredSSP crypto stay
+//! dependency-free.
+//!
 //! ## Design
 //!
 //! * **No I/O in the codec.** Every type encodes to and decodes from byte
@@ -75,6 +82,7 @@
 pub mod ber;
 pub mod capabilities;
 pub mod client_info;
+pub mod credssp;
 pub mod crypto;
 pub mod cursor;
 pub mod display;
@@ -87,6 +95,7 @@ pub mod license;
 pub mod mcs;
 pub mod nego;
 pub mod net;
+pub mod ntlm;
 pub mod output;
 pub mod pdu;
 pub mod per;

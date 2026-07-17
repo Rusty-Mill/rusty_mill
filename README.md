@@ -20,7 +20,9 @@ Early foundation. Implemented so far, bottom-up:
 | MCS (T.125) | `mcs` | `Connect-Initial` / `Connect-Response` and the domain PDUs (erect domain, attach user, channel join, send data). |
 | GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
 | Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. |
-| Crypto primitives | `crypto` | Hand-rolled MD5, SHA-1, RC4, and a minimal bignum for RSA — no crypto crate. |
+| Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5, RC4, and a minimal bignum for RSA — no crypto crate. |
+| NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP): NEGOTIATE/CHALLENGE/AUTHENTICATE messages, the NTLMv2 response and key schedule, and the extended-session-security sealing used by CredSSP. |
+| CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): NTLM tokens, the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation. Pure codec + crypto, driven over TLS by the `tls` feature. |
 | Client Info | `client_info` | `TS_INFO_PACKET` logon data (domain/user/password/shell, extended info). |
 | Licensing | `license` | Licensing preamble and the License Error Message (`STATUS_VALID_CLIENT` detection). |
 | Session framing | `pdu` | Share Control / Share Data headers with the `PDUTYPE` / `PDUTYPE2` constants. |
@@ -57,8 +59,14 @@ selects `SSL` on the raw TCP connection, the stream is upgraded to TLS, and
 capabilities and finalization inside the tunnel with the RDP security layer
 switched off (no Security Exchange, no RC4 — TLS carries confidentiality). The
 protocol logic for this lives entirely in the dependency-free core; the actual
-TLS bytes are the one thing behind an optional feature. CredSSP/NLA (the
-`HYBRID` path) is not yet implemented and is reported as a clear error.
+TLS bytes are the one thing behind an optional feature.
+
+CredSSP / NLA (the `HYBRID` path) is implemented too: NTLMv2 authentication,
+the CredSSP `TSRequest` exchange with the public-key channel binding, and
+sealed credential delegation — all in the dependency-free core (`ntlm`,
+`credssp`), verified against the published MS-NLMP test vectors. With the `tls`
+feature, `connect_tls()` runs the whole exchange over the TLS channel when the
+server selects `HYBRID`. Only NTLMv2 is supported (no Kerberos).
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
