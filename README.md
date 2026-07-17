@@ -36,7 +36,7 @@ Early foundation. Implemented so far, bottom-up:
 | Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
 | Framebuffer | `display` | RGBA desktop surface with clipped blit, `apply_bitmap`, and a PPM dump; assembles server bitmap updates. |
-| TCP driver | `net` | Blocking `RdpTransport<S>` with `establish()` — the full standard-RDP bring-up (negotiation → MCS → security → logon → licensing → capabilities → finalization) — plus `establish_enhanced()` for the TLS path, the individual steps, secure I/O-channel send/recv, and generic static-virtual-channel routing (`extra_channels`, `RdpEvent::ChannelData`, `send_channel_data`). The one module that touches a socket. |
+| TCP driver | `net` | Blocking `RdpTransport<S>` with `establish()` — the full standard-RDP bring-up (negotiation → MCS → security → logon → licensing → capabilities → finalization) — plus `establish_enhanced()` for the TLS path, `accept()` for the server side (see below), the individual steps, secure I/O-channel send/recv, and generic static-virtual-channel routing (`extra_channels`, `RdpEvent::ChannelData`, `send_channel_data`). The one module that touches a socket. |
 | Virtual channel chunking | `vchan` | MS-RDPBCGR 2.2.6.1 `CHANNEL_PDU_HEADER` framing shared by every static virtual channel: splits outbound messages into chunks and reassembles inbound ones. What `net` uses to receive traffic on any channel beyond the I/O channel. |
 | Dynamic virtual channels | `dvc` | MS-RDPEDYC PDU framing for the `DRDYNVC` channel that RDPGFX, clipboard, and other redirection protocols multiplex over: create/data/close, the version 1–3 capability exchange, and `fragment()` for outbound message splitting. |
 | DVC session management | `dvcman` | `DvcManager` — tracks open dynamic channels, auto-accepts `Create` requests and echoes `Capabilities` requests, and reassembles a channel's own fragmented messages into `DvcEvent::{ChannelOpened, Data, ChannelClosed}`. The layer a caller drives with `net`'s `RdpEvent::ChannelData` to reach a named DVC-based protocol (e.g. RDPGFX) without hand-parsing `dvc` PDUs. |
@@ -121,10 +121,20 @@ the order they'd add the most value:
   audio volume/pitch/encryption, and RDPDR's lock control (its request
   layout isn't published anywhere findable, and no reference client
   implementation actually parses it either — low priority given that).
-- **Server-side RDP.** The crate only drives the client half of the connection
-  sequence (`RdpTransport::establish*`). A server role would reuse the same
-  codecs but needs its own connection state machine (Connection Confirm,
-  Connect-Response, license issuance, Demand Active, etc.).
+- **Server-side RDP.** `RdpTransport::accept` now drives the server half of
+  the connection sequence too — X.224 Connection Confirm, GCC/MCS
+  Connect-Response, channel setup, Client Info, "no license required",
+  Demand Active/Confirm Active, and the server's finalization sequence —
+  reusing the same bidirectional codec types `establish*` uses, and tested
+  end to end over a real TCP loopback connection against a hand-driven
+  client. It's restricted to **unencrypted** standard RDP security
+  (`encryptionLevel = 0`): no RSA key exchange, no RC4. Still needed for a
+  production-capable server: real encrypted standard security (a
+  proprietary-certificate signing key plus an RSA private-key decrypt path,
+  neither implemented) and TLS/CredSSP server support (a certificate and a
+  TLS server implementation); beyond the connection sequence, an actual
+  server also needs to originate display updates and consume input, which
+  `accept` does not attempt.
 
 ## Design principles
 

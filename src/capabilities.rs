@@ -639,6 +639,19 @@ pub fn client_capability_sets(width: u16, height: u16, bits_per_pixel: u16) -> V
     ]
 }
 
+/// A minimal but complete server capability set for a Demand Active PDU at
+/// the given desktop size and color depth. Real servers also advertise an
+/// Order capability set (not modeled by this crate, which does not decode
+/// drawing orders); a client that requires one to proceed will reject this.
+pub fn server_capability_sets(width: u16, height: u16, bits_per_pixel: u16) -> Vec<CapabilitySet> {
+    vec![
+        CapabilitySet::General(GeneralCapabilitySet::default()),
+        CapabilitySet::Bitmap(BitmapCapabilitySet::new(width, height, bits_per_pixel)),
+        CapabilitySet::Pointer(PointerCapabilitySet::default()),
+        CapabilitySet::Share(ShareCapabilitySet { node_id: 0 }),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // UTF-16LE fixed-field helpers
 // ---------------------------------------------------------------------------
@@ -757,6 +770,20 @@ mod tests {
         let (source, decoded) = ConfirmActive::decode(&bytes).unwrap();
         assert_eq!(source, 1007);
         assert_eq!(decoded.originator_id, CONFIRM_ACTIVE_ORIGINATOR_ID);
+        assert_eq!(decoded, pdu);
+    }
+
+    #[test]
+    fn demand_active_with_server_capability_sets_roundtrips() {
+        let pdu = DemandActive {
+            share_id: 0x0001_00EA,
+            source_descriptor: b"RDP\0".to_vec(),
+            capability_sets: server_capability_sets(1024, 768, 16),
+            session_id: 0,
+        };
+        let bytes = pdu.encode(1002).unwrap();
+        let (source, decoded) = DemandActive::decode(&bytes).unwrap();
+        assert_eq!(source, 1002);
         assert_eq!(decoded, pdu);
     }
 

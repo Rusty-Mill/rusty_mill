@@ -290,6 +290,18 @@ pub fn client_finalization_sequence(server_channel: u16) -> [FinalizationPdu; 4]
     ]
 }
 
+/// The ordered finalization PDUs a server sends in reply to the client's
+/// [`client_finalization_sequence`], granting the client input control and
+/// ending with an empty Font Map.
+pub fn server_finalization_sequence(client_channel: u16) -> [FinalizationPdu; 4] {
+    [
+        FinalizationPdu::Synchronize(SynchronizePdu::new(client_channel)),
+        FinalizationPdu::Control(ControlPdu::cooperate()),
+        FinalizationPdu::Control(ControlPdu::granted_control(client_channel, 0)),
+        FinalizationPdu::FontMap(FontMapPdu::default()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +366,28 @@ mod tests {
             })
         ));
         assert!(matches!(seq[3], FinalizationPdu::FontList(_)));
+    }
+
+    #[test]
+    fn server_sequence_is_ordered_and_grants_control() {
+        let seq = server_finalization_sequence(1007);
+        assert!(matches!(seq[0], FinalizationPdu::Synchronize(_)));
+        assert!(matches!(
+            seq[1],
+            FinalizationPdu::Control(ControlPdu {
+                action: CTRLACTION_COOPERATE,
+                ..
+            })
+        ));
+        assert!(matches!(
+            seq[2],
+            FinalizationPdu::Control(ControlPdu {
+                action: CTRLACTION_GRANTED_CONTROL,
+                grant_id: 1007,
+                ..
+            })
+        ));
+        assert!(matches!(seq[3], FinalizationPdu::FontMap(_)));
     }
 
     #[test]
