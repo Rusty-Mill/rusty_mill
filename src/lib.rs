@@ -40,6 +40,7 @@
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
+//!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR+DWT tile decode
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -109,6 +110,7 @@ pub mod pdu;
 pub mod per;
 pub mod pixel;
 pub mod pointer;
+pub mod rfx;
 pub mod rle;
 pub mod security;
 #[cfg(feature = "tls")]
