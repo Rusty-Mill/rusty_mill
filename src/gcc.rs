@@ -504,6 +504,25 @@ impl ClientSecurityData {
 // TS_UD_CS_NET
 // ---------------------------------------------------------------------------
 
+// CHANNEL_OPTION_* flags (MS-RDPBCGR 2.2.1.3.4.1).
+/// The channel is initialized (always set in practice; required by the spec).
+pub const CHANNEL_OPTION_INITIALIZED: u32 = 0x8000_0000;
+/// Traffic on this channel should be encrypted when standard RDP security is
+/// in use.
+pub const CHANNEL_OPTION_ENCRYPT_RDP: u32 = 0x4000_0000;
+/// Server-to-client traffic on this channel should be encrypted.
+pub const CHANNEL_OPTION_ENCRYPT_SC: u32 = 0x2000_0000;
+/// Client-to-server traffic on this channel should be encrypted.
+pub const CHANNEL_OPTION_ENCRYPT_CS: u32 = 0x1000_0000;
+/// High priority bandwidth class.
+pub const CHANNEL_OPTION_PRI_HIGH: u32 = 0x0800_0000;
+/// Medium priority bandwidth class.
+pub const CHANNEL_OPTION_PRI_MED: u32 = 0x0400_0000;
+/// Low priority bandwidth class.
+pub const CHANNEL_OPTION_PRI_LOW: u32 = 0x0200_0000;
+/// The channel's data should be compressed.
+pub const CHANNEL_OPTION_COMPRESS_RDP: u32 = 0x0080_0000;
+
 /// A single virtual-channel definition in `TS_UD_CS_NET`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelDef {

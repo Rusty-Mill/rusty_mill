@@ -37,7 +37,17 @@
 //! [`RdpTransport::send_input`] sends keyboard/mouse events over the compact
 //! fast-path input path. Everything here stays on the standard library, so the
 //! crate remains dependency-free.
+//!
+//! Static virtual channels beyond the required I/O channel — e.g. `"DRDYNVC"`,
+//! which carries [`crate::dvc`]'s dynamic-channel traffic (RDPGFX,
+//! redirection protocols) — are opt in: list them in
+//! [`EstablishConfig::extra_channels`], look up the id the server granted with
+//! [`RdpSession::channel_id`], and [`RdpTransport::recv_event`] reassembles
+//! their chunked traffic (MS-RDPBCGR 2.2.6.1, [`crate::vchan`]) into
+//! [`RdpEvent::ChannelData`] alongside the usual display/input events;
+//! [`RdpTransport::send_channel_data`] is the outbound counterpart.
 
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
 use crate::capabilities::{client_capability_sets, ConfirmActive, DemandActive};
@@ -45,7 +55,7 @@ use crate::client_info::{ClientInfo, INFO_UNICODE};
 use crate::finalization::client_finalization_sequence;
 use crate::finalization::FinalizationPdu;
 use crate::gcc::{
-    self, ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData,
+    self, ChannelDef, ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData,
     ServerNetworkData, UserDataBlock, ENCRYPTION_METHOD_128BIT, ENCRYPTION_METHOD_40BIT,
 };
 use crate::input::InputEvent;
@@ -81,11 +91,16 @@ pub struct EstablishConfig {
     pub password: String,
     /// Client host name reported to the server.
     pub client_name: String,
+    /// Additional static virtual channels to request beyond the required I/O
+    /// channel — e.g. [`crate::dvc::DRDYNVC_CHANNEL_NAME`] to enable dynamic
+    /// virtual channels (RDPGFX, redirection protocols). Empty by default;
+    /// the assigned channel ids come back on [`RdpSession::channel_id`].
+    pub extra_channels: Vec<ChannelDef>,
 }
 
 impl EstablishConfig {
     /// Build a config for the given desktop size and credentials, defaulting
-    /// to 16bpp and a `rusty-rdp` client name.
+    /// to 16bpp, a `rusty-rdp` client name, and no extra virtual channels.
     pub fn new(width: u16, height: u16, domain: &str, username: &str, password: &str) -> Self {
         EstablishConfig {
             desktop_width: width,
@@ -95,12 +110,13 @@ impl EstablishConfig {
             username: username.to_string(),
             password: password.to_string(),
             client_name: "rusty-rdp".to_string(),
+            extra_channels: Vec::new(),
         }
     }
 }
 
 /// A session that reached the "active" state after [`RdpTransport::establish`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RdpSession {
     /// The client's assigned MCS `UserId`.
     pub user_id: u16,
@@ -110,6 +126,18 @@ pub struct RdpSession {
     pub share_id: u32,
     /// The server's MCS channel id (the Demand Active `pduSource`).
     pub server_channel: u16,
+    /// MCS channel ids assigned to [`EstablishConfig::extra_channels`], keyed
+    /// by the channel name that was requested. A name absent from this map
+    /// means the server did not grant that channel.
+    pub channels: HashMap<String, u16>,
+}
+
+impl RdpSession {
+    /// Look up the MCS channel id assigned to a requested static virtual
+    /// channel by name (e.g. [`crate::dvc::DRDYNVC_CHANNEL_NAME`]).
+    pub fn channel_id(&self, name: &str) -> Option<u16> {
+        self.channels.get(name).copied()
+    }
 }
 
 /// A server-to-client event read after the session is active.
@@ -129,6 +157,16 @@ pub enum RdpEvent {
     Finalization(FinalizationPdu),
     /// The server asked to deactivate the share (a reactivation may follow).
     DeactivateAll,
+    /// A reassembled message on a static virtual channel other than the I/O
+    /// channel (MS-RDPBCGR 2.2.6.1) — e.g. dynamic-channel traffic on
+    /// [`crate::dvc::DRDYNVC_CHANNEL_NAME`], decodable with [`crate::dvc`].
+    ChannelData {
+        /// The MCS channel id the data arrived on (see
+        /// [`RdpSession::channel_id`] to map this back to a channel name).
+        channel_id: u16,
+        /// The reassembled message.
+        data: Vec<u8>,
+    },
     /// A share PDU this driver does not model.
     Other {
         /// The Share Control `pduType`.
@@ -197,6 +235,13 @@ pub struct RdpTransport<S> {
     /// data PDUs carry no Basic Security Header (MS-RDPBCGR 5.4). Only the
     /// Client Info and licensing PDUs keep a header in this mode.
     enhanced: bool,
+    /// The MCS I/O channel id, once known (set during channel setup). Slow-path
+    /// traffic on any other joined channel is virtual-channel data, not a
+    /// Share Control/Data PDU.
+    io_channel: Option<u16>,
+    /// Per-channel reassembly state for static virtual channel traffic
+    /// (MS-RDPBCGR 2.2.6.1), keyed by MCS channel id.
+    channel_reassemblers: HashMap<u16, crate::vchan::Reassembler>,
 }
 
 impl<S: Read + Write> RdpTransport<S> {
@@ -208,6 +253,8 @@ impl<S: Read + Write> RdpTransport<S> {
             session: None,
             pending: std::collections::VecDeque::new(),
             enhanced: false,
+            io_channel: None,
+            channel_reassemblers: HashMap::new(),
         }
     }
 
@@ -224,6 +271,8 @@ impl<S: Read + Write> RdpTransport<S> {
             session: None,
             pending: std::collections::VecDeque::new(),
             enhanced: true,
+            io_channel: None,
+            channel_reassemblers: HashMap::new(),
         }
     }
 
@@ -481,16 +530,35 @@ impl<S: Read + Write> RdpTransport<S> {
 
     // --- Full session establishment --------------------------------------
 
-    /// Send a Share Data / Share Control PDU on the I/O channel, encrypting it
-    /// with the stored session when one is active.
-    fn send_share(&mut self, user_id: u16, io_channel: u16, share: &[u8]) -> io::Result<()> {
+    /// Send a Share Data / Share Control PDU (or any other channel payload)
+    /// on `channel_id`, encrypting it with the stored session when active —
+    /// exactly how the I/O channel and other static virtual channels both
+    /// carry traffic once encryption is negotiated.
+    fn send_share(&mut self, user_id: u16, channel_id: u16, share: &[u8]) -> io::Result<()> {
         let mut session = self.session.take();
         let result = match session.as_mut() {
-            Some(s) => self.send_secure(Some(s), user_id, io_channel, 0, share),
-            None => self.send_data(user_id, io_channel, share),
+            Some(s) => self.send_secure(Some(s), user_id, channel_id, 0, share),
+            None => self.send_data(user_id, channel_id, share),
         };
         self.session = session;
         result
+    }
+
+    /// Send `data` on virtual channel `channel_id`, chunking it per
+    /// MS-RDPBCGR 2.2.6.1 (`crate::vchan::chunk`) and encrypting each chunk
+    /// with the stored session when active. Use the id from
+    /// [`RdpSession::channel_id`] for a channel requested via
+    /// [`EstablishConfig::extra_channels`].
+    pub fn send_channel_data(
+        &mut self,
+        user_id: u16,
+        channel_id: u16,
+        data: &[u8],
+    ) -> io::Result<()> {
+        for chunk in crate::vchan::chunk(data, crate::vchan::DEFAULT_CHUNK_SIZE) {
+            self.send_share(user_id, channel_id, &chunk)?;
+        }
+        Ok(())
     }
 
     /// Receive one security-wrapped PDU using the stored session, returning
@@ -526,7 +594,9 @@ impl<S: Read + Write> RdpTransport<S> {
                 encryption_methods,
                 ext_encryption_methods: 0,
             }),
-            UserDataBlock::ClientNetwork(ClientNetworkData { channels: vec![] }),
+            UserDataBlock::ClientNetwork(ClientNetworkData {
+                channels: config.extra_channels.clone(),
+            }),
             UserDataBlock::ClientCluster(ClientClusterData {
                 flags: 0x0D,
                 redirected_session_id: 0,
@@ -534,10 +604,31 @@ impl<S: Read + Write> RdpTransport<S> {
         ]
     }
 
+    /// Zip the requested [`EstablishConfig::extra_channels`] names against the
+    /// server's granted channel ids (in the same order), skipping any the
+    /// server did not grant (id `0`).
+    fn build_channel_map(
+        config: &EstablishConfig,
+        virtual_channels: &[u16],
+    ) -> HashMap<String, u16> {
+        config
+            .extra_channels
+            .iter()
+            .zip(virtual_channels)
+            .filter(|(_, &id)| id != 0)
+            .map(|(def, &id)| (def.name.clone(), id))
+            .collect()
+    }
+
     /// Run the MCS domain setup: erect the domain, attach a user, and join the
     /// user, I/O, and any virtual channels advertised in `server_blocks`.
-    /// Returns `(user_id, io_channel)`.
-    fn join_all_channels(&mut self, server_blocks: &[UserDataBlock]) -> io::Result<(u16, u16)> {
+    /// Returns `(user_id, io_channel, granted_virtual_channel_ids)` — the
+    /// third element is in the same order as [`EstablishConfig::extra_channels`]
+    /// was requested, with `0` marking a channel the server did not grant.
+    fn join_all_channels(
+        &mut self,
+        server_blocks: &[UserDataBlock],
+    ) -> io::Result<(u16, u16, Vec<u16>)> {
         let io_channel = server_blocks
             .iter()
             .find_map(|b| match b {
@@ -561,10 +652,11 @@ impl<S: Read + Write> RdpTransport<S> {
         let user_id = self.attach_user()?;
         self.join_channel(user_id, user_id)?;
         self.join_channel(user_id, io_channel)?;
-        for vc in virtual_channels {
+        for &vc in virtual_channels.iter().filter(|&&id| id != 0) {
             self.join_channel(user_id, vc)?;
         }
-        Ok((user_id, io_channel))
+        self.io_channel = Some(io_channel);
+        Ok((user_id, io_channel, virtual_channels))
     }
 
     /// Run the shared tail of the connection sequence: licensing, capability
@@ -574,6 +666,7 @@ impl<S: Read + Write> RdpTransport<S> {
         config: &EstablishConfig,
         user_id: u16,
         io_channel: u16,
+        channels: HashMap<String, u16>,
     ) -> io::Result<RdpSession> {
         // Licensing + capability exchange: read until Demand Active.
         let (share_id, server_channel) = self.await_activation(io_channel)?;
@@ -601,6 +694,7 @@ impl<S: Read + Write> RdpTransport<S> {
             io_channel,
             share_id,
             server_channel,
+            channels,
         })
     }
 
@@ -643,7 +737,8 @@ impl<S: Read + Write> RdpTransport<S> {
         })?;
 
         // 3. Channel setup.
-        let (user_id, io_channel) = self.join_all_channels(&server_blocks)?;
+        let (user_id, io_channel, virtual_channels) = self.join_all_channels(&server_blocks)?;
+        let channels = Self::build_channel_map(config, &virtual_channels);
 
         // 4. Security commencement.
         if crypto.server_random.len() != RANDOM_LEN {
@@ -668,7 +763,7 @@ impl<S: Read + Write> RdpTransport<S> {
         }
 
         // 6-8. Licensing, capabilities, finalization.
-        self.activate(config, user_id, io_channel)
+        self.activate(config, user_id, io_channel, channels)
     }
 
     /// Drive the connection sequence over a stream that already provides
@@ -699,7 +794,8 @@ impl<S: Read + Write> RdpTransport<S> {
         let server_blocks = self.mcs_connect(&client_blocks)?;
 
         // Channel setup.
-        let (user_id, io_channel) = self.join_all_channels(&server_blocks)?;
+        let (user_id, io_channel, virtual_channels) = self.join_all_channels(&server_blocks)?;
+        let channels = Self::build_channel_map(config, &virtual_channels);
 
         // Client Info (logon) in the clear under a SEC_INFO_PKT header — TLS
         // already encrypts the stream, so no RC4 session is used.
@@ -707,7 +803,7 @@ impl<S: Read + Write> RdpTransport<S> {
         self.send_client_info(None, user_id, io_channel, &info)?;
 
         // Licensing, capabilities, finalization.
-        self.activate(config, user_id, io_channel)
+        self.activate(config, user_id, io_channel, channels)
     }
 
     /// Consume licensing PDUs until the server signals a valid client, then
@@ -806,7 +902,10 @@ impl<S: Read + Write> RdpTransport<S> {
     /// fast-path — decrypts it with the stored session, and returns a typed
     /// [`RdpEvent`]. A fast-path PDU may bundle several updates; the extras are
     /// buffered and returned by later calls. Anything not modelled comes back
-    /// as [`RdpEvent::Other`] rather than an error.
+    /// as [`RdpEvent::Other`] rather than an error. Slow-path traffic on a
+    /// virtual channel other than the I/O channel is reassembled
+    /// (MS-RDPBCGR 2.2.6.1) and, once complete, returned as
+    /// [`RdpEvent::ChannelData`].
     pub fn recv_event(&mut self) -> io::Result<RdpEvent> {
         loop {
             if let Some(event) = self.pending.pop_front() {
@@ -817,8 +916,24 @@ impl<S: Read + Write> RdpTransport<S> {
             if crate::fastpath::is_fastpath(first[0]) {
                 let events = self.read_fastpath_output(first[0])?;
                 self.pending.extend(events);
-            } else if let Some(body) = self.read_slowpath_share(first[0])? {
-                self.pending.push_back(classify_share(&body)?);
+            } else if let Some((channel_id, body)) = self.read_slowpath_share(first[0])? {
+                // Route by channel once join_all_channels has told us which one
+                // is the I/O channel; if that hasn't happened (e.g. a caller
+                // driving recv_event without the full establish() sequence),
+                // there is nothing to route by, so treat it as Share data.
+                if self.io_channel.is_none() || Some(channel_id) == self.io_channel {
+                    self.pending.push_back(classify_share(&body)?);
+                } else if let Some(data) = self
+                    .channel_reassemblers
+                    .entry(channel_id)
+                    .or_default()
+                    .feed(&body)
+                    .map_err(to_io)?
+                {
+                    self.pending
+                        .push_back(RdpEvent::ChannelData { channel_id, data });
+                }
+                // Otherwise a partial chunk was buffered; keep reading.
             }
         }
     }
@@ -839,28 +954,32 @@ impl<S: Read + Write> RdpTransport<S> {
         Ok(tpkt.payload.to_vec())
     }
 
-    /// Read a slow-path frame and return the decrypted Share PDU body, or
+    /// Read a slow-path frame and return `(channel_id, decrypted body)`, or
     /// `None` if the frame is not a Send Data Indication.
-    fn read_slowpath_share(&mut self, first: u8) -> io::Result<Option<Vec<u8>>> {
+    fn read_slowpath_share(&mut self, first: u8) -> io::Result<Option<(u16, Vec<u8>)>> {
         let tpdu = self.read_tpkt_rest(first)?;
         let inner = match X224::decode(&tpdu).map_err(to_io)? {
             X224::Data(payload) => payload.to_vec(),
             _ => return Ok(None),
         };
-        let user_data = match DomainPdu::decode(&inner).map_err(to_io)? {
-            DomainPdu::SendDataIndication { user_data, .. } => user_data.to_vec(),
+        let (channel_id, user_data) = match DomainPdu::decode(&inner).map_err(to_io)? {
+            DomainPdu::SendDataIndication {
+                channel_id,
+                user_data,
+                ..
+            } => (channel_id, user_data.to_vec()),
             _ => return Ok(None),
         };
         if self.enhanced {
             // Under TLS, data PDUs carry no Basic Security Header.
-            return Ok(Some(user_data));
+            return Ok(Some((channel_id, user_data)));
         }
         let mut session = self.session.take();
         let result = security::unwrap_pdu(session.as_mut(), &user_data)
             .map(|(_flags, body)| body)
             .map_err(to_io);
         self.session = session;
-        Ok(Some(result?))
+        Ok(Some((channel_id, result?)))
     }
 
     /// Read a fast-path output frame whose header byte is `header` and decode
@@ -1664,6 +1783,212 @@ mod tests {
         assert_eq!(session.io_channel, 1003);
         assert_eq!(session.share_id, 0x0000_1234);
         assert_eq!(session.server_channel, 1002);
+    }
+
+    #[test]
+    fn establish_requests_and_maps_extra_channel() {
+        // Same handshake as above, but the client also asks for DRDYNVC and
+        // the server grants it a channel id; establish() should surface that
+        // mapping on the returned session.
+        use crate::capabilities::{CapabilitySet, DemandActive, GeneralCapabilitySet};
+        use crate::gcc::{
+            ServerCoreData, ServerNetworkData, ServerSecurityData, ENCRYPTION_METHOD_128BIT,
+        };
+        use crate::license::{LicenseErrorMessage, LicensePdu};
+        use crate::mcs::DomainParameters;
+        use crate::security::{derive_session_keys, SessionKeys, RANDOM_LEN};
+
+        let client_random = [0x5Au8; RANDOM_LEN];
+        let server_random = [0xA5u8; RANDOM_LEN];
+        let client_keys =
+            derive_session_keys(&client_random, &server_random, ENCRYPTION_METHOD_128BIT);
+        let server_keys = SessionKeys {
+            mac_key: client_keys.mac_key.clone(),
+            encrypt_key: client_keys.decrypt_key.clone(),
+            decrypt_key: client_keys.encrypt_key.clone(),
+        };
+        let mut server_session = Rc4Session::new(&server_keys);
+
+        let modulus = [0xA1u8, 0x0C];
+        let mut cert = crate::cursor::Writer::new();
+        cert.write_u32_le(1);
+        cert.write_u32_le(1);
+        cert.write_u32_le(1);
+        cert.write_u16_le(0x0006);
+        cert.write_u16_le(0);
+        cert.write_u32_le(0x3141_5352);
+        cert.write_u32_le(modulus.len() as u32 + 8);
+        cert.write_u32_le(modulus.len() as u32 * 8);
+        cert.write_u32_le(modulus.len() as u32 - 1);
+        cert.write_u32_le(17);
+        cert.write_bytes(&modulus);
+        cert.write_bytes(&[0u8; 8]);
+        cert.write_u16_le(0x0008);
+        cert.write_u16_le(0);
+
+        // The server grants the one requested extra channel as id 1004.
+        let server_blocks = vec![
+            UserDataBlock::ServerCore(ServerCoreData {
+                version: 0x0008_0004,
+                client_requested_protocols: Some(0),
+                early_capability_flags: None,
+            }),
+            UserDataBlock::ServerNetwork(ServerNetworkData {
+                io_channel_id: 1003,
+                channel_ids: vec![1004],
+            }),
+            UserDataBlock::ServerSecurity(ServerSecurityData {
+                encryption_method: ENCRYPTION_METHOD_128BIT,
+                encryption_level: 2,
+                server_random: server_random.to_vec(),
+                server_certificate: cert.into_vec(),
+            }),
+        ];
+        let server_ud = gcc::encode_user_data(&server_blocks).unwrap();
+        let ccrsp = gcc::encode_conference_create_response(1002, &server_ud).unwrap();
+        let connect_response = ConnectResponse {
+            result: McsResult::Successful,
+            called_connect_id: 0,
+            domain_parameters: DomainParameters::client_target(),
+            user_data: ccrsp,
+        };
+
+        let data_ind = |payload: &[u8]| -> Vec<u8> {
+            framed(
+                X224::data(
+                    &DomainPdu::SendDataIndication {
+                        initiator: 1002,
+                        channel_id: 1003,
+                        user_data: payload,
+                    }
+                    .to_vec()
+                    .unwrap(),
+                )
+                .to_vec()
+                .unwrap(),
+            )
+        };
+        let license = LicensePdu::ErrorAlert(LicenseErrorMessage::valid_client())
+            .to_vec()
+            .unwrap();
+        let license_wrapped =
+            security::wrap_pdu(Some(&mut server_session), SEC_LICENSE_PKT, &license);
+        let demand = DemandActive {
+            share_id: 0x0000_1234,
+            source_descriptor: b"RDP\0".to_vec(),
+            capability_sets: vec![CapabilitySet::General(GeneralCapabilitySet::default())],
+            session_id: 0,
+        };
+        let demand_bytes = demand.encode(1002).unwrap();
+        let demand_wrapped = security::wrap_pdu(Some(&mut server_session), 0, &demand_bytes);
+
+        let confirm = |requested: u16, channel: u16| -> Vec<u8> {
+            framed(
+                X224::data(
+                    &DomainPdu::ChannelJoinConfirm {
+                        result: McsResult::Successful,
+                        initiator: 1007,
+                        requested,
+                        channel_id: Some(channel),
+                    }
+                    .to_vec()
+                    .unwrap(),
+                )
+                .to_vec()
+                .unwrap(),
+            )
+        };
+        let mut inbound = Vec::new();
+        inbound.extend(framed(
+            X224::ConnectionConfirm(ConnectionPdu {
+                negotiation: Some(Negotiation::Response {
+                    flags: 0,
+                    selected: SecurityProtocols::RDP,
+                }),
+                ..Default::default()
+            })
+            .to_vec()
+            .unwrap(),
+        ));
+        inbound.extend(framed(
+            X224::data(&connect_response.to_vec()).to_vec().unwrap(),
+        ));
+        inbound.extend(framed(
+            X224::data(
+                &DomainPdu::AttachUserConfirm {
+                    result: McsResult::Successful,
+                    initiator: Some(1007),
+                }
+                .to_vec()
+                .unwrap(),
+            )
+            .to_vec()
+            .unwrap(),
+        ));
+        // User channel, I/O channel, then the extra DRDYNVC channel.
+        inbound.extend(confirm(1007, 1007));
+        inbound.extend(confirm(1003, 1003));
+        inbound.extend(confirm(1004, 1004));
+        inbound.extend(data_ind(&license_wrapped));
+        inbound.extend(data_ind(&demand_wrapped));
+
+        let mut t = RdpTransport::new(MockStream::new(inbound));
+        let mut config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        config.extra_channels.push(ChannelDef {
+            name: crate::dvc::DRDYNVC_CHANNEL_NAME.to_string(),
+            options: 0,
+        });
+        let session = t.establish(&config, &client_random).unwrap();
+
+        assert_eq!(
+            session.channel_id(crate::dvc::DRDYNVC_CHANNEL_NAME),
+            Some(1004)
+        );
+        assert_eq!(session.channel_id("not-requested"), None);
+    }
+
+    #[test]
+    fn recv_event_reassembles_channel_data_across_chunks() {
+        // Once the I/O channel is known, traffic on any other channel is
+        // virtual-channel data (MS-RDPBCGR 2.2.6.1), reassembled and surfaced
+        // as RdpEvent::ChannelData only once the last chunk arrives.
+        let message = b"a dynamic-channel payload that needs no encryption";
+        let chunks = crate::vchan::chunk(message, 16);
+        assert!(chunks.len() > 1, "test needs a fragmented message");
+
+        let data_ind = |payload: &[u8]| -> Vec<u8> {
+            framed(
+                X224::data(
+                    &DomainPdu::SendDataIndication {
+                        initiator: 1002,
+                        channel_id: 1004, // not the I/O channel
+                        user_data: payload,
+                    }
+                    .to_vec()
+                    .unwrap(),
+                )
+                .to_vec()
+                .unwrap(),
+            )
+        };
+
+        // Every Send Data Indication carries a Basic Security Header, even
+        // with no session active (flags = 0, no SEC_ENCRYPT).
+        let mut inbound = Vec::new();
+        for c in &chunks {
+            let wrapped = security::wrap_pdu(None, 0, c);
+            inbound.extend(data_ind(&wrapped));
+        }
+        let mut t = RdpTransport::new(MockStream::new(inbound));
+        t.io_channel = Some(1003);
+
+        match t.recv_event().unwrap() {
+            RdpEvent::ChannelData { channel_id, data } => {
+                assert_eq!(channel_id, 1004);
+                assert_eq!(data, message);
+            }
+            other => panic!("expected ChannelData, got {other:?}"),
+        }
     }
 
     #[test]
