@@ -44,6 +44,7 @@
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface/cache/composition/output-mapping PDUs
 //!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR1/RLGR3+DWT tile decode + control PDUs
+//!                                 └─ Planar codec (crate::planar)  MS-RDPEGDI RDP 6.0 bitmap plane/RLE decode
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -120,6 +121,7 @@ pub mod output;
 pub mod pdu;
 pub mod per;
 pub mod pixel;
+pub mod planar;
 pub mod pointer;
 pub mod rdpdr;
 pub mod rdpsnd;
