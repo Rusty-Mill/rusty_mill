@@ -43,7 +43,7 @@
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
-//!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR+DWT tile decode
+//!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR1/RLGR3+DWT tile decode + control PDUs
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
