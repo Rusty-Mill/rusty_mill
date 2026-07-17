@@ -37,6 +37,7 @@
 //!                       └─ framebuffer  (crate::display)  blit rects to a surface
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
 //!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
+//!                  └─ clipboard         (crate::cliprdr)  MS-RDPECLIP redirection PDUs
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
@@ -87,6 +88,7 @@
 pub mod ber;
 pub mod capabilities;
 pub mod client_info;
+pub mod cliprdr;
 pub mod credssp;
 pub mod crypto;
 pub mod cursor;
