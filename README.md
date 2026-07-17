@@ -40,7 +40,7 @@ Early foundation. Implemented so far, bottom-up:
 | Virtual channel chunking | `vchan` | MS-RDPBCGR 2.2.6.1 `CHANNEL_PDU_HEADER` framing shared by every static virtual channel: splits outbound messages into chunks and reassembles inbound ones. What `net` uses to receive traffic on any channel beyond the I/O channel. |
 | Dynamic virtual channels | `dvc` | MS-RDPEDYC PDU framing for the `DRDYNVC` channel that RDPGFX, clipboard, and other redirection protocols multiplex over: create/data/close, the version 1–3 capability exchange, and `fragment()` for outbound message splitting. |
 | DVC session management | `dvcman` | `DvcManager` — tracks open dynamic channels, auto-accepts `Create` requests and echoes `Capabilities` requests, and reassembles a channel's own fragmented messages into `DvcEvent::{ChannelOpened, Data, ChannelClosed}`. The layer a caller drives with `net`'s `RdpEvent::ChannelData` to reach a named DVC-based protocol (e.g. RDPGFX) without hand-parsing `dvc` PDUs. |
-| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`), the bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/`EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), and surface composition (`SolidFillPdu`/`SurfaceToSurfacePdu`). |
+| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`), the bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/`EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), surface composition (`SolidFillPdu`/`SurfaceToSurfacePdu`), and output mapping (`ResetGraphicsPdu`, `MapSurfaceToOutputPdu`/`MapSurfaceToScaledOutputPdu`, `MapSurfaceToWindowPdu`/`MapSurfaceToScaledWindowPdu`). |
 | RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 and RLGR3 entropy decoding (`EntropyAlgorithm`), the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`, plus the control PDUs that wrap a tile set on the wire (`SyncPdu`, `CodecVersionsPdu`, `ChannelsPdu`, `ContextPdu`, `RegionPdu`, `FrameBeginPdu`/`FrameEndPdu`, dispatched by `peek_block_type`). The GFX cache/composition PDUs (`SURFACETOCACHE`, `SOLIDFILL`, etc.) belong to `gfx` instead, and encoding (the server-side direction) is not implemented. |
 | Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), and data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`). File copy/paste and the Short Format Name variant are not implemented. |
 | Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), and wave playback (`encode_wave`/`decode_wave` hiding the WaveInfo/Wave PDU split, `WaveConfirmPdu`), plus `ClosePdu`. Volume/pitch control, `SNDC_WAVE2`, encryption, and the UDP transport variants are not implemented. |
@@ -98,17 +98,18 @@ the order they'd add the most value:
 - **RemoteFX / GFX codec support.** The channel plumbing (`vchan`, `dvc`,
   `dvcman`), the MS-RDPEGFX capability negotiation, surface/frame PDUs, the
   bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/
-  `EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), and
-  surface composition (`SolidFillPdu`/`SurfaceToSurfacePdu`) are all wired
-  up in `gfx`, and the RemoteFX tile codec (`rfx`) is essentially complete:
-  RLGR1 and RLGR3 entropy decoding, the 3-level 5/3 inverse DWT,
-  dequantization, and YCbCr→RGB decode a `TS_RFX_TILESET` straight to RGB
-  pixels, and the control PDUs that wrap a tile set on the wire
+  `EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), surface
+  composition (`SolidFillPdu`/`SurfaceToSurfacePdu`), and output mapping
+  (`ResetGraphicsPdu`, `MapSurfaceToOutputPdu`/`MapSurfaceToScaledOutputPdu`,
+  `MapSurfaceToWindowPdu`/`MapSurfaceToScaledWindowPdu`) are all wired up in
+  `gfx`, and the RemoteFX tile codec (`rfx`) is essentially complete: RLGR1
+  and RLGR3 entropy decoding, the 3-level 5/3 inverse DWT, dequantization,
+  and YCbCr→RGB decode a `TS_RFX_TILESET` straight to RGB pixels, and the
+  control PDUs that wrap a tile set on the wire
   (`TS_RFX_SYNC`/`CODEC_VERSIONS`/`CHANNELS`/`CONTEXT`/`REGION`/
-  `FRAME_BEGIN`/`END`) are implemented too. Still needed: output mapping
-  (`RESETGRAPHICS`, `MAPSURFACETO*`) in `gfx`, and the other GFX codecs
-  (AVC420/444, ClearCodec, Planar) — `gfx` still carries their `bitmapData`
-  as opaque bytes for those.
+  `FRAME_BEGIN`/`END`) are implemented too. Still needed: the other GFX
+  codecs (AVC420/444, ClearCodec, Planar) — `gfx` still carries their
+  `bitmapData` as opaque bytes for those.
 - **Channels: drive, USB, smartcard, and printer redirection.** The
   static/dynamic virtual channel plumbing all of these ride on (`vchan`,
   `dvc`, `dvcman`, and `net`'s generic channel routing) is implemented end
