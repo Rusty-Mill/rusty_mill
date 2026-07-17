@@ -91,6 +91,7 @@ pub mod fastpath;
 pub mod finalization;
 pub mod gcc;
 pub mod input;
+pub mod krb5;
 pub mod license;
 pub mod mcs;
 pub mod nego;

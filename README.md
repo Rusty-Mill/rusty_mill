@@ -23,6 +23,7 @@ Early foundation. Implemented so far, bottom-up:
 | Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5, RC4, and a minimal bignum for RSA — no crypto crate. |
 | NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP): NEGOTIATE/CHALLENGE/AUTHENTICATE messages, the NTLMv2 response and key schedule, and the extended-session-security sealing used by CredSSP. |
 | CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): NTLM tokens, the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation. Pure codec + crypto, driven over TLS by the `tls` feature. |
+| Kerberos | `krb5` | Kerberos v5 foundation (RFC 4120 / MS-KILE): the RC4-HMAC encryption profile (etype 23) and the ASN.1 building blocks (principal names, `KerberosTime`, `EncryptedData`/`EncryptionKey`/`Checksum`). Message PDUs, AES etypes, and SPNEGO/GSS wrapping are still to come. |
 | Client Info | `client_info` | `TS_INFO_PACKET` logon data (domain/user/password/shell, extended info). |
 | Licensing | `license` | Licensing preamble and the License Error Message (`STATUS_VALID_CLIENT` detection). |
 | Session framing | `pdu` | Share Control / Share Data headers with the `PDUTYPE` / `PDUTYPE2` constants. |
@@ -66,7 +67,10 @@ the CredSSP `TSRequest` exchange with the public-key channel binding, and
 sealed credential delegation — all in the dependency-free core (`ntlm`,
 `credssp`), verified against the published MS-NLMP test vectors. With the `tls`
 feature, `connect_tls()` runs the whole exchange over the TLS channel when the
-server selects `HYBRID`. Only NTLMv2 is supported (no Kerberos).
+server selects `HYBRID`. NTLMv2 is the fully wired authentication mechanism;
+Kerberos (the `krb5` module) is being built bottom-up — the RC4-HMAC crypto
+profile and ASN.1 foundations are in place, with the message exchange and
+SPNEGO/GSS wrapping still to come.
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
