@@ -39,6 +39,7 @@
 //!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
 //!                  └─ clipboard         (crate::cliprdr)  MS-RDPECLIP redirection PDUs
 //!                  └─ audio             (crate::rdpsnd)  MS-RDPEA redirection PDUs
+//!                  └─ device redirection (crate::rdpdr)  MS-RDPEFS init/capability handshake
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface PDUs
@@ -113,6 +114,7 @@ pub mod pdu;
 pub mod per;
 pub mod pixel;
 pub mod pointer;
+pub mod rdpdr;
 pub mod rdpsnd;
 pub mod rfx;
 pub mod rle;
