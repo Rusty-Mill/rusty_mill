@@ -33,7 +33,8 @@ Early foundation. Implemented so far, bottom-up:
 | Bitmap RLE | `rle` | The interleaved RLE bitmap decompressor (8/15/16/24 bpp), reachable via `BitmapData::decompressed()`. |
 | Pixel unpack | `pixel` | Native pixel formats (8 indexed / 15 / 16 / 24 / 32 bpp) → top-down RGBA8888, via `BitmapData::to_rgba()`. |
 | Framebuffer | `display` | RGBA desktop surface with clipped blit, `apply_bitmap`, and a PPM dump; assembles server bitmap updates. |
-| TCP driver | `net` | Blocking `RdpTransport<S>` with `establish()` — the full standard-RDP bring-up (negotiation → MCS → security → logon → licensing → capabilities → finalization) — plus the individual steps and secure I/O-channel send/recv. The one module that touches a socket. |
+| TCP driver | `net` | Blocking `RdpTransport<S>` with `establish()` — the full standard-RDP bring-up (negotiation → MCS → security → logon → licensing → capabilities → finalization) — plus `establish_enhanced()` for the TLS path, the individual steps, and secure I/O-channel send/recv. The one module that touches a socket. |
+| TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -50,11 +51,23 @@ path all the way to pixels: bitmap and palette updates, RLE decompression, and
 pixel-format unpacking to a top-down RGBA framebuffer. Pointer/cursor updates
 and fast-path framing build on top without disturbing what is here.
 
+The enhanced-security (TLS) path is also wired up: `RdpTransport::negotiate()`
+selects `SSL` on the raw TCP connection, the stream is upgraded to TLS, and
+`RdpTransport::establish_enhanced()` drives MCS/GCC, logon, licensing,
+capabilities and finalization inside the tunnel with the RDP security layer
+switched off (no Security Exchange, no RC4 — TLS carries confidentiality). The
+protocol logic for this lives entirely in the dependency-free core; the actual
+TLS bytes are the one thing behind an optional feature. CredSSP/NLA (the
+`HYBRID` path) is not yet implemented and is reported as a clear error.
+
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
 > speak RDP *standard security*. They are not for general use; modern
-> deployments should negotiate TLS/CredSSP (the `SSL`/`HYBRID` path), which is
-> the next security milestone.
+> deployments should negotiate TLS/CredSSP. The `tls` feature's `connect_tls()`
+> does **not** verify the server certificate (RDP servers are typically
+> self-signed with out-of-band trust), so it does not defend against an active
+> man-in-the-middle — bring your own verified `rustls` stream and use
+> `establish_enhanced()` if you need that.
 
 ## Design principles
 
@@ -62,10 +75,13 @@ and fast-path framing build on top without disturbing what is here.
   slices, so the same code works with blocking sockets, any async runtime, or
   in-memory tests. Socket access lives in exactly one module (`net`), a thin
   blocking driver kept apart from the codec.
-- **Minimal dependencies.** The core has zero. Anything that genuinely needs a
-  third-party crate (TLS for the `SSL`/`HYBRID` security modes, RSA for
-  standard RDP security) will live behind an optional feature flag, never in
-  the default build.
+- **Minimal dependencies.** The core has zero. The one thing that genuinely
+  needs a third-party crate — a TLS stack, which cannot be hand-rolled
+  responsibly — lives behind the optional `tls` feature (`rustls`), never in
+  the default build. Even the RDP-over-TLS *protocol* logic stays in the
+  dependency-free core: the transport is generic over the stream, so you can
+  bring your own TLS implementation instead. RSA for standard RDP security is
+  hand-rolled, so it needs no crate.
 - **Total decoding.** Malformed input returns an `Error`; it never panics.
 - **Explicit endianness.** RDP mixes big-endian transport framing with
   little-endian RDP structures, so every integer access names its byte order.
@@ -91,9 +107,14 @@ let packet = Tpkt::new(&tpdu).to_vec().unwrap();
 ## Building
 
 ```sh
-cargo build
+cargo build            # zero dependencies
 cargo test
+cargo build --features tls   # opt-in TLS connector (pulls in rustls)
 ```
+
+The default build has no dependencies and keeps an MSRV of 1.70. The optional
+`tls` feature pulls in `rustls` and its transitive crates, which raise the
+effective MSRV to whatever `rustls` requires.
 
 ## Connecting to a server
 
@@ -110,8 +131,26 @@ capabilities → finalization) and returns an active session. The example then
 pumps server updates with `recv_event()` — which accepts both slow-path and
 fast-path framing — into a `Framebuffer` until the stream goes quiet and writes
 the result to `screen.ppm`; `send_input()` sends keyboard/mouse events over
-fast-path. Standard RDP security only — a server that requires TLS/CredSSP will
-reject the RDP-only negotiation.
+fast-path.
+
+For a server that requires TLS, enable the `tls` feature and use
+`connect_tls()` instead, which negotiates `SSL`, upgrades to TLS, and runs
+`establish_enhanced()`:
+
+```rust
+# #[cfg(feature = "tls")]
+# fn demo() -> std::io::Result<()> {
+use rusty_rdp::net::EstablishConfig;
+use rusty_rdp::nego::SecurityProtocols;
+use rusty_rdp::tls::connect_tls;
+
+let config = EstablishConfig::new(1024, 768, "", "alice", "secret");
+let (mut transport, session) =
+    connect_tls("192.0.2.10:3389", &config, SecurityProtocols::SSL)?;
+let _ = (transport.recv_event()?, session);
+# Ok(())
+# }
+```
 
 ## License
 

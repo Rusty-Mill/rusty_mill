@@ -94,6 +94,8 @@ pub mod pixel;
 pub mod pointer;
 pub mod rle;
 pub mod security;
+#[cfg(feature = "tls")]
+pub mod tls;
 pub mod tpkt;
 pub mod x224;
 

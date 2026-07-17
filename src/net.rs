@@ -23,6 +23,15 @@
 //! into one call and returns an active [`RdpSession`]. [`server_crypto`] pulls
 //! the server's RSA key and random out of the Connect-Response for it.
 //!
+//! For the enhanced-security (TLS/CredSSP) path, the X.224 negotiation runs on
+//! the raw TCP connection, the stream is then upgraded to TLS, and
+//! [`RdpTransport::new_enhanced`] + [`RdpTransport::establish_enhanced`] drive
+//! the rest of the sequence with the RDP security layer switched off — no
+//! Security Exchange and no RC4, since TLS provides confidentiality. This
+//! module stays dependency-free by being generic over the stream: bring any
+//! TLS implementation (or, with the optional `tls` feature, use
+//! `crate::tls::connect_tls`).
+//!
 //! Once active, [`RdpTransport::recv_event`] reads server updates — accepting
 //! both slow-path (TPKT) and fast-path framing transparently — and
 //! [`RdpTransport::send_input`] sends keyboard/mouse events over the compact
@@ -183,15 +192,38 @@ pub struct RdpTransport<S> {
     /// Events decoded from a fast-path PDU that bundled several updates,
     /// waiting to be returned one at a time by [`RdpTransport::recv_event`].
     pending: std::collections::VecDeque<RdpEvent>,
+    /// `true` when the stream already provides encryption (TLS/CredSSP), so
+    /// the RDP security layer is disabled: no Security Exchange, no RC4, and
+    /// data PDUs carry no Basic Security Header (MS-RDPBCGR 5.4). Only the
+    /// Client Info and licensing PDUs keep a header in this mode.
+    enhanced: bool,
 }
 
 impl<S: Read + Write> RdpTransport<S> {
-    /// Wrap a connected stream.
+    /// Wrap a connected stream that speaks standard RDP security (the RDP
+    /// security layer encrypts PDUs itself).
     pub fn new(stream: S) -> Self {
         RdpTransport {
             stream,
             session: None,
             pending: std::collections::VecDeque::new(),
+            enhanced: false,
+        }
+    }
+
+    /// Wrap a stream that already provides encryption (TLS/CredSSP).
+    ///
+    /// Use this after the X.224 negotiation on the raw TCP connection has
+    /// selected an enhanced-security protocol and the stream has been upgraded
+    /// (e.g. wrapped in TLS). The RDP security layer is left off:
+    /// [`RdpTransport::establish_enhanced`] skips the Security Exchange and no
+    /// PDU is RC4-encrypted.
+    pub fn new_enhanced(stream: S) -> Self {
+        RdpTransport {
+            stream,
+            session: None,
+            pending: std::collections::VecDeque::new(),
+            enhanced: true,
         }
     }
 
@@ -471,39 +503,27 @@ impl<S: Read + Write> RdpTransport<S> {
         result
     }
 
-    /// Drive the entire standard-RDP connection sequence and return the active
-    /// session.
+    /// Build the client GCC settings blocks for the connection.
     ///
-    /// Performs, in order: X.224 negotiation (standard RDP security only), the
-    /// GCC/MCS connect, channel setup, the RSA security exchange and session-
-    /// key derivation, the encrypted Client Info PDU, the licensing exchange,
-    /// the capability exchange (Demand → Confirm Active), and the client's
-    /// connection-finalization sequence. `client_random` must be 32 bytes.
-    ///
-    /// Requires a server that offers standard RDP security *with* encryption;
-    /// a TLS/CredSSP selection or an unencrypted session returns an error.
-    pub fn establish(
-        &mut self,
+    /// `selected_protocol` echoes the X.224 negotiation into the client core
+    /// data (0 for standard RDP, [`SecurityProtocols::SSL`] etc. for enhanced
+    /// security). `encryption_methods` advertises the RDP-layer ciphers we
+    /// accept — always 0 under TLS, where the RDP security layer is off.
+    fn build_client_blocks(
         config: &EstablishConfig,
-        client_random: &[u8; RANDOM_LEN],
-    ) -> io::Result<RdpSession> {
-        // 1. Negotiate standard RDP security.
-        let selected = self.negotiate(SecurityProtocols::RDP, Some(&config.username))?;
-        if selected != SecurityProtocols::RDP {
-            return Err(protocol_error(format!(
-                "server requires {selected:?}; establish only supports standard RDP security"
-            )));
-        }
-
-        // 2. MCS connect with our client settings.
-        let client_blocks = vec![
-            UserDataBlock::ClientCore(ClientCoreData::new(
-                config.desktop_width,
-                config.desktop_height,
-                &config.client_name,
-            )),
+        selected_protocol: u32,
+        encryption_methods: u32,
+    ) -> Vec<UserDataBlock> {
+        let mut core = ClientCoreData::new(
+            config.desktop_width,
+            config.desktop_height,
+            &config.client_name,
+        );
+        core.server_selected_protocol = Some(selected_protocol);
+        vec![
+            UserDataBlock::ClientCore(core),
             UserDataBlock::ClientSecurity(ClientSecurityData {
-                encryption_methods: ENCRYPTION_METHOD_40BIT | ENCRYPTION_METHOD_128BIT,
+                encryption_methods,
                 ext_encryption_methods: 0,
             }),
             UserDataBlock::ClientNetwork(ClientNetworkData { channels: vec![] }),
@@ -511,13 +531,13 @@ impl<S: Read + Write> RdpTransport<S> {
                 flags: 0x0D,
                 redirected_session_id: 0,
             }),
-        ];
-        let server_blocks = self.mcs_connect(&client_blocks)?;
-        let crypto = server_crypto(&server_blocks)?.ok_or_else(|| {
-            protocol_error(
-                "server selected no encryption; establish requires standard RDP security",
-            )
-        })?;
+        ]
+    }
+
+    /// Run the MCS domain setup: erect the domain, attach a user, and join the
+    /// user, I/O, and any virtual channels advertised in `server_blocks`.
+    /// Returns `(user_id, io_channel)`.
+    fn join_all_channels(&mut self, server_blocks: &[UserDataBlock]) -> io::Result<(u16, u16)> {
         let io_channel = server_blocks
             .iter()
             .find_map(|b| match b {
@@ -537,7 +557,6 @@ impl<S: Read + Write> RdpTransport<S> {
             })
             .unwrap_or_default();
 
-        // 3. Channel setup.
         self.erect_domain()?;
         let user_id = self.attach_user()?;
         self.join_channel(user_id, user_id)?;
@@ -545,6 +564,86 @@ impl<S: Read + Write> RdpTransport<S> {
         for vc in virtual_channels {
             self.join_channel(user_id, vc)?;
         }
+        Ok((user_id, io_channel))
+    }
+
+    /// Run the shared tail of the connection sequence: licensing, capability
+    /// exchange, and the client finalization PDUs. Returns the active session.
+    fn activate(
+        &mut self,
+        config: &EstablishConfig,
+        user_id: u16,
+        io_channel: u16,
+    ) -> io::Result<RdpSession> {
+        // Licensing + capability exchange: read until Demand Active.
+        let (share_id, server_channel) = self.await_activation(io_channel)?;
+
+        // Confirm Active with our capability sets.
+        let confirm = ConfirmActive::new(
+            share_id,
+            client_capability_sets(
+                config.desktop_width,
+                config.desktop_height,
+                config.bits_per_pixel,
+            ),
+        );
+        let confirm_bytes = confirm.encode(user_id).map_err(to_io)?;
+        self.send_share(user_id, io_channel, &confirm_bytes)?;
+
+        // Client connection-finalization sequence.
+        for pdu in client_finalization_sequence(server_channel) {
+            let bytes = pdu.encode(share_id, user_id).map_err(to_io)?;
+            self.send_share(user_id, io_channel, &bytes)?;
+        }
+
+        Ok(RdpSession {
+            user_id,
+            io_channel,
+            share_id,
+            server_channel,
+        })
+    }
+
+    /// Drive the entire standard-RDP connection sequence and return the active
+    /// session.
+    ///
+    /// Performs, in order: X.224 negotiation (standard RDP security only), the
+    /// GCC/MCS connect, channel setup, the RSA security exchange and session-
+    /// key derivation, the encrypted Client Info PDU, the licensing exchange,
+    /// the capability exchange (Demand → Confirm Active), and the client's
+    /// connection-finalization sequence. `client_random` must be 32 bytes.
+    ///
+    /// Requires a server that offers standard RDP security *with* encryption;
+    /// a TLS/CredSSP selection or an unencrypted session returns an error. For
+    /// the TLS path see [`RdpTransport::establish_enhanced`].
+    pub fn establish(
+        &mut self,
+        config: &EstablishConfig,
+        client_random: &[u8; RANDOM_LEN],
+    ) -> io::Result<RdpSession> {
+        // 1. Negotiate standard RDP security.
+        let selected = self.negotiate(SecurityProtocols::RDP, Some(&config.username))?;
+        if selected != SecurityProtocols::RDP {
+            return Err(protocol_error(format!(
+                "server requires {selected:?}; establish only supports standard RDP security"
+            )));
+        }
+
+        // 2. MCS connect with our client settings (both RDP ciphers on offer).
+        let client_blocks = Self::build_client_blocks(
+            config,
+            0,
+            ENCRYPTION_METHOD_40BIT | ENCRYPTION_METHOD_128BIT,
+        );
+        let server_blocks = self.mcs_connect(&client_blocks)?;
+        let crypto = server_crypto(&server_blocks)?.ok_or_else(|| {
+            protocol_error(
+                "server selected no encryption; establish requires standard RDP security",
+            )
+        })?;
+
+        // 3. Channel setup.
+        let (user_id, io_channel) = self.join_all_channels(&server_blocks)?;
 
         // 4. Security commencement.
         if crypto.server_random.len() != RANDOM_LEN {
@@ -568,38 +667,55 @@ impl<S: Read + Write> RdpTransport<S> {
             result?;
         }
 
-        // 6. Licensing + 7. capability exchange: read until Demand Active.
-        let (share_id, server_channel) = self.await_activation(io_channel)?;
+        // 6-8. Licensing, capabilities, finalization.
+        self.activate(config, user_id, io_channel)
+    }
 
-        // 7b. Confirm Active with our capability sets.
-        let confirm = ConfirmActive::new(
-            share_id,
-            client_capability_sets(
-                config.desktop_width,
-                config.desktop_height,
-                config.bits_per_pixel,
-            ),
-        );
-        let confirm_bytes = confirm.encode(user_id).map_err(to_io)?;
-        self.send_share(user_id, io_channel, &confirm_bytes)?;
+    /// Drive the connection sequence over a stream that already provides
+    /// encryption (TLS/CredSSP) and return the active session.
+    ///
+    /// The X.224 negotiation must already have happened on the raw TCP
+    /// connection and selected `selected` (an enhanced-security protocol);
+    /// this transport must wrap the *upgraded* (e.g. TLS) stream — build it
+    /// with [`RdpTransport::new_enhanced`]. Compared to [`establish`], the RDP
+    /// security layer is off: there is no Security Exchange, no client random,
+    /// and no RC4 — TLS carries the confidentiality. Only the Client Info and
+    /// licensing PDUs carry a Basic Security Header (MS-RDPBCGR 5.4).
+    ///
+    /// The server is expected to send its licensing PDU(s) before the Demand
+    /// Active PDU, as real servers do.
+    ///
+    /// [`establish`]: Self::establish
+    pub fn establish_enhanced(
+        &mut self,
+        config: &EstablishConfig,
+        selected: SecurityProtocols,
+    ) -> io::Result<RdpSession> {
+        self.enhanced = true;
+        self.session = None;
 
-        // 8. Client connection-finalization sequence.
-        for pdu in client_finalization_sequence(server_channel) {
-            let bytes = pdu.encode(share_id, user_id).map_err(to_io)?;
-            self.send_share(user_id, io_channel, &bytes)?;
-        }
+        // MCS connect: echo the selected protocol, advertise no RDP ciphers.
+        let client_blocks = Self::build_client_blocks(config, selected.0, 0);
+        let server_blocks = self.mcs_connect(&client_blocks)?;
 
-        Ok(RdpSession {
-            user_id,
-            io_channel,
-            share_id,
-            server_channel,
-        })
+        // Channel setup.
+        let (user_id, io_channel) = self.join_all_channels(&server_blocks)?;
+
+        // Client Info (logon) in the clear under a SEC_INFO_PKT header — TLS
+        // already encrypts the stream, so no RC4 session is used.
+        let info = ClientInfo::new(&config.domain, &config.username, &config.password);
+        self.send_client_info(None, user_id, io_channel, &info)?;
+
+        // Licensing, capabilities, finalization.
+        self.activate(config, user_id, io_channel)
     }
 
     /// Consume licensing PDUs until the server signals a valid client, then
     /// read the Demand Active PDU. Returns `(share_id, server_channel)`.
     fn await_activation(&mut self, _io_channel: u16) -> io::Result<(u32, u16)> {
+        if self.enhanced {
+            return self.await_activation_enhanced();
+        }
         for _ in 0..16 {
             let (flags, body) = self.recv_wrapped()?;
             if flags & SEC_LICENSE_PKT != 0 {
@@ -623,6 +739,57 @@ impl<S: Read + Write> RdpTransport<S> {
             let (control, _) = ShareControlHeader::decode(&body).map_err(to_io)?;
             if control.pdu_type == PDUTYPE_DEMANDACTIVEPDU {
                 let (server_channel, demand) = DemandActive::decode(&body).map_err(to_io)?;
+                return Ok((demand.share_id, server_channel));
+            }
+            // Ignore any other share control PDU (e.g. an early Deactivate All).
+        }
+        Err(protocol_error(
+            "did not receive a Demand Active PDU during activation",
+        ))
+    }
+
+    /// Enhanced-security variant of [`await_activation`](Self::await_activation).
+    ///
+    /// Under TLS the RDP security layer is off, so only the licensing PDUs
+    /// carry a Basic Security Header (`SEC_LICENSE_PKT`); the Demand Active and
+    /// every later PDU are bare Share Control PDUs. We read licensing PDUs
+    /// until the server signals a valid client, then read the headerless
+    /// Demand Active.
+    fn await_activation_enhanced(&mut self) -> io::Result<(u32, u16)> {
+        let mut licensing = true;
+        for _ in 0..16 {
+            let (_channel, user_data) = self.recv_data()?;
+
+            // A licensing PDU still carries a Basic Security Header.
+            if licensing && user_data.len() >= 4 {
+                let flags = u16::from_le_bytes([user_data[0], user_data[1]]);
+                if flags & SEC_LICENSE_PKT != 0 {
+                    match LicensePdu::decode(&user_data[4..]).map_err(to_io)? {
+                        LicensePdu::ErrorAlert(msg) if msg.is_valid_client() => {
+                            licensing = false;
+                            continue;
+                        }
+                        LicensePdu::ErrorAlert(msg) => {
+                            return Err(protocol_error(format!(
+                                "licensing rejected: error {:#x}",
+                                msg.error_code
+                            )));
+                        }
+                        LicensePdu::Other { msg_type, .. } => {
+                            return Err(protocol_error(format!(
+                                "server requires full licensing (message type {msg_type:#x}), \
+                                 which is not implemented"
+                            )));
+                        }
+                    }
+                }
+            }
+
+            // Otherwise it is a headerless Share Control PDU.
+            licensing = false;
+            let (control, _) = ShareControlHeader::decode(&user_data).map_err(to_io)?;
+            if control.pdu_type == PDUTYPE_DEMANDACTIVEPDU {
+                let (server_channel, demand) = DemandActive::decode(&user_data).map_err(to_io)?;
                 return Ok((demand.share_id, server_channel));
             }
             // Ignore any other share control PDU (e.g. an early Deactivate All).
@@ -684,6 +851,10 @@ impl<S: Read + Write> RdpTransport<S> {
             DomainPdu::SendDataIndication { user_data, .. } => user_data.to_vec(),
             _ => return Ok(None),
         };
+        if self.enhanced {
+            // Under TLS, data PDUs carry no Basic Security Header.
+            return Ok(Some(user_data));
+        }
         let mut session = self.session.take();
         let result = security::unwrap_pdu(session.as_mut(), &user_data)
             .map(|(_flags, body)| body)
@@ -1493,6 +1664,203 @@ mod tests {
         assert_eq!(session.io_channel, 1003);
         assert_eq!(session.share_id, 0x0000_1234);
         assert_eq!(session.server_channel, 1002);
+    }
+
+    #[test]
+    fn establish_enhanced_drives_tls_handshake() {
+        // The TLS path: no Security Exchange, no RC4. Licensing carries a
+        // SEC_LICENSE_PKT header; the Demand Active and everything after are
+        // bare Share Control PDUs.
+        use crate::capabilities::{CapabilitySet, DemandActive, GeneralCapabilitySet};
+        use crate::gcc::{ServerCoreData, ServerNetworkData};
+        use crate::license::{LicenseErrorMessage, LicensePdu};
+        use crate::mcs::DomainParameters;
+
+        // Server security block advertises no RDP encryption (TLS handles it).
+        let server_blocks = vec![
+            UserDataBlock::ServerCore(ServerCoreData {
+                version: 0x0008_0004,
+                client_requested_protocols: Some(SecurityProtocols::SSL.0),
+                early_capability_flags: None,
+            }),
+            UserDataBlock::ServerNetwork(ServerNetworkData {
+                io_channel_id: 1003,
+                channel_ids: vec![],
+            }),
+        ];
+        let server_ud = gcc::encode_user_data(&server_blocks).unwrap();
+        let ccrsp = gcc::encode_conference_create_response(1002, &server_ud).unwrap();
+        let connect_response = ConnectResponse {
+            result: McsResult::Successful,
+            called_connect_id: 0,
+            domain_parameters: DomainParameters::client_target(),
+            user_data: ccrsp,
+        };
+
+        let data_ind = |payload: &[u8]| -> Vec<u8> {
+            framed(
+                X224::data(
+                    &DomainPdu::SendDataIndication {
+                        initiator: 1002,
+                        channel_id: 1003,
+                        user_data: payload,
+                    }
+                    .to_vec()
+                    .unwrap(),
+                )
+                .to_vec()
+                .unwrap(),
+            )
+        };
+        let confirm = |requested: u16, channel: u16| -> Vec<u8> {
+            framed(
+                X224::data(
+                    &DomainPdu::ChannelJoinConfirm {
+                        result: McsResult::Successful,
+                        initiator: 1007,
+                        requested,
+                        channel_id: Some(channel),
+                    }
+                    .to_vec()
+                    .unwrap(),
+                )
+                .to_vec()
+                .unwrap(),
+            )
+        };
+
+        // Licensing PDU: valid-client alert under a plaintext SEC_LICENSE_PKT
+        // header (no encryption).
+        let license = LicensePdu::ErrorAlert(LicenseErrorMessage::valid_client())
+            .to_vec()
+            .unwrap();
+        let license_wrapped = security::wrap_pdu(None, SEC_LICENSE_PKT, &license);
+
+        // Demand Active: a bare Share Control PDU (no security header).
+        let demand = DemandActive {
+            share_id: 0x0000_1234,
+            source_descriptor: b"RDP\0".to_vec(),
+            capability_sets: vec![CapabilitySet::General(GeneralCapabilitySet::default())],
+            session_id: 0,
+        };
+        let demand_bytes = demand.encode(1002).unwrap();
+
+        let mut inbound = Vec::new();
+        // No Connection Confirm here: negotiation already happened on raw TCP.
+        // 1. MCS Connect-Response.
+        inbound.extend(framed(
+            X224::data(&connect_response.to_vec()).to_vec().unwrap(),
+        ));
+        // 2. Attach User Confirm.
+        inbound.extend(framed(
+            X224::data(
+                &DomainPdu::AttachUserConfirm {
+                    result: McsResult::Successful,
+                    initiator: Some(1007),
+                }
+                .to_vec()
+                .unwrap(),
+            )
+            .to_vec()
+            .unwrap(),
+        ));
+        // 3/4. Channel join confirms.
+        inbound.extend(confirm(1007, 1007));
+        inbound.extend(confirm(1003, 1003));
+        // 5. Licensing, then 6. Demand Active (headerless).
+        inbound.extend(data_ind(&license_wrapped));
+        inbound.extend(data_ind(&demand_bytes));
+
+        let mut t = RdpTransport::new_enhanced(MockStream::new(inbound));
+        let config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        let session = t
+            .establish_enhanced(&config, SecurityProtocols::SSL)
+            .unwrap();
+
+        assert_eq!(session.user_id, 1007);
+        assert_eq!(session.io_channel, 1003);
+        assert_eq!(session.share_id, 0x0000_1234);
+        assert_eq!(session.server_channel, 1002);
+
+        // The client sent no Security Exchange PDU; the Client Info rode under
+        // a plaintext SEC_INFO_PKT header (no SEC_ENCRYPT).
+        let out = t.into_inner().outbound;
+        let mut info_seen = false;
+        for user_data in split_send_data_requests(&out) {
+            if user_data.len() < 4 {
+                continue;
+            }
+            let flags = u16::from_le_bytes([user_data[0], user_data[1]]);
+            // No PDU carries a Security Exchange header under TLS.
+            assert_eq!(flags & crate::security::SEC_EXCHANGE_PKT, 0);
+            if flags & SEC_INFO_PKT != 0 {
+                info_seen = true;
+                // Client Info is in the clear under TLS.
+                assert_eq!(flags & crate::security::SEC_ENCRYPT, 0);
+            }
+        }
+        assert!(info_seen, "Client Info PDU was not sent");
+    }
+
+    /// Split a client's outbound byte stream into the user-data payloads of
+    /// each MCS Send Data Request it carries.
+    fn split_send_data_requests(mut out: &[u8]) -> Vec<Vec<u8>> {
+        let mut payloads = Vec::new();
+        while out.len() >= TPKT_HEADER_LEN {
+            let Some(total) = Tpkt::peek_total_len(&out[..TPKT_HEADER_LEN]).unwrap() else {
+                break;
+            };
+            if total > out.len() {
+                break;
+            }
+            let (packet, rest) = out.split_at(total);
+            out = rest;
+            let tpkt = Tpkt::decode(packet).unwrap();
+            if let Ok(X224::Data(mcs)) = X224::decode(tpkt.payload) {
+                if let Ok(DomainPdu::SendDataRequest { user_data, .. }) = DomainPdu::decode(mcs) {
+                    payloads.push(user_data.to_vec());
+                }
+            }
+        }
+        payloads
+    }
+
+    #[test]
+    fn establish_enhanced_bitmap_has_no_security_header() {
+        // After an enhanced-mode session, a bitmap update arrives as a bare
+        // Share Data PDU with no Basic Security Header.
+        use crate::output::{BitmapData, UpdatePdu};
+
+        let update = UpdatePdu::Bitmap(vec![BitmapData::uncompressed(
+            2,
+            3,
+            1,
+            1,
+            16,
+            vec![0x00, 0xF8],
+        )]);
+        let share = update.encode(0x1234, 1002).unwrap();
+        let indication = X224::data(
+            &DomainPdu::SendDataIndication {
+                initiator: 1002,
+                channel_id: 1003,
+                user_data: &share,
+            }
+            .to_vec()
+            .unwrap(),
+        )
+        .to_vec()
+        .unwrap();
+
+        let mut t = RdpTransport::new_enhanced(MockStream::new(framed(indication)));
+        match t.recv_event().unwrap() {
+            RdpEvent::Bitmap(rects) => {
+                assert_eq!(rects.len(), 1);
+                assert_eq!(rects[0].dest_left, 2);
+                assert_eq!(rects[0].dest_top, 3);
+            }
+            other => panic!("expected Bitmap, got {other:?}"),
+        }
     }
 
     #[test]

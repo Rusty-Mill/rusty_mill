@@ -9,10 +9,20 @@ repository = "https://github.com/baileyrd/rusty_rdp"
 keywords = ["rdp", "remote-desktop", "protocol", "no-deps"]
 categories = ["network-programming", "encoding"]
 
-# Intentionally zero dependencies. The whole point of this crate is a
-# std-only RDP codec. Anything that would need a third-party crate
-# (TLS, RSA, etc.) lives behind a future feature flag, never in the core.
+# The default build has ZERO dependencies — the whole point of this crate is a
+# std-only RDP codec. The one thing that genuinely cannot be hand-rolled
+# responsibly is a TLS stack, so the enhanced-security (TLS) path lives behind
+# an opt-in `tls` feature. Everything else, including the RDP-over-TLS protocol
+# logic itself, stays in the dependency-free core (it is generic over the
+# stream, so you can also bring your own TLS implementation).
 [dependencies]
+rustls = { version = "0.23", optional = true }
+
+[features]
+# Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
+# stream to TLS with rustls before driving `establish_enhanced`. Off by
+# default; enabling it pulls in rustls and its transitive dependencies.
+tls = ["dep:rustls"]
 
 [lints.rust]
 unsafe_code = "forbid"
