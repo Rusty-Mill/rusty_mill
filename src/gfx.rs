@@ -22,14 +22,16 @@
 //! sequencing/flow-control ([`StartFramePdu`] / [`EndFramePdu`] /
 //! [`FrameAcknowledgePdu`]), the bitmap cache PDUs
 //! ([`SurfaceToCachePdu`] / [`CacheToSurfacePdu`] / [`EvictCacheEntryPdu`] /
-//! [`CacheImportOfferPdu`] / [`CacheImportReplyPdu`]), and surface
-//! composition ([`SolidFillPdu`] / [`SurfaceToSurfacePdu`]).
+//! [`CacheImportOfferPdu`] / [`CacheImportReplyPdu`]), surface composition
+//! ([`SolidFillPdu`] / [`SurfaceToSurfacePdu`]), and output mapping
+//! ([`ResetGraphicsPdu`] / [`MapSurfaceToOutputPdu`] /
+//! [`MapSurfaceToScaledOutputPdu`] / [`MapSurfaceToWindowPdu`] /
+//! [`MapSurfaceToScaledWindowPdu`]).
 //!
-//! **Not yet implemented:** output mapping (`RESETGRAPHICS`,
-//! `MAPSURFACETO*`), and — the largest remaining piece — the bitmap codecs
-//! themselves (`bitmapData` is carried opaquely here as raw bytes; decoding
-//! AVC/ClearCodec/Planar payloads is future work — [`crate::rfx`] already
-//! decodes the RemoteFX ones).
+//! **Not yet implemented** — the largest remaining piece — the bitmap
+//! codecs themselves (`bitmapData` is carried opaquely here as raw bytes;
+//! decoding AVC/ClearCodec/Planar payloads is future work —
+//! [`crate::rfx`] already decodes the RemoteFX ones).
 
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
@@ -74,6 +76,16 @@ pub const CMDID_CAPSCONFIRM: u16 = 0x0013;
 pub const CMDID_CACHEIMPORTOFFER: u16 = 0x0010;
 /// `RDPGFX_CMDID_CACHEIMPORTREPLY`.
 pub const CMDID_CACHEIMPORTREPLY: u16 = 0x0011;
+/// `RDPGFX_CMDID_RESETGRAPHICS`.
+pub const CMDID_RESETGRAPHICS: u16 = 0x000E;
+/// `RDPGFX_CMDID_MAPSURFACETOOUTPUT`.
+pub const CMDID_MAPSURFACETOOUTPUT: u16 = 0x000F;
+/// `RDPGFX_CMDID_MAPSURFACETOWINDOW`.
+pub const CMDID_MAPSURFACETOWINDOW: u16 = 0x0015;
+/// `RDPGFX_CMDID_MAPSURFACETOSCALEDOUTPUT`.
+pub const CMDID_MAPSURFACETOSCALEDOUTPUT: u16 = 0x0017;
+/// `RDPGFX_CMDID_MAPSURFACETOSCALEDWINDOW`.
+pub const CMDID_MAPSURFACETOSCALEDWINDOW: u16 = 0x0018;
 
 // RDPGFX_CODECID_* values (MS-RDPEGFX 2.2.2.1 / 2.2.2.2).
 /// `RDPGFX_CODECID_UNCOMPRESSED`.
@@ -229,6 +241,51 @@ impl Color32 {
         let red = r.read_u8()?;
         let xa = r.read_u8()?;
         Ok(Color32 { b, g, r: red, xa })
+    }
+}
+
+/// `TS_MONITOR_PRIMARY` flag for [`MonitorDef::flags`] (MS-RDPBCGR
+/// 2.2.1.3.6.1) — marks the monitor as the display containing the taskbar
+/// and Start menu.
+pub const TS_MONITOR_PRIMARY: u32 = 0x0000_0001;
+
+/// `TS_MONITOR_DEF` (MS-RDPBCGR 2.2.1.3.6.1) — describes one monitor's
+/// position and size within a [`ResetGraphicsPdu`]'s monitor layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorDef {
+    /// Left bound, relative to the upper-left corner of the primary
+    /// monitor.
+    pub left: i32,
+    /// Upper bound, relative to the upper-left corner of the primary
+    /// monitor.
+    pub top: i32,
+    /// Right bound (inclusive), relative to the upper-left corner of the
+    /// primary monitor.
+    pub right: i32,
+    /// Lower bound (inclusive), relative to the upper-left corner of the
+    /// primary monitor.
+    pub bottom: i32,
+    /// Monitor flags; see [`TS_MONITOR_PRIMARY`].
+    pub flags: u32,
+}
+
+impl MonitorDef {
+    fn encode(&self, w: &mut Writer) {
+        w.write_u32_le(self.left as u32);
+        w.write_u32_le(self.top as u32);
+        w.write_u32_le(self.right as u32);
+        w.write_u32_le(self.bottom as u32);
+        w.write_u32_le(self.flags);
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<MonitorDef> {
+        Ok(MonitorDef {
+            left: r.read_u32_le()? as i32,
+            top: r.read_u32_le()? as i32,
+            right: r.read_u32_le()? as i32,
+            bottom: r.read_u32_le()? as i32,
+            flags: r.read_u32_le()?,
+        })
     }
 }
 
@@ -895,6 +952,253 @@ impl CacheImportReplyPdu {
     }
 }
 
+/// `RDPGFX_RESET_GRAPHICS_PDU` — sent by the server to reset the client's
+/// graphics output buffer to a new monitor layout, e.g. after a display
+/// resize or reconfiguration. Always exactly 340 bytes on the wire
+/// regardless of `monitors.len()`; the remainder is ignored padding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResetGraphicsPdu {
+    /// Width, in pixels, of the graphics output buffer. MUST be less than
+    /// or equal to 32766.
+    pub width: u32,
+    /// Height, in pixels, of the graphics output buffer. MUST be less than
+    /// or equal to 32766.
+    pub height: u32,
+    /// The new monitor layout. MUST contain at most 16 entries.
+    pub monitors: Vec<MonitorDef>,
+}
+
+/// Fixed total size, in bytes, of an encoded [`ResetGraphicsPdu`]
+/// (MS-RDPEGFX 2.2.2.14).
+const RESET_GRAPHICS_PDU_LEN: usize = 340;
+/// Maximum number of [`MonitorDef`] entries a [`ResetGraphicsPdu`] may
+/// carry (MS-RDPEGFX 2.2.2.14).
+const RESET_GRAPHICS_MAX_MONITORS: usize = 16;
+
+impl ResetGraphicsPdu {
+    /// Encode to bytes. `monitors` MUST have at most 16 entries, or the
+    /// padding computation underflows and the returned buffer will not be
+    /// 340 bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u32_le(self.width);
+        body.write_u32_le(self.height);
+        body.write_u32_le(self.monitors.len() as u32);
+        for monitor in &self.monitors {
+            monitor.encode(&mut body);
+        }
+        let used = HEADER_LEN + 12 + 20 * self.monitors.len();
+        body.write_bytes(&vec![0u8; RESET_GRAPHICS_PDU_LEN.saturating_sub(used)]);
+        wrap(CMDID_RESETGRAPHICS, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<ResetGraphicsPdu> {
+        if buf.len() != RESET_GRAPHICS_PDU_LEN {
+            return Err(Error::InvalidLength {
+                field: "RDPGFX_RESET_GRAPHICS_PDU pduLength",
+                length: buf.len(),
+            });
+        }
+        let mut r = unwrap(buf, CMDID_RESETGRAPHICS)?;
+        let width = r.read_u32_le()?;
+        let height = r.read_u32_le()?;
+        let monitor_count = r.read_u32_le()?;
+        if monitor_count as usize > RESET_GRAPHICS_MAX_MONITORS {
+            return Err(Error::InvalidValue {
+                field: "RDPGFX_RESET_GRAPHICS_PDU monitorCount",
+                value: monitor_count.to_string(),
+            });
+        }
+        let mut monitors = Vec::with_capacity(monitor_count as usize);
+        for _ in 0..monitor_count {
+            monitors.push(MonitorDef::decode(&mut r)?);
+        }
+        Ok(ResetGraphicsPdu {
+            width,
+            height,
+            monitors,
+        })
+    }
+}
+
+/// `RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU` — instructs the client to map a
+/// surface to a rectangular area of the graphics output buffer at a fixed
+/// (unscaled) origin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSurfaceToOutputPdu {
+    /// ID of the surface to map.
+    pub surface_id: u16,
+    /// X-coordinate, relative to the origin of the graphics output buffer,
+    /// at which to map the top-left corner of the surface.
+    pub output_origin_x: u32,
+    /// Y-coordinate, relative to the origin of the graphics output buffer,
+    /// at which to map the top-left corner of the surface.
+    pub output_origin_y: u32,
+}
+
+impl MapSurfaceToOutputPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.surface_id);
+        body.write_u16_le(0); // reserved, MUST be zero
+        body.write_u32_le(self.output_origin_x);
+        body.write_u32_le(self.output_origin_y);
+        wrap(CMDID_MAPSURFACETOOUTPUT, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<MapSurfaceToOutputPdu> {
+        let mut r = unwrap(buf, CMDID_MAPSURFACETOOUTPUT)?;
+        let surface_id = r.read_u16_le()?;
+        let _reserved = r.read_u16_le()?;
+        Ok(MapSurfaceToOutputPdu {
+            surface_id,
+            output_origin_x: r.read_u32_le()?,
+            output_origin_y: r.read_u32_le()?,
+        })
+    }
+}
+
+/// `RDPGFX_MAP_SURFACE_TO_SCALED_OUTPUT_PDU` — instructs the client to map
+/// a surface to a rectangular area of the graphics output buffer, scaled to
+/// a target width/height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSurfaceToScaledOutputPdu {
+    /// ID of the surface to map.
+    pub surface_id: u16,
+    /// X-coordinate, relative to the origin of the graphics output buffer,
+    /// at which to map the top-left corner of the surface.
+    pub output_origin_x: u32,
+    /// Y-coordinate, relative to the origin of the graphics output buffer,
+    /// at which to map the top-left corner of the surface.
+    pub output_origin_y: u32,
+    /// Width, in pixels, to which the surface MUST be scaled.
+    pub target_width: u32,
+    /// Height, in pixels, to which the surface MUST be scaled.
+    pub target_height: u32,
+}
+
+impl MapSurfaceToScaledOutputPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.surface_id);
+        body.write_u16_le(0); // reserved, MUST be zero
+        body.write_u32_le(self.output_origin_x);
+        body.write_u32_le(self.output_origin_y);
+        body.write_u32_le(self.target_width);
+        body.write_u32_le(self.target_height);
+        wrap(CMDID_MAPSURFACETOSCALEDOUTPUT, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<MapSurfaceToScaledOutputPdu> {
+        let mut r = unwrap(buf, CMDID_MAPSURFACETOSCALEDOUTPUT)?;
+        let surface_id = r.read_u16_le()?;
+        let _reserved = r.read_u16_le()?;
+        Ok(MapSurfaceToScaledOutputPdu {
+            surface_id,
+            output_origin_x: r.read_u32_le()?,
+            output_origin_y: r.read_u32_le()?,
+            target_width: r.read_u32_le()?,
+            target_height: r.read_u32_le()?,
+        })
+    }
+}
+
+/// `RDPGFX_MAP_SURFACE_TO_WINDOW_PDU` — instructs the client to map a
+/// surface to a RAIL window (Enhanced RemoteApp), unscaled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSurfaceToWindowPdu {
+    /// ID of the surface to map.
+    pub surface_id: u16,
+    /// ID of the RAIL window to associate with the mapping (see
+    /// `[MS-RDPERP]` 2.2.1.3.1.1's `WindowId`).
+    pub window_id: u64,
+    /// Width of the rectangular region on the surface to which the window
+    /// is mapped.
+    pub mapped_width: u32,
+    /// Height of the rectangular region on the surface to which the window
+    /// is mapped.
+    pub mapped_height: u32,
+}
+
+impl MapSurfaceToWindowPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.surface_id);
+        body.write_u64_le(self.window_id);
+        body.write_u32_le(self.mapped_width);
+        body.write_u32_le(self.mapped_height);
+        wrap(CMDID_MAPSURFACETOWINDOW, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<MapSurfaceToWindowPdu> {
+        let mut r = unwrap(buf, CMDID_MAPSURFACETOWINDOW)?;
+        Ok(MapSurfaceToWindowPdu {
+            surface_id: r.read_u16_le()?,
+            window_id: r.read_u64_le()?,
+            mapped_width: r.read_u32_le()?,
+            mapped_height: r.read_u32_le()?,
+        })
+    }
+}
+
+/// `RDPGFX_MAP_SURFACE_TO_SCALED_WINDOW_PDU` — instructs the client to map
+/// a surface to a RAIL window (Enhanced RemoteApp), scaled to a target
+/// width/height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MapSurfaceToScaledWindowPdu {
+    /// ID of the surface to map.
+    pub surface_id: u16,
+    /// ID of the RAIL window to associate with the mapping (see
+    /// `[MS-RDPERP]` 2.2.1.3.1.1's `WindowId`).
+    pub window_id: u64,
+    /// Width of the rectangular region on the surface to which the window
+    /// is mapped.
+    pub mapped_width: u32,
+    /// Height of the rectangular region on the surface to which the window
+    /// is mapped.
+    pub mapped_height: u32,
+    /// Width, in pixels, of the target graphics output to which the
+    /// surface will be scaled.
+    pub target_width: u32,
+    /// Height, in pixels, of the target graphics output to which the
+    /// surface will be scaled.
+    pub target_height: u32,
+}
+
+impl MapSurfaceToScaledWindowPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.surface_id);
+        body.write_u64_le(self.window_id);
+        body.write_u32_le(self.mapped_width);
+        body.write_u32_le(self.mapped_height);
+        body.write_u32_le(self.target_width);
+        body.write_u32_le(self.target_height);
+        wrap(CMDID_MAPSURFACETOSCALEDWINDOW, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<MapSurfaceToScaledWindowPdu> {
+        let mut r = unwrap(buf, CMDID_MAPSURFACETOSCALEDWINDOW)?;
+        Ok(MapSurfaceToScaledWindowPdu {
+            surface_id: r.read_u16_le()?,
+            window_id: r.read_u64_le()?,
+            mapped_width: r.read_u32_le()?,
+            mapped_height: r.read_u32_le()?,
+            target_width: r.read_u32_le()?,
+            target_height: r.read_u32_le()?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1326,5 +1630,235 @@ mod tests {
         // Finally evict the cache slot.
         let evict = EvictCacheEntryPdu { cache_slot };
         assert_eq!(EvictCacheEntryPdu::decode(&evict.encode()).unwrap(), evict);
+    }
+
+    #[test]
+    fn monitor_def_roundtrip_with_negative_bounds() {
+        let m = MonitorDef {
+            left: -1920,
+            top: 0,
+            right: -1,
+            bottom: 1079,
+            flags: TS_MONITOR_PRIMARY,
+        };
+        let mut w = Writer::new();
+        m.encode(&mut w);
+        let mut r = Reader::new(w.as_slice());
+        assert_eq!(MonitorDef::decode(&mut r).unwrap(), m);
+    }
+
+    #[test]
+    fn reset_graphics_roundtrip_is_always_340_bytes() {
+        let pdu = ResetGraphicsPdu {
+            width: 1920,
+            height: 1080,
+            monitors: vec![MonitorDef {
+                left: 0,
+                top: 0,
+                right: 1919,
+                bottom: 1079,
+                flags: TS_MONITOR_PRIMARY,
+            }],
+        };
+        let encoded = pdu.encode();
+        assert_eq!(encoded.len(), 340);
+        assert_eq!(ResetGraphicsPdu::decode(&encoded).unwrap(), pdu);
+    }
+
+    #[test]
+    fn reset_graphics_wire_shape_header_and_fixed_fields() {
+        let pdu = ResetGraphicsPdu {
+            width: 1024,
+            height: 768,
+            monitors: vec![],
+        };
+        let encoded = pdu.encode();
+        assert_eq!(encoded.len(), 340);
+        // cmdId=0x000E LE, flags=0, pduLength=340 LE.
+        assert_eq!(
+            &encoded[0..8],
+            &[0x0E, 0x00, 0x00, 0x00, 0x54, 0x01, 0x00, 0x00]
+        );
+        // width=1024 LE, height=768 LE, monitorCount=0 LE.
+        assert_eq!(
+            &encoded[8..20],
+            &[0x00, 0x04, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+        );
+        // Remainder is ignored padding out to 340 bytes total.
+        assert_eq!(encoded.len() - 20, 320);
+    }
+
+    #[test]
+    fn reset_graphics_roundtrip_with_max_monitors() {
+        let monitors: Vec<MonitorDef> = (0..16)
+            .map(|i| MonitorDef {
+                left: i * 1920,
+                top: 0,
+                right: (i + 1) * 1920 - 1,
+                bottom: 1079,
+                flags: if i == 0 { TS_MONITOR_PRIMARY } else { 0 },
+            })
+            .collect();
+        let pdu = ResetGraphicsPdu {
+            width: 1920 * 16,
+            height: 1080,
+            monitors,
+        };
+        let encoded = pdu.encode();
+        assert_eq!(encoded.len(), 340);
+        assert_eq!(ResetGraphicsPdu::decode(&encoded).unwrap(), pdu);
+    }
+
+    #[test]
+    fn reset_graphics_rejects_wrong_total_length() {
+        let mut encoded = ResetGraphicsPdu {
+            width: 1024,
+            height: 768,
+            monitors: vec![],
+        }
+        .encode();
+        encoded.pop();
+        assert!(ResetGraphicsPdu::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn reset_graphics_rejects_monitor_count_over_max() {
+        // Hand-craft a 340-byte PDU whose monitorCount field claims 17
+        // monitors (one more than the protocol maximum), independent of
+        // how many MonitorDef entries actually follow.
+        let mut w = Writer::new();
+        w.write_u32_le(1024);
+        w.write_u32_le(768);
+        w.write_u32_le(17);
+        w.write_bytes(&vec![0u8; 340 - 8 - 12]);
+        let encoded = wrap(CMDID_RESETGRAPHICS, w.as_slice());
+        assert_eq!(encoded.len(), 340);
+        assert!(ResetGraphicsPdu::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn map_surface_to_output_roundtrip() {
+        let pdu = MapSurfaceToOutputPdu {
+            surface_id: 5,
+            output_origin_x: 100,
+            output_origin_y: 200,
+        };
+        assert_eq!(MapSurfaceToOutputPdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn map_surface_to_output_wire_shape() {
+        let pdu = MapSurfaceToOutputPdu {
+            surface_id: 5,
+            output_origin_x: 100,
+            output_origin_y: 200,
+        };
+        assert_eq!(
+            pdu.encode(),
+            vec![
+                0x0F, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, // header
+                0x05, 0x00, 0x00, 0x00, // surfaceId, reserved
+                0x64, 0x00, 0x00, 0x00, // outputOriginX = 100
+                0xC8, 0x00, 0x00, 0x00, // outputOriginY = 200
+            ]
+        );
+    }
+
+    #[test]
+    fn map_surface_to_scaled_output_roundtrip() {
+        let pdu = MapSurfaceToScaledOutputPdu {
+            surface_id: 5,
+            output_origin_x: 100,
+            output_origin_y: 200,
+            target_width: 1280,
+            target_height: 720,
+        };
+        assert_eq!(
+            MapSurfaceToScaledOutputPdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn map_surface_to_window_roundtrip() {
+        let pdu = MapSurfaceToWindowPdu {
+            surface_id: 5,
+            window_id: 0x0102_0304_0506_0708,
+            mapped_width: 640,
+            mapped_height: 480,
+        };
+        assert_eq!(MapSurfaceToWindowPdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn map_surface_to_scaled_window_roundtrip() {
+        let pdu = MapSurfaceToScaledWindowPdu {
+            surface_id: 5,
+            window_id: 0x0102_0304_0506_0708,
+            mapped_width: 640,
+            mapped_height: 480,
+            target_width: 1280,
+            target_height: 960,
+        };
+        assert_eq!(
+            MapSurfaceToScaledWindowPdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn output_mapping_cmd_ids_are_distinct_and_route_correctly() {
+        let reset = ResetGraphicsPdu {
+            width: 640,
+            height: 480,
+            monitors: vec![],
+        }
+        .encode();
+        let to_output = MapSurfaceToOutputPdu {
+            surface_id: 1,
+            output_origin_x: 0,
+            output_origin_y: 0,
+        }
+        .encode();
+        let to_scaled_output = MapSurfaceToScaledOutputPdu {
+            surface_id: 1,
+            output_origin_x: 0,
+            output_origin_y: 0,
+            target_width: 640,
+            target_height: 480,
+        }
+        .encode();
+        let to_window = MapSurfaceToWindowPdu {
+            surface_id: 1,
+            window_id: 1,
+            mapped_width: 640,
+            mapped_height: 480,
+        }
+        .encode();
+        let to_scaled_window = MapSurfaceToScaledWindowPdu {
+            surface_id: 1,
+            window_id: 1,
+            mapped_width: 640,
+            mapped_height: 480,
+            target_width: 640,
+            target_height: 480,
+        }
+        .encode();
+
+        assert_eq!(decode_cmd_id(&reset).unwrap(), CMDID_RESETGRAPHICS);
+        assert_eq!(decode_cmd_id(&to_output).unwrap(), CMDID_MAPSURFACETOOUTPUT);
+        assert_eq!(
+            decode_cmd_id(&to_scaled_output).unwrap(),
+            CMDID_MAPSURFACETOSCALEDOUTPUT
+        );
+        assert_eq!(decode_cmd_id(&to_window).unwrap(), CMDID_MAPSURFACETOWINDOW);
+        assert_eq!(
+            decode_cmd_id(&to_scaled_window).unwrap(),
+            CMDID_MAPSURFACETOSCALEDWINDOW
+        );
+
+        // Cross-decoding with the wrong PDU type is rejected.
+        assert!(MapSurfaceToWindowPdu::decode(&to_output).is_err());
+        assert!(MapSurfaceToOutputPdu::decode(&to_window).is_err());
     }
 }
