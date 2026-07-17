@@ -46,21 +46,48 @@
 //! their chunked traffic (MS-RDPBCGR 2.2.6.1, [`crate::vchan`]) into
 //! [`RdpEvent::ChannelData`] alongside the usual display/input events;
 //! [`RdpTransport::send_channel_data`] is the outbound counterpart.
+//!
+//! ## Server side
+//!
+//! [`RdpTransport::accept`] drives the same connection sequence in reverse,
+//! as a server: X.224 Connection Confirm, the GCC/MCS `Connect-Response`
+//! (building the server's settings blocks), channel-join confirmation, the
+//! Client Info PDU, the "no license required" response, Demand Active /
+//! Confirm Active, and the server's connection-finalization sequence —
+//! returning an [`AcceptedClient`]. Every codec type it uses is the same
+//! bidirectional type [`RdpTransport::establish`] uses on the other side;
+//! `accept` is what supplies the missing server-role driving logic and
+//! defaults (a fixed share id and MCS identity, since there is only ever one
+//! client per `accept` call).
+//!
+//! `accept` only speaks **unencrypted** standard RDP security
+//! (`encryptionLevel = 0`): no RSA key exchange, no RC4. Real encrypted
+//! standard security needs a proprietary-certificate signing key and an
+//! RSA private-key decrypt path, and TLS/CredSSP server support needs a
+//! certificate and a TLS server implementation — neither exists in this
+//! crate yet, so treat `accept` as a building block for trusted-network or
+//! testing use, not a production-ready server.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 
-use crate::capabilities::{client_capability_sets, ConfirmActive, DemandActive};
+use crate::capabilities::{
+    client_capability_sets, server_capability_sets, ConfirmActive, DemandActive,
+};
 use crate::client_info::{ClientInfo, INFO_UNICODE};
-use crate::finalization::client_finalization_sequence;
 use crate::finalization::FinalizationPdu;
+use crate::finalization::{client_finalization_sequence, server_finalization_sequence};
 use crate::gcc::{
     self, ChannelDef, ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData,
-    ServerNetworkData, UserDataBlock, ENCRYPTION_METHOD_128BIT, ENCRYPTION_METHOD_40BIT,
+    ServerCoreData, ServerNetworkData, ServerSecurityData, UserDataBlock, ENCRYPTION_METHOD_128BIT,
+    ENCRYPTION_METHOD_40BIT, RDP_VERSION_5_PLUS,
 };
 use crate::input::InputEvent;
-use crate::license::LicensePdu;
-use crate::mcs::{ConnectInitial, ConnectResponse, DomainPdu, McsResult, MCS_GLOBAL_CHANNEL_ID};
+use crate::license::{LicenseErrorMessage, LicensePdu};
+use crate::mcs::{
+    ConnectInitial, ConnectResponse, DomainParameters, DomainPdu, McsResult, MCS_BASE_CHANNEL_ID,
+    MCS_GLOBAL_CHANNEL_ID,
+};
 use crate::nego::{Negotiation, SecurityProtocols};
 use crate::output::{BitmapData, PaletteUpdate, UpdatePdu};
 use crate::pdu::{
@@ -138,6 +165,51 @@ impl RdpSession {
     pub fn channel_id(&self, name: &str) -> Option<u16> {
         self.channels.get(name).copied()
     }
+}
+
+/// Settings for [`RdpTransport::accept`].
+#[derive(Debug, Clone)]
+pub struct AcceptConfig {
+    /// Desktop width in pixels, advertised in the Demand Active PDU.
+    pub desktop_width: u16,
+    /// Desktop height in pixels, advertised in the Demand Active PDU.
+    pub desktop_height: u16,
+    /// Session color depth (bits per pixel), advertised in the Demand
+    /// Active PDU.
+    pub bits_per_pixel: u16,
+    /// `sourceDescriptor` advertised in the Demand Active PDU.
+    pub source_descriptor: Vec<u8>,
+}
+
+impl AcceptConfig {
+    /// Build a config for the given desktop size, defaulting to 16bpp and
+    /// the conventional `b"RDP\0"` source descriptor.
+    pub fn new(width: u16, height: u16) -> Self {
+        AcceptConfig {
+            desktop_width: width,
+            desktop_height: height,
+            bits_per_pixel: 16,
+            source_descriptor: b"RDP\0".to_vec(),
+        }
+    }
+}
+
+/// A client accepted by [`RdpTransport::accept`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedClient {
+    /// The `UserId` [`RdpTransport::accept`] assigned the client.
+    pub user_id: u16,
+    /// The MCS I/O channel carrying the main RDP data.
+    pub io_channel: u16,
+    /// The share id this server assigned in its Demand Active PDU.
+    pub share_id: u32,
+    /// MCS channel ids granted to the client's requested static virtual
+    /// channels, keyed by channel name.
+    pub channels: HashMap<String, u16>,
+    /// The client's logon data (domain/user/password). `accept` only speaks
+    /// unencrypted standard RDP security, so this travelled the wire in the
+    /// clear — do not use `accept` over an untrusted network.
+    pub client_info: ClientInfo,
 }
 
 /// A server-to-client event read after the session is active.
@@ -804,6 +876,328 @@ impl<S: Read + Write> RdpTransport<S> {
 
         // Licensing, capabilities, finalization.
         self.activate(config, user_id, io_channel, channels)
+    }
+
+    // --- Server-side connection sequence (RdpTransport::accept) ----------
+
+    /// The pseudo `UserId` [`RdpTransport::accept`] uses as the server's own
+    /// MCS identity when it originates a Send Data Indication or a Share
+    /// Control/Data PDU — distinct from any client `UserId`, matching the
+    /// convention real servers use (and this module's tests already assume).
+    const SERVER_MCS_ID: u16 = MCS_GLOBAL_CHANNEL_ID - 1;
+
+    /// The `UserId` [`RdpTransport::accept`] assigns the (single) client it
+    /// accepts.
+    const ACCEPTED_CLIENT_USER_ID: u16 = MCS_BASE_CHANNEL_ID + 6;
+
+    /// The share id [`RdpTransport::accept`] assigns in its Demand Active
+    /// PDU.
+    const ACCEPTED_SHARE_ID: u32 = 0x0001_00EA;
+
+    /// Read a Connection Request and reply with a Connection Confirm.
+    /// `accept` only speaks standard RDP security, so this always selects
+    /// [`SecurityProtocols::RDP`] regardless of what the client offered.
+    fn accept_negotiate(&mut self) -> io::Result<()> {
+        let request = self.read_tpkt()?;
+        let pdu = match X224::decode(&request).map_err(to_io)? {
+            X224::ConnectionRequest(pdu) => pdu,
+            other => {
+                return Err(protocol_error(format!(
+                    "expected Connection Request, got {other:?}"
+                )))
+            }
+        };
+        let negotiation = match pdu.negotiation {
+            Some(Negotiation::Request { .. }) => Some(Negotiation::Response {
+                flags: 0,
+                selected: SecurityProtocols::RDP,
+            }),
+            // A client that skipped negotiation entirely gets a bare
+            // Connection Confirm; `negotiate()` treats that as standard RDP.
+            _ => None,
+        };
+        let confirm = X224::ConnectionConfirm(ConnectionPdu {
+            negotiation,
+            ..Default::default()
+        })
+        .to_vec()
+        .map_err(to_io)?;
+        self.write_tpkt(&confirm)
+    }
+
+    /// Read the client's `Connect-Initial` and return its decoded GCC
+    /// settings blocks.
+    fn accept_read_connect_initial(&mut self) -> io::Result<Vec<UserDataBlock>> {
+        let payload = self.read_x224_data()?;
+        let connect_initial = ConnectInitial::decode(&payload).map_err(to_io)?;
+        let client_ud =
+            gcc::decode_conference_create_request(&connect_initial.user_data).map_err(to_io)?;
+        gcc::parse_user_data(&client_ud).map_err(to_io)
+    }
+
+    /// Send a `Connect-Response` wrapping `server_blocks`.
+    fn accept_send_connect_response(&mut self, server_blocks: &[UserDataBlock]) -> io::Result<()> {
+        let user_data = gcc::encode_user_data(server_blocks).map_err(to_io)?;
+        let ccrsp = gcc::encode_conference_create_response(Self::SERVER_MCS_ID, &user_data)
+            .map_err(to_io)?;
+        let response = ConnectResponse {
+            result: McsResult::Successful,
+            called_connect_id: 0,
+            domain_parameters: DomainParameters::client_target(),
+            user_data: ccrsp,
+        };
+        self.write_x224_data(&response.to_vec())
+    }
+
+    /// Consume the client's `ErectDomainRequest`, answer its
+    /// `AttachUserRequest` with the assigned `UserId`, then answer each of
+    /// the `2 + granted_channels.len()` `ChannelJoinRequest`s (the client's
+    /// own user channel, the I/O channel, and each granted virtual channel,
+    /// in that order — the sequence [`join_all_channels`](Self::join_all_channels)
+    /// drives client-side) with a `ChannelJoinConfirm`. Returns the assigned
+    /// `UserId`.
+    fn accept_join_channels(
+        &mut self,
+        io_channel: u16,
+        granted_channels: &[u16],
+    ) -> io::Result<u16> {
+        let erect = self.read_x224_data()?;
+        match DomainPdu::decode(&erect).map_err(to_io)? {
+            DomainPdu::ErectDomainRequest { .. } => {}
+            other => {
+                return Err(protocol_error(format!(
+                    "expected Erect Domain Request, got {other:?}"
+                )))
+            }
+        }
+
+        let attach = self.read_x224_data()?;
+        match DomainPdu::decode(&attach).map_err(to_io)? {
+            DomainPdu::AttachUserRequest => {}
+            other => {
+                return Err(protocol_error(format!(
+                    "expected Attach User Request, got {other:?}"
+                )))
+            }
+        }
+        let user_id = Self::ACCEPTED_CLIENT_USER_ID;
+        let attach_confirm = DomainPdu::AttachUserConfirm {
+            result: McsResult::Successful,
+            initiator: Some(user_id),
+        }
+        .to_vec()
+        .map_err(to_io)?;
+        self.write_x224_data(&attach_confirm)?;
+
+        let expected_joins = 2 + granted_channels.len();
+        for _ in 0..expected_joins {
+            let req = self.read_x224_data()?;
+            let (initiator, channel_id) = match DomainPdu::decode(&req).map_err(to_io)? {
+                DomainPdu::ChannelJoinRequest {
+                    initiator,
+                    channel_id,
+                } => (initiator, channel_id),
+                other => {
+                    return Err(protocol_error(format!(
+                        "expected Channel Join Request, got {other:?}"
+                    )))
+                }
+            };
+            let join_confirm = DomainPdu::ChannelJoinConfirm {
+                result: McsResult::Successful,
+                initiator,
+                requested: channel_id,
+                channel_id: Some(channel_id),
+            }
+            .to_vec()
+            .map_err(to_io)?;
+            self.write_x224_data(&join_confirm)?;
+        }
+
+        self.io_channel = Some(io_channel);
+        Ok(user_id)
+    }
+
+    /// Send `data` on `channel_id` as a Send Data Indication from
+    /// `initiator` — the server-role counterpart of
+    /// [`send_data`](Self::send_data).
+    fn send_data_indication(
+        &mut self,
+        initiator: u16,
+        channel_id: u16,
+        data: &[u8],
+    ) -> io::Result<()> {
+        let pdu = DomainPdu::SendDataIndication {
+            initiator,
+            channel_id,
+            user_data: data,
+        }
+        .to_vec()
+        .map_err(to_io)?;
+        self.write_x224_data(&pdu)
+    }
+
+    /// Receive one Send Data Request, returning `(initiator, channel_id,
+    /// data)` — the server-role counterpart of
+    /// [`recv_data`](Self::recv_data).
+    fn recv_data_request(&mut self) -> io::Result<(u16, u16, Vec<u8>)> {
+        let response = self.read_x224_data()?;
+        match DomainPdu::decode(&response).map_err(to_io)? {
+            DomainPdu::SendDataRequest {
+                initiator,
+                channel_id,
+                user_data,
+            } => Ok((initiator, channel_id, user_data.to_vec())),
+            other => Err(protocol_error(format!(
+                "expected Send Data Request, got {other:?}"
+            ))),
+        }
+    }
+
+    /// Read the (unencrypted) Client Info PDU and decode the client's logon
+    /// data.
+    fn accept_client_info(&mut self) -> io::Result<ClientInfo> {
+        let (_initiator, _channel, data) = self.recv_data_request()?;
+        let (_flags, body) = security::unwrap_pdu(None, &data).map_err(to_io)?;
+        ClientInfo::decode(&body).map_err(to_io)
+    }
+
+    /// Send the "no license required" License Error Message.
+    fn accept_send_no_license_required(&mut self, io_channel: u16) -> io::Result<()> {
+        let license = LicensePdu::ErrorAlert(LicenseErrorMessage::valid_client())
+            .to_vec()
+            .map_err(to_io)?;
+        let wrapped = security::wrap_pdu(None, SEC_LICENSE_PKT, &license);
+        self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &wrapped)
+    }
+
+    /// Send the (headerless — `encryptionLevel = 0` carries no Basic
+    /// Security Header past licensing, same as the TLS/`establish_enhanced`
+    /// path) Demand Active PDU and read back the client's Confirm Active.
+    /// Returns `(share_id, client_channel)`, where `client_channel` is the
+    /// `pduSource` the client used — needed to target
+    /// [`server_finalization_sequence`].
+    fn accept_capability_exchange(
+        &mut self,
+        config: &AcceptConfig,
+        io_channel: u16,
+    ) -> io::Result<(u32, u16)> {
+        let share_id = Self::ACCEPTED_SHARE_ID;
+        let demand = DemandActive {
+            share_id,
+            source_descriptor: config.source_descriptor.clone(),
+            capability_sets: server_capability_sets(
+                config.desktop_width,
+                config.desktop_height,
+                config.bits_per_pixel,
+            ),
+            session_id: 0,
+        };
+        let demand_bytes = demand.encode(Self::SERVER_MCS_ID).map_err(to_io)?;
+        self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &demand_bytes)?;
+
+        let (_initiator, _channel, body) = self.recv_data_request()?;
+        let (client_channel, confirm) = ConfirmActive::decode(&body).map_err(to_io)?;
+        if confirm.share_id != share_id {
+            return Err(protocol_error(format!(
+                "Confirm Active echoed share id {:#x}, expected {share_id:#x}",
+                confirm.share_id
+            )));
+        }
+        Ok((share_id, client_channel))
+    }
+
+    /// Read the client's four-PDU finalization sequence and reply with the
+    /// server's.
+    fn accept_finalization(
+        &mut self,
+        share_id: u32,
+        io_channel: u16,
+        client_channel: u16,
+    ) -> io::Result<()> {
+        for _ in 0..4 {
+            let (_initiator, _channel, body) = self.recv_data_request()?;
+            FinalizationPdu::decode(&body).map_err(to_io)?;
+        }
+        for pdu in server_finalization_sequence(client_channel) {
+            let bytes = pdu.encode(share_id, Self::SERVER_MCS_ID).map_err(to_io)?;
+            self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &bytes)?;
+        }
+        Ok(())
+    }
+
+    /// Drive the entire standard-RDP connection sequence as the *server* and
+    /// return the accepted client.
+    ///
+    /// Performs, in order: the X.224 negotiation (always selecting standard
+    /// RDP security), the GCC/MCS connect — building the server's settings
+    /// blocks with `encryptionLevel = 0` (no server random, no certificate)
+    /// — channel setup, the Client Info PDU, the "no license required"
+    /// response, the capability exchange (Demand → Confirm Active), and the
+    /// server's connection-finalization sequence.
+    ///
+    /// `accept` only speaks **unencrypted** standard RDP security: no RSA key
+    /// exchange, no RC4, no TLS/CredSSP. Real encrypted standard security
+    /// (which needs a proprietary-certificate signing key and RSA private-key
+    /// decryption, neither implemented) and TLS/CredSSP server support
+    /// (which needs a certificate and a TLS server implementation) are not
+    /// implemented. Do not use this over an untrusted network — see this
+    /// crate's security note on [`crate::security`]/[`crate::crypto`].
+    pub fn accept(&mut self, config: &AcceptConfig) -> io::Result<AcceptedClient> {
+        self.accept_negotiate()?;
+
+        let client_blocks = self.accept_read_connect_initial()?;
+        let requested_channels: Vec<ChannelDef> = client_blocks
+            .iter()
+            .find_map(|b| match b {
+                UserDataBlock::ClientNetwork(net) => Some(net.channels.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let io_channel = MCS_GLOBAL_CHANNEL_ID;
+        let granted_ids: Vec<u16> = (0..requested_channels.len() as u16)
+            .map(|i| io_channel + 1 + i)
+            .collect();
+
+        let server_blocks = vec![
+            UserDataBlock::ServerCore(ServerCoreData {
+                version: RDP_VERSION_5_PLUS,
+                client_requested_protocols: Some(0),
+                early_capability_flags: Some(0),
+            }),
+            UserDataBlock::ServerSecurity(ServerSecurityData {
+                encryption_method: 0,
+                encryption_level: 0,
+                server_random: Vec::new(),
+                server_certificate: Vec::new(),
+            }),
+            UserDataBlock::ServerNetwork(ServerNetworkData {
+                io_channel_id: io_channel,
+                channel_ids: granted_ids.clone(),
+            }),
+        ];
+        self.accept_send_connect_response(&server_blocks)?;
+
+        let user_id = self.accept_join_channels(io_channel, &granted_ids)?;
+        let channels: HashMap<String, u16> = requested_channels
+            .iter()
+            .zip(&granted_ids)
+            .map(|(def, &id)| (def.name.clone(), id))
+            .collect();
+
+        let client_info = self.accept_client_info()?;
+        self.accept_send_no_license_required(io_channel)?;
+
+        let (share_id, client_channel) = self.accept_capability_exchange(config, io_channel)?;
+        self.accept_finalization(share_id, io_channel, client_channel)?;
+
+        Ok(AcceptedClient {
+            user_id,
+            io_channel,
+            share_id,
+            channels,
+            client_info,
+        })
     }
 
     /// Consume licensing PDUs until the server signals a valid client, then
@@ -2223,5 +2617,145 @@ mod tests {
             })])
             .unwrap();
         assert_eq!(blocks, server_blocks);
+    }
+
+    /// End-to-end: [`RdpTransport::accept`] against a hand-driven client that
+    /// speaks the same sequence [`RdpTransport::establish`] would (negotiate,
+    /// MCS connect, channel setup, unencrypted Client Info, licensing,
+    /// capability exchange, finalization) over a real TCP loopback
+    /// connection — exercising the full wire protocol both directions, not
+    /// just one side's framing in isolation.
+    ///
+    /// A hand-driven client rather than `establish()` itself: `establish()`
+    /// requires the server to select encryption (real standard RDP security
+    /// needs RSA, which this crate's server side does not implement yet),
+    /// so it cannot speak `accept`'s unencrypted `encryptionLevel = 0` mode.
+    /// Any real RDP client can, though — `accept` only has to speak the wire
+    /// protocol correctly, which is what this test checks.
+    #[test]
+    fn accept_completes_full_connection_sequence_with_a_real_client() {
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut t = RdpTransport::new(stream);
+            t.accept(&AcceptConfig::new(1024, 768)).unwrap()
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let mut client = RdpTransport::new(stream);
+
+        // 1. X.224 negotiation.
+        let selected = client
+            .negotiate(SecurityProtocols::RDP, Some("alice"))
+            .unwrap();
+        assert_eq!(selected, SecurityProtocols::RDP);
+
+        // 2. GCC/MCS connect, requesting one virtual channel.
+        let mut core = ClientCoreData::new(1024, 768, "test-client");
+        core.server_selected_protocol = Some(0);
+        let client_blocks = vec![
+            UserDataBlock::ClientCore(core),
+            UserDataBlock::ClientSecurity(ClientSecurityData {
+                encryption_methods: 0,
+                ext_encryption_methods: 0,
+            }),
+            UserDataBlock::ClientNetwork(ClientNetworkData {
+                channels: vec![ChannelDef {
+                    name: "rdpdr".to_string(),
+                    options: 0,
+                }],
+            }),
+            UserDataBlock::ClientCluster(ClientClusterData {
+                flags: 0x0D,
+                redirected_session_id: 0,
+            }),
+        ];
+        let server_blocks = client.mcs_connect(&client_blocks).unwrap();
+        // encryptionLevel = 0: no server random/certificate to derive keys from.
+        assert_eq!(server_crypto(&server_blocks).unwrap(), None);
+
+        let io_channel = server_blocks
+            .iter()
+            .find_map(|b| match b {
+                UserDataBlock::ServerNetwork(net) => Some(net.io_channel_id),
+                _ => None,
+            })
+            .unwrap();
+        let virtual_channels: Vec<u16> = server_blocks
+            .iter()
+            .find_map(|b| match b {
+                UserDataBlock::ServerNetwork(net) => Some(net.channel_ids.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(virtual_channels.len(), 1);
+
+        // 3. Channel setup.
+        client.erect_domain().unwrap();
+        let user_id = client.attach_user().unwrap();
+        client.join_channel(user_id, user_id).unwrap();
+        client.join_channel(user_id, io_channel).unwrap();
+        for &vc in &virtual_channels {
+            client.join_channel(user_id, vc).unwrap();
+        }
+
+        // 4. Client Info, in the clear (encryptionLevel = 0, no RC4 session).
+        let info = ClientInfo::new("CORP", "alice", "secret");
+        client
+            .send_client_info(None, user_id, io_channel, &info)
+            .unwrap();
+
+        // 5. Licensing: expect "no license required".
+        let (_channel, data) = client.recv_data().unwrap();
+        let (flags, body) = security::unwrap_pdu(None, &data).unwrap();
+        assert!(flags & SEC_LICENSE_PKT != 0);
+        match LicensePdu::decode(&body).unwrap() {
+            LicensePdu::ErrorAlert(msg) => assert!(msg.is_valid_client()),
+            other => panic!("expected ErrorAlert, got {other:?}"),
+        }
+
+        // 6. Capability exchange — headerless past licensing, same as the
+        //    TLS/`establish_enhanced` path, since encryptionLevel = 0 also
+        //    carries no Basic Security Header on Share Control/Data PDUs.
+        let (_channel, demand_body) = client.recv_data().unwrap();
+        let (server_channel, demand) = DemandActive::decode(&demand_body).unwrap();
+        assert_eq!(demand.source_descriptor, b"RDP\0");
+
+        let confirm = ConfirmActive::new(demand.share_id, client_capability_sets(1024, 768, 16));
+        let confirm_bytes = confirm.encode(user_id).unwrap();
+        client
+            .send_data(user_id, io_channel, &confirm_bytes)
+            .unwrap();
+
+        // 7. Client finalization sequence.
+        for pdu in client_finalization_sequence(server_channel) {
+            let bytes = pdu.encode(demand.share_id, user_id).unwrap();
+            client.send_data(user_id, io_channel, &bytes).unwrap();
+        }
+
+        // 8. Server finalization sequence in reply.
+        let mut got_font_map = false;
+        for _ in 0..4 {
+            let (_channel, body) = client.recv_data().unwrap();
+            let (_source, share_id, pdu) = FinalizationPdu::decode(&body).unwrap();
+            assert_eq!(share_id, demand.share_id);
+            if matches!(pdu, FinalizationPdu::FontMap(_)) {
+                got_font_map = true;
+            }
+        }
+        assert!(got_font_map);
+
+        let accepted = server.join().unwrap();
+        assert_eq!(accepted.user_id, user_id);
+        assert_eq!(accepted.io_channel, io_channel);
+        assert_eq!(accepted.share_id, demand.share_id);
+        assert_eq!(accepted.channels.get("rdpdr"), Some(&virtual_channels[0]));
+        assert_eq!(accepted.client_info.username, "alice");
+        assert_eq!(accepted.client_info.domain, "CORP");
     }
 }

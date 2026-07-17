@@ -53,6 +53,13 @@
 //! an optional feature (`tls`); every codec and the NTLM/CredSSP crypto stay
 //! dependency-free.
 //!
+//! [`net::RdpTransport::accept`] drives the same connection sequence in
+//! reverse, as a server, over the identical bidirectional codec types —
+//! restricted for now to unencrypted standard RDP security
+//! (`encryptionLevel = 0`), since real encrypted standard security and
+//! TLS/CredSSP server support both need certificate/RSA-private-key material
+//! this crate does not yet provide.
+//!
 //! ## Design
 //!
 //! * **No I/O in the codec.** Every type encodes to and decodes from byte
