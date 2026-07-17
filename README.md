@@ -44,7 +44,7 @@ Early foundation. Implemented so far, bottom-up:
 | RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 entropy decoding, the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`. RLGR3, the auxiliary control PDUs (`TS_RFX_SYNC`/`CONTEXT`/`CHANNELS`/`REGION`/`FRAME_BEGIN`/`END`), and encoding are not implemented. |
 | Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), and data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`). File copy/paste and the Short Format Name variant are not implemented. |
 | Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), and wave playback (`encode_wave`/`decode_wave` hiding the WaveInfo/Wave PDU split, `WaveConfirmPdu`), plus `ClosePdu`. Volume/pitch control, `SNDC_WAVE2`, encryption, and the UDP transport variants are not implemented. |
-| Device redirection | `rdpdr` | MS-RDPEFS PDUs on the `"rdpdr"` static channel: the full initialization/capability handshake (`ServerAnnounceRequestPdu`/`ClientAnnounceReplyPdu`/`ServerClientIdConfirmPdu`/`ClientNameRequestPdu`, `ServerCoreCapabilityPdu`/`ClientCoreCapabilityPdu` with `GeneralCapsSet`, `ClientDeviceListAnnouncePdu`/`ServerDeviceAnnounceResponsePdu`, `ServerUserLoggedOnPdu`). The Device I/O Request/Response exchange that carries actual file/printer/port/smart-card operations is not implemented. |
+| Device redirection | `rdpdr` | MS-RDPEFS PDUs on the `"rdpdr"` static channel: the full initialization/capability handshake (`ServerAnnounceRequestPdu`/`ClientAnnounceReplyPdu`/`ServerClientIdConfirmPdu`/`ClientNameRequestPdu`, `ServerCoreCapabilityPdu`/`ClientCoreCapabilityPdu` with `GeneralCapsSet`, `ClientDeviceListAnnouncePdu`/`ServerDeviceAnnounceResponsePdu`, `ServerUserLoggedOnPdu`), and the Device I/O Request/Response exchange (`DeviceIoRequest`/`DeviceIoResponse` headers) for the five major functions common to every device: create/close/read/write (`DeviceCreateRequestPdu`/`RspPdu`, `DeviceCloseRequestPdu`/`RspPdu`, `DeviceReadRequestPdu`/`RspPdu`, `DeviceWriteRequestPdu`/`RspPdu`) and the generic IOCTL/FSCTL carrier (`DeviceControlRequestPdu`/`RspPdu`) that smart-card and port redirection ride on. Query/set file and volume information, directory control (listing/change notification), and lock control are not implemented. |
 | TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
@@ -112,11 +112,14 @@ the order they'd add the most value:
   `dvc`, `dvcman`, and `net`'s generic channel routing) is implemented end
   to end, and clipboard redirection (CLIPRDR, `cliprdr`, text only), audio
   redirection (RDPEA, `rdpsnd`, PCM/format negotiation and wave playback),
-  and RDPDR's initialization/capability handshake (`rdpdr`) are now
-  implemented; still needed: clipboard file copy/paste, audio
-  volume/pitch/encryption, and — the largest remaining piece — RDPDR's
-  Device I/O Request/Response exchange, which is what actually carries
-  drive/USB/smartcard/printer file operations once a device is announced.
+  and RDPDR (`rdpdr`) — both the initialization/capability handshake and
+  the Device I/O Request/Response exchange for create/close/read/write and
+  generic device control (the IOCTL/FSCTL carrier smart-card and port
+  redirection ride on almost entirely) — are now implemented; still
+  needed: clipboard file copy/paste, audio volume/pitch/encryption, and
+  RDPDR's filesystem-specific major functions (query/set file and volume
+  information, directory listing/change notification, and lock control) —
+  what's left to fully redirect a drive beyond basic file I/O.
 - **Server-side RDP.** The crate only drives the client half of the connection
   sequence (`RdpTransport::establish*`). A server role would reuse the same
   codecs but needs its own connection state machine (Connection Confirm,

@@ -95,6 +95,18 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    /// Read a big-endian `u64`.
+    pub fn read_u64_be(&mut self) -> Result<u64> {
+        let b = self.read_bytes(8)?;
+        Ok(u64::from_be_bytes(b.try_into().unwrap()))
+    }
+
+    /// Read a little-endian `u64`.
+    pub fn read_u64_le(&mut self) -> Result<u64> {
+        let b = self.read_bytes(8)?;
+        Ok(u64::from_le_bytes(b.try_into().unwrap()))
+    }
+
     /// Skip `len` bytes, advancing the cursor.
     pub fn skip(&mut self, len: usize) -> Result<()> {
         self.ensure(len)?;
@@ -165,6 +177,16 @@ impl Writer {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
+    /// Append a big-endian `u64`.
+    pub fn write_u64_be(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+    }
+
+    /// Append a little-endian `u64`.
+    pub fn write_u64_le(&mut self, v: u64) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
     /// Overwrite two bytes at `offset` with a big-endian `u16`.
     ///
     /// Used to back-patch length fields once the final size is known.
@@ -225,6 +247,18 @@ mod tests {
         w.write_u32_le(0xDEAD_BEEF);
         let bytes = w.into_vec();
         assert_eq!(bytes, [0x03, 0x12, 0x34, 0xEF, 0xBE, 0xAD, 0xDE]);
+    }
+
+    #[test]
+    fn u64_roundtrips_both_endian() {
+        let mut w = Writer::new();
+        w.write_u64_be(0x0102_0304_0506_0708);
+        w.write_u64_le(0x0102_0304_0506_0708);
+        let bytes = w.into_vec();
+        let mut r = Reader::new(&bytes);
+        assert_eq!(r.read_u64_be().unwrap(), 0x0102_0304_0506_0708);
+        assert_eq!(r.read_u64_le().unwrap(), 0x0102_0304_0506_0708);
+        assert!(r.is_empty());
     }
 
     #[test]
