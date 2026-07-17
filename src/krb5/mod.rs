@@ -20,9 +20,13 @@
 //!   [`messages::Authenticator`], [`messages::ApReq`], the KDC exchange
 //!   ([`messages::KdcReq`] / [`messages::KdcRep`] with [`messages::PaData`]),
 //!   [`messages::EncKdcRepPart`], and [`messages::KrbError`].
+//! * [`gss`] — the GSS-API / SPNEGO wrapping (RFC 2743 / 4178) that carries the
+//!   Kerberos `AP-REQ` inside CredSSP's `negoTokens`: DER OID encoding, the
+//!   `InitialContextToken` framing, and SPNEGO `NegTokenInit` / `NegTokenResp`.
 //!
-//! Still to come: the KDC transport (the AS/TGS round trips over the network)
-//! and the SPNEGO + GSS-API wrapping that plugs Kerberos into
+//! Still to come: the KDC transport (the AS/TGS round trips over the network),
+//! the RFC 4121 per-message Wrap tokens that seal the CredSSP public key and
+//! credentials with the Kerberos session key, and wiring it all into
 //! [`crate::credssp`].
 //!
 //! ## Security warning
@@ -33,6 +37,7 @@
 pub mod aes;
 pub mod asn1;
 pub mod crypto;
+pub mod gss;
 pub mod messages;
 
 pub use aes::{AesKey, ETYPE_AES128_CTS_HMAC_SHA1_96, ETYPE_AES256_CTS_HMAC_SHA1_96};
