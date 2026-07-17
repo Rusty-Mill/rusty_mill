@@ -71,6 +71,47 @@ pub fn max_data_len(header_len: usize) -> usize {
     MAX_PDU_LEN.saturating_sub(header_len)
 }
 
+/// Split `message` into one or more encoded DVC PDUs — a single [`DataPdu`]
+/// when it fits in one PDU, otherwise a [`DataFirstPdu`] followed by
+/// [`DataPdu`]s — ready to send one at a time (e.g. via
+/// `RdpTransport::send_channel_data`, one PDU per call so each gets its own
+/// MS-RDPBCGR chunking envelope).
+pub fn fragment(channel_id: u32, message: &[u8]) -> Vec<Vec<u8>> {
+    let (_, cbid_width) = narrowest_width(channel_id);
+    // A plain Data PDU's header is just Cmd + ChannelId.
+    let data_header_len = 1 + cbid_width;
+    if message.len() <= max_data_len(data_header_len) {
+        return vec![DataPdu {
+            channel_id,
+            data: message.to_vec(),
+        }
+        .encode()];
+    }
+
+    let total_length = message.len() as u32;
+    let (_len_code, len_width) = narrowest_width(total_length);
+    let first_header_len = 1 + cbid_width + len_width;
+    let first_len = max_data_len(first_header_len).min(message.len());
+    let mut pdus = vec![DataFirstPdu {
+        channel_id,
+        total_length,
+        data: message[..first_len].to_vec(),
+    }
+    .encode()];
+
+    let max_rest = max_data_len(data_header_len).max(1);
+    for chunk in message[first_len..].chunks(max_rest) {
+        pdus.push(
+            DataPdu {
+                channel_id,
+                data: chunk.to_vec(),
+            }
+            .encode(),
+        );
+    }
+    pdus
+}
+
 /// Pick the narrowest `cbId`/`Len` code (0/1/2) that fits `value`, and the
 /// byte width it denotes.
 fn narrowest_width(value: u32) -> (u8, usize) {
@@ -611,5 +652,82 @@ mod tests {
     fn wrong_cmd_is_rejected() {
         let close = ClosePdu { channel_id: 1 }.encode();
         assert!(DataPdu::decode(&close).is_err());
+    }
+
+    /// Reassemble the PDUs `fragment` produced, the way a receiver would:
+    /// a lone `DataPdu` is already complete; a `DataFirstPdu` starts a buffer
+    /// that later `DataPdu`s fill until it reaches `total_length`.
+    fn reassemble(channel_id: u32, pdus: &[Vec<u8>]) -> Vec<u8> {
+        let mut buf: Option<Vec<u8>> = None;
+        let mut total = 0usize;
+        for p in pdus {
+            match peek_cmd(p).unwrap() {
+                CMD_DATA_FIRST => {
+                    let first = DataFirstPdu::decode(p).unwrap();
+                    assert_eq!(first.channel_id, channel_id);
+                    total = first.total_length as usize;
+                    buf = Some(first.data);
+                }
+                CMD_DATA => {
+                    let d = DataPdu::decode(p).unwrap();
+                    assert_eq!(d.channel_id, channel_id);
+                    match &mut buf {
+                        Some(b) => b.extend_from_slice(&d.data),
+                        None => buf = Some(d.data),
+                    }
+                }
+                other => panic!("unexpected cmd {other:#x} in fragment stream"),
+            }
+        }
+        let out = buf.unwrap();
+        if total > 0 {
+            assert_eq!(out.len(), total);
+        }
+        out
+    }
+
+    #[test]
+    fn fragment_single_pdu_when_it_fits() {
+        let message = vec![0x11u8; 100];
+        let pdus = fragment(5, &message);
+        assert_eq!(pdus.len(), 1);
+        assert_eq!(peek_cmd(&pdus[0]).unwrap(), CMD_DATA);
+        assert_eq!(reassemble(5, &pdus), message);
+    }
+
+    #[test]
+    fn fragment_splits_large_message_and_reassembles() {
+        // channel_id 42 fits in a 1-byte cbId, so a plain DataPdu header is
+        // Cmd(1) + ChannelId(1) = 2 bytes, giving a 1598-byte single-PDU
+        // budget; every length here exceeds it and must split.
+        for len in [1599, 1600, 1601, 5000, 50_000] {
+            let message: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let pdus = fragment(42, &message);
+            assert!(pdus.len() > 1, "len {len} should need multiple PDUs");
+            assert_eq!(peek_cmd(&pdus[0]).unwrap(), CMD_DATA_FIRST);
+            for p in &pdus[1..] {
+                assert_eq!(peek_cmd(p).unwrap(), CMD_DATA);
+            }
+            assert_eq!(reassemble(42, &pdus), message);
+        }
+    }
+
+    #[test]
+    fn fragment_boundary_is_exact() {
+        // channel_id 42's single-PDU budget is exactly 1598 bytes.
+        let at_limit = vec![0x22u8; 1598];
+        assert_eq!(fragment(42, &at_limit).len(), 1);
+        let over_limit = vec![0x22u8; 1599];
+        assert!(fragment(42, &over_limit).len() > 1);
+    }
+
+    #[test]
+    fn fragment_respects_wide_channel_id() {
+        // A large channel id widens the header, shrinking the per-PDU budget;
+        // the split must still reassemble correctly.
+        let message = vec![0xAAu8; 3300];
+        let pdus = fragment(1_000_000, &message);
+        assert!(pdus.len() >= 3);
+        assert_eq!(reassemble(1_000_000, &pdus), message);
     }
 }

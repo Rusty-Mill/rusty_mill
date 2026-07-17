@@ -38,6 +38,7 @@
 //!             └─ fast-path            (crate::fastpath)  compact input/output framing
 //!             └─ virtual channels     (crate::vchan)  MS-RDPBCGR chunking, any static channel
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
+//!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -89,6 +90,7 @@ pub mod crypto;
 pub mod cursor;
 pub mod display;
 pub mod dvc;
+pub mod dvcman;
 pub mod error;
 pub mod fastpath;
 pub mod finalization;
