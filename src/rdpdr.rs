@@ -42,13 +42,31 @@
 //! [`DeviceWriteRequestPdu`]/[`DeviceWriteResponsePdu`] (`IRP_MJ_WRITE`), and
 //! [`DeviceControlRequestPdu`]/[`DeviceControlResponsePdu`]
 //! (`IRP_MJ_DEVICE_CONTROL`, the generic IOCTL/FSCTL carrier smart-card and
-//! port redirection ride on).
+//! port redirection ride on), and the filesystem-specific major functions:
+//! [`QueryInformationRequestPdu`]/[`QueryInformationResponsePdu`] and
+//! [`SetInformationRequestPdu`]/[`SetInformationResponsePdu`]
+//! (`IRP_MJ_QUERY_INFORMATION`/`SET_INFORMATION`),
+//! [`QueryVolumeInformationRequestPdu`]/[`QueryVolumeInformationResponsePdu`]
+//! and
+//! [`SetVolumeInformationRequestPdu`]/[`SetVolumeInformationResponsePdu`]
+//! (`IRP_MJ_QUERY_VOLUME_INFORMATION`/`SET_VOLUME_INFORMATION`), and
+//! [`QueryDirectoryRequestPdu`]/[`QueryDirectoryResponsePdu`] plus
+//! [`NotifyChangeDirectoryRequestPdu`]/[`NotifyChangeDirectoryResponsePdu`]
+//! (`IRP_MJ_DIRECTORY_CONTROL`, distinguished by `MinorFunction`). Every
+//! `*InformationClass`-dependent buffer (the structures [MS-FSCC] section
+//! 2.4/2.5 define) is kept opaque, the same way [`DeviceControlRequestPdu`]
+//! keeps its IOCTL buffers opaque — there are too many information classes
+//! to type individually, and a caller that needs one can decode it from the
+//! `FsInformationClass` tag plus raw bytes.
 //!
-//! **Not yet implemented:** the filesystem-specific major functions —
-//! `IRP_MJ_QUERY_INFORMATION`/`SET_INFORMATION`,
-//! `IRP_MJ_QUERY_VOLUME_INFORMATION`/`SET_VOLUME_INFORMATION`,
-//! `IRP_MJ_DIRECTORY_CONTROL` (directory listing/change notification), and
-//! `IRP_MJ_LOCK_CONTROL` — and `PAKID_CORE_DEVICELIST_REMOVE`.
+//! **Not yet implemented:** `IRP_MJ_LOCK_CONTROL`, and
+//! `PAKID_CORE_DEVICELIST_REMOVE`. The response side of lock control is
+//! documented (`DR_DEVICE_IOCOMPLETION` + 5 bytes padding), but the
+//! request's byte layout could not be located in Microsoft's published
+//! Open Specs pages, and none of the reference client implementations
+//! surveyed (FreeRDP, rdesktop, xrdp) actually parse it either — all three
+//! treat it as an inert no-op — so there was nothing to cross-check a guess
+//! against.
 
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
@@ -83,21 +101,17 @@ pub const IRP_MJ_CLOSE: u32 = 0x0000_0002;
 pub const IRP_MJ_READ: u32 = 0x0000_0003;
 /// `IRP_MJ_WRITE` — write request.
 pub const IRP_MJ_WRITE: u32 = 0x0000_0004;
-/// `IRP_MJ_QUERY_INFORMATION` — query file information request. Not yet
-/// implemented.
+/// `IRP_MJ_QUERY_INFORMATION` — query file information request.
 pub const IRP_MJ_QUERY_INFORMATION: u32 = 0x0000_0005;
-/// `IRP_MJ_SET_INFORMATION` — set file information request. Not yet
-/// implemented.
+/// `IRP_MJ_SET_INFORMATION` — set file information request.
 pub const IRP_MJ_SET_INFORMATION: u32 = 0x0000_0006;
 /// `IRP_MJ_QUERY_VOLUME_INFORMATION` — query volume information request.
-/// Not yet implemented.
 pub const IRP_MJ_QUERY_VOLUME_INFORMATION: u32 = 0x0000_000A;
-/// `IRP_MJ_SET_VOLUME_INFORMATION` — set volume information request. Not
-/// yet implemented.
+/// `IRP_MJ_SET_VOLUME_INFORMATION` — set volume information request.
 pub const IRP_MJ_SET_VOLUME_INFORMATION: u32 = 0x0000_000B;
 /// `IRP_MJ_DIRECTORY_CONTROL` — directory control request (query
 /// directory / notify change directory, distinguished by
-/// [`DeviceIoRequest::minor_function`]). Not yet implemented.
+/// [`DeviceIoRequest::minor_function`]).
 pub const IRP_MJ_DIRECTORY_CONTROL: u32 = 0x0000_000C;
 /// `IRP_MJ_DEVICE_CONTROL` — device control (IOCTL/FSCTL) request.
 pub const IRP_MJ_DEVICE_CONTROL: u32 = 0x0000_000E;
@@ -110,6 +124,61 @@ pub const IRP_MJ_LOCK_CONTROL: u32 = 0x0000_0011;
 pub const IRP_MN_QUERY_DIRECTORY: u32 = 0x0000_0001;
 /// `IRP_MN_NOTIFY_CHANGE_DIRECTORY` — notify change directory request.
 pub const IRP_MN_NOTIFY_CHANGE_DIRECTORY: u32 = 0x0000_0002;
+
+// FsInformationClass values used by Query/Set Information and by Query
+// Directory's FsInformationClass field (MS-FSCC 2.4 FILE_INFORMATION_CLASS
+// — a single enum shared by all three; only the members MS-RDPEFS actually
+// allows on the wire are listed here).
+/// `FileDirectoryInformation` — basic per-entry info (name, timestamps,
+/// size, attributes) in a [`QueryDirectoryRequestPdu`].
+pub const FILE_DIRECTORY_INFORMATION: u32 = 0x0000_0001;
+/// `FileFullDirectoryInformation` — [`FILE_DIRECTORY_INFORMATION`] plus
+/// extended attribute size.
+pub const FILE_FULL_DIRECTORY_INFORMATION: u32 = 0x0000_0002;
+/// `FileBothDirectoryInformation` — [`FILE_FULL_DIRECTORY_INFORMATION`]
+/// plus the short (8.3) name.
+pub const FILE_BOTH_DIRECTORY_INFORMATION: u32 = 0x0000_0003;
+/// `FileBasicInformation` — creation/access/write/change timestamps plus
+/// attributes; valid for both query and set.
+pub const FILE_BASIC_INFORMATION: u32 = 0x0000_0004;
+/// `FileStandardInformation` — allocation size, end-of-file, link count;
+/// query only.
+pub const FILE_STANDARD_INFORMATION: u32 = 0x0000_0005;
+/// `FileRenameInformation` — renames/moves a file; set only.
+pub const FILE_RENAME_INFORMATION: u32 = 0x0000_000A;
+/// `FileNamesInformation` — per-entry file names only, in a
+/// [`QueryDirectoryRequestPdu`].
+pub const FILE_NAMES_INFORMATION: u32 = 0x0000_000C;
+/// `FileDispositionInformation` — marks a file for deletion; set only, and
+/// the `SetBuffer`/`set_buffer` is always empty (see
+/// [`SetInformationRequestPdu`]).
+pub const FILE_DISPOSITION_INFORMATION: u32 = 0x0000_000D;
+/// `FileAllocationInformation` — sets a file's allocation size; set only.
+pub const FILE_ALLOCATION_INFORMATION: u32 = 0x0000_0013;
+/// `FileEndOfFileInformation` — sets a file's end-of-file position (i.e.
+/// truncates/extends it); set only.
+pub const FILE_END_OF_FILE_INFORMATION: u32 = 0x0000_0014;
+/// `FileAttributeTagInformation` — attributes and reparse tag; query only.
+pub const FILE_ATTRIBUTE_TAG_INFORMATION: u32 = 0x0000_0023;
+
+// FsInformationClass values used by Query/Set Volume Information
+// (MS-FSCC 2.5 FS_INFORMATION_CLASS — a distinct enum from the file one
+// above; values overlap numerically but mean something different here).
+/// `FileFsVolumeInformation` — volume label/serial number/creation time;
+/// query only.
+pub const FILE_FS_VOLUME_INFORMATION: u32 = 0x0000_0001;
+/// `FileFsSizeInformation` — sector/cluster/allocation-unit counts; query
+/// only.
+pub const FILE_FS_SIZE_INFORMATION: u32 = 0x0000_0003;
+/// `FileFsDeviceInformation` — the underlying device's type and
+/// characteristics; query only.
+pub const FILE_FS_DEVICE_INFORMATION: u32 = 0x0000_0004;
+/// `FileFsAttributeInformation` — file system name and feature flags;
+/// query only.
+pub const FILE_FS_ATTRIBUTE_INFORMATION: u32 = 0x0000_0005;
+/// `FileFsFullSizeInformation` — [`FILE_FS_SIZE_INFORMATION`] plus caller-
+/// available allocation units; query only.
+pub const FILE_FS_FULL_SIZE_INFORMATION: u32 = 0x0000_0007;
 
 // DeviceType values (DEVICE_ANNOUNCE's DeviceType field).
 /// `RDPDR_DTYP_SERIAL`.
@@ -748,6 +817,17 @@ impl DeviceIoRequest {
         }
         Ok(())
     }
+
+    fn expect_major_minor_function(&self, major: u32, minor: u32) -> Result<()> {
+        self.expect_major_function(major)?;
+        if self.minor_function != minor {
+            return Err(Error::InvalidValue {
+                field: "DR_DEVICE_IOREQUEST MinorFunction",
+                value: format!("0x{:08X} (expected 0x{minor:08X})", self.minor_function),
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Peek the [`DeviceIoRequest`] header of an encoded Device I/O Request PDU
@@ -1372,6 +1452,701 @@ impl DeviceControlResponsePdu {
     /// `true` when `io_status` is `STATUS_SUCCESS` (0).
     pub fn succeeded(&self) -> bool {
         self.io_status == 0
+    }
+}
+
+/// A leftover byte the wire format documents as optional padding (present
+/// or not, content ignored either way) at the end of an otherwise
+/// length-prefixed response. Consumes whatever is left in `r`, erroring if
+/// more than one byte remains — matching this module's "every `decode`
+/// consumes its entire input buffer" contract without over-trusting an
+/// oversized buffer.
+fn skip_optional_trailing_pad(r: &mut Reader<'_>) -> Result<()> {
+    let remaining = r.remaining();
+    if remaining > 1 {
+        return Err(Error::InvalidLength {
+            field: "optional trailing Padding",
+            length: remaining,
+        });
+    }
+    r.skip(remaining)
+}
+
+/// `DR_QUERY_INFORMATION_REQ` — a query information request
+/// (`IRP_MJ_QUERY_INFORMATION`). `fs_information_class` is one of the
+/// `FILE_*_INFORMATION` constants; `query_buffer`'s content depends on it
+/// and is kept opaque (see the module-level note on `*InformationClass`
+/// buffers).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryInformationRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// The file/handle being queried, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// One of the `FILE_*_INFORMATION` constants.
+    pub fs_information_class: u32,
+    /// Device-specific query parameters, opaque to this codec.
+    pub query_buffer: Vec<u8>,
+}
+
+impl QueryInformationRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(56 + self.query_buffer.len());
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_QUERY_INFORMATION,
+            minor_function: 0,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.fs_information_class);
+        w.write_u32_le(self.query_buffer.len() as u32);
+        w.write_bytes(&[0u8; 24]); // Padding
+        w.write_bytes(&self.query_buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryInformationRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_function(IRP_MJ_QUERY_INFORMATION)?;
+        let fs_information_class = r.read_u32_le()?;
+        let length = r.read_u32_le()? as usize;
+        r.skip(24)?; // Padding
+        let query_buffer = r.read_bytes(length)?.to_vec();
+        Ok(QueryInformationRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            fs_information_class,
+            query_buffer,
+        })
+    }
+}
+
+/// `DR_QUERY_INFORMATION_RSP` — the response to a
+/// [`QueryInformationRequestPdu`], carrying the requested information
+/// class's structure ([MS-FSCC] 2.4), opaque to this codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryInformationResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// The requested information, opaque to this codec.
+    pub buffer: Vec<u8>,
+}
+
+impl QueryInformationResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(20 + self.buffer.len());
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.buffer.len() as u32);
+        w.write_bytes(&self.buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryInformationResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()? as usize;
+        let buffer = r.read_bytes(length)?.to_vec();
+        Ok(QueryInformationResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            buffer,
+        })
+    }
+}
+
+/// `DR_SET_INFORMATION_REQ` — a set information request
+/// (`IRP_MJ_SET_INFORMATION`). `fs_information_class` is one of the
+/// `FILE_*_INFORMATION` constants valid for setting; `set_buffer`'s
+/// content depends on it and is kept opaque. For
+/// [`FILE_DISPOSITION_INFORMATION`], `set_buffer` is always empty — its
+/// mere presence marks the file for deletion. For
+/// [`FILE_RENAME_INFORMATION`], `set_buffer` holds an
+/// `RDP_FILE_RENAME_INFORMATION` structure (MS-RDPEFS 2.2.1.4.3), not
+/// separately typed here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetInformationRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// The file/handle being modified, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// One of the `FILE_*_INFORMATION` constants.
+    pub fs_information_class: u32,
+    /// Device-specific set parameters, opaque to this codec.
+    pub set_buffer: Vec<u8>,
+}
+
+impl SetInformationRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(56 + self.set_buffer.len());
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_SET_INFORMATION,
+            minor_function: 0,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.fs_information_class);
+        w.write_u32_le(self.set_buffer.len() as u32);
+        w.write_bytes(&[0u8; 24]); // Padding
+        w.write_bytes(&self.set_buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<SetInformationRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_function(IRP_MJ_SET_INFORMATION)?;
+        let fs_information_class = r.read_u32_le()?;
+        let length = r.read_u32_le()? as usize;
+        r.skip(24)?; // Padding
+        let set_buffer = r.read_bytes(length)?.to_vec();
+        Ok(SetInformationRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            fs_information_class,
+            set_buffer,
+        })
+    }
+}
+
+/// `DR_SET_INFORMATION_RSP` — the response to a [`SetInformationRequestPdu`].
+/// Unlike the query side, there is no returned buffer — `length` merely
+/// echoes the request's byte count back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetInformationResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// Echoes the request's `set_buffer` length.
+    pub length: u32,
+}
+
+impl SetInformationResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.length);
+        w.write_u8(0); // Padding
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<SetInformationResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()?;
+        r.skip(1)?; // Padding
+        Ok(SetInformationResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            length,
+        })
+    }
+
+    /// `true` when `io_status` is `STATUS_SUCCESS` (0).
+    pub fn succeeded(&self) -> bool {
+        self.io_status == 0
+    }
+}
+
+/// `DR_DRIVE_QUERY_VOLUME_INFORMATION_REQ` — a query volume information
+/// request (`IRP_MJ_QUERY_VOLUME_INFORMATION`). `fs_information_class` is
+/// one of the `FILE_FS_*_INFORMATION` constants; `query_volume_buffer`'s
+/// content depends on it and is kept opaque.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryVolumeInformationRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// An open file/handle on the volume being queried, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// One of the `FILE_FS_*_INFORMATION` constants.
+    pub fs_information_class: u32,
+    /// Device-specific query parameters, opaque to this codec.
+    pub query_volume_buffer: Vec<u8>,
+}
+
+impl QueryVolumeInformationRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(56 + self.query_volume_buffer.len());
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_QUERY_VOLUME_INFORMATION,
+            minor_function: 0,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.fs_information_class);
+        w.write_u32_le(self.query_volume_buffer.len() as u32);
+        w.write_bytes(&[0u8; 24]); // Padding
+        w.write_bytes(&self.query_volume_buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryVolumeInformationRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_function(IRP_MJ_QUERY_VOLUME_INFORMATION)?;
+        let fs_information_class = r.read_u32_le()?;
+        let length = r.read_u32_le()? as usize;
+        r.skip(24)?; // Padding
+        let query_volume_buffer = r.read_bytes(length)?.to_vec();
+        Ok(QueryVolumeInformationRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            fs_information_class,
+            query_volume_buffer,
+        })
+    }
+}
+
+/// `DR_DRIVE_QUERY_VOLUME_INFORMATION_RSP` — the response to a
+/// [`QueryVolumeInformationRequestPdu`]. The wire format allows one extra,
+/// content-free trailing byte after `buffer` ("intended to allow the
+/// client minor flexibility in determining the overall packet length" per
+/// MS-RDPEFS); this codec accepts and discards it either way rather than
+/// exposing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryVolumeInformationResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// The requested information, opaque to this codec.
+    pub buffer: Vec<u8>,
+}
+
+impl QueryVolumeInformationResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(20 + self.buffer.len());
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.buffer.len() as u32);
+        w.write_bytes(&self.buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryVolumeInformationResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()? as usize;
+        let buffer = r.read_bytes(length)?.to_vec();
+        skip_optional_trailing_pad(&mut r)?;
+        Ok(QueryVolumeInformationResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            buffer,
+        })
+    }
+}
+
+/// `DR_DRIVE_SET_VOLUME_INFORMATION_REQ` — a set volume information
+/// request (`IRP_MJ_SET_VOLUME_INFORMATION`). `fs_information_class` is
+/// one of the `FILE_FS_*_INFORMATION` constants; `set_volume_buffer`'s
+/// content depends on it and is kept opaque.
+///
+/// Its exact byte layout was not independently located in Microsoft's
+/// published Open Specs pages (only its section title, 2.2.3.3.7, turned
+/// up); it is modeled here identically to
+/// [`QueryVolumeInformationRequestPdu`] by structural inference — every
+/// other Query/Set pair in MS-RDPEFS (Query/Set Information, Query/Set
+/// Volume Information's request shape) shares its request's exact field
+/// layout, differing only in `MajorFunction` and the buffer's name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetVolumeInformationRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// An open file/handle on the volume being modified, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// One of the `FILE_FS_*_INFORMATION` constants.
+    pub fs_information_class: u32,
+    /// Device-specific set parameters, opaque to this codec.
+    pub set_volume_buffer: Vec<u8>,
+}
+
+impl SetVolumeInformationRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(56 + self.set_volume_buffer.len());
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_SET_VOLUME_INFORMATION,
+            minor_function: 0,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.fs_information_class);
+        w.write_u32_le(self.set_volume_buffer.len() as u32);
+        w.write_bytes(&[0u8; 24]); // Padding
+        w.write_bytes(&self.set_volume_buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<SetVolumeInformationRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_function(IRP_MJ_SET_VOLUME_INFORMATION)?;
+        let fs_information_class = r.read_u32_le()?;
+        let length = r.read_u32_le()? as usize;
+        r.skip(24)?; // Padding
+        let set_volume_buffer = r.read_bytes(length)?.to_vec();
+        Ok(SetVolumeInformationRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            fs_information_class,
+            set_volume_buffer,
+        })
+    }
+}
+
+/// `DR_DRIVE_SET_VOLUME_INFORMATION_RSP` — the response to a
+/// [`SetVolumeInformationRequestPdu`]. Modeled identically to
+/// [`SetInformationResponsePdu`] by the same structural inference
+/// described on [`SetVolumeInformationRequestPdu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SetVolumeInformationResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// Echoes the request's `set_volume_buffer` length.
+    pub length: u32,
+}
+
+impl SetVolumeInformationResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.length);
+        w.write_u8(0); // Padding
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<SetVolumeInformationResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()?;
+        r.skip(1)?; // Padding
+        Ok(SetVolumeInformationResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            length,
+        })
+    }
+
+    /// `true` when `io_status` is `STATUS_SUCCESS` (0).
+    pub fn succeeded(&self) -> bool {
+        self.io_status == 0
+    }
+}
+
+/// `DR_DRIVE_QUERY_DIRECTORY_REQ` — a query directory request
+/// (`IRP_MJ_DIRECTORY_CONTROL`/`IRP_MN_QUERY_DIRECTORY`), requesting one
+/// directory entry per call (the next one after whatever the previous call
+/// on this `file_id` returned).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryDirectoryRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// The open directory handle, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// One of `FILE_DIRECTORY_INFORMATION`/`FILE_FULL_DIRECTORY_INFORMATION`/
+    /// `FILE_BOTH_DIRECTORY_INFORMATION`/`FILE_NAMES_INFORMATION`.
+    pub fs_information_class: u32,
+    /// `true` to (re)start enumeration at `path`; `false` to continue from
+    /// wherever the previous query on this `file_id` left off, in which
+    /// case `path` is ignored.
+    pub initial_query: bool,
+    /// The directory (and search pattern, e.g. `"\\*"`) to enumerate.
+    /// Ignored by the client when `initial_query` is `false`.
+    pub path: String,
+}
+
+impl QueryDirectoryRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut path_units: Vec<u16> = self.path.encode_utf16().collect();
+        path_units.push(0); // NUL terminator
+        let path_len_bytes = (path_units.len() * 2) as u32;
+
+        let mut w = Writer::with_capacity(56 + path_units.len() * 2);
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_DIRECTORY_CONTROL,
+            minor_function: IRP_MN_QUERY_DIRECTORY,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.fs_information_class);
+        w.write_u8(self.initial_query as u8);
+        w.write_u32_le(path_len_bytes);
+        w.write_bytes(&[0u8; 23]); // Padding
+        for u in path_units {
+            w.write_u16_le(u);
+        }
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryDirectoryRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_minor_function(IRP_MJ_DIRECTORY_CONTROL, IRP_MN_QUERY_DIRECTORY)?;
+        let fs_information_class = r.read_u32_le()?;
+        let initial_query = r.read_u8()? != 0;
+        let path_len = r.read_u32_le()? as usize;
+        r.skip(23)?; // Padding
+        let raw = r.read_bytes(path_len)?;
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        let path = String::from_utf16_lossy(&units[..end]);
+        Ok(QueryDirectoryRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            fs_information_class,
+            initial_query,
+            path,
+        })
+    }
+}
+
+/// `DR_DRIVE_QUERY_DIRECTORY_RSP` — the response to a
+/// [`QueryDirectoryRequestPdu`], carrying one directory entry in the
+/// structure the request's `fs_information_class` selects ([MS-FSCC]
+/// 2.4), opaque to this codec. An empty `buffer` with a failing `io_status`
+/// (`STATUS_NO_MORE_FILES`/`STATUS_NO_SUCH_FILE`) signals end of
+/// enumeration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryDirectoryResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// The directory entry, opaque to this codec.
+    pub buffer: Vec<u8>,
+}
+
+impl QueryDirectoryResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(20 + self.buffer.len());
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.buffer.len() as u32);
+        w.write_bytes(&self.buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<QueryDirectoryResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()? as usize;
+        let buffer = r.read_bytes(length)?.to_vec();
+        Ok(QueryDirectoryResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            buffer,
+        })
+    }
+
+    /// `true` when `io_status` is `STATUS_SUCCESS` (0).
+    pub fn succeeded(&self) -> bool {
+        self.io_status == 0
+    }
+}
+
+/// `DR_DRIVE_NOTIFY_CHANGE_DIRECTORY_REQ` — a directory change
+/// notification request
+/// (`IRP_MJ_DIRECTORY_CONTROL`/`IRP_MN_NOTIFY_CHANGE_DIRECTORY`). The
+/// matching [`NotifyChangeDirectoryResponsePdu`] is sent only once a
+/// matching change occurs (or the file is closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotifyChangeDirectoryRequestPdu {
+    /// Target device.
+    pub device_id: u32,
+    /// The open directory handle, from
+    /// [`DeviceCreateResponsePdu::file_id`].
+    pub file_id: u32,
+    /// Matched back in [`DeviceIoResponse::completion_id`].
+    pub completion_id: u32,
+    /// `true` to watch the whole subtree; `false` to watch only the
+    /// directory itself.
+    pub watch_tree: bool,
+    /// Which kinds of change to report (`MS-SMB2` 2.2.35
+    /// `CompletionFilter`).
+    pub completion_filter: u32,
+}
+
+impl NotifyChangeDirectoryRequestPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        DeviceIoRequest {
+            device_id: self.device_id,
+            file_id: self.file_id,
+            completion_id: self.completion_id,
+            major_function: IRP_MJ_DIRECTORY_CONTROL,
+            minor_function: IRP_MN_NOTIFY_CHANGE_DIRECTORY,
+        }
+        .encode_into(&mut w);
+        w.write_u8(self.watch_tree as u8);
+        w.write_u32_le(self.completion_filter);
+        w.write_bytes(&[0u8; 27]); // Padding
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<NotifyChangeDirectoryRequestPdu> {
+        let mut r = Reader::new(buf);
+        let io_request = DeviceIoRequest::decode_from(&mut r)?;
+        io_request.expect_major_minor_function(
+            IRP_MJ_DIRECTORY_CONTROL,
+            IRP_MN_NOTIFY_CHANGE_DIRECTORY,
+        )?;
+        let watch_tree = r.read_u8()? != 0;
+        let completion_filter = r.read_u32_le()?;
+        r.skip(27)?; // Padding
+        Ok(NotifyChangeDirectoryRequestPdu {
+            device_id: io_request.device_id,
+            file_id: io_request.file_id,
+            completion_id: io_request.completion_id,
+            watch_tree,
+            completion_filter,
+        })
+    }
+}
+
+/// `DR_DRIVE_NOTIFY_CHANGE_DIRECTORY_RSP` — the response to a
+/// [`NotifyChangeDirectoryRequestPdu`], carrying an `MS-SMB2`
+/// `CHANGE_NOTIFY` response buffer (2.2.36), opaque to this codec; empty
+/// when the handle was closed with no matching change having occurred.
+/// Like [`QueryVolumeInformationResponsePdu`], the wire format allows one
+/// extra, content-free trailing byte, accepted and discarded either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyChangeDirectoryResponsePdu {
+    /// Echoes the request's device.
+    pub device_id: u32,
+    /// Echoes the request's `completion_id`.
+    pub completion_id: u32,
+    /// An NTSTATUS code; `0` (`STATUS_SUCCESS`) on success.
+    pub io_status: u32,
+    /// The change notification data, opaque to this codec.
+    pub buffer: Vec<u8>,
+}
+
+impl NotifyChangeDirectoryResponsePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::with_capacity(20 + self.buffer.len());
+        DeviceIoResponse {
+            device_id: self.device_id,
+            completion_id: self.completion_id,
+            io_status: self.io_status,
+        }
+        .encode_into(&mut w);
+        w.write_u32_le(self.buffer.len() as u32);
+        w.write_bytes(&self.buffer);
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<NotifyChangeDirectoryResponsePdu> {
+        let mut r = Reader::new(buf);
+        let io_completion = DeviceIoResponse::decode_from(&mut r)?;
+        let length = r.read_u32_le()? as usize;
+        let buffer = r.read_bytes(length)?.to_vec();
+        skip_optional_trailing_pad(&mut r)?;
+        Ok(NotifyChangeDirectoryResponsePdu {
+            device_id: io_completion.device_id,
+            completion_id: io_completion.completion_id,
+            io_status: io_completion.io_status,
+            buffer,
+        })
     }
 }
 
@@ -2088,6 +2863,419 @@ mod tests {
         let close_resp = DeviceCloseResponsePdu {
             device_id,
             completion_id: decoded_close.completion_id,
+            io_status: 0,
+        }
+        .encode();
+        assert!(DeviceCloseResponsePdu::decode(&close_resp)
+            .unwrap()
+            .succeeded());
+    }
+
+    /// MS-RDPEFS "Client Drive Set Information Response" example.
+    #[test]
+    fn set_information_response_matches_spec_vector() {
+        #[rustfmt::skip]
+        let bytes: [u8; 21] = [
+            0x72, 0x44, 0x43, 0x49, 0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x24, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let pdu = SetInformationResponsePdu::decode(&bytes).unwrap();
+        assert_eq!(
+            pdu,
+            SetInformationResponsePdu {
+                device_id: 1,
+                completion_id: 8,
+                io_status: 0,
+                length: 0x24,
+            }
+        );
+        assert!(pdu.succeeded());
+        assert_eq!(pdu.encode(), bytes);
+    }
+
+    /// MS-RDPEFS "Server Drive Query Directory Request" example: a query
+    /// for `FileFsSizeInformation` starting fresh at path `"\*"`.
+    #[test]
+    fn query_directory_request_matches_spec_vector() {
+        #[rustfmt::skip]
+        let bytes: [u8; 62] = [
+            0x72, 0x44, 0x52, 0x49, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x06, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x5c, 0x00, 0x2a, 0x00, 0x00, 0x00,
+        ];
+        let pdu = QueryDirectoryRequestPdu::decode(&bytes).unwrap();
+        assert_eq!(pdu.device_id, 1);
+        assert_eq!(pdu.file_id, 2);
+        assert_eq!(pdu.completion_id, 1);
+        assert_eq!(pdu.fs_information_class, FILE_FS_SIZE_INFORMATION);
+        assert!(pdu.initial_query);
+        assert_eq!(pdu.path, "\\*");
+        assert_eq!(pdu.encode(), bytes);
+    }
+
+    #[test]
+    fn query_information_roundtrips() {
+        let req = QueryInformationRequestPdu {
+            device_id: 1,
+            file_id: 2,
+            completion_id: 10,
+            fs_information_class: FILE_BASIC_INFORMATION,
+            query_buffer: vec![],
+        };
+        assert_eq!(
+            QueryInformationRequestPdu::decode(&req.encode()).unwrap(),
+            req
+        );
+
+        let resp = QueryInformationResponsePdu {
+            device_id: 1,
+            completion_id: 10,
+            io_status: 0,
+            buffer: vec![0xAA; 36],
+        };
+        assert_eq!(
+            QueryInformationResponsePdu::decode(&resp.encode()).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn query_information_wrong_major_function_is_rejected() {
+        let bytes = SetInformationRequestPdu {
+            device_id: 1,
+            file_id: 1,
+            completion_id: 1,
+            fs_information_class: FILE_BASIC_INFORMATION,
+            set_buffer: vec![],
+        }
+        .encode();
+        assert!(QueryInformationRequestPdu::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn set_information_roundtrips_rename_and_disposition() {
+        let rename = SetInformationRequestPdu {
+            device_id: 1,
+            file_id: 2,
+            completion_id: 11,
+            fs_information_class: FILE_RENAME_INFORMATION,
+            set_buffer: vec![0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00],
+        };
+        assert_eq!(
+            SetInformationRequestPdu::decode(&rename.encode()).unwrap(),
+            rename
+        );
+
+        let disposition = SetInformationRequestPdu {
+            device_id: 1,
+            file_id: 2,
+            completion_id: 12,
+            fs_information_class: FILE_DISPOSITION_INFORMATION,
+            set_buffer: vec![],
+        };
+        assert_eq!(
+            SetInformationRequestPdu::decode(&disposition.encode()).unwrap(),
+            disposition
+        );
+    }
+
+    #[test]
+    fn set_information_response_failure_status() {
+        let pdu = SetInformationResponsePdu {
+            device_id: 1,
+            completion_id: 12,
+            io_status: 0xC000_0022, // STATUS_ACCESS_DENIED
+            length: 0,
+        };
+        assert!(!pdu.succeeded());
+        assert_eq!(
+            SetInformationResponsePdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn query_volume_information_roundtrips() {
+        let req = QueryVolumeInformationRequestPdu {
+            device_id: 1,
+            file_id: 2,
+            completion_id: 13,
+            fs_information_class: FILE_FS_FULL_SIZE_INFORMATION,
+            query_volume_buffer: vec![],
+        };
+        assert_eq!(
+            QueryVolumeInformationRequestPdu::decode(&req.encode()).unwrap(),
+            req
+        );
+
+        let resp = QueryVolumeInformationResponsePdu {
+            device_id: 1,
+            completion_id: 13,
+            io_status: 0,
+            buffer: vec![0x11; 32],
+        };
+        assert_eq!(
+            QueryVolumeInformationResponsePdu::decode(&resp.encode()).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn query_volume_information_response_tolerates_optional_trailing_byte() {
+        let resp = QueryVolumeInformationResponsePdu {
+            device_id: 1,
+            completion_id: 13,
+            io_status: 0,
+            buffer: vec![0x11; 32],
+        };
+        let mut encoded = resp.encode();
+        encoded.push(0xFF); // the spec's "optional" trailing byte
+        let decoded = QueryVolumeInformationResponsePdu::decode(&encoded).unwrap();
+        assert_eq!(decoded, resp);
+    }
+
+    #[test]
+    fn query_volume_information_response_rejects_more_than_one_trailing_byte() {
+        let resp = QueryVolumeInformationResponsePdu {
+            device_id: 1,
+            completion_id: 13,
+            io_status: 0,
+            buffer: vec![],
+        };
+        let mut encoded = resp.encode();
+        encoded.extend_from_slice(&[0xFF, 0xFF]);
+        assert!(QueryVolumeInformationResponsePdu::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn set_volume_information_roundtrips() {
+        let req = SetVolumeInformationRequestPdu {
+            device_id: 1,
+            file_id: 2,
+            completion_id: 14,
+            fs_information_class: FILE_FS_ATTRIBUTE_INFORMATION,
+            set_volume_buffer: vec![0x01, 0x02],
+        };
+        assert_eq!(
+            SetVolumeInformationRequestPdu::decode(&req.encode()).unwrap(),
+            req
+        );
+
+        let resp = SetVolumeInformationResponsePdu {
+            device_id: 1,
+            completion_id: 14,
+            io_status: 0,
+            length: 2,
+        };
+        assert!(resp.succeeded());
+        assert_eq!(
+            SetVolumeInformationResponsePdu::decode(&resp.encode()).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn query_directory_request_roundtrips_continuation() {
+        let pdu = QueryDirectoryRequestPdu {
+            device_id: 1,
+            file_id: 5,
+            completion_id: 15,
+            fs_information_class: FILE_BOTH_DIRECTORY_INFORMATION,
+            initial_query: false,
+            path: String::new(),
+        };
+        assert_eq!(
+            QueryDirectoryRequestPdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn query_directory_response_roundtrips() {
+        let pdu = QueryDirectoryResponsePdu {
+            device_id: 1,
+            completion_id: 15,
+            io_status: 0,
+            buffer: vec![0x42; 64],
+        };
+        assert!(pdu.succeeded());
+        assert_eq!(
+            QueryDirectoryResponsePdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn query_directory_response_no_more_files() {
+        let pdu = QueryDirectoryResponsePdu {
+            device_id: 1,
+            completion_id: 15,
+            io_status: 0x8000_0006u32, // STATUS_NO_MORE_FILES
+            buffer: vec![],
+        };
+        assert!(!pdu.succeeded());
+        assert_eq!(
+            QueryDirectoryResponsePdu::decode(&pdu.encode()).unwrap(),
+            pdu
+        );
+    }
+
+    #[test]
+    fn query_directory_wrong_minor_function_is_rejected() {
+        let bytes = NotifyChangeDirectoryRequestPdu {
+            device_id: 1,
+            file_id: 1,
+            completion_id: 1,
+            watch_tree: true,
+            completion_filter: 0x17,
+        }
+        .encode();
+        assert!(QueryDirectoryRequestPdu::decode(&bytes).is_err());
+    }
+
+    #[test]
+    fn notify_change_directory_roundtrips() {
+        let req = NotifyChangeDirectoryRequestPdu {
+            device_id: 1,
+            file_id: 5,
+            completion_id: 16,
+            watch_tree: true,
+            completion_filter: 0x0000_0017, // FILE_NOTIFY_CHANGE_FILE_NAME | ...
+        };
+        let encoded = req.encode();
+        assert_eq!(encoded.len(), 56); // DeviceIoRequest(24) + WatchTree(1) + CompletionFilter(4) + Padding(27)
+        assert_eq!(
+            NotifyChangeDirectoryRequestPdu::decode(&encoded).unwrap(),
+            req
+        );
+
+        let resp = NotifyChangeDirectoryResponsePdu {
+            device_id: 1,
+            completion_id: 16,
+            io_status: 0,
+            buffer: vec![0x01, 0x02, 0x03, 0x04],
+        };
+        assert_eq!(
+            NotifyChangeDirectoryResponsePdu::decode(&resp.encode()).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn notify_change_directory_response_empty_on_close() {
+        let resp = NotifyChangeDirectoryResponsePdu {
+            device_id: 1,
+            completion_id: 16,
+            io_status: 0,
+            buffer: vec![],
+        };
+        assert_eq!(
+            NotifyChangeDirectoryResponsePdu::decode(&resp.encode()).unwrap(),
+            resp
+        );
+    }
+
+    #[test]
+    fn notify_change_directory_response_tolerates_optional_trailing_byte() {
+        let resp = NotifyChangeDirectoryResponsePdu {
+            device_id: 1,
+            completion_id: 16,
+            io_status: 0,
+            buffer: vec![0xAB],
+        };
+        let mut encoded = resp.encode();
+        encoded.push(0x00);
+        assert_eq!(
+            NotifyChangeDirectoryResponsePdu::decode(&encoded).unwrap(),
+            resp
+        );
+    }
+
+    /// Simulate a directory browse: open a directory, enumerate two
+    /// entries (initial query then continuation), get STATUS_NO_MORE_FILES,
+    /// then close — matching MS-RDPEFS 2.2.1.4/2.2.1.5's directory control
+    /// major function on top of `full_device_io_sequence`'s file lifecycle.
+    #[test]
+    fn full_directory_browse_sequence() {
+        let device_id = 1;
+
+        let create_resp = DeviceCreateResponsePdu {
+            device_id,
+            completion_id: 200,
+            io_status: 0,
+            file_id: 7,
+            information: Some(FILE_OPENED),
+        }
+        .encode();
+        let file_id = DeviceCreateResponsePdu::decode(&create_resp)
+            .unwrap()
+            .file_id;
+
+        // First entry: initial query.
+        let first_req = QueryDirectoryRequestPdu {
+            device_id,
+            file_id,
+            completion_id: 201,
+            fs_information_class: FILE_BOTH_DIRECTORY_INFORMATION,
+            initial_query: true,
+            path: "\\*".to_string(),
+        }
+        .encode();
+        let decoded_first = QueryDirectoryRequestPdu::decode(&first_req).unwrap();
+        assert!(decoded_first.initial_query);
+
+        let first_resp = QueryDirectoryResponsePdu {
+            device_id,
+            completion_id: decoded_first.completion_id,
+            io_status: 0,
+            buffer: b"entry-one".to_vec(),
+        }
+        .encode();
+        assert!(QueryDirectoryResponsePdu::decode(&first_resp)
+            .unwrap()
+            .succeeded());
+
+        // Second entry: continuation.
+        let second_req = QueryDirectoryRequestPdu {
+            device_id,
+            file_id,
+            completion_id: 202,
+            fs_information_class: FILE_BOTH_DIRECTORY_INFORMATION,
+            initial_query: false,
+            path: String::new(),
+        }
+        .encode();
+        let decoded_second = QueryDirectoryRequestPdu::decode(&second_req).unwrap();
+        assert!(!decoded_second.initial_query);
+
+        let second_resp = QueryDirectoryResponsePdu {
+            device_id,
+            completion_id: decoded_second.completion_id,
+            io_status: 0,
+            buffer: b"entry-two".to_vec(),
+        }
+        .encode();
+        assert!(QueryDirectoryResponsePdu::decode(&second_resp)
+            .unwrap()
+            .succeeded());
+
+        // Enumeration ends.
+        let end_resp = QueryDirectoryResponsePdu {
+            device_id,
+            completion_id: 203,
+            io_status: 0x8000_0006, // STATUS_NO_MORE_FILES
+            buffer: vec![],
+        }
+        .encode();
+        assert!(!QueryDirectoryResponsePdu::decode(&end_resp)
+            .unwrap()
+            .succeeded());
+
+        // Close.
+        let close_resp = DeviceCloseResponsePdu {
+            device_id,
+            completion_id: 204,
             io_status: 0,
         }
         .encode();
