@@ -23,7 +23,7 @@ Early foundation. Implemented so far, bottom-up:
 | Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5/SHA-1, RC4, AES, PBKDF2, and a minimal bignum for RSA — no crypto crate. |
 | NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP), both roles: `NtlmClient` (NEGOTIATE/AUTHENTICATE) and `NtlmServer` (CHALLENGE, then verifies AUTHENTICATE against a caller-supplied password-hash callback), the NTLMv2 response and key schedule, and the extended-session-security sealing (`NtlmContext`, `new`/`new_server` for the two roles) used by CredSSP. |
 | CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): `CredSspClient` (NTLM and Kerberos) and `CredSspServer` (NTLM only), the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation (`decode_ts_credentials` recovers what the server delegates to). Pure codec + crypto, driven over TLS by the `tls` feature. |
-| Kerberos | `krb5` | Kerberos v5 (RFC 4120 / MS-KILE): the RC4-HMAC (etype 23) and AES (etypes 17/18, RFC 3962) encryption profiles, the ASN.1 building blocks, the message PDUs (`Ticket`, `Authenticator`, `AP-REQ`, the AS/TGS exchange, `KRB-ERROR`), the GSS-API/SPNEGO wrapping (`krb5::gss`) that carries the AP-REQ in CredSSP `negoTokens`, and the RFC 4121 per-message Wrap/MIC sealing (`krb5::cfx`). The KDC transport and CredSSP wiring are still to come. |
+| Kerberos | `krb5` | Kerberos v5 (RFC 4120 / MS-KILE): the RC4-HMAC (etype 23) and AES (etypes 17/18, RFC 3962) encryption profiles, the ASN.1 building blocks, the message PDUs (`Ticket`, `Authenticator`, `AP-REQ`, the AS/TGS exchange, `KRB-ERROR`), the GSS-API/SPNEGO wrapping (`krb5::gss`) that carries the AP-REQ in CredSSP `negoTokens`, the RFC 4121 per-message Wrap/MIC sealing (`krb5::cfx`), and a KDC client (`krb5::kdc`) that drives the Authentication Service exchange over TCP — `get_tgt`/`fetch_tgt` trade a realm/username/password for a Ticket-Granting Ticket, with optimistic `PA-ENC-TIMESTAMP` pre-authentication. The Ticket-Granting Service exchange (trading that TGT for the service ticket `connect_tls_kerberos` needs) is still to come. |
 | Client Info | `client_info` | `TS_INFO_PACKET` logon data (domain/user/password/shell, extended info). |
 | Licensing | `license` | Licensing preamble and the License Error Message (`STATUS_VALID_CLIENT` detection). |
 | Session framing | `pdu` | Share Control / Share Data headers with the `PDUTYPE` / `PDUTYPE2` constants. |
@@ -80,8 +80,12 @@ feature, `connect_tls()` runs the whole exchange over the TLS channel when the
 server selects `HYBRID`. Both authentication mechanisms are wired end to end:
 NTLMv2 (`connect_tls`) and Kerberos (`connect_tls_kerberos`, which takes a
 caller-supplied ticket + AES session key and drives the SPNEGO/AP-REQ exchange
-sealed with RFC 4121 Wrap tokens). The one remaining Kerberos gap is the KDC
-transport that fetches the ticket in the first place.
+sealed with RFC 4121 Wrap tokens). Fetching that ticket from a KDC is half
+done: `krb5::kdc::fetch_tgt` gets a Ticket-Granting Ticket from a
+realm/username/password over a real TCP connection to a KDC. The remaining
+gap is the second round trip — trading that TGT for the actual service
+ticket `connect_tls_kerberos` needs, via the Ticket-Granting Service
+exchange.
 
 > **Security note:** the `crypto` and `security` modules implement obsolete,
 > deliberately weak algorithms (RC4, MD5/SHA-1 MACs, unpadded RSA) purely to
