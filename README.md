@@ -44,7 +44,7 @@ Early foundation. Implemented so far, bottom-up:
 | RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 and RLGR3 entropy decoding (`EntropyAlgorithm`), the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`, plus the control PDUs that wrap a tile set on the wire (`SyncPdu`, `CodecVersionsPdu`, `ChannelsPdu`, `ContextPdu`, `RegionPdu`, `FrameBeginPdu`/`FrameEndPdu`, dispatched by `peek_block_type`). The GFX cache/composition PDUs (`SURFACETOCACHE`, `SOLIDFILL`, etc.) belong to `gfx` instead, and encoding (the server-side direction) is not implemented. |
 | Planar codec | `planar` | MS-RDPEGDI RDP 6.0 bitmap decode for `gfx`'s `CODECID_PLANAR` bitmap data: `decode()` turns an `RDP6_BITMAP_STREAM` into a top-down RGBA8888 buffer, handling all four color planes (alpha/luma-or-red/orange-or-green/green-or-blue), the scan-line delta RLE scheme (`RDP6_RLE_SEGMENT`), the optional AYCoCg color space with color-loss reduction and 2×2 chroma subsampling, and the documented decoder-side R/B swap. Decode-only, like `rfx`. |
 | ClearCodec | `clearcodec` | MS-RDPEGFX decode for `gfx`'s `CODECID_CLEARCODEC` bitmap data: `ClearCodecDecoder` composites a `CLEARCODEC_BITMAP_STREAM`'s three payloads (a full-canvas run-length `residualData` fill, per-column `bandsData` "VBar" runs, and independent raw/RLEX `subcodecsData` sub-tiles) onto a top-down RGBA8888 buffer, and owns the persistent glyph and VBar/short-VBar caches later messages in the same session reference by index. NSCodec sub-tiles (`subcodecId == 1`) are not implemented. Decode-only, like `rfx`/`planar`. |
-| Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), and data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`). File copy/paste and the Short Format Name variant are not implemented. |
+| Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`), and file copy/paste (`FileList`/`FileDescriptor` for the `CFSTR_FILEDESCRIPTORW` format, `FileContentsRequestPdu`/`FileContentsResponsePdu` to pull a file's size or byte ranges, `LockClipDataPdu`/`UnlockClipDataPdu`). `CB_TEMP_DIRECTORY` and the Short Format Name variant are not implemented. |
 | Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), and wave playback (`encode_wave`/`decode_wave` hiding the WaveInfo/Wave PDU split, `WaveConfirmPdu`), plus `ClosePdu`. Volume/pitch control, `SNDC_WAVE2`, encryption, and the UDP transport variants are not implemented. |
 | Device redirection | `rdpdr` | MS-RDPEFS PDUs on the `"rdpdr"` static channel: the full initialization/capability handshake (`ServerAnnounceRequestPdu`/`ClientAnnounceReplyPdu`/`ServerClientIdConfirmPdu`/`ClientNameRequestPdu`, `ServerCoreCapabilityPdu`/`ClientCoreCapabilityPdu` with `GeneralCapsSet`, `ClientDeviceListAnnouncePdu`/`ServerDeviceAnnounceResponsePdu`, `ServerUserLoggedOnPdu`), and the full Device I/O Request/Response exchange (`DeviceIoRequest`/`DeviceIoResponse` headers) for every major function but one: create/close/read/write (`DeviceCreateRequestPdu`/`RspPdu`, `DeviceCloseRequestPdu`/`RspPdu`, `DeviceReadRequestPdu`/`RspPdu`, `DeviceWriteRequestPdu`/`RspPdu`), the generic IOCTL/FSCTL carrier (`DeviceControlRequestPdu`/`RspPdu`) that smart-card and port redirection ride on, query/set file information (`QueryInformationRequestPdu`/`RspPdu`, `SetInformationRequestPdu`/`RspPdu`), query/set volume information (`QueryVolumeInformationRequestPdu`/`RspPdu`, `SetVolumeInformationRequestPdu`/`RspPdu`), and directory control — listing (`QueryDirectoryRequestPdu`/`RspPdu`) and change notification (`NotifyChangeDirectoryRequestPdu`/`RspPdu`). Lock control is not implemented — its request layout isn't in Microsoft's published spec pages, and no reference client (FreeRDP, rdesktop, xrdp) actually parses it either. |
 | TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
@@ -119,17 +119,20 @@ the order they'd add the most value:
 - **Channels: drive, USB, smartcard, and printer redirection.** The
   static/dynamic virtual channel plumbing all of these ride on (`vchan`,
   `dvc`, `dvcman`, and `net`'s generic channel routing) is implemented end
-  to end, and clipboard redirection (CLIPRDR, `cliprdr`, text only), audio
-  redirection (RDPEA, `rdpsnd`, PCM/format negotiation and wave playback),
-  and RDPDR (`rdpdr`) are now implemented, essentially completely: the
+  to end, and clipboard redirection (CLIPRDR, `cliprdr`), audio redirection
+  (RDPEA, `rdpsnd`, PCM/format negotiation and wave playback), and RDPDR
+  (`rdpdr`) are now implemented, essentially completely: the
   initialization/capability handshake and the full Device I/O
   Request/Response exchange — create/close/read/write, generic device
   control (the IOCTL/FSCTL carrier smart-card and port redirection ride on
   almost entirely), query/set file and volume information, and directory
-  listing/change notification. Still needed: clipboard file copy/paste,
-  audio volume/pitch/encryption, and RDPDR's lock control (its request
-  layout isn't published anywhere findable, and no reference client
-  implementation actually parses it either — low priority given that).
+  listing/change notification, plus, for `cliprdr`, file copy/paste
+  (`FileList`/`FileDescriptor`, `FileContentsRequestPdu`/
+  `FileContentsResponsePdu`, `LockClipDataPdu`/`UnlockClipDataPdu`). Still
+  needed: audio volume/pitch/encryption, and RDPDR's lock control (its
+  request layout isn't published anywhere findable, and no reference
+  client implementation actually parses it either — low priority given
+  that).
 - **Server-side RDP.** `RdpTransport::accept` now drives the server half of
   the connection sequence too — X.224 Connection Confirm, GCC/MCS
   Connect-Response, channel setup, Client Info, "no license required",
