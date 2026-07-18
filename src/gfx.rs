@@ -23,15 +23,18 @@
 //! [`FrameAcknowledgePdu`]), the bitmap cache PDUs
 //! ([`SurfaceToCachePdu`] / [`CacheToSurfacePdu`] / [`EvictCacheEntryPdu`] /
 //! [`CacheImportOfferPdu`] / [`CacheImportReplyPdu`]), surface composition
-//! ([`SolidFillPdu`] / [`SurfaceToSurfacePdu`]), and output mapping
+//! ([`SolidFillPdu`] / [`SurfaceToSurfacePdu`]), output mapping
 //! ([`ResetGraphicsPdu`] / [`MapSurfaceToOutputPdu`] /
 //! [`MapSurfaceToScaledOutputPdu`] / [`MapSurfaceToWindowPdu`] /
-//! [`MapSurfaceToScaledWindowPdu`]).
+//! [`MapSurfaceToScaledWindowPdu`]), and the AVC420/AVC444 wrapper formats
+//! ([`Avc420BitmapStream`] / [`Avc444BitmapStream`]) — region and
+//! quantization metadata only, since decoding the H.264 bitstreams they
+//! carry needs an actual H.264 decoder (see [`Avc420BitmapStream`]'s docs).
 //!
-//! **Not yet implemented** — the largest remaining piece — the bitmap
-//! codecs themselves (`bitmapData` is carried opaquely here as raw bytes;
-//! decoding AVC/ClearCodec/Planar payloads is future work —
-//! [`crate::rfx`] already decodes the RemoteFX ones).
+//! The RemoteFX, RDP 6.0 Planar, and ClearCodec bitmap codecs decode all
+//! the way to pixels, in [`crate::rfx`], [`crate::planar`], and
+//! [`crate::clearcodec`] respectively; `bitmapData` for the other codec
+//! IDs stays opaque.
 
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
@@ -1199,6 +1202,222 @@ impl MapSurfaceToScaledWindowPdu {
     }
 }
 
+/// `RDPGFX_AVC420_QUANT_QUALITY` — one region's H.264 quantization/quality
+/// hint within an [`Avc420MetaBlock`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Avc420QuantQuality {
+    /// Quantization parameter used to encode the region (0-63).
+    pub qp: u8,
+    /// `useQualityVal` flag: when set, `quality_val` should be used instead
+    /// of `qp` to judge the region's quality.
+    pub r: bool,
+    /// Progressive-frame flag.
+    pub p: bool,
+    /// Quality value for the region, on a 0-100 scale.
+    pub quality_val: u8,
+}
+
+impl Avc420QuantQuality {
+    fn encode(&self, w: &mut Writer) {
+        let qp_val = (self.qp & 0x3F) | ((self.r as u8) << 6) | ((self.p as u8) << 7);
+        w.write_u8(qp_val);
+        w.write_u8(self.quality_val);
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<Avc420QuantQuality> {
+        let qp_val = r.read_u8()?;
+        let quality_val = r.read_u8()?;
+        Ok(Avc420QuantQuality {
+            qp: qp_val & 0x3F,
+            r: (qp_val >> 6) & 1 != 0,
+            p: (qp_val >> 7) & 1 != 0,
+            quality_val,
+        })
+    }
+}
+
+/// `RFX_AVC420_METABLOCK` — the region list an AVC420/AVC444 encoded
+/// bitstream applies to, one [`Rect16`] and one [`Avc420QuantQuality`] per
+/// region.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Avc420MetaBlock {
+    /// The regions this bitstream's decoded frame should be cropped to and
+    /// composited over.
+    pub region_rects: Vec<Rect16>,
+    /// Per-region quantization/quality hints, same length and order as
+    /// `region_rects`.
+    pub quant_quality_vals: Vec<Avc420QuantQuality>,
+}
+
+impl Avc420MetaBlock {
+    fn encode(&self, w: &mut Writer) {
+        w.write_u32_le(self.region_rects.len() as u32);
+        for rect in &self.region_rects {
+            rect.encode(w);
+        }
+        for qq in &self.quant_quality_vals {
+            qq.encode(w);
+        }
+    }
+
+    fn decode(r: &mut Reader<'_>) -> Result<Avc420MetaBlock> {
+        let count = r.read_u32_le()? as usize;
+        let mut region_rects = Vec::with_capacity(count);
+        for _ in 0..count {
+            region_rects.push(Rect16::decode(r)?);
+        }
+        let mut quant_quality_vals = Vec::with_capacity(count);
+        for _ in 0..count {
+            quant_quality_vals.push(Avc420QuantQuality::decode(r)?);
+        }
+        Ok(Avc420MetaBlock {
+            region_rects,
+            quant_quality_vals,
+        })
+    }
+}
+
+/// `RFX_AVC420_BITMAP_STREAM` — the wire format carried as
+/// [`WireToSurface1Pdu::bitmap_data`] when `codec_id == `[`CODECID_AVC420`],
+/// and nested (with a bounded length instead of running to the end of the
+/// buffer) inside [`Avc444BitmapStream`].
+///
+/// This crate parses the region/quality metadata only; `bitstream` is
+/// carried opaquely as raw ITU-T H.264 Annex B bytes — decoding it to
+/// pixels requires an actual H.264 decoder, out of scope for this
+/// dependency-free crate. Hand `bitstream` to an external decoder (e.g.
+/// openh264, ffmpeg) keyed on the region metadata here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Avc420BitmapStream {
+    /// The regions and per-region quality hints this bitstream applies to.
+    pub meta: Avc420MetaBlock,
+    /// Opaque ITU-T H.264 Annex B encoded frame data.
+    pub bitstream: Vec<u8>,
+}
+
+impl Avc420BitmapStream {
+    /// Encode to bytes (not wrapped in an `RDPGFX_HEADER` — this is a
+    /// codec-specific `bitmapData` payload, not a PDU in its own right).
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        self.meta.encode(&mut w);
+        w.write_bytes(&self.bitstream);
+        w.into_vec()
+    }
+
+    /// Decode from bytes, taking every byte after the metadata as the
+    /// encoded bitstream.
+    pub fn decode(buf: &[u8]) -> Result<Avc420BitmapStream> {
+        let mut r = Reader::new(buf);
+        let meta = Avc420MetaBlock::decode(&mut r)?;
+        let bitstream = r.read_bytes(r.remaining())?.to_vec();
+        Ok(Avc420BitmapStream { meta, bitstream })
+    }
+}
+
+/// The `LC` (layer composition) field of an [`Avc444BitmapStream`],
+/// specifying which of its one or two [`Avc420BitmapStream`]s carry the
+/// YUV420 luma frame vs. the Chroma420 residual frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Avc444LayerComposition {
+    /// `stream1` carries the YUV420 frame, `stream2` carries the
+    /// corresponding Chroma420 frame.
+    LumaAndChroma,
+    /// `stream1` carries the YUV420 frame only; the matching Chroma420
+    /// frame will follow in a later message.
+    LumaOnly,
+    /// `stream1` carries the Chroma420 frame only, to be combined with a
+    /// previously received YUV420 frame.
+    ChromaOnly,
+}
+
+impl Avc444LayerComposition {
+    fn from_lc(lc: u32) -> Result<Avc444LayerComposition> {
+        match lc {
+            0 => Ok(Avc444LayerComposition::LumaAndChroma),
+            1 => Ok(Avc444LayerComposition::LumaOnly),
+            2 => Ok(Avc444LayerComposition::ChromaOnly),
+            other => Err(Error::InvalidValue {
+                field: "RFX_AVC444_BITMAP_STREAM LC",
+                value: other.to_string(),
+            }),
+        }
+    }
+
+    fn to_lc(self) -> u32 {
+        match self {
+            Avc444LayerComposition::LumaAndChroma => 0,
+            Avc444LayerComposition::LumaOnly => 1,
+            Avc444LayerComposition::ChromaOnly => 2,
+        }
+    }
+}
+
+/// `RFX_AVC444_BITMAP_STREAM` / `RFX_AVC444V2_BITMAP_STREAM` (identical
+/// wrapper shape) — the wire format carried as
+/// [`WireToSurface1Pdu::bitmap_data`] when `codec_id == `[`CODECID_AVC444`]
+/// or [`CODECID_AVC444V2`]: up to two [`Avc420BitmapStream`]s carrying the
+/// YUV420 and Chroma420 halves of a YUV444 frame. See
+/// [`Avc420BitmapStream`] for why the encoded bitstreams are carried
+/// opaquely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Avc444BitmapStream {
+    /// Which frame(s) `stream1`/`stream2` carry.
+    pub lc: Avc444LayerComposition,
+    /// The YUV420 frame, or the Chroma420 frame if `lc` is `ChromaOnly`.
+    pub stream1: Avc420BitmapStream,
+    /// The Chroma420 frame, present only when `lc` is `LumaAndChroma`.
+    pub stream2: Option<Avc420BitmapStream>,
+}
+
+impl Avc444BitmapStream {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let stream1_encoded = self.stream1.encode();
+        let mut w = Writer::new();
+        let info = (stream1_encoded.len() as u32 & 0x3FFF_FFFF) | (self.lc.to_lc() << 30);
+        w.write_u32_le(info);
+        w.write_bytes(&stream1_encoded);
+        if let Some(stream2) = &self.stream2 {
+            w.write_bytes(&stream2.encode());
+        }
+        w.into_vec()
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<Avc444BitmapStream> {
+        let mut r = Reader::new(buf);
+        let info = r.read_u32_le()?;
+        let cb_stream1 = (info & 0x3FFF_FFFF) as usize;
+        let lc = Avc444LayerComposition::from_lc(info >> 30)?;
+
+        let stream1 = if matches!(lc, Avc444LayerComposition::LumaAndChroma) {
+            // Bounded to exactly cb_stream1 bytes so the reader lands at
+            // the start of stream2.
+            let chunk = r.read_bytes(cb_stream1)?;
+            Avc420BitmapStream::decode(chunk)?
+        } else {
+            // Only one bitstream is present: it runs to the end of the
+            // buffer regardless of what cb_stream1 claims (matching
+            // FreeRDP's reference decoder, which does not bound it here
+            // either).
+            Avc420BitmapStream::decode(r.read_bytes(r.remaining())?)?
+        };
+
+        let stream2 = if matches!(lc, Avc444LayerComposition::LumaAndChroma) {
+            Some(Avc420BitmapStream::decode(r.read_bytes(r.remaining())?)?)
+        } else {
+            None
+        };
+
+        Ok(Avc444BitmapStream {
+            lc,
+            stream1,
+            stream2,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1860,5 +2079,192 @@ mod tests {
         // Cross-decoding with the wrong PDU type is rejected.
         assert!(MapSurfaceToWindowPdu::decode(&to_output).is_err());
         assert!(MapSurfaceToOutputPdu::decode(&to_window).is_err());
+    }
+
+    #[test]
+    fn avc420_quant_quality_roundtrip_including_flag_bits() {
+        let qq = Avc420QuantQuality {
+            qp: 0x3F,
+            r: true,
+            p: true,
+            quality_val: 77,
+        };
+        let mut w = Writer::new();
+        qq.encode(&mut w);
+        assert_eq!(w.as_slice(), &[0xFF, 77]);
+        let mut r = Reader::new(w.as_slice());
+        assert_eq!(Avc420QuantQuality::decode(&mut r).unwrap(), qq);
+    }
+
+    #[test]
+    fn avc420_quant_quality_zero_flags() {
+        let qq = Avc420QuantQuality {
+            qp: 0x2A,
+            r: false,
+            p: false,
+            quality_val: 0,
+        };
+        let mut w = Writer::new();
+        qq.encode(&mut w);
+        assert_eq!(w.as_slice(), &[0x2A, 0]);
+        let mut r = Reader::new(w.as_slice());
+        assert_eq!(Avc420QuantQuality::decode(&mut r).unwrap(), qq);
+    }
+
+    #[test]
+    fn avc420_bitmap_stream_roundtrip() {
+        let stream = Avc420BitmapStream {
+            meta: Avc420MetaBlock {
+                region_rects: vec![
+                    Rect16 {
+                        left: 0,
+                        top: 0,
+                        right: 64,
+                        bottom: 64,
+                    },
+                    Rect16 {
+                        left: 64,
+                        top: 0,
+                        right: 128,
+                        bottom: 64,
+                    },
+                ],
+                quant_quality_vals: vec![
+                    Avc420QuantQuality {
+                        qp: 22,
+                        r: false,
+                        p: true,
+                        quality_val: 80,
+                    },
+                    Avc420QuantQuality {
+                        qp: 30,
+                        r: true,
+                        p: false,
+                        quality_val: 60,
+                    },
+                ],
+            },
+            bitstream: vec![0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0xAB], // fake Annex B start code + NAL.
+        };
+        assert_eq!(
+            Avc420BitmapStream::decode(&stream.encode()).unwrap(),
+            stream
+        );
+    }
+
+    #[test]
+    fn avc420_bitmap_stream_empty_metadata_and_bitstream_roundtrip() {
+        let stream = Avc420BitmapStream {
+            meta: Avc420MetaBlock {
+                region_rects: vec![],
+                quant_quality_vals: vec![],
+            },
+            bitstream: vec![],
+        };
+        assert_eq!(
+            Avc420BitmapStream::decode(&stream.encode()).unwrap(),
+            stream
+        );
+    }
+
+    fn sample_avc420_stream(tag: u8) -> Avc420BitmapStream {
+        Avc420BitmapStream {
+            meta: Avc420MetaBlock {
+                region_rects: vec![Rect16 {
+                    left: 0,
+                    top: 0,
+                    right: 32,
+                    bottom: 32,
+                }],
+                quant_quality_vals: vec![Avc420QuantQuality {
+                    qp: 20,
+                    r: false,
+                    p: true,
+                    quality_val: 90,
+                }],
+            },
+            bitstream: vec![tag; 10],
+        }
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_luma_and_chroma_roundtrip() {
+        let stream = Avc444BitmapStream {
+            lc: Avc444LayerComposition::LumaAndChroma,
+            stream1: sample_avc420_stream(0xAA),
+            stream2: Some(sample_avc420_stream(0xBB)),
+        };
+        assert_eq!(
+            Avc444BitmapStream::decode(&stream.encode()).unwrap(),
+            stream
+        );
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_luma_only_roundtrip() {
+        let stream = Avc444BitmapStream {
+            lc: Avc444LayerComposition::LumaOnly,
+            stream1: sample_avc420_stream(0xCC),
+            stream2: None,
+        };
+        let encoded = stream.encode();
+        let decoded = Avc444BitmapStream::decode(&encoded).unwrap();
+        assert_eq!(decoded, stream);
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_chroma_only_roundtrip() {
+        let stream = Avc444BitmapStream {
+            lc: Avc444LayerComposition::ChromaOnly,
+            stream1: sample_avc420_stream(0xDD),
+            stream2: None,
+        };
+        assert_eq!(
+            Avc444BitmapStream::decode(&stream.encode()).unwrap(),
+            stream
+        );
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_rejects_invalid_lc_value() {
+        // info word with LC=3 (invalid) in the top 2 bits, cbAvc420EncodedBitstream1=0.
+        let info: u32 = 0b11 << 30;
+        let mut w = Writer::new();
+        w.write_u32_le(info);
+        assert!(Avc444BitmapStream::decode(w.as_slice()).is_err());
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_wire_shape_lc_bits_are_top_two() {
+        let stream = Avc444BitmapStream {
+            lc: Avc444LayerComposition::ChromaOnly,
+            stream1: sample_avc420_stream(0xEE),
+            stream2: None,
+        };
+        let encoded = stream.encode();
+        let info = u32::from_le_bytes(encoded[0..4].try_into().unwrap());
+        assert_eq!(info >> 30, 2);
+    }
+
+    #[test]
+    fn avc444_bitmap_stream_second_bitstream_only_present_for_luma_and_chroma() {
+        let luma_only = Avc444BitmapStream {
+            lc: Avc444LayerComposition::LumaOnly,
+            stream1: sample_avc420_stream(0x11),
+            stream2: None,
+        }
+        .encode();
+        assert!(Avc444BitmapStream::decode(&luma_only)
+            .unwrap()
+            .stream2
+            .is_none());
+
+        let both = Avc444BitmapStream {
+            lc: Avc444LayerComposition::LumaAndChroma,
+            stream1: sample_avc420_stream(0x22),
+            stream2: Some(sample_avc420_stream(0x33)),
+        }
+        .encode();
+        assert!(Avc444BitmapStream::decode(&both).unwrap().stream2.is_some());
     }
 }

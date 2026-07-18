@@ -42,7 +42,7 @@
 //!                  └─ device redirection (crate::rdpdr)  MS-RDPEFS init/capability handshake + Device I/O Request/Response + file/volume/directory ops
 //!                  └─ dynamic channels (crate::dvc)  MS-RDPEDYC framing (RDPGFX, redirection)
 //!                       └─ session mgmt (crate::dvcman)  open-channel bookkeeping
-//!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface/cache/composition/output-mapping PDUs
+//!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface/cache/composition/output-mapping PDUs + AVC420/444 wrapper metadata
 //!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR1/RLGR3+DWT tile decode + control PDUs
 //!                                 └─ Planar codec (crate::planar)  MS-RDPEGDI RDP 6.0 bitmap plane/RLE decode
 //!                                 └─ ClearCodec (crate::clearcodec)  MS-RDPEGFX residual/bands/subcodec decode + glyph/VBar caches

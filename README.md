@@ -40,7 +40,7 @@ Early foundation. Implemented so far, bottom-up:
 | Virtual channel chunking | `vchan` | MS-RDPBCGR 2.2.6.1 `CHANNEL_PDU_HEADER` framing shared by every static virtual channel: splits outbound messages into chunks and reassembles inbound ones. What `net` uses to receive traffic on any channel beyond the I/O channel. |
 | Dynamic virtual channels | `dvc` | MS-RDPEDYC PDU framing for the `DRDYNVC` channel that RDPGFX, clipboard, and other redirection protocols multiplex over: create/data/close, the version 1–3 capability exchange, and `fragment()` for outbound message splitting. |
 | DVC session management | `dvcman` | `DvcManager` — tracks open dynamic channels, auto-accepts `Create` requests and echoes `Capabilities` requests, and reassembles a channel's own fragmented messages into `DvcEvent::{ChannelOpened, Data, ChannelClosed}`. The layer a caller drives with `net`'s `RdpEvent::ChannelData` to reach a named DVC-based protocol (e.g. RDPGFX) without hand-parsing `dvc` PDUs. |
-| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`), the bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/`EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), surface composition (`SolidFillPdu`/`SurfaceToSurfacePdu`), and output mapping (`ResetGraphicsPdu`, `MapSurfaceToOutputPdu`/`MapSurfaceToScaledOutputPdu`, `MapSurfaceToWindowPdu`/`MapSurfaceToScaledWindowPdu`). |
+| Graphics pipeline | `gfx` | MS-RDPEGFX PDUs carried over the `dvc`/`dvcman` `"Microsoft::Windows::RDS::Graphics"` channel: capability negotiation (`CapsAdvertisePdu`/`CapsConfirmPdu`), surface lifecycle (`CreateSurfacePdu`/`DeleteSurfacePdu`), the bitmap-carrying and frame-sequencing PDUs (`WireToSurface1Pdu`/`WireToSurface2Pdu`, `StartFramePdu`/`EndFramePdu`/`FrameAcknowledgePdu`), the bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/`EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), surface composition (`SolidFillPdu`/`SurfaceToSurfacePdu`), output mapping (`ResetGraphicsPdu`, `MapSurfaceToOutputPdu`/`MapSurfaceToScaledOutputPdu`, `MapSurfaceToWindowPdu`/`MapSurfaceToScaledWindowPdu`), and the AVC420/AVC444 wrapper formats (`Avc420BitmapStream`/`Avc444BitmapStream`) — region and quantization metadata only, since decoding the H.264 bitstreams they carry needs an actual H.264 decoder. |
 | RemoteFX codec | `rfx` | MS-RDPRFX tile decode for `gfx`'s `CODECID_CAVIDEO` bitmap data: RLGR1 and RLGR3 entropy decoding (`EntropyAlgorithm`), the 3-level 5/3 lifting-scheme inverse DWT, per-sub-band dequantization, and YCbCr→RGB, wired together by `Tile::decode_rgb`/`TileSet`, plus the control PDUs that wrap a tile set on the wire (`SyncPdu`, `CodecVersionsPdu`, `ChannelsPdu`, `ContextPdu`, `RegionPdu`, `FrameBeginPdu`/`FrameEndPdu`, dispatched by `peek_block_type`). The GFX cache/composition PDUs (`SURFACETOCACHE`, `SOLIDFILL`, etc.) belong to `gfx` instead, and encoding (the server-side direction) is not implemented. |
 | Planar codec | `planar` | MS-RDPEGDI RDP 6.0 bitmap decode for `gfx`'s `CODECID_PLANAR` bitmap data: `decode()` turns an `RDP6_BITMAP_STREAM` into a top-down RGBA8888 buffer, handling all four color planes (alpha/luma-or-red/orange-or-green/green-or-blue), the scan-line delta RLE scheme (`RDP6_RLE_SEGMENT`), the optional AYCoCg color space with color-loss reduction and 2×2 chroma subsampling, and the documented decoder-side R/B swap. Decode-only, like `rfx`. |
 | ClearCodec | `clearcodec` | MS-RDPEGFX decode for `gfx`'s `CODECID_CLEARCODEC` bitmap data: `ClearCodecDecoder` composites a `CLEARCODEC_BITMAP_STREAM`'s three payloads (a full-canvas run-length `residualData` fill, per-column `bandsData` "VBar" runs, and independent raw/RLEX `subcodecsData` sub-tiles) onto a top-down RGBA8888 buffer, and owns the persistent glyph and VBar/short-VBar caches later messages in the same session reference by index. NSCodec sub-tiles (`subcodecId == 1`) are not implemented. Decode-only, like `rfx`/`planar`. |
@@ -97,26 +97,25 @@ transport that fetches the ticket in the first place.
 Known gaps versus full-featured implementations (FreeRDP, IronRDP), roughly in
 the order they'd add the most value:
 
-- **RemoteFX / GFX codec support.** The channel plumbing (`vchan`, `dvc`,
-  `dvcman`), the MS-RDPEGFX capability negotiation, surface/frame PDUs, the
-  bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/
+- ~~**RemoteFX / GFX codec support.**~~ Done. The channel plumbing (`vchan`,
+  `dvc`, `dvcman`), the MS-RDPEGFX capability negotiation, surface/frame
+  PDUs, the bitmap cache PDUs (`SurfaceToCachePdu`/`CacheToSurfacePdu`/
   `EvictCacheEntryPdu`/`CacheImportOfferPdu`/`CacheImportReplyPdu`), surface
   composition (`SolidFillPdu`/`SurfaceToSurfacePdu`), and output mapping
   (`ResetGraphicsPdu`, `MapSurfaceToOutputPdu`/`MapSurfaceToScaledOutputPdu`,
   `MapSurfaceToWindowPdu`/`MapSurfaceToScaledWindowPdu`) are all wired up in
-  `gfx`, and the RemoteFX tile codec (`rfx`) is essentially complete: RLGR1
-  and RLGR3 entropy decoding, the 3-level 5/3 inverse DWT, dequantization,
-  and YCbCr→RGB decode a `TS_RFX_TILESET` straight to RGB pixels, and the
-  control PDUs that wrap a tile set on the wire
-  (`TS_RFX_SYNC`/`CODEC_VERSIONS`/`CHANNELS`/`CONTEXT`/`REGION`/
-  `FRAME_BEGIN`/`END`) are implemented too, and so is the RDP 6.0 Planar
-  codec (`planar`): scan-line delta RLE, AYCoCg with color-loss reduction
-  and chroma subsampling, decode straight to RGBA. ClearCodec
-  (`clearcodec`) is implemented as well — residual/bands/subcodec
-  compositing plus the persistent glyph and VBar caches it depends on —
-  except for its NSCodec sub-tile variant, which is out of scope (a whole
-  separate legacy codec). Still needed: AVC420/444 — `gfx` still carries
-  their `bitmapData` as opaque bytes.
+  `gfx`. Every bitmap codec RDPGFX carries is now handled: the RemoteFX
+  tile codec (`rfx` — RLGR1/RLGR3 entropy decoding, the 3-level 5/3 inverse
+  DWT, dequantization, and YCbCr→RGB, plus its control PDUs), the RDP 6.0
+  Planar codec (`planar` — scan-line delta RLE, AYCoCg with color-loss
+  reduction and chroma subsampling), and ClearCodec (`clearcodec` —
+  residual/bands/subcodec compositing plus the persistent glyph and VBar
+  caches it depends on, except its NSCodec sub-tile variant, a whole
+  separate legacy codec out of scope on its own) all decode straight to
+  pixels. AVC420/AVC444 (`gfx::Avc420BitmapStream`/`Avc444BitmapStream`)
+  parse their region/quantization metadata and hand back the raw H.264
+  Annex B bitstream unopened — actually decoding it needs a real H.264
+  decoder, permanently out of scope for a dependency-free crate.
 - **Channels: drive, USB, smartcard, and printer redirection.** The
   static/dynamic virtual channel plumbing all of these ride on (`vchan`,
   `dvc`, `dvcman`, and `net`'s generic channel routing) is implemented end
