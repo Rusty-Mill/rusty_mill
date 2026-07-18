@@ -28,15 +28,19 @@
 //!   protect the CredSSP public key and credentials with the Kerberos session
 //!   key the way NTLM's `EncryptMessage` does.
 //! * [`kdc`] — the KDC network client: [`kdc::get_tgt`] drives the
-//!   Authentication Service (AS) exchange over TCP to trade a
-//!   realm/username/password for a Ticket-Granting Ticket. The Kerberos path
-//!   is otherwise wired end to end into [`crate::credssp`]
-//!   ([`crate::credssp::KerberosCredSspClient`]) and, with the `tls` feature,
-//!   `crate::tls::connect_tls_kerberos`.
+//!   Authentication Service (AS) exchange and [`kdc::tgs_exchange`] the
+//!   Ticket-Granting Service (TGS) exchange, both over TCP;
+//!   [`kdc::fetch_ap_req`] chains AS, TGS, and local AP-REQ assembly to go
+//!   straight from a realm/username/password/service-principal to the
+//!   `(ap_req_bytes, session_key)` pair `crate::tls::connect_tls_kerberos`
+//!   (feature `tls`) takes — the client-side Kerberos path is wired end to
+//!   end, from a plaintext password to an authenticated RDP session, with no
+//!   external `kinit`/keytab needed.
 //!
-//! Still to come: the Ticket-Granting Service (TGS) exchange that trades a
-//! [`kdc::get_tgt`]-obtained TGT for the service ticket
-//! `connect_tls_kerberos` actually needs.
+//! The server side only speaks NTLM ([`crate::credssp::CredSspServer`]) —
+//! there is no Kerberos-accepting counterpart, since validating an `AP-REQ`
+//! needs a keytab (or equivalent long-term key access) and a much larger
+//! surface than this crate implements.
 //!
 //! ## Security warning
 //!
