@@ -24,12 +24,15 @@
 //!
 //! The full non-UDP audio path: [`AudioFormat`]/[`AudioFormatsPdu`],
 //! [`TrainingPdu`]/[`TrainingConfirmPdu`], [`encode_wave`]/[`decode_wave`]
-//! (the WaveInfo/Wave PDU pair), [`WaveConfirmPdu`], and [`ClosePdu`].
+//! (the WaveInfo/Wave PDU pair), [`WaveConfirmPdu`], [`ClosePdu`],
+//! [`VolumePdu`]/[`PitchPdu`], and [`CryptKeyPdu`] (the key-distribution
+//! PDU, sent over this virtual channel even though the audio data it keys
+//! is not — see below).
 //!
-//! **Not yet implemented:** `SNDC_SETVOLUME`/`SNDC_SETPITCH`,
-//! `SNDC_WAVE2` (the newer single-PDU wave format with an explicit
-//! `dwAudioTimeStamp`), `SNDC_WAVEENCRYPT`/`SNDC_CRYPTKEY`, and the UDP
-//! transport variants (`SNDC_UDPWAVE`/`UDPWAVELAST`).
+//! **Not yet implemented:** `SNDC_WAVE2` (the newer single-PDU wave format
+//! with an explicit `dwAudioTimeStamp`), and everything that rides over
+//! UDP rather than this virtual channel: `SNDC_WAVEENCRYPT` (the encrypted
+//! wave data [`CryptKeyPdu`] keys) and `SNDC_UDPWAVE`/`UDPWAVELAST`.
 
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
@@ -40,9 +43,12 @@ pub const RDPSND_CHANNEL_NAME: &str = "rdpsnd";
 // msgType values (MS-RDPEA 2.2.1, the SNDPROLOG header's msgType field).
 const SNDC_CLOSE: u8 = 0x01;
 const SNDC_WAVE: u8 = 0x02;
+const SNDC_SETVOLUME: u8 = 0x03;
+const SNDC_SETPITCH: u8 = 0x04;
 const SNDC_WAVECONFIRM: u8 = 0x05;
 const SNDC_TRAINING: u8 = 0x06;
 const SNDC_FORMATS: u8 = 0x07;
+const SNDC_CRYPTKEY: u8 = 0x08;
 
 /// `WAVE_FORMAT_PCM` — the one format clients and servers are required to
 /// support at minimum.
@@ -254,6 +260,98 @@ impl ClosePdu {
     pub fn decode(buf: &[u8]) -> Result<ClosePdu> {
         unwrap(buf, SNDC_CLOSE)?;
         Ok(ClosePdu)
+    }
+}
+
+/// `SNDVOL` — sent by the server to set the volume applied to all
+/// subsequently played audio data. Only sent if the client advertised
+/// [`TSSNDCAPS_VOLUME`] in its [`AudioFormatsPdu`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VolumePdu {
+    /// Left-channel volume; `0x0000` is silence, `0xFFFF` is full volume,
+    /// interpreted logarithmically.
+    pub left: u16,
+    /// Right-channel volume, same scale as `left`.
+    pub right: u16,
+}
+
+impl VolumePdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.left);
+        body.write_u16_le(self.right);
+        wrap(SNDC_SETVOLUME, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<VolumePdu> {
+        let mut r = unwrap(buf, SNDC_SETVOLUME)?;
+        Ok(VolumePdu {
+            left: r.read_u16_le()?,
+            right: r.read_u16_le()?,
+        })
+    }
+}
+
+/// `SNDPITCH` — sent by the server to set the pitch applied to all
+/// subsequently played audio data. Only sent if the client advertised
+/// [`TSSNDCAPS_PITCH`] in its [`AudioFormatsPdu`]; per MS-RDPEA, the client
+/// MUST ignore this PDU regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PitchPdu {
+    /// Signed integer part of the fixed-point pitch multiplier.
+    pub integer_part: u16,
+    /// Fractional part of the fixed-point pitch multiplier; `0x8000` is
+    /// one-half, `0x4000` is one-quarter.
+    pub fractional_part: u16,
+}
+
+impl PitchPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u16_le(self.fractional_part);
+        body.write_u16_le(self.integer_part);
+        wrap(SNDC_SETPITCH, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<PitchPdu> {
+        let mut r = unwrap(buf, SNDC_SETPITCH)?;
+        let fractional_part = r.read_u16_le()?;
+        let integer_part = r.read_u16_le()?;
+        Ok(PitchPdu {
+            integer_part,
+            fractional_part,
+        })
+    }
+}
+
+/// `SNDCRYPT` — sent by the server to distribute the symmetric key used to
+/// encrypt audio data sent over UDP (Wave Encrypt / UDP Wave PDUs, neither
+/// implemented by this module — see the module-level docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CryptKeyPdu {
+    /// The 32-byte symmetric key.
+    pub seed: [u8; 32],
+}
+
+impl CryptKeyPdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.write_u32_le(0); // Reserved, MUST be ignored on receipt.
+        body.write_bytes(&self.seed);
+        wrap(SNDC_CRYPTKEY, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<CryptKeyPdu> {
+        let mut r = unwrap(buf, SNDC_CRYPTKEY)?;
+        let _reserved = r.read_u32_le()?;
+        let seed: [u8; 32] = r.read_bytes(32)?.try_into().unwrap();
+        Ok(CryptKeyPdu { seed })
     }
 }
 
@@ -641,5 +739,113 @@ mod tests {
             WaveConfirmPdu::decode(&confirm).unwrap().confirmed_block_no,
             3
         );
+    }
+
+    #[test]
+    fn volume_pdu_roundtrip() {
+        let pdu = VolumePdu {
+            left: 0xC000,
+            right: 0x8000,
+        };
+        assert_eq!(VolumePdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn volume_pdu_wire_shape_low_word_is_left_channel() {
+        let pdu = VolumePdu {
+            left: 0x1234,
+            right: 0x5678,
+        };
+        let encoded = pdu.encode();
+        // Header (msgType=0x03, pad=0, BodySize=4 LE), then left LE, right LE.
+        assert_eq!(
+            encoded,
+            vec![0x03, 0x00, 0x04, 0x00, 0x34, 0x12, 0x78, 0x56]
+        );
+    }
+
+    #[test]
+    fn volume_full_and_silent_roundtrip() {
+        let full = VolumePdu {
+            left: 0xFFFF,
+            right: 0xFFFF,
+        };
+        assert_eq!(VolumePdu::decode(&full.encode()).unwrap(), full);
+
+        let silent = VolumePdu { left: 0, right: 0 };
+        assert_eq!(VolumePdu::decode(&silent.encode()).unwrap(), silent);
+    }
+
+    #[test]
+    fn pitch_pdu_roundtrip() {
+        let pdu = PitchPdu {
+            integer_part: 1,
+            fractional_part: 0,
+        };
+        assert_eq!(PitchPdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn pitch_pdu_no_change_multiplier_matches_spec_example() {
+        // MS-RDPEA: 0x00010000 == a multiplier of 1.0 (no pitch change).
+        let pdu = PitchPdu {
+            integer_part: 1,
+            fractional_part: 0,
+        };
+        let encoded = pdu.encode();
+        let dw_pitch = u32::from_le_bytes(encoded[4..8].try_into().unwrap());
+        assert_eq!(dw_pitch, 0x0001_0000);
+    }
+
+    #[test]
+    fn pitch_pdu_fifteen_point_five_matches_spec_example() {
+        // MS-RDPEA: 0x000F8000 == a multiplier of 15.5.
+        let pdu = PitchPdu {
+            integer_part: 15,
+            fractional_part: 0x8000,
+        };
+        let encoded = pdu.encode();
+        let dw_pitch = u32::from_le_bytes(encoded[4..8].try_into().unwrap());
+        assert_eq!(dw_pitch, 0x000F_8000);
+        assert_eq!(PitchPdu::decode(&encoded).unwrap(), pdu);
+    }
+
+    #[test]
+    fn crypt_key_pdu_roundtrip() {
+        let mut seed = [0u8; 32];
+        for (i, b) in seed.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let pdu = CryptKeyPdu { seed };
+        assert_eq!(CryptKeyPdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn crypt_key_pdu_wire_shape_has_reserved_field_before_seed() {
+        let pdu = CryptKeyPdu { seed: [0xAB; 32] };
+        let encoded = pdu.encode();
+        // Header(4) + Reserved(4) + Seed(32) = 40 bytes.
+        assert_eq!(encoded.len(), 40);
+        assert_eq!(&encoded[4..8], &[0, 0, 0, 0]); // Reserved, always encoded as zero.
+        assert_eq!(&encoded[8..40], &[0xAB; 32]);
+    }
+
+    #[test]
+    fn volume_pitch_cryptkey_msg_types_are_distinct() {
+        let volume = VolumePdu { left: 1, right: 1 }.encode();
+        let pitch = PitchPdu {
+            integer_part: 1,
+            fractional_part: 0,
+        }
+        .encode();
+        let crypt_key = CryptKeyPdu { seed: [0; 32] }.encode();
+
+        assert_eq!(decode_msg_type(&volume).unwrap(), SNDC_SETVOLUME);
+        assert_eq!(decode_msg_type(&pitch).unwrap(), SNDC_SETPITCH);
+        assert_eq!(decode_msg_type(&crypt_key).unwrap(), SNDC_CRYPTKEY);
+
+        // Cross-decoding with the wrong PDU type is rejected.
+        assert!(VolumePdu::decode(&pitch).is_err());
+        assert!(PitchPdu::decode(&crypt_key).is_err());
     }
 }
