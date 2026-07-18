@@ -45,6 +45,7 @@
 //!                            └─ graphics pipeline (crate::gfx)  MS-RDPEGFX caps/surface/cache/composition/output-mapping PDUs
 //!                                 └─ RemoteFX codec (crate::rfx)  MS-RDPRFX RLGR1/RLGR3+DWT tile decode + control PDUs
 //!                                 └─ Planar codec (crate::planar)  MS-RDPEGDI RDP 6.0 bitmap plane/RLE decode
+//!                                 └─ ClearCodec (crate::clearcodec)  MS-RDPEGFX residual/bands/subcodec decode + glyph/VBar caches
 //! ```
 //!
 //! For the enhanced-security (TLS/CredSSP) path, the negotiation runs on the
@@ -97,6 +98,7 @@
 
 pub mod ber;
 pub mod capabilities;
+pub mod clearcodec;
 pub mod client_info;
 pub mod cliprdr;
 pub mod credssp;
