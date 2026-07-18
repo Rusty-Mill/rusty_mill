@@ -47,7 +47,7 @@ Early foundation. Implemented so far, bottom-up:
 | Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`), and file copy/paste (`FileList`/`FileDescriptor` for the `CFSTR_FILEDESCRIPTORW` format, `FileContentsRequestPdu`/`FileContentsResponsePdu` to pull a file's size or byte ranges, `LockClipDataPdu`/`UnlockClipDataPdu`). `CB_TEMP_DIRECTORY` and the Short Format Name variant are not implemented. |
 | Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), wave playback — both the legacy WaveInfo/Wave PDU split (`encode_wave`/`decode_wave` hide the split) and the newer single-PDU `Wave2Pdu` (`SNDC_WAVE2`, used once both sides negotiate version 8+) — `WaveConfirmPdu`, `ClosePdu`, volume/pitch control (`VolumePdu`/`PitchPdu`), and encryption key distribution (`CryptKeyPdu`). Everything that rides over UDP instead of this channel (encrypted wave data, the UDP wave PDUs) is not implemented. |
 | Device redirection | `rdpdr` | MS-RDPEFS PDUs on the `"rdpdr"` static channel: the full initialization/capability handshake (`ServerAnnounceRequestPdu`/`ClientAnnounceReplyPdu`/`ServerClientIdConfirmPdu`/`ClientNameRequestPdu`, `ServerCoreCapabilityPdu`/`ClientCoreCapabilityPdu` with `GeneralCapsSet`, `ClientDeviceListAnnouncePdu`/`ServerDeviceAnnounceResponsePdu`, `ServerUserLoggedOnPdu`), and the full Device I/O Request/Response exchange (`DeviceIoRequest`/`DeviceIoResponse` headers) for every major function but one: create/close/read/write (`DeviceCreateRequestPdu`/`RspPdu`, `DeviceCloseRequestPdu`/`RspPdu`, `DeviceReadRequestPdu`/`RspPdu`, `DeviceWriteRequestPdu`/`RspPdu`), the generic IOCTL/FSCTL carrier (`DeviceControlRequestPdu`/`RspPdu`) that smart-card and port redirection ride on, query/set file information (`QueryInformationRequestPdu`/`RspPdu`, `SetInformationRequestPdu`/`RspPdu`), query/set volume information (`QueryVolumeInformationRequestPdu`/`RspPdu`, `SetVolumeInformationRequestPdu`/`RspPdu`), and directory control — listing (`QueryDirectoryRequestPdu`/`RspPdu`) and change notification (`NotifyChangeDirectoryRequestPdu`/`RspPdu`). Lock control is not implemented — its request layout isn't in Microsoft's published spec pages, and no reference client (FreeRDP, rdesktop, xrdp) actually parses it either. |
-| TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`; `accept_tls()` is the server-side counterpart, negotiating `SSL` and driving `RdpTransport::accept`'s shared post-negotiation logic over a caller-supplied `rustls::ServerConfig`. The crate's only third-party dependency, and off by default. |
+| TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`; `accept_tls()`/`accept_tls_nla()` are the server-side counterparts, negotiating `SSL`/`HYBRID` respectively and driving `RdpTransport::accept`'s shared post-negotiation logic over a caller-supplied `rustls::ServerConfig` (`accept_tls_nla` also runs `CredSspServer` first, and returns the delegated `NlaIdentity`). The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -166,21 +166,31 @@ the order they'd add the most value:
   test certificate.
 
   The NTLM/CredSSP *authentication* primitives a `HYBRID`-accepting server
-  needs now exist too: `ntlm::NtlmServer` builds the CHALLENGE and verifies
-  a client's AUTHENTICATE (NTProofStr and MIC) against a caller-supplied
+  needs also exist: `ntlm::NtlmServer` builds the CHALLENGE and verifies a
+  client's AUTHENTICATE (NTProofStr and MIC) against a caller-supplied
   password-hash callback — this crate never stores or looks up credentials
   itself — and `credssp::CredSspServer` drives the three-leg `TSRequest`
   exchange on top of it, ending with the delegated `(domain, user,
-  password)` decoded from `authInfo`. Tested end to end against the real
-  `CredSspClient`/`NtlmClient` (both the version 5+ nonce-hash and the
-  legacy public-key binding), including wrong-password and tampered-MIC
-  rejection. Kerberos is not supported server-side (validating an `AP-REQ`
-  needs a keytab and a much larger surface). Not yet done: wiring this into
-  `net`/`tls` so `accept`/`accept_tls` can actually negotiate and drive
-  `HYBRID` end to end over a live connection — a separate future slice.
+  password)` decoded from `authInfo`.
+
+  `tls::accept_tls_nla` wires all of that into a live connection: it
+  negotiates `SecurityProtocols::HYBRID` (rejecting a client that didn't
+  offer it), upgrades to TLS, drives `CredSspServer`'s three legs over the
+  TLS stream (replying with a `STATUS_LOGON_FAILURE` `TSRequest` on
+  authentication failure), then shares `accept`'s post-negotiation logic
+  like `accept_tls` does, returning the delegated identity as
+  `tls::NlaIdentity` alongside the accepted client. `tls::extract_spki` is
+  exposed publicly so a caller can pull the `public_key` `CredSspServer::new`
+  needs from the same certificate DER used to build the `rustls::ServerConfig`.
+  Tested end to end against the real `tls::connect_tls`, including
+  wrong-password rejection and a client that never offered `HYBRID`.
+  Kerberos is not supported server-side (validating an `AP-REQ` needs a
+  keytab and a much larger surface), and `HYBRID_EX`'s Early User
+  Authorization Result PDU is not sent — only the base `HYBRID` protocol.
+
   Beyond the connection sequence, an actual server also needs to originate
-  display updates and consume input,
-  which `accept`/`accept_tls` do not attempt.
+  display updates and consume input, which `accept`/`accept_tls`/
+  `accept_tls_nla` do not attempt.
 
 ## Design principles
 

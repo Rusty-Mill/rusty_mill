@@ -59,12 +59,16 @@
 //! reverse, as a server, over the identical bidirectional codec types —
 //! either unencrypted standard RDP security (`encryptionLevel = 0`) or, with
 //! caller-supplied RSA key material, real encrypted standard security (RSA
-//! exchange + RC4). `crate::tls::accept_tls` (feature `tls`) is the
-//! TLS-upgrading counterpart to `accept`: it negotiates
-//! [`nego::SecurityProtocols::SSL`], upgrades the stream with a
-//! caller-supplied `rustls::ServerConfig` (certificate + private key), and
-//! then shares `accept`'s post-negotiation logic. CredSSP/NLA (`HYBRID`)
-//! server-side validation is not implemented.
+//! exchange + RC4). Two TLS-upgrading counterparts to `accept` (feature
+//! `tls`) share its post-negotiation logic: `crate::tls::accept_tls`
+//! negotiates [`nego::SecurityProtocols::SSL`] and upgrades the stream with
+//! a caller-supplied `rustls::ServerConfig` (certificate + private key);
+//! `crate::tls::accept_tls_nla` does the same for
+//! [`nego::SecurityProtocols::HYBRID`], additionally running
+//! `crate::credssp::CredSspServer` (NTLM only, verified against a
+//! caller-supplied password-hash callback) over the TLS stream first and
+//! returning the delegated identity. Kerberos is not supported
+//! server-side.
 //!
 //! ## Design
 //!

@@ -956,12 +956,17 @@ impl<S: Read + Write> RdpTransport<S> {
         self.write_tpkt(&confirm)
     }
 
-    /// Read a Connection Request and reply selecting
-    /// [`SecurityProtocols::SSL`], for a TLS-upgrading server entry point
-    /// (see `crate::tls::accept_tls`). Errors (after telling the client via
-    /// an `RDP_NEG_FAILURE`) if the client didn't offer TLS.
+    /// Read a Connection Request and reply selecting `protocol` if the
+    /// client offered it, else reply with an `RDP_NEG_FAILURE` (`code`) and
+    /// return an error. Shared by [`RdpTransport::accept_negotiate_ssl`] and
+    /// [`RdpTransport::accept_negotiate_hybrid`].
     #[cfg(feature = "tls")]
-    pub(crate) fn accept_negotiate_ssl(&mut self) -> io::Result<()> {
+    fn accept_negotiate_select(
+        &mut self,
+        protocol: SecurityProtocols,
+        code: NegFailureCode,
+        unmet_msg: &str,
+    ) -> io::Result<()> {
         let request = self.read_tpkt()?;
         let pdu = match X224::decode(&request).map_err(to_io)? {
             X224::ConnectionRequest(pdu) => pdu,
@@ -975,30 +980,56 @@ impl<S: Read + Write> RdpTransport<S> {
             Some(Negotiation::Request { protocols, .. }) => protocols,
             _ => SecurityProtocols::RDP,
         };
-        if !offered.contains(SecurityProtocols::SSL) {
+        if !offered.contains(protocol) {
             let failure = X224::ConnectionConfirm(ConnectionPdu {
-                negotiation: Some(Negotiation::Failure {
-                    code: NegFailureCode::SslRequiredByServer,
-                }),
+                negotiation: Some(Negotiation::Failure { code }),
                 ..Default::default()
             })
             .to_vec()
             .map_err(to_io)?;
             self.write_tpkt(&failure)?;
-            return Err(protocol_error(
-                "client did not offer TLS security, but accept_tls requires it",
-            ));
+            return Err(protocol_error(unmet_msg));
         }
         let confirm = X224::ConnectionConfirm(ConnectionPdu {
             negotiation: Some(Negotiation::Response {
                 flags: 0,
-                selected: SecurityProtocols::SSL,
+                selected: protocol,
             }),
             ..Default::default()
         })
         .to_vec()
         .map_err(to_io)?;
         self.write_tpkt(&confirm)
+    }
+
+    /// Read a Connection Request and reply selecting
+    /// [`SecurityProtocols::SSL`], for a TLS-upgrading server entry point
+    /// (see `crate::tls::accept_tls`). Errors (after telling the client via
+    /// an `RDP_NEG_FAILURE`) if the client didn't offer TLS.
+    #[cfg(feature = "tls")]
+    pub(crate) fn accept_negotiate_ssl(&mut self) -> io::Result<()> {
+        self.accept_negotiate_select(
+            SecurityProtocols::SSL,
+            NegFailureCode::SslRequiredByServer,
+            "client did not offer TLS security, but accept_tls requires it",
+        )
+    }
+
+    /// Read a Connection Request and reply selecting
+    /// [`SecurityProtocols::HYBRID`], for a CredSSP/NLA-accepting server
+    /// entry point (see `crate::tls::accept_tls_nla`). Errors (after telling
+    /// the client via an `RDP_NEG_FAILURE`) if the client didn't offer it.
+    ///
+    /// `HYBRID_EX`'s Early User Authorization Result PDU is not sent — this
+    /// selects (and `accept_tls_nla` only speaks) the base `HYBRID`
+    /// protocol.
+    #[cfg(feature = "tls")]
+    pub(crate) fn accept_negotiate_hybrid(&mut self) -> io::Result<()> {
+        self.accept_negotiate_select(
+            SecurityProtocols::HYBRID,
+            NegFailureCode::HybridRequiredByServer,
+            "client did not offer CredSSP/NLA, but accept_tls_nla requires it",
+        )
     }
 
     /// Read the client's `Connect-Initial` and return its decoded GCC

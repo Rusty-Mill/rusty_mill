@@ -38,7 +38,7 @@ use rustls::{
     SignatureScheme, StreamOwned,
 };
 
-use crate::credssp::{CredSspClient, KerberosCredSspClient};
+use crate::credssp::{self, CredSspClient, CredSspServer, KerberosCredSspClient};
 use crate::krb5::aes::AesKey;
 use crate::nego::SecurityProtocols;
 use crate::net::{EstablishConfig, RdpSession, RdpTransport};
@@ -251,6 +251,113 @@ pub fn accept_tls(
     Ok((transport, client))
 }
 
+/// A client's identity delegated over CredSSP/NLA by [`accept_tls_nla`]:
+/// the domain, username, and password decrypted from the client's
+/// `authInfo`.
+///
+/// [`CredSspServer`] (which [`accept_tls_nla`] drives) has already verified
+/// the client knows the account's password (via the `hash_lookup` callback
+/// passed to it), but this crate does not maintain an account database or
+/// decide who is allowed to log on — that, and actually logging the user on,
+/// is the caller's responsibility.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NlaIdentity {
+    /// Logon domain (may be empty).
+    pub domain: String,
+    /// Logon user name.
+    pub user: String,
+    /// Logon password.
+    pub password: String,
+}
+
+/// Accept an RDP client over CredSSP/NLA: negotiate
+/// [`SecurityProtocols::HYBRID`] on `tcp`, upgrade to TLS using
+/// `tls_config`, run the CredSSP exchange via `credssp` (verifying the
+/// client's NTLM authentication and recovering its delegated credentials),
+/// and then drive the rest of the server-side connection sequence via
+/// [`RdpTransport::accept`]'s shared post-negotiation logic — the same
+/// three pieces [`accept_tls`] composes, plus the CredSSP leg in between.
+///
+/// Build `credssp` with [`CredSspServer::new`], passing this server's own
+/// `SubjectPublicKeyInfo` as its `public_key` argument — extract that from
+/// the same certificate DER used to build `tls_config` with [`extract_spki`].
+/// On authentication failure, the client is sent an `errorCode` `TSRequest`
+/// ([`credssp::STATUS_LOGON_FAILURE`]) before this returns `Err`.
+///
+/// As with [`accept_tls`], leave `accept_config.encryption` as `None`: TLS
+/// (here, on top of CredSSP) already provides confidentiality.
+///
+/// `HYBRID_EX`'s Early User Authorization Result PDU is not sent — only the
+/// base `HYBRID` protocol is offered, and rejected (with an
+/// `RDP_NEG_FAILURE`) if the client doesn't support it.
+pub fn accept_tls_nla<F: Fn(&str, &str) -> Option<[u8; 16]>>(
+    tcp: TcpStream,
+    tls_config: Arc<ServerConfig>,
+    mut credssp: CredSspServer<F>,
+    accept_config: &crate::net::AcceptConfig,
+) -> io::Result<(
+    RdpTransport<TlsServerStream>,
+    crate::net::AcceptedClient,
+    NlaIdentity,
+)> {
+    let mut pre = RdpTransport::new(tcp);
+    pre.accept_negotiate_hybrid()?;
+    let tcp = pre.into_inner();
+
+    let conn = ServerConnection::new(tls_config)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("TLS setup failed: {e}")))?;
+    let mut tls = StreamOwned::new(conn, tcp);
+
+    while tls.conn.is_handshaking() {
+        if tls.conn.complete_io(&mut tls.sock)?.0 == 0 && tls.conn.is_handshaking() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "TLS handshake stalled",
+            ));
+        }
+    }
+
+    let identity = run_credssp_server(&mut tls, &mut credssp)?;
+
+    let mut transport = RdpTransport::new_enhanced(tls);
+    let client = transport.accept_after_negotiate(accept_config)?;
+    Ok((transport, client, identity))
+}
+
+/// Drive [`CredSspServer`]'s three legs over an established TLS stream. On
+/// [`CredSspServer::verify_authenticate`] failure, tells the client via an
+/// `errorCode` `TSRequest` before returning the error.
+fn run_credssp_server<F: Fn(&str, &str) -> Option<[u8; 16]>>(
+    tls: &mut TlsServerStream,
+    credssp: &mut CredSspServer<F>,
+) -> io::Result<NlaIdentity> {
+    let leg1 = read_ts_request(tls)?;
+    let leg2 = credssp.challenge_response(&leg1).map_err(to_io)?;
+    tls.write_all(&leg2)?;
+    tls.flush()?;
+
+    let leg3 = read_ts_request(tls)?;
+    let leg4 = match credssp.verify_authenticate(&leg3) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            let error_response = credssp::encode_error_response(credssp::STATUS_LOGON_FAILURE);
+            let _ = tls.write_all(&error_response);
+            let _ = tls.flush();
+            return Err(to_io(e));
+        }
+    };
+    tls.write_all(&leg4)?;
+    tls.flush()?;
+
+    let leg5 = read_ts_request(tls)?;
+    let (domain, user, password) = credssp.finish(&leg5).map_err(to_io)?;
+    Ok(NlaIdentity {
+        domain,
+        user,
+        password,
+    })
+}
+
 /// Run the Kerberos CredSSP exchange over an established TLS stream.
 fn run_credssp_kerberos(
     tls: &mut TlsStream,
@@ -384,8 +491,12 @@ fn split_tlv(buf: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
 ///
 /// Walks `Certificate → tbsCertificate`, skips the optional version, serial
 /// number, and the four SEQUENCEs (signature, issuer, validity, subject), and
-/// returns the following SEQUENCE (the SPKI) verbatim.
-fn extract_spki(cert: &[u8]) -> Option<Vec<u8>> {
+/// returns the following SEQUENCE (the SPKI) verbatim. Used internally to
+/// extract the *peer's* public key for the CredSSP channel binding; exposed
+/// publicly so a server can extract the same bytes from its *own*
+/// certificate for [`CredSspServer::new`]'s `public_key` argument (see
+/// [`accept_tls_nla`]).
+pub fn extract_spki(cert: &[u8]) -> Option<Vec<u8>> {
     let (_, cert_content, _) = split_tlv(cert)?; // Certificate
     let (_, tbs, _) = split_tlv(cert_content)?; // tbsCertificate
     let mut cur = tbs;
@@ -590,6 +701,120 @@ mod tests {
         assert_eq!(accepted.share_id, session.share_id);
         assert_eq!(accepted.client_info.username, "alice");
         assert_eq!(accepted.client_info.domain, "CORP");
+    }
+
+    type HashLookupFn = fn(&str, &str) -> Option<[u8; 16]>;
+
+    fn test_credssp_server() -> CredSspServer<HashLookupFn> {
+        let public_key = extract_spki(&TEST_TLS_CERT_DER).unwrap();
+        CredSspServer::new(
+            "SRV",
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+            [0u8; 8],
+            public_key,
+            |domain: &str, user: &str| {
+                if domain == "CORP" && user == "alice" {
+                    Some(crate::ntlm::nt_hash("secret"))
+                } else {
+                    None
+                }
+            },
+        )
+    }
+
+    #[test]
+    fn accept_tls_nla_completes_full_connection_sequence_with_connect_tls() {
+        use crate::net::AcceptConfig;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let config = AcceptConfig::new(1024, 768);
+            accept_tls_nla(
+                stream,
+                test_tls_server_config(),
+                test_credssp_server(),
+                &config,
+            )
+            .unwrap()
+        });
+
+        let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        let (_transport, session) = connect_tls(
+            &addr.to_string(),
+            &establish_config,
+            SecurityProtocols::HYBRID,
+        )
+        .unwrap();
+
+        let (_transport, accepted, identity) = server.join().unwrap();
+        assert_eq!(accepted.share_id, session.share_id);
+        assert_eq!(accepted.client_info.username, "alice");
+        assert_eq!(accepted.client_info.domain, "CORP");
+        assert_eq!(identity.domain, "CORP");
+        assert_eq!(identity.user, "alice");
+        assert_eq!(identity.password, "secret");
+    }
+
+    #[test]
+    fn accept_tls_nla_rejects_wrong_password() {
+        use crate::net::AcceptConfig;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let config = AcceptConfig::new(1024, 768);
+            accept_tls_nla(
+                stream,
+                test_tls_server_config(),
+                test_credssp_server(),
+                &config,
+            )
+        });
+
+        let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "wrong-password");
+        let client_result = connect_tls(
+            &addr.to_string(),
+            &establish_config,
+            SecurityProtocols::HYBRID,
+        );
+        assert!(client_result.is_err());
+        assert!(server.join().unwrap().is_err());
+    }
+
+    #[test]
+    fn accept_tls_nla_rejects_client_that_did_not_offer_hybrid() {
+        use crate::net::AcceptConfig;
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let config = AcceptConfig::new(1024, 768);
+            accept_tls_nla(
+                stream,
+                test_tls_server_config(),
+                test_credssp_server(),
+                &config,
+            )
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let mut client = RdpTransport::new(stream);
+        let _ = client.negotiate(SecurityProtocols::SSL, None);
+
+        assert!(server.join().unwrap().is_err());
     }
 
     /// Build a DER TLV with a single-byte tag and short-form length.
