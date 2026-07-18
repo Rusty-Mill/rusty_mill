@@ -21,8 +21,8 @@ Early foundation. Implemented so far, bottom-up:
 | GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
 | Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. The server side of the RSA exchange is implemented too — `RsaPrivateKey` decryption and `encode_proprietary_certificate` (signed with the fixed, publicly-known `ts_signing_key`) — and wired into `net`'s `accept()`. `Rc4Session::new`/`new_server` build the RC4 state for each end of the exchange from the same `SessionKeys`, applying the client/server encrypt-decrypt role swap `SessionKeys`'s fields are documented from the client's point of view. |
 | Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5/SHA-1, RC4, AES, PBKDF2, and a minimal bignum for RSA — no crypto crate. |
-| NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP): NEGOTIATE/CHALLENGE/AUTHENTICATE messages, the NTLMv2 response and key schedule, and the extended-session-security sealing used by CredSSP. |
-| CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): the NTLM and Kerberos client state machines, the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation. Pure codec + crypto, driven over TLS by the `tls` feature. |
+| NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP), both roles: `NtlmClient` (NEGOTIATE/AUTHENTICATE) and `NtlmServer` (CHALLENGE, then verifies AUTHENTICATE against a caller-supplied password-hash callback), the NTLMv2 response and key schedule, and the extended-session-security sealing (`NtlmContext`, `new`/`new_server` for the two roles) used by CredSSP. |
+| CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): `CredSspClient` (NTLM and Kerberos) and `CredSspServer` (NTLM only), the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation (`decode_ts_credentials` recovers what the server delegates to). Pure codec + crypto, driven over TLS by the `tls` feature. |
 | Kerberos | `krb5` | Kerberos v5 (RFC 4120 / MS-KILE): the RC4-HMAC (etype 23) and AES (etypes 17/18, RFC 3962) encryption profiles, the ASN.1 building blocks, the message PDUs (`Ticket`, `Authenticator`, `AP-REQ`, the AS/TGS exchange, `KRB-ERROR`), the GSS-API/SPNEGO wrapping (`krb5::gss`) that carries the AP-REQ in CredSSP `negoTokens`, and the RFC 4121 per-message Wrap/MIC sealing (`krb5::cfx`). The KDC transport and CredSSP wiring are still to come. |
 | Client Info | `client_info` | `TS_INFO_PACKET` logon data (domain/user/password/shell, extended info). |
 | Licensing | `license` | Licensing preamble and the License Error Message (`STATUS_VALID_CLIENT` detection). |
@@ -163,10 +163,23 @@ the order they'd add the most value:
   already does the right thing under TLS, since `RdpTransport::session` stays
   `None` there (TLS supplies confidentiality instead of RC4). Tested end to
   end against the real `tls::connect_tls`, with a throwaway self-signed P-256
-  test certificate. CredSSP/NLA (`HYBRID`) server-side validation is not
-  implemented — a real NTLM/Kerberos-accepting authentication path is a much
-  larger undertaking than TLS alone. Beyond the connection sequence, an
-  actual server also needs to originate display updates and consume input,
+  test certificate.
+
+  The NTLM/CredSSP *authentication* primitives a `HYBRID`-accepting server
+  needs now exist too: `ntlm::NtlmServer` builds the CHALLENGE and verifies
+  a client's AUTHENTICATE (NTProofStr and MIC) against a caller-supplied
+  password-hash callback — this crate never stores or looks up credentials
+  itself — and `credssp::CredSspServer` drives the three-leg `TSRequest`
+  exchange on top of it, ending with the delegated `(domain, user,
+  password)` decoded from `authInfo`. Tested end to end against the real
+  `CredSspClient`/`NtlmClient` (both the version 5+ nonce-hash and the
+  legacy public-key binding), including wrong-password and tampered-MIC
+  rejection. Kerberos is not supported server-side (validating an `AP-REQ`
+  needs a keytab and a much larger surface). Not yet done: wiring this into
+  `net`/`tls` so `accept`/`accept_tls` can actually negotiate and drive
+  `HYBRID` end to end over a live connection — a separate future slice.
+  Beyond the connection sequence, an actual server also needs to originate
+  display updates and consume input,
   which `accept`/`accept_tls` do not attempt.
 
 ## Design principles
