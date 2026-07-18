@@ -24,6 +24,13 @@
 //! SPNEGO-wrapped `AP-REQ` in `negoTokens` and seals the public key and
 //! credentials with the Kerberos session key (RFC 4121 Wrap tokens,
 //! [`crate::krb5::cfx`]) instead of the NTLM context.
+//!
+//! [`CredSspServer`] drives the NTLM-only server (acceptor) side — the same
+//! three legs in reverse, ending with the delegated `(domain, user,
+//! password)` recovered from `authInfo`. It verifies the client's password
+//! via a caller-supplied hash lookup (see [`crate::ntlm::NtlmServer`]);
+//! there is no Kerberos-accepting counterpart, since validating an `AP-REQ`
+//! needs a keytab and a much larger surface than this crate implements.
 
 use crate::ber::{
     expect_tag, read_integer, read_octet_string, write_integer, write_octet_string, write_tlv,
@@ -32,10 +39,16 @@ use crate::ber::{
 use crate::crypto::sha256::sha256;
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
-use crate::ntlm::{NtlmClient, NtlmContext};
+use crate::ntlm::{NtlmClient, NtlmContext, NtlmServer};
 
 /// The CredSSP protocol version this client offers.
 pub const CLIENT_VERSION: u32 = 6;
+/// The CredSSP protocol version [`CredSspServer`] offers.
+pub const SERVER_VERSION: u32 = 6;
+/// `STATUS_LOGON_FAILURE` — the conventional NTSTATUS servers report in a
+/// CredSSP `TSRequest.errorCode` to reject a client (see
+/// [`encode_error_response`]).
+pub const STATUS_LOGON_FAILURE: u32 = 0xC000_006D;
 
 const CLIENT_TO_SERVER_MAGIC: &[u8] = b"CredSSP Client-To-Server Binding Hash\0";
 const SERVER_TO_CLIENT_MAGIC: &[u8] = b"CredSSP Server-To-Client Binding Hash\0";
@@ -220,6 +233,34 @@ pub fn encode_ts_credentials(domain: &str, user: &str, password: &str) -> Vec<u8
     let mut out = Writer::new();
     write_tlv(&mut out, TAG_SEQUENCE, body.as_slice());
     out.into_vec()
+}
+
+/// Decode a `TSCredentials { credType = 1, credentials }` wrapping
+/// `TSPasswordCreds { domainName, userName, password }` back into
+/// `(domain, user, password)` — the counterpart to [`encode_ts_credentials`],
+/// used by [`CredSspServer::finish`] to recover the delegated credentials.
+pub fn decode_ts_credentials(buf: &[u8]) -> Result<(String, String, String)> {
+    let mut r = Reader::new(buf);
+    let seq_len = expect_tag(&mut r, TAG_SEQUENCE)?;
+    let body = r.read_bytes(seq_len)?;
+    let mut r = Reader::new(body);
+
+    expect_tag(&mut r, &ctx_tag(0))?;
+    let _cred_type = read_integer(&mut r)?;
+    expect_tag(&mut r, &ctx_tag(1))?;
+    let pwd_creds = read_octet_string(&mut r)?;
+
+    let mut pr = Reader::new(pwd_creds);
+    let pwd_seq_len = expect_tag(&mut pr, TAG_SEQUENCE)?;
+    let pwd_body = pr.read_bytes(pwd_seq_len)?;
+    let mut pr = Reader::new(pwd_body);
+
+    let mut fields = Vec::with_capacity(3);
+    for i in 0..3u8 {
+        expect_tag(&mut pr, &ctx_tag(i))?;
+        fields.push(crate::ntlm::utf16le_decode(read_octet_string(&mut pr)?)?);
+    }
+    Ok((fields[0].clone(), fields[1].clone(), fields[2].clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +463,188 @@ pub fn peek_version(buf: &[u8]) -> Result<u32> {
     let mut r = Reader::new(body);
     expect_tag(&mut r, &ctx_tag(0))?;
     read_integer(&mut r)
+}
+
+/// Encode a `TSRequest` carrying only an `errorCode` — send this after
+/// [`CredSspServer::verify_authenticate`] returns an error, so the client
+/// sees a clean rejection instead of a dropped connection. Pass
+/// [`STATUS_LOGON_FAILURE`] unless a more specific NTSTATUS applies.
+pub fn encode_error_response(code: u32) -> Vec<u8> {
+    TsRequest {
+        version: SERVER_VERSION,
+        error_code: Some(code),
+        ..Default::default()
+    }
+    .to_vec()
+}
+
+// ---------------------------------------------------------------------------
+// CredSSP server state machine
+// ---------------------------------------------------------------------------
+
+/// Drives the CredSSP server (acceptor) exchange over an already-established
+/// TLS channel, verifying the client's NTLM authentication and recovering
+/// its delegated credentials.
+///
+/// Mirrors [`CredSspClient`]'s three legs from the server's side:
+///
+/// 1. [`CredSspServer::challenge_response`] ← client NEGOTIATE, → NTLM
+///    CHALLENGE.
+/// 2. [`CredSspServer::verify_authenticate`] ← client AUTHENTICATE +
+///    `pubKeyAuth`, → the server's own sealed public-key confirmation. This
+///    is where the `hash_lookup` callback passed to [`CredSspServer::new`]
+///    is consulted; on failure, reply with [`encode_error_response`] instead
+///    of this method's `Ok` value.
+/// 3. [`CredSspServer::finish`] ← the sealed `authInfo`, returning the
+///    delegated `(domain, user, password)` to log the client on with.
+///
+/// Only NTLM is supported server-side — there is no Kerberos-accepting
+/// counterpart here, since validating a Kerberos `AP-REQ` needs a keytab (or
+/// equivalent long-term key access) and a much larger surface than this
+/// crate implements.
+pub struct CredSspServer<F: Fn(&str, &str) -> Option<[u8; 16]>> {
+    ntlm: NtlmServer<F>,
+    context: Option<NtlmContext>,
+    client_version: u32,
+    public_key: Vec<u8>,
+    nonce: Option<[u8; 32]>,
+}
+
+impl<F: Fn(&str, &str) -> Option<[u8; 16]>> CredSspServer<F> {
+    /// Create a server. `public_key` is this server's own TLS
+    /// `SubjectPublicKeyInfo` (the same bytes a peer's `connect_tls` extracts
+    /// from the certificate it receives — used for the channel binding).
+    /// `target_name`/`server_challenge`/`timestamp` feed [`NtlmServer::new`];
+    /// `hash_lookup` is the password-hash callback (see [`NtlmServer`]).
+    pub fn new(
+        target_name: &str,
+        server_challenge: [u8; 8],
+        timestamp: [u8; 8],
+        public_key: Vec<u8>,
+        hash_lookup: F,
+    ) -> Self {
+        CredSspServer {
+            ntlm: NtlmServer::new(target_name, server_challenge, timestamp, hash_lookup),
+            context: None,
+            client_version: 0,
+            public_key,
+            nonce: None,
+        }
+    }
+
+    /// Leg 2: consume the client's `TSRequest` carrying the NTLM NEGOTIATE
+    /// token and return the `TSRequest` carrying the CHALLENGE.
+    pub fn challenge_response(&mut self, client_msg: &[u8]) -> Result<Vec<u8>> {
+        let request = TsRequest::decode(client_msg)?;
+        self.client_version = request.version;
+        let negotiate = request.nego_tokens.first().ok_or(Error::InvalidValue {
+            field: "CredSSP negotiate",
+            value: "no negoToken".to_string(),
+        })?;
+        let challenge = self.ntlm.challenge(negotiate)?;
+        Ok(TsRequest {
+            version: self.effective_version(),
+            nego_tokens: vec![challenge],
+            ..Default::default()
+        }
+        .to_vec())
+    }
+
+    /// Leg 4: consume the client's `TSRequest` carrying the NTLM
+    /// AUTHENTICATE token and its sealed public-key binding. Verifies the
+    /// password (via the `hash_lookup` callback) and the channel binding,
+    /// then returns the `TSRequest` carrying this server's own sealed
+    /// public-key confirmation.
+    pub fn verify_authenticate(&mut self, client_msg: &[u8]) -> Result<Vec<u8>> {
+        let request = TsRequest::decode(client_msg)?;
+        let authenticate = request.nego_tokens.first().ok_or(Error::InvalidValue {
+            field: "CredSSP authenticate",
+            value: "no negoToken".to_string(),
+        })?;
+        let pub_key_auth = request.pub_key_auth.ok_or(Error::InvalidValue {
+            field: "CredSSP client response",
+            value: "missing pubKeyAuth".to_string(),
+        })?;
+
+        let (_domain, _user, mut context) = self.ntlm.authenticate(authenticate)?;
+
+        let expected = self.client_public_key_binding(request.client_nonce.as_deref());
+        let received = context.decrypt_message(&pub_key_auth)?;
+        if received != expected {
+            return Err(Error::InvalidValue {
+                field: "CredSSP public key confirmation",
+                value: "mismatch".to_string(),
+            });
+        }
+        self.nonce = request.client_nonce.map(|n| {
+            let mut a = [0u8; 32];
+            let len = n.len().min(32);
+            a[..len].copy_from_slice(&n[..len]);
+            a
+        });
+
+        let outgoing = self.server_public_key_binding();
+        let sealed = context.encrypt_message(&outgoing);
+        self.context = Some(context);
+
+        Ok(TsRequest {
+            version: self.effective_version(),
+            pub_key_auth: Some(sealed),
+            ..Default::default()
+        }
+        .to_vec())
+    }
+
+    /// Leg 6: consume the client's `TSRequest` carrying the sealed
+    /// `authInfo` and return the delegated `(domain, user, password)`.
+    pub fn finish(&mut self, client_msg: &[u8]) -> Result<(String, String, String)> {
+        let request = TsRequest::decode(client_msg)?;
+        let auth_info = request.auth_info.ok_or(Error::InvalidValue {
+            field: "CredSSP client response",
+            value: "missing authInfo".to_string(),
+        })?;
+        let context = self.context.as_mut().ok_or(Error::InvalidValue {
+            field: "CredSSP state",
+            value: "no security context".to_string(),
+        })?;
+        let credentials = context.decrypt_message(&auth_info)?;
+        decode_ts_credentials(&credentials)
+    }
+
+    /// The negotiated CredSSP version (min of client and server).
+    fn effective_version(&self) -> u32 {
+        SERVER_VERSION.min(self.client_version)
+    }
+
+    /// The client's expected public-key binding value (before it was
+    /// sealed).
+    fn client_public_key_binding(&self, client_nonce: Option<&[u8]>) -> Vec<u8> {
+        if self.effective_version() >= 5 {
+            let mut nonce = [0u8; 32];
+            if let Some(n) = client_nonce {
+                let len = n.len().min(32);
+                nonce[..len].copy_from_slice(&n[..len]);
+            }
+            hash_binding(CLIENT_TO_SERVER_MAGIC, &nonce, &self.public_key)
+        } else {
+            self.public_key.clone()
+        }
+    }
+
+    /// This server's own public-key binding value (before sealing).
+    fn server_public_key_binding(&self) -> Vec<u8> {
+        if self.effective_version() >= 5 {
+            let nonce = self.nonce.unwrap_or([0u8; 32]);
+            hash_binding(SERVER_TO_CLIENT_MAGIC, &nonce, &self.public_key)
+        } else {
+            // Legacy: increment the first byte of the public key.
+            let mut pk = self.public_key.clone();
+            if let Some(first) = pk.first_mut() {
+                *first = first.wrapping_add(1);
+            }
+            pk
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -709,7 +932,7 @@ mod tests {
     /// Build a server-side NTLM context whose directions mirror the client's:
     /// its server-direction keys equal the client's client-direction keys.
     fn mirror_context(esk: &[u8; 16]) -> NtlmContext {
-        NtlmContext::mirror_for_test(esk)
+        NtlmContext::new_server(esk)
     }
 
     #[test]
@@ -830,5 +1053,136 @@ mod tests {
             credentials,
             encode_ts_credentials("EXAMPLE.COM", "alice", "s3cr3t")
         );
+    }
+
+    fn credentials_store(domain: &str, user: &str) -> Option<[u8; 16]> {
+        if domain == "CORP" && user == "alice" {
+            Some(crate::ntlm::nt_hash("secret"))
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn ts_credentials_roundtrip() {
+        let encoded = encode_ts_credentials("CORP", "alice", "secret");
+        let (domain, user, password) = decode_ts_credentials(&encoded).unwrap();
+        assert_eq!(
+            (domain.as_str(), user.as_str(), password.as_str()),
+            ("CORP", "alice", "secret")
+        );
+    }
+
+    #[test]
+    fn full_credssp_exchange_against_real_server() {
+        // The real (not mocked) CredSSP server: two independently-derived
+        // NTLM contexts genuinely authenticate and delegate credentials.
+        let public_key = vec![0x30, 0x82, 0x01, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF];
+        let nonce = [0x77u8; 32];
+        let esk = [0x55u8; 16];
+        let client_challenge = [0xAAu8; 8];
+
+        let mut client = CredSspClient::new(
+            "CORP",
+            "alice",
+            "secret",
+            "WKS",
+            public_key.clone(),
+            nonce,
+            client_challenge,
+            [0u8; 8],
+            esk,
+        );
+        let mut server = CredSspServer::new(
+            "SRV",
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+            [0u8; 8],
+            public_key,
+            credentials_store,
+        );
+
+        let leg1 = client.negotiate_request();
+        let leg2 = server.challenge_response(&leg1).unwrap();
+        let leg3 = client.challenge_response(&leg2).unwrap();
+        let leg4 = server.verify_authenticate(&leg3).unwrap();
+        let leg5 = client.finish(&leg4).unwrap();
+        let (domain, user, password) = server.finish(&leg5).unwrap();
+
+        assert_eq!(domain, "CORP");
+        assert_eq!(user, "alice");
+        assert_eq!(password, "secret");
+    }
+
+    #[test]
+    fn full_credssp_exchange_legacy_version_binding() {
+        // Force a pre-5 negotiated version so both sides fall back to the
+        // legacy "public key (+1)" binding instead of the nonce hash.
+        let public_key = vec![0x30, 0x82, 0x01, 0x0A, 0xDE, 0xAD, 0xBE, 0xEF];
+        let nonce = [0x77u8; 32];
+        let esk = [0x55u8; 16];
+
+        let mut client = CredSspClient::new(
+            "CORP",
+            "alice",
+            "secret",
+            "WKS",
+            public_key.clone(),
+            nonce,
+            [0xAAu8; 8],
+            [0u8; 8],
+            esk,
+        );
+        let mut server = CredSspServer::new(
+            "SRV",
+            [0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef],
+            [0u8; 8],
+            public_key,
+            credentials_store,
+        );
+
+        let mut leg1 = TsRequest::decode(&client.negotiate_request()).unwrap();
+        leg1.version = 4;
+        let leg2 = server.challenge_response(&leg1.to_vec()).unwrap();
+        assert_eq!(TsRequest::decode(&leg2).unwrap().version, 4);
+
+        let leg3 = client.challenge_response(&leg2).unwrap();
+        assert!(TsRequest::decode(&leg3).unwrap().client_nonce.is_none());
+
+        let leg4 = server.verify_authenticate(&leg3).unwrap();
+        let leg5 = client.finish(&leg4).unwrap();
+        let (domain, user, password) = server.finish(&leg5).unwrap();
+        assert_eq!(domain, "CORP");
+        assert_eq!(user, "alice");
+        assert_eq!(password, "secret");
+    }
+
+    #[test]
+    fn real_server_rejects_wrong_password_and_client_sees_error() {
+        let public_key = vec![0xAA; 8];
+        let nonce = [0x11u8; 32];
+        let esk = [0x22u8; 16];
+
+        let mut client = CredSspClient::new(
+            "CORP",
+            "alice",
+            "wrong-password",
+            "WKS",
+            public_key.clone(),
+            nonce,
+            [0x33u8; 8],
+            [0u8; 8],
+            esk,
+        );
+        let mut server =
+            CredSspServer::new("SRV", [0x44u8; 8], [0u8; 8], public_key, credentials_store);
+
+        let leg1 = client.negotiate_request();
+        let leg2 = server.challenge_response(&leg1).unwrap();
+        let leg3 = client.challenge_response(&leg2).unwrap();
+        assert!(server.verify_authenticate(&leg3).is_err());
+
+        // The server tells the client via an errorCode TSRequest instead.
+        let error_response = encode_error_response(STATUS_LOGON_FAILURE);
+        assert!(client.finish(&error_response).is_err());
     }
 }
