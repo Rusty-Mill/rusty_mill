@@ -28,10 +28,9 @@
 //!             └─ Share Control/Data   (crate::pdu)   session PDU framing
 //!                  ├─ capabilities    (crate::capabilities)  Demand/Confirm Active
 //!                  ├─ finalization    (crate::finalization)  sync/control/font
-//!                  ├─ input            (crate::input)  keyboard / mouse events
-//!                  └─ output           (crate::output)  bitmap / palette updates
+//!                  ├─ input           (crate::input)  keyboard / mouse events
 //!                  ├─ pointer         (crate::pointer)  cursor updates
-//!                  └─ output           (crate::output)  bitmap / palette updates
+//!                  └─ output          (crate::output)  bitmap / palette updates
 //!                       ├─ RLE decode   (crate::rle)  interleaved bitmap codec
 //!                       ├─ pixel unpack (crate::pixel)  native format → RGBA
 //!                       └─ framebuffer  (crate::display)  blit rects to a surface
