@@ -27,9 +27,16 @@
 //!   (sealing) and [`cfx::mic`] / [`cfx::verify_mic`] (integrity), which
 //!   protect the CredSSP public key and credentials with the Kerberos session
 //!   key the way NTLM's `EncryptMessage` does.
+//! * [`kdc`] — the KDC network client: [`kdc::get_tgt`] drives the
+//!   Authentication Service (AS) exchange over TCP to trade a
+//!   realm/username/password for a Ticket-Granting Ticket. The Kerberos path
+//!   is otherwise wired end to end into [`crate::credssp`]
+//!   ([`crate::credssp::KerberosCredSspClient`]) and, with the `tls` feature,
+//!   `crate::tls::connect_tls_kerberos`.
 //!
-//! Still to come: the KDC transport (the AS/TGS round trips over the network)
-//! and wiring the Kerberos path into [`crate::credssp`] alongside NTLM.
+//! Still to come: the Ticket-Granting Service (TGS) exchange that trades a
+//! [`kdc::get_tgt`]-obtained TGT for the service ticket
+//! `connect_tls_kerberos` actually needs.
 //!
 //! ## Security warning
 //!
@@ -41,6 +48,7 @@ pub mod asn1;
 pub mod cfx;
 pub mod crypto;
 pub mod gss;
+pub mod kdc;
 pub mod messages;
 
 pub use aes::{AesKey, ETYPE_AES128_CTS_HMAC_SHA1_96, ETYPE_AES256_CTS_HMAC_SHA1_96};
