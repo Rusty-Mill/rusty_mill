@@ -90,6 +90,8 @@ use crate::mcs::{
     ConnectInitial, ConnectResponse, DomainParameters, DomainPdu, McsResult, MCS_BASE_CHANNEL_ID,
     MCS_GLOBAL_CHANNEL_ID,
 };
+#[cfg(feature = "tls")]
+use crate::nego::NegFailureCode;
 use crate::nego::{Negotiation, SecurityProtocols};
 use crate::output::{BitmapData, PaletteUpdate, UpdatePdu};
 use crate::pdu::{
@@ -954,6 +956,51 @@ impl<S: Read + Write> RdpTransport<S> {
         self.write_tpkt(&confirm)
     }
 
+    /// Read a Connection Request and reply selecting
+    /// [`SecurityProtocols::SSL`], for a TLS-upgrading server entry point
+    /// (see `crate::tls::accept_tls`). Errors (after telling the client via
+    /// an `RDP_NEG_FAILURE`) if the client didn't offer TLS.
+    #[cfg(feature = "tls")]
+    pub(crate) fn accept_negotiate_ssl(&mut self) -> io::Result<()> {
+        let request = self.read_tpkt()?;
+        let pdu = match X224::decode(&request).map_err(to_io)? {
+            X224::ConnectionRequest(pdu) => pdu,
+            other => {
+                return Err(protocol_error(format!(
+                    "expected Connection Request, got {other:?}"
+                )))
+            }
+        };
+        let offered = match pdu.negotiation {
+            Some(Negotiation::Request { protocols, .. }) => protocols,
+            _ => SecurityProtocols::RDP,
+        };
+        if !offered.contains(SecurityProtocols::SSL) {
+            let failure = X224::ConnectionConfirm(ConnectionPdu {
+                negotiation: Some(Negotiation::Failure {
+                    code: NegFailureCode::SslRequiredByServer,
+                }),
+                ..Default::default()
+            })
+            .to_vec()
+            .map_err(to_io)?;
+            self.write_tpkt(&failure)?;
+            return Err(protocol_error(
+                "client did not offer TLS security, but accept_tls requires it",
+            ));
+        }
+        let confirm = X224::ConnectionConfirm(ConnectionPdu {
+            negotiation: Some(Negotiation::Response {
+                flags: 0,
+                selected: SecurityProtocols::SSL,
+            }),
+            ..Default::default()
+        })
+        .to_vec()
+        .map_err(to_io)?;
+        self.write_tpkt(&confirm)
+    }
+
     /// Read the client's `Connect-Initial` and return its decoded GCC
     /// settings blocks.
     fn accept_read_connect_initial(&mut self) -> io::Result<Vec<UserDataBlock>> {
@@ -1271,13 +1318,38 @@ impl<S: Read + Write> RdpTransport<S> {
     /// With `config.encryption` left `None`, `accept` speaks only
     /// **unencrypted** standard RDP security (`encryptionLevel = 0`): no RSA
     /// key exchange, no RC4. Setting it drives real encrypted standard
-    /// security instead — see [`AcceptEncryption`]. Either way, TLS/CredSSP
-    /// server support is not implemented. Do not use the unencrypted mode
-    /// over an untrusted network — see this crate's security note on
+    /// security instead — see [`AcceptEncryption`]. For TLS-upgraded
+    /// connections, use `crate::tls::accept_tls` instead (which negotiates
+    /// [`SecurityProtocols::SSL`] and calls the shared post-negotiation logic
+    /// this method also uses); leave `config.encryption` as `None` there too,
+    /// since TLS already provides confidentiality. CredSSP/NLA server-side
+    /// validation is not implemented. Do not use the unencrypted mode over an
+    /// untrusted network — see this crate's security note on
     /// [`crate::security`]/[`crate::crypto`].
     pub fn accept(&mut self, config: &AcceptConfig) -> io::Result<AcceptedClient> {
         self.accept_negotiate()?;
+        self.accept_after_negotiate(config)
+    }
 
+    /// Everything [`RdpTransport::accept`] does after the X.224 negotiation:
+    /// GCC/MCS connect, channel setup, the RSA security exchange (when
+    /// `config.encryption` is set), the Client Info PDU, licensing, the
+    /// capability exchange, and connection finalization.
+    ///
+    /// Shared with `crate::tls::accept_tls`, which negotiates
+    /// [`SecurityProtocols::SSL`] itself (via `accept_negotiate_ssl`) and
+    /// then re-wraps the stream in TLS before calling this. Under TLS,
+    /// `config.encryption` should stay `None`: the resulting all-zero
+    /// `encryptionLevel`/`encryptionMethod`
+    /// server security data is exactly what MS-RDPBCGR requires when
+    /// Enhanced RDP Security supplies confidentiality, and every
+    /// session-conditional framing helper below (`send_secure_indication`,
+    /// `send_share_indication`, ...) already does the right thing since
+    /// `self.session` naturally stays `None`.
+    pub(crate) fn accept_after_negotiate(
+        &mut self,
+        config: &AcceptConfig,
+    ) -> io::Result<AcceptedClient> {
         let client_blocks = self.accept_read_connect_initial()?;
         let requested_channels: Vec<ChannelDef> = client_blocks
             .iter()

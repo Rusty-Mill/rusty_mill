@@ -57,10 +57,14 @@
 //!
 //! [`net::RdpTransport::accept`] drives the same connection sequence in
 //! reverse, as a server, over the identical bidirectional codec types —
-//! restricted for now to unencrypted standard RDP security
-//! (`encryptionLevel = 0`), since real encrypted standard security and
-//! TLS/CredSSP server support both need certificate/RSA-private-key material
-//! this crate does not yet provide.
+//! either unencrypted standard RDP security (`encryptionLevel = 0`) or, with
+//! caller-supplied RSA key material, real encrypted standard security (RSA
+//! exchange + RC4). `crate::tls::accept_tls` (feature `tls`) is the
+//! TLS-upgrading counterpart to `accept`: it negotiates
+//! [`nego::SecurityProtocols::SSL`], upgrades the stream with a
+//! caller-supplied `rustls::ServerConfig` (certificate + private key), and
+//! then shares `accept`'s post-negotiation logic. CredSSP/NLA (`HYBRID`)
+//! server-side validation is not implemented.
 //!
 //! ## Design
 //!

@@ -47,7 +47,7 @@ Early foundation. Implemented so far, bottom-up:
 | Clipboard redirection | `cliprdr` | MS-RDPECLIP PDUs on the `"cliprdr"` static channel: the caps/monitor-ready handshake (`CapsPdu`/`GeneralCapabilitySet`/`MonitorReadyPdu`), format announcement (`FormatListPdu`/`FormatListResponsePdu`, Long Format Name variant), data transfer (`FormatDataRequestPdu`/`FormatDataResponsePdu`, with `as_unicode_text()` for `CF_UNICODETEXT`), and file copy/paste (`FileList`/`FileDescriptor` for the `CFSTR_FILEDESCRIPTORW` format, `FileContentsRequestPdu`/`FileContentsResponsePdu` to pull a file's size or byte ranges, `LockClipDataPdu`/`UnlockClipDataPdu`). `CB_TEMP_DIRECTORY` and the Short Format Name variant are not implemented. |
 | Audio redirection | `rdpsnd` | MS-RDPEA PDUs on the `"rdpsnd"` static channel: format negotiation (`AudioFormatsPdu`/`AudioFormat`), bandwidth training (`TrainingPdu`/`TrainingConfirmPdu`), wave playback (`encode_wave`/`decode_wave` hiding the WaveInfo/Wave PDU split, `WaveConfirmPdu`), `ClosePdu`, volume/pitch control (`VolumePdu`/`PitchPdu`), and encryption key distribution (`CryptKeyPdu`). `SNDC_WAVE2` and everything that rides over UDP instead of this channel (encrypted wave data, the UDP wave PDUs) are not implemented. |
 | Device redirection | `rdpdr` | MS-RDPEFS PDUs on the `"rdpdr"` static channel: the full initialization/capability handshake (`ServerAnnounceRequestPdu`/`ClientAnnounceReplyPdu`/`ServerClientIdConfirmPdu`/`ClientNameRequestPdu`, `ServerCoreCapabilityPdu`/`ClientCoreCapabilityPdu` with `GeneralCapsSet`, `ClientDeviceListAnnouncePdu`/`ServerDeviceAnnounceResponsePdu`, `ServerUserLoggedOnPdu`), and the full Device I/O Request/Response exchange (`DeviceIoRequest`/`DeviceIoResponse` headers) for every major function but one: create/close/read/write (`DeviceCreateRequestPdu`/`RspPdu`, `DeviceCloseRequestPdu`/`RspPdu`, `DeviceReadRequestPdu`/`RspPdu`, `DeviceWriteRequestPdu`/`RspPdu`), the generic IOCTL/FSCTL carrier (`DeviceControlRequestPdu`/`RspPdu`) that smart-card and port redirection ride on, query/set file information (`QueryInformationRequestPdu`/`RspPdu`, `SetInformationRequestPdu`/`RspPdu`), query/set volume information (`QueryVolumeInformationRequestPdu`/`RspPdu`, `SetVolumeInformationRequestPdu`/`RspPdu`), and directory control — listing (`QueryDirectoryRequestPdu`/`RspPdu`) and change notification (`NotifyChangeDirectoryRequestPdu`/`RspPdu`). Lock control is not implemented — its request layout isn't in Microsoft's published spec pages, and no reference client (FreeRDP, rdesktop, xrdp) actually parses it either. |
-| TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`. The crate's only third-party dependency, and off by default. |
+| TLS connector | `tls` | *(optional `tls` feature)* `connect_tls()` — upgrades the TCP stream to TLS with `rustls` and drives `establish_enhanced()`; `accept_tls()` is the server-side counterpart, negotiating `SSL` and driving `RdpTransport::accept`'s shared post-negotiation logic over a caller-supplied `rustls::ServerConfig`. The crate's only third-party dependency, and off by default. |
 | BER (X.690) | `ber` | The definite-length TLV subset the MCS connection PDUs need. |
 | PER (X.691) | `per` | The ALIGNED-PER subset the MCS domain PDUs and GCC envelope need. |
 | Byte cursors | `cursor` | Explicit big/little-endian, bounds-checked read/write. |
@@ -150,10 +150,23 @@ the order they'd add the most value:
   caught a real bug: `Rc4Session::new` derives keys from the *client's*
   point of view, so a server using it directly on the same `SessionKeys`
   gets its encrypt/decrypt roles backwards; `Rc4Session::new_server` now
-  does the correct swap. Still needed: TLS/CredSSP server support (a
-  certificate and a TLS server implementation); beyond the connection
-  sequence, an actual server also needs to originate display updates and
-  consume input, which `accept` does not attempt.
+  does the correct swap.
+
+  *(optional `tls` feature)* `tls::accept_tls` is the TLS-upgrading
+  counterpart: it negotiates `SecurityProtocols::SSL` on the raw TCP stream
+  (rejecting, with an `RDP_NEG_FAILURE`, a client that didn't offer it),
+  upgrades using a caller-supplied `rustls::ServerConfig` (certificate +
+  private key — this crate doesn't generate X.509 certificates, matching how
+  `connect_tls` doesn't verify them), and then shares `accept`'s
+  post-negotiation logic unchanged: every session-conditional framing helper
+  already does the right thing under TLS, since `RdpTransport::session` stays
+  `None` there (TLS supplies confidentiality instead of RC4). Tested end to
+  end against the real `tls::connect_tls`, with a throwaway self-signed P-256
+  test certificate. CredSSP/NLA (`HYBRID`) server-side validation is not
+  implemented — a real NTLM/Kerberos-accepting authentication path is a much
+  larger undertaking than TLS alone. Beyond the connection sequence, an
+  actual server also needs to originate display updates and consume input,
+  which `accept`/`accept_tls` do not attempt.
 
 ## Design principles
 
