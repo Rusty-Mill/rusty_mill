@@ -1,5 +1,9 @@
 # rusty_rdp
 
+[![Release](https://img.shields.io/github/v/release/baileyrd/rusty_rdp?label=release)](https://github.com/baileyrd/rusty_rdp/releases/latest)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Rust: 1.70+](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](#building)
+
 A minimal, **dependency-free** implementation of the Remote Desktop Protocol
 (RDP) wire format in Rust.
 
@@ -10,13 +14,15 @@ structure is encoded and decoded by hand with bounds-checked cursors, and
 
 ## Status
 
+🎉 **[v0.1.0 — "The Foundation Release"](https://github.com/baileyrd/rusty_rdp/releases/tag/v0.1.0) is out.**
+
 Broad protocol coverage, built bottom-up and still growing. The full client
 connection sequence (standard security, TLS, CredSSP/NLA with either NTLM or
 Kerberos), the server side of that same sequence (including NLA), the RDPGFX
 graphics pipeline with every bitmap codec it carries, and the clipboard/audio/
 device-redirection channels are all implemented and tested. See
 [Roadmap](#roadmap) below for what's left, and
-[RELEASE_NOTES.md](RELEASE_NOTES.md) for how it got here.
+[RELEASE_NOTES.md](RELEASE_NOTES.md) for the full writeup.
 
 Layer by layer:
 
