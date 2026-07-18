@@ -13,26 +13,29 @@
 //! 3. Client sends [`AudioFormatsPdu`] back with the formats both ends
 //!    support, each entry's index into this list becoming the `format_no`
 //!    used by later Wave PDUs.
-//! 4. Server streams audio: [`encode_wave`] splits samples into the
-//!    WaveInfo + Wave PDU pair (the first 4 bytes of every sample block are
-//!    carried inside the WaveInfo PDU itself, a wire quirk this module
-//!    hides — [`decode_wave`] reassembles the two back into one buffer).
-//!    The client answers each with a [`WaveConfirmPdu`] once played out.
+//! 4. Server streams audio. If both sides negotiated version 8 or later
+//!    (MS-RDPEA 3.1.1.2), each sample is one self-contained [`Wave2Pdu`],
+//!    carrying an extra `audio_timestamp` for syncing against a remoted
+//!    video stream. Otherwise [`encode_wave`] splits samples into the
+//!    older WaveInfo + Wave PDU pair (the first 4 bytes of every sample
+//!    block are carried inside the WaveInfo PDU itself, a wire quirk this
+//!    module hides — [`decode_wave`] reassembles the two back into one
+//!    buffer). Either way, the client answers each with a
+//!    [`WaveConfirmPdu`] once played out.
 //! 5. Either side may send [`ClosePdu`] to end the stream.
 //!
 //! ## What's implemented
 //!
 //! The full non-UDP audio path: [`AudioFormat`]/[`AudioFormatsPdu`],
 //! [`TrainingPdu`]/[`TrainingConfirmPdu`], [`encode_wave`]/[`decode_wave`]
-//! (the WaveInfo/Wave PDU pair), [`WaveConfirmPdu`], [`ClosePdu`],
-//! [`VolumePdu`]/[`PitchPdu`], and [`CryptKeyPdu`] (the key-distribution
-//! PDU, sent over this virtual channel even though the audio data it keys
-//! is not — see below).
+//! (the WaveInfo/Wave PDU pair) and [`Wave2Pdu`] (the newer single-PDU
+//! format), [`WaveConfirmPdu`], [`ClosePdu`], [`VolumePdu`]/[`PitchPdu`],
+//! and [`CryptKeyPdu`] (the key-distribution PDU, sent over this virtual
+//! channel even though the audio data it keys is not — see below).
 //!
-//! **Not yet implemented:** `SNDC_WAVE2` (the newer single-PDU wave format
-//! with an explicit `dwAudioTimeStamp`), and everything that rides over
-//! UDP rather than this virtual channel: `SNDC_WAVEENCRYPT` (the encrypted
-//! wave data [`CryptKeyPdu`] keys) and `SNDC_UDPWAVE`/`UDPWAVELAST`.
+//! **Not yet implemented:** everything that rides over UDP rather than this
+//! virtual channel: `SNDC_WAVEENCRYPT` (the encrypted wave data
+//! [`CryptKeyPdu`] keys) and `SNDC_UDPWAVE`/`UDPWAVELAST`.
 
 use crate::cursor::{Reader, Writer};
 use crate::error::{Error, Result};
@@ -49,6 +52,7 @@ const SNDC_WAVECONFIRM: u8 = 0x05;
 const SNDC_TRAINING: u8 = 0x06;
 const SNDC_FORMATS: u8 = 0x07;
 const SNDC_CRYPTKEY: u8 = 0x08;
+const SNDC_WAVE2: u8 = 0x0D;
 
 /// `WAVE_FORMAT_PCM` — the one format clients and servers are required to
 /// support at minimum.
@@ -554,6 +558,59 @@ pub fn decode_wave(wave_info_pdu: &[u8], wave_pdu: &[u8]) -> Result<(u16, u16, u
     Ok((info.timestamp, info.format_no, info.block_no, sample))
 }
 
+/// `SNDWAVE2` (MS-RDPEA 2.2.3.9) — the newer single-PDU wave format, sent
+/// instead of the [`encode_wave`]/[`decode_wave`] WaveInfo+Wave pair once
+/// both client and server negotiate version 8 or later during
+/// initialization. Unlike that pair, the audio data travels in this one PDU
+/// alongside a second timestamp (`audio_timestamp`) marking when the server
+/// captured it from the audio source, for syncing against a video stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wave2Pdu {
+    /// Time stamp of when this PDU was built.
+    pub timestamp: u16,
+    /// Index into the format list exchanged during initialization.
+    pub format_no: u16,
+    /// Block ID, echoed back by the client's `WaveConfirmPdu`.
+    pub block_no: u8,
+    /// Milliseconds since system start when the server captured this audio
+    /// from its source; used to sync against a remoted video stream.
+    pub audio_timestamp: u32,
+    /// Audio data in the format named by `format_no`.
+    pub data: Vec<u8>,
+}
+
+impl Wave2Pdu {
+    /// Encode to bytes.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut body = Writer::with_capacity(12 + self.data.len());
+        body.write_u16_le(self.timestamp);
+        body.write_u16_le(self.format_no);
+        body.write_u8(self.block_no);
+        body.write_bytes(&[0, 0, 0]); // bPad
+        body.write_u32_le(self.audio_timestamp);
+        body.write_bytes(&self.data);
+        wrap(SNDC_WAVE2, body.as_slice())
+    }
+
+    /// Decode from bytes.
+    pub fn decode(buf: &[u8]) -> Result<Wave2Pdu> {
+        let mut r = unwrap(buf, SNDC_WAVE2)?;
+        let timestamp = r.read_u16_le()?;
+        let format_no = r.read_u16_le()?;
+        let block_no = r.read_u8()?;
+        r.skip(3)?; // bPad
+        let audio_timestamp = r.read_u32_le()?;
+        let data = r.read_bytes(r.remaining())?.to_vec();
+        Ok(Wave2Pdu {
+            timestamp,
+            format_no,
+            block_no,
+            audio_timestamp,
+            data,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,5 +904,60 @@ mod tests {
         // Cross-decoding with the wrong PDU type is rejected.
         assert!(VolumePdu::decode(&pitch).is_err());
         assert!(PitchPdu::decode(&crypt_key).is_err());
+    }
+
+    #[test]
+    fn wave2_pdu_roundtrip() {
+        let pdu = Wave2Pdu {
+            timestamp: 0xadd7,
+            format_no: 15,
+            block_no: 8,
+            audio_timestamp: 0x1234_5678,
+            data: (0..593u32).map(|i| (i % 251) as u8).collect(),
+        };
+        assert_eq!(decode_msg_type(&pdu.encode()).unwrap(), SNDC_WAVE2);
+        assert_eq!(Wave2Pdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn wave2_pdu_empty_data_roundtrip() {
+        let pdu = Wave2Pdu {
+            timestamp: 0,
+            format_no: 0,
+            block_no: 0,
+            audio_timestamp: 0,
+            data: Vec::new(),
+        };
+        assert_eq!(Wave2Pdu::decode(&pdu.encode()).unwrap(), pdu);
+    }
+
+    #[test]
+    fn wave2_pdu_wire_shape_matches_spec_field_layout() {
+        // Header(4) + wTimeStamp(2) + wFormatNo(2) + cBlockNo(1) + bPad(3)
+        // + dwAudioTimeStamp(4) = 16 bytes before Data (MS-RDPEA 2.2.3.9).
+        let pdu = Wave2Pdu {
+            timestamp: 0x0102,
+            format_no: 0x0304,
+            block_no: 0x05,
+            audio_timestamp: 0x0607_0809,
+            data: vec![0xAA, 0xBB],
+        };
+        let encoded = pdu.encode();
+        assert_eq!(encoded.len(), 18);
+        assert_eq!(encoded[0], SNDC_WAVE2);
+        // BodySize = size of PDU minus the 4-byte header.
+        assert_eq!(u16::from_le_bytes([encoded[2], encoded[3]]), 14);
+        assert_eq!(&encoded[4..6], &[0x02, 0x01]); // wTimeStamp, LE
+        assert_eq!(&encoded[6..8], &[0x04, 0x03]); // wFormatNo, LE
+        assert_eq!(encoded[8], 0x05); // cBlockNo
+        assert_eq!(&encoded[9..12], &[0, 0, 0]); // bPad
+        assert_eq!(&encoded[12..16], &[0x09, 0x08, 0x07, 0x06]); // dwAudioTimeStamp, LE
+        assert_eq!(&encoded[16..18], &[0xAA, 0xBB]); // Data
+    }
+
+    #[test]
+    fn wave2_pdu_rejects_wrong_msg_type() {
+        let close = ClosePdu.encode();
+        assert!(Wave2Pdu::decode(&close).is_err());
     }
 }
