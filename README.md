@@ -19,7 +19,7 @@ Early foundation. Implemented so far, bottom-up:
 | RDP negotiation | `nego` | `RDP_NEG_REQ` / `RSP` / `FAILURE` security selection. |
 | MCS (T.125) | `mcs` | `Connect-Initial` / `Connect-Response` and the domain PDUs (erect domain, attach user, channel join, send data). |
 | GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
-| Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. The server side of the RSA exchange is implemented too — `RsaPrivateKey` decryption and `encode_proprietary_certificate` (signed with the fixed, publicly-known `ts_signing_key`) — but not yet wired into `net`'s `accept()`. |
+| Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. The server side of the RSA exchange is implemented too — `RsaPrivateKey` decryption and `encode_proprietary_certificate` (signed with the fixed, publicly-known `ts_signing_key`) — and wired into `net`'s `accept()`. `Rc4Session::new`/`new_server` build the RC4 state for each end of the exchange from the same `SessionKeys`, applying the client/server encrypt-decrypt role swap `SessionKeys`'s fields are documented from the client's point of view. |
 | Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5/SHA-1, RC4, AES, PBKDF2, and a minimal bignum for RSA — no crypto crate. |
 | NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP): NEGOTIATE/CHALLENGE/AUTHENTICATE messages, the NTLMv2 response and key schedule, and the extended-session-security sealing used by CredSSP. |
 | CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): the NTLM and Kerberos client state machines, the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation. Pure codec + crypto, driven over TLS by the `tls` feature. |
@@ -135,21 +135,25 @@ the order they'd add the most value:
   priority given that), `rdpsnd`'s newer `SNDC_WAVE2` format, and
   everything on either channel that rides over UDP instead of the virtual
   channel (encrypted wave audio, the UDP wave PDUs).
-- **Server-side RDP.** `RdpTransport::accept` now drives the server half of
-  the connection sequence too — X.224 Connection Confirm, GCC/MCS
-  Connect-Response, channel setup, Client Info, "no license required",
-  Demand Active/Confirm Active, and the server's finalization sequence —
-  reusing the same bidirectional codec types `establish*` uses, and tested
-  end to end over a real TCP loopback connection against a hand-driven
-  client. It's restricted to **unencrypted** standard RDP security
-  (`encryptionLevel = 0`): no RSA key exchange, no RC4. The building blocks
-  for real encrypted standard security now exist in `security`
-  (`RsaPrivateKey` decryption, `encode_proprietary_certificate` signed with
-  the fixed `ts_signing_key`), but aren't yet wired into `accept`'s
-  connection sequence. Still needed: that wiring, plus TLS/CredSSP server
-  support (a certificate and a TLS server implementation); beyond the
-  connection sequence, an actual server also needs to originate display
-  updates and consume input, which `accept` does not attempt.
+- **Server-side RDP.** `RdpTransport::accept` drives the server half of the
+  connection sequence — X.224 Connection Confirm, GCC/MCS Connect-Response,
+  channel setup, Client Info, "no license required", Demand Active/Confirm
+  Active, and the server's finalization sequence — reusing the same
+  bidirectional codec types `establish*` uses. It supports both
+  **unencrypted** standard RDP security (`encryptionLevel = 0`, the
+  default) and, with `AcceptConfig::encryption` set, **real encrypted**
+  standard security: the RSA key exchange, a certificate signed with the
+  fixed `security::ts_signing_key`, and RC4. Tested end to end over a real
+  TCP loopback connection — the unencrypted path against a hand-driven
+  client (`establish` can't speak to an unencrypted server), the encrypted
+  path against the real `RdpTransport::establish`. That encrypted test also
+  caught a real bug: `Rc4Session::new` derives keys from the *client's*
+  point of view, so a server using it directly on the same `SessionKeys`
+  gets its encrypt/decrypt roles backwards; `Rc4Session::new_server` now
+  does the correct swap. Still needed: TLS/CredSSP server support (a
+  certificate and a TLS server implementation); beyond the connection
+  sequence, an actual server also needs to originate display updates and
+  consume input, which `accept` does not attempt.
 
 ## Design principles
 

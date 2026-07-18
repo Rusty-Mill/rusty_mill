@@ -60,6 +60,10 @@ pub const ENCRYPTION_METHOD_56BIT: u32 = 0x0000_0008;
 /// `encryptionMethods` flag: FIPS 140-1.
 pub const ENCRYPTION_METHOD_FIPS: u32 = 0x0000_0010;
 
+/// `encryptionLevel` value: all data protected using the maximum key
+/// strength both client and server support.
+pub const ENCRYPTION_LEVEL_CLIENT_COMPATIBLE: u32 = 0x0000_0002;
+
 // ---------------------------------------------------------------------------
 // Conference Create Request / Response envelope
 // ---------------------------------------------------------------------------

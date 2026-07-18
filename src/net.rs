@@ -60,13 +60,14 @@
 //! defaults (a fixed share id and MCS identity, since there is only ever one
 //! client per `accept` call).
 //!
-//! `accept` only speaks **unencrypted** standard RDP security
-//! (`encryptionLevel = 0`): no RSA key exchange, no RC4. Real encrypted
-//! standard security needs a proprietary-certificate signing key and an
-//! RSA private-key decrypt path, and TLS/CredSSP server support needs a
-//! certificate and a TLS server implementation — neither exists in this
-//! crate yet, so treat `accept` as a building block for trusted-network or
-//! testing use, not a production-ready server.
+//! By default `accept` speaks **unencrypted** standard RDP security
+//! (`encryptionLevel = 0`): no RSA key exchange, no RC4. Supplying
+//! [`AcceptConfig::encryption`] drives real encrypted standard security
+//! instead (RSA key exchange, a signed proprietary certificate, RC4). TLS/
+//! CredSSP server support needs a certificate and a TLS server
+//! implementation, which doesn't exist in this crate yet, so treat `accept`
+//! as a building block for trusted-network or testing use, not a
+//! production-ready server.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -79,8 +80,9 @@ use crate::finalization::FinalizationPdu;
 use crate::finalization::{client_finalization_sequence, server_finalization_sequence};
 use crate::gcc::{
     self, ChannelDef, ClientClusterData, ClientCoreData, ClientNetworkData, ClientSecurityData,
-    ServerCoreData, ServerNetworkData, ServerSecurityData, UserDataBlock, ENCRYPTION_METHOD_128BIT,
-    ENCRYPTION_METHOD_40BIT, RDP_VERSION_5_PLUS,
+    ServerCoreData, ServerNetworkData, ServerSecurityData, UserDataBlock,
+    ENCRYPTION_LEVEL_CLIENT_COMPATIBLE, ENCRYPTION_METHOD_128BIT, ENCRYPTION_METHOD_40BIT,
+    ENCRYPTION_METHOD_56BIT, RDP_VERSION_5_PLUS,
 };
 use crate::input::InputEvent;
 use crate::license::{LicenseErrorMessage, LicensePdu};
@@ -96,7 +98,8 @@ use crate::pdu::{
 };
 use crate::pointer::PointerUpdate;
 use crate::security::{
-    self, derive_session_keys, Rc4Session, RsaPublicKey, RANDOM_LEN, SEC_INFO_PKT, SEC_LICENSE_PKT,
+    self, derive_session_keys, Rc4Session, RsaPrivateKey, RsaPublicKey, RANDOM_LEN, SEC_INFO_PKT,
+    SEC_LICENSE_PKT,
 };
 use crate::tpkt::{Tpkt, TPKT_HEADER_LEN};
 use crate::x224::{ConnectionPdu, Cookie, X224};
@@ -167,6 +170,26 @@ impl RdpSession {
     }
 }
 
+/// Server-side encryption parameters for [`RdpTransport::accept`]. Supply
+/// this (via [`AcceptConfig::encryption`]) to negotiate real encrypted
+/// standard RDP security instead of `encryptionLevel = 0`.
+#[derive(Debug, Clone)]
+pub struct AcceptEncryption {
+    /// The server's RSA public key, embedded in the certificate
+    /// [`accept`](RdpTransport::accept) sends the client (signed with
+    /// [`crate::security::ts_signing_key`] via
+    /// [`crate::security::encode_proprietary_certificate`]).
+    pub public_key: RsaPublicKey,
+    /// The matching private key, used to decrypt the client's Security
+    /// Exchange PDU.
+    pub private_key: RsaPrivateKey,
+    /// 32 bytes of server randomness, mixed into session-key derivation
+    /// alongside the client's random. Caller-supplied, like
+    /// [`RdpTransport::establish`]'s `client_random` — this crate does not
+    /// generate randomness itself.
+    pub server_random: [u8; RANDOM_LEN],
+}
+
 /// Settings for [`RdpTransport::accept`].
 #[derive(Debug, Clone)]
 pub struct AcceptConfig {
@@ -179,17 +202,22 @@ pub struct AcceptConfig {
     pub bits_per_pixel: u16,
     /// `sourceDescriptor` advertised in the Demand Active PDU.
     pub source_descriptor: Vec<u8>,
+    /// When `Some`, drive real encrypted standard security (RSA exchange +
+    /// RC4) instead of `encryptionLevel = 0`. `None` (the default from
+    /// [`AcceptConfig::new`]) keeps the original unencrypted-only behavior.
+    pub encryption: Option<AcceptEncryption>,
 }
 
 impl AcceptConfig {
-    /// Build a config for the given desktop size, defaulting to 16bpp and
-    /// the conventional `b"RDP\0"` source descriptor.
+    /// Build a config for the given desktop size, defaulting to 16bpp, the
+    /// conventional `b"RDP\0"` source descriptor, and no encryption.
     pub fn new(width: u16, height: u16) -> Self {
         AcceptConfig {
             desktop_width: width,
             desktop_height: height,
             bits_per_pixel: 16,
             source_descriptor: b"RDP\0".to_vec(),
+            encryption: None,
         }
     }
 }
@@ -206,9 +234,10 @@ pub struct AcceptedClient {
     /// MCS channel ids granted to the client's requested static virtual
     /// channels, keyed by channel name.
     pub channels: HashMap<String, u16>,
-    /// The client's logon data (domain/user/password). `accept` only speaks
-    /// unencrypted standard RDP security, so this travelled the wire in the
-    /// clear — do not use `accept` over an untrusted network.
+    /// The client's logon data (domain/user/password). Encrypted in transit
+    /// only when [`AcceptConfig::encryption`] was set; with no encryption
+    /// configured this travelled the wire in the clear — do not use
+    /// `accept` unencrypted over an untrusted network.
     pub client_info: ClientInfo,
 }
 
@@ -1054,28 +1083,131 @@ impl<S: Read + Write> RdpTransport<S> {
         }
     }
 
-    /// Read the (unencrypted) Client Info PDU and decode the client's logon
-    /// data.
-    fn accept_client_info(&mut self) -> io::Result<ClientInfo> {
+    /// Send `payload` on `channel_id` as a Send Data Indication from
+    /// `initiator`, under a Basic Security Header, encrypting with the
+    /// stored session when active — the server-role counterpart of
+    /// [`send_share`](Self::send_share).
+    fn send_secure_indication(
+        &mut self,
+        initiator: u16,
+        channel_id: u16,
+        base_flags: u16,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let mut session = self.session.take();
+        let wrapped = security::wrap_pdu(session.as_mut(), base_flags, payload);
+        self.session = session;
+        self.send_data_indication(initiator, channel_id, &wrapped)
+    }
+
+    /// Receive one Send Data Request and unwrap its Basic Security Header,
+    /// decrypting with the stored session when active. Returns
+    /// `(initiator, channel_id, security_flags, body)`.
+    fn recv_secure_request(&mut self) -> io::Result<(u16, u16, u16, Vec<u8>)> {
+        let (initiator, channel_id, data) = self.recv_data_request()?;
+        let mut session = self.session.take();
+        let result = security::unwrap_pdu(session.as_mut(), &data).map_err(to_io);
+        self.session = session;
+        let (flags, body) = result?;
+        Ok((initiator, channel_id, flags, body))
+    }
+
+    /// Receive the client's Security Exchange PDU, decrypt the client
+    /// random with `private_key`, derive the session keys alongside
+    /// `server_random`, and store the resulting [`Rc4Session`] — the
+    /// server-role counterpart of
+    /// [`security_exchange`](Self::security_exchange). Never encrypted
+    /// itself, per MS-RDPBCGR.
+    fn accept_security_exchange(
+        &mut self,
+        private_key: &RsaPrivateKey,
+        server_random: &[u8; RANDOM_LEN],
+        encryption_method: u32,
+    ) -> io::Result<()> {
         let (_initiator, _channel, data) = self.recv_data_request()?;
-        let (_flags, body) = security::unwrap_pdu(None, &data).map_err(to_io)?;
+        let padded = security::decode_security_exchange(&data).map_err(to_io)?;
+        let key_len = private_key.key_length();
+        if padded.len() < key_len {
+            return Err(protocol_error(format!(
+                "Security Exchange PDU is {} bytes, shorter than the {key_len}-byte RSA key",
+                padded.len()
+            )));
+        }
+        let plain = private_key.decrypt(&padded[..key_len]).map_err(to_io)?;
+        if plain.len() < RANDOM_LEN {
+            return Err(protocol_error(format!(
+                "decrypted client random is {} bytes, expected at least {RANDOM_LEN}",
+                plain.len()
+            )));
+        }
+        let mut client_random = [0u8; RANDOM_LEN];
+        client_random.copy_from_slice(&plain[..RANDOM_LEN]);
+        let keys = derive_session_keys(&client_random, server_random, encryption_method);
+        self.session = Some(Rc4Session::new_server(&keys));
+        Ok(())
+    }
+
+    /// Read the Client Info PDU and decode the client's logon data,
+    /// decrypting with the stored session when encryption is active.
+    fn accept_client_info(&mut self) -> io::Result<ClientInfo> {
+        let (_initiator, _channel, _flags, body) = self.recv_secure_request()?;
         ClientInfo::decode(&body).map_err(to_io)
     }
 
-    /// Send the "no license required" License Error Message.
+    /// Send the "no license required" License Error Message. Always carries
+    /// a Basic Security Header (encrypted when a session is active), like
+    /// the Client Info PDU.
     fn accept_send_no_license_required(&mut self, io_channel: u16) -> io::Result<()> {
         let license = LicensePdu::ErrorAlert(LicenseErrorMessage::valid_client())
             .to_vec()
             .map_err(to_io)?;
-        let wrapped = security::wrap_pdu(None, SEC_LICENSE_PKT, &license);
-        self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &wrapped)
+        self.send_secure_indication(Self::SERVER_MCS_ID, io_channel, SEC_LICENSE_PKT, &license)
     }
 
-    /// Send the (headerless — `encryptionLevel = 0` carries no Basic
-    /// Security Header past licensing, same as the TLS/`establish_enhanced`
-    /// path) Demand Active PDU and read back the client's Confirm Active.
-    /// Returns `(share_id, client_channel)`, where `client_channel` is the
-    /// `pduSource` the client used — needed to target
+    /// Send `payload` on `channel_id` as a Send Data Indication from
+    /// `initiator`, wrapping it in a Basic Security Header and encrypting
+    /// it only when the stored session is active — the server-role
+    /// counterpart of [`send_share`](Self::send_share). Share Control/Data
+    /// PDUs (Demand Active, Confirm Active, finalization) use this: unlike
+    /// Client Info and licensing, they carry no header at all when
+    /// unencrypted.
+    fn send_share_indication(
+        &mut self,
+        initiator: u16,
+        channel_id: u16,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        let mut session = self.session.take();
+        let result = match session.as_mut() {
+            Some(s) => {
+                let wrapped = security::wrap_pdu(Some(s), 0, payload);
+                self.send_data_indication(initiator, channel_id, &wrapped)
+            }
+            None => self.send_data_indication(initiator, channel_id, payload),
+        };
+        self.session = session;
+        result
+    }
+
+    /// Receive one Send Data Request, stripping and decrypting its Basic
+    /// Security Header only when the stored session is active — the
+    /// receive-side counterpart of [`send_share_indication`](Self::send_share_indication).
+    fn recv_share_request(&mut self) -> io::Result<Vec<u8>> {
+        let (_initiator, _channel, data) = self.recv_data_request()?;
+        let mut session = self.session.take();
+        let result = match session.as_mut() {
+            Some(s) => security::unwrap_pdu(Some(s), &data)
+                .map(|(_flags, body)| body)
+                .map_err(to_io),
+            None => Ok(data),
+        };
+        self.session = session;
+        result
+    }
+
+    /// Send the Demand Active PDU and read back the client's Confirm
+    /// Active. Returns `(share_id, client_channel)`, where `client_channel`
+    /// is the `pduSource` the client used — needed to target
     /// [`server_finalization_sequence`].
     fn accept_capability_exchange(
         &mut self,
@@ -1094,9 +1226,9 @@ impl<S: Read + Write> RdpTransport<S> {
             session_id: 0,
         };
         let demand_bytes = demand.encode(Self::SERVER_MCS_ID).map_err(to_io)?;
-        self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &demand_bytes)?;
+        self.send_share_indication(Self::SERVER_MCS_ID, io_channel, &demand_bytes)?;
 
-        let (_initiator, _channel, body) = self.recv_data_request()?;
+        let body = self.recv_share_request()?;
         let (client_channel, confirm) = ConfirmActive::decode(&body).map_err(to_io)?;
         if confirm.share_id != share_id {
             return Err(protocol_error(format!(
@@ -1116,12 +1248,12 @@ impl<S: Read + Write> RdpTransport<S> {
         client_channel: u16,
     ) -> io::Result<()> {
         for _ in 0..4 {
-            let (_initiator, _channel, body) = self.recv_data_request()?;
+            let body = self.recv_share_request()?;
             FinalizationPdu::decode(&body).map_err(to_io)?;
         }
         for pdu in server_finalization_sequence(client_channel) {
             let bytes = pdu.encode(share_id, Self::SERVER_MCS_ID).map_err(to_io)?;
-            self.send_data_indication(Self::SERVER_MCS_ID, io_channel, &bytes)?;
+            self.send_share_indication(Self::SERVER_MCS_ID, io_channel, &bytes)?;
         }
         Ok(())
     }
@@ -1130,19 +1262,19 @@ impl<S: Read + Write> RdpTransport<S> {
     /// return the accepted client.
     ///
     /// Performs, in order: the X.224 negotiation (always selecting standard
-    /// RDP security), the GCC/MCS connect — building the server's settings
-    /// blocks with `encryptionLevel = 0` (no server random, no certificate)
-    /// — channel setup, the Client Info PDU, the "no license required"
-    /// response, the capability exchange (Demand → Confirm Active), and the
-    /// server's connection-finalization sequence.
+    /// RDP security), the GCC/MCS connect, channel setup, the RSA security
+    /// exchange and session-key derivation (when `config.encryption` is
+    /// set), the Client Info PDU, the "no license required" response, the
+    /// capability exchange (Demand → Confirm Active), and the server's
+    /// connection-finalization sequence.
     ///
-    /// `accept` only speaks **unencrypted** standard RDP security: no RSA key
-    /// exchange, no RC4, no TLS/CredSSP. Real encrypted standard security
-    /// (which needs a proprietary-certificate signing key and RSA private-key
-    /// decryption, neither implemented) and TLS/CredSSP server support
-    /// (which needs a certificate and a TLS server implementation) are not
-    /// implemented. Do not use this over an untrusted network — see this
-    /// crate's security note on [`crate::security`]/[`crate::crypto`].
+    /// With `config.encryption` left `None`, `accept` speaks only
+    /// **unencrypted** standard RDP security (`encryptionLevel = 0`): no RSA
+    /// key exchange, no RC4. Setting it drives real encrypted standard
+    /// security instead — see [`AcceptEncryption`]. Either way, TLS/CredSSP
+    /// server support is not implemented. Do not use the unencrypted mode
+    /// over an untrusted network — see this crate's security note on
+    /// [`crate::security`]/[`crate::crypto`].
     pub fn accept(&mut self, config: &AcceptConfig) -> io::Result<AcceptedClient> {
         self.accept_negotiate()?;
 
@@ -1159,18 +1291,47 @@ impl<S: Read + Write> RdpTransport<S> {
             .map(|i| io_channel + 1 + i)
             .collect();
 
+        let encryption_method = config.encryption.as_ref().map(|_| {
+            let client_methods = client_blocks
+                .iter()
+                .find_map(|b| match b {
+                    UserDataBlock::ClientSecurity(d) => Some(d.encryption_methods),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            if client_methods & ENCRYPTION_METHOD_128BIT != 0 {
+                ENCRYPTION_METHOD_128BIT
+            } else if client_methods & ENCRYPTION_METHOD_56BIT != 0 {
+                ENCRYPTION_METHOD_56BIT
+            } else {
+                // Falls back to 40-bit even if the client didn't offer it
+                // (matching a permissive real server); enc.public_key still
+                // ends up in the certificate either way.
+                ENCRYPTION_METHOD_40BIT
+            }
+        });
+        let server_security = match (&config.encryption, encryption_method) {
+            (Some(enc), Some(method)) => ServerSecurityData {
+                encryption_method: method,
+                encryption_level: ENCRYPTION_LEVEL_CLIENT_COMPATIBLE,
+                server_random: enc.server_random.to_vec(),
+                server_certificate: security::encode_proprietary_certificate(&enc.public_key),
+            },
+            _ => ServerSecurityData {
+                encryption_method: 0,
+                encryption_level: 0,
+                server_random: Vec::new(),
+                server_certificate: Vec::new(),
+            },
+        };
+
         let server_blocks = vec![
             UserDataBlock::ServerCore(ServerCoreData {
                 version: RDP_VERSION_5_PLUS,
                 client_requested_protocols: Some(0),
                 early_capability_flags: Some(0),
             }),
-            UserDataBlock::ServerSecurity(ServerSecurityData {
-                encryption_method: 0,
-                encryption_level: 0,
-                server_random: Vec::new(),
-                server_certificate: Vec::new(),
-            }),
+            UserDataBlock::ServerSecurity(server_security),
             UserDataBlock::ServerNetwork(ServerNetworkData {
                 io_channel_id: io_channel,
                 channel_ids: granted_ids.clone(),
@@ -1179,6 +1340,9 @@ impl<S: Read + Write> RdpTransport<S> {
         self.accept_send_connect_response(&server_blocks)?;
 
         let user_id = self.accept_join_channels(io_channel, &granted_ids)?;
+        if let (Some(enc), Some(method)) = (&config.encryption, encryption_method) {
+            self.accept_security_exchange(&enc.private_key, &enc.server_random, method)?;
+        }
         let channels: HashMap<String, u16> = requested_channels
             .iter()
             .zip(&granted_ids)
@@ -2755,6 +2919,99 @@ mod tests {
         assert_eq!(accepted.io_channel, io_channel);
         assert_eq!(accepted.share_id, demand.share_id);
         assert_eq!(accepted.channels.get("rdpdr"), Some(&virtual_channels[0]));
+        assert_eq!(accepted.client_info.username, "alice");
+        assert_eq!(accepted.client_info.domain, "CORP");
+    }
+
+    /// A 512-bit RSA test key pair (freshly generated for this test, not
+    /// used anywhere else), little-endian as this crate's `RsaPublicKey`/
+    /// `RsaPrivateKey` expect.
+    fn test_rsa_key_pair() -> (RsaPublicKey, RsaPrivateKey) {
+        #[rustfmt::skip]
+        let modulus_le: [u8; 64] = [
+            0x81, 0x7d, 0xb9, 0xf7, 0x70, 0xef, 0x15, 0xb1, 0x2e, 0xfb, 0x94, 0x37,
+            0x9b, 0x70, 0xae, 0x91, 0x99, 0x23, 0x71, 0xac, 0x86, 0x1d, 0xc6, 0xf7,
+            0xef, 0x18, 0x82, 0xce, 0x38, 0x5a, 0xcc, 0xc6, 0xee, 0xb6, 0x82, 0x24,
+            0x9f, 0xe9, 0x76, 0x00, 0x58, 0x1b, 0xde, 0xc9, 0x63, 0x09, 0x3f, 0x26,
+            0x66, 0xcb, 0xd0, 0x2c, 0x0c, 0x5f, 0xf5, 0x48, 0xb6, 0xd8, 0x48, 0x08,
+            0xe4, 0x31, 0xbe, 0xb4,
+        ];
+        #[rustfmt::skip]
+        let private_exponent_le: [u8; 64] = [
+            0x11, 0xc9, 0x5c, 0x53, 0xd8, 0x32, 0x7f, 0x57, 0x10, 0xba, 0xef, 0x8c,
+            0x1d, 0x9f, 0x66, 0xa4, 0x11, 0xb0, 0x41, 0xea, 0x85, 0xce, 0x57, 0x17,
+            0xe1, 0x23, 0x7e, 0xfc, 0x2a, 0x84, 0x44, 0x89, 0xb8, 0x87, 0x1c, 0x82,
+            0x35, 0xe2, 0x90, 0x19, 0xce, 0x56, 0x4c, 0xbc, 0x46, 0x9d, 0x14, 0x71,
+            0x97, 0x68, 0xa1, 0xd6, 0x4a, 0xee, 0x5a, 0x66, 0xa5, 0x78, 0xb8, 0xe8,
+            0x02, 0xb8, 0x35, 0x84,
+        ];
+        (
+            RsaPublicKey {
+                modulus_le: modulus_le.to_vec(),
+                exponent: 65537,
+            },
+            RsaPrivateKey {
+                modulus_le: modulus_le.to_vec(),
+                private_exponent_le: private_exponent_le.to_vec(),
+            },
+        )
+    }
+
+    /// Same as [`accept_completes_full_connection_sequence_with_a_real_client`]
+    /// but with [`AcceptConfig::encryption`] set, driving real encrypted
+    /// standard RDP security end to end over a real TCP loopback connection
+    /// — and this time the client is the real [`RdpTransport::establish`]
+    /// rather than a hand-driven one, since `establish` requires the server
+    /// to select encryption, which this configuration now does.
+    #[test]
+    fn accept_with_encryption_completes_full_connection_sequence_with_establish() {
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+
+        let (public_key, private_key) = test_rsa_key_pair();
+        let server_random = [0x77u8; RANDOM_LEN];
+        let client_random = [0x99u8; RANDOM_LEN];
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut t = RdpTransport::new(stream);
+            let mut config = AcceptConfig::new(1024, 768);
+            config.encryption = Some(AcceptEncryption {
+                public_key,
+                private_key,
+                server_random,
+            });
+            (t.accept(&config).unwrap(), t.session.is_some())
+        });
+
+        let stream = TcpStream::connect(addr).unwrap();
+        let mut client = RdpTransport::new(stream);
+        let mut establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        establish_config.extra_channels = vec![ChannelDef {
+            name: "rdpdr".to_string(),
+            options: 0,
+        }];
+        let session = client.establish(&establish_config, &client_random).unwrap();
+
+        let (accepted, server_had_session) = server.join().unwrap();
+        assert!(
+            server_had_session,
+            "accept() should have set up an Rc4Session"
+        );
+        assert!(
+            client.session.is_some(),
+            "establish() should have set up an Rc4Session"
+        );
+        assert_eq!(accepted.user_id, session.user_id);
+        assert_eq!(accepted.io_channel, session.io_channel);
+        assert_eq!(accepted.share_id, session.share_id);
+        assert_eq!(
+            accepted.channels.get("rdpdr"),
+            session.channel_id("rdpdr").as_ref()
+        );
         assert_eq!(accepted.client_info.username, "alice");
         assert_eq!(accepted.client_info.domain, "CORP");
     }
