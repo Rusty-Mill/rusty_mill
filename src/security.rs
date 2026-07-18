@@ -10,6 +10,12 @@
 //!    ([`derive_session_keys`]) and use them to RC4-encrypt and MAC every
 //!    subsequent PDU ([`Rc4Session`]).
 //!
+//! The server side of this exchange is also implemented — building and
+//! signing a certificate ([`encode_proprietary_certificate`],
+//! [`ts_signing_key`]) and decrypting the client's Security Exchange PDU
+//! ([`RsaPrivateKey`]) — but not yet wired into [`crate::net`]'s `accept()`,
+//! which currently only drives unencrypted standard security.
+//!
 //! ## Security warning
 //!
 //! Standard security is obsolete and weak (RC4, MD5/SHA-1 MACs, no forward
@@ -78,6 +84,120 @@ impl RsaPublicKey {
             value: "exceeds modulus length".to_string(),
         })
     }
+}
+
+/// An RSA private key, used server-side to decrypt the client random out of
+/// a Security Exchange PDU ([`decode_security_exchange`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RsaPrivateKey {
+    /// Modulus `n`, little-endian.
+    pub modulus_le: Vec<u8>,
+    /// Private exponent `d`, little-endian.
+    pub private_exponent_le: Vec<u8>,
+}
+
+impl RsaPrivateKey {
+    /// The modulus length in bytes, which is also the expected ciphertext
+    /// length.
+    pub fn key_length(&self) -> usize {
+        self.modulus_le.len()
+    }
+
+    /// RSA-decrypt `data` (`m = c^d mod n`), returning `key_length()`
+    /// little-endian bytes.
+    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let c = BigUint::from_bytes_le(data);
+        let n = BigUint::from_bytes_le(&self.modulus_le);
+        let d = BigUint::from_bytes_le(&self.private_exponent_le);
+        let m = c.modpow(&d, &n);
+        m.to_bytes_le(self.key_length()).ok_or(Error::InvalidValue {
+            field: "RSA plaintext",
+            value: "exceeds modulus length".to_string(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal Services Signing Key (MS-RDPBCGR 5.3.3.1.1)
+// ---------------------------------------------------------------------------
+
+/// The fixed 512-bit RSA key pair used to "sign" Proprietary Certificates
+/// (MS-RDPBCGR 5.3.3.1.1). This key is published in the specification and
+/// baked into every RDP client, so the signature it produces authenticates
+/// nothing — any party can compute a valid signature over any server public
+/// key. It exists purely so the historically-mandated signature-shaped
+/// bytes are present on the wire; [`encode_proprietary_certificate`] uses
+/// it to build a certificate real clients will accept.
+pub mod ts_signing_key {
+    /// 64-byte modulus `n`, little-endian.
+    pub const MODULUS_LE: [u8; 64] = [
+        0x3d, 0x3a, 0x5e, 0xbd, 0x72, 0x43, 0x3e, 0xc9, 0x4d, 0xbb, 0xc1, 0x1e, 0x4a, 0xba, 0x5f,
+        0xcb, 0x3e, 0x88, 0x20, 0x87, 0xef, 0xf5, 0xc1, 0xe2, 0xd7, 0xb7, 0x6b, 0x9a, 0xf2, 0x52,
+        0x45, 0x95, 0xce, 0x63, 0x65, 0x6b, 0x58, 0x3a, 0xfe, 0xef, 0x7c, 0xe7, 0xbf, 0xfe, 0x3d,
+        0xf6, 0x5c, 0x7d, 0x6c, 0x5e, 0x06, 0x09, 0x1a, 0xf5, 0x61, 0xbb, 0x20, 0x93, 0x09, 0x5f,
+        0x05, 0x6d, 0xea, 0x87,
+    ];
+    /// 64-byte private exponent `d`, little-endian.
+    pub const PRIVATE_EXPONENT_LE: [u8; 64] = [
+        0x87, 0xa7, 0x19, 0x32, 0xda, 0x11, 0x87, 0x55, 0x58, 0x00, 0x16, 0x16, 0x25, 0x65, 0x68,
+        0xf8, 0x24, 0x3e, 0xe6, 0xfa, 0xe9, 0x67, 0x49, 0x94, 0xcf, 0x92, 0xcc, 0x33, 0x99, 0xe8,
+        0x08, 0x60, 0x17, 0x9a, 0x12, 0x9f, 0x24, 0xdd, 0xb1, 0x24, 0x99, 0xc7, 0x3a, 0xb8, 0x0a,
+        0x7b, 0x0d, 0xdd, 0x35, 0x07, 0x79, 0x17, 0x0b, 0x51, 0x9b, 0xb3, 0xc7, 0x10, 0x01, 0x13,
+        0xe7, 0x3f, 0xf3, 0x5f,
+    ];
+    /// 4-byte public exponent `e`, little-endian: `0x5b, 0x7b, 0x88, 0xc0`.
+    pub const PUBLIC_EXPONENT_LE: [u8; 4] = [0x5b, 0x7b, 0x88, 0xc0];
+}
+
+/// Build and sign a `PROPRIETARYSERVERCERTIFICATE` (MS-RDPBCGR
+/// 2.2.1.4.3.1.1) embedding `server_key`, ready to place in a `TS_UD_SC_SEC1`
+/// Server Security Data block. Signed with the [`ts_signing_key`] per
+/// MS-RDPBCGR 5.3.3.1.2 — see that module's docs for why this signature
+/// authenticates nothing.
+pub fn encode_proprietary_certificate(server_key: &RsaPublicKey) -> Vec<u8> {
+    const CERT_CHAIN_VERSION_1: u32 = 0x0000_0001;
+    const SIGNATURE_ALG_RSA: u32 = 0x0000_0001;
+    const KEY_EXCHANGE_ALG_RSA: u32 = 0x0000_0001;
+    const BB_RSA_KEY_BLOB: u16 = 0x0006;
+    const BB_RSA_SIGNATURE_BLOB: u16 = 0x0008;
+
+    let mod_len = server_key.modulus_le.len();
+    let mut pubkey_blob = Writer::with_capacity(20 + mod_len + 8);
+    pubkey_blob.write_u32_le(RSA_MAGIC);
+    pubkey_blob.write_u32_le((mod_len + 8) as u32); // keylen
+    pubkey_blob.write_u32_le((mod_len * 8) as u32); // bitlen
+    pubkey_blob.write_u32_le((mod_len - 1) as u32); // datalen
+    pubkey_blob.write_u32_le(server_key.exponent);
+    pubkey_blob.write_bytes(&server_key.modulus_le);
+    pubkey_blob.write_bytes(&[0u8; 8]);
+
+    let mut w = Writer::new();
+    w.write_u32_le(CERT_CHAIN_VERSION_1);
+    w.write_u32_le(SIGNATURE_ALG_RSA);
+    w.write_u32_le(KEY_EXCHANGE_ALG_RSA);
+    w.write_u16_le(BB_RSA_KEY_BLOB);
+    w.write_u16_le(pubkey_blob.len() as u16);
+    w.write_bytes(pubkey_blob.as_slice());
+
+    // Sign the first six fields (everything written so far): MD5 the bytes,
+    // pad to a 63-byte little-endian integer, and RSA-sign with the fixed
+    // Terminal Services private key (MS-RDPBCGR 5.3.3.1.2).
+    let hash = crate::crypto::md5::md5(w.as_slice());
+    let mut padded = [0xFFu8; 63];
+    padded[0..16].copy_from_slice(&hash);
+    padded[16] = 0x00;
+    padded[62] = 0x01;
+    let m = BigUint::from_bytes_le(&padded);
+    let d = BigUint::from_bytes_le(&ts_signing_key::PRIVATE_EXPONENT_LE);
+    let n = BigUint::from_bytes_le(&ts_signing_key::MODULUS_LE);
+    let signature = m.modpow(&d, &n).to_bytes_le(64).expect(
+        "signature is reduced mod the 64-byte Terminal Services modulus, so it always fits",
+    );
+
+    w.write_u16_le(BB_RSA_SIGNATURE_BLOB);
+    w.write_u16_le(signature.len() as u16);
+    w.write_bytes(&signature);
+    w.into_vec()
 }
 
 /// Parse a `TS_UD_SC_SEC1` server certificate and return its RSA public key.
@@ -474,6 +594,98 @@ mod tests {
         let key = parse_server_certificate(w.as_slice()).unwrap();
         assert_eq!(key.exponent, 65537);
         assert_eq!(key.modulus_le, modulus);
+    }
+
+    #[test]
+    fn rsa_private_key_decrypt_matches_manual_modpow() {
+        // Same toy key as rsa_encrypt_matches_manual_modpow: n=3233, d=413.
+        // 65^17 mod 3233 = 2790 -> little-endian [0xE6, 0x0A].
+        let key = RsaPrivateKey {
+            modulus_le: vec![0xA1, 0x0C],
+            private_exponent_le: 413u32.to_le_bytes().to_vec(),
+        };
+        assert_eq!(key.key_length(), 2);
+        let plain = key.decrypt(&[0xE6, 0x0A]).unwrap();
+        assert_eq!(plain, [65, 0]);
+    }
+
+    #[test]
+    fn rsa_public_and_private_key_roundtrip() {
+        let public = RsaPublicKey {
+            modulus_le: vec![0xA1, 0x0C],
+            exponent: 17,
+        };
+        let private = RsaPrivateKey {
+            modulus_le: vec![0xA1, 0x0C],
+            private_exponent_le: 413u32.to_le_bytes().to_vec(),
+        };
+        let cipher = public.encrypt(&[65]).unwrap();
+        let plain = private.decrypt(&cipher).unwrap();
+        assert_eq!(plain[0], 65);
+    }
+
+    #[test]
+    fn ts_signing_key_is_internally_consistent() {
+        // Encrypting with the public exponent and decrypting with the
+        // private one should round-trip -- a strong check that the four
+        // 64-byte/4-byte constants were transcribed correctly, since any
+        // wrong digit would break this.
+        let n = BigUint::from_bytes_le(&ts_signing_key::MODULUS_LE);
+        let e = BigUint::from_bytes_le(&ts_signing_key::PUBLIC_EXPONENT_LE);
+        let d = BigUint::from_bytes_le(&ts_signing_key::PRIVATE_EXPONENT_LE);
+        let m = BigUint::from_bytes_le(&[42u8]);
+        let c = m.modpow(&e, &n);
+        let recovered = c.modpow(&d, &n);
+        assert_eq!(recovered.to_bytes_le(1).unwrap(), [42]);
+    }
+
+    #[test]
+    fn encode_proprietary_certificate_roundtrips_through_parse_server_certificate() {
+        let server_key = RsaPublicKey {
+            modulus_le: (1u8..=64).collect(),
+            exponent: 65537,
+        };
+        let cert = encode_proprietary_certificate(&server_key);
+        let parsed = parse_server_certificate(&cert).unwrap();
+        assert_eq!(parsed, server_key);
+    }
+
+    #[test]
+    fn encode_proprietary_certificate_signature_verifies_against_ts_public_key() {
+        let server_key = RsaPublicKey {
+            modulus_le: (1u8..=64).collect(),
+            exponent: 65537,
+        };
+        let cert = encode_proprietary_certificate(&server_key);
+
+        // Locate the signed prefix (dwVersion..PublicKeyBlob) and the
+        // SignatureBlob, mirroring the layout encode_proprietary_certificate
+        // itself writes.
+        let pubkey_blob_len = u16::from_le_bytes(cert[14..16].try_into().unwrap()) as usize;
+        let signed_prefix_len = 16 + pubkey_blob_len;
+        let signed_prefix = &cert[..signed_prefix_len];
+        let sig_blob_len = u16::from_le_bytes(
+            cert[signed_prefix_len + 2..signed_prefix_len + 4]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert_eq!(sig_blob_len, 64);
+        let signature = &cert[signed_prefix_len + 4..signed_prefix_len + 4 + sig_blob_len];
+
+        // Decrypt the signature with the TS *public* key (per MS-RDPBCGR
+        // 5.3.3.2, verification uses the public exponent) to recover the
+        // padded hash, and check it matches the documented padding scheme
+        // exactly: MD5 hash, then 0x00, then 45 bytes of 0xFF, then 0x01.
+        let s = BigUint::from_bytes_le(signature);
+        let e = BigUint::from_bytes_le(&ts_signing_key::PUBLIC_EXPONENT_LE);
+        let n = BigUint::from_bytes_le(&ts_signing_key::MODULUS_LE);
+        let recovered = s.modpow(&e, &n).to_bytes_le(63).unwrap();
+
+        let expected_hash = crate::crypto::md5::md5(signed_prefix);
+        assert_eq!(&recovered[0..16], &expected_hash);
+        assert_eq!(recovered[16], 0x00);
+        assert_eq!(&recovered[17..62], &[0xFFu8; 45][..]);
+        assert_eq!(recovered[62], 0x01);
     }
 
     #[test]

@@ -19,7 +19,7 @@ Early foundation. Implemented so far, bottom-up:
 | RDP negotiation | `nego` | `RDP_NEG_REQ` / `RSP` / `FAILURE` security selection. |
 | MCS (T.125) | `mcs` | `Connect-Initial` / `Connect-Response` and the domain PDUs (erect domain, attach user, channel join, send data). |
 | GCC (T.124) | `gcc` | Conference Create Request/Response envelope and the typed `TS_UD_*` settings blocks (client/server core, security, network, cluster). |
-| Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. |
+| Standard security | `security` | Server certificate → RSA key, client-random encryption, the key-derivation schedule, the Security Exchange PDU, the basic security header, and RC4 + MAC for encrypted PDUs. The server side of the RSA exchange is implemented too — `RsaPrivateKey` decryption and `encode_proprietary_certificate` (signed with the fixed, publicly-known `ts_signing_key`) — but not yet wired into `net`'s `accept()`. |
 | Crypto primitives | `crypto` | Hand-rolled MD4, MD5, SHA-1, SHA-256, HMAC-MD5/SHA-1, RC4, AES, PBKDF2, and a minimal bignum for RSA — no crypto crate. |
 | NTLM | `ntlm` | NTLMv2 authentication (MS-NLMP): NEGOTIATE/CHALLENGE/AUTHENTICATE messages, the NTLMv2 response and key schedule, and the extended-session-security sealing used by CredSSP. |
 | CredSSP / NLA | `credssp` | The `TSRequest` DER exchange (MS-CSSP): the NTLM and Kerberos client state machines, the public-key channel binding (SHA-256 nonce hash, or legacy), and sealed credential delegation. Pure codec + crypto, driven over TLS by the `tls` feature. |
@@ -142,13 +142,14 @@ the order they'd add the most value:
   reusing the same bidirectional codec types `establish*` uses, and tested
   end to end over a real TCP loopback connection against a hand-driven
   client. It's restricted to **unencrypted** standard RDP security
-  (`encryptionLevel = 0`): no RSA key exchange, no RC4. Still needed for a
-  production-capable server: real encrypted standard security (a
-  proprietary-certificate signing key plus an RSA private-key decrypt path,
-  neither implemented) and TLS/CredSSP server support (a certificate and a
-  TLS server implementation); beyond the connection sequence, an actual
-  server also needs to originate display updates and consume input, which
-  `accept` does not attempt.
+  (`encryptionLevel = 0`): no RSA key exchange, no RC4. The building blocks
+  for real encrypted standard security now exist in `security`
+  (`RsaPrivateKey` decryption, `encode_proprietary_certificate` signed with
+  the fixed `ts_signing_key`), but aren't yet wired into `accept`'s
+  connection sequence. Still needed: that wiring, plus TLS/CredSSP server
+  support (a certificate and a TLS server implementation); beyond the
+  connection sequence, an actual server also needs to originate display
+  updates and consume input, which `accept` does not attempt.
 
 ## Design principles
 
