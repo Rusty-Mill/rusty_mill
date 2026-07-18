@@ -10,7 +10,15 @@ structure is encoded and decoded by hand with bounds-checked cursors, and
 
 ## Status
 
-Early foundation. Implemented so far, bottom-up:
+Broad protocol coverage, built bottom-up and still growing. The full client
+connection sequence (standard security, TLS, CredSSP/NLA with either NTLM or
+Kerberos), the server side of that same sequence (including NLA), the RDPGFX
+graphics pipeline with every bitmap codec it carries, and the clipboard/audio/
+device-redirection channels are all implemented and tested. See
+[Roadmap](#roadmap) below for what's left, and
+[RELEASE_NOTES.md](RELEASE_NOTES.md) for how it got here.
+
+Layer by layer:
 
 | Layer | Module | What it does |
 |-------|--------|--------------|
@@ -139,7 +147,15 @@ the order they'd add the most value:
   (its request layout isn't published anywhere findable, and no reference
   client implementation actually parses it either — low priority given
   that), and everything on either channel that rides over UDP instead of
-  the virtual channel (encrypted wave audio, the UDP wave PDUs).
+  the virtual channel (encrypted wave audio, the UDP wave PDUs). Smartcard
+  and printer/port redirection ride on RDPDR's generic IOCTL/FSCTL carrier
+  (`DeviceControlRequestPdu`/`RspPdu`) and so already work at the framing
+  level, but their own higher-level protocols (MS-RDPESC smartcard PC/SC
+  calls, MS-RDPEPC print job control) aren't modeled — a caller gets the
+  raw IOCTL bytes and has to interpret them itself. USB redirection
+  (MS-RDPEUSB) is unrelated to RDPDR — its own dynamic channel (`URBDRC`)
+  and USB Request Block framing — and is not implemented at all; it is a
+  substantially larger protocol than anything else on this list.
 - **Server-side RDP.** `RdpTransport::accept` drives the server half of the
   connection sequence — X.224 Connection Confirm, GCC/MCS Connect-Response,
   channel setup, Client Info, "no license required", Demand Active/Confirm
