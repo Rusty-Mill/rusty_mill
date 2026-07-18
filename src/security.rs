@@ -406,11 +406,27 @@ pub struct Rc4Session {
 }
 
 impl Rc4Session {
-    /// Build a session from derived keys.
+    /// Build a session from derived keys, from the **client's** point of
+    /// view: encrypts outbound data with `keys.encrypt_key` and decrypts
+    /// inbound data with `keys.decrypt_key`, matching those fields' own
+    /// documentation. Servers must use [`Rc4Session::new_server`] instead.
     pub fn new(keys: &SessionKeys) -> Self {
         Rc4Session {
             encrypt: Rc4::new(&keys.encrypt_key),
             decrypt: Rc4::new(&keys.decrypt_key),
+            mac_key: keys.mac_key.clone(),
+        }
+    }
+
+    /// Build a session from derived keys, from the **server's** point of
+    /// view: the encrypt/decrypt roles are swapped relative to
+    /// [`Rc4Session::new`], since `SessionKeys`' fields are documented from
+    /// the client's perspective — what the client encrypts outbound with,
+    /// the server must decrypt inbound with, and vice versa.
+    pub fn new_server(keys: &SessionKeys) -> Self {
+        Rc4Session {
+            encrypt: Rc4::new(&keys.decrypt_key),
+            decrypt: Rc4::new(&keys.encrypt_key),
             mac_key: keys.mac_key.clone(),
         }
     }
@@ -728,25 +744,44 @@ mod tests {
 
     #[test]
     fn session_encrypt_decrypt_roundtrip() {
-        // Two peers derive mirror-image keys: the client's encrypt key is the
-        // server's decrypt key and vice versa.
+        // Both peers derive the identical SessionKeys (as they do on the
+        // real wire: from the same client/server randoms). Rc4Session::new
+        // and Rc4Session::new_server apply the client/server role swap so
+        // what one peer encrypts, the other decrypts correctly.
         let client = [0x33u8; RANDOM_LEN];
         let server = [0x44u8; RANDOM_LEN];
-        let client_keys = derive_session_keys(&client, &server, ENCRYPTION_METHOD_128BIT);
-        let server_keys = SessionKeys {
-            mac_key: client_keys.mac_key.clone(),
-            encrypt_key: client_keys.decrypt_key.clone(),
-            decrypt_key: client_keys.encrypt_key.clone(),
-        };
+        let keys = derive_session_keys(&client, &server, ENCRYPTION_METHOD_128BIT);
 
-        let mut client_session = Rc4Session::new(&client_keys);
-        let mut server_session = Rc4Session::new(&server_keys);
+        let mut client_session = Rc4Session::new(&keys);
+        let mut server_session = Rc4Session::new_server(&keys);
 
         let message = b"TS_INFO_PACKET payload";
         let (sig, ciphertext) = client_session.encrypt(message);
         assert_ne!(&ciphertext[..], &message[..]);
         let recovered = server_session.decrypt(&sig, &ciphertext).unwrap();
         assert_eq!(recovered, message);
+
+        // And the reverse direction: server -> client.
+        let (sig2, ciphertext2) = server_session.encrypt(message);
+        let recovered2 = client_session.decrypt(&sig2, &ciphertext2).unwrap();
+        assert_eq!(recovered2, message);
+    }
+
+    #[test]
+    fn rc4_session_new_vs_new_server_actually_differ() {
+        // Regression guard: two Rc4Session::new (both client-role) built
+        // from the same keys must NOT be able to talk to each other --
+        // that was the bug new_server exists to fix. If this ever starts
+        // passing, the role swap has been lost.
+        let keys = derive_session_keys(
+            &[1u8; RANDOM_LEN],
+            &[2u8; RANDOM_LEN],
+            ENCRYPTION_METHOD_128BIT,
+        );
+        let mut a = Rc4Session::new(&keys);
+        let mut b = Rc4Session::new(&keys);
+        let (sig, ciphertext) = a.encrypt(b"hello");
+        assert!(b.decrypt(&sig, &ciphertext).is_err());
     }
 
     #[test]
@@ -796,12 +831,7 @@ mod tests {
             &[8u8; RANDOM_LEN],
             ENCRYPTION_METHOD_128BIT,
         );
-        let peer = SessionKeys {
-            mac_key: keys.mac_key.clone(),
-            encrypt_key: keys.decrypt_key.clone(),
-            decrypt_key: keys.encrypt_key.clone(),
-        };
-        (Rc4Session::new(&keys), Rc4Session::new(&peer))
+        (Rc4Session::new(&keys), Rc4Session::new_server(&keys))
     }
 
     #[test]
