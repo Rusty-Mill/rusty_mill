@@ -4,14 +4,16 @@ A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
 
-**Status: phase 3 — feature parity for everyday use.** The protocol layers,
-relay server, file-transfer engine, and the local-network path are ported and
-**wire-compatible with stock croc v10**: rusty-croc can send to stock croc,
-receive from stock croc, and relay for stock croc — files, folders, text, and
-zipped folders, with resume/skip, local-relay hand-off, direct `--ip`
-connections, throttling, and all four hash algorithms (verified end-to-end;
-see `scripts/interop_test.sh`). See [MIGRATION.md](MIGRATION.md) for the full
-analysis, module mapping, and roadmap.
+**Status: phase 4 — resilient and feature-complete for everyday use.** The
+protocol layers, relay server, file-transfer engine, local-network path, and
+**reconnect-and-resume** are ported and **wire-compatible with stock croc
+v10**: rusty-croc can send to stock croc, receive from stock croc, relay for
+stock croc, and survive a relay drop mid-transfer alongside stock croc —
+files, folders, text, and zipped folders, with resume/skip, local-relay
+hand-off, direct `--ip` connections, throttling, and all four hash
+algorithms (verified end-to-end; see `scripts/interop_test.sh`). See
+[MIGRATION.md](MIGRATION.md) for the full analysis, module mapping, and
+roadmap.
 
 ## Usage
 
@@ -44,7 +46,12 @@ rusty-croc receive --ip 192.168.1.5:9009 <code>
 Useful flags: `--relay host:port`, `--pass`, `--yes` (skip the accept
 prompt), `--overwrite`, `--curve p256|p384|p521|siec`,
 `--hash xxhash|imohash|highway|md5`, `--no-compress`, `--no-multi`,
-`--local` (LAN only), `--no-local`.
+`--local` (LAN only), `--no-local`, `--exclude .git,node_modules`,
+`--qr` (show the code as a QR code), `--remember` (persist relay settings).
+
+If the relay drops mid-transfer, both sides reconnect in a pre-agreed
+rendezvous room and resume where they left off (croc's ReconnectVersion 1 —
+works cross-implementation with stock croc).
 
 When sender and receiver share a network, rusty-croc behaves like croc: the
 sender starts a local relay and announces it (UDP multicast + the `ips?`
@@ -64,7 +71,9 @@ leaves the LAN.
 | File-transfer engine (`croc`: send/receive, folders, resume) | ✅ interop-tested both directions |
 | Local-network path (discovery, local relay, `ips?` probe, `--ip`) | ✅ interop-tested both directions |
 | Text sending, stdin, `--zip`, `--throttle`, imohash/highway | ✅ interop-tested |
-| Reconnect-after-drop, proxies, `--remember`, QR codes | ⬜ phase 4 |
+| Reconnect-and-resume after relay drops (ReconnectVersion 1) | ✅ interop-tested |
+| `--exclude`, `--qr`, `--remember`, code prompt | ✅ |
+| Proxies (SOCKS5/HTTP), custom-DNS resolution, IPv6 multicast, `--git` | ⬜ phase 5 |
 
 ## Development
 

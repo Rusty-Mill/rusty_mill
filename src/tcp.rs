@@ -37,12 +37,51 @@ struct Room {
 
 type Rooms = Arc<Mutex<HashMap<String, Room>>>;
 
+/// Test hook: sever every piped connection once `after_bytes` total bytes
+/// have crossed the relay, then keep serving normally. Lets the interop
+/// suite simulate a relay network blip to exercise reconnect-and-resume.
+pub struct SeverState {
+    after_bytes: u64,
+    counter: std::sync::atomic::AtomicU64,
+    fired: std::sync::atomic::AtomicBool,
+    streams: Mutex<Vec<std::net::TcpStream>>,
+}
+
+impl SeverState {
+    pub fn new(after_bytes: u64) -> Self {
+        SeverState {
+            after_bytes,
+            counter: std::sync::atomic::AtomicU64::new(0),
+            fired: std::sync::atomic::AtomicBool::new(false),
+            streams: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register(&self, s: &std::net::TcpStream) {
+        if let Ok(clone) = s.try_clone() {
+            self.streams.lock().unwrap().push(clone);
+        }
+    }
+
+    fn add(&self, n: u64) {
+        use std::sync::atomic::Ordering;
+        let total = self.counter.fetch_add(n, Ordering::Relaxed) + n;
+        if total >= self.after_bytes && !self.fired.swap(true, Ordering::Relaxed) {
+            log::info!("test sever: dropping all piped connections after {total} bytes");
+            for s in self.streams.lock().unwrap().drain(..) {
+                let _ = s.shutdown(Shutdown::Both);
+            }
+        }
+    }
+}
+
 pub struct RelayServer {
     host: String,
     port: String,
     password: String,
     banner: String,
     rooms: Rooms,
+    sever: Option<Arc<SeverState>>,
 }
 
 impl RelayServer {
@@ -53,7 +92,14 @@ impl RelayServer {
             password: password.to_string(),
             banner: banner.to_string(),
             rooms: Arc::new(Mutex::new(HashMap::new())),
+            sever: None,
         }
+    }
+
+    /// Attach the test-sever hook (shared across all of a relay's ports).
+    pub fn with_test_sever(mut self, sever: Arc<SeverState>) -> Self {
+        self.sever = Some(sever);
+        self
     }
 
     /// Bind and serve forever (mirrors `tcp.Run`). Blocks the calling thread.
@@ -97,6 +143,7 @@ impl RelayServer {
             let rooms = Arc::clone(&self.rooms);
             let password = self.password.clone();
             let banner = self.banner.clone();
+            let sever = self.sever.clone();
             std::thread::spawn(move || {
                 let comm = match Comm::new(stream) {
                     Ok(c) => c,
@@ -105,7 +152,7 @@ impl RelayServer {
                         return;
                     }
                 };
-                if let Err(e) = client_communication(comm, &rooms, &password, &banner) {
+                if let Err(e) = client_communication(comm, &rooms, &password, &banner, sever) {
                     log::debug!("relay client error: {e}");
                 }
             });
@@ -129,6 +176,7 @@ fn client_communication(
     rooms: &Rooms,
     password: &str,
     banner: &str,
+    sever: Option<Arc<SeverState>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Step 1: PAKE with the fixed weak key (or a bare ping).
     let mut pake = Pake::init_curve(WEAK_KEY, 1, "siec")?;
@@ -198,7 +246,7 @@ fn client_communication(
         drop(map);
 
         // Staple the two sockets (pipes first, then the "ok", same order as Go).
-        let piping = start_pipe(first.try_clone()?, c.try_clone()?);
+        let piping = start_pipe(first.try_clone()?, c.try_clone()?, sever);
         let ok = crypt::encrypt(b"ok", &key)?;
         c.send(&ok)?;
         piping.join().ok();
@@ -243,11 +291,15 @@ fn first_client_keepalive(
 
 /// Full-duplex raw byte piping between two stapled sockets. Returns a handle
 /// that resolves when either direction closes (both sockets are then shut).
-fn start_pipe(a: Comm, b: Comm) -> std::thread::JoinHandle<()> {
+fn start_pipe(a: Comm, b: Comm, sever: Option<Arc<SeverState>>) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
+        if let Some(s) = &sever {
+            s.register(a.stream());
+            s.register(b.stream());
+        }
         let a2 = a.try_clone();
         let b2 = b.try_clone();
-        let one_way = |from: Comm, to: Comm| {
+        let one_way = move |from: Comm, to: Comm, sever: Option<Arc<SeverState>>| {
             std::thread::spawn(move || {
                 let mut buf = vec![0u8; models::TCP_BUFFER_SIZE];
                 loop {
@@ -256,6 +308,9 @@ fn start_pipe(a: Comm, b: Comm) -> std::thread::JoinHandle<()> {
                         Ok(n) => {
                             if to.stream().write_all(&buf[..n]).is_err() {
                                 break;
+                            }
+                            if let Some(s) = &sever {
+                                s.add(n as u64);
                             }
                         }
                         Err(_) => break,
@@ -267,8 +322,8 @@ fn start_pipe(a: Comm, b: Comm) -> std::thread::JoinHandle<()> {
         };
         match (a2, b2) {
             (Ok(a2), Ok(b2)) => {
-                let t1 = one_way(a, b2);
-                let t2 = one_way(b, a2);
+                let t1 = one_way(a, b2, sever.clone());
+                let t2 = one_way(b, a2, sever);
                 let _ = t1.join();
                 let _ = t2.join();
             }

@@ -24,14 +24,14 @@ struct Cli {
 #[derive(Args, Clone)]
 struct TransferFlags {
     /// Address of the relay
-    #[arg(long, default_value_t = format!("{}:{}", models::DEFAULT_RELAY, models::DEFAULT_PORT))]
-    relay: String,
+    #[arg(long)]
+    relay: Option<String>,
     /// Password for the relay
-    #[arg(long, default_value = models::DEFAULT_PASSPHRASE)]
-    pass: String,
+    #[arg(long)]
+    pass: Option<String>,
     /// Curve to use for PAKE (p256, p384, p521, siec)
-    #[arg(long, default_value = "p256")]
-    curve: String,
+    #[arg(long)]
+    curve: Option<String>,
     /// Disable compression
     #[arg(long)]
     no_compress: bool,
@@ -44,6 +44,69 @@ struct TransferFlags {
     /// Disable the local-network path
     #[arg(long)]
     no_local: bool,
+    /// Save these settings (relay, pass, curve) for future runs
+    #[arg(long)]
+    remember: bool,
+}
+
+/// Settings persisted by `--remember` (our own file, so stock croc's config
+/// is never touched).
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct RememberedConfig {
+    relay: Option<String>,
+    pass: Option<String>,
+    curve: Option<String>,
+}
+
+fn config_path(kind: &str) -> std::path::PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".config")
+        });
+    base.join("rusty-croc").join(format!("{kind}.json"))
+}
+
+/// Resolve relay/pass/curve from flags > remembered config > defaults, and
+/// persist them when --remember was given.
+fn resolve_flags(flags: &TransferFlags, kind: &str) -> (String, String, String) {
+    let remembered: RememberedConfig = std::fs::read(config_path(kind))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let relay = flags
+        .relay
+        .clone()
+        .or(remembered.relay)
+        .unwrap_or_else(|| format!("{}:{}", models::DEFAULT_RELAY, models::DEFAULT_PORT));
+    let pass = flags
+        .pass
+        .clone()
+        .or(remembered.pass)
+        .unwrap_or_else(|| models::DEFAULT_PASSPHRASE.to_string());
+    let curve = flags
+        .curve
+        .clone()
+        .or(remembered.curve)
+        .unwrap_or_else(|| "p256".to_string());
+    if flags.remember {
+        let cfg = RememberedConfig {
+            relay: Some(relay.clone()),
+            pass: Some(pass.clone()),
+            curve: Some(curve.clone()),
+        };
+        let path = config_path(kind);
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(b) = serde_json::to_vec_pretty(&cfg) {
+            if std::fs::write(&path, b).is_ok() {
+                eprintln!("Saved settings to {}", path.display());
+            }
+        }
+    }
+    (relay, pass, curve)
 }
 
 #[derive(Subcommand)]
@@ -67,6 +130,12 @@ enum Command {
         /// Throttle the upload speed, e.g. 500K, 10M, 1G
         #[arg(long, default_value = "")]
         throttle: String,
+        /// Show the receive code as a QR code
+        #[arg(long, alias = "qrcode")]
+        qr: bool,
+        /// Exclude files whose path contains any of these comma-separated strings
+        #[arg(long, default_value = "")]
+        exclude: String,
         #[command(flatten)]
         flags: TransferFlags,
     },
@@ -99,6 +168,10 @@ enum Command {
         /// Password to access the relay
         #[arg(long, default_value = models::DEFAULT_PASSPHRASE)]
         pass: String,
+        /// TEST ONLY: sever all piped connections once this many bytes have
+        /// crossed the relay (simulates a network blip for reconnect tests)
+        #[arg(long, default_value_t = 0, hide = true)]
+        test_sever_after: u64,
     },
     /// Check that a relay is reachable (sends ping, expects pong)
     Ping {
@@ -125,8 +198,10 @@ fn main() {
             text,
             zip,
             throttle,
+            qr,
+            exclude,
             flags,
-        } => send_command(files, code, hash, text, zip, throttle, flags),
+        } => send_command(files, code, hash, text, zip, throttle, qr, exclude, flags),
         Command::Receive {
             code,
             yes,
@@ -134,19 +209,35 @@ fn main() {
             ip,
             flags,
         } => {
-            let secret = code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty()));
+            let mut secret =
+                code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty()));
+            if secret.is_none() {
+                // Interactive prompt, like croc's "Enter receive code:"
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() {
+                    eprint!("Enter receive code: ");
+                    let mut line = String::new();
+                    if std::io::stdin().read_line(&mut line).is_ok() {
+                        let line = line.trim().to_string();
+                        if !line.is_empty() {
+                            secret = Some(line);
+                        }
+                    }
+                }
+            }
             match secret {
                 None => Err("enter a code (argument or CROC_SECRET env var)".into()),
                 Some(s) if s.len() < 6 => {
                     Err("code is too short (must be at least 6 characters)".into())
                 }
                 Some(s) => {
+                    let (relay, pass, curve) = resolve_flags(&flags, "receive");
                     let opts = croc::Options {
                         is_sender: false,
                         shared_secret: s,
-                        relay_address: flags.relay,
-                        relay_password: flags.pass,
-                        curve: flags.curve,
+                        relay_address: relay,
+                        relay_password: pass,
+                        curve,
                         no_prompt: yes,
                         overwrite,
                         no_compress: flags.no_compress,
@@ -160,7 +251,12 @@ fn main() {
                 }
             }
         }
-        Command::Relay { host, ports, pass } => relay(&host, &ports, &pass),
+        Command::Relay {
+            host,
+            ports,
+            pass,
+            test_sever_after,
+        } => relay(&host, &ports, &pass, test_sever_after),
         Command::Ping { address } => tcp::ping_server(&address).map(|()| {
             println!("pong from {address}");
         }),
@@ -171,6 +267,7 @@ fn main() {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn send_command(
     mut files: Vec<String>,
     code: Option<String>,
@@ -178,6 +275,8 @@ fn send_command(
     text: Option<String>,
     zip: bool,
     throttle: String,
+    qr: bool,
+    exclude: String,
     flags: TransferFlags,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let secret =
@@ -187,6 +286,17 @@ fn send_command(
         };
     if secret.len() < 6 {
         return Err("code is too short (must be at least 6 characters)".into());
+    }
+    if qr {
+        match qrcode::QrCode::new(secret.as_bytes()) {
+            Ok(code) => eprintln!(
+                "{}",
+                code.render::<qrcode::render::unicode::Dense1x2>()
+                    .quiet_zone(true)
+                    .build()
+            ),
+            Err(e) => log::debug!("could not render QR code: {e}"),
+        }
     }
 
     // --text and stdin ("-") become a temp file, like croc's croc-stdin-*.
@@ -210,12 +320,18 @@ fn send_command(
         return Err("provide files/folders to send, --text, or '-' for stdin".into());
     }
 
+    let (relay, pass, curve) = resolve_flags(&flags, "send");
+    let exclude: Vec<String> = exclude
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     let opts = croc::Options {
         is_sender: true,
         shared_secret: secret,
-        relay_address: flags.relay,
-        relay_password: flags.pass,
-        curve: flags.curve,
+        relay_address: relay,
+        relay_password: pass,
+        curve,
         hash_algorithm: hash,
         no_compress: flags.no_compress,
         no_multiplexing: flags.no_multi,
@@ -224,6 +340,7 @@ fn send_command(
         throttle_upload: throttle,
         sending_text,
         zip_folder: zip,
+        exclude,
         ..Default::default()
     };
     let result = croc::Client::send(opts, &files).map_err(|e| e as Box<dyn std::error::Error>);
@@ -233,7 +350,12 @@ fn send_command(
     result
 }
 
-fn relay(host: &str, ports: &str, pass: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn relay(
+    host: &str,
+    ports: &str,
+    pass: &str,
+    test_sever_after: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
     let ports: Vec<String> = ports
         .split(',')
         .map(|p| p.trim().to_string())
@@ -247,18 +369,29 @@ fn relay(host: &str, ports: &str, pass: &str) -> Result<(), Box<dyn std::error::
         env!("CARGO_PKG_VERSION"),
         ports.join(",")
     );
+    let sever = (test_sever_after > 0)
+        .then(|| std::sync::Arc::new(tcp::SeverState::new(test_sever_after)));
     let transfer_ports = ports[1..].join(",");
     for port in &ports[1..] {
         let host = host.to_string();
         let port = port.clone();
         let pass = pass.to_string();
+        let sever = sever.clone();
         std::thread::spawn(move || {
-            if let Err(e) = tcp::RelayServer::new(&host, &port, &pass, "").run() {
+            let mut server = tcp::RelayServer::new(&host, &port, &pass, "");
+            if let Some(s) = sever {
+                server = server.with_test_sever(s);
+            }
+            if let Err(e) = server.run() {
                 log::error!("relay port {port} failed: {e}");
                 std::process::exit(1);
             }
         });
     }
-    tcp::RelayServer::new(host, &ports[0], pass, &transfer_ports).run()?;
+    let mut server = tcp::RelayServer::new(host, &ports[0], pass, &transfer_ports);
+    if let Some(s) = sever {
+        server = server.with_test_sever(s);
+    }
+    server.run()?;
     Ok(())
 }
