@@ -18,6 +18,9 @@ serde_json = { version = "1", features = ["arbitrary_precision"] }
 base64 = "0.22"
 num-bigint = "0.4"
 num-traits = "0.2"
+p256 = { version = "0.13", features = ["arithmetic"] }
+p384 = { version = "0.13", features = ["arithmetic"] }
+p521 = { version = "0.13", features = ["arithmetic"] }
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"

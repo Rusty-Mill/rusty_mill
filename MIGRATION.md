@@ -276,20 +276,40 @@ Still pending from this phase: IPv6 multicast group, custom
   PAKE update, and mnemonic encoder (`fuzz/`); a deterministic
   garbage-input robustness test also runs under `cargo test`.
 
+### Phase 6 — constant-time curves (done)
+
+* The standard NIST curves (`p256`, `p384`, `p521`) now run their PAKE
+  scalar multiplications and point additions through the audited RustCrypto
+  crates (`p256`/`p384`/`p521`, `arithmetic` feature) — constant-time with
+  respect to the secret scalar, unlike the previous `num-bigint`
+  double-and-add. `src/pake.rs` keeps the affine-coordinate wire format:
+  each op converts big-int coordinates in, runs the constant-time group
+  operation, and converts back out. Scalars are reduced mod the group order
+  first — Go's `crypto/elliptic.ScalarMult` leaves the scalar unreduced, but
+  every one of these curves is prime-order with cofactor 1, so
+  `k·P == (k mod n)·P` and the point is byte-identical (the Go-generated
+  vector tests confirm this).
+* **SIEC stays on the bignum backend** — its nonstandard curve has no
+  constant-time implementation in any language (Go's `tscholl2/siec` is also
+  variable-time), so this matches upstream rather than lagging it. SIEC is
+  only ever used with the fixed weak key `[1,2,3]` for the relay handshake,
+  not with the user's secret.
+* Bonus: the constant-time field arithmetic is also markedly faster than
+  bignum, cutting the unit-test suite runtime ~4×.
+
 Still pending: custom-DNS relay resolution (the hardcoded public-DNS
-fallback in `models`), and constant-time curve arithmetic (below).
+fallback in `models`), the only remaining functional gap.
 
-### Phase 6 — divergence budget
+### Phase 7 — divergence budget
 
-* Constant-time curve arithmetic for p256/p384/p521 via RustCrypto crates
-  (keep bignum SIEC, or upstream a constant-time SIEC — Go's is also
-  variable-time, so this exceeds upstream rather than lagging it).
-* Zeroize key material; audit nonce handling.
-* Fuzz the frame/message/PAKE parsers (`cargo-fuzz`; the Go side has fuzz
-  corpora to borrow).
+* ~~Constant-time curve arithmetic for p256/p384/p521~~ — done (phase 6).
+* ~~Zeroize key material~~ — done (phase 5).
+* ~~Fuzz the frame/message/PAKE parsers~~ — done (phase 5, `fuzz/`).
 * Property tests cross-checking Go and Rust binaries in CI.
 * Evaluate async for relay scalability; evaluate `croc`'s newer features as
   upstream moves (this port tracks v10.2.x behavior).
+* Constant-time SIEC (would exceed upstream; low priority since SIEC only
+  guards the relay handshake with a fixed weak key, never the user secret).
 
 ## Building and testing
 
