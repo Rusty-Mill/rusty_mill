@@ -4,17 +4,24 @@ A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
 
-**Status: phase 1 — foundations + relay.** The protocol building blocks and
-the relay server are ported and **wire-compatible with stock croc v10
-clients**: a plain `croc send` / `croc <code>` pair can transfer files through
-a `rusty-croc relay` today (verified end-to-end; see `scripts/interop_test.sh`).
-The client-side file-transfer engine (`send`/`receive`) is the next phase —
-see [MIGRATION.md](MIGRATION.md) for the full analysis, module mapping, and
+**Status: phase 2 — transfers work, cross-implementation.** The protocol
+layers, the relay server, and the client file-transfer engine are ported and
+**wire-compatible with stock croc v10**: rusty-croc can send to stock croc,
+receive from stock croc, and relay for stock croc — files and folders, with
+resume/skip semantics (verified end-to-end; see `scripts/interop_test.sh`).
+See [MIGRATION.md](MIGRATION.md) for the full analysis, module mapping, and
 roadmap.
 
 ## Usage
 
 ```sh
+# Send a file or folder (prints a code phrase)
+rusty-croc send my-file.txt
+
+# Receive on the other machine (rusty-croc or stock croc, either works)
+rusty-croc receive 1234-foo-bar-baz
+CROC_SECRET=1234-foo-bar-baz croc     # stock croc receiving from rusty-croc
+
 # Start a relay that stock croc clients can use
 rusty-croc relay --ports 9009,9010,9011,9012,9013 --pass pass123
 
@@ -22,12 +29,9 @@ rusty-croc relay --ports 9009,9010,9011,9012,9013 --pass pass123
 rusty-croc ping croc.schollz.com:9009
 ```
 
-Point stock croc at it:
-
-```sh
-croc --relay myhost:9009 send some-file
-croc --relay myhost:9009 <code-phrase>
-```
+Useful flags: `--relay host:port`, `--pass`, `--yes` (skip the accept
+prompt), `--overwrite`, `--curve p256|p384|p521|siec`, `--no-compress`,
+`--no-multi`.
 
 ## What's ported
 
@@ -39,7 +43,8 @@ croc --relay myhost:9009 <code-phrase>
 | PAKE (schollz/pake v3, incl. the SIEC curve) | ✅ live-tested against Go, both roles |
 | Code phrases (`mnemonicode`) | ✅ vector-tested against Go |
 | Relay server + relay client handshake (`tcp`) | ✅ end-to-end with stock croc |
-| File-transfer engine (`send` / `receive`) | ⬜ phase 2 |
+| File-transfer engine (`croc`: send/receive, folders, resume) | ✅ interop-tested both directions |
+| Local-network discovery, reconnect, zip, throttling, proxies | ⬜ phase 3 |
 
 ## Development
 

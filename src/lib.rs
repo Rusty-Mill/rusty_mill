@@ -8,6 +8,7 @@
 
 pub mod comm;
 pub mod compress;
+pub mod croc;
 pub mod crypt;
 pub mod message;
 pub mod mnemonicode;

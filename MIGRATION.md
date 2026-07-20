@@ -100,9 +100,9 @@ body deadline.
 | `schollz/pake/v3` | `src/pake.rs` | ✅ ported | All four curves incl. SIEC, written against Go-generated curve vectors; live-tested against Go in both roles. `ed25519` option not yet ported (croc never defaults to it). |
 | `src/tcp` | `src/tcp.rs` | ✅ ported | Relay serves stock Go croc clients (verified end-to-end); client-side `connect_to_tcp_server` verified against the stock Go relay. |
 | `src/models` | `src/models.rs` | ✅ constants | Custom-DNS default-relay resolution deferred. |
-| `src/utils` | `src/utils.rs` | 🟡 partial | Code-phrase generation done. Hashing/file-walking arrive with phase 2. |
-| `src/croc` | — | ⬜ phase 2 | The send/receive engine — the largest remaining piece. |
-| `src/cli` | `src/main.rs` | 🟡 partial | `relay` + `ping` functional; `send`/`receive` stubbed. |
+| `src/utils` | `src/utils.rs` | 🟡 partial | Code phrases, xxhash/md5 hashing, missing-chunk ranges. imohash/highway pending. |
+| `src/croc` | `src/croc.rs` | ✅ core ported | Send/receive engine: peer PAKE, fileinfo, parallel chunked transfer, folders, resume/skip. Local-discovery, reconnect, zip, throttling pending (phase 3). |
+| `src/cli` | `src/main.rs` | 🟡 partial | `send`, `receive`, `relay`, `ping` functional; long tail of flags pending. |
 | `src/diskusage`, `src/install` | — | ⬜ later | Platform niceties, not protocol. |
 
 ### Crate choices
@@ -157,43 +157,51 @@ These are the traps for anyone continuing this migration:
 Everything below runs in `scripts/interop_test.sh` (needs Go + the croc
 source) or `cargo test` (self-contained):
 
-* ✅ `cargo test` — 29 unit tests, including Go-generated vectors for:
+* ✅ `cargo test` — 38 unit tests, including Go-generated vectors for:
   PBKDF2 keys, AES-GCM decryption, DEFLATE decompression of Go output,
-  message envelope decode (plain + encrypted), mnemonicode encodings, and
-  scalar/add/double results on all four curves.
+  message envelope decode (plain + encrypted), mnemonicode encodings,
+  scalar/add/double results on all four curves, xxhash/md5 file hashes,
+  and the FileInfo/SenderInfo/RemoteFileRequest/SimpleMessage JSON shapes.
 * ✅ **Stock Go croc binary transfers a 1 MiB file through the rusty-croc
   relay** (5 ports, parallel transfer connections), checksums equal.
 * ✅ Rust client handshake (`connect_to_tcp_server`) joins a room on the
   stock Go relay and reads the banner.
+* ✅ **Transfer matrix through the rusty-croc relay**: rust→rust,
+  rust→go, and go→rust file transfers, checksums equal. Folder transfers
+  (nested + empty dirs) and identical-file skip verified in both
+  directions during development.
 
 ## Roadmap
 
-### Phase 1 — foundations + relay (this change)
+### Phase 1 — foundations + relay (done)
 
-Done; see the mapping table.
+See the mapping table.
 
-### Phase 2 — the file-transfer engine (`src/croc` port)
+### Phase 2 — the file-transfer engine (done: core)
 
-The big one (~3,000 lines of Go). Suggested order:
+`src/croc.rs` ports the transfer state machine: peer PAKE with curve
+negotiation and salt/PBKDF2 key derivation, the optional pake1/ips?
+handshake probe (answered for stock recipients doing local discovery),
+`fileinfo`/`recipientready` exchange, parallel chunked transfer striped
+round-robin over the relay's transfer ports (`u64 LE position ‖ data`,
+per-chunk DEFLATE + AES-GCM), missing-chunk resume, folder + empty-folder
++ symlink handling, and the close/finished handshakes.
 
-1. Peer PAKE + salt/key derivation over a stapled room
-   (`processMessagePake`) — all primitives exist already.
-2. `fileinfo` exchange: file metadata JSON (names, sizes, modes, folder
-   structure, empty folders), recipient overwrite/resume decisions.
-3. Single-connection chunked transfer: `u64 LE position ‖ data` chunks,
-   progress, per-file finalization.
-4. Parallel transfers across the extra relay ports; chunk-range assignment.
-5. Resume: imohash/xxhash file fingerprints, missing-chunk-range request
-   messages (these can be hundreds of thousands of ranges — croc recently
-   raised message limits for this; mind `MAX_READ_MESSAGE_SIZE`).
-6. Local-network path: UDP multicast discovery (`peerdiscovery`), local
-   relay auto-start, the `externalip` message and ipv4/ipv6 preference.
+Notable divergences (documented in code): `ModTime` is sent as Go's zero
+time (peers then skip their optional chtimes on skipped files), reconnect
+support is declared as version 0 (Go peers fall back to no-reconnect),
+and `imohash`/`highway` hash options aren't ported yet.
 
-### Phase 3 — CLI/UX parity
+### Phase 3 — remaining engine features + CLI/UX parity
 
-Code-phrase prompt, `--remember` config file, QR code, proxy dialing
-(SOCKS5/HTTP `CONNECT`), custom-DNS relay resolution, exclude patterns,
-`--git` mode, stdin/stdout piping, text sending.
+* Local-network path: UDP multicast discovery (`peerdiscovery`), local
+  relay auto-start, `--ip` direct connections.
+* Reconnect-and-resume on dropped relays (ReconnectVersion 1 rooms).
+* Zip-folder mode (`--zip`), text sending (`--text`), stdin piping.
+* Throttling (`--throttle`), imohash/highway hashing.
+* CLI parity: code-phrase prompt, `--remember` config file, QR code,
+  proxy dialing (SOCKS5/HTTP `CONNECT`), custom-DNS relay resolution,
+  exclude patterns, `--git` mode.
 
 ### Phase 4 — hardening & divergence budget
 
