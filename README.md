@@ -4,16 +4,16 @@ A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
 
-**Status: phase 4 — resilient and feature-complete for everyday use.** The
-protocol layers, relay server, file-transfer engine, local-network path, and
-**reconnect-and-resume** are ported and **wire-compatible with stock croc
-v10**: rusty-croc can send to stock croc, receive from stock croc, relay for
-stock croc, and survive a relay drop mid-transfer alongside stock croc —
-files, folders, text, and zipped folders, with resume/skip, local-relay
-hand-off, direct `--ip` connections, throttling, and all four hash
-algorithms (verified end-to-end; see `scripts/interop_test.sh`). See
-[MIGRATION.md](MIGRATION.md) for the full analysis, module mapping, and
-roadmap.
+**Status: phase 5 — feature-complete and hardened.** rusty-croc is a
+functionally complete croc client and relay, **wire-compatible with stock
+croc v10**: it sends to, receives from, relays for, and reconnects alongside
+stock croc — files, folders, text, and zipped folders, with resume/skip,
+local-network hand-off (IPv4 + IPv6 discovery), direct `--ip`, throttling,
+all four hash algorithms, `.gitignore` mode, and SOCKS5 / HTTP-CONNECT
+proxies. Key material is zeroized on drop, and the parsers have `cargo-fuzz`
+harnesses. Verified end-to-end against the real Go binary in
+`scripts/interop_test.sh`. See [MIGRATION.md](MIGRATION.md) for the full
+analysis, module mapping, and remaining divergences.
 
 ## Usage
 
@@ -47,7 +47,9 @@ Useful flags: `--relay host:port`, `--pass`, `--yes` (skip the accept
 prompt), `--overwrite`, `--curve p256|p384|p521|siec`,
 `--hash xxhash|imohash|highway|md5`, `--no-compress`, `--no-multi`,
 `--local` (LAN only), `--no-local`, `--exclude .git,node_modules`,
-`--qr` (show the code as a QR code), `--remember` (persist relay settings).
+`--git` (respect `.gitignore`), `--qr` (show the code as a QR code),
+`--remember` (persist relay settings), `--socks5 host:port` /
+`--connect host:port` (or `$SOCKS5_PROXY` / `$HTTP_PROXY`).
 
 If the relay drops mid-transfer, both sides reconnect in a pre-agreed
 rendezvous room and resume where they left off (croc's ReconnectVersion 1 —
@@ -73,7 +75,18 @@ leaves the LAN.
 | Text sending, stdin, `--zip`, `--throttle`, imohash/highway | ✅ interop-tested |
 | Reconnect-and-resume after relay drops (ReconnectVersion 1) | ✅ interop-tested |
 | `--exclude`, `--qr`, `--remember`, code prompt | ✅ |
-| Proxies (SOCKS5/HTTP), custom-DNS resolution, IPv6 multicast, `--git` | ⬜ phase 5 |
+| `--git` (.gitignore), SOCKS5/HTTP proxies, IPv6 discovery | ✅ interop/unit-tested |
+| Zeroized key material, `cargo-fuzz` parser harnesses | ✅ |
+| Custom-DNS relay resolution, constant-time curve math | ⬜ future |
+
+## Fuzzing
+
+The frame, message-envelope, PAKE, and mnemonicode parsers have
+`cargo-fuzz` targets under `fuzz/`:
+
+```sh
+cargo +nightly fuzz run message   # or: frame, pake, mnemonicode
+```
 
 ## Development
 

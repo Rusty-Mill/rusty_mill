@@ -1,8 +1,9 @@
 //! CLI for rusty-croc, mirroring croc's subcommands.
 //!
 //! `relay`, `ping`, `send`, and `receive` are functional and wire-compatible
-//! with stock croc v10. Not yet ported: local-network discovery, reconnect,
-//! zip-folder mode, throttling, proxies (see MIGRATION.md).
+//! with stock croc v10, including the local-network path, reconnect-and-resume,
+//! zip/text/stdin sending, throttling, proxies, and `--git` (see MIGRATION.md
+//! for what remains).
 
 use clap::{Args, Parser, Subcommand};
 use rusty_croc::{croc, models, tcp, utils};
@@ -47,6 +48,27 @@ struct TransferFlags {
     /// Save these settings (relay, pass, curve) for future runs
     #[arg(long)]
     remember: bool,
+    /// SOCKS5 proxy for non-local relays, e.g. 127.0.0.1:9050 (or $SOCKS5_PROXY)
+    #[arg(long)]
+    socks5: Option<String>,
+    /// HTTP CONNECT proxy for non-local relays (or $HTTP_PROXY)
+    #[arg(long)]
+    connect: Option<String>,
+}
+
+impl TransferFlags {
+    fn socks5_proxy(&self) -> String {
+        self.socks5
+            .clone()
+            .or_else(|| std::env::var("SOCKS5_PROXY").ok())
+            .unwrap_or_default()
+    }
+    fn http_proxy(&self) -> String {
+        self.connect
+            .clone()
+            .or_else(|| std::env::var("HTTP_PROXY").ok())
+            .unwrap_or_default()
+    }
 }
 
 /// Settings persisted by `--remember` (our own file, so stock croc's config
@@ -136,6 +158,9 @@ enum Command {
         /// Exclude files whose path contains any of these comma-separated strings
         #[arg(long, default_value = "")]
         exclude: String,
+        /// Respect .gitignore (don't send ignored files)
+        #[arg(long)]
+        git: bool,
         #[command(flatten)]
         flags: TransferFlags,
     },
@@ -200,8 +225,9 @@ fn main() {
             throttle,
             qr,
             exclude,
+            git,
             flags,
-        } => send_command(files, code, hash, text, zip, throttle, qr, exclude, flags),
+        } => send_command(files, code, hash, text, zip, throttle, qr, exclude, git, flags),
         Command::Receive {
             code,
             yes,
@@ -245,6 +271,8 @@ fn main() {
                         disable_local: flags.no_local,
                         only_local: flags.local,
                         ip,
+                        socks5_proxy: flags.socks5_proxy(),
+                        http_proxy: flags.http_proxy(),
                         ..Default::default()
                     };
                     croc::Client::receive(opts).map_err(|e| e as Box<dyn std::error::Error>)
@@ -277,6 +305,7 @@ fn send_command(
     throttle: String,
     qr: bool,
     exclude: String,
+    git: bool,
     flags: TransferFlags,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let secret =
@@ -341,6 +370,9 @@ fn send_command(
         sending_text,
         zip_folder: zip,
         exclude,
+        git_ignore: git,
+        socks5_proxy: flags.socks5_proxy(),
+        http_proxy: flags.http_proxy(),
         ..Default::default()
     };
     let result = croc::Client::send(opts, &files).map_err(|e| e as Box<dyn std::error::Error>);

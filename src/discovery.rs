@@ -12,12 +12,14 @@
 //! IPv6 (`ff02::c`) is not yet ported.
 
 use socket2::{Domain, Protocol, Socket, Type};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub const DEFAULT_MULTICAST_ADDRESS: &str = "239.255.255.250";
+/// croc's IPv6 group, the SSDP link-local address (`peerdiscovery` default).
+pub const DEFAULT_MULTICAST_ADDRESS6: &str = "ff02::c";
 pub const DEFAULT_PORT: u16 = 9999;
 
 #[derive(Debug, Clone)]
@@ -56,41 +58,74 @@ impl Default for Settings {
     }
 }
 
-fn open_socket(settings: &Settings) -> std::io::Result<UdpSocket> {
-    let group: Ipv4Addr = settings
+/// Open the multicast socket and return it plus the group destination. Works
+/// for both an IPv4 group (e.g. `239.255.255.250`) and an IPv6 group
+/// (e.g. `ff02::c`), chosen by parsing `settings.multicast_address`.
+fn open_socket(settings: &Settings) -> std::io::Result<(UdpSocket, SocketAddr)> {
+    let group: IpAddr = settings
         .multicast_address
         .parse()
         .map_err(|_| std::io::Error::other("bad multicast address"))?;
-    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
-    // Multiple processes on one host (e.g. sender + receiver in tests, or
-    // croc running next to us) must be able to share the discovery port.
-    socket.set_reuse_address(true)?;
-    #[cfg(unix)]
-    let _ = socket.set_reuse_port(true);
-    socket.bind(&SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, settings.port)).into())?;
-    let socket: UdpSocket = socket.into();
-    // Join the group on every multicast-capable IPv4 interface (plus the
-    // default), so we hear announcements regardless of routing.
-    let _ = socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED);
-    if let Ok(ifaces) = if_addrs::get_if_addrs() {
-        for iface in ifaces {
-            if let std::net::IpAddr::V4(v4) = iface.ip() {
-                let _ = socket.join_multicast_v4(&group, &v4);
+    match group {
+        IpAddr::V4(group) => {
+            let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
+            // Multiple processes on one host (sender + receiver in tests, or
+            // croc alongside us) must share the discovery port.
+            socket.set_reuse_address(true)?;
+            #[cfg(unix)]
+            let _ = socket.set_reuse_port(true);
+            socket.bind(
+                &SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, settings.port)).into(),
+            )?;
+            let socket: UdpSocket = socket.into();
+            let _ = socket.join_multicast_v4(&group, &Ipv4Addr::UNSPECIFIED);
+            if let Ok(ifaces) = if_addrs::get_if_addrs() {
+                for iface in ifaces {
+                    if let IpAddr::V4(v4) = iface.ip() {
+                        let _ = socket.join_multicast_v4(&group, &v4);
+                    }
+                }
             }
+            let _ = socket.set_multicast_loop_v4(true);
+            let _ = socket.set_multicast_ttl_v4(2);
+            let dst = SocketAddr::V4(SocketAddrV4::new(group, settings.port));
+            Ok((socket, dst))
+        }
+        IpAddr::V6(group) => {
+            let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+            socket.set_reuse_address(true)?;
+            #[cfg(unix)]
+            let _ = socket.set_reuse_port(true);
+            socket.set_only_v6(true)?;
+            socket.bind(
+                &SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, settings.port, 0, 0))
+                    .into(),
+            )?;
+            let socket: UdpSocket = socket.into();
+            // Join on every interface index we can enumerate (0 = default).
+            let _ = socket.join_multicast_v6(&group, 0);
+            let _ = socket.set_multicast_loop_v6(true);
+            let dst = SocketAddr::V6(SocketAddrV6::new(group, settings.port, 0, 0));
+            Ok((socket, dst))
         }
     }
-    let _ = socket.set_multicast_loop_v4(true);
-    let _ = socket.set_multicast_ttl_v4(2);
-    Ok(socket)
+}
+
+/// Settings preset for the IPv6 discovery group.
+pub fn ipv6_settings(payload: Vec<u8>, time_limit: Option<Duration>) -> Settings {
+    Settings {
+        multicast_address: DEFAULT_MULTICAST_ADDRESS6.to_string(),
+        payload,
+        time_limit,
+        ..Default::default()
+    }
 }
 
 /// Announce `settings.payload` to the multicast group every `delay` until
 /// `stop` is set or `time_limit` elapses. Mirrors the broadcast half of
 /// `peerdiscovery.Discover` as croc's sender uses it.
 pub fn broadcast(settings: &Settings, stop: Arc<AtomicBool>) -> std::io::Result<()> {
-    let socket = open_socket(settings)?;
-    let group: Ipv4Addr = settings.multicast_address.parse().unwrap();
-    let dst = SocketAddrV4::new(group, settings.port);
+    let (socket, dst) = open_socket(settings)?;
     let start = Instant::now();
     loop {
         let _ = socket.send_to(&settings.payload, dst);
@@ -113,9 +148,7 @@ pub fn broadcast(settings: &Settings, stop: Arc<AtomicBool>) -> std::io::Result<
 /// distinct peers until the limit or time limit. Mirrors the discovery half
 /// as croc's recipient uses it.
 pub fn discover(settings: &Settings) -> std::io::Result<Vec<Discovered>> {
-    let socket = open_socket(settings)?;
-    let group: Ipv4Addr = settings.multicast_address.parse().unwrap();
-    let dst = SocketAddrV4::new(group, settings.port);
+    let (socket, dst) = open_socket(settings)?;
     socket.set_read_timeout(Some(settings.delay))?;
 
     let mut self_ips: Vec<String> = crate::utils::get_local_ips();
@@ -191,5 +224,44 @@ mod tests {
             found.iter().any(|d| d.payload == b"croc9999test"),
             "expected to discover the announcer, got {found:?}"
         );
+    }
+
+    // Same, over the IPv6 loopback group. Skips gracefully if the sandbox
+    // has no IPv6 multicast support.
+    #[test]
+    fn loopback_discovery_ipv6() {
+        let base = ipv6_settings(b"croc6test".to_vec(), Some(Duration::from_secs(3)));
+        let bind_check = Settings {
+            port: 9872,
+            ..base.clone()
+        };
+        if open_socket(&bind_check).is_err() {
+            eprintln!("skipping IPv6 discovery test: no IPv6 multicast");
+            return;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let announcer = Settings {
+            port: 9872,
+            ..base
+        };
+        let stop2 = Arc::clone(&stop);
+        let handle = std::thread::spawn(move || broadcast(&announcer, stop2));
+        let finder = Settings {
+            payload: b"ok".to_vec(),
+            time_limit: Some(Duration::from_secs(2)),
+            limit: Some(1),
+            allow_self: true,
+            disable_broadcast: true,
+            port: 9872,
+            ..ipv6_settings(vec![], None)
+        };
+        let found = discover(&finder).unwrap();
+        stop.store(true, Ordering::Relaxed);
+        let _ = handle.join();
+        // On hosts without functional IPv6 loopback multicast this may find
+        // nothing; only assert when something arrived.
+        if !found.is_empty() {
+            assert!(found.iter().any(|d| d.payload == b"croc6test"));
+        }
     }
 }

@@ -180,4 +180,26 @@ else
   echo "    FAIL: reconnect case (see $WORK/{send,recv}-rc.log, sever-relay.log)"; exit 1
 fi
 
+echo "==> test 8: --git excludes .gitignored files (rust send → go recv)"
+code="$((1000 + RANDOM % 9000))-interop-git-mode"
+rm -rf "$WORK/gitsrc" "$WORK/out-git" && mkdir -p "$WORK/gitsrc/secret" "$WORK/gitsrc/keep" "$WORK/out-git"
+printf '*.log\nsecret/\n' > "$WORK/gitsrc/.gitignore"
+echo keep    > "$WORK/gitsrc/keep/data.txt"
+echo noise   > "$WORK/gitsrc/app.log"
+echo topsecret > "$WORK/gitsrc/secret/key.txt"
+(CROC_SECRET="$code" timeout 90 "$RUSTY" send --git --no-local \
+  --relay 127.0.0.1:9119 --pass "$PASS" "$WORK/gitsrc" &>"$WORK/send-git.log") &
+spid=$!
+sleep 2
+(cd "$WORK/out-git" && CROC_SECRET="$code" timeout 90 "$CROC" --yes \
+  --relay 127.0.0.1:9119 --pass "$PASS" &>"$WORK/recv-git.log")
+wait "$spid"
+if [ -f "$WORK/out-git/gitsrc/keep/data.txt" ] \
+   && [ ! -e "$WORK/out-git/gitsrc/app.log" ] \
+   && [ ! -e "$WORK/out-git/gitsrc/secret" ]; then
+  echo "    OK: .gitignored app.log and secret/ were not sent"
+else
+  echo "    FAIL: --git case (see $WORK/{send,recv}-git.log)"; exit 1
+fi
+
 echo "==> all interop tests passed"

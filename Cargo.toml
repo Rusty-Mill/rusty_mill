@@ -29,6 +29,8 @@ if-addrs = "0.13"
 socket2 = { version = "0.5", features = ["all"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 qrcode = { version = "0.14", default-features = false }
+ignore = "0.4"
+zeroize = "1"
 
 [dev-dependencies]
 hex = "0.4"

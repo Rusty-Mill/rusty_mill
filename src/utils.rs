@@ -170,6 +170,43 @@ pub fn find_open_ports(host: &str, port_start: u16, num_ports: usize) -> Vec<u16
     open
 }
 
+/// Whether `address` (host or host:port) is loopback, link-local, or in a
+/// private RFC1918/ULA range — mirroring `utils.IsLocalIP`. Proxies are
+/// skipped for such addresses.
+pub fn is_local_ip(address: &str) -> bool {
+    use std::net::IpAddr;
+    if address.contains("127.0.0.1") {
+        return true;
+    }
+    // Strip an optional :port (also handles [v6]:port).
+    let host = match address.rsplit_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => h,
+        _ => address,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ip: IpAddr = match host.parse() {
+        Ok(ip) => ip,
+        Err(_) => return false,
+    };
+    if ip.is_loopback() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_link_local()
+                || o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+        }
+        IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            // fe80::/10 link-local, fc00::/7 unique-local
+            (seg[0] & 0xffc0) == 0xfe80 || (seg[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
 /// Non-loopback IPv4 addresses of this host, mirroring `utils.GetLocalIPs`.
 pub fn get_local_ips() -> Vec<String> {
     let mut ips = Vec::new();

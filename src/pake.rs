@@ -253,6 +253,19 @@ pub struct Pake {
     k: Option<Vec<u8>>,
 }
 
+impl Drop for Pake {
+    fn drop(&mut self) {
+        // Wipe secret material: the weak password, the random blinding scalar,
+        // and the derived session key. (Public curve points aren't secret.)
+        use zeroize::Zeroize;
+        self.pw.zeroize();
+        self.alpha.zeroize();
+        if let Some(k) = self.k.as_mut() {
+            k.zeroize();
+        }
+    }
+}
+
 /// Minimal big-endian bytes, matching Go's `big.Int.Bytes()` (empty for 0).
 fn go_bytes(n: &BigUint) -> Vec<u8> {
     if n.is_zero() {

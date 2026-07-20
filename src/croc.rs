@@ -104,6 +104,12 @@ pub struct Options {
     /// Skip files whose remote path contains any of these lowercase
     /// substrings (croc's `--exclude`).
     pub exclude: Vec<String>,
+    /// Respect `.gitignore` when collecting files (croc's `--git`).
+    pub git_ignore: bool,
+    /// SOCKS5 proxy (host:port); non-local relays are dialed through it.
+    pub socks5_proxy: String,
+    /// HTTP CONNECT proxy (host:port).
+    pub http_proxy: String,
 }
 
 impl Default for Options {
@@ -126,7 +132,21 @@ impl Default for Options {
             sending_text: false,
             zip_folder: false,
             exclude: Vec::new(),
+            git_ignore: false,
+            socks5_proxy: String::new(),
+            http_proxy: String::new(),
         }
+    }
+}
+
+/// Apply proxy options to the process-wide `comm` proxy config. Call once
+/// before any relay connection.
+fn apply_proxy_options(opts: &Options) {
+    if !opts.socks5_proxy.is_empty() {
+        crate::comm::set_socks5_proxy(&opts.socks5_proxy);
+    }
+    if !opts.http_proxy.is_empty() {
+        crate::comm::set_http_proxy(&opts.http_proxy);
     }
 }
 
@@ -381,6 +401,7 @@ fn walk_dir(
     files: &mut Vec<FileInfo>,
     empty_folders: &mut Vec<FileInfo>,
     total_folders: &mut i64,
+    ignored: &std::collections::HashSet<PathBuf>,
 ) -> Result<()> {
     *total_folders += 1;
     let base_parent = base.parent().unwrap_or(Path::new(""));
@@ -397,9 +418,12 @@ fn walk_dir(
     }
     for entry in entries {
         let p = entry.path();
+        if ignored.contains(&p) {
+            continue;
+        }
         let meta = std::fs::symlink_metadata(&p)?;
         if meta.is_dir() {
-            walk_dir(base, &p, files, empty_folders, total_folders)?;
+            walk_dir(base, &p, files, empty_folders, total_folders, ignored)?;
         } else {
             let rel_dir = p
                 .parent()
@@ -412,19 +436,59 @@ fn walk_dir(
     Ok(())
 }
 
+/// Absolute paths under `dir` excluded by .gitignore rules (used by `--git`).
+/// The `ignore` crate walks with the same gitignore semantics git uses.
+fn gitignored_paths(dir: &Path) -> std::collections::HashSet<PathBuf> {
+    let mut included = std::collections::HashSet::new();
+    for entry in ignore::WalkBuilder::new(dir)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        // Apply .gitignore rules even when the folder isn't a git repo,
+        // matching croc's --git behavior (it compiles .gitignore directly).
+        .require_git(false)
+        .hidden(false)
+        .parents(false)
+        .build()
+        .flatten()
+    {
+        if let Ok(abs) = std::fs::canonicalize(entry.path()) {
+            included.insert(abs);
+        }
+    }
+    // Everything present on disk but NOT in the gitignore-respecting walk is
+    // ignored.
+    let mut ignored = std::collections::HashSet::new();
+    for entry in ignore::WalkBuilder::new(dir)
+        .standard_filters(false)
+        .hidden(false)
+        .build()
+        .flatten()
+    {
+        if let Ok(abs) = std::fs::canonicalize(entry.path()) {
+            if !included.contains(&abs) {
+                ignored.insert(abs);
+            }
+        }
+    }
+    ignored
+}
+
 /// Collect files/folders to send. Mirrors `croc.GetFilesInfo` without the
 /// gitignore options.
 pub fn get_files_info(paths: &[String]) -> Result<(Vec<FileInfo>, Vec<FileInfo>, i64)> {
-    get_files_info_opts(paths, false)
+    get_files_info_opts(paths, false, false)
 }
 
 pub fn get_files_info_opts(
     paths: &[String],
     zip_folder: bool,
+    git_ignore: bool,
 ) -> Result<(Vec<FileInfo>, Vec<FileInfo>, i64)> {
     let mut files = Vec::new();
     let mut empty_folders = Vec::new();
     let mut total_folders = 0i64;
+    let empty_ignored = std::collections::HashSet::new();
     for p in paths {
         let path = PathBuf::from(p);
         let meta = std::fs::symlink_metadata(&path)
@@ -445,7 +509,12 @@ pub fn get_files_info_opts(
             files.push(fi);
         } else if meta.is_dir() {
             let abs = std::fs::canonicalize(&path)?;
-            walk_dir(&abs, &abs, &mut files, &mut empty_folders, &mut total_folders)?;
+            let ignored = if git_ignore {
+                gitignored_paths(&abs)
+            } else {
+                empty_ignored.clone()
+            };
+            walk_dir(&abs, &abs, &mut files, &mut empty_folders, &mut total_folders, &ignored)?;
         } else {
             files.push(file_info_from(&path, "./".to_string())?);
         }
@@ -621,6 +690,12 @@ impl RecvState {
             sending_text: false,
             last_pct: -1,
         }
+    }
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.clear_key();
     }
 }
 
@@ -826,6 +901,21 @@ impl Client {
         self.relay_candidates = candidates;
     }
 
+    /// Install a new transfer key, wiping any previous one.
+    fn set_key(&mut self, key: Vec<u8>) {
+        self.clear_key();
+        self.key = Some(key);
+    }
+
+    /// Wipe the current transfer key from memory.
+    fn clear_key(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(k) = self.key.as_mut() {
+            k.zeroize();
+        }
+        self.key = None;
+    }
+
     fn send_msg(&self, m: &Message) -> Result<()> {
         let payload = message::encode(self.key.as_deref(), m)?;
         self.control_tx
@@ -848,7 +938,9 @@ impl Client {
     // route against the remote-relay route like Go's errchan pattern.
     // -----------------------------------------------------------------------
     pub fn send(opts: Options, paths: &[String]) -> Result<()> {
-        let (files, empty_folders, total_folders) = get_files_info_opts(paths, opts.zip_folder)?;
+        apply_proxy_options(&opts);
+        let (files, empty_folders, total_folders) =
+            get_files_info_opts(paths, opts.zip_folder, opts.git_ignore)?;
         let (mut files, empty_folders, total_folders) =
             apply_exclusions(&opts.exclude, files, empty_folders, total_folders);
         let mut total_size = 0i64;
@@ -902,19 +994,24 @@ impl Client {
                 local_info = Some(ips);
 
                 let payload = format!("croc{local_port}").into_bytes();
-                let settings = crate::discovery::Settings {
-                    payload,
-                    time_limit: if opts.only_local {
-                        None
-                    } else {
-                        Some(Duration::from_secs(30))
-                    },
+                let time_limit = if opts.only_local {
+                    None
+                } else {
+                    Some(Duration::from_secs(30))
+                };
+                // Announce on both IPv4 and IPv6 groups, like croc.
+                let v4 = crate::discovery::Settings {
+                    payload: payload.clone(),
+                    time_limit,
                     ..Default::default()
                 };
-                let stop = Arc::clone(&stop_broadcast);
-                std::thread::spawn(move || {
-                    let _ = crate::discovery::broadcast(&settings, stop);
-                });
+                let v6 = crate::discovery::ipv6_settings(payload, time_limit);
+                for settings in [v4, v6] {
+                    let stop = Arc::clone(&stop_broadcast);
+                    std::thread::spawn(move || {
+                        let _ = crate::discovery::broadcast(&settings, stop);
+                    });
+                }
             } else {
                 log::debug!("not enough open ports for a local relay");
             }
@@ -1046,6 +1143,7 @@ impl Client {
     // sender's local relay when reachable.
     // -----------------------------------------------------------------------
     pub fn receive(mut opts: Options) -> Result<()> {
+        apply_proxy_options(&opts);
         eprintln!("connecting...");
         let is_ip_set = !opts.ip.is_empty();
         let mut using_local = false;
@@ -1053,13 +1151,28 @@ impl Client {
             opts.relay_address = opts.ip.clone();
         } else if !opts.disable_local {
             // Look for a sender broadcasting on the local network.
-            let settings = crate::discovery::Settings {
+            // Discover on both IPv4 and IPv6 groups concurrently, like croc.
+            let v4 = crate::discovery::Settings {
                 payload: b"ok".to_vec(),
                 time_limit: Some(Duration::from_millis(200)),
                 limit: Some(1),
                 ..Default::default()
             };
-            if let Ok(discoveries) = crate::discovery::discover(&settings) {
+            let v6 = crate::discovery::Settings {
+                limit: Some(1),
+                ..crate::discovery::ipv6_settings(b"ok".to_vec(), Some(Duration::from_millis(200)))
+            };
+            let handles: Vec<_> = [v4, v6]
+                .into_iter()
+                .map(|s| std::thread::spawn(move || crate::discovery::discover(&s).unwrap_or_default()))
+                .collect();
+            let mut discoveries = Vec::new();
+            for h in handles {
+                if let Ok(found) = h.join() {
+                    discoveries.extend(found);
+                }
+            }
+            {
                 for d in discoveries {
                     if let Some(port) = d.payload.strip_prefix(b"croc") {
                         let port = String::from_utf8_lossy(port);
@@ -1292,7 +1405,7 @@ impl Client {
         self.step3_recipient_request_file = false;
         self.step4_file_transferring = false;
         self.success = false;
-        self.key = None;
+        self.clear_key();
         self.chunk_map.clear();
         {
             let mut st = self.recv.lock().unwrap();
@@ -1497,10 +1610,12 @@ impl Client {
                 .map_err(|e| -> Error { format!("pake not successful: {e}").into() })?;
             salt = m.bytes2.clone();
         }
-        let session = self.pake.as_ref().unwrap().session_key()?;
+        let mut session = self.pake.as_ref().unwrap().session_key()?;
         let (key, _) = crypt::new_key(&session, Some(&salt))?;
         log::debug!("generated transfer key with salt {salt:02x?}");
-        self.key = Some(key);
+        use zeroize::Zeroize;
+        session.zeroize();
+        self.set_key(key);
 
         // Connect to every transfer port with room "{room}-{j}".
         for j in 0..self.relay_ports.len() {
