@@ -126,12 +126,18 @@ fn dns_query(server: &str, host: &str, qtype: u16) -> std::io::Result<Vec<IpAddr
                 .map_err(|_| std::io::Error::other("bad dns server address"))?
         }
     };
-    let bind = if server_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if server_addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let sock = UdpSocket::bind(bind)?;
     sock.set_read_timeout(Some(Duration::from_millis(500)))?;
     // Derive a query id from the host so concurrent queries differ; the exact
     // value doesn't matter for a single request/response.
-    let id = host.bytes().fold(0x1234u16, |a, b| a.wrapping_add(b as u16));
+    let id = host
+        .bytes()
+        .fold(0x1234u16, |a, b| a.wrapping_add(b as u16));
     sock.send_to(&build_dns_query(id, host, qtype), server_addr)?;
     let mut buf = [0u8; 512];
     let (n, _) = sock.recv_from(&mut buf)?;

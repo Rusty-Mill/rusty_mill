@@ -1,5 +1,7 @@
 # rusty-croc 🦀🐊
 
+[![CI](https://github.com/baileyrd/rusty_croc/actions/workflows/ci.yml/badge.svg)](https://github.com/baileyrd/rusty_croc/actions/workflows/ci.yml)
+
 A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
@@ -114,8 +116,15 @@ cargo +nightly fuzz run message   # or: frame, pake, mnemonicode
 
 ```sh
 cargo test                  # self-contained tests incl. Go-generated vectors
+cargo fmt --all --check     # formatting
+cargo clippy --all-targets  # lints
 scripts/interop_test.sh     # live Go↔Rust interop (needs Go toolchain + git)
+scripts/bench.sh            # rusty-croc vs Go croc throughput/latency
 ```
+
+CI (`.github/workflows/ci.yml`) runs fmt + clippy + tests and the full
+interop suite against a freshly built stock Go croc on every push and PR;
+the parser fuzz targets run on a weekly schedule.
 
 The module layout mirrors the Go source tree (`src/comm.rs` ↔ `src/comm`,
 etc.) to keep the port reviewable side by side with upstream.

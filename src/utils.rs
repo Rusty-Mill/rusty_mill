@@ -301,7 +301,11 @@ pub fn byte_count_decimal(b: i64) -> String {
         exp += 1;
         n /= UNIT;
     }
-    format!("{:.1} {}B", b as f64 / div as f64, ['k', 'M', 'G', 'T', 'P', 'E'][exp])
+    format!(
+        "{:.1} {}B",
+        b as f64 / div as f64,
+        ['k', 'M', 'G', 'T', 'P', 'E'][exp]
+    )
 }
 
 #[cfg(test)]
@@ -347,7 +351,9 @@ mod tests {
         let dir = std::env::temp_dir().join("rusty-croc-imo-test");
         std::fs::create_dir_all(&dir).unwrap();
         let small: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
-        let big: Vec<u8> = (0..9 * 1024 * 1024u64).map(|i| ((i * 7) % 253) as u8).collect();
+        let big: Vec<u8> = (0..9 * 1024 * 1024u64)
+            .map(|i| ((i * 7) % 253) as u8)
+            .collect();
         let ps = dir.join("small.bin");
         let pb = dir.join("big.bin");
         std::fs::write(&ps, &small).unwrap();

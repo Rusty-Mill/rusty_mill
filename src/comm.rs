@@ -70,8 +70,10 @@ impl Comm {
             return Comm::new(stream);
         }
 
-        let mut last_err =
-            std::io::Error::new(std::io::ErrorKind::NotFound, format!("cannot resolve {address}"));
+        let mut last_err = std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("cannot resolve {address}"),
+        );
         for addr in address.to_socket_addrs()? {
             match TcpStream::connect_timeout(&addr, limit) {
                 Ok(stream) => return Comm::new(stream),
@@ -138,7 +140,10 @@ fn split_host_port(address: &str) -> std::io::Result<(String, u16)> {
         .or_else(|| address.strip_prefix("http://"))
         .unwrap_or(address);
     let (host, port) = address.rsplit_once(':').ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("no port in {address}"))
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("no port in {address}"),
+        )
     })?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let port: u16 = port
@@ -149,8 +154,10 @@ fn split_host_port(address: &str) -> std::io::Result<(String, u16)> {
 
 fn connect_proxy(proxy: &str, limit: Duration) -> std::io::Result<TcpStream> {
     let (host, port) = split_host_port(proxy)?;
-    let mut last_err =
-        std::io::Error::new(std::io::ErrorKind::NotFound, format!("cannot resolve proxy {host}"));
+    let mut last_err = std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("cannot resolve proxy {host}"),
+    );
     for addr in (host.as_str(), port).to_socket_addrs()? {
         match TcpStream::connect_timeout(&addr, limit) {
             Ok(s) => return Ok(s),
@@ -185,7 +192,10 @@ fn dial_socks5(proxy: &str, dest: &str, limit: Duration) -> std::io::Result<TcpS
     let mut head = [0u8; 4];
     s.read_exact(&mut head)?;
     if head[1] != 0x00 {
-        return Err(std::io::Error::other(format!("socks5: connect failed (code {})", head[1])));
+        return Err(std::io::Error::other(format!(
+            "socks5: connect failed (code {})",
+            head[1]
+        )));
     }
     let skip = match head[3] {
         0x01 => 4,
@@ -206,9 +216,7 @@ fn dial_socks5(proxy: &str, dest: &str, limit: Duration) -> std::io::Result<TcpS
 fn dial_http_connect(proxy: &str, dest: &str, limit: Duration) -> std::io::Result<TcpStream> {
     let (dhost, dport) = split_host_port(dest)?;
     let mut s = connect_proxy(proxy, limit)?;
-    let req = format!(
-        "CONNECT {dhost}:{dport} HTTP/1.1\r\nHost: {dhost}:{dport}\r\n\r\n"
-    );
+    let req = format!("CONNECT {dhost}:{dport} HTTP/1.1\r\nHost: {dhost}:{dport}\r\n\r\n");
     s.write_all(req.as_bytes())?;
     // Read headers up to the blank line.
     let mut buf = Vec::new();
@@ -289,7 +297,8 @@ mod tests {
             let mut host = vec![0u8; head[4] as usize + 2];
             c.read_exact(&mut host).unwrap();
             // Success reply with a dummy IPv4 bound address.
-            c.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).unwrap();
+            c.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .unwrap();
             // Bridge proxy <-> real destination.
             let mut upstream = TcpStream::connect(dest_addr).unwrap();
             let mut cbuf = [0u8; 64];
@@ -302,7 +311,7 @@ mod tests {
         set_socks5_proxy(&proxy_addr.to_string());
         // Use a non-local target so the proxy is actually used. The proxy
         // ignores the requested host and bridges to our echo server.
-        let mut comm = Comm::new_connection("example.com:80", Some(Duration::from_secs(5))).unwrap();
+        let comm = Comm::new_connection("example.com:80", Some(Duration::from_secs(5))).unwrap();
         set_socks5_proxy(""); // reset global for other tests
         comm.stream().write_all(b"proxied hello").unwrap();
         let mut buf = [0u8; 13];
