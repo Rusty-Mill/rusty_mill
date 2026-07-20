@@ -77,7 +77,8 @@ leaves the LAN.
 | `--exclude`, `--qr`, `--remember`, code prompt | ✅ |
 | `--git` (.gitignore), SOCKS5/HTTP proxies, IPv6 discovery | ✅ interop/unit-tested |
 | Zeroized key material, `cargo-fuzz` parser harnesses | ✅ |
-| Custom-DNS relay resolution, constant-time curve math | ⬜ future |
+| Constant-time PAKE curves (p256/p384/p521 via RustCrypto) | ✅ interop-tested |
+| Custom-DNS relay resolution | ⬜ future |
 
 ## Fuzzing
 
