@@ -66,6 +66,33 @@ pub fn connect_tls(
     config: &EstablishConfig,
     requested: SecurityProtocols,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    connect_tls_impl(addr, config, requested, run_credssp)
+}
+
+/// Like [`connect_tls`], but draws the CredSSP exchange's nonce/challenge/key
+/// from `csprng` instead of opening `/dev/urandom` directly. Requires the
+/// optional `platform` feature (on top of this module's own `tls` feature).
+#[cfg(feature = "platform")]
+pub fn connect_tls_with_csprng(
+    addr: &str,
+    config: &EstablishConfig,
+    requested: SecurityProtocols,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    connect_tls_impl(addr, config, requested, |tls, config| {
+        run_credssp_with_csprng(tls, config, csprng)
+    })
+}
+
+/// The shared body of [`connect_tls`]/[`connect_tls_with_csprng`]: the only
+/// difference between the two is how the CredSSP exchange (`run_credssp`)
+/// obtains its randomness, so that step is the one thing passed in.
+fn connect_tls_impl(
+    addr: &str,
+    config: &EstablishConfig,
+    requested: SecurityProtocols,
+    run_credssp: impl FnOnce(&mut TlsStream, &EstablishConfig) -> io::Result<()>,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
     // Host portion of `host:port`, for the TLS server name.
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
 
@@ -114,9 +141,14 @@ pub fn connect_tls(
     Ok((transport, session))
 }
 
-/// Run the CredSSP/NLA exchange over an established TLS stream, delegating the
-/// user's credentials so the RDP connection sequence can proceed.
-fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> {
+/// The shared tail of [`run_credssp`]/[`run_credssp_with_csprng`]: complete
+/// the TLS handshake, fetch the server's public key, and drive the NTLM
+/// CredSSP exchange with `seed` split into the nonce/challenge/key it needs.
+fn run_credssp_with_seed(
+    tls: &mut TlsStream,
+    config: &EstablishConfig,
+    seed: [u8; 56],
+) -> io::Result<()> {
     // Complete the TLS handshake so the server certificate is available.
     while tls.conn.is_handshaking() {
         if tls.conn.complete_io(&mut tls.sock)?.0 == 0 && tls.conn.is_handshaking() {
@@ -128,9 +160,6 @@ fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> 
     }
     let public_key = server_public_key(tls)?;
 
-    // Gather the nondeterministic inputs from the OS.
-    let mut seed = [0u8; 56];
-    File::open("/dev/urandom")?.read_exact(&mut seed)?;
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(&seed[..32]);
     let mut client_challenge = [0u8; 8];
@@ -166,6 +195,31 @@ fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> 
     Ok(())
 }
 
+/// Run the CredSSP/NLA exchange over an established TLS stream, delegating the
+/// user's credentials so the RDP connection sequence can proceed. Gathers its
+/// nonce/challenge/key from `/dev/urandom`; [`run_credssp_with_csprng`] is the
+/// `platform`-feature alternative.
+fn run_credssp(tls: &mut TlsStream, config: &EstablishConfig) -> io::Result<()> {
+    let mut seed = [0u8; 56];
+    File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    run_credssp_with_seed(tls, config, seed)
+}
+
+/// Like [`run_credssp`], but draws `seed` from `csprng` instead of opening
+/// `/dev/urandom` directly.
+#[cfg(feature = "platform")]
+fn run_credssp_with_csprng(
+    tls: &mut TlsStream,
+    config: &EstablishConfig,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<()> {
+    let mut seed = [0u8; 56];
+    csprng
+        .fill_random(&mut seed)
+        .map_err(crate::platform_net::to_io_error)?;
+    run_credssp_with_seed(tls, config, seed)
+}
+
 /// Connect to an RDP server over TLS using a Kerberos ticket for NLA.
 ///
 /// Same as [`connect_tls`] but authenticates with Kerberos instead of NTLM:
@@ -181,6 +235,34 @@ pub fn connect_tls_kerberos(
     config: &EstablishConfig,
     ap_req: Vec<u8>,
     session_key: AesKey,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    connect_tls_kerberos_impl(addr, config, move |tls, config| {
+        run_credssp_kerberos(tls, config, ap_req, session_key)
+    })
+}
+
+/// Like [`connect_tls_kerberos`], but draws the CredSSP exchange's nonce and
+/// two GSS confounders from `csprng` instead of opening `/dev/urandom`
+/// directly. Requires the optional `platform` feature (on top of this
+/// module's own `tls` feature).
+#[cfg(feature = "platform")]
+pub fn connect_tls_kerberos_with_csprng(
+    addr: &str,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
+    connect_tls_kerberos_impl(addr, config, move |tls, config| {
+        run_credssp_kerberos_with_csprng(tls, config, ap_req, session_key, csprng)
+    })
+}
+
+/// The shared body of [`connect_tls_kerberos`]/[`connect_tls_kerberos_with_csprng`].
+fn connect_tls_kerberos_impl(
+    addr: &str,
+    config: &EstablishConfig,
+    run_credssp_kerberos: impl FnOnce(&mut TlsStream, &EstablishConfig) -> io::Result<()>,
 ) -> io::Result<(RdpTransport<TlsStream>, RdpSession)> {
     let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
 
@@ -207,7 +289,7 @@ pub fn connect_tls_kerberos(
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("TLS setup failed: {e}")))?;
     let mut tls = StreamOwned::new(conn, tcp);
 
-    run_credssp_kerberos(&mut tls, config, ap_req, session_key)?;
+    run_credssp_kerberos(&mut tls, config)?;
 
     let mut transport = RdpTransport::new_enhanced(tls);
     let session = transport.establish_enhanced(config, selected)?;
@@ -358,12 +440,16 @@ fn run_credssp_server<F: Fn(&str, &str) -> Option<[u8; 16]>>(
     })
 }
 
-/// Run the Kerberos CredSSP exchange over an established TLS stream.
-fn run_credssp_kerberos(
+/// The shared tail of [`run_credssp_kerberos`]/[`run_credssp_kerberos_with_csprng`]:
+/// complete the TLS handshake, fetch the server's public key, and drive the
+/// Kerberos CredSSP exchange with `seed` split into the nonce and two GSS
+/// confounders it needs.
+fn run_credssp_kerberos_with_seed(
     tls: &mut TlsStream,
     config: &EstablishConfig,
     ap_req: Vec<u8>,
     session_key: AesKey,
+    seed: [u8; 64],
 ) -> io::Result<()> {
     while tls.conn.is_handshaking() {
         if tls.conn.complete_io(&mut tls.sock)?.0 == 0 && tls.conn.is_handshaking() {
@@ -376,8 +462,6 @@ fn run_credssp_kerberos(
     let public_key = server_public_key(tls)?;
 
     // Nonce plus two 16-byte GSS confounders.
-    let mut seed = [0u8; 64];
-    File::open("/dev/urandom")?.read_exact(&mut seed)?;
     let mut nonce = [0u8; 32];
     nonce.copy_from_slice(&seed[..32]);
     let conf1 = &seed[32..48];
@@ -402,6 +486,37 @@ fn run_credssp_kerberos(
     tls.write_all(&leg3)?;
     tls.flush()?;
     Ok(())
+}
+
+/// Run the Kerberos CredSSP exchange over an established TLS stream. Gathers
+/// its nonce/confounders from `/dev/urandom`; [`run_credssp_kerberos_with_csprng`]
+/// is the `platform`-feature alternative.
+fn run_credssp_kerberos(
+    tls: &mut TlsStream,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+) -> io::Result<()> {
+    let mut seed = [0u8; 64];
+    File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    run_credssp_kerberos_with_seed(tls, config, ap_req, session_key, seed)
+}
+
+/// Like [`run_credssp_kerberos`], but draws `seed` from `csprng` instead of
+/// opening `/dev/urandom` directly.
+#[cfg(feature = "platform")]
+fn run_credssp_kerberos_with_csprng(
+    tls: &mut TlsStream,
+    config: &EstablishConfig,
+    ap_req: Vec<u8>,
+    session_key: AesKey,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<()> {
+    let mut seed = [0u8; 64];
+    csprng
+        .fill_random(&mut seed)
+        .map_err(crate::platform_net::to_io_error)?;
+    run_credssp_kerberos_with_seed(tls, config, ap_req, session_key, seed)
 }
 
 /// The Windows FILETIME (100 ns since 1601-01-01) for the current time.
@@ -748,6 +863,47 @@ mod tests {
             &addr.to_string(),
             &establish_config,
             SecurityProtocols::HYBRID,
+        )
+        .unwrap();
+
+        let (_transport, accepted, identity) = server.join().unwrap();
+        assert_eq!(accepted.share_id, session.share_id);
+        assert_eq!(accepted.client_info.username, "alice");
+        assert_eq!(accepted.client_info.domain, "CORP");
+        assert_eq!(identity.domain, "CORP");
+        assert_eq!(identity.user, "alice");
+        assert_eq!(identity.password, "secret");
+    }
+
+    #[cfg(feature = "platform")]
+    #[test]
+    fn connect_tls_with_csprng_completes_full_connection_sequence() {
+        use crate::net::AcceptConfig;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let config = AcceptConfig::new(1024, 768);
+            accept_tls_nla(
+                stream,
+                test_tls_server_config(),
+                test_credssp_server(),
+                &config,
+            )
+            .unwrap()
+        });
+
+        let establish_config = EstablishConfig::new(1024, 768, "CORP", "alice", "secret");
+        let csprng = platform_mock::MockCsprng::new();
+        let (_transport, session) = connect_tls_with_csprng(
+            &addr.to_string(),
+            &establish_config,
+            SecurityProtocols::HYBRID,
+            &csprng,
         )
         .unwrap();
 
