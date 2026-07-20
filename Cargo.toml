@@ -21,6 +21,8 @@ num-traits = "0.2"
 p256 = { version = "0.13", features = ["arithmetic"] }
 p384 = { version = "0.13", features = ["arithmetic"] }
 p521 = { version = "0.13", features = ["arithmetic"] }
+crypto-bigint = { version = "0.7", features = ["subtle"] }
+subtle = "2"
 clap = { version = "4", features = ["derive"] }
 log = "0.4"
 env_logger = "0.11"
