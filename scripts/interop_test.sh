@@ -158,4 +158,26 @@ else
   echo "    FAIL: zip case (see $WORK/{send,recv}-zip.log)"; exit 1
 fi
 
+echo "==> test 7: reconnect-and-resume through a severed relay (rust send → go recv)"
+"$RUSTY" relay --ports 9139,9140,9141,9142,9143 --pass "$PASS" \
+  --test-sever-after 1500000 &>"$WORK/sever-relay.log" &
+sleep 1
+code="$((1000 + RANDOM % 9000))-interop-reconnect"
+head -c 6000000 /dev/urandom > "$WORK/payload-rc.bin"
+rm -rf "$WORK/out-rc" && mkdir -p "$WORK/out-rc"
+(CROC_SECRET="$code" timeout 120 "$RUSTY" send --no-local --relay 127.0.0.1:9139 --pass "$PASS" \
+  "$WORK/payload-rc.bin" &>"$WORK/send-rc.log") &
+spid=$!
+sleep 2
+(cd "$WORK/out-rc" && CROC_SECRET="$code" timeout 90 "$CROC" --yes --overwrite \
+  --relay 127.0.0.1:9139 --pass "$PASS" &>"$WORK/recv-rc.log")
+wait "$spid"
+if cmp -s "$WORK/payload-rc.bin" "$WORK/out-rc/payload-rc.bin" \
+   && grep -q "interruption" "$WORK/send-rc.log" \
+   && grep -q "dropping all piped connections" "$WORK/sever-relay.log"; then
+  echo "    OK: relay severed mid-transfer; both sides reconnected and resumed"
+else
+  echo "    FAIL: reconnect case (see $WORK/{send,recv}-rc.log, sever-relay.log)"; exit 1
+fi
+
 echo "==> all interop tests passed"

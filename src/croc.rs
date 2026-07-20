@@ -49,6 +49,33 @@ pub type Result<T> = std::result::Result<T, Error>;
 const CHUNK_SIZE: usize = models::TCP_BUFFER_SIZE / 2; // 32 KiB, matches Go
 const ZERO_TIME: &str = "0001-01-01T00:00:00Z";
 
+/// Our reconnect protocol version (croc's `ReconnectVersion`).
+pub const RECONNECT_VERSION: i64 = 1;
+const MAX_RECONNECT_ATTEMPTS: usize = 10;
+const RECONNECT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 100ms · 2^(n−1), capped at 5 s — mirrors `reconnectBackoff`.
+fn reconnect_backoff(attempt: usize) -> Duration {
+    if attempt == 0 {
+        return Duration::ZERO;
+    }
+    let mut delay = Duration::from_millis(100);
+    for _ in 1..attempt {
+        delay *= 2;
+        if delay >= Duration::from_secs(5) {
+            return Duration::from_secs(5);
+        }
+    }
+    delay
+}
+
+/// Random 32-byte hex room for reconnects (`generateReconnectRoom`).
+fn generate_reconnect_room() -> String {
+    let mut b = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut b);
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
 /// Mirrors the parts of Go's `croc.Options` that are ported.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -74,6 +101,9 @@ pub struct Options {
     pub sending_text: bool,
     /// Zip folders before sending (croc's `--zip`).
     pub zip_folder: bool,
+    /// Skip files whose remote path contains any of these lowercase
+    /// substrings (croc's `--exclude`).
+    pub exclude: Vec<String>,
 }
 
 impl Default for Options {
@@ -95,6 +125,7 @@ impl Default for Options {
             throttle_upload: String::new(),
             sending_text: false,
             zip_folder: false,
+            exclude: Vec::new(),
         }
     }
 }
@@ -269,6 +300,19 @@ pub struct SimpleMessage {
     pub kind: String,
 }
 
+/// `host:port` with croc's default port filled in (`normalizeRelayAddress`).
+fn normalize_relay_address(address: &str) -> String {
+    if address.is_empty() {
+        return String::new();
+    }
+    match address.rsplit_once(':') {
+        Some((_, p)) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
+            address.to_string()
+        }
+        _ => format!("{address}:{}", models::DEFAULT_PORT),
+    }
+}
+
 /// Room name on the relay: `hex(sha256(secret[:4] + "croc"))`.
 pub fn room_name(shared_secret: &str) -> String {
     let mut h = Sha256::new();
@@ -407,6 +451,34 @@ pub fn get_files_info_opts(
         }
     }
     Ok((files, empty_folders, total_folders))
+}
+
+/// Drop files/folders whose remote path contains any exclusion (lowercase
+/// substring match, like the post-walk filter in croc's cli.go). Recomputes
+/// the folder count from what's left.
+fn apply_exclusions(
+    exclude: &[String],
+    mut files: Vec<FileInfo>,
+    mut empty_folders: Vec<FileInfo>,
+    total_folders: i64,
+) -> (Vec<FileInfo>, Vec<FileInfo>, i64) {
+    if exclude.is_empty() {
+        return (files, empty_folders, total_folders);
+    }
+    let matches = |fr: &str, name: &str| {
+        let joined = format!("{}/{}", fr.to_lowercase(), name.to_lowercase())
+            .trim_start_matches("./")
+            .trim_start_matches('/')
+            .to_string();
+        exclude.iter().any(|e| joined.contains(e))
+    };
+    files.retain(|f| !matches(&f.folder_remote, &f.name));
+    empty_folders.retain(|f| !matches(&f.folder_remote, &f.name));
+    let mut folder_set = std::collections::HashSet::new();
+    for f in files.iter().chain(empty_folders.iter()) {
+        folder_set.insert(f.folder_remote.clone());
+    }
+    (files, empty_folders, folder_set.len() as i64)
 }
 
 /// Zip `src_dir` into `dest`, entries prefixed with the folder's base name —
@@ -558,6 +630,7 @@ struct Route {
     banner: String,
     ipaddr: String,
     host: String,
+    control_address: String,
 }
 
 /// Mirrors senderWaitForHandshake: answer optional `pake1`/`ips?` probes
@@ -656,6 +729,12 @@ pub struct Client {
     data_streams: Vec<std::net::TcpStream>,
 
     throttle: Option<Arc<Throttle>>,
+
+    // reconnect support (croc ReconnectVersion 1)
+    control_address: String,
+    relay_candidates: Vec<String>,
+    peer_reconnect_version: i64,
+    next_reconnect_room: String,
 }
 
 fn now_secs() -> u64 {
@@ -666,7 +745,7 @@ fn now_secs() -> u64 {
 }
 
 impl Client {
-    fn connect_relay(opts: &Options) -> Result<(Comm, String, String, String)> {
+    fn connect_relay(opts: &Options) -> Result<(Comm, String, String, String, String)> {
         let address = &opts.relay_address;
         let (host, port) = match address.rsplit_once(':') {
             Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h.to_string(), p.to_string()),
@@ -681,7 +760,7 @@ impl Client {
             Some(Duration::from_secs(5)),
         )
         .map_err(|e| -> Error { format!("could not connect to {full}: {e}").into() })?;
-        Ok((comm, banner, ipaddr, host))
+        Ok((comm, banner, ipaddr, host, full))
     }
 
     fn new(opts: Options, control: Comm, banner: &str, ipaddr: String, host: String) -> Result<Self> {
@@ -723,7 +802,28 @@ impl Client {
             recv: Arc::new(Mutex::new(RecvState::new())),
             data_streams: Vec::new(),
             throttle: None,
+            control_address: String::new(),
+            relay_candidates: Vec::new(),
+            peer_reconnect_version: 0,
+            next_reconnect_room: String::new(),
         })
+    }
+
+    /// Remember where the control connection actually went (plus the
+    /// originally configured relay) as reconnect candidates.
+    fn set_relay_control_address(&mut self, address: &str) {
+        self.control_address = address.to_string();
+        let mut candidates = vec![address.to_string()];
+        let original = normalize_relay_address(&self.opts.relay_address);
+        if !original.is_empty() && original != address {
+            candidates.push(original);
+        }
+        for existing in std::mem::take(&mut self.relay_candidates) {
+            if !candidates.contains(&existing) {
+                candidates.push(existing);
+            }
+        }
+        self.relay_candidates = candidates;
     }
 
     fn send_msg(&self, m: &Message) -> Result<()> {
@@ -749,8 +849,9 @@ impl Client {
     // -----------------------------------------------------------------------
     pub fn send(opts: Options, paths: &[String]) -> Result<()> {
         let (files, empty_folders, total_folders) = get_files_info_opts(paths, opts.zip_folder)?;
+        let (mut files, empty_folders, total_folders) =
+            apply_exclusions(&opts.exclude, files, empty_folders, total_folders);
         let mut total_size = 0i64;
-        let mut files = files;
         for fi in files.iter_mut() {
             let full = Path::new(&fi.folder_source).join(&fi.name);
             if fi.symlink.is_empty() {
@@ -850,6 +951,7 @@ impl Client {
                         banner,
                         ipaddr,
                         host: "127.0.0.1".to_string(),
+                        control_address: local_addr.clone(),
                     })
                 })();
                 let _ = tx2.send(result);
@@ -864,7 +966,8 @@ impl Client {
             let streams = Arc::clone(&route_streams);
             std::thread::spawn(move || {
                 let result = (|| -> Result<Route> {
-                    let (mut control, banner, ipaddr, host) = Client::connect_relay(&opts2)?;
+                    let (mut control, banner, ipaddr, host, control_address) =
+                        Client::connect_relay(&opts2)?;
                     streams.lock().unwrap().push(control.stream().try_clone()?);
                     sender_wait_for_handshake(&mut control, &opts2, &local_info2)?;
                     log::debug!("sender using remote relay route");
@@ -873,6 +976,7 @@ impl Client {
                         banner,
                         ipaddr,
                         host,
+                        control_address,
                     })
                 })();
                 let _ = tx2.send(result);
@@ -911,12 +1015,13 @@ impl Client {
 
         let throttle = parse_throttle(&opts.throttle_upload).map(|r| Arc::new(Throttle::new(r)));
         let mut c = Self::new(opts, route.control, &route.banner, route.ipaddr, route.host)?;
+        c.set_relay_control_address(&route.control_address);
         c.throttle = throttle;
         c.files = files;
         c.empty_folders = empty_folders;
         c.total_folders = total_folders;
 
-        let result = c.transfer_loop();
+        let result = c.transfer_with_reconnect();
         stop_broadcast.store(true, std::sync::atomic::Ordering::Relaxed);
         c.shutdown();
         match &result {
@@ -978,8 +1083,9 @@ impl Client {
             return Err("could not find sender on the local network (--local set)".into());
         }
 
-        let (control, banner, ipaddr, host) = Self::connect_relay(&opts)?;
+        let (control, banner, ipaddr, host, control_address) = Self::connect_relay(&opts)?;
         let mut c = Self::new(opts, control, &banner, ipaddr, host)?;
+        c.set_relay_control_address(&control_address);
         c.external_ip_connected = if using_local {
             c.opts.relay_address.clone()
         } else {
@@ -1006,7 +1112,7 @@ impl Client {
             ..Default::default()
         })?;
         c.pake = Some(pake);
-        let result = c.transfer_loop();
+        let result = c.transfer_with_reconnect();
         c.shutdown();
         match &result {
             Ok(()) => {
@@ -1070,6 +1176,7 @@ impl Client {
                     let _ = self.control.stream().shutdown(Shutdown::Both);
                     self.control = conn;
                     self.control_tx = Arc::new(Mutex::new(self.control.try_clone()?));
+                    self.set_relay_control_address(&address);
                     self.relay_host = ip.clone();
                     self.relay_ports = banner
                         .split(',')
@@ -1096,6 +1203,179 @@ impl Client {
         while let Some(h) = self.sender_threads.pop() {
             let _ = h.join();
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconnect-and-resume (croc ReconnectVersion 1): when a transfer drops
+    // mid-flight and both peers advertise version ≥ 1, they meet again in a
+    // pre-agreed random room (announced in each fileinfo) and resume — the
+    // recipient's missing-chunk request naturally skips completed data.
+    // -----------------------------------------------------------------------
+    fn transfer_with_reconnect(&mut self) -> Result<()> {
+        let mut last_disconnect: Option<String> = None;
+        let mut attempt = 0usize;
+        loop {
+            if attempt > 0 {
+                std::thread::sleep(reconnect_backoff(attempt));
+                self.reset_for_reconnect()?;
+                if let Err(e) = self.reconnect_relay_attempt() {
+                    return Err(format!(
+                        "{} (reconnect attempt {attempt} failed: {e})",
+                        last_disconnect.unwrap_or_default()
+                    )
+                    .into());
+                }
+                if !self.opts.is_sender {
+                    // Recipient re-initiates the PAKE, as in Receive().
+                    let pake_bytes = self.pake.as_ref().map(|p| p.bytes()).unwrap_or_default();
+                    self.send_msg(&Message {
+                        typ: message::TYPE_PAKE.to_string(),
+                        bytes: pake_bytes,
+                        bytes2: self.opts.curve.as_bytes().to_vec(),
+                        ..Default::default()
+                    })?;
+                }
+            }
+            match self.transfer_loop() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    attempt += 1;
+                    if !self.can_retry(&e, attempt) {
+                        return Err(e);
+                    }
+                    let role = if self.opts.is_sender {
+                        "Sender"
+                    } else {
+                        "Receiver"
+                    };
+                    eprintln!("\n{role} detected a transfer interruption. Retrying securely...");
+                    last_disconnect = Some(e.to_string());
+                    self.close_attempt();
+                }
+            }
+        }
+    }
+
+    /// Mirrors `canRetryTransfer`.
+    fn can_retry(&self, e: &Error, attempt: usize) -> bool {
+        !self.success
+            && attempt <= MAX_RECONNECT_ATTEMPTS
+            && self.peer_reconnect_version >= RECONNECT_VERSION
+            && !self.next_reconnect_room.is_empty()
+            && e.to_string().starts_with("transfer disconnected")
+    }
+
+    /// Mirrors `closeAttempt`: tear down every connection and open file.
+    fn close_attempt(&mut self) {
+        let _ = self.control.stream().shutdown(Shutdown::Both);
+        for s in &self.data_streams {
+            let _ = s.shutdown(Shutdown::Both);
+        }
+        while let Some(h) = self.sender_threads.pop() {
+            let _ = h.join();
+        }
+        self.data_conns.clear();
+        self.data_streams.clear();
+        let mut st = self.recv.lock().unwrap();
+        st.file = None;
+        st.closed = true;
+    }
+
+    /// Mirrors `resetForReconnectAttempt`.
+    fn reset_for_reconnect(&mut self) -> Result<()> {
+        if self.next_reconnect_room.is_empty() {
+            return Err("transfer disconnected: missing reconnect room".into());
+        }
+        self.room = self.next_reconnect_room.clone();
+        self.step1_channel_secured = false;
+        self.step2_file_info_transferred = false;
+        self.step3_recipient_request_file = false;
+        self.step4_file_transferring = false;
+        self.success = false;
+        self.key = None;
+        self.chunk_map.clear();
+        {
+            let mut st = self.recv.lock().unwrap();
+            *st = RecvState::new();
+        }
+        if !self.opts.is_sender {
+            self.pake = Some(Pake::init_curve(
+                pake_secret(&self.opts.shared_secret),
+                0,
+                &self.opts.curve,
+            )?);
+        }
+        Ok(())
+    }
+
+    /// Mirrors `reconnectRelayAttempt`: rejoin the reconnect room on the
+    /// first reachable relay candidate and redo the pre-transfer handshake.
+    fn reconnect_relay_attempt(&mut self) -> Result<()> {
+        let room = self.next_reconnect_room.clone();
+        let mut errors: Vec<String> = Vec::new();
+        for address in self.relay_candidates.clone() {
+            let connected = tcp::connect_to_tcp_server(
+                &address,
+                &self.opts.relay_password,
+                &room,
+                Some(Duration::from_secs(5)),
+            );
+            let (conn, banner, ipaddr) = match connected {
+                Ok(v) => v,
+                Err(e) => {
+                    errors.push(format!("{address}: {e}"));
+                    continue;
+                }
+            };
+            let (conn, banner, ipaddr) = if self.opts.is_sender {
+                // Wait for the recipient's `handshake` with an overall
+                // deadline, like Go's 2s reconnect handshake window.
+                let stream = conn.stream().try_clone()?;
+                let opts = self.opts.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let mut moved = conn;
+                std::thread::spawn(move || {
+                    let r = sender_wait_for_handshake(&mut moved, &opts, &None);
+                    let _ = tx.send((moved, r));
+                });
+                match rx.recv_timeout(RECONNECT_HANDSHAKE_TIMEOUT) {
+                    Ok((conn, Ok(()))) => (conn, banner, ipaddr),
+                    Ok((_, Err(e))) => {
+                        errors.push(format!("{address}: {e}"));
+                        continue;
+                    }
+                    Err(_) => {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        errors.push(format!("{address}: timed out waiting for reconnect handshake"));
+                        continue;
+                    }
+                }
+            } else {
+                let mut conn = conn;
+                if let Err(e) = conn.send(b"handshake") {
+                    errors.push(format!("{address}: {e}"));
+                    continue;
+                }
+                (conn, banner, ipaddr)
+            };
+            log::debug!("reconnected via {address}");
+            self.control = conn;
+            self.control_tx = Arc::new(Mutex::new(self.control.try_clone()?));
+            self.room = room;
+            self.relay_host = address.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or(address.clone());
+            self.relay_ports = banner
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if self.opts.no_multiplexing {
+                self.relay_ports.truncate(1);
+            }
+            self.external_ip = ipaddr;
+            self.set_relay_control_address(&address);
+            return Ok(());
+        }
+        Err(format!("could not reconnect to any relay: {}", errors.join("; ")).into())
     }
 
     // -----------------------------------------------------------------------
@@ -1271,6 +1551,8 @@ impl Client {
             st.no_compress = si.no_compress;
             st.sending_text = si.sending_text;
         }
+        self.peer_reconnect_version = si.reconnect_version;
+        self.next_reconnect_room = si.next_reconnect_room.clone();
         self.total_folders = si.total_number_folders;
         let mut files = si.files_to_transfer.unwrap_or_default();
         // Mirror Go: text payloads named croc-stdin-* get a random local name
@@ -1348,6 +1630,7 @@ impl Client {
             let _ = h.join();
         }
         let req: RemoteFileRequest = serde_json::from_slice(&m.bytes)?;
+        self.peer_reconnect_version = req.reconnect_version;
         self.current_num = req.files_to_transfer_current_num;
         let ranges = req.current_file_chunk_ranges.unwrap_or_default();
         let chunks = utils::chunk_ranges_to_chunks(&ranges);
@@ -1363,6 +1646,8 @@ impl Client {
             && self.step1_channel_secured
             && !self.step2_file_info_transferred
         {
+            // Each manifest announces a fresh rendezvous room for reconnects.
+            self.next_reconnect_room = generate_reconnect_room();
             let si = SenderInfo {
                 files_to_transfer: if self.files.is_empty() {
                     None
@@ -1379,8 +1664,8 @@ impl Client {
                 hash_algorithm: self.opts.hash_algorithm.clone(),
                 no_compress: self.opts.no_compress,
                 sending_text: self.opts.sending_text,
-                // reconnect_version 0 = "old peer": Go then disables its
-                // reconnect logic, which this port doesn't support yet.
+                reconnect_version: RECONNECT_VERSION,
+                next_reconnect_room: self.next_reconnect_room.clone(),
                 ..Default::default()
             };
             self.send_msg(&Message {
@@ -1504,7 +1789,7 @@ impl Client {
             current_file_chunk_ranges: Some(ranges),
             files_to_transfer_current_num: self.current_num,
             machine_id: machine_id(),
-            reconnect_version: 0,
+            reconnect_version: RECONNECT_VERSION,
         };
         eprintln!(
             "Receiving {} ({})",

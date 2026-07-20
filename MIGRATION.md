@@ -178,6 +178,10 @@ source) or `cargo test` (self-contained):
 * ✅ **`--text` both directions**, **`--zip` go→rust** (auto-unpacked),
   `--throttle` rate limiting, and a live identical-file skip with
   `--hash imohash` across implementations.
+* ✅ **Reconnect-and-resume**: the relay severs every piped connection
+  mid-transfer (test hook); rust↔rust, rust→go, and go→rust all detect the
+  interruption, rendezvous in the reconnect room, and finish with matching
+  checksums.
 
 ## Roadmap
 
@@ -227,12 +231,27 @@ and `imohash`/`highway` hash options aren't ported yet.
 Still pending from this phase: IPv6 multicast group, custom
 `--multicast` address.
 
-### Phase 4 — reconnect, CLI tail, hardening
+### Phase 4 — reconnect + CLI tail (done: core)
 
-* Reconnect-and-resume on dropped relays (ReconnectVersion 1 rooms).
-* CLI parity: code-phrase prompt, `--remember` config file, QR code,
-  proxy dialing (SOCKS5/HTTP `CONNECT`), custom-DNS relay resolution,
-  exclude patterns, `--git` mode.
+* **Reconnect-and-resume (ReconnectVersion 1)**: each `fileinfo` announces
+  a fresh random rendezvous room; both sides advertise version 1 (SenderInfo
+  and RemoteFileRequest). On a mid-transfer disconnect (classified from the
+  control-connection error), each side backs off (100 ms · 2ⁿ, capped 5 s),
+  resets its transfer state, rejoins the reconnect room on the first
+  reachable relay candidate (current control address, then the original
+  relay), redoes the handshake (sender waits ≤ 2 s, like Go), and reruns
+  the transfer — the recipient's missing-chunk request makes the resume
+  incremental. Verified cross-implementation in both directions using the
+  relay's test-only `--test-sever-after` hook, which drops every piped
+  connection once N bytes have crossed (a deterministic "network blip").
+* **CLI tail**: interactive code prompt on receive (TTY only), `--exclude`
+  (case-insensitive substring on the remote path, post-walk, like cli.go),
+  `--qr` terminal QR code, `--remember` (persists relay/pass/curve to
+  `$XDG_CONFIG_HOME/rusty-croc/{send,receive}.json` — a rusty-croc-owned
+  file, so stock croc's config is never touched).
+
+Still pending: proxy dialing (SOCKS5/HTTP `CONNECT`), custom-DNS relay
+resolution, `--git` mode, IPv6 multicast.
 
 ### Phase 5 — hardening & divergence budget
 
