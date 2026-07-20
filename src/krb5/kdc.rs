@@ -154,7 +154,7 @@ pub fn fetch_tgt(
 
     let mut seed = [0u8; 20];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
-    let nonce = u32::from_le_bytes(seed[..4].try_into().unwrap());
+    let nonce = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]]);
     let mut confounder = [0u8; 16];
     confounder.copy_from_slice(&seed[4..20]);
 
@@ -325,7 +325,7 @@ pub fn fetch_ap_req(
 
     let mut seed = [0u8; 20];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
-    let nonce = u32::from_le_bytes(seed[..4].try_into().unwrap());
+    let nonce = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]]);
     let mut confounder = [0u8; 16];
     confounder.copy_from_slice(&seed[4..20]);
 

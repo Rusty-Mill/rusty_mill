@@ -354,7 +354,7 @@ impl CryptKeyPdu {
     pub fn decode(buf: &[u8]) -> Result<CryptKeyPdu> {
         let mut r = unwrap(buf, SNDC_CRYPTKEY)?;
         let _reserved = r.read_u32_le()?;
-        let seed: [u8; 32] = r.read_bytes(32)?.try_into().unwrap();
+        let seed: [u8; 32] = r.read_array()?;
         Ok(CryptKeyPdu { seed })
     }
 }
@@ -525,7 +525,7 @@ fn decode_wave_info(buf: &[u8]) -> Result<WaveInfoHeader> {
     let format_no = r.read_u16_le()?;
     let block_no = r.read_u8()?;
     r.skip(3)?; // bPad
-    let first4: [u8; 4] = r.read_bytes(4)?.try_into().unwrap();
+    let first4: [u8; 4] = r.read_array()?;
     Ok(WaveInfoHeader {
         timestamp,
         format_no,
