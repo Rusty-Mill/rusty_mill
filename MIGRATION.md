@@ -100,9 +100,10 @@ body deadline.
 | `schollz/pake/v3` | `src/pake.rs` | ✅ ported | All four curves incl. SIEC, written against Go-generated curve vectors; live-tested against Go in both roles. `ed25519` option not yet ported (croc never defaults to it). |
 | `src/tcp` | `src/tcp.rs` | ✅ ported | Relay serves stock Go croc clients (verified end-to-end); client-side `connect_to_tcp_server` verified against the stock Go relay. |
 | `src/models` | `src/models.rs` | ✅ constants | Custom-DNS default-relay resolution deferred. |
-| `src/utils` | `src/utils.rs` | 🟡 partial | Code phrases, xxhash/md5 hashing, missing-chunk ranges. imohash/highway pending. |
-| `src/croc` | `src/croc.rs` | ✅ core ported | Send/receive engine: peer PAKE, fileinfo, parallel chunked transfer, folders, resume/skip. Local-discovery, reconnect, zip, throttling pending (phase 3). |
-| `src/cli` | `src/main.rs` | 🟡 partial | `send`, `receive`, `relay`, `ping` functional; long tail of flags pending. |
+| `src/utils` | `src/utils.rs` | ✅ core ported | Code phrases, all four hash algorithms (xxhash/imohash/highway/md5, vector-tested), chunk ranges, open-port scan, local IPs. |
+| `schollz/peerdiscovery` | `src/discovery.rs` | ✅ ported | UDP multicast announce/discover (IPv4; same wire format, same self-filter semantics). IPv6 group pending. |
+| `src/croc` | `src/croc.rs` | ✅ ported | Send/receive engine incl. the local path: auto-started local relay, multicast announce, `ips?` probe hand-off, `--ip` direct, zip mode, text mode, throttling. Reconnect-after-drop pending (phase 4). |
+| `src/cli` | `src/main.rs` | 🟡 mostly | `send` (files/folders/text/stdin/zip/throttle), `receive`, `relay`, `ping`. Pending: `--remember`, QR, proxies, excludes, `--git`. |
 | `src/diskusage`, `src/install` | — | ⬜ later | Platform niceties, not protocol. |
 
 ### Crate choices
@@ -170,6 +171,13 @@ source) or `cargo test` (self-contained):
   rust→go, and go→rust file transfers, checksums equal. Folder transfers
   (nested + empty dirs) and identical-file skip verified in both
   directions during development.
+* ✅ **Local-network route**: a stock Go recipient's `ips?` probe hops
+  onto the rusty-croc sender's auto-started local relay (and vice versa —
+  the Rust recipient hops onto Go's); `--ip` direct connections verified
+  both directions; multicast announce/discover unit-tested over loopback.
+* ✅ **`--text` both directions**, **`--zip` go→rust** (auto-unpacked),
+  `--throttle` rate limiting, and a live identical-file skip with
+  `--hash imohash` across implementations.
 
 ## Roadmap
 
@@ -192,18 +200,41 @@ time (peers then skip their optional chtimes on skipped files), reconnect
 support is declared as version 0 (Go peers fall back to no-reconnect),
 and `imohash`/`highway` hash options aren't ported yet.
 
-### Phase 3 — remaining engine features + CLI/UX parity
+### Phase 3 — local-network path + everyday features (done: core)
 
-* Local-network path: UDP multicast discovery (`peerdiscovery`), local
-  relay auto-start, `--ip` direct connections.
+* **Local path**: the sender auto-starts a relay on open ports (0.0.0.0),
+  announces `croc<port>` over UDP multicast (`src/discovery.rs`, same wire
+  format as `peerdiscovery`), and races the local route against the remote
+  relay. The recipient tries multicast discovery, then the `ips?` probe —
+  a SimpleMessage PAKE + encrypted query over the relay that returns the
+  sender's `[local-port, ip...]` — and hops onto the sender's local relay
+  when reachable. `--ip` connects straight to a sender. Verified against
+  stock croc in both directions (the probe hand-off is croc's own
+  same-host/TestFlag path; multicast between distinct hosts is
+  unit-tested via loopback).
+* **`--text` / stdin**: temp `croc-stdin-*` files with `SendingText`,
+  printed on arrival; incoming text files get random local names exactly
+  like Go (this matters — without the rename, a same-directory transfer
+  self-skips).
+* **`--zip`**: folders zipped (stored, base-name-prefixed entries like
+  `utils.ZipDirectory`), sent as `TempFile`, auto-unpacked and removed on
+  the receiving side.
+* **`--throttle`**: token-bucket rate limit shared across data threads.
+* **imohash/highway**: full hash-algorithm parity, vector-tested and
+  live-tested (identical-file skip with `--hash imohash` across
+  implementations).
+
+Still pending from this phase: IPv6 multicast group, custom
+`--multicast` address.
+
+### Phase 4 — reconnect, CLI tail, hardening
+
 * Reconnect-and-resume on dropped relays (ReconnectVersion 1 rooms).
-* Zip-folder mode (`--zip`), text sending (`--text`), stdin piping.
-* Throttling (`--throttle`), imohash/highway hashing.
 * CLI parity: code-phrase prompt, `--remember` config file, QR code,
   proxy dialing (SOCKS5/HTTP `CONNECT`), custom-DNS relay resolution,
   exclude patterns, `--git` mode.
 
-### Phase 4 — hardening & divergence budget
+### Phase 5 — hardening & divergence budget
 
 * Constant-time curve arithmetic for p256/p384/p521 via RustCrypto crates
   (keep bignum SIEC, or upstream a constant-time SIEC — Go's is also

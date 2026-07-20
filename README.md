@@ -4,13 +4,14 @@ A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
 
-**Status: phase 2 — transfers work, cross-implementation.** The protocol
-layers, the relay server, and the client file-transfer engine are ported and
+**Status: phase 3 — feature parity for everyday use.** The protocol layers,
+relay server, file-transfer engine, and the local-network path are ported and
 **wire-compatible with stock croc v10**: rusty-croc can send to stock croc,
-receive from stock croc, and relay for stock croc — files and folders, with
-resume/skip semantics (verified end-to-end; see `scripts/interop_test.sh`).
-See [MIGRATION.md](MIGRATION.md) for the full analysis, module mapping, and
-roadmap.
+receive from stock croc, and relay for stock croc — files, folders, text, and
+zipped folders, with resume/skip, local-relay hand-off, direct `--ip`
+connections, throttling, and all four hash algorithms (verified end-to-end;
+see `scripts/interop_test.sh`). See [MIGRATION.md](MIGRATION.md) for the full
+analysis, module mapping, and roadmap.
 
 ## Usage
 
@@ -29,9 +30,26 @@ rusty-croc relay --ports 9009,9010,9011,9012,9013 --pass pass123
 rusty-croc ping croc.schollz.com:9009
 ```
 
+```sh
+# More ways to send
+rusty-croc send --text "quick message"      # send text instead of a file
+echo hi | rusty-croc send -                 # send stdin
+rusty-croc send --zip my-folder             # zip the folder first
+rusty-croc send --throttle 10M big-file     # limit upload speed
+
+# Receive directly from a sender on your network (no relay round-trip)
+rusty-croc receive --ip 192.168.1.5:9009 <code>
+```
+
 Useful flags: `--relay host:port`, `--pass`, `--yes` (skip the accept
-prompt), `--overwrite`, `--curve p256|p384|p521|siec`, `--no-compress`,
-`--no-multi`.
+prompt), `--overwrite`, `--curve p256|p384|p521|siec`,
+`--hash xxhash|imohash|highway|md5`, `--no-compress`, `--no-multi`,
+`--local` (LAN only), `--no-local`.
+
+When sender and receiver share a network, rusty-croc behaves like croc: the
+sender starts a local relay and announces it (UDP multicast + the `ips?`
+side-channel through the relay), and the receiver hops onto it so data never
+leaves the LAN.
 
 ## What's ported
 
@@ -44,7 +62,9 @@ prompt), `--overwrite`, `--curve p256|p384|p521|siec`, `--no-compress`,
 | Code phrases (`mnemonicode`) | ✅ vector-tested against Go |
 | Relay server + relay client handshake (`tcp`) | ✅ end-to-end with stock croc |
 | File-transfer engine (`croc`: send/receive, folders, resume) | ✅ interop-tested both directions |
-| Local-network discovery, reconnect, zip, throttling, proxies | ⬜ phase 3 |
+| Local-network path (discovery, local relay, `ips?` probe, `--ip`) | ✅ interop-tested both directions |
+| Text sending, stdin, `--zip`, `--throttle`, imohash/highway | ✅ interop-tested |
+| Reconnect-after-drop, proxies, `--remember`, QR codes | ⬜ phase 4 |
 
 ## Development
 

@@ -32,10 +32,89 @@ pub fn get_random_name() -> String {
     format!("{}-{}", generate_random_pin(), words.join("-"))
 }
 
+/// imohash with croc's "partial" parameters (`utils.IMOHashFile`):
+/// sample the first/middle/last 2 MiB for files ≥ 8 MiB, murmur3-x64-128,
+/// then overwrite the first bytes with the uvarint-encoded file size.
+pub fn imohash_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    const SAMPLE_SIZE: u64 = 16 * 16 * 8 * 1024; // 2 MiB, croc's imopartial
+    const SAMPLE_THRESHOLD: u64 = 128 * 1024;
+
+    let mut f = std::fs::File::open(path)?;
+    let size = f.metadata()?.len();
+    let mut data = Vec::new();
+    if size < SAMPLE_THRESHOLD || size < 4 * SAMPLE_SIZE {
+        f.read_to_end(&mut data)?;
+    } else {
+        use std::io::{Seek, SeekFrom};
+        let mut buf = vec![0u8; SAMPLE_SIZE as usize];
+        f.read_exact(&mut buf)?;
+        data.extend_from_slice(&buf);
+        f.seek(SeekFrom::Start(size / 2))?;
+        f.read_exact(&mut buf)?;
+        data.extend_from_slice(&buf);
+        f.seek(SeekFrom::End(-(SAMPLE_SIZE as i64)))?;
+        f.read_exact(&mut buf)?;
+        data.extend_from_slice(&buf);
+    }
+    let h = murmur3::murmur3_x64_128(&mut std::io::Cursor::new(&data), 0)
+        .map_err(std::io::Error::other)?;
+    // twmb/murmur3's Sum lays out h1 then h2 as big-endian.
+    let h1 = (h & 0xffff_ffff_ffff_ffff) as u64;
+    let h2 = (h >> 64) as u64;
+    let mut hash = [0u8; 16];
+    hash[..8].copy_from_slice(&h1.to_be_bytes());
+    hash[8..].copy_from_slice(&h2.to_be_bytes());
+    put_uvarint(&mut hash, size);
+    Ok(hash.to_vec())
+}
+
+/// Go's `binary.PutUvarint` into the head of `buf`.
+fn put_uvarint(buf: &mut [u8], mut x: u64) {
+    let mut i = 0;
+    while x >= 0x80 {
+        buf[i] = (x as u8) | 0x80;
+        x >>= 7;
+        i += 1;
+    }
+    buf[i] = x as u8;
+}
+
+/// HighwayHash-256 with croc's fixed key (`utils.HighwayHashFile`).
+pub fn highway_hash_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    use highway::HighwayHash;
+    const KEY_HEX: [u64; 4] = [
+        u64::from_le_bytes([0x15, 0x53, 0xc5, 0x38, 0x3f, 0xb0, 0xb8, 0x65]),
+        u64::from_le_bytes([0x78, 0xc3, 0x31, 0x0d, 0xa6, 0x65, 0xb4, 0xf6]),
+        u64::from_le_bytes([0xe0, 0x52, 0x1a, 0xcf, 0x22, 0xeb, 0x58, 0xa9]),
+        u64::from_le_bytes([0x95, 0x32, 0xff, 0xed, 0x02, 0xa6, 0xb1, 0x15]),
+    ];
+    let mut hasher = highway::HighwayHasher::new(highway::Key(KEY_HEX));
+    let mut f = std::fs::File::open(path)?;
+    let mut buf = vec![0u8; 1 << 16];
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.append(&buf[..n]);
+    }
+    let out = hasher.finalize256();
+    let mut bytes = Vec::with_capacity(32);
+    for word in out {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 /// Hash a file with the named algorithm, mirroring `utils.HashFile`.
 /// `xxhash` (croc's default) produces the 8-byte big-endian XXH64 sum, like
-/// Go's `cespare/xxhash` `Sum(nil)`. `imohash`/`highway` are not yet ported.
+/// Go's `cespare/xxhash` `Sum(nil)`.
 pub fn hash_file(path: &Path, algorithm: &str) -> std::io::Result<Vec<u8>> {
+    match algorithm {
+        "imohash" => return imohash_file(path),
+        "highway" => return highway_hash_file(path),
+        _ => {}
+    }
     match algorithm {
         "xxhash" => {
             let mut hasher = xxhash_rust::xxh64::Xxh64::new(0);
@@ -65,9 +144,46 @@ pub fn hash_file(path: &Path, algorithm: &str) -> std::io::Result<Vec<u8>> {
         }
         other => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            format!("hash algorithm '{other}' not yet ported (use xxhash or md5)"),
+            format!("unknown hash algorithm '{other}' (use xxhash, imohash, highway, or md5)"),
         )),
     }
+}
+
+/// Ports with nothing listening, mirroring `utils.FindOpenPorts`
+/// (a port is "open" for our use when dialing it fails).
+pub fn find_open_ports(host: &str, port_start: u16, num_ports: usize) -> Vec<u16> {
+    let mut open = Vec::new();
+    for port in port_start..port_start.saturating_add(200) {
+        let addr: std::net::SocketAddr = match format!("{host}:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => break,
+        };
+        if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(100))
+            .is_err()
+        {
+            open.push(port);
+        }
+        if open.len() >= num_ports {
+            break;
+        }
+    }
+    open
+}
+
+/// Non-loopback IPv4 addresses of this host, mirroring `utils.GetLocalIPs`.
+pub fn get_local_ips() -> Vec<String> {
+    let mut ips = Vec::new();
+    if let Ok(ifaces) = if_addrs::get_if_addrs() {
+        for iface in ifaces {
+            if iface.is_loopback() {
+                continue;
+            }
+            if let std::net::IpAddr::V4(v4) = iface.ip() {
+                ips.push(v4.to_string());
+            }
+        }
+    }
+    ips
 }
 
 /// Find all-zero chunks of an on-disk file, encoded as croc chunk ranges:
@@ -185,6 +301,43 @@ mod tests {
             hex::encode(hash_file(&p, "md5").unwrap()),
             "77add1d5f41223d5582fca736a5cb335"
         );
+    }
+
+    // Vectors from Go: utils.IMOHashFile / utils.HighwayHashFile over
+    // deterministic content (small = full-hash path, big = sampled path).
+    #[test]
+    fn imohash_highway_vectors_match_go() {
+        let dir = std::env::temp_dir().join("rusty-croc-imo-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let small: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let big: Vec<u8> = (0..9 * 1024 * 1024u64).map(|i| ((i * 7) % 253) as u8).collect();
+        let ps = dir.join("small.bin");
+        let pb = dir.join("big.bin");
+        std::fs::write(&ps, &small).unwrap();
+        std::fs::write(&pb, &big).unwrap();
+        assert_eq!(
+            hex::encode(imohash_file(&ps).unwrap()),
+            "e80762416fa3a01c3a12c3f073f1099e"
+        );
+        assert_eq!(
+            hex::encode(imohash_file(&pb).unwrap()),
+            "8080c00496dd707f36645be7f15df6f4"
+        );
+        assert_eq!(
+            hex::encode(highway_hash_file(&ps).unwrap()),
+            "e417fdbe375b8b83f33e4168cc64d621d13c6a107250935e60e0ee0654c48d1a"
+        );
+        assert_eq!(
+            hex::encode(highway_hash_file(&pb).unwrap()),
+            "451d67cac71669ce99505502ca8a688d41cc5145af4344873aa5f47ee6e624e9"
+        );
+    }
+
+    #[test]
+    fn find_open_ports_returns_requested_count() {
+        let ports = find_open_ports("127.0.0.1", 39000, 3);
+        assert_eq!(ports.len(), 3);
+        assert!(ports[0] >= 39000);
     }
 
     #[test]
