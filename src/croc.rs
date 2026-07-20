@@ -62,6 +62,18 @@ pub struct Options {
     pub overwrite: bool,
     pub no_compress: bool,
     pub no_multiplexing: bool,
+    /// Disable the local-network path entirely (croc's `--no-local`).
+    pub disable_local: bool,
+    /// Only use the local-network path (croc's `--local`).
+    pub only_local: bool,
+    /// Direct peer address for the recipient (croc's `--ip`).
+    pub ip: String,
+    /// Upload rate limit like "10M", "500K", "1G" (bytes/sec; croc's `--throttle`).
+    pub throttle_upload: String,
+    /// The payload is text to display, not a file to keep (croc's `--text`).
+    pub sending_text: bool,
+    /// Zip folders before sending (croc's `--zip`).
+    pub zip_folder: bool,
 }
 
 impl Default for Options {
@@ -77,6 +89,66 @@ impl Default for Options {
             overwrite: false,
             no_compress: false,
             no_multiplexing: false,
+            disable_local: false,
+            only_local: false,
+            ip: String::new(),
+            throttle_upload: String::new(),
+            sending_text: false,
+            zip_folder: false,
+        }
+    }
+}
+
+/// Parse croc's throttle syntax ("10M", "500K", "2G", or plain bytes/sec).
+fn parse_throttle(s: &str) -> Option<u64> {
+    if s.is_empty() {
+        return None;
+    }
+    let (num, mult) = match s.chars().last().unwrap() {
+        'g' | 'G' => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        'm' | 'M' => (&s[..s.len() - 1], 1024 * 1024),
+        'k' | 'K' => (&s[..s.len() - 1], 1024),
+        _ => (s, 1),
+    };
+    num.trim().parse::<u64>().ok().map(|n| n * mult)
+}
+
+/// Simple shared token-bucket rate limiter for upload throttling.
+struct Throttle {
+    rate: u64, // bytes per second
+    state: Mutex<(f64, std::time::Instant)>,
+}
+
+impl Throttle {
+    fn new(rate: u64) -> Self {
+        Throttle {
+            rate,
+            state: Mutex::new((rate as f64, std::time::Instant::now())),
+        }
+    }
+
+    /// Block until `n` bytes may be sent.
+    fn take(&self, n: usize) {
+        loop {
+            let wait = {
+                let mut st = self.state.lock().unwrap();
+                let now = std::time::Instant::now();
+                let elapsed = now.duration_since(st.1).as_secs_f64();
+                st.0 = (st.0 + elapsed * self.rate as f64).min(self.rate as f64);
+                st.1 = now;
+                if st.0 >= n as f64 {
+                    st.0 -= n as f64;
+                    None
+                } else {
+                    Some(Duration::from_secs_f64(
+                        ((n as f64 - st.0) / self.rate as f64).min(1.0),
+                    ))
+                }
+            };
+            match wait {
+                None => return,
+                Some(d) => std::thread::sleep(d),
+            }
         }
     }
 }
@@ -297,8 +369,15 @@ fn walk_dir(
 }
 
 /// Collect files/folders to send. Mirrors `croc.GetFilesInfo` without the
-/// zip/gitignore options.
+/// gitignore options.
 pub fn get_files_info(paths: &[String]) -> Result<(Vec<FileInfo>, Vec<FileInfo>, i64)> {
+    get_files_info_opts(paths, false)
+}
+
+pub fn get_files_info_opts(
+    paths: &[String],
+    zip_folder: bool,
+) -> Result<(Vec<FileInfo>, Vec<FileInfo>, i64)> {
     let mut files = Vec::new();
     let mut empty_folders = Vec::new();
     let mut total_folders = 0i64;
@@ -306,7 +385,21 @@ pub fn get_files_info(paths: &[String]) -> Result<(Vec<FileInfo>, Vec<FileInfo>,
         let path = PathBuf::from(p);
         let meta = std::fs::symlink_metadata(&path)
             .map_err(|e| format!("cannot access '{p}': {e}"))?;
-        if meta.is_dir() {
+        if meta.is_dir() && zip_folder {
+            let abs = std::fs::canonicalize(&path)?;
+            let dest = format!(
+                "{}.zip",
+                abs.file_name().unwrap_or_default().to_string_lossy()
+            );
+            if Path::new(&dest).exists() {
+                return Err(format!("file already exists: {dest}").into());
+            }
+            eprintln!("Zipping {} to {dest}", path.display());
+            zip_directory(Path::new(&dest), &abs)?;
+            let mut fi = file_info_from(Path::new(&dest), "./".to_string())?;
+            fi.temp_file = true;
+            files.push(fi);
+        } else if meta.is_dir() {
             let abs = std::fs::canonicalize(&path)?;
             walk_dir(&abs, &abs, &mut files, &mut empty_folders, &mut total_folders)?;
         } else {
@@ -314,6 +407,71 @@ pub fn get_files_info(paths: &[String]) -> Result<(Vec<FileInfo>, Vec<FileInfo>,
         }
     }
     Ok((files, empty_folders, total_folders))
+}
+
+/// Zip `src_dir` into `dest`, entries prefixed with the folder's base name —
+/// the layout `utils.ZipDirectory` produces (stored, since croc compresses
+/// in flight).
+fn zip_directory(dest: &Path, src_dir: &Path) -> Result<()> {
+    use zip::write::SimpleFileOptions;
+    let base = src_dir
+        .file_name()
+        .ok_or("bad source dir")?
+        .to_string_lossy()
+        .to_string();
+    let f = File::create(dest)?;
+    let mut zw = zip::ZipWriter::new(f);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Stored)
+        .large_file(true);
+    let mut stack = vec![src_dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let p = entry.path();
+            let rel = p.strip_prefix(src_dir).unwrap_or(&p);
+            let name = format!("{base}/{}", rel.to_string_lossy().replace('\\', "/"));
+            if p.is_dir() {
+                zw.add_directory(format!("{name}/"), options)?;
+                stack.push(p);
+            } else {
+                zw.start_file(name, options)?;
+                let mut f = File::open(&p)?;
+                std::io::copy(&mut f, &mut zw)?;
+            }
+        }
+    }
+    zw.finish()?;
+    Ok(())
+}
+
+/// Safely extract a received zip into `dest`, mirroring `utils.UnzipDirectory`.
+fn unzip_directory(dest: &Path, zip_path: &Path) -> Result<()> {
+    let f = File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(f)?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(format!("unsafe zip entry: {}", entry.name()).into());
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut of = File::create(&out)?;
+        std::io::copy(&mut entry, &mut of)?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            set_perm(&out, mode);
+        }
+        eprintln!("{}", out.display());
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +552,71 @@ impl RecvState {
     }
 }
 
+/// A won connection route (local or remote relay) for the sender.
+struct Route {
+    control: Comm,
+    banner: String,
+    ipaddr: String,
+    host: String,
+}
+
+/// Mirrors senderWaitForHandshake: answer optional `pake1`/`ips?` probes
+/// from recipients doing local discovery, until `handshake` arrives.
+/// `local_info` is the ips? reply: `[local-relay-port, ip1, ip2, ...]`.
+fn sender_wait_for_handshake(
+    control: &mut Comm,
+    opts: &Options,
+    local_info: &Option<Vec<String>>,
+) -> Result<()> {
+    let mut k_b: Option<Vec<u8>> = None;
+    loop {
+        let raw = control.receive()?;
+        // If a session key exists, frames may be encrypted. Short frames
+        // (`handshake`, `[1]`) fall through crypt's minimum-length check
+        // unchanged — the same trick Go relies on.
+        let data = match &k_b {
+            Some(k) => match crypt::decrypt(&raw, k) {
+                Ok(d) => d,
+                Err(crypt::CryptError::TooShort) => raw.clone(),
+                Err(_) => return Err("handshake decryption failed (wrong code?)".into()),
+            },
+            None => raw.clone(),
+        };
+        if data == b"handshake" {
+            return Ok(());
+        }
+        if data == [1] {
+            continue;
+        }
+        if data == b"ips?" {
+            let reply = match local_info {
+                Some(ips) => serde_json::to_vec(ips)?,
+                None => b"null".to_vec(),
+            };
+            let enc = match &k_b {
+                Some(k) => crypt::encrypt(&reply, k)?,
+                None => return Err("ips? before pake".into()),
+            };
+            control.send(&enc)?;
+            continue;
+        }
+        if let Ok(sm) = serde_json::from_slice::<SimpleMessage>(&data) {
+            if sm.kind == "pake1" {
+                let mut b = Pake::init_curve(pake_secret(&opts.shared_secret), 1, &opts.curve)?;
+                b.update(&sm.bytes)?;
+                k_b = Some(b.session_key()?);
+                let reply = SimpleMessage {
+                    bytes: b.bytes(),
+                    kind: "pake2".to_string(),
+                };
+                control.send(&serde_json::to_vec(&reply)?)?;
+                continue;
+            }
+        }
+        return Err("gracefully refusing using the public relay".into());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The client
 // ---------------------------------------------------------------------------
@@ -431,6 +654,8 @@ pub struct Client {
     // recipient side
     recv: Arc<Mutex<RecvState>>,
     data_streams: Vec<std::net::TcpStream>,
+
+    throttle: Option<Arc<Throttle>>,
 }
 
 fn now_secs() -> u64 {
@@ -497,6 +722,7 @@ impl Client {
             chunk_map: HashSet::new(),
             recv: Arc::new(Mutex::new(RecvState::new())),
             data_streams: Vec::new(),
+            throttle: None,
         })
     }
 
@@ -518,10 +744,11 @@ impl Client {
     }
 
     // -----------------------------------------------------------------------
-    // Sender entry point — mirrors croc.Client.Send (relay route only).
+    // Sender entry point — mirrors croc.Client.Send, racing the local-relay
+    // route against the remote-relay route like Go's errchan pattern.
     // -----------------------------------------------------------------------
     pub fn send(opts: Options, paths: &[String]) -> Result<()> {
-        let (files, empty_folders, total_folders) = get_files_info(paths)?;
+        let (files, empty_folders, total_folders) = get_files_info_opts(paths, opts.zip_folder)?;
         let mut total_size = 0i64;
         let mut files = files;
         for fi in files.iter_mut() {
@@ -547,84 +774,227 @@ impl Client {
         eprintln!("Code is: {}", opts.shared_secret);
         eprintln!("\nOn the other computer run:\n\nrusty-croc {}\n(or with stock croc: CROC_SECRET={:?} croc)", opts.shared_secret, opts.shared_secret);
 
-        let (control, banner, ipaddr, host) = Self::connect_relay(&opts)?;
-        let mut c = Self::new(opts, control, &banner, ipaddr, host)?;
+        // Set up the local relay + discovery broadcast, mirroring
+        // setupLocalRelay/broadcastOnLocalNetwork.
+        let stop_broadcast = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut local_info: Option<Vec<String>> = None;
+        let mut local_port = String::new();
+        if !opts.disable_local {
+            let ports = utils::find_open_ports("127.0.0.1", 9009, 5);
+            if ports.len() == 5 {
+                local_port = ports[0].to_string();
+                let banner: String = ports[1..]
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                for (i, port) in ports.iter().enumerate() {
+                    let b = if i == 0 { banner.clone() } else { String::new() };
+                    let pass = opts.relay_password.clone();
+                    let port = port.to_string();
+                    std::thread::spawn(move || {
+                        let _ = tcp::RelayServer::new("0.0.0.0", &port, &pass, &b).run();
+                    });
+                }
+                let mut ips = vec![local_port.clone()];
+                ips.extend(utils::get_local_ips());
+                local_info = Some(ips);
+
+                let payload = format!("croc{local_port}").into_bytes();
+                let settings = crate::discovery::Settings {
+                    payload,
+                    time_limit: if opts.only_local {
+                        None
+                    } else {
+                        Some(Duration::from_secs(30))
+                    },
+                    ..Default::default()
+                };
+                let stop = Arc::clone(&stop_broadcast);
+                std::thread::spawn(move || {
+                    let _ = crate::discovery::broadcast(&settings, stop);
+                });
+            } else {
+                log::debug!("not enough open ports for a local relay");
+            }
+        }
+
+        // Race the routes; first successful handshake wins.
+        let (tx, rx) = std::sync::mpsc::channel::<Result<Route>>();
+        let route_streams: Arc<Mutex<Vec<std::net::TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut n_routes = 0;
+
+        if !local_port.is_empty() {
+            n_routes += 1;
+            let opts2 = opts.clone();
+            let tx2 = tx.clone();
+            let local_info2 = local_info.clone();
+            let streams = Arc::clone(&route_streams);
+            let local_addr = format!("127.0.0.1:{local_port}");
+            std::thread::spawn(move || {
+                let result = (|| -> Result<Route> {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let room = room_name(&opts2.shared_secret);
+                    let (mut control, banner, ipaddr) = tcp::connect_to_tcp_server(
+                        &local_addr,
+                        &opts2.relay_password,
+                        &room,
+                        None,
+                    )
+                    .map_err(|e| -> Error { format!("local relay: {e}").into() })?;
+                    streams.lock().unwrap().push(control.stream().try_clone()?);
+                    sender_wait_for_handshake(&mut control, &opts2, &local_info2)?;
+                    log::debug!("sender using local relay route");
+                    Ok(Route {
+                        control,
+                        banner,
+                        ipaddr,
+                        host: "127.0.0.1".to_string(),
+                    })
+                })();
+                let _ = tx2.send(result);
+            });
+        }
+
+        if !opts.only_local {
+            n_routes += 1;
+            let opts2 = opts.clone();
+            let tx2 = tx.clone();
+            let local_info2 = local_info.clone();
+            let streams = Arc::clone(&route_streams);
+            std::thread::spawn(move || {
+                let result = (|| -> Result<Route> {
+                    let (mut control, banner, ipaddr, host) = Client::connect_relay(&opts2)?;
+                    streams.lock().unwrap().push(control.stream().try_clone()?);
+                    sender_wait_for_handshake(&mut control, &opts2, &local_info2)?;
+                    log::debug!("sender using remote relay route");
+                    Ok(Route {
+                        control,
+                        banner,
+                        ipaddr,
+                        host,
+                    })
+                })();
+                let _ = tx2.send(result);
+            });
+        }
+        drop(tx);
+        if n_routes == 0 {
+            return Err("no transfer routes available (local disabled and only-local set?)".into());
+        }
+
+        let mut route: Option<Route> = None;
+        let mut last_err: Error = "no routes completed".into();
+        for _ in 0..n_routes {
+            match rx.recv() {
+                Ok(Ok(r)) => {
+                    route = Some(r);
+                    break;
+                }
+                Ok(Err(e)) => last_err = e,
+                Err(_) => break,
+            }
+        }
+        let route = match route {
+            Some(r) => r,
+            None => return Err(last_err),
+        };
+        // Cut off the losing route(s).
+        {
+            let winner = route.control.stream().peer_addr().ok();
+            for s in route_streams.lock().unwrap().iter() {
+                if s.peer_addr().ok() != winner {
+                    let _ = s.shutdown(Shutdown::Both);
+                }
+            }
+        }
+
+        let throttle = parse_throttle(&opts.throttle_upload).map(|r| Arc::new(Throttle::new(r)));
+        let mut c = Self::new(opts, route.control, &route.banner, route.ipaddr, route.host)?;
+        c.throttle = throttle;
         c.files = files;
         c.empty_folders = empty_folders;
         c.total_folders = total_folders;
 
-        c.sender_wait_for_handshake()?;
         let result = c.transfer_loop();
+        stop_broadcast.store(true, std::sync::atomic::Ordering::Relaxed);
         c.shutdown();
-        if result.is_err() {
-            if let Err(ref e) = result {
-                c.send_error(&e.to_string());
+        match &result {
+            Ok(()) => {
+                // Clean up temporary payloads (zip-folder mode, --text).
+                for fi in &c.files {
+                    if fi.temp_file {
+                        let full = Path::new(&fi.folder_source).join(&fi.name);
+                        eprintln!("Removing {}", fi.name);
+                        let _ = std::fs::remove_file(full);
+                    }
+                }
             }
+            Err(e) => c.send_error(&e.to_string()),
         }
         result
     }
 
-    /// Mirrors senderWaitForHandshake: answer optional `pake1`/`ips?` probes
-    /// from stock recipients doing local discovery, until `handshake` arrives.
-    fn sender_wait_for_handshake(&mut self) -> Result<()> {
-        let mut k_b: Option<Vec<u8>> = None;
-        loop {
-            let raw = self.control.receive()?;
-            // If a session key exists, frames may be encrypted. Short frames
-            // (`handshake`, `[1]`) fall through crypt's minimum-length check
-            // unchanged — the same trick Go relies on.
-            let data = match &k_b {
-                Some(k) => match crypt::decrypt(&raw, k) {
-                    Ok(d) => d,
-                    Err(crypt::CryptError::TooShort) => raw.clone(),
-                    Err(_) => return Err("handshake decryption failed (wrong code?)".into()),
-                },
-                None => raw.clone(),
+    // -----------------------------------------------------------------------
+    // Recipient entry point — mirrors croc.Client.Receive: multicast
+    // discovery, then the relay, then the ips? probe to jump to the
+    // sender's local relay when reachable.
+    // -----------------------------------------------------------------------
+    pub fn receive(mut opts: Options) -> Result<()> {
+        eprintln!("connecting...");
+        let is_ip_set = !opts.ip.is_empty();
+        let mut using_local = false;
+        if is_ip_set {
+            opts.relay_address = opts.ip.clone();
+        } else if !opts.disable_local {
+            // Look for a sender broadcasting on the local network.
+            let settings = crate::discovery::Settings {
+                payload: b"ok".to_vec(),
+                time_limit: Some(Duration::from_millis(200)),
+                limit: Some(1),
+                ..Default::default()
             };
-            if data == b"handshake" {
-                return Ok(());
-            }
-            if data == [1] {
-                continue;
-            }
-            if data == b"ips?" {
-                // No local-relay support yet: reply "null" (no candidates).
-                let enc = match &k_b {
-                    Some(k) => crypt::encrypt(b"null", k)?,
-                    None => return Err("ips? before pake".into()),
-                };
-                self.control.send(&enc)?;
-                continue;
-            }
-            if let Ok(sm) = serde_json::from_slice::<SimpleMessage>(&data) {
-                if sm.kind == "pake1" {
-                    let mut b = Pake::init_curve(
-                        pake_secret(&self.opts.shared_secret),
-                        1,
-                        &self.opts.curve,
-                    )?;
-                    b.update(&sm.bytes)?;
-                    k_b = Some(b.session_key()?);
-                    let reply = SimpleMessage {
-                        bytes: b.bytes(),
-                        kind: "pake2".to_string(),
-                    };
-                    self.control.send(&serde_json::to_vec(&reply)?)?;
-                    continue;
+            if let Ok(discoveries) = crate::discovery::discover(&settings) {
+                for d in discoveries {
+                    if let Some(port) = d.payload.strip_prefix(b"croc") {
+                        let port = String::from_utf8_lossy(port);
+                        let port = if port.is_empty() {
+                            models::DEFAULT_PORT.to_string()
+                        } else {
+                            port.to_string()
+                        };
+                        let address = format!("{}:{}", d.address, port);
+                        if tcp::ping_server(&address).is_ok() {
+                            log::debug!("switching to local relay {address}");
+                            opts.relay_address = address;
+                            using_local = true;
+                            break;
+                        }
+                    }
                 }
             }
-            return Err("gracefully refusing using the public relay".into());
         }
-    }
+        if opts.only_local && !using_local && !is_ip_set {
+            return Err("could not find sender on the local network (--local set)".into());
+        }
 
-    // -----------------------------------------------------------------------
-    // Recipient entry point — mirrors croc.Client.Receive (relay route only).
-    // -----------------------------------------------------------------------
-    pub fn receive(opts: Options) -> Result<()> {
-        eprintln!("connecting...");
         let (control, banner, ipaddr, host) = Self::connect_relay(&opts)?;
         let mut c = Self::new(opts, control, &banner, ipaddr, host)?;
-        // No local-discovery: go straight to the handshake.
+        c.external_ip_connected = if using_local {
+            c.opts.relay_address.clone()
+        } else {
+            String::new()
+        };
+
+        // The ips? probe: ask the sender (via the relay) for its local relay
+        // candidates and switch to one if reachable. Mirrors the closure in
+        // Go's Receive; failures are non-fatal.
+        if !using_local && !is_ip_set && !c.opts.disable_local {
+            if let Err(e) = c.try_local_probe() {
+                log::debug!("local probe failed (continuing over relay): {e}");
+            }
+        }
+
         c.control.send(b"handshake")?;
         eprintln!("securing channel...");
         // Recipient initiates the peer PAKE (role 0) with its curve choice.
@@ -638,12 +1008,85 @@ impl Client {
         c.pake = Some(pake);
         let result = c.transfer_loop();
         c.shutdown();
-        if result.is_err() {
-            if let Err(ref e) = result {
-                c.send_error(&e.to_string());
+        match &result {
+            Ok(()) => {
+                let sending_text = c.recv.lock().unwrap().sending_text;
+                for fi in &c.files {
+                    let (_, dest) = normalize_receive_file_path(&fi.folder_remote, &fi.name)?;
+                    if fi.temp_file && fi.name.ends_with(".zip") {
+                        // Zip-folder mode: unpack transferred archives.
+                        if dest.exists() {
+                            unzip_directory(Path::new("."), &dest)?;
+                            let _ = std::fs::remove_file(&dest);
+                        }
+                    } else if sending_text {
+                        // Text was printed during receive; drop the temp file.
+                        let _ = std::fs::remove_file(&dest);
+                    }
+                }
             }
+            Err(e) => c.send_error(&e.to_string()),
         }
         result
+    }
+
+    /// Recipient's `ips?` probe over the relay: run a SimpleMessage PAKE,
+    /// ask the sender for its local relay `[port, ip...]`, and if one of the
+    /// candidates answers, switch the control connection to it.
+    fn try_local_probe(&mut self) -> Result<()> {
+        let mut a = Pake::init_curve(pake_secret(&self.opts.shared_secret), 0, &self.opts.curve)?;
+        let msg = SimpleMessage {
+            bytes: a.bytes(),
+            kind: "pake1".to_string(),
+        };
+        self.control.send(&serde_json::to_vec(&msg)?)?;
+        let reply: SimpleMessage = serde_json::from_slice(&self.control.receive()?)?;
+        if reply.kind != "pake2" {
+            return Err(format!("expected pake2, got '{}'", reply.kind).into());
+        }
+        a.update(&reply.bytes)?;
+        let k_a = a.session_key()?;
+
+        self.control.send(&crypt::encrypt(b"ips?", &k_a)?)?;
+        let enc = self.control.receive()?;
+        let data = crypt::decrypt(&enc, &k_a)?;
+        let ips: Vec<String> = serde_json::from_slice(&data).unwrap_or_default();
+        log::debug!("sender's local candidates: {ips:?}");
+        if ips.len() <= 1 {
+            return Ok(());
+        }
+        let port = &ips[0];
+        let room = room_name(&self.opts.shared_secret);
+        for ip in &ips[1..] {
+            let address = format!("{ip}:{port}");
+            match tcp::connect_to_tcp_server(
+                &address,
+                &self.opts.relay_password,
+                &room,
+                Some(Duration::from_millis(500)),
+            ) {
+                Ok((conn, banner, ipaddr)) => {
+                    log::debug!("local connection established to {address}");
+                    let _ = self.control.stream().shutdown(Shutdown::Both);
+                    self.control = conn;
+                    self.control_tx = Arc::new(Mutex::new(self.control.try_clone()?));
+                    self.relay_host = ip.clone();
+                    self.relay_ports = banner
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if self.opts.no_multiplexing {
+                        self.relay_ports.truncate(1);
+                    }
+                    self.external_ip = ipaddr;
+                    self.external_ip_connected = address;
+                    return Ok(());
+                }
+                Err(e) => log::debug!("could not connect to {address}: {e}"),
+            }
+        }
+        Ok(())
     }
 
     fn shutdown(&mut self) {
@@ -659,6 +1102,19 @@ impl Client {
     // The message loop — mirrors croc.Client.transfer + processMessage.
     // -----------------------------------------------------------------------
     fn transfer_loop(&mut self) -> Result<()> {
+        let result = self.transfer_loop_inner();
+        // Mirror Go's transfer(): errors after a successful transfer (e.g. the
+        // peer's in-process local relay dying with it) are purged.
+        if self.success {
+            if let Err(e) = &result {
+                log::debug!("purging error after successful transfer: {e}");
+            }
+            return Ok(());
+        }
+        result
+    }
+
+    fn transfer_loop_inner(&mut self) -> Result<()> {
         loop {
             let data = self.control.receive().map_err(|e| -> Error {
                 if !self.step1_channel_secured {
@@ -816,7 +1272,17 @@ impl Client {
             st.sending_text = si.sending_text;
         }
         self.total_folders = si.total_number_folders;
-        let files = si.files_to_transfer.unwrap_or_default();
+        let mut files = si.files_to_transfer.unwrap_or_default();
+        // Mirror Go: text payloads named croc-stdin-* get a random local name
+        // so they never collide with an existing temp file (e.g. the sender's
+        // own, when both run in one directory).
+        if si.sending_text {
+            for fi in files.iter_mut() {
+                if fi.name.starts_with("croc-stdin-") {
+                    fi.name = format!("croc-text-{}", rand::random::<u32>());
+                }
+            }
+        }
         // Validate every destination before accepting anything.
         for fi in &files {
             normalize_receive_file_path(&fi.folder_remote, &fi.name)?;
@@ -912,6 +1378,7 @@ impl Client {
                 machine_id: machine_id(),
                 hash_algorithm: self.opts.hash_algorithm.clone(),
                 no_compress: self.opts.no_compress,
+                sending_text: self.opts.sending_text,
                 // reconnect_version 0 = "old peer": Go then disables its
                 // reconnect logic, which this port doesn't support yet.
                 ..Default::default()
@@ -1087,6 +1554,7 @@ impl Client {
             let conn = Arc::clone(&self.data_conns[i]);
             let key = key.clone();
             let path = path.clone();
+            let throttle = self.throttle.clone();
             self.sender_threads.push(std::thread::spawn(move || {
                 let mut f = File::open(&path)
                     .map_err(|e| -> Error { format!("open {}: {e}", path.display()).into() })?;
@@ -1095,6 +1563,9 @@ impl Client {
                 for (pos, len) in chunk_list {
                     f.seek(SeekFrom::Start(pos))?;
                     f.read_exact(&mut buf[..len])?;
+                    if let Some(t) = &throttle {
+                        t.take(len);
+                    }
                     let mut payload = Vec::with_capacity(8 + len);
                     payload.extend_from_slice(&pos.to_le_bytes());
                     payload.extend_from_slice(&buf[..len]);
@@ -1226,11 +1697,13 @@ fn receive_data_loop(
             st.file = None; // drop → close
             eprintln!("\r100% {}", path.display());
             if sending_text {
+                // Print now; the temp file itself is removed in the
+                // end-of-transfer cleanup (deleting it here would make the
+                // next-file scan re-request it forever, mirroring Go).
                 if let Ok(text) = std::fs::read_to_string(&path) {
                     print!("{text}");
                     let _ = std::io::stdout().flush();
                 }
-                let _ = std::fs::remove_file(&path);
             }
             drop(st);
             let payload =

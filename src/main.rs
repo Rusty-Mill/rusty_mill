@@ -38,21 +38,35 @@ struct TransferFlags {
     /// Disable multiplexing (use a single transfer connection)
     #[arg(long)]
     no_multi: bool,
+    /// Force local-network-only transfer
+    #[arg(long)]
+    local: bool,
+    /// Disable the local-network path
+    #[arg(long)]
+    no_local: bool,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Send file(s) or folder
+    /// Send file(s), folder, or text
     Send {
-        /// Files or folders to send
-        #[arg(required = true)]
+        /// Files or folders to send ("-" reads stdin)
         files: Vec<String>,
         /// Codephrase used to connect to relay (min 6 characters)
         #[arg(long)]
         code: Option<String>,
-        /// Hash algorithm (xxhash, md5)
+        /// Hash algorithm (xxhash, imohash, highway, md5)
         #[arg(long, default_value = "xxhash")]
         hash: String,
+        /// Send some text instead of a file
+        #[arg(long, short = 't')]
+        text: Option<String>,
+        /// Zip each folder into a single archive before sending
+        #[arg(long)]
+        zip: bool,
+        /// Throttle the upload speed, e.g. 500K, 10M, 1G
+        #[arg(long, default_value = "")]
+        throttle: String,
         #[command(flatten)]
         flags: TransferFlags,
     },
@@ -67,6 +81,9 @@ enum Command {
         /// Overwrite existing files without prompting
         #[arg(long)]
         overwrite: bool,
+        /// Connect directly to this sender address (ip:port), skipping discovery
+        #[arg(long, default_value = "")]
+        ip: String,
         #[command(flatten)]
         flags: TransferFlags,
     },
@@ -105,33 +122,16 @@ fn main() {
             files,
             code,
             hash,
+            text,
+            zip,
+            throttle,
             flags,
-        } => {
-            let secret = match code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty())) {
-                Some(c) => c,
-                None => utils::get_random_name(),
-            };
-            if secret.len() < 6 {
-                Err("code is too short (must be at least 6 characters)".into())
-            } else {
-                let opts = croc::Options {
-                    is_sender: true,
-                    shared_secret: secret,
-                    relay_address: flags.relay,
-                    relay_password: flags.pass,
-                    curve: flags.curve,
-                    hash_algorithm: hash,
-                    no_compress: flags.no_compress,
-                    no_multiplexing: flags.no_multi,
-                    ..Default::default()
-                };
-                croc::Client::send(opts, &files).map_err(|e| e as Box<dyn std::error::Error>)
-            }
-        }
+        } => send_command(files, code, hash, text, zip, throttle, flags),
         Command::Receive {
             code,
             yes,
             overwrite,
+            ip,
             flags,
         } => {
             let secret = code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty()));
@@ -151,6 +151,9 @@ fn main() {
                         overwrite,
                         no_compress: flags.no_compress,
                         no_multiplexing: flags.no_multi,
+                        disable_local: flags.no_local,
+                        only_local: flags.local,
+                        ip,
                         ..Default::default()
                     };
                     croc::Client::receive(opts).map_err(|e| e as Box<dyn std::error::Error>)
@@ -166,6 +169,68 @@ fn main() {
         eprintln!("error: {e}");
         std::process::exit(1);
     }
+}
+
+fn send_command(
+    mut files: Vec<String>,
+    code: Option<String>,
+    hash: String,
+    text: Option<String>,
+    zip: bool,
+    throttle: String,
+    flags: TransferFlags,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let secret =
+        match code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty())) {
+            Some(c) => c,
+            None => utils::get_random_name(),
+        };
+    if secret.len() < 6 {
+        return Err("code is too short (must be at least 6 characters)".into());
+    }
+
+    // --text and stdin ("-") become a temp file, like croc's croc-stdin-*.
+    let mut temp_path: Option<std::path::PathBuf> = None;
+    let sending_text = text.is_some();
+    if let Some(t) = text {
+        let p = std::path::PathBuf::from(format!("croc-stdin-{}", std::process::id()));
+        std::fs::write(&p, t)?;
+        files = vec![p.to_string_lossy().to_string()];
+        temp_path = Some(p);
+    } else if files.len() == 1 && files[0] == "-" {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        std::io::stdin().read_to_end(&mut buf)?;
+        let p = std::path::PathBuf::from(format!("croc-stdin-{}", std::process::id()));
+        std::fs::write(&p, buf)?;
+        files = vec![p.to_string_lossy().to_string()];
+        temp_path = Some(p);
+    }
+    if files.is_empty() {
+        return Err("provide files/folders to send, --text, or '-' for stdin".into());
+    }
+
+    let opts = croc::Options {
+        is_sender: true,
+        shared_secret: secret,
+        relay_address: flags.relay,
+        relay_password: flags.pass,
+        curve: flags.curve,
+        hash_algorithm: hash,
+        no_compress: flags.no_compress,
+        no_multiplexing: flags.no_multi,
+        disable_local: flags.no_local,
+        only_local: flags.local,
+        throttle_upload: throttle,
+        sending_text,
+        zip_folder: zip,
+        ..Default::default()
+    };
+    let result = croc::Client::send(opts, &files).map_err(|e| e as Box<dyn std::error::Error>);
+    if let Some(p) = temp_path {
+        let _ = std::fs::remove_file(p);
+    }
+    result
 }
 
 fn relay(host: &str, ports: &str, pass: &str) -> Result<(), Box<dyn std::error::Error>> {
