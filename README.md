@@ -81,6 +81,26 @@ leaves the LAN.
 | Constant-time PAKE curves (p256/p384/p521 via RustCrypto) | ✅ interop-tested |
 | Custom-DNS relay resolution (`--internal-dns`) | ✅ live-tested |
 
+## Performance
+
+Full-stack loopback benchmark (each implementation's own client + relay,
+best-of-N, 4-core machine — see `scripts/bench.sh`). Loopback isolates
+CPU/protocol cost; over a real network both are network-bound and tie.
+
+| Scenario | rusty-croc | Go croc |
+|---|---|---|
+| Handshake latency (64 KiB) | 0.32 s | **0.28 s** |
+| 200 MB random, compression on (default) | **97 MB/s** | 57 MB/s |
+| 200 MB random, `--no-compress` | **240 MB/s** | 192 MB/s |
+| 200 MB zeros, compression on | **230 MB/s** | 65 MB/s |
+| Peak RSS (200 MB transfer) | ~6 MB | ~6 MB |
+| Binary size | **4.8 MB** | 15.0 MB |
+
+rusty-croc is faster on throughput (most on the compression path, where
+`flate2` beats Go's `compress/flate`) at equal memory and a third of the
+binary size. Go retains a small edge on fixed handshake latency. Run it
+yourself: `CROC_SRC=/path/to/croc scripts/bench.sh`.
+
 ## Fuzzing
 
 The frame, message-envelope, PAKE, and mnemonicode parsers have

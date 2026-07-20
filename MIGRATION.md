@@ -311,6 +311,22 @@ Still pending from this phase: IPv6 multicast group, custom
 * This closes the **last functional gap**: rusty-croc now matches stock
   croc v10 across every feature the reference implementation exposes.
 
+### Performance
+
+`scripts/bench.sh` benchmarks each implementation full-stack over loopback
+(best-of-N). rusty-croc is faster on throughput at every size tested —
+most on the compression path (`flate2`/miniz_oxide beats Go's
+`compress/flate`), and still ahead with `--no-compress` — at ~equal peak
+RSS (~6 MB, both stream in 32 KB chunks) and a third of the binary size
+(4.8 MB vs 15 MB).
+
+One regression surfaced by the benchmark and fixed: the transfer-port relay
+handshakes were done **sequentially**, serializing N slow SIEC PAKEs and
+inflating first-byte latency (~0.55 s). `process_pake` now fans them out
+across threads like Go's goroutines, cutting handshake latency to ~0.32 s —
+within ~40 ms of Go. (A tiny residual remains: the control-connection SIEC
+handshake is the one curve still on variable-time bignum.)
+
 ### Phase 8 — divergence budget
 
 * ~~Constant-time curve arithmetic for p256/p384/p521~~ — done (phase 6).
