@@ -23,7 +23,10 @@ categories = ["network-programming", "encoding"]
 # networking framework would.
 [dependencies]
 rustls = { version = "0.23", optional = true }
-platform = { git = "https://github.com/baileyrd/rustils", optional = true }
+# Pinned to a specific commit (rustils' PAL group v0.5.0) rather than
+# tracking `main` — a bare SHA carries the same guarantee as a tag, per
+# rustils' docs/versioning.md §3, which also documents this pinning rule.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "edb12b903f11ca7b07807a95246900f83dc9b0ba", optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
