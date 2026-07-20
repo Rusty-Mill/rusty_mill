@@ -1636,18 +1636,35 @@ impl Client {
         session.zeroize();
         self.set_key(key);
 
-        // Connect to every transfer port with room "{room}-{j}".
-        for j in 0..self.relay_ports.len() {
+        // Connect to every transfer port (room "{room}-{j}") in parallel,
+        // matching Go's goroutine fan-out. Each connection runs its own SIEC
+        // relay handshake; doing them sequentially would serialize N slow
+        // PAKEs and dominate startup latency. The relay pairs peers by room
+        // name, so arrival order doesn't matter.
+        let n = self.relay_ports.len();
+        let mut handles = Vec::with_capacity(n);
+        for j in 0..n {
             let server = format!("{}:{}", self.relay_host, self.relay_ports[j]);
-            let (conn, _, _) = tcp::connect_to_tcp_server(
-                &server,
-                &self.opts.relay_password,
-                &format!("{}-{}", self.room, j),
-                Some(Duration::from_secs(10)),
-            )
-            .map_err(|e| -> Error {
-                format!("could not connect transfer port {server}: {e}").into()
-            })?;
+            let pass = self.opts.relay_password.clone();
+            let room = format!("{}-{}", self.room, j);
+            handles.push(std::thread::spawn(move || -> Result<Comm> {
+                let (conn, _, _) =
+                    tcp::connect_to_tcp_server(&server, &pass, &room, Some(Duration::from_secs(10)))
+                        .map_err(|e| -> Error {
+                            format!("could not connect transfer port {server}: {e}").into()
+                        })?;
+                Ok(conn)
+            }));
+        }
+        // Collect in index order so the "{room}-{j}" ↔ stripe mapping holds.
+        let mut conns = Vec::with_capacity(n);
+        for h in handles {
+            let conn = h
+                .join()
+                .map_err(|_| -> Error { "transfer-port connect thread panicked".into() })??;
+            conns.push(conn);
+        }
+        for conn in conns {
             self.data_streams.push(conn.stream().try_clone()?);
             if self.opts.is_sender {
                 self.data_conns.push(Arc::new(Mutex::new(conn)));
