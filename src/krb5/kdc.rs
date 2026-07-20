@@ -138,22 +138,21 @@ pub fn get_tgt(
     Ok((rep.ticket, session_key))
 }
 
-/// Connect to `kdc_addr` (a `host:port` string, e.g. `"kdc.example.com:88"`)
-/// and run [`get_tgt`] with OS-supplied randomness and the current time,
-/// deriving `key` from `password` using the RFC 3961 default salt (`realm`
-/// followed by `user`, e.g. `"EXAMPLE.COMalice"`).
-pub fn fetch_tgt(
+/// The shared tail of [`fetch_tgt`]/[`fetch_tgt_with_csprng`]: derive `key`
+/// from `password`, split `seed` into the nonce/confounder [`get_tgt`]
+/// needs, and drive the exchange. The only difference between the two
+/// public entry points is how `seed` was obtained.
+fn fetch_tgt_with_seed(
     kdc_addr: &str,
     realm: &str,
     user: &str,
     password: &str,
+    seed: [u8; 20],
 ) -> io::Result<(Ticket, AesKey)> {
     let salt = format!("{realm}{user}");
     let key = AesKey::from_password(ETYPE_AES256_CTS_HMAC_SHA1_96, password, salt.as_bytes())
         .map_err(to_io)?;
 
-    let mut seed = [0u8; 20];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
     let nonce = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]]);
     let mut confounder = [0u8; 16];
     confounder.copy_from_slice(&seed[4..20]);
@@ -168,6 +167,40 @@ pub fn fetch_tgt(
         confounder,
         SystemTime::now(),
     )
+}
+
+/// Connect to `kdc_addr` (a `host:port` string, e.g. `"kdc.example.com:88"`)
+/// and run [`get_tgt`] with OS-supplied randomness and the current time,
+/// deriving `key` from `password` using the RFC 3961 default salt (`realm`
+/// followed by `user`, e.g. `"EXAMPLE.COMalice"`).
+pub fn fetch_tgt(
+    kdc_addr: &str,
+    realm: &str,
+    user: &str,
+    password: &str,
+) -> io::Result<(Ticket, AesKey)> {
+    let mut seed = [0u8; 20];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    fetch_tgt_with_seed(kdc_addr, realm, user, password, seed)
+}
+
+/// Like [`fetch_tgt`], but draws its nonce/confounder from `csprng`
+/// (any `platform::security::Csprng` backend the caller supplies —
+/// Linux, Windows, or the mock, per this crate's optional `platform`
+/// feature) instead of opening `/dev/urandom` directly.
+#[cfg(feature = "platform")]
+pub fn fetch_tgt_with_csprng(
+    kdc_addr: &str,
+    realm: &str,
+    user: &str,
+    password: &str,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<(Ticket, AesKey)> {
+    let mut seed = [0u8; 20];
+    csprng
+        .fill_random(&mut seed)
+        .map_err(crate::platform_net::to_io_error)?;
+    fetch_tgt_with_seed(kdc_addr, realm, user, password, seed)
 }
 
 /// Trade a Ticket-Granting Ticket for a service ticket over an
@@ -304,27 +337,27 @@ pub fn build_ap_req(
     }
 }
 
-/// Get an AP-REQ for `service` (e.g. `TERMSRV/host.example.com`) from just
-/// a realm/username/password: [`fetch_tgt`], [`tgs_exchange`], then
-/// [`build_ap_req`] — the two KDC round trips plus local assembly needed to
-/// drive `crate::tls::connect_tls_kerberos`, which takes exactly this
-/// function's return type. Opens a separate TCP connection per KDC request,
-/// matching how most deployed KDCs expect one exchange per connection.
-pub fn fetch_ap_req(
+/// The shared tail of [`fetch_ap_req`]/[`fetch_ap_req_with_csprng`]: run
+/// the TGS exchange and assemble the AP-REQ. The only difference between
+/// the two public entry points is how `tgt`/`tgt_session_key` (via
+/// whichever `fetch_tgt*` was used) and `seed`/`ap_confounder` were
+/// obtained.
+#[allow(clippy::too_many_arguments)]
+fn fetch_ap_req_with_seed(
     kdc_addr: &str,
     realm: &str,
     user: &str,
-    password: &str,
     service: PrincipalName,
+    tgt: Ticket,
+    tgt_session_key: AesKey,
+    seed: [u8; 20],
+    ap_confounder: [u8; 16],
 ) -> io::Result<(Vec<u8>, AesKey)> {
-    let (tgt, tgt_session_key) = fetch_tgt(kdc_addr, realm, user, password)?;
     let cname = PrincipalName {
         name_type: NT_PRINCIPAL,
         name_string: vec![user.to_string()],
     };
 
-    let mut seed = [0u8; 20];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
     let nonce = u32::from_le_bytes([seed[0], seed[1], seed[2], seed[3]]);
     let mut confounder = [0u8; 16];
     confounder.copy_from_slice(&seed[4..20]);
@@ -343,8 +376,6 @@ pub fn fetch_ap_req(
         SystemTime::now(),
     )?;
 
-    let mut ap_confounder = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut ap_confounder)?;
     let ap_req = build_ap_req(
         &service_ticket,
         &service_key,
@@ -354,6 +385,73 @@ pub fn fetch_ap_req(
         SystemTime::now(),
     );
     Ok((ap_req.encode(), service_key))
+}
+
+/// Get an AP-REQ for `service` (e.g. `TERMSRV/host.example.com`) from just
+/// a realm/username/password: [`fetch_tgt`], [`tgs_exchange`], then
+/// [`build_ap_req`] — the two KDC round trips plus local assembly needed to
+/// drive `crate::tls::connect_tls_kerberos`, which takes exactly this
+/// function's return type. Opens a separate TCP connection per KDC request,
+/// matching how most deployed KDCs expect one exchange per connection.
+pub fn fetch_ap_req(
+    kdc_addr: &str,
+    realm: &str,
+    user: &str,
+    password: &str,
+    service: PrincipalName,
+) -> io::Result<(Vec<u8>, AesKey)> {
+    let (tgt, tgt_session_key) = fetch_tgt(kdc_addr, realm, user, password)?;
+
+    let mut seed = [0u8; 20];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    let mut ap_confounder = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut ap_confounder)?;
+
+    fetch_ap_req_with_seed(
+        kdc_addr,
+        realm,
+        user,
+        service,
+        tgt,
+        tgt_session_key,
+        seed,
+        ap_confounder,
+    )
+}
+
+/// Like [`fetch_ap_req`], but draws every nonce/confounder — for both the
+/// TGT fetch and this function's own — from `csprng` instead of opening
+/// `/dev/urandom`, via [`fetch_tgt_with_csprng`].
+#[cfg(feature = "platform")]
+pub fn fetch_ap_req_with_csprng(
+    kdc_addr: &str,
+    realm: &str,
+    user: &str,
+    password: &str,
+    service: PrincipalName,
+    csprng: &dyn platform::security::Csprng,
+) -> io::Result<(Vec<u8>, AesKey)> {
+    let (tgt, tgt_session_key) = fetch_tgt_with_csprng(kdc_addr, realm, user, password, csprng)?;
+
+    let mut seed = [0u8; 20];
+    csprng
+        .fill_random(&mut seed)
+        .map_err(crate::platform_net::to_io_error)?;
+    let mut ap_confounder = [0u8; 16];
+    csprng
+        .fill_random(&mut ap_confounder)
+        .map_err(crate::platform_net::to_io_error)?;
+
+    fetch_ap_req_with_seed(
+        kdc_addr,
+        realm,
+        user,
+        service,
+        tgt,
+        tgt_session_key,
+        seed,
+        ap_confounder,
+    )
 }
 
 /// Send a request and read back one framed response, or map a `KRB-ERROR`
@@ -849,27 +947,18 @@ mod tests {
         assert_eq!(service_key.key(), service_session_key_bytes.as_slice());
     }
 
-    #[test]
-    fn fetch_ap_req_completes_against_mock_kdc() {
-        let realm = "EXAMPLE.COM";
-        let user = "alice";
-        let password = "s3cr3t";
-        let service = PrincipalName {
-            name_type: NT_SRV_INST,
-            name_string: vec!["TERMSRV".to_string(), "host.example.com".to_string()],
-        };
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let kdc_addr = addr.to_string();
-
-        let tgt_session_key_bytes = vec![0x44u8; 32];
-        let tgt_session_key_bytes_for_server = tgt_session_key_bytes.clone();
-        let service_session_key_bytes = vec![0x55u8; 32];
-        let service_session_key_bytes_for_server = service_session_key_bytes.clone();
-        let realm_for_server = realm.to_string();
-
-        let server = thread::spawn(move || {
+    /// Both legs of a real AS+TGS exchange over `listener`, exactly what
+    /// [`fetch_ap_req`]/[`fetch_ap_req_with_csprng`] each drive from the
+    /// client side — shared so the two tests exercising them don't
+    /// duplicate this mock KDC.
+    fn spawn_mock_kdc(
+        listener: TcpListener,
+        password: &'static str,
+        tgt_session_key_bytes: Vec<u8>,
+        service_session_key_bytes: Vec<u8>,
+        realm: String,
+    ) -> thread::JoinHandle<Ticket> {
+        thread::spawn(move || {
             let key =
                 AesKey::from_password(ETYPE_AES256_CTS_HMAC_SHA1_96, password, b"EXAMPLE.COMalice")
                     .unwrap();
@@ -883,20 +972,20 @@ mod tests {
 
             let krbtgt_sname = PrincipalName {
                 name_type: NT_SRV_INST,
-                name_string: vec!["krbtgt".to_string(), realm_for_server.clone()],
+                name_string: vec!["krbtgt".to_string(), realm.clone()],
             };
             let enc_as_rep_part = encode_enc_kdc_rep_part(
                 25,
                 &EncryptionKey {
                     keytype: ETYPE_AES256_CTS_HMAC_SHA1_96,
-                    keyvalue: tgt_session_key_bytes_for_server.clone(),
+                    keyvalue: tgt_session_key_bytes.clone(),
                 },
                 req.req_body.nonce,
-                &realm_for_server,
+                &realm,
                 &krbtgt_sname,
             );
             let tgt = Ticket {
-                realm: realm_for_server.clone(),
+                realm: realm.clone(),
                 sname: krbtgt_sname,
                 enc_part: EncryptedData {
                     etype: ETYPE_AES256_CTS_HMAC_SHA1_96,
@@ -907,7 +996,7 @@ mod tests {
             let as_rep = KdcRep {
                 msg_type: KRB_AS_REP,
                 padata: Vec::new(),
-                crealm: realm_for_server.clone(),
+                crealm: realm.clone(),
                 cname: cname.clone(),
                 ticket: tgt.clone(),
                 enc_part: EncryptedData {
@@ -925,11 +1014,9 @@ mod tests {
             let req = KdcReq::decode(&req_bytes).unwrap();
             assert_eq!(req.msg_type, KRB_TGS_REQ);
 
-            let tgt_key = AesKey::from_key(
-                ETYPE_AES256_CTS_HMAC_SHA1_96,
-                tgt_session_key_bytes_for_server.clone(),
-            )
-            .unwrap();
+            let tgt_key =
+                AesKey::from_key(ETYPE_AES256_CTS_HMAC_SHA1_96, tgt_session_key_bytes.clone())
+                    .unwrap();
             let pa = req
                 .padata
                 .iter()
@@ -951,14 +1038,14 @@ mod tests {
                 26,
                 &EncryptionKey {
                     keytype: ETYPE_AES256_CTS_HMAC_SHA1_96,
-                    keyvalue: service_session_key_bytes_for_server.clone(),
+                    keyvalue: service_session_key_bytes.clone(),
                 },
                 req.req_body.nonce,
-                &realm_for_server,
+                &realm,
                 &service_sname,
             );
             let service_ticket = Ticket {
-                realm: realm_for_server.clone(),
+                realm: realm.clone(),
                 sname: service_sname,
                 enc_part: EncryptedData {
                     etype: ETYPE_AES256_CTS_HMAC_SHA1_96,
@@ -969,7 +1056,7 @@ mod tests {
             let tgs_rep = KdcRep {
                 msg_type: KRB_TGS_REP,
                 padata: Vec::new(),
-                crealm: realm_for_server.clone(),
+                crealm: realm,
                 cname,
                 ticket: service_ticket.clone(),
                 enc_part: EncryptedData {
@@ -984,24 +1071,107 @@ mod tests {
             };
             write_framed(&mut stream, &tgs_rep.encode()).unwrap();
             service_ticket
-        });
+        })
+    }
 
-        let (ap_req_bytes, service_key) =
-            fetch_ap_req(&kdc_addr, realm, user, password, service).unwrap();
-        let service_ticket = server.join().unwrap();
+    /// Asserts the client-side outcome common to both
+    /// `fetch_ap_req_completes_against_mock_kdc` and
+    /// `fetch_ap_req_with_csprng_completes_against_mock_kdc`: the AP-REQ
+    /// decodes, carries the service ticket the mock KDC issued, and its
+    /// Authenticator decrypts with the returned service session key.
+    fn assert_ap_req_outcome(
+        ap_req_bytes: &[u8],
+        service_key: &AesKey,
+        service_ticket: &Ticket,
+        service_session_key_bytes: &[u8],
+        realm: &str,
+    ) {
+        assert_eq!(service_key.key(), service_session_key_bytes);
 
-        assert_eq!(service_key.key(), service_session_key_bytes.as_slice());
+        let ap_req = ApReq::decode(ap_req_bytes).unwrap();
+        assert_eq!(&ap_req.ticket, service_ticket);
 
-        // The AP-REQ decodes and carries the service ticket.
-        let ap_req = ApReq::decode(&ap_req_bytes).unwrap();
-        assert_eq!(ap_req.ticket, service_ticket);
-
-        // Its Authenticator decrypts with the service session key.
         let plain = service_key
             .decrypt(USAGE_AP_REQ_AUTHENTICATOR, &ap_req.authenticator.cipher)
             .unwrap();
         let authenticator = Authenticator::decode(&plain).unwrap();
         assert_eq!(authenticator.crealm, realm);
         assert_eq!(authenticator.cname.name_string, vec!["alice".to_string()]);
+    }
+
+    #[test]
+    fn fetch_ap_req_completes_against_mock_kdc() {
+        let realm = "EXAMPLE.COM";
+        let user = "alice";
+        let password = "s3cr3t";
+        let service = PrincipalName {
+            name_type: NT_SRV_INST,
+            name_string: vec!["TERMSRV".to_string(), "host.example.com".to_string()],
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let kdc_addr = addr.to_string();
+
+        let tgt_session_key_bytes = vec![0x44u8; 32];
+        let service_session_key_bytes = vec![0x55u8; 32];
+        let server = spawn_mock_kdc(
+            listener,
+            password,
+            tgt_session_key_bytes,
+            service_session_key_bytes.clone(),
+            realm.to_string(),
+        );
+
+        let (ap_req_bytes, service_key) =
+            fetch_ap_req(&kdc_addr, realm, user, password, service).unwrap();
+        let service_ticket = server.join().unwrap();
+
+        assert_ap_req_outcome(
+            &ap_req_bytes,
+            &service_key,
+            &service_ticket,
+            &service_session_key_bytes,
+            realm,
+        );
+    }
+
+    #[cfg(feature = "platform")]
+    #[test]
+    fn fetch_ap_req_with_csprng_completes_against_mock_kdc() {
+        let realm = "EXAMPLE.COM";
+        let user = "alice";
+        let password = "s3cr3t";
+        let service = PrincipalName {
+            name_type: NT_SRV_INST,
+            name_string: vec!["TERMSRV".to_string(), "host.example.com".to_string()],
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let kdc_addr = addr.to_string();
+
+        let tgt_session_key_bytes = vec![0x44u8; 32];
+        let service_session_key_bytes = vec![0x55u8; 32];
+        let server = spawn_mock_kdc(
+            listener,
+            password,
+            tgt_session_key_bytes,
+            service_session_key_bytes.clone(),
+            realm.to_string(),
+        );
+
+        let csprng = platform_mock::MockCsprng::new();
+        let (ap_req_bytes, service_key) =
+            fetch_ap_req_with_csprng(&kdc_addr, realm, user, password, service, &csprng).unwrap();
+        let service_ticket = server.join().unwrap();
+
+        assert_ap_req_outcome(
+            &ap_req_bytes,
+            &service_key,
+            &service_ticket,
+            &service_session_key_bytes,
+            realm,
+        );
     }
 }

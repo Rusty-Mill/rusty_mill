@@ -90,7 +90,11 @@ impl Write for PlatformTcpStream {
 /// source rather than discarding it — just re-classified into
 /// `std::io`'s narrower taxonomy, the one this crate's own
 /// `io::Result`-returning API already speaks.
-fn to_io_error(e: PlatformError) -> io::Error {
+///
+/// `pub(crate)`: also reused by [`crate::krb5::kdc`]'s `_with_csprng`
+/// functions, the same `PlatformError -> io::Error` mapping this module
+/// needed first.
+pub(crate) fn to_io_error(e: PlatformError) -> io::Error {
     let kind = match e.kind {
         ErrorKind::NotFound => io::ErrorKind::NotFound,
         ErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,

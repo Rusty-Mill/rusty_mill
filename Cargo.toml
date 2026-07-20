@@ -23,10 +23,21 @@ categories = ["network-programming", "encoding"]
 # networking framework would.
 [dependencies]
 rustls = { version = "0.23", optional = true }
-# Pinned to a specific commit (rustils' PAL group v0.5.0) rather than
-# tracking `main` — a bare SHA carries the same guarantee as a tag, per
-# rustils' docs/versioning.md §3, which also documents this pinning rule.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "edb12b903f11ca7b07807a95246900f83dc9b0ba", optional = true }
+# Pinned to a specific commit (rustils' PAL group v0.6.0, the CSPRNG
+# slice this crate's krb5/kdc.rs `_with_csprng` functions need) rather
+# than tracking `main` — a bare SHA carries the same guarantee as a tag,
+# per rustils' docs/versioning.md §3, which also documents this pinning
+# rule.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "05fda9877ed6b9a7b47be2d0bfdc9e08aac2a228", optional = true }
+# Test-only, despite living in [dependencies] rather than
+# [dev-dependencies]: Cargo doesn't allow dev-dependencies to be
+# optional, so this is the only way to keep it out of the default
+# `cargo test` build too, not just the default `cargo build`. Used
+# solely by krb5::kdc's own `#[cfg(test)]` module, to exercise
+# fetch_tgt_with_csprng/fetch_ap_req_with_csprng against a real (if
+# mock) Csprng — never re-exported, never a runtime dependency of the
+# shipped library.
+platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "05fda9877ed6b9a7b47be2d0bfdc9e08aac2a228", optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
@@ -38,7 +49,7 @@ tls = ["dep:rustls"]
 # the caller picks). Off by default; enabling it pulls in `platform` itself
 # (not a concrete backend crate — the caller adds platform-linux/
 # platform-windows/platform-mock separately).
-platform = ["dep:platform"]
+platform = ["dep:platform", "dep:platform-mock"]
 
 [lints.rust]
 unsafe_code = "forbid"
