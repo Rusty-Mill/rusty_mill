@@ -275,10 +275,9 @@ impl Curve {
             None => false,
             Some((x, y)) => {
                 let lhs = y.modpow(&BigUint::from(2u32), &self.p);
-                let rhs = (x.modpow(&BigUint::from(3u32), &self.p)
-                    + (&self.a * x) % &self.p
-                    + &self.b)
-                    % &self.p;
+                let rhs =
+                    (x.modpow(&BigUint::from(3u32), &self.p) + (&self.a * x) % &self.p + &self.b)
+                        % &self.p;
                 lhs == rhs
             }
         }
@@ -332,10 +331,7 @@ impl Curve {
             return self.double(p1);
         }
         let lambda = (self.sub_mod(y2, y1) * self.inv_mod(&self.sub_mod(x2, x1))) % &self.p;
-        let x3 = self.sub_mod(
-            &self.sub_mod(&((&lambda * &lambda) % &self.p), x1),
-            x2,
-        );
+        let x3 = self.sub_mod(&self.sub_mod(&((&lambda * &lambda) % &self.p), x1), x2);
         let y3 = self.sub_mod(&((&lambda * self.sub_mod(x1, &x3)) % &self.p), y1);
         Some((x3, y3))
     }
@@ -506,8 +502,8 @@ impl Pake {
 
     /// Process the other party's `bytes()`. Mirrors `Pake.Update`.
     pub fn update(&mut self, q_bytes: &[u8]) -> Result<(), PakeError> {
-        let v: serde_json::Value = serde_json::from_slice(q_bytes)
-            .map_err(|e| PakeError::BadMessage(e.to_string()))?;
+        let v: serde_json::Value =
+            serde_json::from_slice(q_bytes).map_err(|e| PakeError::BadMessage(e.to_string()))?;
         let q_role = v
             .get("Role")
             .and_then(|r| r.as_u64())
@@ -574,11 +570,9 @@ impl Pake {
     fn session_hash(&self, z: &Point) -> Vec<u8> {
         let mut h = Sha256::new();
         h.update(&self.pw);
-        for pt in [&self.x, &self.y, z] {
-            if let Some((x, y)) = pt {
-                h.update(go_bytes(x));
-                h.update(go_bytes(y));
-            }
+        for (x, y) in [&self.x, &self.y, z].into_iter().flatten() {
+            h.update(go_bytes(x));
+            h.update(go_bytes(y));
         }
         h.finalize().to_vec()
     }
@@ -675,7 +669,10 @@ mod tests {
                 "{name} should use the constant-time backend"
             );
         }
-        assert!(matches!(Curve::by_name("siec").unwrap().kind, CurveKind::Siec));
+        assert!(matches!(
+            Curve::by_name("siec").unwrap().kind,
+            CurveKind::Siec
+        ));
     }
 
     // A large scalar (top bit set, so ≥ n for p256) must still agree between
@@ -685,11 +682,10 @@ mod tests {
     fn large_scalar_reduces_like_go() {
         let c = Curve::by_name("p256").unwrap();
         let k = [0xffu8; 32]; // 2^256 - 1 > n
-        // k·G computed via the backend must be a valid on-curve point equal to
-        // (k mod n)·G. Recompute (k mod n)·G by feeding the reduced bytes.
-        let n = decu(
-            "115792089210356248762697446949407573529996955224135760342422259061068512044369",
-        );
+                              // k·G computed via the backend must be a valid on-curve point equal to
+                              // (k mod n)·G. Recompute (k mod n)·G by feeding the reduced bytes.
+        let n =
+            decu("115792089210356248762697446949407573529996955224135760342422259061068512044369");
         let reduced = (BigUint::from_bytes_be(&k) % &n).to_bytes_be();
         assert_eq!(
             c.scalar_base_mult(&k),

@@ -98,8 +98,13 @@ fn open_socket(settings: &Settings) -> std::io::Result<(UdpSocket, SocketAddr)> 
             let _ = socket.set_reuse_port(true);
             socket.set_only_v6(true)?;
             socket.bind(
-                &SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, settings.port, 0, 0))
-                    .into(),
+                &SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::UNSPECIFIED,
+                    settings.port,
+                    0,
+                    0,
+                ))
+                .into(),
             )?;
             let socket: UdpSocket = socket.into();
             // Join on every interface index we can enumerate (0 = default).
@@ -163,7 +168,7 @@ pub fn discover(settings: &Settings) -> std::io::Result<Vec<Discovered>> {
         }
         while let Ok((n, src)) = socket.recv_from(&mut buf) {
             let src_ip = src.ip().to_string();
-            if !settings.allow_self && self_ips.iter().any(|ip| *ip == src_ip) {
+            if !settings.allow_self && self_ips.contains(&src_ip) {
                 continue;
             }
             match found.iter_mut().find(|d| d.address == src_ip) {
@@ -240,10 +245,7 @@ mod tests {
             return;
         }
         let stop = Arc::new(AtomicBool::new(false));
-        let announcer = Settings {
-            port: 9872,
-            ..base
-        };
+        let announcer = Settings { port: 9872, ..base };
         let stop2 = Arc::clone(&stop);
         let handle = std::thread::spawn(move || broadcast(&announcer, stop2));
         let finder = Settings {

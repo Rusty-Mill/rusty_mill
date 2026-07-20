@@ -332,7 +332,10 @@ handshake is the one curve still on variable-time bignum.)
 * ~~Constant-time curve arithmetic for p256/p384/p521~~ — done (phase 6).
 * ~~Zeroize key material~~ — done (phase 5).
 * ~~Fuzz the frame/message/PAKE parsers~~ — done (phase 5, `fuzz/`).
-* Property tests cross-checking Go and Rust binaries in CI.
+* ~~Cross-check Go and Rust binaries in CI~~ — done: `.github/workflows/ci.yml`
+  runs `scripts/interop_test.sh` (the full transfer matrix against a freshly
+  built stock croc) on every push/PR, alongside fmt/clippy/tests, plus a
+  weekly parser fuzz smoke.
 * Evaluate async for relay scalability; evaluate `croc`'s newer features as
   upstream moves (this port tracks v10.2.x behavior).
 * Constant-time SIEC (would exceed upstream; low priority since SIEC only

@@ -495,8 +495,8 @@ pub fn get_files_info_opts(
     let empty_ignored = std::collections::HashSet::new();
     for p in paths {
         let path = PathBuf::from(p);
-        let meta = std::fs::symlink_metadata(&path)
-            .map_err(|e| format!("cannot access '{p}': {e}"))?;
+        let meta =
+            std::fs::symlink_metadata(&path).map_err(|e| format!("cannot access '{p}': {e}"))?;
         if meta.is_dir() && zip_folder {
             let abs = std::fs::canonicalize(&path)?;
             let dest = format!(
@@ -518,7 +518,14 @@ pub fn get_files_info_opts(
             } else {
                 empty_ignored.clone()
             };
-            walk_dir(&abs, &abs, &mut files, &mut empty_folders, &mut total_folders, &ignored)?;
+            walk_dir(
+                &abs,
+                &abs,
+                &mut files,
+                &mut empty_folders,
+                &mut total_folders,
+                &ignored,
+            )?;
         } else {
             files.push(file_info_from(&path, "./".to_string())?);
         }
@@ -652,10 +659,7 @@ fn normalize_receive_folder(folder: &str) -> Result<String> {
 fn normalize_receive_file_path(folder: &str, name: &str) -> Result<(String, PathBuf)> {
     let clean_folder = normalize_receive_folder(folder)?;
     let clean_name = name.replace('\\', "/");
-    if clean_name.is_empty()
-        || clean_name.contains('/')
-        || clean_name == "."
-        || clean_name == ".."
+    if clean_name.is_empty() || clean_name.contains('/') || clean_name == "." || clean_name == ".."
     {
         return Err(format!("filename must be a local path: '{name}'").into());
     }
@@ -857,9 +861,18 @@ impl Client {
         Ok((comm, banner, ipaddr, host, full))
     }
 
-    fn new(opts: Options, control: Comm, banner: &str, ipaddr: String, host: String) -> Result<Self> {
-        let mut relay_ports: Vec<String> =
-            banner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    fn new(
+        opts: Options,
+        control: Comm,
+        banner: &str,
+        ipaddr: String,
+        host: String,
+    ) -> Result<Self> {
+        let mut relay_ports: Vec<String> = banner
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
         if relay_ports.is_empty() {
             return Err(format!("relay banner has no transfer ports: '{banner}'").into());
         }
@@ -1001,7 +1014,11 @@ impl Client {
                     .collect::<Vec<_>>()
                     .join(",");
                 for (i, port) in ports.iter().enumerate() {
-                    let b = if i == 0 { banner.clone() } else { String::new() };
+                    let b = if i == 0 {
+                        banner.clone()
+                    } else {
+                        String::new()
+                    };
                     let pass = opts.relay_password.clone();
                     let port = port.to_string();
                     std::thread::spawn(move || {
@@ -1052,13 +1069,9 @@ impl Client {
                 let result = (|| -> Result<Route> {
                     std::thread::sleep(Duration::from_millis(500));
                     let room = room_name(&opts2.shared_secret);
-                    let (mut control, banner, ipaddr) = tcp::connect_to_tcp_server(
-                        &local_addr,
-                        &opts2.relay_password,
-                        &room,
-                        None,
-                    )
-                    .map_err(|e| -> Error { format!("local relay: {e}").into() })?;
+                    let (mut control, banner, ipaddr) =
+                        tcp::connect_to_tcp_server(&local_addr, &opts2.relay_password, &room, None)
+                            .map_err(|e| -> Error { format!("local relay: {e}").into() })?;
                     streams.lock().unwrap().push(control.stream().try_clone()?);
                     sender_wait_for_handshake(&mut control, &opts2, &local_info2)?;
                     log::debug!("sender using local relay route");
@@ -1183,7 +1196,9 @@ impl Client {
             };
             let handles: Vec<_> = [v4, v6]
                 .into_iter()
-                .map(|s| std::thread::spawn(move || crate::discovery::discover(&s).unwrap_or_default()))
+                .map(|s| {
+                    std::thread::spawn(move || crate::discovery::discover(&s).unwrap_or_default())
+                })
                 .collect();
             let mut discoveries = Vec::new();
             for h in handles {
@@ -1478,7 +1493,9 @@ impl Client {
                     }
                     Err(_) => {
                         let _ = stream.shutdown(Shutdown::Both);
-                        errors.push(format!("{address}: timed out waiting for reconnect handshake"));
+                        errors.push(format!(
+                            "{address}: timed out waiting for reconnect handshake"
+                        ));
                         continue;
                     }
                 }
@@ -1494,7 +1511,10 @@ impl Client {
             self.control = conn;
             self.control_tx = Arc::new(Mutex::new(self.control.try_clone()?));
             self.room = room;
-            self.relay_host = address.rsplit_once(':').map(|(h, _)| h.to_string()).unwrap_or(address.clone());
+            self.relay_host = address
+                .rsplit_once(':')
+                .map(|(h, _)| h.to_string())
+                .unwrap_or(address.clone());
             self.relay_ports = banner
                 .split(',')
                 .map(|s| s.trim().to_string())
@@ -1608,8 +1628,7 @@ impl Client {
         if self.opts.is_sender {
             let curve = String::from_utf8_lossy(&m.bytes2).to_string();
             log::debug!("using curve {curve}");
-            let mut pake =
-                Pake::init_curve(pake_secret(&self.opts.shared_secret), 1, &curve)?;
+            let mut pake = Pake::init_curve(pake_secret(&self.opts.shared_secret), 1, &curve)?;
             pake.update(&m.bytes)
                 .map_err(|e| -> Error { format!("pake not successful: {e}").into() })?;
             let mut s = vec![0u8; 8];
@@ -1648,11 +1667,15 @@ impl Client {
             let pass = self.opts.relay_password.clone();
             let room = format!("{}-{}", self.room, j);
             handles.push(std::thread::spawn(move || -> Result<Comm> {
-                let (conn, _, _) =
-                    tcp::connect_to_tcp_server(&server, &pass, &room, Some(Duration::from_secs(10)))
-                        .map_err(|e| -> Error {
-                            format!("could not connect transfer port {server}: {e}").into()
-                        })?;
+                let (conn, _, _) = tcp::connect_to_tcp_server(
+                    &server,
+                    &pass,
+                    &room,
+                    Some(Duration::from_secs(10)),
+                )
+                .map_err(|e| -> Error {
+                    format!("could not connect transfer port {server}: {e}").into()
+                })?;
                 Ok(conn)
             }));
         }
@@ -1793,10 +1816,7 @@ impl Client {
     /// Mirrors updateState: advance whichever step is now unblocked.
     fn update_state(&mut self) -> Result<()> {
         // Sender: channel secured → send the file manifest.
-        if self.opts.is_sender
-            && self.step1_channel_secured
-            && !self.step2_file_info_transferred
-        {
+        if self.opts.is_sender && self.step1_channel_secured && !self.step2_file_info_transferred {
             // Each manifest announces a fresh rendezvous room for reconnects.
             self.next_reconnect_room = generate_reconnect_room();
             let si = SenderInfo {
@@ -1836,9 +1856,7 @@ impl Client {
         }
 
         // Sender: recipient asked for a file → stream it.
-        if self.opts.is_sender
-            && self.step3_recipient_request_file
-            && !self.step4_file_transferring
+        if self.opts.is_sender && self.step3_recipient_request_file && !self.step4_file_transferring
         {
             self.step4_file_transferring = true;
             self.spawn_send_data()?;
@@ -1963,11 +1981,7 @@ impl Client {
         let path = Path::new(&fi.folder_source).join(&fi.name);
         let size = fi.size;
         let nconns = self.data_conns.len();
-        eprintln!(
-            "Sending {} ({})",
-            fi.name,
-            utils::byte_count_decimal(size)
-        );
+        eprintln!("Sending {} ({})", fi.name, utils::byte_count_decimal(size));
 
         // Precompute each connection's chunk list (position, length).
         let mut assignments: Vec<Vec<(u64, usize)>> = vec![Vec::new(); nconns];
@@ -2040,12 +2054,17 @@ fn open_receive_file(dest: &Path, fi: &FileInfo) -> Result<File> {
     // Refuse to write through a symlink, mirroring rejectSymlinkDestination.
     if let Ok(meta) = std::fs::symlink_metadata(dest) {
         if meta.file_type().is_symlink() {
-            return Err(format!("refusing to open symlink destination: '{}'", dest.display()).into());
+            return Err(
+                format!("refusing to open symlink destination: '{}'", dest.display()).into(),
+            );
         }
     }
     let file = match std::fs::OpenOptions::new().write(true).open(dest) {
         Ok(f) => {
-            let need_truncate = f.metadata().map(|m| m.len() as i64 != fi.size).unwrap_or(true);
+            let need_truncate = f
+                .metadata()
+                .map(|m| m.len() as i64 != fi.size)
+                .unwrap_or(true);
             if need_truncate {
                 f.set_len(fi.size as u64)?;
             }
@@ -2124,8 +2143,8 @@ fn receive_data_loop(
             eprint!("\r{:3}%", pct.min(100));
             st.last_pct = pct;
         }
-        let complete = !st.closed
-            && (st.chunks_transferred == st.chunks_expected || st.total_sent == st.size);
+        let complete =
+            !st.closed && (st.chunks_transferred == st.chunks_expected || st.total_sent == st.size);
         if complete {
             st.closed = true;
             let path = st.path.clone();
@@ -2142,14 +2161,16 @@ fn receive_data_loop(
                 }
             }
             drop(st);
-            let payload =
-                match message::encode(Some(&key), &Message {
+            let payload = match message::encode(
+                Some(&key),
+                &Message {
                     typ: message::TYPE_CLOSE_SENDER.to_string(),
                     ..Default::default()
-                }) {
-                    Ok(p) => p,
-                    Err(_) => return,
-                };
+                },
+            ) {
+                Ok(p) => p,
+                Err(_) => return,
+            };
             if control_tx.lock().unwrap().send(&payload).is_err() {
                 return;
             }

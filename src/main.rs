@@ -231,7 +231,9 @@ fn main() {
             exclude,
             git,
             flags,
-        } => send_command(files, code, hash, text, zip, throttle, qr, exclude, git, flags),
+        } => send_command(
+            files, code, hash, text, zip, throttle, qr, exclude, git, flags,
+        ),
         Command::Receive {
             code,
             yes,
@@ -313,11 +315,11 @@ fn send_command(
     git: bool,
     flags: TransferFlags,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let secret =
-        match code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty())) {
-            Some(c) => c,
-            None => utils::get_random_name(),
-        };
+    let secret = match code.or_else(|| std::env::var("CROC_SECRET").ok().filter(|s| !s.is_empty()))
+    {
+        Some(c) => c,
+        None => utils::get_random_name(),
+    };
     if secret.len() < 6 {
         return Err("code is too short (must be at least 6 characters)".into());
     }
@@ -407,8 +409,8 @@ fn relay(
         env!("CARGO_PKG_VERSION"),
         ports.join(",")
     );
-    let sever = (test_sever_after > 0)
-        .then(|| std::sync::Arc::new(tcp::SeverState::new(test_sever_after)));
+    let sever =
+        (test_sever_after > 0).then(|| std::sync::Arc::new(tcp::SeverState::new(test_sever_after)));
     let transfer_ports = ports[1..].join(",");
     for port in &ports[1..] {
         let host = host.to_string();
