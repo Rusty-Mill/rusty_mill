@@ -154,7 +154,7 @@ pub mod ts_signing_key {
 /// Server Security Data block. Signed with the [`ts_signing_key`] per
 /// MS-RDPBCGR 5.3.3.1.2 — see that module's docs for why this signature
 /// authenticates nothing.
-pub fn encode_proprietary_certificate(server_key: &RsaPublicKey) -> Vec<u8> {
+pub fn encode_proprietary_certificate(server_key: &RsaPublicKey) -> Result<Vec<u8>> {
     const CERT_CHAIN_VERSION_1: u32 = 0x0000_0001;
     const SIGNATURE_ALG_RSA: u32 = 0x0000_0001;
     const KEY_EXCHANGE_ALG_RSA: u32 = 0x0000_0001;
@@ -190,14 +190,18 @@ pub fn encode_proprietary_certificate(server_key: &RsaPublicKey) -> Vec<u8> {
     let m = BigUint::from_bytes_le(&padded);
     let d = BigUint::from_bytes_le(&ts_signing_key::PRIVATE_EXPONENT_LE);
     let n = BigUint::from_bytes_le(&ts_signing_key::MODULUS_LE);
-    let signature = m.modpow(&d, &n).to_bytes_le(64).expect(
-        "signature is reduced mod the 64-byte Terminal Services modulus, so it always fits",
-    );
+    // The signature is `m` reduced mod the 64-byte Terminal Services
+    // modulus, so it always fits in 64 bytes — `to_bytes_le` only
+    // returns `None` if the value doesn't fit, which would mean the
+    // fixed `ts_signing_key` constants themselves are wrong.
+    let signature = m.modpow(&d, &n).to_bytes_le(64).ok_or(Error::Overflow {
+        field: "ts_signing_key signature",
+    })?;
 
     w.write_u16_le(BB_RSA_SIGNATURE_BLOB);
     w.write_u16_le(signature.len() as u16);
     w.write_bytes(&signature);
-    w.into_vec()
+    Ok(w.into_vec())
 }
 
 /// Parse a `TS_UD_SC_SEC1` server certificate and return its RSA public key.
@@ -661,7 +665,7 @@ mod tests {
             modulus_le: (1u8..=64).collect(),
             exponent: 65537,
         };
-        let cert = encode_proprietary_certificate(&server_key);
+        let cert = encode_proprietary_certificate(&server_key).unwrap();
         let parsed = parse_server_certificate(&cert).unwrap();
         assert_eq!(parsed, server_key);
     }
@@ -672,7 +676,7 @@ mod tests {
             modulus_le: (1u8..=64).collect(),
             exponent: 65537,
         };
-        let cert = encode_proprietary_certificate(&server_key);
+        let cert = encode_proprietary_certificate(&server_key).unwrap();
 
         // Locate the signed prefix (dwVersion..PublicKeyBlob) and the
         // SignatureBlob, mirroring the layout encode_proprietary_certificate

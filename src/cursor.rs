@@ -58,6 +58,17 @@ impl<'a> Reader<'a> {
         Ok(out)
     }
 
+    /// Read exactly `N` bytes into a fixed-size array, advancing the cursor.
+    /// The array-length conversion can't fail: [`read_bytes`](Self::read_bytes)
+    /// always returns a slice of exactly the requested length, so this is the
+    /// fallible-free alternative to `read_bytes(N)?.try_into().unwrap()`.
+    pub fn read_array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let b = self.read_bytes(N)?;
+        let mut out = [0u8; N];
+        out.copy_from_slice(b);
+        Ok(out)
+    }
+
     /// Borrow the remaining bytes without advancing the cursor.
     pub fn peek_remaining(&self) -> &'a [u8] {
         &self.buf[self.pos..]
@@ -98,13 +109,17 @@ impl<'a> Reader<'a> {
     /// Read a big-endian `u64`.
     pub fn read_u64_be(&mut self) -> Result<u64> {
         let b = self.read_bytes(8)?;
-        Ok(u64::from_be_bytes(b.try_into().unwrap()))
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// Read a little-endian `u64`.
     pub fn read_u64_le(&mut self) -> Result<u64> {
         let b = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes(b.try_into().unwrap()))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// Skip `len` bytes, advancing the cursor.

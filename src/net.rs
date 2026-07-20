@@ -1418,7 +1418,8 @@ impl<S: Read + Write> RdpTransport<S> {
                 encryption_method: method,
                 encryption_level: ENCRYPTION_LEVEL_CLIENT_COMPATIBLE,
                 server_random: enc.server_random.to_vec(),
-                server_certificate: security::encode_proprietary_certificate(&enc.public_key),
+                server_certificate: security::encode_proprietary_certificate(&enc.public_key)
+                    .map_err(to_io)?,
             },
             _ => ServerSecurityData {
                 encryption_method: 0,

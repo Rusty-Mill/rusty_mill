@@ -922,7 +922,7 @@ impl TileSet {
 
         let mut quant_vals = Vec::with_capacity(num_quant as usize);
         for _ in 0..num_quant {
-            let bytes: [u8; 5] = r.read_bytes(5)?.try_into().unwrap();
+            let bytes: [u8; 5] = r.read_array()?;
             quant_vals.push(CodecQuant::decode(bytes));
         }
 
