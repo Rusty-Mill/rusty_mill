@@ -297,10 +297,21 @@ Still pending from this phase: IPv6 multicast group, custom
 * Bonus: the constant-time field arithmetic is also markedly faster than
   bignum, cutting the unit-test suite runtime ~4×.
 
-Still pending: custom-DNS relay resolution (the hardcoded public-DNS
-fallback in `models`), the only remaining functional gap.
+### Phase 7 — custom-DNS relay resolution (done)
 
-### Phase 7 — divergence budget
+* `--internal-dns` resolves the relay hostname by querying a hardcoded list
+  of public DNS resolvers directly over UDP:53, for when the local resolver
+  is broken or censored (croc's identically named feature). `src/models.rs`
+  hand-rolls a minimal DNS client — build an A/AAAA query, fan out to the
+  resolvers in parallel, take the first answer — in the same
+  dependency-light style as `comm`/`discovery`. `connect_relay` resolves the
+  host up front so the transfer ports reuse the same IP. Without the flag,
+  the system resolver is used (croc's `localLookupIP`), which was already
+  the behavior.
+* This closes the **last functional gap**: rusty-croc now matches stock
+  croc v10 across every feature the reference implementation exposes.
+
+### Phase 8 — divergence budget
 
 * ~~Constant-time curve arithmetic for p256/p384/p521~~ — done (phase 6).
 * ~~Zeroize key material~~ — done (phase 5).

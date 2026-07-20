@@ -4,16 +4,17 @@ A Rust port of [croc](https://github.com/schollz/croc) — a tool for easily and
 securely transferring files and folders between two computers, using a code
 phrase and (when needed) a relay.
 
-**Status: phase 5 — feature-complete and hardened.** rusty-croc is a
-functionally complete croc client and relay, **wire-compatible with stock
-croc v10**: it sends to, receives from, relays for, and reconnects alongside
-stock croc — files, folders, text, and zipped folders, with resume/skip,
-local-network hand-off (IPv4 + IPv6 discovery), direct `--ip`, throttling,
-all four hash algorithms, `.gitignore` mode, and SOCKS5 / HTTP-CONNECT
-proxies. Key material is zeroized on drop, and the parsers have `cargo-fuzz`
-harnesses. Verified end-to-end against the real Go binary in
+**Status: functionally complete.** rusty-croc is a complete croc client and
+relay, **wire-compatible with stock croc v10**: it sends to, receives from,
+relays for, and reconnects alongside stock croc — files, folders, text, and
+zipped folders, with resume/skip, local-network hand-off (IPv4 + IPv6
+discovery), direct `--ip`, throttling, all four hash algorithms, `.gitignore`
+mode, SOCKS5 / HTTP-CONNECT proxies, and public-DNS relay resolution
+(`--internal-dns`). The PAKE runs on constant-time curve arithmetic for the
+standard curves, key material is zeroized on drop, and the parsers have
+`cargo-fuzz` harnesses. Verified end-to-end against the real Go binary in
 `scripts/interop_test.sh`. See [MIGRATION.md](MIGRATION.md) for the full
-analysis, module mapping, and remaining divergences.
+analysis and module mapping.
 
 ## Usage
 
@@ -78,7 +79,7 @@ leaves the LAN.
 | `--git` (.gitignore), SOCKS5/HTTP proxies, IPv6 discovery | ✅ interop/unit-tested |
 | Zeroized key material, `cargo-fuzz` parser harnesses | ✅ |
 | Constant-time PAKE curves (p256/p384/p521 via RustCrypto) | ✅ interop-tested |
-| Custom-DNS relay resolution | ⬜ future |
+| Custom-DNS relay resolution (`--internal-dns`) | ✅ live-tested |
 
 ## Fuzzing
 
