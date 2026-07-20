@@ -110,6 +110,9 @@ pub struct Options {
     pub socks5_proxy: String,
     /// HTTP CONNECT proxy (host:port).
     pub http_proxy: String,
+    /// Resolve the relay hostname via hardcoded public DNS servers
+    /// (croc's `--internal-dns`).
+    pub internal_dns: bool,
 }
 
 impl Default for Options {
@@ -135,6 +138,7 @@ impl Default for Options {
             git_ignore: false,
             socks5_proxy: String::new(),
             http_proxy: String::new(),
+            internal_dns: false,
         }
     }
 }
@@ -825,6 +829,21 @@ impl Client {
         let (host, port) = match address.rsplit_once(':') {
             Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => (h.to_string(), p.to_string()),
             _ => (address.to_string(), models::DEFAULT_PORT.to_string()),
+        };
+        // With --internal-dns, resolve the hostname to an IP via public DNS
+        // servers so the transfer ports connect to the same resolved host.
+        let host = if opts.internal_dns {
+            match models::resolve_host(&host, true) {
+                Some(ip) => {
+                    log::debug!("internal-dns resolved {host} -> {ip}");
+                    ip.to_string()
+                }
+                None => {
+                    return Err(format!("internal-dns could not resolve {host}").into());
+                }
+            }
+        } else {
+            host
         };
         let full = format!("{host}:{port}");
         let room = room_name(&opts.shared_secret);

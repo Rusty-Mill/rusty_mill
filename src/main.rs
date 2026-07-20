@@ -54,6 +54,10 @@ struct TransferFlags {
     /// HTTP CONNECT proxy for non-local relays (or $HTTP_PROXY)
     #[arg(long)]
     connect: Option<String>,
+    /// Resolve the relay hostname via public DNS servers (for broken/censored
+    /// local DNS)
+    #[arg(long)]
+    internal_dns: bool,
 }
 
 impl TransferFlags {
@@ -273,6 +277,7 @@ fn main() {
                         ip,
                         socks5_proxy: flags.socks5_proxy(),
                         http_proxy: flags.http_proxy(),
+                        internal_dns: flags.internal_dns,
                         ..Default::default()
                     };
                     croc::Client::receive(opts).map_err(|e| e as Box<dyn std::error::Error>)
@@ -373,6 +378,7 @@ fn send_command(
         git_ignore: git,
         socks5_proxy: flags.socks5_proxy(),
         http_proxy: flags.http_proxy(),
+        internal_dns: flags.internal_dns,
         ..Default::default()
     };
     let result = croc::Client::send(opts, &files).map_err(|e| e as Box<dyn std::error::Error>);
