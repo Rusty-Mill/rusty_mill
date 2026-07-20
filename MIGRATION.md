@@ -182,6 +182,12 @@ source) or `cargo test` (self-contained):
   mid-transfer (test hook); rust↔rust, rust→go, and go→rust all detect the
   interruption, rendezvous in the reconnect room, and finish with matching
   checksums.
+* ✅ **`--git`**: a rust sender with `--git` omits `.gitignore`d files; a
+  stock Go recipient receives only the kept files.
+* ✅ **SOCKS5 tunnel** unit-tested end-to-end (greeting → CONNECT → bridged
+  echo); **IPv6 loopback discovery** unit-tested; parser **fuzz targets**
+  run clean (mnemonicode >1M execs, message/frame tens of thousands, no
+  panics).
 
 ## Roadmap
 
@@ -250,10 +256,30 @@ Still pending from this phase: IPv6 multicast group, custom
   `$XDG_CONFIG_HOME/rusty-croc/{send,receive}.json` — a rusty-croc-owned
   file, so stock croc's config is never touched).
 
-Still pending: proxy dialing (SOCKS5/HTTP `CONNECT`), custom-DNS relay
-resolution, `--git` mode, IPv6 multicast.
+### Phase 5 — remaining features + hardening (done: core)
 
-### Phase 5 — hardening & divergence budget
+* **Proxies**: SOCKS5 (RFC 1928, no-auth, domain-name CONNECT) and HTTP
+  `CONNECT` tunnels, in `src/comm.rs`, selected by `--socks5` / `--connect`
+  (or `$SOCKS5_PROXY` / `$HTTP_PROXY`). Skipped for local destinations via
+  a port of `utils.IsLocalIP` (RFC1918 / loopback / link-local / ULA).
+* **`--git`**: `.gitignore` respected during file collection using the
+  `ignore` crate with `require_git(false)`, so rules apply even outside a
+  git repo (matching croc, which compiles `.gitignore` directly).
+* **IPv6 discovery**: `src/discovery.rs` now opens either an IPv4
+  (`239.255.255.250`) or IPv6 (`ff02::c`) multicast socket; the sender
+  announces and the recipient discovers on both stacks concurrently, like
+  croc.
+* **Zeroization**: `Pake` wipes its password, blinding scalar, and session
+  key on drop; the client wipes the derived transfer key on drop, on
+  rekey, and on reconnect reset (`zeroize` crate).
+* **Fuzzing**: `cargo-fuzz` targets for the frame reader, message envelope,
+  PAKE update, and mnemonic encoder (`fuzz/`); a deterministic
+  garbage-input robustness test also runs under `cargo test`.
+
+Still pending: custom-DNS relay resolution (the hardcoded public-DNS
+fallback in `models`), and constant-time curve arithmetic (below).
+
+### Phase 6 — divergence budget
 
 * Constant-time curve arithmetic for p256/p384/p521 via RustCrypto crates
   (keep bignum SIEC, or upstream a constant-time SIEC — Go's is also

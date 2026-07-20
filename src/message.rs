@@ -160,6 +160,26 @@ mod tests {
         assert_eq!(decode(Some(&key), &go_encrypted).unwrap(), m);
     }
 
+    // Robustness smoke test (a deterministic mini-fuzz; the real campaign
+    // lives in fuzz/). Decoding arbitrary bytes must never panic.
+    #[test]
+    fn decode_never_panics_on_garbage() {
+        let (key, _) = crypt::new_key(b"pass123", Some(b"saltsalt")).unwrap();
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        for len in 0..256usize {
+            // xorshift-derived pseudo-random bytes, no external rng needed.
+            let mut buf = vec![0u8; len];
+            for b in buf.iter_mut() {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *b = seed as u8;
+            }
+            let _ = decode(None, &buf);
+            let _ = decode(Some(&key), &buf);
+        }
+    }
+
     #[test]
     fn empty_fields_omitted() {
         let m = Message {
