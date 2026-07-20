@@ -271,10 +271,12 @@ compromise the dependency-free ethos the `tls` feature already establishes an
 exception to — and similarly raises the effective MSRV to whatever `platform`
 requires. It brings in the trait crate only; you add a concrete backend
 (`platform-linux`, `platform-windows`, or `platform-mock`) yourself. See
-[`src/platform_net.rs`](src/platform_net.rs) for the adapter, and
-[`krb5::kdc::fetch_tgt_with_csprng`]/[`fetch_ap_req_with_csprng`] for the
-Kerberos client's `platform::security::Csprng`-backed alternative to its
-default `/dev/urandom` reads.
+[`src/platform_net.rs`](src/platform_net.rs) for the adapter. It also
+enables `_with_csprng` siblings of every function that otherwise reads
+`/dev/urandom` directly for its nonces/confounders —
+`krb5::kdc::fetch_tgt_with_csprng`/`fetch_ap_req_with_csprng` and
+`tls::connect_tls_with_csprng`/`connect_tls_kerberos_with_csprng` — each
+taking a `platform::security::Csprng` backend in place of the file read.
 
 ## Connecting to a server
 
