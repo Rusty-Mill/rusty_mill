@@ -365,8 +365,42 @@ Montgomery backend, which is also faster than the old bignum path.)
   weekly parser fuzz smoke.
 * ~~Constant-time SIEC~~ — done (`src/pake.rs::siec_ct`); exceeds upstream.
   Every curve is now constant-time in the scalar.
-* Evaluate async for relay scalability; evaluate `croc`'s newer features as
-  upstream moves (this port tracks v10.2.x behavior).
+* ~~Evaluate async for relay scalability~~ — done; see below. Threads are
+  adequate; async deferred.
+* Evaluate `croc`'s newer features as upstream moves (this port tracks
+  v10.2.x behavior).
+
+### Relay scalability (evaluated — threads kept)
+
+The relay is thread-per-connection: a control thread per client plus two
+pipe threads per stapled room, so a single transfer (1 control + N data
+rooms) costs roughly `2·(N+1)` relay threads. `scripts/relay_scale.sh`
+drives K simultaneous transfers through one relay over loopback and reports
+success rate, peak thread count, and peak RSS.
+
+Measured on a 4-core box (best-effort; loopback co-locates the clients):
+
+| concurrent transfers | success | relay peak threads | relay peak RSS | notes |
+|---|---|---|---|---|
+| 30  | 30/30   | 615  | 25 MB | |
+| 100 | 100/100 | 1307 | 50 MB | |
+| 200 | 200/200 | 2095 | 75 MB | ~10.5 threads/transfer, linear |
+| 400 | 223/400 | 2900 | 118 MB | **test-rig limit**, not the relay |
+
+Threads and memory scale **linearly** (~10.5 threads and ~375 KB RSS per
+concurrent transfer) with 100% success through 200 concurrent transfers.
+The 400 row is *not* a relay ceiling: driving 400 transfers means 800
+co-located client processes on 4 cores, which saturate CPU and time out —
+the relay itself was still healthy at 2900 threads / 118 MB. On a dedicated
+relay host (clients elsewhere), the practical ceiling is the OS thread
+limit (here `ulimit -u` ≈ 64k), i.e. thousands of concurrent transfers.
+
+**Conclusion: keep the thread model.** For personal/team relays and
+moderate public use it is simple, correct, and comfortably sufficient.
+Async (tokio) would cut per-connection memory and lift the ceiling to many
+thousands of concurrent transfers, but only matters for a high-fanout
+public relay, and the rewrite carries interop risk not justified by current
+needs. Revisit if deploying at that scale.
 
 ## Building and testing
 
