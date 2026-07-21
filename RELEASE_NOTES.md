@@ -23,6 +23,34 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
+## PR TBD — Skeleton crate + seam rule (mission handoff step 1)
+**2026-07-21** · (not yet pushed — link once merged)
+
+- **Added:** `Cargo.toml` (zero runtime deps, `[lints.rust]` forbidding
+  `unsafe_code`), `src/lib.rs` crate-level docs stating the mission/scope/
+  seam rule, `.gitignore`, and a Rust CI workflow (`cargo fmt`/`clippy -D
+  warnings`/`cargo test`) now that a manifest exists to run it against.
+- **Changed:** README and ARCHITECTURE rewritten from the greenfield
+  placeholder to the real mission (sans-IO HTTP/1.1 core + `Url`,
+  replacing donor code in `rusty_request`/`rusty_tail`), with a boundary
+  table naming the planned (not yet built) sans-IO core and sync/async
+  transport adapters.
+- **Known limitation, stated plainly:** this is the skeleton only — no
+  parsing/serialization code has landed. `Url` and the sans-IO message
+  core are next (step 2 of the handoff plan), followed by adapters and
+  the migration PRs.
+- **Correction to the source handoff, worth recording:** the handoff
+  described all four `rusty_tail` donor sites as hand-rolled HTTP. Source
+  review found `ts-cli/src/localapi.rs` and `ts-localapi/src/lib.rs`
+  actually build on `hyper`'s HTTP/1 client/server connection machinery —
+  only their request routing and query-param parsing are hand-rolled, not
+  the HTTP framing itself. `ts-control/src/controlhttp.rs` and
+  `ts-derp/src/client.rs` are genuinely hand-rolled as described. This
+  doesn't change the mission, but it changes what migrating the LocalAPI
+  sites means: trading a mature, widely-used dependency (`hyper`) for this
+  new crate, not de-duplicating hand-rolled logic — worth weighing
+  deliberately when step 4's migration order gets there, not assumed.
+
 ## PR TBD — Bootstrap repo governance scaffolding
 **2026-07-21** · (not yet pushed — link once merged)
 

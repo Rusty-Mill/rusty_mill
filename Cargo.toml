@@ -1,0 +1,20 @@
+[package]
+name = "rusty_http"
+version = "0.1.0"
+edition = "2021"
+description = "One sans-IO HTTP/1.1 message layer and Url type for the rusty ecosystem"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_http"
+
+# The core is sans-IO: it never touches a socket, so it takes nothing to
+# parse/serialize HTTP/1.1 heads or frame bodies. Target is zero runtime
+# deps here permanently -- adapters (sync std::io, async over rusty_tokio
+# behind a feature) are the only place a dependency could ever belong, and
+# even those stay optional so a sync-only consumer pulls in nothing extra.
+# Per the ecosystem's dependency-justification convention (see rusty_tls's
+# Cargo.toml): nothing gets added here without a comment justifying it.
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
