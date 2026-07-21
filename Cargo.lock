@@ -678,16 +678,16 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "platform"
-version = "0.8.0"
-source = "git+https://github.com/baileyrd/rustils?rev=5251808971c2e89164d4461c5cf1f45095f60dd3#5251808971c2e89164d4461c5cf1f45095f60dd3"
+version = "0.12.0"
+source = "git+https://github.com/baileyrd/rustils?rev=b8bf992f689e1f1fccc5f4147886a75c25c671dc#b8bf992f689e1f1fccc5f4147886a75c25c671dc"
 dependencies = [
  "thiserror 1.0.69",
 ]
 
 [[package]]
 name = "platform-linux"
-version = "0.8.0"
-source = "git+https://github.com/baileyrd/rustils?rev=5251808971c2e89164d4461c5cf1f45095f60dd3#5251808971c2e89164d4461c5cf1f45095f60dd3"
+version = "0.12.0"
+source = "git+https://github.com/baileyrd/rustils?rev=b8bf992f689e1f1fccc5f4147886a75c25c671dc#b8bf992f689e1f1fccc5f4147886a75c25c671dc"
 dependencies = [
  "libc",
  "platform",
@@ -1260,7 +1260,8 @@ dependencies = [
 name = "ts-tun"
 version = "0.0.1"
 dependencies = [
- "libc",
+ "platform",
+ "platform-linux",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

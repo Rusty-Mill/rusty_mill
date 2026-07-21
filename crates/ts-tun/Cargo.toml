@@ -8,6 +8,8 @@ repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["net", "rt", "macros"] }
-libc.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# rustils' Tun/virtual-link surface (rustils#56, decision D14) — justified in DESIGN.md:
+platform = { git = "https://github.com/baileyrd/rustils", rev = "b8bf992f689e1f1fccc5f4147886a75c25c671dc" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "b8bf992f689e1f1fccc5f4147886a75c25c671dc" }

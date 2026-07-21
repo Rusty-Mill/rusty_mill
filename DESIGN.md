@@ -77,11 +77,10 @@ tree.
 | `h2`, `http`, `bytes` | ts-control | HTTP/2 over the Noise channel, mirroring Go's `x/net/http2`. |
 | `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
 | `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
-| `libc` | ts-tun | TUN device creation/config via raw ioctls; syscall bindings only, no iproute2. |
 | `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
 | `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
 | `smoltcp` | ts-net | Audited pure-Rust userspace TCP/IP stack; hand-rolling TCP is not a good use of risk budget. `default-features = false`, only `medium-ip`/`proto-ipv4`/`socket-tcp`. |
-| `platform`, `platform-linux` (git dep on `rustils`, pinned `rev`) | ts-magicsock | rustils' D16 Net surface (`platform::net::UdpSocket`, `platform_linux::LinuxUdpSocket`) was named for magicsock from the start but blocked on a non-blocking, fd-exposing concrete socket type; rustils#41/#42 added `AsFd`/`AsRawFd`/`set_nonblocking` and concrete (non-`Box`) constructors specifically to unblock this. `LinuxUdpSocket::bind` + `set_nonblocking(true)` replaces `tokio::net::UdpSocket::bind(...).await`, wrapped in tokio's own `AsyncFd` — the same shape `ts-tun`'s `TunFd` already established in this codebase, not a new pattern; `rusty_tokio`'s `io/udp.rs` proves the same wrapping works end to end. |
+| `platform`, `platform-linux` (git dep on `rustils`, pinned `rev`) | ts-magicsock, ts-tun | rustils' D16 Net surface (`platform::net::UdpSocket`, `platform_linux::LinuxUdpSocket`) was named for magicsock from the start but blocked on a non-blocking, fd-exposing concrete socket type; rustils#41/#42 added `AsFd`/`AsRawFd`/`set_nonblocking` and concrete (non-`Box`) constructors specifically to unblock this. `LinuxUdpSocket::bind` + `set_nonblocking(true)` replaces `tokio::net::UdpSocket::bind(...).await`, wrapped in tokio's own `AsyncFd` — the same shape `ts-tun`'s hand-rolled `TunFd` originally established in this codebase, not a new pattern; `rusty_tokio`'s `io/udp.rs` proves the same wrapping works end to end. `ts-tun` itself converged onto the mirrored Tun/virtual-link surface (rustils#56, D14) shortly after: `platform_linux::LinuxTunDevice::create` replaces the hand-rolled `/dev/net/tun` + `TUNSETIFF`/`SIOCSIF*` ioctl sequence in `ts-tun/src/sys.rs` (now deleted), leaving `libc` with no remaining consumer in this workspace. |
 
 Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
 rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted
@@ -227,10 +226,12 @@ Real apps across the tailnet. Full protocol notes in `PROTOCOL.md`.
 
 - **Hand-rolled TUN via ioctls, not the `tun` crate.** The `tun` crate pulls
   Windows bindings and a wider surface; TUN on Linux is a small, stable set
-  of ioctls (`TUNSETIFF` + `SIOCSIF*`). `ts-tun` does them directly over
-  `libc` — pure syscalls, in the sovereign-stack spirit, one dependency
-  (`libc`). The `tun` crate remains the likely choice for the Windows
-  (`wintun`) adapter in Phase 7.
+  of ioctls (`TUNSETIFF` + `SIOCSIF*`). `ts-tun` originally did them directly
+  over `libc`; it has since converged onto rustils'
+  `platform_linux::LinuxTunDevice` (same ioctl sequence, now behind that
+  crate's `Tun`/`TunDevice` traits — see the dependency table), so `libc` is
+  no longer in this workspace's dependency tree at all. The `tun` crate
+  remains the likely choice for the Windows (`wintun`) adapter in Phase 7.
 - **No route command: the `/10` netmask trick.** Assigning the TUN address
   as `100.64.x.y/10` makes the kernel auto-install the connected route for
   the whole CGNAT range, so we never shell out to `ip route` or hand-roll
