@@ -302,9 +302,8 @@ impl Curve {
     /// the standard NIST curves use the RustCrypto backend, SIEC the
     /// `crypto-bigint` Montgomery backend in [`siec_ct`].
     fn scalar_mult(&self, pt: &Point, k: &[u8]) -> Point {
-        let (x, y) = match pt {
-            None => return None,
-            Some(p) => p,
+        let Some((x, y)) = pt else {
+            return None; // k · O = O
         };
         match self.kind {
             CurveKind::Std(id) => ct::scalar_mult(id, x, y, k),
