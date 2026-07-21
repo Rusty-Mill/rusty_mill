@@ -23,12 +23,15 @@ categories = ["network-programming", "encoding"]
 # networking framework would.
 [dependencies]
 rustls = { version = "0.23", optional = true }
-# Pinned to a specific commit (rustils' PAL group v0.6.0, the CSPRNG
-# slice this crate's krb5/kdc.rs `_with_csprng` functions need) rather
-# than tracking `main` — a bare SHA carries the same guarantee as a tag,
-# per rustils' docs/versioning.md §3, which also documents this pinning
-# rule.
-platform = { git = "https://github.com/baileyrd/rustils", rev = "05fda9877ed6b9a7b47be2d0bfdc9e08aac2a228", optional = true }
+# Pinned to a specific commit (rustils' PAL group v0.8.0 — CSPRNG,
+# Sandbox, and the Net raw-fd/non-blocking escape hatch have all landed
+# as of this rev) rather than tracking `main` — a bare SHA carries the
+# same guarantee as a tag, per rustils' docs/versioning.md §3, which
+# also documents this pinning rule. Bumped from v0.6.0 (05fda987);
+# nothing in this crate's own `_with_csprng`/`platform_net` code needed
+# anything past v0.6.0, but keeping the pin current avoids drifting
+# further behind before the next real need shows up.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
 # Test-only, despite living in [dependencies] rather than
 # [dev-dependencies]: Cargo doesn't allow dev-dependencies to be
 # optional, so this is the only way to keep it out of the default
@@ -37,7 +40,7 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "05fda9877ed6b9a
 # fetch_tgt_with_csprng/fetch_ap_req_with_csprng against a real (if
 # mock) Csprng — never re-exported, never a runtime dependency of the
 # shipped library.
-platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "05fda9877ed6b9a7b47be2d0bfdc9e08aac2a228", optional = true }
+platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
