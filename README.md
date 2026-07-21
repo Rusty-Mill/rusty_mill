@@ -17,7 +17,8 @@ mode, SOCKS5 / HTTP-CONNECT proxies, and public-DNS relay resolution
 nonstandard SIEC via a from-scratch Montgomery backend — key material is
 zeroized on drop, and the parsers have `cargo-fuzz` harnesses. Verified end-to-end against the real Go binary in
 `scripts/interop_test.sh`. See [MIGRATION.md](MIGRATION.md) for the full
-analysis and module mapping.
+analysis and module mapping, and [CHANGELOG.md](CHANGELOG.md) for release
+notes.
 
 ## Usage
 
