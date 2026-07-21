@@ -17,13 +17,12 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use ts_control::ControlClient;
 use ts_derp::{DerpClient, DerpSender};
 use ts_filter::Filter;
 use ts_key::NodeState;
-use ts_magicsock::{MagicSock, PathKind, UdpInput};
+use ts_magicsock::{MagicSock, MagicUdp, PathKind, UdpInput};
 use ts_tun::Tun;
 use ts_types::NodePublic;
 use ts_types::tailcfg::{Hostinfo, MapResponse};
@@ -954,7 +953,7 @@ impl Engine {
 
 /// Awaits the next UDP datagram from the magicsock socket, or never resolves
 /// when direct paths are disabled.
-async fn recv_udp(udp: &Option<Arc<UdpSocket>>) -> Option<std::io::Result<(Vec<u8>, SocketAddr)>> {
+async fn recv_udp(udp: &Option<Arc<MagicUdp>>) -> Option<std::io::Result<(Vec<u8>, SocketAddr)>> {
     match udp {
         Some(sock) => {
             let mut buf = vec![0u8; 65_536];

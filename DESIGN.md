@@ -81,6 +81,7 @@ tree.
 | `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
 | `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
 | `smoltcp` | ts-net | Audited pure-Rust userspace TCP/IP stack; hand-rolling TCP is not a good use of risk budget. `default-features = false`, only `medium-ip`/`proto-ipv4`/`socket-tcp`. |
+| `platform`, `platform-linux` (git dep on `rustils`, pinned `rev`) | ts-magicsock | rustils' D16 Net surface (`platform::net::UdpSocket`, `platform_linux::LinuxUdpSocket`) was named for magicsock from the start but blocked on a non-blocking, fd-exposing concrete socket type; rustils#41/#42 added `AsFd`/`AsRawFd`/`set_nonblocking` and concrete (non-`Box`) constructors specifically to unblock this. `LinuxUdpSocket::bind` + `set_nonblocking(true)` replaces `tokio::net::UdpSocket::bind(...).await`, wrapped in tokio's own `AsyncFd` — the same shape `ts-tun`'s `TunFd` already established in this codebase, not a new pattern; `rusty_tokio`'s `io/udp.rs` proves the same wrapping works end to end. |
 
 Approved for later phases (not yet in tree): `snow` (evaluated in Phase 2 and
 rejected — see Phase 2 decisions), `sha2`, `rustls` (HTTPS DERP + hosted

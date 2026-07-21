@@ -269,7 +269,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -677,6 +677,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "platform"
+version = "0.8.0"
+source = "git+https://github.com/baileyrd/rustils?rev=5251808971c2e89164d4461c5cf1f45095f60dd3#5251808971c2e89164d4461c5cf1f45095f60dd3"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.8.0"
+source = "git+https://github.com/baileyrd/rustils?rev=5251808971c2e89164d4461c5cf1f45095f60dd3#5251808971c2e89164d4461c5cf1f45095f60dd3"
+dependencies = [
+ "libc",
+ "platform",
+]
+
+[[package]]
 name = "poly1305"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -919,11 +936,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1061,7 +1098,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "ts-types",
 ]
@@ -1081,7 +1118,7 @@ dependencies = [
  "hyper-util",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-key",
@@ -1108,7 +1145,7 @@ dependencies = [
  "crypto_box",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-key",
@@ -1121,7 +1158,7 @@ version = "0.0.1"
 dependencies = [
  "crypto_box",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "ts-key",
  "ts-types",
 ]
@@ -1130,7 +1167,7 @@ dependencies = [
 name = "ts-engine"
 version = "0.0.1"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-control",
@@ -1159,7 +1196,7 @@ dependencies = [
  "rand_core",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "ts-types",
  "x25519-dalek",
 ]
@@ -1174,7 +1211,7 @@ dependencies = [
  "hyper-util",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-types",
@@ -1184,8 +1221,10 @@ dependencies = [
 name = "ts-magicsock"
 version = "0.0.1"
 dependencies = [
+ "platform",
+ "platform-linux",
  "rand_core",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-derp",
@@ -1200,7 +1239,7 @@ name = "ts-net"
 version = "0.0.1"
 dependencies = [
  "smoltcp",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "ts-engine",
@@ -1213,7 +1252,7 @@ name = "ts-stun"
 version = "0.0.1"
 dependencies = [
  "rand_core",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -1222,7 +1261,7 @@ name = "ts-tun"
 version = "0.0.1"
 dependencies = [
  "libc",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -1233,7 +1272,7 @@ version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1241,7 +1280,7 @@ name = "ts-wg"
 version = "0.0.1"
 dependencies = [
  "boringtun",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
  "ts-key",
  "ts-types",
