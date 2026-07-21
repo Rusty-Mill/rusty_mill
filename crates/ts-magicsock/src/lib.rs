@@ -13,12 +13,16 @@
 //! Protocol details: PROTOCOL.md.
 
 use std::collections::HashMap;
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use platform::error::{ErrorKind as PlatformErrorKind, PlatformError};
+use platform::net::UdpSocket as PlatformUdpSocket;
+use platform_linux::LinuxUdpSocket;
 use rand_core::{OsRng, RngCore};
-use tokio::net::UdpSocket;
+use tokio::io::unix::AsyncFd;
 use ts_derp::DerpSender;
 use ts_disco::{Message, TxId};
 use ts_key::DiscoPrivate;
@@ -76,7 +80,7 @@ impl PeerPaths {
 /// internal locking); the UDP socket is shared via `Arc` for the receive
 /// path.
 pub struct MagicSock {
-    udp: Arc<UdpSocket>,
+    udp: Arc<MagicUdp>,
     port: u16,
     disco: DiscoPrivate,
     derp: DerpSender,
@@ -94,7 +98,10 @@ impl MagicSock {
     /// Binds the UDP socket (IPv4, `0.0.0.0:0` unless `port` is set) and
     /// builds the mux.
     pub async fn new(port: u16, disco: DiscoPrivate, derp: DerpSender) -> std::io::Result<Self> {
-        let udp = UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, port)).await?;
+        let udp = MagicUdp::bind(SocketAddr::new(
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port,
+        ))?;
         let bound = udp.local_addr()?.port();
         Ok(Self {
             udp: Arc::new(udp),
@@ -110,7 +117,7 @@ impl MagicSock {
     }
 
     /// The shared UDP socket, for the engine's receive loop.
-    pub fn udp(&self) -> Arc<UdpSocket> {
+    pub fn udp(&self) -> Arc<MagicUdp> {
         self.udp.clone()
     }
 
@@ -414,6 +421,83 @@ fn primary_local_ip(dst: IpAddr) -> Option<IpAddr> {
     if ip.is_unspecified() { None } else { Some(ip) }
 }
 
+/// The magic socket's UDP transport: a `platform_linux::LinuxUdpSocket`
+/// (rustils' D16 Net surface) driven non-blocking through tokio's own
+/// `AsyncFd` — the same "rustils-backed fd on tokio's reactor" shape
+/// `ts-tun`'s `TunFd` established, not a new pattern. `rusty_tokio`'s
+/// `io/udp.rs` proves the same wrapping end to end.
+pub struct MagicUdp {
+    fd: AsyncFd<LinuxUdpSocket>,
+}
+
+impl MagicUdp {
+    fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let sock = LinuxUdpSocket::bind(addr).map_err(from_platform_err)?;
+        sock.set_nonblocking(true).map_err(from_platform_err)?;
+        Ok(Self {
+            fd: AsyncFd::new(sock)?,
+        })
+    }
+
+    /// The address this socket is bound to.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.fd.get_ref().local_addr().map_err(from_platform_err)
+    }
+
+    /// Sends `buf` as one datagram to `addr`.
+    pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        loop {
+            let mut guard = self.fd.writable().await?;
+            match guard.try_io(|inner| {
+                inner
+                    .get_ref()
+                    .send_to(buf, addr)
+                    .map_err(from_platform_err)
+            }) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    /// Waits for and returns the next datagram, with its sender's address.
+    pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        loop {
+            let mut guard = self.fd.readable().await?;
+            match guard.try_io(|inner| inner.get_ref().recv_from(buf).map_err(from_platform_err)) {
+                Ok(result) => return result,
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+/// Maps a rustils [`PlatformError`] to [`io::Error`], keeping the
+/// operation/path context in the error's `Display` (via `source`) while
+/// giving `AsyncFd::try_io` an accurate [`io::ErrorKind`] to recognize
+/// `WouldBlock` by — `platform-linux` already maps `EAGAIN` to
+/// `ErrorKind::WouldBlock`, so this just carries that through.
+fn from_platform_err(e: PlatformError) -> io::Error {
+    let kind = match e.kind {
+        PlatformErrorKind::NotFound => io::ErrorKind::NotFound,
+        PlatformErrorKind::PermissionDenied => io::ErrorKind::PermissionDenied,
+        PlatformErrorKind::AlreadyExists => io::ErrorKind::AlreadyExists,
+        PlatformErrorKind::WouldBlock => io::ErrorKind::WouldBlock,
+        PlatformErrorKind::Interrupted => io::ErrorKind::Interrupted,
+        PlatformErrorKind::BrokenPipe => io::ErrorKind::BrokenPipe,
+        PlatformErrorKind::ConnectionRefused => io::ErrorKind::ConnectionRefused,
+        PlatformErrorKind::ConnectionReset => io::ErrorKind::ConnectionReset,
+        PlatformErrorKind::ConnectionAborted => io::ErrorKind::ConnectionAborted,
+        PlatformErrorKind::NotConnected => io::ErrorKind::NotConnected,
+        PlatformErrorKind::AddrInUse => io::ErrorKind::AddrInUse,
+        PlatformErrorKind::AddrNotAvailable => io::ErrorKind::AddrNotAvailable,
+        PlatformErrorKind::TimedOut => io::ErrorKind::TimedOut,
+        PlatformErrorKind::InvalidInput => io::ErrorKind::InvalidInput,
+        _ => io::ErrorKind::Other,
+    };
+    io::Error::new(kind, e)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -443,5 +527,21 @@ mod tests {
         // A stale direct path falls back to relay.
         p.direct = Some((ep, Instant::now() - Duration::from_secs(60)));
         assert_eq!(p.path(), PathKind::Relay);
+    }
+
+    /// End-to-end check that `MagicUdp` (the `LinuxUdpSocket` + `AsyncFd`
+    /// wrapper) actually moves bytes: two sockets bound to loopback, one
+    /// sends, the other receives via the `AsyncFd::readable`/`try_io` loop.
+    #[tokio::test]
+    async fn magic_udp_round_trips_a_datagram() {
+        let loopback = |port| SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port);
+        let a = MagicUdp::bind(loopback(0)).unwrap();
+        let b = MagicUdp::bind(loopback(0)).unwrap();
+        let b_addr = b.local_addr().unwrap();
+        a.send_to(b"hello from rustils", b_addr).await.unwrap();
+        let mut buf = [0u8; 64];
+        let (n, src) = b.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"hello from rustils");
+        assert_eq!(src, a.local_addr().unwrap());
     }
 }
