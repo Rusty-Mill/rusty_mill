@@ -260,6 +260,7 @@ cargo build            # zero dependencies
 cargo test
 cargo build --features tls        # opt-in TLS connector (pulls in rustls)
 cargo build --features platform   # opt-in platform::net::TcpStream adapter
+cargo build --features serve-example   # opt-in `serve` example (Sandbox confinement)
 ```
 
 The default build has no dependencies and keeps an MSRV of 1.70. The optional
@@ -277,6 +278,11 @@ enables `_with_csprng` siblings of every function that otherwise reads
 `krb5::kdc::fetch_tgt_with_csprng`/`fetch_ap_req_with_csprng` and
 `tls::connect_tls_with_csprng`/`connect_tls_kerberos_with_csprng` — each
 taking a `platform::security::Csprng` backend in place of the file read.
+
+The optional `serve-example` feature implies `platform` and additionally
+pulls in the concrete `platform-linux` backend, purely to build
+`examples/serve.rs` (see [Serving connections](#serving-connections) below);
+it changes nothing about the core library's own dependencies.
 
 ## Connecting to a server
 
@@ -313,6 +319,28 @@ let _ = (transport.recv_event()?, session);
 # Ok(())
 # }
 ```
+
+## Serving connections
+
+`RdpTransport::accept()` is this crate's server-side entry point, and the one
+place that processes fully untrusted, attacker-controlled wire data end to
+end (negotiation, GCC, the Security Exchange PDU, Client Info). The `serve`
+example demonstrates driving it behind optional OS-level confinement from
+`platform::security::Sandbox` (Landlock filesystem confinement, seccomp
+`block_inet_sockets`) — bind the listening socket first, confine, then accept:
+
+```sh
+cargo run --example serve --features serve-example -- 127.0.0.1:3389
+```
+
+Confinement is Linux-only, and `block_inet_sockets` further requires
+`x86_64`; `Sandbox` reports a three-way `SandboxStatus`
+(`Enforced`/`NotEnforced`/`Unsupported`) instead of silently degrading, and
+the example prints whichever it actually got rather than assuming
+`Enforced`. On any other platform it prints that confinement isn't available
+and runs unconfined. The example speaks only unencrypted standard RDP
+security and exists to demonstrate the confinement pattern, not as a usable
+server — do not point it at an untrusted network as-is.
 
 ## License
 
