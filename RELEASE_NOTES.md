@@ -23,8 +23,41 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — Skeleton crate + seam rule (mission handoff step 1)
+## PR TBD — Url + sans-IO message core (mission handoff step 2)
 **2026-07-21** · (not yet pushed — link once merged)
+
+- **Added:** `Url` (ported near-verbatim from donor 2, `rusty_request`'s
+  `url.rs`); `HeaderMap`, `Method`, `StatusCode`, `Version`; the sans-IO
+  message core (`head::parse_request_head`/`parse_response_head` +
+  `RequestHead::write`/`ResponseHead::write`, inverted from donor 1's
+  async `http1.rs`); body framing (`body::request_framing`/
+  `response_framing`) and the incremental `body::ChunkedDecoder`. 57 unit
+  tests plus a doc test, all passing; `cargo fmt`/`clippy -D warnings`
+  clean.
+- **Added, pinning the mission's core requirement:** tests
+  (`head::tests::request_head_over_reads_nothing_past_the_blank_line` and
+  its response counterpart) that parse a head with trailing non-HTTP bytes
+  appended — modeled on donor 4's actual Noise-upgrade scenario
+  (`ts-control/controlhttp.rs`) — and assert the trailing bytes are
+  returned untouched via `Outcome::Complete::consumed`.
+- **Added, beyond the handoff's explicit step-2 scope:** an explicit
+  `max_head_len`/`max_line_len` bound on head parsing and chunked-framing
+  lines (`HeadTooLarge`/`ChunkFramingTooLarge` errors), defaulting to 8
+  KiB. Not asked for in the sequencing, but flagged in this crate's own
+  earlier review as a real gap: this core parses untrusted, server-bound
+  requests (donor 6's LocalAPI server), and an unbounded head/line is a
+  memory-exhaustion vector against exactly that consumer.
+- **Changed:** `Method` gained `Connect`/`Trace` variants and an
+  `Extension(String)` catch-all, and a `parse` constructor -- donor 1's
+  client-only `Method` never needed to parse an arbitrary incoming
+  token; a bidirectional core does.
+- **Known limitation, stated plainly:** no sync/async transport adapter
+  exists yet, so nothing here has been exercised against a real socket —
+  only against byte buffers in tests. The `cookies` feature (RFC 6265,
+  donor 3) is also not yet built; it wasn't part of this step's scope.
+
+## PR #1 — Skeleton crate + seam rule (mission handoff step 1)
+**2026-07-21** · [#1](https://github.com/baileyrd/rusty_http/pull/1)
 
 - **Added:** `Cargo.toml` (zero runtime deps, `[lints.rust]` forbidding
   `unsafe_code`), `src/lib.rs` crate-level docs stating the mission/scope/
@@ -51,8 +84,8 @@ newest first (no version tags yet — this is pre-1.0).
   new crate, not de-duplicating hand-rolled logic — worth weighing
   deliberately when step 4's migration order gets there, not assumed.
 
-## PR TBD — Bootstrap repo governance scaffolding
-**2026-07-21** · (not yet pushed — link once merged)
+## PR #1 — Bootstrap repo governance scaffolding
+**2026-07-21** · [#1](https://github.com/baileyrd/rusty_http/pull/1)
 
 - **Added:** PR templates (feature/bug_fix/docs/chore), issue templates
   (bug_report/feature_request), CONTRIBUTING, CODE_OF_CONDUCT, SECURITY,
