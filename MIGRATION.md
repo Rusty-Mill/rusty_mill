@@ -289,13 +289,40 @@ Still pending from this phase: IPv6 multicast group, custom
   every one of these curves is prime-order with cofactor 1, so
   `k·P == (k mod n)·P` and the point is byte-identical (the Go-generated
   vector tests confirm this).
-* **SIEC stays on the bignum backend** — its nonstandard curve has no
-  constant-time implementation in any language (Go's `tscholl2/siec` is also
-  variable-time), so this matches upstream rather than lagging it. SIEC is
-  only ever used with the fixed weak key `[1,2,3]` for the relay handshake,
-  not with the user's secret.
+* **SIEC** was later given its own constant-time backend too (`siec_ct`),
+  so *every* curve rusty-croc offers is now constant-time in the scalar —
+  see the "Constant-time SIEC" section below.
 * Bonus: the constant-time field arithmetic is also markedly faster than
   bignum, cutting the unit-test suite runtime ~4×.
+
+### Constant-time SIEC (exceeds upstream)
+
+SIEC (`y² = x³ + 19` over a 255-bit prime) is croc's nonstandard
+relay-handshake curve; no crate implements it and Go's `tscholl2/siec` is
+variable-time, so this is the one place the port goes *beyond* the
+reference rather than matching it. `src/pake.rs::siec_ct` implements it
+constant-time in the scalar:
+
+* Field arithmetic is `crypto-bigint`'s Montgomery form (`FixedMontyForm`),
+  which is constant-time.
+* Point addition uses the Renes–Costello–Batina **complete** formula
+  (Algorithm 7, `a = 0`) in homogeneous projective coordinates — uniform,
+  so the same operations run for `P + Q`, `P + P`, and identity, with no
+  input-dependent branches.
+* Scalar multiplication is a **double-and-add-always** ladder with `subtle`
+  conditional selection, processing exactly `8·len(k)` bits (the length is
+  public: the 3-byte weak key for the handshake, or a 32-byte ephemeral).
+
+Verified byte-identical to Go via the existing SIEC vector tests
+(`scalar_base_mult`/`scalar_mult`/`add`) and the full siec handshake, and
+live against stock croc in both roles: the relay handshake (whose ephemeral
+scalar *is* secret) and a peer PAKE over `--curve siec`.
+
+Security note: this has marginal practical value — SIEC only guards the
+relay handshake, whose only secret is a per-connection ephemeral, and the
+peer PAKE (with the user's actual secret) defaults to the now-constant-time
+p256. It's a completeness/craftsmanship item, and it removes the last
+variable-time scalar path from the codebase.
 
 ### Phase 7 — custom-DNS relay resolution (done)
 
@@ -324,8 +351,8 @@ One regression surfaced by the benchmark and fixed: the transfer-port relay
 handshakes were done **sequentially**, serializing N slow SIEC PAKEs and
 inflating first-byte latency (~0.55 s). `process_pake` now fans them out
 across threads like Go's goroutines, cutting handshake latency to ~0.32 s —
-within ~40 ms of Go. (A tiny residual remains: the control-connection SIEC
-handshake is the one curve still on variable-time bignum.)
+within ~40 ms of Go. (The SIEC handshake later moved to a constant-time
+Montgomery backend, which is also faster than the old bignum path.)
 
 ### Phase 8 — divergence budget
 
@@ -336,10 +363,44 @@ handshake is the one curve still on variable-time bignum.)
   runs `scripts/interop_test.sh` (the full transfer matrix against a freshly
   built stock croc) on every push/PR, alongside fmt/clippy/tests, plus a
   weekly parser fuzz smoke.
-* Evaluate async for relay scalability; evaluate `croc`'s newer features as
-  upstream moves (this port tracks v10.2.x behavior).
-* Constant-time SIEC (would exceed upstream; low priority since SIEC only
-  guards the relay handshake with a fixed weak key, never the user secret).
+* ~~Constant-time SIEC~~ — done (`src/pake.rs::siec_ct`); exceeds upstream.
+  Every curve is now constant-time in the scalar.
+* ~~Evaluate async for relay scalability~~ — done; see below. Threads are
+  adequate; async deferred.
+* Evaluate `croc`'s newer features as upstream moves (this port tracks
+  v10.2.x behavior).
+
+### Relay scalability (evaluated — threads kept)
+
+The relay is thread-per-connection: a control thread per client plus two
+pipe threads per stapled room, so a single transfer (1 control + N data
+rooms) costs roughly `2·(N+1)` relay threads. `scripts/relay_scale.sh`
+drives K simultaneous transfers through one relay over loopback and reports
+success rate, peak thread count, and peak RSS.
+
+Measured on a 4-core box (best-effort; loopback co-locates the clients):
+
+| concurrent transfers | success | relay peak threads | relay peak RSS | notes |
+|---|---|---|---|---|
+| 30  | 30/30   | 615  | 25 MB | |
+| 100 | 100/100 | 1307 | 50 MB | |
+| 200 | 200/200 | 2095 | 75 MB | ~10.5 threads/transfer, linear |
+| 400 | 223/400 | 2900 | 118 MB | **test-rig limit**, not the relay |
+
+Threads and memory scale **linearly** (~10.5 threads and ~375 KB RSS per
+concurrent transfer) with 100% success through 200 concurrent transfers.
+The 400 row is *not* a relay ceiling: driving 400 transfers means 800
+co-located client processes on 4 cores, which saturate CPU and time out —
+the relay itself was still healthy at 2900 threads / 118 MB. On a dedicated
+relay host (clients elsewhere), the practical ceiling is the OS thread
+limit (here `ulimit -u` ≈ 64k), i.e. thousands of concurrent transfers.
+
+**Conclusion: keep the thread model.** For personal/team relays and
+moderate public use it is simple, correct, and comfortably sufficient.
+Async (tokio) would cut per-connection memory and lift the ceiling to many
+thousands of concurrent transfers, but only matters for a high-fanout
+public relay, and the rewrite carries interop risk not justified by current
+needs. Revisit if deploying at that scale.
 
 ## Building and testing
 

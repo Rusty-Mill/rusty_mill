@@ -44,13 +44,15 @@ impl std::error::Error for PakeError {}
 /// Affine point; `None` is the point at infinity.
 type Point = Option<(BigUint, BigUint)>;
 
+/// Curve parameters retained for the on-curve check and affine negation only;
+/// all scalar multiplication / point addition runs in a constant-time backend
+/// ([`ct`] for the NIST curves, [`siec_ct`] for SIEC), which carries its own
+/// generator, so the base point is no longer stored here.
 struct Curve {
     kind: CurveKind,
     p: BigUint,
     a: BigUint, // curve coefficient a, already reduced mod p
     b: BigUint,
-    gx: BigUint,
-    gy: BigUint,
 }
 
 fn hexu(s: &str) -> BigUint {
@@ -225,8 +227,6 @@ impl Curve {
                     kind: CurveKind::Std(ct::StdId::P256),
                     a: &p - 3u32,
                     b: hexu("5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),
-                    gx: hexu("6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),
-                    gy: hexu("4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),
                     p,
                 })
             }
@@ -238,8 +238,6 @@ impl Curve {
                     kind: CurveKind::Std(ct::StdId::P384),
                     a: &p - 3u32,
                     b: hexu("b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef"),
-                    gx: hexu("aa87ca22be8b05378eb1c71ef320ad746e1d3b628ba79b9859f741e082542a385502f25dbf55296c3a545e3872760ab7"),
-                    gy: hexu("3617de4a96262c6f5d9e98bf9292dc29f8f41dbd289a147ce9da3113b5f0b8c00a60b1ce1d7e819d7a431d7c90ea0e5f"),
                     p,
                 })
             }
@@ -251,8 +249,6 @@ impl Curve {
                     kind: CurveKind::Std(ct::StdId::P521),
                     a: &p - 3u32,
                     b: hexu("0051953eb9618e1c9a1f929a21a0b68540eea2da725b99b315f3b8b489918ef109e156193951ec7e937b1652c0bd3bb1bf073573df883d2c34f1ef451fd46b503f00"),
-                    gx: hexu("00c6858e06b70404e9cd9e3ecb662395b4429c648139053fb521f828af606b4d3dbaa14b5e77efe75928fe1dc127a2ffa8de3348b3c1856a429bf97e7e31c2e5bd66"),
-                    gy: hexu("011839296a789a3bc0045c8a5fb42c7d1bd998f54449579b446817afbd17273e662c97ee72995ef42640c550b9013fad0761353c7086a272c24088be94769fd16650"),
                     p,
                 })
             }
@@ -263,8 +259,6 @@ impl Curve {
                 ),
                 a: BigUint::zero(),
                 b: decu("19"),
-                gx: decu("5"),
-                gy: decu("12"),
             }),
             other => Err(PakeError::UnknownCurve(other.to_string())),
         }
@@ -283,87 +277,226 @@ impl Curve {
         }
     }
 
-    fn sub_mod(&self, a: &BigUint, b: &BigUint) -> BigUint {
-        ((a % &self.p) + &self.p - (b % &self.p)) % &self.p
-    }
-
-    fn inv_mod(&self, a: &BigUint) -> BigUint {
-        // p is prime, so a^(p-2) is the inverse.
-        a.modpow(&(&self.p - 2u32), &self.p)
-    }
-
+    /// Affine point negation: (x, y) → (x, −y mod p). Cheap and not
+    /// secret-scalar-dependent, so this stays on `num-bigint`.
     fn neg_y(&self, pt: &Point) -> Point {
-        pt.as_ref()
-            .map(|(x, y)| (x.clone(), self.sub_mod(&BigUint::zero(), y)))
-    }
-
-    fn double(&self, pt: &Point) -> Point {
-        let (x, y) = pt.as_ref()?;
-        if y.is_zero() {
-            return None;
-        }
-        let three_x2 = (BigUint::from(3u32) * x * x) % &self.p;
-        let num = (three_x2 + &self.a) % &self.p;
-        let den = self.inv_mod(&((BigUint::from(2u32) * y) % &self.p));
-        let lambda = (num * den) % &self.p;
-        let x3 = self.sub_mod(&((&lambda * &lambda) % &self.p), &((x + x) % &self.p));
-        let y3 = self.sub_mod(&((&lambda * self.sub_mod(x, &x3)) % &self.p), y);
-        Some((x3, y3))
-    }
-
-    fn add(&self, p1: &Point, p2: &Point) -> Point {
-        if let CurveKind::Std(id) = self.kind {
-            return ct::add(id, p1, p2);
-        }
-        // SIEC: variable-time affine addition over num-bigint.
-        let (x1, y1) = match p1 {
-            None => return p2.clone(),
-            Some(v) => v,
-        };
-        let (x2, y2) = match p2 {
-            None => return p1.clone(),
-            Some(v) => v,
-        };
-        if x1 == x2 {
-            if (y1 + y2) % &self.p == BigUint::zero() {
-                return None;
-            }
-            return self.double(p1);
-        }
-        let lambda = (self.sub_mod(y2, y1) * self.inv_mod(&self.sub_mod(x2, x1))) % &self.p;
-        let x3 = self.sub_mod(&self.sub_mod(&((&lambda * &lambda) % &self.p), x1), x2);
-        let y3 = self.sub_mod(&((&lambda * self.sub_mod(x1, &x3)) % &self.p), y1);
-        Some((x3, y3))
-    }
-
-    /// Scalar multiplication. Standard NIST curves use the constant-time
-    /// RustCrypto backend; SIEC uses double-and-add over the big-endian scalar
-    /// bytes, matching Go's `crypto/elliptic` semantics (prime order, so
-    /// reduction differences cannot change the result).
-    fn scalar_mult(&self, pt: &Point, k: &[u8]) -> Point {
-        if let CurveKind::Std(id) = self.kind {
-            return match pt {
-                None => None,
-                Some((x, y)) => ct::scalar_mult(id, x, y, k),
+        pt.as_ref().map(|(x, y)| {
+            let neg = if y.is_zero() {
+                BigUint::zero()
+            } else {
+                &self.p - y
             };
+            (x.clone(), neg)
+        })
+    }
+
+    /// Point addition, dispatched to the constant-time backend for the curve.
+    fn add(&self, p1: &Point, p2: &Point) -> Point {
+        match self.kind {
+            CurveKind::Std(id) => ct::add(id, p1, p2),
+            CurveKind::Siec => siec_ct::add(p1, p2),
         }
-        let mut result: Point = None;
-        for byte in k {
-            for bit in (0..8).rev() {
-                result = self.double(&result);
-                if (byte >> bit) & 1 == 1 {
-                    result = self.add(&result, pt);
-                }
-            }
+    }
+
+    /// Scalar multiplication, constant-time in the scalar for every curve:
+    /// the standard NIST curves use the RustCrypto backend, SIEC the
+    /// `crypto-bigint` Montgomery backend in [`siec_ct`].
+    fn scalar_mult(&self, pt: &Point, k: &[u8]) -> Point {
+        let Some((x, y)) = pt else {
+            return None; // k · O = O
+        };
+        match self.kind {
+            CurveKind::Std(id) => ct::scalar_mult(id, x, y, k),
+            CurveKind::Siec => siec_ct::scalar_mult(x, y, k),
         }
-        result
     }
 
     fn scalar_base_mult(&self, k: &[u8]) -> Point {
-        if let CurveKind::Std(id) = self.kind {
-            return ct::scalar_base_mult(id, k);
+        match self.kind {
+            CurveKind::Std(id) => ct::scalar_base_mult(id, k),
+            CurveKind::Siec => siec_ct::scalar_base_mult(k),
         }
-        self.scalar_mult(&Some((self.gx.clone(), self.gy.clone())), k)
+    }
+}
+
+/// Constant-time SIEC arithmetic.
+///
+/// SIEC (`y² = x³ + 19` over a 255-bit prime, generator (5, 12)) is croc's
+/// nonstandard relay-handshake curve; no crate implements it, and Go's
+/// `tscholl2/siec` is variable-time. This backend is constant-time in the
+/// scalar: field arithmetic is `crypto-bigint`'s Montgomery form (constant
+/// time), point addition uses the Renes–Costello–Batina *complete* formula
+/// (uniform — no input-dependent branches), and scalar multiplication is a
+/// double-and-add-*always* ladder with `subtle` conditional selection, so the
+/// same operations run regardless of the scalar bits.
+///
+/// The scalar is processed over exactly `8·k.len()` bits; the length is public
+/// (protocol-fixed: the 3-byte weak key for the handshake, or a 32-byte
+/// ephemeral), so no reduction is needed — every curve here has prime order,
+/// making `k·P` well defined for an unreduced `k`, matching Go.
+mod siec_ct {
+    use crypto_bigint::modular::{FixedMontyForm, FixedMontyParams};
+    use crypto_bigint::{Odd, U256};
+    use num_bigint::BigUint;
+    use std::sync::OnceLock;
+    use subtle::{Choice, ConditionallySelectable};
+
+    type Fp = FixedMontyForm<{ U256::LIMBS }>;
+    type Point = Option<(BigUint, BigUint)>;
+
+    // SIEC field prime p (255-bit).
+    const P_HEX: &str = "4000000000000000000000000200104080000000000000000004004103082041";
+
+    fn params() -> &'static FixedMontyParams<{ U256::LIMBS }> {
+        static P: OnceLock<FixedMontyParams<{ U256::LIMBS }>> = OnceLock::new();
+        P.get_or_init(|| FixedMontyParams::new(Odd::new(U256::from_be_hex(P_HEX)).unwrap()))
+    }
+
+    fn fp(v: u64) -> Fp {
+        Fp::new(&U256::from_u64(v), params())
+    }
+
+    fn fp_from_biguint(v: &BigUint) -> Fp {
+        let be = v.to_bytes_be();
+        let mut bytes = [0u8; 32]; // coords are < p < 2^255, so ≤ 32 bytes
+        bytes[32 - be.len()..].copy_from_slice(&be);
+        Fp::new(&U256::from_be_slice(&bytes), params())
+    }
+
+    fn fp_to_biguint(f: &Fp) -> BigUint {
+        BigUint::from_bytes_be(&f.retrieve().to_be_bytes())
+    }
+
+    /// Homogeneous projective point (X:Y:Z); the identity is (0:1:0).
+    #[derive(Clone, Copy)]
+    struct Pt {
+        x: Fp,
+        y: Fp,
+        z: Fp,
+    }
+
+    impl ConditionallySelectable for Pt {
+        fn conditional_select(a: &Self, b: &Self, c: Choice) -> Self {
+            Pt {
+                x: Fp::conditional_select(&a.x, &b.x, c),
+                y: Fp::conditional_select(&a.y, &b.y, c),
+                z: Fp::conditional_select(&a.z, &b.z, c),
+            }
+        }
+    }
+
+    fn identity() -> Pt {
+        Pt {
+            x: Fp::zero(params()),
+            y: Fp::one(params()),
+            z: Fp::zero(params()),
+        }
+    }
+
+    fn projective(p: &Point) -> Pt {
+        match p {
+            None => identity(),
+            Some((x, y)) => Pt {
+                x: fp_from_biguint(x),
+                y: fp_from_biguint(y),
+                z: Fp::one(params()),
+            },
+        }
+    }
+
+    fn to_affine(p: &Pt) -> Point {
+        if p.z.retrieve() == U256::ZERO {
+            return None; // point at infinity
+        }
+        let zinv: Fp = Option::from(p.z.invert()).expect("z ≠ 0 is invertible mod prime p");
+        Some((fp_to_biguint(&(p.x * zinv)), fp_to_biguint(&(p.y * zinv))))
+    }
+
+    /// Renes–Costello–Batina complete addition, Algorithm 7 (`a = 0`), with
+    /// `b3 = 3·b = 57`. Uniform: correct for all inputs incl. P = Q and the
+    /// identity, with no data-dependent branches.
+    // Statements are kept in the paper's exact `tN ← tI op tJ` order (not
+    // compound-assign) so they line up 1:1 with Algorithm 7 for review.
+    #[allow(clippy::assign_op_pattern)]
+    fn add_pt(p: &Pt, q: &Pt) -> Pt {
+        let b3 = fp(57);
+        let (x1, y1, z1) = (p.x, p.y, p.z);
+        let (x2, y2, z2) = (q.x, q.y, q.z);
+        let mut t0 = x1 * x2;
+        let mut t1 = y1 * y2;
+        let mut t2 = z1 * z2;
+        let mut t3 = x1 + y1;
+        let mut t4 = x2 + y2;
+        t3 = t3 * t4;
+        t4 = t0 + t1;
+        t3 = t3 - t4;
+        t4 = y1 + z1;
+        let mut t5 = y2 + z2;
+        t4 = t4 * t5;
+        t5 = t1 + t2;
+        t4 = t4 - t5;
+        let mut x3 = x1 + z1;
+        let mut y3 = x2 + z2;
+        x3 = x3 * y3;
+        y3 = t0 + t2;
+        y3 = x3 - y3;
+        x3 = t0 + t0;
+        t0 = x3 + t0;
+        t2 = b3 * t2;
+        let mut z3 = t1 + t2;
+        t1 = t1 - t2;
+        y3 = b3 * y3;
+        x3 = t4 * y3;
+        t2 = t3 * t1;
+        x3 = t2 - x3;
+        y3 = y3 * t0;
+        t1 = t1 * z3;
+        y3 = t1 + y3;
+        t0 = t0 * t3;
+        z3 = z3 * t4;
+        z3 = z3 + t0;
+        Pt {
+            x: x3,
+            y: y3,
+            z: z3,
+        }
+    }
+
+    /// Double-and-add-*always* over the big-endian bits of `k`. Constant-time
+    /// in the bit values: each step doubles, computes R+base, then selects.
+    fn scalar_mult_pt(base: &Pt, k: &[u8]) -> Pt {
+        let mut r = identity();
+        for &byte in k {
+            for i in (0..8).rev() {
+                let bit = (byte >> i) & 1;
+                r = add_pt(&r, &r); // double
+                let r_add = add_pt(&r, base);
+                r = Pt::conditional_select(&r, &r_add, Choice::from(bit));
+            }
+        }
+        r
+    }
+
+    pub fn scalar_mult(x: &BigUint, y: &BigUint, k: &[u8]) -> Point {
+        let base = Pt {
+            x: fp_from_biguint(x),
+            y: fp_from_biguint(y),
+            z: Fp::one(params()),
+        };
+        to_affine(&scalar_mult_pt(&base, k))
+    }
+
+    pub fn scalar_base_mult(k: &[u8]) -> Point {
+        let base = Pt {
+            x: fp(5),
+            y: fp(12),
+            z: Fp::one(params()),
+        };
+        to_affine(&scalar_mult_pt(&base, k))
+    }
+
+    pub fn add(p1: &Point, p2: &Point) -> Point {
+        to_affine(&add_pt(&projective(p1), &projective(p2)))
     }
 }
 
