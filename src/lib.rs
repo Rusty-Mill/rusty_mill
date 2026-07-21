@@ -11,12 +11,15 @@
 //!
 //! # Shape
 //!
-//! A **sans-IO core**: parsing and serializing HTTP/1.1 request/response
-//! heads, and driving body framing (`Content-Length`, `Transfer-Encoding:
-//! chunked`, close-delimited) as a byte-in/byte-out state machine that never
-//! touches a socket. Head parsing consumes exactly the head and no further,
-//! so a caller mid-protocol-upgrade (Noise, DERP, WebSocket-style flows) can
-//! take the underlying connection over byte-exact.
+//! A **sans-IO core**: [`head::parse_request_head`]/
+//! [`head::parse_response_head`] parse a request/response head from a byte
+//! buffer without ever touching a socket, consuming *exactly* the head
+//! ([`head::Outcome::Complete::consumed`]) so a caller mid-protocol-upgrade
+//! (Noise, DERP, WebSocket-style flows) can take the connection over
+//! byte-exact. [`body`] determines how a body's end is framed
+//! (`Content-Length`, `Transfer-Encoding: chunked`, or close-delimited) and
+//! provides [`body::ChunkedDecoder`], the same byte-in/byte-out shape, for
+//! the incremental case.
 //!
 //! Sync and async I/O are thin adapters layered above the core -- the async
 //! adapter feature-gated on `rusty_tokio`, mirroring
@@ -29,10 +32,33 @@
 //! In: request/response head parse + serialize (both directions); a header
 //! map preserving order and case-insensitivity; the three body framings as
 //! an incremental/streaming state machine; upgrade-safe head consumption;
-//! [`Url`]; an optional `cookies` feature (RFC 6265 jar, client-only).
+//! [`Url`]; an optional `cookies` feature (RFC 6265 jar, client-only, not
+//! yet built).
 //!
 //! Out: HTTP/2, TLS (that's `rusty_tls` -- the two compose, neither imports
 //! the other), compression, multipart, routing frameworks.
 //!
-//! Nothing is implemented yet -- this crate is at the skeleton stage. See
-//! `ARCHITECTURE.md` for the boundary table and build sequencing.
+//! # Status
+//!
+//! `Url` and the sans-IO message core (this crate's step 2) are built and
+//! tested. Sync/async transport adapters and the `cookies` feature are not
+//! yet built -- see `ARCHITECTURE.md` for the boundary table and
+//! sequencing.
+
+mod error;
+mod util;
+mod version;
+
+pub mod body;
+pub mod head;
+pub mod header;
+pub mod method;
+pub mod status;
+pub mod url;
+
+pub use error::{Error, Result};
+pub use header::HeaderMap;
+pub use method::Method;
+pub use status::StatusCode;
+pub use url::Url;
+pub use version::Version;

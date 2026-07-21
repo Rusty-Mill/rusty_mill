@@ -31,22 +31,36 @@ justification of anything added.
 
 ## Status
 
-Skeleton stage — `Cargo.toml` and crate docs exist; no parsing/serialization
-code has landed yet. See `ARCHITECTURE.md` for the boundary table and build
-sequencing (`Url` and the sans-IO core next, then adapters, then the
-migration PRs against `rusty_request`/`rusty_tail`).
+**Built and tested:** `Url` (`url`), the header map (`header`), `Method`/
+`StatusCode`/`Version`, and the sans-IO message core — request/response
+head parsing + serialization (`head`), and body framing including the
+incremental chunked decoder (`body`). **Not yet built:** the sync/async
+transport adapters and the `cookies` feature — see `ARCHITECTURE.md` for
+the boundary table and remaining sequencing (adapters, then the migration
+PRs against `rusty_request`/`rusty_tail`).
 
 ## Getting Started
 
-Nothing to run yet — `cargo build` succeeds against an empty crate.
+```rust
+use rusty_http::head::{parse_request_head, Outcome};
+
+let buf = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n";
+if let Outcome::Complete { head, consumed } = parse_request_head(buf, 8192).unwrap() {
+    assert_eq!(head.target, "/a");
+    assert_eq!(consumed, buf.len());
+}
+```
+
+`cargo test --all-features` runs 57 unit tests plus a doc test.
 
 ## Security note
 
 A shared HTTP parser is a shared attack surface — this is the one real cost
-of consolidating six hand-rolled implementations into one. The head parser
-and chunked-body decoder are fuzz targets once they exist (see
-`rustils`' fuzz setup for the ecosystem's convention), and this crate accepts
-untrusted server input (donor 6's LocalAPI server proves the core must
-parse a request, not just a response) — bounding header/line size against a
-malicious or slow peer is part of the core's scope, not a later hardening
-pass.
+of consolidating six hand-rolled implementations into one. Head parsing and
+chunked-body-framing lines are bounded against a malicious or slow peer
+(`max_len` parameters, 8 KiB default) rather than allowed to grow a
+caller's buffer forever — donor 6's LocalAPI server proves the core must
+parse untrusted requests, not just trusted responses, so this landed with
+the core itself rather than as a later hardening pass. The head parser and
+chunked-body decoder are fuzz targets once an adapter exists to drive them
+end-to-end (see `rustils`' fuzz setup for the ecosystem's convention).
