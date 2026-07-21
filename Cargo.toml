@@ -32,8 +32,6 @@ http = "1"
 # Phase 3 (DERP-only data plane) — justified in DESIGN.md:
 crypto_box = { version = "0.9", features = ["salsa20"] }
 boringtun = "0.7"
-# Phase 4 (TUN, routes, MagicDNS) — justified in DESIGN.md:
-libc = "0.2"
 
 # Intra-workspace crates
 ts-types = { path = "crates/ts-types" }
