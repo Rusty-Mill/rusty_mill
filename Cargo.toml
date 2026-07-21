@@ -41,6 +41,15 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89
 # mock) Csprng — never re-exported, never a runtime dependency of the
 # shipped library.
 platform-mock = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
+# Example-only, same reasoning as platform-mock above: `[[example]]`
+# targets pull from [dependencies], not [dev-dependencies] (which can't
+# be optional), so this is how `examples/serve.rs` gets a concrete
+# `Sandbox`/`Net` backend without the core library (or the backend-
+# agnostic `platform` feature) ever depending on one. Empty crate on
+# non-Linux targets (`#![cfg(target_os = "linux")]` at its root) rather
+# than a compile error, so `serve`'s own non-Linux fallback path builds
+# cleanly everywhere this pin resolves.
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
 
 [features]
 # Enables `tls::connect_tls`, a convenience connector that upgrades the TCP
@@ -53,6 +62,18 @@ tls = ["dep:rustls"]
 # (not a concrete backend crate — the caller adds platform-linux/
 # platform-windows/platform-mock separately).
 platform = ["dep:platform", "dep:platform-mock"]
+# Enables `examples/serve.rs`: a minimal server-mode deployment that binds a
+# listener and drives `RdpTransport::accept`, wrapped in optional
+# `platform::security::Sandbox` confinement (Landlock filesystem confinement,
+# seccomp `block_inet_sockets`). Implies `platform`; additionally pulls in
+# the concrete `platform-linux` backend the example needs to actually
+# construct a `Sandbox` — kept out of the `platform` feature itself, which
+# stays backend-agnostic (see that feature's doc comment above).
+serve-example = ["platform", "dep:platform-linux"]
+
+[[example]]
+name = "serve"
+required-features = ["serve-example"]
 
 [lints.rust]
 unsafe_code = "forbid"
