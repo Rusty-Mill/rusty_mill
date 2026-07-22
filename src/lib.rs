@@ -33,16 +33,16 @@
 //! In: request/response head parse + serialize (both directions); a header
 //! map preserving order and case-insensitivity; the three body framings as
 //! an incremental/streaming state machine; upgrade-safe head consumption;
-//! [`Url`]; sync and async transport adapters; an optional `cookies` feature
-//! (RFC 6265 jar, client-only, not yet built).
+//! [`Url`]; sync and async transport adapters; an optional `cookies`
+//! feature ([`cookie::CookieJar`], RFC 6265, client-only).
 //!
 //! Out: HTTP/2, TLS (that's `rusty_tls` -- the two compose, neither imports
 //! the other), compression, multipart, routing frameworks.
 //!
 //! # Status
 //!
-//! `Url`, the sans-IO message core, and both transport adapters are built
-//! and tested. Not yet built: the `cookies` feature, and any consumer
+//! `Url`, the sans-IO message core, both transport adapters, and the
+//! `cookies` feature are built and tested. Not yet built: any consumer
 //! migration (`rusty_request`/`rusty_tail` still carry their own parsers).
 //! See `ARCHITECTURE.md` for the boundary table and remaining sequencing.
 
@@ -54,6 +54,8 @@ mod version;
 #[cfg(feature = "rusty-tokio")]
 pub mod async_tokio;
 pub mod body;
+#[cfg(feature = "cookies")]
+pub mod cookie;
 pub mod head;
 pub mod header;
 pub mod method;

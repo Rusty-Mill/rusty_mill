@@ -30,6 +30,11 @@ rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c93
 # by default so a sync-only consumer (e.g. a `rusty_tail` site once
 # migrated) never pulls in `rusty_tokio` and its transitive dependencies.
 rusty-tokio = ["dep:rusty_tokio"]
+# Enables `cookie::CookieJar`, an RFC 6265 cookie jar. Client-only (a
+# server has no use for it) and needs no dependency of its own -- off by
+# default purely so a server-only consumer's public API surface doesn't
+# carry a client concern it'll never use.
+cookies = []
 
 [lints.rust]
 unsafe_code = "forbid"
