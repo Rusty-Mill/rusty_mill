@@ -23,8 +23,23 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — Byte-exact protocol handoff: `into_parts()` + `Replay<T>`
-**2026-07-22** · (not yet pushed — link once merged)
+## PR #8 — Cross-repo doc accuracy: `rusty_tail`'s migration is complete
+**2026-07-22** · [#8](https://github.com/baileyrd/rusty_http/pull/8)
+
+- **Fixed:** `README.md` and `ARCHITECTURE.md` still described
+  `rusty_tail`'s migration as pending after both of its PRs
+  (`ts-control`/`ts-derp`, then `ts-cli`/`ts-localapi`) had already
+  merged in its own repo. Updated the Status section, the Overview, and
+  the two "gap found" sections' closing lines to say so.
+- **Added:** explicit cross-references between this crate's two
+  consumers — `rusty_request`'s README now links `rusty_tail` and vice
+  versa — plus a note that `ts-cli`/`ts-localapi` were `hyper`-based
+  rather than hand-rolled, which the original "six hand-rolled
+  implementations" framing didn't capture.
+- **Known limitation:** docs-only change; no code touched.
+
+## PR #7 — Byte-exact protocol handoff: `into_parts()` + `Replay<T>`
+**2026-07-22** · [#7](https://github.com/baileyrd/rusty_http/pull/7)
 
 - **Context:** preparing `rusty_tail`'s migration (per the user's
   instruction to start with its two genuinely-hand-rolled sites,
