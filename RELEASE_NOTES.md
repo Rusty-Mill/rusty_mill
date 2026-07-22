@@ -23,8 +23,44 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — Url + sans-IO message core (mission handoff step 2)
-**2026-07-21** · (not yet pushed — link once merged)
+## PR TBD — Sync + async transport adapters (mission handoff step 3)
+**2026-07-22** · (not yet pushed — link once merged)
+
+- **Added:** `sync::SyncTransport<T: std::io::Read + Write>` and
+  `async_tokio::AsyncTransport<T: rusty_tokio::io::AsyncRead + AsyncWrite>`
+  (behind the new `rusty-tokio` feature) — both drive
+  `head::parse_request_head`/`parse_response_head` and `body`'s framing
+  over a real (or in-memory-loopback, in tests) transport: read a head,
+  read its body per `Framing`, write a head, write a body (verbatim or
+  chunked). A new `transport::Error`/`Result` (re-exported as
+  `TransportError`/`TransportResult`) wraps I/O failures alongside the
+  core's own `Error`, since the sans-IO core deliberately has no `Io`
+  variant of its own.
+- **Added:** `rusty_tokio` as an optional git dependency, pinned to the
+  same rev `rusty_tls`/`rusty_request` already pin
+  (`ac598c930e85460ae3f79328a1d82f28390672f8`), gated behind the
+  `rusty-tokio` feature so a sync-only consumer pulls in nothing extra.
+- **Added:** 13 new tests (7 sync, 6 async) exercising both adapters
+  end-to-end — request/response heads plus all three body framings
+  (`Content-Length`, chunked, close-delimited), head+body writing, and a
+  repeat of the exact-head-consumption guarantee through the buffering
+  adapter itself, not just the bare parser. 70 unit tests total, `cargo
+  fmt`/`clippy -D warnings` clean with and without `--all-features`.
+- **Found while building this, not in the original handoff:** step 3's
+  sequencing assigned `rusty_tail`'s four donor sites to the sync
+  adapter. Source review shows this is wrong — all four are already
+  async, built on real crates.io `tokio`, not `std::io` and not
+  `rusty_tokio` either. **Neither adapter built here fits those call
+  sites as they exist today.** Recorded in `ARCHITECTURE.md` in detail;
+  migrating `rusty_tail` (step 4) needs a deliberate call on a third
+  adapter, a `spawn_blocking` bridge, or a runtime migration — not
+  something this crate's mission decides on its own.
+- **Known limitation, stated plainly:** both adapters are only exercised
+  against in-memory loopbacks in tests, not a real socket or a real peer.
+  The `cookies` feature is still not built; out of this step's scope.
+
+## PR #2 — Url + sans-IO message core (mission handoff step 2)
+**2026-07-21** · [#2](https://github.com/baileyrd/rusty_http/pull/2)
 
 - **Added:** `Url` (ported near-verbatim from donor 2, `rusty_request`'s
   `url.rs`); `HeaderMap`, `Method`, `StatusCode`, `Version`; the sans-IO
