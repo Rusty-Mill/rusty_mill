@@ -7,8 +7,7 @@
 use bytes::Bytes;
 use h2::client::SendRequest;
 use http::{Method, Request};
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use ts_key::MachinePrivate;
 use ts_types::tailcfg::{
     CURRENT_CAPABILITY_VERSION, MapRequest, MapResponse, RegisterRequest, RegisterResponse,
@@ -223,9 +222,14 @@ impl ControlClient {
 /// stream before HTTP/2 begins. Headscale sends none; a real Tailscale
 /// control server may. Returns an IO stream positioned at the first HTTP/2
 /// byte.
-async fn skip_early_payload(
-    mut conn: Conn<TcpStream>,
-) -> Result<crate::prefixed::Prefixed<Conn<TcpStream>>, ClientError> {
+///
+/// Generic over the Noise conn's own transport `T` (rather than the
+/// concrete `TcpStream`) because `controlhttp::dial`'s upgrade handoff may
+/// hand back a `Conn` wrapping `rusty_http::tokio_native::Replay<TcpStream>`
+/// instead, when Noise bytes arrived bundled with the upgrade response.
+async fn skip_early_payload<T: AsyncRead + AsyncWrite + Unpin>(
+    mut conn: Conn<T>,
+) -> Result<crate::prefixed::Prefixed<Conn<T>>, ClientError> {
     let mut header = [0u8; EARLY_HEADER_LEN];
     conn.read_exact(&mut header).await?;
     if &header[..5] == EARLY_PAYLOAD_MAGIC {

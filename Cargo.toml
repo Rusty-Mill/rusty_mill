@@ -32,6 +32,8 @@ http = "1"
 # Phase 3 (DERP-only data plane) — justified in DESIGN.md:
 crypto_box = { version = "0.9", features = ["salsa20"] }
 boringtun = "0.7"
+# Shared sans-IO HTTP/1.1 layer (rusty ecosystem) — justified in DESIGN.md:
+rusty_http = { git = "https://github.com/baileyrd/rusty_http", rev = "a5463a4c0f346b673a5996f26ece550c16747924" }
 
 # Intra-workspace crates
 ts-types = { path = "crates/ts-types" }

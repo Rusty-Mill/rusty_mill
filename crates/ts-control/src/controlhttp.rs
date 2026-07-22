@@ -6,10 +6,17 @@
 //! Phase-2 scope is plain HTTP against Headscale (`http://host:port`). TLS
 //! (:443) and the 80/443 race are deferred to the hosted-control-plane
 //! milestone.
+//!
+//! HTTP/1.1 framing itself (the head parse/serialize, and reclaiming any
+//! Noise bytes bundled with the upgrade response) is `rusty_http`'s job, not
+//! hand-rolled here anymore -- see `DESIGN.md`'s dependency table.
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use ts_key::MachinePrivate;
+
+use rusty_http::head::RequestHead;
+use rusty_http::tokio_native::{AsyncTransport, Replay};
+use rusty_http::{HeaderMap, Method, Version};
 
 use crate::base64;
 use crate::controlbase::{self, Conn, ConnectError, client_initiation};
@@ -17,6 +24,10 @@ use crate::controlbase::{self, Conn, ConnectError, client_initiation};
 const UPGRADE_PATH: &str = "/ts2021";
 const UPGRADE_HEADER_VALUE: &str = "tailscale-control-protocol";
 const HANDSHAKE_HEADER: &str = "X-Tailscale-Handshake";
+/// Cap on the HTTP/1.1 head (status line + headers) we'll buffer before
+/// giving up -- generous for a control server's own responses, small enough
+/// to bound a hung/malicious peer.
+const MAX_HEAD_LEN: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ControlHttpError {
@@ -32,6 +43,8 @@ pub enum ControlHttpError {
     NoUpgrade(u16),
     #[error(transparent)]
     Handshake(#[from] ConnectError),
+    #[error("HTTP transport error: {0}")]
+    Http(#[from] rusty_http::TransportError),
 }
 
 /// A parsed `http://host:port` control URL.
@@ -84,20 +97,35 @@ pub async fn fetch_control_key(
     url: &ControlUrl,
     protocol_version: u16,
 ) -> Result<ts_types::MachinePublic, ControlHttpError> {
-    let mut stream = TcpStream::connect(url.socket_addr()).await?;
-    let req = format!(
-        "GET /key?v={protocol_version} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        url.authority
-    );
-    stream.write_all(req.as_bytes()).await?;
-    stream.flush().await?;
+    let stream = TcpStream::connect(url.socket_addr()).await?;
+    let mut transport = AsyncTransport::new(stream);
 
-    let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await?;
-    let (status, _headers, body) = parse_http_response(&raw)?;
-    if status != 200 {
-        return Err(ControlHttpError::HttpStatus(status, "/key".into()));
+    let mut headers = HeaderMap::new();
+    headers
+        .insert("Host", &url.authority)
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    headers
+        .insert("Connection", "close")
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    transport
+        .write_request_head(&RequestHead {
+            method: Method::Get,
+            target: format!("/key?v={protocol_version}"),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+
+    let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+    if head.status.as_u16() != 200 {
+        return Err(ControlHttpError::HttpStatus(
+            head.status.as_u16(),
+            "/key".into(),
+        ));
     }
+    let framing = rusty_http::body::response_framing(&head.headers, &Method::Get, head.status)
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    let body = transport.read_body(framing).await?;
 
     #[derive(serde::Deserialize)]
     struct KeyResponse {
@@ -105,7 +133,7 @@ pub async fn fetch_control_key(
         public_key: ts_types::MachinePublic,
     }
     let parsed: KeyResponse =
-        serde_json::from_slice(body).map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+        serde_json::from_slice(&body).map_err(|e| ControlHttpError::Parse(e.to_string()))?;
     Ok(parsed.public_key)
 }
 
@@ -116,85 +144,51 @@ pub async fn dial(
     machine_key: &MachinePrivate,
     control_key: &[u8; 32],
     protocol_version: u16,
-) -> Result<Conn<TcpStream>, ControlHttpError> {
+) -> Result<Conn<Replay<TcpStream>>, ControlHttpError> {
     let (init, handshake) = client_initiation(machine_key, control_key, protocol_version);
 
-    let mut stream = TcpStream::connect(url.socket_addr()).await?;
-    let req = format!(
-        "POST {UPGRADE_PATH} HTTP/1.1\r\n\
-         Host: {host}\r\n\
-         Upgrade: {UPGRADE_HEADER_VALUE}\r\n\
-         Connection: upgrade\r\n\
-         {HANDSHAKE_HEADER}: {handshake_b64}\r\n\
-         Content-Length: 0\r\n\r\n",
-        host = url.authority,
-        handshake_b64 = base64::encode(&init),
-    );
-    stream.write_all(req.as_bytes()).await?;
-    stream.flush().await?;
+    let stream = TcpStream::connect(url.socket_addr()).await?;
+    let mut transport = AsyncTransport::new(stream);
 
-    // Read only the HTTP response head (up to and including the blank line);
-    // anything after belongs to the Noise stream, so we must not over-read.
-    // Reading a byte at a time guarantees we stop exactly at the CRLFCRLF.
-    let status = read_http_head(&mut stream).await?;
-    if status != 101 {
-        return Err(ControlHttpError::NoUpgrade(status));
+    let mut headers = HeaderMap::new();
+    headers
+        .insert("Host", &url.authority)
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    headers
+        .insert("Upgrade", UPGRADE_HEADER_VALUE)
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    headers
+        .insert("Connection", "upgrade")
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    headers
+        .insert(HANDSHAKE_HEADER, &base64::encode(&init))
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    headers
+        .insert("Content-Length", "0")
+        .map_err(|e| ControlHttpError::Parse(e.to_string()))?;
+    transport
+        .write_request_head(&RequestHead {
+            method: Method::Post,
+            target: UPGRADE_PATH.to_string(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+
+    // Read only the HTTP response head; `rusty_http` consumes exactly the
+    // head, so any bytes bundled with it in the same read belong to the
+    // Noise stream, not this parse -- reclaim them via `into_parts` below
+    // rather than let a plain `into_inner` silently drop them.
+    let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+    if head.status.as_u16() != 101 {
+        return Err(ControlHttpError::NoUpgrade(head.status.as_u16()));
     }
+    let (stream, leftover) = transport.into_parts();
+    let io = Replay::new(leftover, stream);
 
-    // The raw TCP stream now carries the Noise response + records.
-    Ok(controlbase::connect_deferred(stream, handshake).await?)
-}
-
-/// Reads an HTTP/1.1 response head byte-by-byte until the CRLFCRLF
-/// terminator (so we don't consume Noise bytes), returning the status code.
-async fn read_http_head(stream: &mut TcpStream) -> Result<u16, ControlHttpError> {
-    let mut head = Vec::with_capacity(256);
-    let mut byte = [0u8; 1];
-    loop {
-        let n = stream.read(&mut byte).await?;
-        if n == 0 {
-            return Err(ControlHttpError::Parse(
-                "connection closed before HTTP head".into(),
-            ));
-        }
-        head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
-        }
-        if head.len() > 64 * 1024 {
-            return Err(ControlHttpError::Parse("HTTP head too large".into()));
-        }
-    }
-    parse_status_line(&head)
-}
-
-fn parse_status_line(head: &[u8]) -> Result<u16, ControlHttpError> {
-    let line_end = head
-        .windows(2)
-        .position(|w| w == b"\r\n")
-        .ok_or_else(|| ControlHttpError::Parse("no status line".into()))?;
-    let line = std::str::from_utf8(&head[..line_end])
-        .map_err(|_| ControlHttpError::Parse("non-UTF8 status line".into()))?;
-    // "HTTP/1.1 101 Switching Protocols"
-    let mut parts = line.split(' ');
-    let _version = parts.next();
-    let code = parts
-        .next()
-        .and_then(|c| c.parse().ok())
-        .ok_or_else(|| ControlHttpError::Parse(format!("bad status line {line:?}")))?;
-    Ok(code)
-}
-
-/// Splits a complete HTTP response buffer into (status, header-bytes, body).
-fn parse_http_response(raw: &[u8]) -> Result<(u16, &[u8], &[u8]), ControlHttpError> {
-    let sep = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| ControlHttpError::Parse("no header/body separator".into()))?;
-    let status = parse_status_line(raw)?;
-    let headers = &raw[..sep];
-    let body = &raw[sep + 4..];
-    Ok((status, headers, body))
+    // `io` now carries the Noise response + records, replaying any of it
+    // that arrived bundled with the upgrade response.
+    Ok(controlbase::connect_deferred(io, handshake).await?)
 }
 
 #[cfg(test)]
@@ -220,21 +214,8 @@ mod tests {
         assert!(ControlUrl::parse("http://").is_err());
     }
 
-    #[test]
-    fn status_line_parsing() {
-        assert_eq!(
-            parse_status_line(b"HTTP/1.1 101 Switching Protocols\r\n").unwrap(),
-            101
-        );
-        assert_eq!(parse_status_line(b"HTTP/1.1 200 OK\r\n").unwrap(), 200);
-        assert!(parse_status_line(b"garbage\r\n").is_err());
-    }
-
-    #[test]
-    fn http_response_split() {
-        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
-        let (status, _h, body) = parse_http_response(raw).unwrap();
-        assert_eq!(status, 200);
-        assert_eq!(body, b"{}");
-    }
+    // HTTP/1.1 head parsing itself (status-line + header parsing, and the
+    // byte-exact-consumption guarantee the Noise handoff depends on) is
+    // `rusty_http`'s job now and is covered by its own test suite -- see
+    // `rusty_http::head`'s tests, not duplicated here.
 }

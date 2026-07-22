@@ -6,12 +6,20 @@
 //! writer fed by an mpsc queue and a reader that dispatches control frames
 //! (ping→pong, keepalive, peer-gone) itself and forwards relayed packets to
 //! an inbound channel.
+//!
+//! HTTP/1.1 framing for the upgrade itself (head parse/serialize, and
+//! reclaiming any DERP frame bytes bundled with the upgrade response) is
+//! `rusty_http`'s job, not hand-rolled here anymore -- see `DESIGN.md`'s
+//! dependency table.
 
 use crypto_box::{
     PublicKey, SalsaBox, SecretKey,
     aead::{Aead, AeadCore, OsRng},
 };
-use tokio::io::{AsyncRead, AsyncWrite};
+use rusty_http::head::RequestHead;
+use rusty_http::tokio_native::{AsyncTransport, Replay};
+use rusty_http::{HeaderMap, Method, Version};
+use tokio::io::AsyncRead;
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::mpsc;
@@ -24,6 +32,8 @@ const NONCE_LEN: usize = 24;
 const KEY_LEN: usize = 32;
 /// Bound on the ClientInfo/ServerInfo JSON we'll process.
 const MAX_INFO_LEN: usize = 4 << 10;
+/// Cap on the HTTP/1.1 upgrade response head we'll buffer before giving up.
+const MAX_HEAD_LEN: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DerpError {
@@ -35,6 +45,8 @@ pub enum DerpError {
     BadUrl(String),
     #[error("HTTP upgrade failed: {0}")]
     Upgrade(String),
+    #[error("HTTP transport error: {0}")]
+    Http(#[from] rusty_http::TransportError),
     #[error("invalid server greeting (expected ServerKey frame with magic)")]
     BadGreeting,
     #[error("server info naclbox failed to open")]
@@ -139,8 +151,7 @@ impl DerpClient {
         host_header: &str,
         node_key: &NodePrivate,
     ) -> Result<Self, DerpError> {
-        let (mut read_half, mut write_half) = stream.into_split();
-        http_upgrade(&mut read_half, &mut write_half, host_header).await?;
+        let (mut read_half, mut write_half) = http_upgrade(stream, host_header).await?;
 
         // 1. Read ServerKey: 8B magic + 32B server node public key.
         let (t, payload) = frame::read_frame(&mut read_half, 1 << 10).await?;
@@ -204,8 +215,13 @@ impl DerpClient {
 }
 
 /// Reader task: dispatches control frames, forwards relayed packets inbound.
-async fn reader_loop(
-    mut read_half: OwnedReadHalf,
+///
+/// Generic over the read half's type (rather than the concrete
+/// `OwnedReadHalf`) because [`http_upgrade`] may hand back a
+/// [`Replay`]-wrapped one when the server's ServerKey greeting arrived
+/// bundled with the HTTP upgrade response.
+async fn reader_loop<R: AsyncRead + Unpin + Send + 'static>(
+    mut read_half: R,
     inbound: mpsc::Sender<RelayedPacket>,
     pong: mpsc::Sender<Outbound>,
 ) {
@@ -284,48 +300,46 @@ impl Drop for TaskGuard {
 }
 
 /// Sends the `GET /derp` upgrade request and consumes the `101` response
-/// head (byte-at-a-time so we don't swallow the first DERP frame).
-async fn http_upgrade<R, W>(read: &mut R, write: &mut W, host: &str) -> Result<(), DerpError>
-where
-    R: AsyncRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let req = format!(
-        "GET /derp HTTP/1.1\r\nHost: {host}\r\nUpgrade: DERP\r\nConnection: Upgrade\r\n\r\n"
-    );
-    write.write_all(req.as_bytes()).await?;
-    write.flush().await?;
+/// head, then splits the stream: the server can push its ServerKey greeting
+/// frame in the same read as the upgrade response, so any such bytes are
+/// reclaimed via `into_parts` and replayed into the read half rather than
+/// split off (and silently dropped) beforehand.
+async fn http_upgrade(
+    stream: TcpStream,
+    host: &str,
+) -> Result<(Replay<OwnedReadHalf>, OwnedWriteHalf), DerpError> {
+    let mut transport = AsyncTransport::new(stream);
 
-    let mut head = Vec::with_capacity(256);
-    let mut byte = [0u8; 1];
-    loop {
-        let n = read.read(&mut byte).await?;
-        if n == 0 {
-            return Err(DerpError::Upgrade(
-                "connection closed during upgrade".into(),
-            ));
-        }
-        head.push(byte[0]);
-        if head.ends_with(b"\r\n\r\n") {
-            break;
-        }
-        if head.len() > 64 * 1024 {
-            return Err(DerpError::Upgrade("upgrade head too large".into()));
-        }
+    let mut headers = HeaderMap::new();
+    headers
+        .insert("Host", host)
+        .map_err(|e| DerpError::Upgrade(e.to_string()))?;
+    headers
+        .insert("Upgrade", "DERP")
+        .map_err(|e| DerpError::Upgrade(e.to_string()))?;
+    headers
+        .insert("Connection", "Upgrade")
+        .map_err(|e| DerpError::Upgrade(e.to_string()))?;
+    transport
+        .write_request_head(&RequestHead {
+            method: Method::Get,
+            target: "/derp".to_string(),
+            version: Version::Http11,
+            headers,
+        })
+        .await?;
+
+    let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+    if head.status.as_u16() != 101 {
+        return Err(DerpError::Upgrade(format!(
+            "server did not switch protocols (got status {})",
+            head.status.as_u16()
+        )));
     }
-    let status_ok = head
-        .split(|&b| b == b'\r')
-        .next()
-        .and_then(|line| std::str::from_utf8(line).ok())
-        .map(|line| line.contains(" 101 "))
-        .unwrap_or(false);
-    if !status_ok {
-        let head_str = String::from_utf8_lossy(&head);
-        let first_line = head_str.lines().next().unwrap_or("").to_string();
-        return Err(DerpError::Upgrade(first_line));
-    }
-    Ok(())
+
+    let (stream, leftover) = transport.into_parts();
+    let (read_half, write_half) = stream.into_split();
+    Ok((Replay::new(leftover, read_half), write_half))
 }
 
 /// Parses `http://host:port[/path]` into (`host:port`, host-header value).
