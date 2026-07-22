@@ -76,6 +76,7 @@ tree.
 | `x25519-dalek`, `chacha20poly1305`, `blake2`, `hkdf` | ts-control | Noise IK primitives (hand-rolled controlbase); see Phase 2 decisions. |
 | `h2`, `http`, `bytes` | ts-control | HTTP/2 over the Noise channel, mirroring Go's `x/net/http2`. |
 | `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
+| `rusty_http` (git dep on the rusty ecosystem's shared HTTP layer, pinned `rev`) | ts-control, ts-derp | Replaces the hand-rolled HTTP/1.1 head parse/serialize `controlhttp.rs` (Noise upgrade) and `derp/client.rs` (DERP upgrade) each carried — both needed the same byte-exact-head-consumption guarantee for their protocol handoff and had converged on the same shape independently (one even byte-at-a-time to avoid over-reading). `rusty_http`'s `tokio_native::AsyncTransport` was purpose-built for this migration (see its own `ARCHITECTURE.md`); its `into_parts`/`Replay` pair is what lets the more efficient buffered head parser replace the byte-at-a-time reads without losing bytes the peer bundled with its upgrade response. LocalAPI's own `hyper`-based HTTP (see the Phase 1 row above) is a different tradeoff and is not part of this migration. |
 | `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
 | `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
 | `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
@@ -176,6 +177,16 @@ Full protocol notes are in `PROTOCOL.md` (the Phase-0 recon artifact); the
 - **Deferred to the hosted-control-plane milestone**: HTTPS (:443) dialing,
   the 80/443 race, DNS bootstrap, and OS-root-store TLS. Phase 2 targets
   Headscale over plain HTTP only.
+- **`controlhttp.rs`'s HTTP/1.1 framing migrated onto `rusty_http`** (this
+  session, ahead of any later phase): `fetch_control_key`'s `GET /key` and
+  `dial`'s `POST /ts2021` upgrade now go through
+  `rusty_http::tokio_native::AsyncTransport` instead of hand-rolled
+  string-formatted requests and a byte-at-a-time response-head reader.
+  `dial`'s return type is now `Conn<rusty_http::tokio_native::Replay<TcpStream>>`
+  rather than `Conn<TcpStream>` — `into_parts`/`Replay` is how any Noise
+  bytes bundled with the upgrade response survive the switch to a buffered
+  parser; `skip_early_payload` (client.rs) became generic over the Noise
+  conn's transport to absorb this without otherwise changing.
 
 ## Phase 3 decisions (DERP-only data plane)
 
@@ -219,6 +230,15 @@ First real connectivity. Full protocol notes in `PROTOCOL.md`; decisions here.
 - **No DERP reconnection yet.** If the relay connection drops the engine logs
   and stops; automatic reconnection with backoff is a robustness item for the
   daemon-hardening phase (Phase 6).
+- **`derp/client.rs`'s HTTP upgrade migrated onto `rusty_http`** (this
+  session): `http_upgrade` now writes/reads the `GET /derp` request and its
+  `101` response via `rusty_http::tokio_native::AsyncTransport` instead of a
+  hand-rolled byte-at-a-time reader, and itself returns the split stream
+  (`Replay<OwnedReadHalf>`, `OwnedWriteHalf`) rather than a plain `()` the
+  caller then split itself. `into_parts`/`Replay` is what reclaims any
+  ServerKey greeting bytes the server bundled with the upgrade response, so
+  splitting into owned halves afterward can't lose them. `reader_loop`
+  became generic over its read half's type to accept the wrapped one.
 
 ## Phase 4 decisions (TUN, routes, MagicDNS)
 

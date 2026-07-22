@@ -787,6 +787,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_http"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_http?rev=a5463a4c0f346b673a5996f26ece550c16747924#a5463a4c0f346b673a5996f26ece550c16747924"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "salsa20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1116,6 +1124,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rusty_http",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -1143,6 +1152,7 @@ name = "ts-derp"
 version = "0.0.1"
 dependencies = [
  "crypto_box",
+ "rusty_http",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
