@@ -7,9 +7,8 @@ plus one `Url` type, replacing six hand-rolled implementations duplicated
 today across `rusty_request` and `rusty_tail`. It sits "beside the PAL, not
 on top" in the wider ecosystem's layer picture (`rustils/docs/architecture.md`),
 the same shelf slot and seam discipline as `rusty_tls`. `Url`, the sans-IO
-message core, and both transport adapters are built and tested — see
-Boundaries below. Not yet built: the `cookies` feature and any consumer
-migration.
+message core, both transport adapters, and the `cookies` feature are built
+and tested — see Boundaries below. Not yet built: any consumer migration.
 
 ## Boundaries
 Domain logic vs. I/O (ports-and-adapters): the sans-IO core never touches a
@@ -28,9 +27,8 @@ library. Landed modules: `url` (`Url`), `header` (`HeaderMap`), `method`
 (request/response head parse + serialize), `body` (framing + the
 incremental `ChunkedDecoder`), `sync` (`SyncTransport`), `async_tokio`
 (`AsyncTransport`, behind the `rusty-tokio` feature), `transport` (shared
-adapter error type), `util` (private line-scanning helper), `error`. Not
-yet built: an optional `cookie` module behind the `cookies` feature
-(client-only, RFC 6265).
+adapter error type), `cookie` (`CookieJar`, behind the `cookies` feature,
+client-only, RFC 6265), `util` (private line-scanning helper), `error`.
 
 `sync` and `async_tokio` are deliberately two parallel, near-identical
 modules rather than one written generic over blocking-ness — Rust has no

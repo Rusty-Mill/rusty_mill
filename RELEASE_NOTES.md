@@ -23,8 +23,26 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — Sync + async transport adapters (mission handoff step 3)
+## PR TBD — `cookies` feature (RFC 6265 jar, completing the crate's own scope)
 **2026-07-22** · (not yet pushed — link once merged)
+
+- **Added:** `cookie::CookieJar` behind the new `cookies` feature — ported
+  near-verbatim from `rusty_request`'s `cookie.rs` (donor 3), `pub` here
+  rather than `pub(crate)` since this crate has external consumers. 16
+  new tests; 86 total, `cargo fmt`/`clippy -D warnings` clean with and
+  without `--all-features`.
+- **Why now, ahead of a migration PR:** the handoff's step 4 groups
+  `rusty_request`'s `http1`/`url`/`cookie` deletion into one migration
+  unit. Without this feature, that migration could only delete two of
+  the three donor files, leaving `cookie.rs` duplicated — the opposite of
+  the mission. This closes that gap before any cross-repo change starts.
+- **Known limitation, carried over from the donor, not introduced by this
+  port:** no public-suffix-list support — the one safety check is RFC
+  6265 §5.3's own narrower domain-suffix rule, not full "supercookie"
+  defense. Documented in `cookie.rs`'s module docs, same as the donor.
+
+## PR #3 — Sync + async transport adapters (mission handoff step 3)
+**2026-07-22** · [#3](https://github.com/baileyrd/rusty_http/pull/3)
 
 - **Added:** `sync::SyncTransport<T: std::io::Read + Write>` and
   `async_tokio::AsyncTransport<T: rusty_tokio::io::AsyncRead + AsyncWrite>`
