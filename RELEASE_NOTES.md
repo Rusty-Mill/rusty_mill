@@ -23,8 +23,34 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — `cookies` feature (RFC 6265 jar, completing the crate's own scope)
+## PR TBD — Incremental body reading (`BodyReader`), ahead of the `rusty_request` migration
 **2026-07-22** · (not yet pushed — link once merged)
+
+- **Added:** `SyncTransport::into_body_reader`/`AsyncTransport::into_body_reader`,
+  returning a `BodyReader<T>` that pulls a response body one chunk at a
+  time via `next_chunk()` instead of buffering it all upfront
+  (`read_body`'s existing eager behavior is unchanged and still
+  available). 10 new tests (5 sync, 5 async); 96 total, `cargo
+  fmt`/`clippy -D warnings` clean with and without `--all-features`.
+- **Also:** `cookie::parse_http_date` is now `pub` (was private to the
+  module) -- RFC 7231 IMF-fixdate parsing is a general HTTP concern
+  (`Retry-After`, `Last-Modified`, not just `Set-Cookie`'s `Expires`),
+  and `rusty_request`'s `retry.rs` already reuses this exact parser for
+  `Retry-After` today, so the migration needs it reachable.
+- **Why this wasn't in step 3's original scope:** donor 1
+  (`rusty_request`'s `http1.rs`) had both an eager and a streaming
+  response-reading path, and `rusty_request`'s own
+  `send_streaming`/`StreamingResponse` depends on the streaming half.
+  Discovered while planning the migration PR (step 4): without this,
+  that migration could only replace the eager path, leaving a second
+  parser behind for the streaming case -- the opposite of the mission.
+- **Known limitation, stated plainly:** like the rest of this crate,
+  `BodyReader` is only exercised against in-memory loopbacks in tests,
+  not a real socket yet -- that's still `rusty_request`'s migration PR to
+  prove out.
+
+## PR #4 — `cookies` feature (RFC 6265 jar, completing the crate's own scope)
+**2026-07-22** · [#4](https://github.com/baileyrd/rusty_http/pull/4)
 
 - **Added:** `cookie::CookieJar` behind the new `cookies` feature — ported
   near-verbatim from `rusty_request`'s `cookie.rs` (donor 3), `pub` here

@@ -213,13 +213,18 @@ impl CookieJar {
     }
 }
 
-/// Parses an RFC 7231 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`),
-/// the format every real server sends `Expires` in today. Older
-/// `Set-Cookie`-specific date formats (RFC 850, asctime) aren't
-/// handled -- `Max-Age` is the modern, simpler-to-parse attribute and
-/// already takes precedence when both are present, so this is purely a
-/// fallback for servers that only send `Expires`.
-fn parse_http_date(s: &str) -> Option<SystemTime> {
+/// Parses an RFC 7231 IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), the
+/// format every real server sends `Expires`, `Retry-After`, and similar
+/// date-valued headers in today. Older `Set-Cookie`-specific date formats
+/// (RFC 850, asctime) aren't handled -- `Max-Age` already takes
+/// precedence over `Expires` when both are present, so this is purely a
+/// fallback for servers that only send the date form; likewise a caller
+/// parsing `Retry-After` should try a delta-seconds integer first. `pub`
+/// (not just used internally by this module) since IMF-fixdate parsing
+/// is a general HTTP concern, not a cookie-specific one -- consumers with
+/// their own date-valued headers to parse can reuse this rather than
+/// hand-rolling a second copy.
+pub fn parse_http_date(s: &str) -> Option<SystemTime> {
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() != 6 {
         return None;

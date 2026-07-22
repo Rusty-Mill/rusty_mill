@@ -235,6 +235,146 @@ impl<T: Read + Write> SyncTransport<T> {
         self.io.write_all(&out)?;
         Ok(())
     }
+
+    /// Consumes `self`, returning a [`BodyReader`] that pulls `framing`'s
+    /// body incrementally via [`BodyReader::next_chunk`] instead of
+    /// buffering it all upfront the way [`Self::read_body`] does -- for a
+    /// caller (e.g. a large download) that wants to start processing the
+    /// body before it's fully arrived.
+    pub fn into_body_reader(self, framing: Framing) -> BodyReader<T> {
+        let done = matches!(framing, Framing::None);
+        let state = match framing {
+            Framing::None => BodyReaderState::None,
+            Framing::ContentLength(n) => BodyReaderState::ContentLength(n),
+            Framing::Chunked => BodyReaderState::Chunked(ChunkedDecoder::new()),
+            Framing::Close => BodyReaderState::Close,
+        };
+        BodyReader {
+            transport: self,
+            state,
+            done,
+        }
+    }
+
+    /// Returns up to `max` bytes, doing at most one transport read (none
+    /// at all if already-buffered data can satisfy it) -- unlike
+    /// [`Self::read_body`]'s eager readers, this deliberately doesn't loop
+    /// to fill `max`, so a [`BodyReader`] caller sees data as soon as it's
+    /// available rather than however long it takes to accumulate a full
+    /// `max`-sized batch. Empty return means EOF.
+    fn read_some(&mut self, max: usize) -> Result<Vec<u8>> {
+        if max == 0 {
+            return Ok(Vec::new());
+        }
+        if self.start == self.end && self.fill_more()? == 0 {
+            return Ok(Vec::new());
+        }
+        let take = max.min(self.end - self.start);
+        let data = self.buf[self.start..self.start + take].to_vec();
+        self.start += take;
+        Ok(data)
+    }
+}
+
+/// Bytes at a time an incremental [`BodyReader`] hands back per
+/// [`BodyReader::next_chunk`] call, at most, for `Close`/`ContentLength`
+/// framing -- `Chunked` framing yields whatever the wire's own chunk
+/// boundaries are instead.
+const READ_CHUNK_SIZE: usize = 8192;
+
+#[derive(Debug, Clone, Copy)]
+enum BodyReaderState {
+    None,
+    ContentLength(u64),
+    Chunked(ChunkedDecoder),
+    Close,
+}
+
+/// A response body not yet (fully) read, produced by
+/// [`SyncTransport::into_body_reader`] and pulled incrementally via
+/// [`Self::next_chunk`] instead of requiring the whole thing in memory
+/// upfront. Owns the transport (and therefore the connection) for as long
+/// as it's alive -- see [`Self::into_inner`] to get it back once done.
+pub struct BodyReader<T> {
+    transport: SyncTransport<T>,
+    state: BodyReaderState,
+    done: bool,
+}
+
+impl<T: Read + Write> BodyReader<T> {
+    /// The next chunk of body data, or `None` once the body is fully
+    /// consumed. Chunk boundaries are an implementation detail (a wire
+    /// chunk boundary for `Chunked` framing, or just "however much one
+    /// read returned" otherwise) -- never rely on chunk size or count.
+    pub fn next_chunk(&mut self) -> Result<Option<Vec<u8>>> {
+        if self.done {
+            return Ok(None);
+        }
+        match self.state {
+            BodyReaderState::None => {
+                self.done = true;
+                Ok(None)
+            }
+            BodyReaderState::Close => {
+                let data = self.transport.read_some(READ_CHUNK_SIZE)?;
+                if data.is_empty() {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Ok(Some(data))
+            }
+            BodyReaderState::ContentLength(remaining) => {
+                if remaining == 0 {
+                    self.done = true;
+                    return Ok(None);
+                }
+                let take = remaining.min(READ_CHUNK_SIZE as u64) as usize;
+                let data = self.transport.read_some(take)?;
+                if data.is_empty() {
+                    return Err(unexpected_eof(
+                        "connection closed before the full body arrived",
+                    ));
+                }
+                self.state = BodyReaderState::ContentLength(remaining - data.len() as u64);
+                Ok(Some(data))
+            }
+            BodyReaderState::Chunked(mut decoder) => loop {
+                match decoder.advance(
+                    &self.transport.buf[self.transport.start..self.transport.end],
+                    DEFAULT_MAX_LINE_LEN,
+                )? {
+                    Progress::Incomplete => {
+                        if self.transport.fill_more()? == 0 {
+                            return Err(unexpected_eof(
+                                "connection closed before the chunked body completed",
+                            ));
+                        }
+                    }
+                    Progress::Framing { consumed } => {
+                        self.transport.start += consumed;
+                    }
+                    Progress::Data { len } => {
+                        let data = self.transport.buf
+                            [self.transport.start..self.transport.start + len]
+                            .to_vec();
+                        self.transport.start += len;
+                        self.state = BodyReaderState::Chunked(decoder);
+                        return Ok(Some(data));
+                    }
+                    Progress::Done { consumed } => {
+                        self.transport.start += consumed;
+                        self.done = true;
+                        return Ok(None);
+                    }
+                }
+            },
+        }
+    }
+
+    /// Consumes `self`, returning the underlying transport.
+    pub fn into_inner(self) -> SyncTransport<T> {
+        self.transport
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +509,82 @@ mod tests {
         let head = t.read_request_head(8192).unwrap();
         let framing = body::request_framing(&head.headers).unwrap();
         assert!(t.read_body(framing).is_err());
+    }
+
+    fn collect_all(mut reader: BodyReader<Loopback>) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(chunk) = reader.next_chunk().unwrap() {
+            out.extend_from_slice(&chunk);
+        }
+        out
+    }
+
+    #[test]
+    fn body_reader_pulls_a_content_length_body_incrementally() {
+        let wire = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        let reader = t.into_body_reader(framing);
+        assert_eq!(collect_all(reader), b"hello");
+    }
+
+    #[test]
+    fn body_reader_pulls_a_chunked_body_incrementally() {
+        let wire =
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        let reader = t.into_body_reader(framing);
+        assert_eq!(collect_all(reader), b"hello world");
+    }
+
+    #[test]
+    fn body_reader_pulls_a_close_delimited_body_incrementally() {
+        let wire = b"HTTP/1.0 200 OK\r\n\r\nwhatever is left";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        assert_eq!(framing, Framing::Close);
+        let reader = t.into_body_reader(framing);
+        assert_eq!(collect_all(reader), b"whatever is left");
+    }
+
+    #[test]
+    fn body_reader_none_framing_yields_no_chunks() {
+        let wire = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        assert_eq!(framing, Framing::None);
+        let mut reader = t.into_body_reader(framing);
+        assert_eq!(reader.next_chunk().unwrap(), None);
+    }
+
+    #[test]
+    fn body_reader_errors_on_truncated_chunked_body() {
+        let wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+        let mut t = SyncTransport::new(Loopback::new(wire));
+        let head = t.read_response_head(8192).unwrap();
+        let framing = body::response_framing(&head.headers, &Method::Get, head.status).unwrap();
+        let mut reader = t.into_body_reader(framing);
+        // The first call may legitimately return the partial chunk data
+        // that did arrive ("hel", 3 of the declared 5 bytes) -- the error
+        // only surfaces once the reader asks for more and the transport
+        // has nothing left to give.
+        let mut saw_error = false;
+        for _ in 0..4 {
+            match reader.next_chunk() {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(_) => {
+                    saw_error = true;
+                    break;
+                }
+            }
+        }
+        assert!(saw_error, "expected the truncated chunked body to error");
     }
 
     /// Test-only helper so the write tests don't need to hand-build a
