@@ -4,19 +4,23 @@
 //! `http://local-tailscaled.sock/localapi/v0/...` with the `Host` header set
 //! to `local-tailscaled.sock`; on Linux authentication is by socket peer
 //! credentials. One connection per request — a CLI has no use for a pool.
+//!
+//! HTTP/1.1 framing is `rusty_http`'s job, not `hyper`'s, anymore -- see
+//! `DESIGN.md`'s dependency table.
 
 use std::path::PathBuf;
 
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper::{Method, Request, StatusCode, header};
-use hyper_util::rt::TokioIo;
+use rusty_http::head::RequestHead;
+use rusty_http::tokio_native::AsyncTransport;
+use rusty_http::{HeaderMap, Method, StatusCode, Version};
 use tokio::net::UnixStream;
 
 /// Default tailscaled socket path on Linux.
 pub const DEFAULT_SOCKET: &str = "/var/run/tailscale/tailscaled.sock";
 
 const HOST: &str = "local-tailscaled.sock";
+/// Cap on the HTTP/1.1 response head we'll buffer before giving up.
+const MAX_HEAD_LEN: usize = 64 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -26,9 +30,9 @@ pub enum Error {
         source: std::io::Error,
     },
     #[error("localapi http error: {0}")]
-    Http(#[from] hyper::Error),
+    Http(#[from] rusty_http::TransportError),
     #[error("localapi request build error: {0}")]
-    Request(#[from] hyper::http::Error),
+    Request(#[from] rusty_http::Error),
     /// Non-2xx response; body is tailscaled's error text.
     #[error("tailscaled returned {status}: {body}")]
     Api { status: StatusCode, body: String },
@@ -51,33 +55,36 @@ impl LocalApi {
         &self,
         method: Method,
         path_and_query: &str,
-        body: Bytes,
-    ) -> Result<Bytes, Error> {
+        body: Vec<u8>,
+    ) -> Result<Vec<u8>, Error> {
         let stream = UnixStream::connect(&self.socket)
             .await
             .map_err(|source| Error::Connect {
                 path: self.socket.clone(),
                 source,
             })?;
-        let (mut sender, conn) =
-            hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
-        // Drive the connection; it ends when the request completes.
-        let driver = tokio::spawn(conn);
+        let mut transport = AsyncTransport::new(stream);
 
-        let req = Request::builder()
-            .method(method)
-            .uri(path_and_query)
-            .header(header::HOST, HOST)
-            .body(Full::new(body))?;
-        let resp = sender.send_request(req).await?;
-        let status = resp.status();
-        let body = resp.into_body().collect().await?.to_bytes();
-        drop(sender);
-        driver.abort();
+        let mut headers = HeaderMap::new();
+        headers.insert("Host", HOST)?;
+        headers.insert("Content-Length", &body.len().to_string())?;
+        transport
+            .write_request_head(&RequestHead {
+                method: method.clone(),
+                target: path_and_query.to_string(),
+                version: Version::Http11,
+                headers,
+            })
+            .await?;
+        transport.write_body(&body).await?;
 
-        if !status.is_success() {
+        let head = transport.read_response_head(MAX_HEAD_LEN).await?;
+        let framing = rusty_http::body::response_framing(&head.headers, &method, head.status)?;
+        let body = transport.read_body(framing).await?;
+
+        if !head.status.is_success() {
             return Err(Error::Api {
-                status,
+                status: head.status,
                 body: String::from_utf8_lossy(&body).trim().to_string(),
             });
         }
@@ -85,8 +92,8 @@ impl LocalApi {
     }
 
     /// `GET /localapi/v0/status` as raw JSON bytes (for `status --json`).
-    pub async fn status_raw(&self) -> Result<Bytes, Error> {
-        self.request(Method::GET, "/localapi/v0/status", Bytes::new())
+    pub async fn status_raw(&self) -> Result<Vec<u8>, Error> {
+        self.request(Method::Get, "/localapi/v0/status", Vec::new())
             .await
     }
 
@@ -101,7 +108,7 @@ impl LocalApi {
     ) -> Result<ts_types::Prefs, Error> {
         let body = serde_json::to_vec(masked)?;
         let body = self
-            .request(Method::PATCH, "/localapi/v0/prefs", Bytes::from(body))
+            .request(Method::Patch, "/localapi/v0/prefs", body)
             .await?;
         Ok(serde_json::from_slice(&body)?)
     }
@@ -110,7 +117,7 @@ impl LocalApi {
     /// tailscaled's own timeout.
     pub async fn ping(&self, ip: std::net::IpAddr) -> Result<ts_types::PingResult, Error> {
         let path = format!("/localapi/v0/ping?ip={ip}&type=disco");
-        let body = self.request(Method::POST, &path, Bytes::new()).await?;
+        let body = self.request(Method::Post, &path, Vec::new()).await?;
         Ok(serde_json::from_slice(&body)?)
     }
 }
