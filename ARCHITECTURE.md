@@ -3,13 +3,14 @@
 ## Overview
 `rusty_http` is one sans-IO HTTP/1.1 message layer (request/response head
 parse + serialize, body framing, an incremental chunked-body state machine)
-plus one `Url` type, replacing six hand-rolled implementations duplicated
-today across `rusty_request` and `rusty_tail`. It sits "beside the PAL, not
-on top" in the wider ecosystem's layer picture (`rustils/docs/architecture.md`),
-the same shelf slot and seam discipline as `rusty_tls`. `Url`, the sans-IO
-message core, all three transport adapters, and the `cookies` feature are
-built and tested — see Boundaries below. Not yet built:
-`rusty_tail`'s migration itself.
+plus one `Url` type, replacing six hand-rolled (or, for two of `rusty_tail`'s
+sites, `hyper`-based) implementations duplicated today across
+`rusty_request` and `rusty_tail`. It sits "beside the PAL, not on top" in the
+wider ecosystem's layer picture (`rustils/docs/architecture.md`), the same
+shelf slot and seam discipline as `rusty_tls`. `Url`, the sans-IO message
+core, all three transport adapters, and the `cookies` feature are built and
+tested — see Boundaries below. Both consumers' migrations are complete; see
+"A second gap" below for the last piece that fell out of finishing them.
 
 ## Boundaries
 Domain logic vs. I/O (ports-and-adapters): the sans-IO core never touches a
@@ -91,7 +92,7 @@ of this crate's adapters are used directly, not through a channel), and a
 `rusty_tail` runtime migration is a far larger, unrelated undertaking this
 crate's mission was never meant to force. `rusty_tail`'s own migration
 (replacing its four hand-rolled/`hyper`-based call sites with this
-adapter) is the next step, not done in this repo.
+adapter) is now complete, in its own repo.
 
 ## A second gap, found while preparing the `rusty_tail` migration itself
 Before touching `rusty_tail`'s two genuinely-hand-rolled sites
@@ -118,8 +119,9 @@ independent reader/writer tasks) — which produces two owned halves with
 no way to retroactively prime either with leftover bytes — added a
 `Replay<T>` wrapper (`tokio_native` only, where it's needed) that replays
 a reclaimed prefix before falling through to the wrapped transport,
-`AsyncRead`/`AsyncWrite` both. This is deliberately still not part of
-`rusty_tail`'s migration itself — that's the next step, using this.
+`AsyncRead`/`AsyncWrite` both. `rusty_tail`'s migration (in its own repo)
+uses exactly this to hand `ts-derp/client.rs`'s split read half its
+reclaimed ServerKey-greeting bytes.
 
 ## Security-relevant bounds, decided during the core's build
 Both head parsing and chunked-body-framing-line parsing take an explicit
