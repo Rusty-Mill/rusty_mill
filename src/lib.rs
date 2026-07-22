@@ -22,29 +22,35 @@
 //! the incremental case.
 //!
 //! Sync and async I/O are thin adapters layered above the core:
-//! [`sync::SyncTransport`] drives it over any `std::io::Read + Write`, and
+//! [`sync::SyncTransport`] drives it over any `std::io::Read + Write`;
 //! [`async_tokio::AsyncTransport`] (behind the `rusty-tokio` feature) drives
 //! it over [`rusty_tokio`](https://github.com/baileyrd/rusty_tokio)'s
 //! `AsyncRead`/`AsyncWrite`, mirroring
-//! [`rusty_tls`](https://github.com/baileyrd/rusty_tls)'s layout.
+//! [`rusty_tls`](https://github.com/baileyrd/rusty_tls)'s layout; and
+//! [`tokio_native::AsyncTransport`] (behind the `tokio` feature) drives it
+//! over real crates.io `tokio`'s `AsyncRead`/`AsyncWrite`, for a consumer
+//! (`rusty_tail`) built on that runtime instead.
 //!
 //! # Scope
 //!
 //! In: request/response head parse + serialize (both directions); a header
 //! map preserving order and case-insensitivity; the three body framings as
 //! an incremental/streaming state machine; upgrade-safe head consumption;
-//! [`Url`]; sync and async transport adapters; an optional `cookies`
-//! feature ([`cookie::CookieJar`], RFC 6265, client-only).
+//! [`Url`]; sync and async (over either `rusty_tokio` or real `tokio`)
+//! transport adapters; an optional `cookies` feature ([`cookie::CookieJar`],
+//! RFC 6265, client-only).
 //!
 //! Out: HTTP/2, TLS (that's `rusty_tls` -- the two compose, neither imports
 //! the other), compression, multipart, routing frameworks.
 //!
 //! # Status
 //!
-//! `Url`, the sans-IO message core, both transport adapters, and the
+//! `Url`, the sans-IO message core, all three transport adapters, and the
 //! `cookies` feature are built and tested. Not yet built: any consumer
-//! migration (`rusty_request`/`rusty_tail` still carry their own parsers).
-//! See `ARCHITECTURE.md` for the boundary table and remaining sequencing.
+//! migration -- `rusty_request` migrated onto this crate in its own repo;
+//! `rusty_tail`'s migration (which needed the `tokio` adapter added here
+//! first) is still pending. See `ARCHITECTURE.md` for the boundary table
+//! and remaining sequencing.
 
 mod error;
 mod transport;
@@ -61,6 +67,8 @@ pub mod header;
 pub mod method;
 pub mod status;
 pub mod sync;
+#[cfg(feature = "tokio")]
+pub mod tokio_native;
 pub mod url;
 
 pub use error::{Error, Result};
