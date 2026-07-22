@@ -17,7 +17,9 @@
 //! modules, not one generic-over-blocking-ness (or generic-over-runtime)
 //! one.
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 
 use crate::body::{self, ChunkedDecoder, Framing, Progress, DEFAULT_MAX_LINE_LEN};
 use crate::head::{self, Outcome, RequestHead, ResponseHead};
@@ -54,9 +56,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
 
     /// Consumes `self`, returning the underlying transport. See
     /// [`crate::sync::SyncTransport::into_inner`]'s docs -- the same
-    /// caution about unconsumed buffered bytes applies.
+    /// caution about unconsumed buffered bytes applies; prefer
+    /// [`Self::into_parts`] for a protocol handoff.
     pub fn into_inner(self) -> T {
         self.io
+    }
+
+    /// Consumes `self`, returning the underlying transport *and* any
+    /// bytes already read from it but not yet consumed by a
+    /// `read_*`/`into_body_reader` call -- the correct way to hand a
+    /// connection off to a different protocol after reading a head that
+    /// might have arrived bundled with that protocol's first message on
+    /// the wire (the server pushing its greeting frame right after an
+    /// upgrade response, in the same read, is exactly this). Wrap the
+    /// returned bytes and transport in [`Replay`] before handing them to
+    /// code that reads next, e.g. a protocol-upgrade handshake function
+    /// generic only over `AsyncRead`/`AsyncWrite`.
+    pub fn into_parts(self) -> (T, Vec<u8>) {
+        (self.io, self.buf[self.start..self.end].to_vec())
     }
 
     async fn fill_more(&mut self) -> Result<usize> {
@@ -256,6 +273,102 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
         let data = self.buf[self.start..self.start + take].to_vec();
         self.start += take;
         Ok(data)
+    }
+}
+
+/// Replays `prefix` before resuming reads from `inner` -- pairs with
+/// [`AsyncTransport::into_parts`] for handing a connection off to a
+/// different protocol after reading a head that might have arrived
+/// bundled with that protocol's first message on the wire. `inner` is
+/// commonly the read half of a split stream (e.g.
+/// `tokio::net::tcp::OwnedReadHalf`), in which case only the `AsyncRead`
+/// impl below applies; wrapping an unsplit `AsyncRead + AsyncWrite`
+/// stream gets both.
+///
+/// ```
+/// use rusty_http::tokio_native::{AsyncTransport, Replay};
+///
+/// # async fn run() -> rusty_http::TransportResult<()> {
+/// let (client, server) = tokio::io::duplex(64);
+/// let mut client = client;
+/// tokio::io::AsyncWriteExt::write_all(
+///     &mut client,
+///     b"HTTP/1.1 101 Switching Protocols\r\n\r\nfirst-frame-byte",
+/// )
+/// .await
+/// .unwrap();
+///
+/// let mut t = AsyncTransport::new(server);
+/// let head = t.read_response_head(8192).await?;
+/// assert_eq!(head.status.as_u16(), 101);
+/// let (stream, leftover) = t.into_parts();
+/// assert_eq!(leftover, b"first-frame-byte");
+///
+/// // Hand the replaying reader to whatever reads the new protocol next --
+/// // it sees "first-frame-byte" before anything further arrives on `stream`.
+/// let mut resumed = Replay::new(leftover, stream);
+/// let mut buf = [0u8; 16];
+/// tokio::io::AsyncReadExt::read_exact(&mut resumed, &mut buf).await.unwrap();
+/// assert_eq!(&buf, b"first-frame-byte");
+/// # Ok(())
+/// # }
+/// ```
+pub struct Replay<T> {
+    prefix: Vec<u8>,
+    pos: usize,
+    inner: T,
+}
+
+impl<T> Replay<T> {
+    /// Wraps `inner`, replaying `prefix` first.
+    pub fn new(prefix: Vec<u8>, inner: T) -> Self {
+        Replay {
+            prefix,
+            pos: 0,
+            inner,
+        }
+    }
+
+    /// Consumes `self`, returning the wrapped value. Panics-free even if
+    /// `prefix` wasn't fully replayed yet -- those bytes are simply
+    /// dropped, the same discard [`AsyncTransport::into_inner`] documents.
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Replay<T> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        if self.pos < self.prefix.len() {
+            let n = (self.prefix.len() - self.pos).min(buf.remaining());
+            let start = self.pos;
+            buf.put_slice(&self.prefix[start..start + n]);
+            self.pos += n;
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Replay<T> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -538,5 +651,65 @@ mod tests {
             }
         }
         assert!(saw_error, "expected the truncated chunked body to error");
+    }
+
+    #[tokio::test]
+    async fn into_parts_recovers_bytes_bundled_with_the_head() {
+        // The exact scenario this exists for: the peer's upgrade response
+        // and the first bytes of the new protocol arrive in the same
+        // read. `into_inner` alone would silently drop them.
+        let io = wired_with(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: DERP\r\n\r\nSERVERKEYGREETING",
+        )
+        .await;
+        let mut t = AsyncTransport::new(io);
+        let head = t.read_response_head(8192).await.unwrap();
+        assert_eq!(head.status.as_u16(), 101);
+        let (_stream, leftover) = t.into_parts();
+        assert_eq!(leftover, b"SERVERKEYGREETING");
+    }
+
+    #[tokio::test]
+    async fn into_parts_is_empty_when_nothing_is_buffered() {
+        let io = wired_with(b"HTTP/1.1 101 Switching Protocols\r\n\r\n").await;
+        let mut t = AsyncTransport::new(io);
+        t.read_response_head(8192).await.unwrap();
+        let (_stream, leftover) = t.into_parts();
+        assert!(leftover.is_empty());
+    }
+
+    #[tokio::test]
+    async fn replay_yields_prefix_then_falls_through_to_inner() {
+        let (mut feeder, reader) = duplex(64);
+        feeder.write_all(b"-more-after").await.unwrap();
+        drop(feeder);
+
+        let mut replay = Replay::new(b"prefix-".to_vec(), reader);
+        let mut got = Vec::new();
+        replay.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"prefix--more-after");
+    }
+
+    #[tokio::test]
+    async fn replay_with_empty_prefix_reads_straight_through() {
+        let (mut feeder, reader) = duplex(64);
+        feeder.write_all(b"hello").await.unwrap();
+        drop(feeder);
+
+        let mut replay = Replay::new(Vec::new(), reader);
+        let mut got = Vec::new();
+        replay.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"hello");
+    }
+
+    #[tokio::test]
+    async fn replay_write_passes_through_to_inner() {
+        let (feeder, mut sink) = duplex(256);
+        let mut replay = Replay::new(b"ignored-on-write-side".to_vec(), feeder);
+        replay.write_all(b"actual write").await.unwrap();
+        drop(replay);
+        let mut got = Vec::new();
+        sink.read_to_end(&mut got).await.unwrap();
+        assert_eq!(got, b"actual write");
     }
 }

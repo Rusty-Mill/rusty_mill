@@ -49,9 +49,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> AsyncTransport<T> {
 
     /// Consumes `self`, returning the underlying transport. See
     /// [`crate::sync::SyncTransport::into_inner`]'s docs -- the same
-    /// caution about unconsumed buffered bytes applies.
+    /// caution about unconsumed buffered bytes applies; prefer
+    /// [`Self::into_parts`] for a protocol handoff.
     pub fn into_inner(self) -> T {
         self.io
+    }
+
+    /// Consumes `self`, returning the underlying transport *and* any
+    /// unconsumed buffered bytes. See
+    /// [`crate::sync::SyncTransport::into_parts`]'s docs.
+    pub fn into_parts(self) -> (T, Vec<u8>) {
+        (self.io, self.buf[self.start..self.end].to_vec())
     }
 
     async fn fill_more(&mut self) -> Result<usize> {

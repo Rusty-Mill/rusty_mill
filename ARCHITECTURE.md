@@ -93,6 +93,34 @@ crate's mission was never meant to force. `rusty_tail`'s own migration
 (replacing its four hand-rolled/`hyper`-based call sites with this
 adapter) is the next step, not done in this repo.
 
+## A second gap, found while preparing the `rusty_tail` migration itself
+Before touching `rusty_tail`'s two genuinely-hand-rolled sites
+(`ts-control/controlhttp.rs`, `ts-derp/client.rs` — see the LocalAPI
+correction above), reviewing `ts-derp/client.rs`'s `handshake_over`
+surfaced a real correctness bug in all three transports, not just a
+missing feature: `into_inner()` hands back only the raw transport,
+silently dropping any bytes already read into the transport's internal
+buffer but not yet consumed by a `read_*`/`into_body_reader` call. For
+`rusty_request`'s already-merged CONNECT-tunnel handoff this is provably
+harmless — the proxy responds before our own client sends anything for
+the tunneled protocol, so nothing exists yet to over-read. It is not
+harmless for `ts-derp`: its peer can push its ServerKey greeting frame in
+the same TCP read as the HTTP upgrade response, and today's
+`into_inner()` would silently discard that frame, corrupting the DERP
+stream from its first byte — undetectable until it happens, since the
+scenario depends on the peer's read/write timing.
+
+**Resolved**: added `into_parts(self) -> (T, Vec<u8>)` to all three
+transports, returning the transport plus any unconsumed buffered bytes
+instead of just the transport. And since `ts-derp/client.rs` calls
+`stream.into_split()` right after its upgrade handshake (to run
+independent reader/writer tasks) — which produces two owned halves with
+no way to retroactively prime either with leftover bytes — added a
+`Replay<T>` wrapper (`tokio_native` only, where it's needed) that replays
+a reclaimed prefix before falling through to the wrapped transport,
+`AsyncRead`/`AsyncWrite` both. This is deliberately still not part of
+`rusty_tail`'s migration itself — that's the next step, using this.
+
 ## Security-relevant bounds, decided during the core's build
 Both head parsing and chunked-body-framing-line parsing take an explicit
 `max_len` bound (`head::DEFAULT_MAX_HEAD_LEN`/`body::DEFAULT_MAX_LINE_LEN`,

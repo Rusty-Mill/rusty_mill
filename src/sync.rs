@@ -51,14 +51,28 @@ impl<T: Read + Write> SyncTransport<T> {
     }
 
     /// Consumes `self`, returning the underlying transport. Any bytes
-    /// already buffered but unconsumed (e.g. the start of a body that
-    /// arrived in the same packet as the head) are discarded -- a caller
-    /// switching protocols mid-connection (Noise, DERP) should finish
-    /// reading everything it needs through this adapter first, the same
-    /// discipline `rusty_request`'s donor `BufReader::into_stream` relies
-    /// on today.
+    /// already buffered but unconsumed are discarded -- **wrong** for a
+    /// caller switching protocols mid-connection (Noise, DERP), since the
+    /// peer's first message in the new protocol can arrive bundled with
+    /// the HTTP response in the same read. Use [`Self::into_parts`]
+    /// instead whenever that's a possibility; this is only safe once the
+    /// caller has read everything it needs through this adapter (e.g. a
+    /// response whose framing is fully drained).
     pub fn into_inner(self) -> T {
         self.io
+    }
+
+    /// Consumes `self`, returning the underlying transport *and* any
+    /// bytes already read from it but not yet consumed by a
+    /// `read_*`/`into_body_reader` call -- the correct way to hand a
+    /// connection off to a different protocol after reading a head that
+    /// might have arrived bundled with that protocol's first message on
+    /// the wire. Wrap the returned bytes and transport in a small
+    /// prefix-replaying reader (mirroring [`crate::tokio_native::Replay`]
+    /// if the target isn't real tokio) before handing them to whatever
+    /// reads next.
+    pub fn into_parts(self) -> (T, Vec<u8>) {
+        (self.io, self.buf[self.start..self.end].to_vec())
     }
 
     /// Reads more bytes from the transport into the buffer, growing it
