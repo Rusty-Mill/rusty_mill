@@ -37,9 +37,12 @@ transport adapters — `sync::SyncTransport` over any `std::io::Read +
 Write`, and `async_tokio::AsyncTransport` over `rusty_tokio`'s
 `AsyncRead`/`AsyncWrite` (behind the `rusty-tokio` feature) — and
 `cookie::CookieJar` (behind the `cookies` feature, RFC 6265, client-only).
-**Not yet built:** any consumer migration — see `ARCHITECTURE.md` for the
-boundary table, a gap found while building the adapters (rusty_tail's real
-call sites don't fit either adapter as planned), and remaining sequencing.
+Both adapters support eager (`read_body`, whole body in memory) and
+incremental (`into_body_reader`/`BodyReader::next_chunk`, one chunk at a
+time) body reads. **Not yet built:** any consumer migration — see
+`ARCHITECTURE.md` for the boundary table, a gap found while building the
+adapters (rusty_tail's real call sites don't fit either adapter as
+planned), and remaining sequencing.
 
 ## Getting Started
 
@@ -56,7 +59,7 @@ let framing = body::response_framing(&head.headers, &method, head.status)?;
 let response_body = t.read_body(framing)?;
 ```
 
-`cargo test --all-features` runs 86 unit tests plus a doc test.
+`cargo test --all-features` runs 96 unit tests plus a doc test.
 
 ## Security note
 
