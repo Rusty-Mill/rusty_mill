@@ -23,8 +23,50 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — A third adapter, `tokio_native`, for real crates.io tokio
+## PR TBD — Byte-exact protocol handoff: `into_parts()` + `Replay<T>`
 **2026-07-22** · (not yet pushed — link once merged)
+
+- **Context:** preparing `rusty_tail`'s migration (per the user's
+  instruction to start with its two genuinely-hand-rolled sites,
+  `ts-control/controlhttp.rs` and `ts-derp/client.rs`) surfaced a real
+  correctness gap in all three transports before any `rusty_tail` code
+  was touched.
+- **The gap:** `SyncTransport`/`AsyncTransport::into_inner()` hands back
+  only the raw transport, silently discarding any bytes already read
+  into the transport's internal buffer but not yet consumed by a
+  `read_*`/`into_body_reader` call. That's fine when nothing can arrive
+  before the caller starts reading (`rusty_request`'s CONNECT-tunnel
+  handoff, already merged, is provably sequential — the proxy responds
+  before our own client sends anything for the tunneled protocol). It is
+  not fine for `ts-derp`'s DERP upgrade: the server can push its
+  ServerKey greeting frame in the same TCP read as the HTTP upgrade
+  response, and that frame would land in the discarded buffer,
+  corrupting the DERP stream from its very first frame.
+- **Added:** `into_parts(self) -> (T, Vec<u8>)` on all three transports
+  (`sync::SyncTransport`, `async_tokio::AsyncTransport`,
+  `tokio_native::AsyncTransport`), returning the transport plus any
+  unconsumed buffered bytes, so a caller can reclaim exactly what the
+  peer already sent before handing the connection to a different
+  protocol. `into_inner()` is unchanged (still transport-only) but its
+  docs now point callers doing a protocol handoff at `into_parts()`
+  instead.
+- **Added:** `tokio_native::Replay<T>`, a small `AsyncRead`(+`AsyncWrite`
+  when `T` supports it) wrapper that replays a reclaimed prefix before
+  falling through to the wrapped transport — needed because
+  `tokio::net::TcpStream::into_split()` (what `ts-derp/client.rs` does
+  right after its upgrade handshake) produces two owned halves that
+  can't otherwise be primed with leftover bytes. 5 new unit tests plus a
+  doc test walking through the full `into_parts` → `Replay` handoff; 112
+  unit tests total (up from 107), 2 doc tests, `cargo fmt`/`clippy -D
+  warnings` clean with `--all-features`.
+- **Known limitation, stated plainly:** `Replay<T>` lives only in
+  `tokio_native` for now, sized to what `ts-derp`'s migration actually
+  needs — `sync`/`async_tokio` gained `into_parts()` for symmetry and
+  because the same discard bug applied there too, but neither has a
+  `Replay` type yet since no known caller needs one today.
+
+## PR #6 — A third adapter, `tokio_native`, for real crates.io tokio
+**2026-07-22** · [#6](https://github.com/baileyrd/rusty_http/pull/6)
 
 - **Context:** `rusty_request` migrated onto this crate in its own repo
   (deleting its `http1`/`url`/`cookie`/`header`/`method`/`status`) --

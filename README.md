@@ -44,7 +44,12 @@ Write`, `async_tokio::AsyncTransport` over `rusty_tokio`'s
 (behind `tokio`) — and `cookie::CookieJar` (behind the `cookies` feature,
 RFC 6265, client-only). All three adapters support eager (`read_body`,
 whole body in memory) and incremental (`into_body_reader`/
-`BodyReader::next_chunk`, one chunk at a time) body reads.
+`BodyReader::next_chunk`, one chunk at a time) body reads, and all three
+expose `into_parts()` to reclaim any bytes already buffered but not yet
+consumed when handing a connection off to a different protocol after a
+head parse (`tokio_native` additionally has `Replay<T>`, a small
+`AsyncRead`/`AsyncWrite` wrapper for replaying those bytes into code
+that's generic only over the async I/O traits).
 
 **Migrated:** `rusty_request` (deleted its own `http1`/`url`/`cookie`/
 `header`/`method`/`status`, in its own repo). **Not yet done:**
@@ -68,7 +73,7 @@ let framing = body::response_framing(&head.headers, &method, head.status)?;
 let response_body = t.read_body(framing)?;
 ```
 
-`cargo test --all-features` runs 107 unit tests plus a doc test.
+`cargo test --all-features` runs 112 unit tests plus 2 doc tests.
 
 ## Security note
 
