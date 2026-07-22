@@ -3,8 +3,11 @@
 One sans-IO HTTP/1.1 message layer and `Url` type for the rusty ecosystem.
 [`rusty_request`](https://github.com/baileyrd/rusty_request) has migrated
 onto it, deleting its own hand-rolled `http1.rs`/`url.rs`/`cookie.rs`/
-`header.rs`/`method.rs`/`status.rs`. `rusty_tail`'s four sites (still
-duplicating this logic today) are next.
+`header.rs`/`method.rs`/`status.rs`.
+[`rusty_tail`](https://github.com/baileyrd/rusty_tail) has too, across all
+four of its HTTP sites: the ts2021 Noise upgrade (`ts-control`), the DERP
+relay upgrade (`ts-derp`), and the LocalAPI client/server
+(`ts-cli`/`ts-localapi`).
 
 ## Seam
 
@@ -52,11 +55,12 @@ head parse (`tokio_native` additionally has `Replay<T>`, a small
 that's generic only over the async I/O traits).
 
 **Migrated:** `rusty_request` (deleted its own `http1`/`url`/`cookie`/
-`header`/`method`/`status`, in its own repo). **Not yet done:**
-`rusty_tail`'s migration — the `tokio` adapter above was built specifically
-to unblock it (its call sites are async over real tokio, which fit neither
-of the first two adapters). See `ARCHITECTURE.md` for the boundary table
-and that finding's full record.
+`header`/`method`/`status`, in its own repo) and `rusty_tail` (all four
+of `ts-control`/`ts-derp`/`ts-cli`/`ts-localapi`, in its own repo) — the
+`tokio` adapter above was built specifically to unblock the latter (its
+call sites are async over real tokio, which fit neither of the first two
+adapters). See `ARCHITECTURE.md` for the boundary table and that
+finding's full record.
 
 ## Getting Started
 
