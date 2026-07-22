@@ -9,19 +9,23 @@
 //! Ports and adapters: the wire handling lives here; the actual data comes
 //! from a [`LocalBackend`] the daemon supplies (backed by the engine). The
 //! server never touches the engine directly.
+//!
+//! HTTP/1.1 framing is `rusty_http`'s job, not `hyper`'s, anymore -- see
+//! `DESIGN.md`'s dependency table. `hyper` stays in the dev-dependencies as
+//! an independent client for `tests/roundtrip.rs`, proving real HTTP/1.1
+//! interop rather than just this crate testing itself.
 
-use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper::server::conn::http1;
-use hyper::service::service_fn;
-use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
-use tokio::net::UnixListener;
+use rusty_http::head::{RequestHead, ResponseHead};
+use rusty_http::tokio_native::AsyncTransport;
+use rusty_http::{HeaderMap, Method, StatusCode, Version};
+use tokio::net::{UnixListener, UnixStream};
 use ts_types::{MaskedPrefs, PingResult, Prefs, Status};
+
+/// Cap on the HTTP/1.1 request head we'll buffer before giving up.
+const MAX_HEAD_LEN: usize = 64 * 1024;
 
 /// The data source behind the LocalAPI: the daemon implements this over the
 /// engine handle. Every method is infallible at this layer — errors are
@@ -66,15 +70,40 @@ pub async fn serve<B: LocalBackend>(
         let (stream, _addr) = listener.accept().await.map_err(ServeError::Accept)?;
         let backend = backend.clone();
         tokio::spawn(async move {
-            let io = TokioIo::new(stream);
-            let service = service_fn(move |req| {
-                let backend = backend.clone();
-                async move { Ok::<_, Infallible>(handle(&*backend, req).await) }
-            });
-            if let Err(e) = http1::Builder::new().serve_connection(io, service).await {
+            if let Err(e) = serve_connection(stream, &*backend).await {
                 tracing::debug!("localapi: connection error: {e}");
             }
         });
+    }
+}
+
+/// Serves every request on one connection until the client closes it or a
+/// framing error occurs -- either ends the loop the same way `hyper`'s
+/// `serve_connection` did (logged at debug by the caller, not surfaced as a
+/// server-level error).
+async fn serve_connection<B: LocalBackend>(
+    stream: UnixStream,
+    backend: &B,
+) -> rusty_http::TransportResult<()> {
+    let mut transport = AsyncTransport::new(stream);
+    loop {
+        let head = transport.read_request_head(MAX_HEAD_LEN).await?;
+        let framing = rusty_http::body::request_framing(&head.headers)?;
+        let body = transport.read_body(framing).await?;
+        let (status, content_type, resp_body) = handle(backend, &head, &body).await;
+
+        let mut headers = HeaderMap::new();
+        let _ = headers.insert("Content-Length", &resp_body.len().to_string());
+        let _ = headers.insert("Content-Type", content_type);
+        transport
+            .write_response_head(&ResponseHead {
+                status,
+                reason: reason_phrase(status).to_string(),
+                version: Version::Http11,
+                headers,
+            })
+            .await?;
+        transport.write_body(&resp_body).await?;
     }
 }
 
@@ -109,80 +138,82 @@ fn bind(path: &Path) -> Result<UnixListener, ServeError> {
     Ok(listener)
 }
 
-type Body = Full<Bytes>;
-
-fn json_response(status: StatusCode, body: Bytes) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, "application/json")
-        .body(Full::new(body))
-        .expect("static response is valid")
+/// A canonical reason phrase for the status codes this server ever sends --
+/// unlike `hyper`, `rusty_http::head::ResponseHead` takes the caller's
+/// choice of reason phrase rather than deriving one from the status code.
+fn reason_phrase(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "",
+    }
 }
 
-fn text_error(status: StatusCode, msg: &str) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .header(hyper::header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(Full::new(Bytes::from(format!("{msg}\n"))))
-        .expect("static response is valid")
+fn json_response(status: StatusCode, body: Vec<u8>) -> (StatusCode, &'static str, Vec<u8>) {
+    (status, "application/json", body)
+}
+
+fn text_error(status: StatusCode, msg: &str) -> (StatusCode, &'static str, Vec<u8>) {
+    (
+        status,
+        "text/plain; charset=utf-8",
+        format!("{msg}\n").into_bytes(),
+    )
+}
+
+/// Splits a request-target into (path, query), the same split
+/// `req.uri().path()`/`.query()` gave for free under `hyper`.
+fn split_target(target: &str) -> (&str, &str) {
+    match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    }
 }
 
 /// Routes one request to a backend method and encodes the response.
 async fn handle<B: LocalBackend>(
     backend: &B,
-    req: Request<hyper::body::Incoming>,
-) -> Response<Body> {
-    let method = req.method().clone();
-    let path = req.uri().path().to_string();
-    let query = req.uri().query().unwrap_or("").to_string();
+    head: &RequestHead,
+    body: &[u8],
+) -> (StatusCode, &'static str, Vec<u8>) {
+    let (path, query) = split_target(&head.target);
 
-    match (&method, path.as_str()) {
-        (&Method::GET, "/localapi/v0/status") => {
+    match (&head.method, path) {
+        (Method::Get, "/localapi/v0/status") => {
             let status = backend.status().await;
             encode_json(&status)
         }
-        (&Method::PATCH, "/localapi/v0/prefs") => {
-            let body = match collect_body(req).await {
-                Ok(b) => b,
-                Err(resp) => return resp,
-            };
-            let masked: MaskedPrefs = match serde_json::from_slice(&body) {
+        (Method::Patch, "/localapi/v0/prefs") => {
+            let masked: MaskedPrefs = match serde_json::from_slice(body) {
                 Ok(m) => m,
-                Err(e) => return text_error(StatusCode::BAD_REQUEST, &format!("bad prefs: {e}")),
+                Err(e) => {
+                    return text_error(StatusCode::from_u16(400), &format!("bad prefs: {e}"));
+                }
             };
             let prefs = backend.edit_prefs(masked).await;
             encode_json(&prefs)
         }
-        (&Method::POST, "/localapi/v0/ping") => {
-            let Some(ip) = query_param(&query, "ip") else {
-                return text_error(StatusCode::BAD_REQUEST, "ping requires an ip parameter");
+        (Method::Post, "/localapi/v0/ping") => {
+            let Some(ip) = query_param(query, "ip") else {
+                return text_error(StatusCode::from_u16(400), "ping requires an ip parameter");
             };
             let Ok(ip) = ip.parse::<std::net::IpAddr>() else {
-                return text_error(StatusCode::BAD_REQUEST, "invalid ip parameter");
+                return text_error(StatusCode::from_u16(400), "invalid ip parameter");
             };
             let result = backend.ping(ip).await;
             encode_json(&result)
         }
-        _ => text_error(StatusCode::NOT_FOUND, "not found"),
+        _ => text_error(StatusCode::from_u16(404), "not found"),
     }
 }
 
-fn encode_json<T: serde::Serialize>(value: &T) -> Response<Body> {
+fn encode_json<T: serde::Serialize>(value: &T) -> (StatusCode, &'static str, Vec<u8>) {
     match serde_json::to_vec(value) {
-        Ok(bytes) => json_response(StatusCode::OK, Bytes::from(bytes)),
-        Err(e) => text_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("encode error: {e}"),
-        ),
+        Ok(bytes) => json_response(StatusCode::from_u16(200), bytes),
+        Err(e) => text_error(StatusCode::from_u16(500), &format!("encode error: {e}")),
     }
-}
-
-async fn collect_body(req: Request<hyper::body::Incoming>) -> Result<Bytes, Response<Body>> {
-    req.into_body()
-        .collect()
-        .await
-        .map(|c| c.to_bytes())
-        .map_err(|e| text_error(StatusCode::BAD_REQUEST, &format!("read body: {e}")))
 }
 
 /// Extracts a value from a raw `k=v&k2=v2` query string (minimal; the CLI only

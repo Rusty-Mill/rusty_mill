@@ -10,7 +10,5 @@ repository.workspace = true
 ts-types.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "net", "macros"] }
-hyper = { workspace = true, features = ["client", "http1"] }
-hyper-util = { workspace = true, features = ["tokio"] }
-http-body-util.workspace = true
+rusty_http = { workspace = true, features = ["tokio"] }
 thiserror.workspace = true

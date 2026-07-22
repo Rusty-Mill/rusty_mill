@@ -69,14 +69,14 @@ tree.
 | Crate | Used by | Justification |
 |-------|---------|---------------|
 | `serde`, `serde_json` | ts-types, ts-cli | LocalAPI and control protocol payloads are JSON; hand-rolling JSON is not a good use of risk budget. |
-| `tokio` | ts-cli (net) | Async runtime decision fixed at project start; hyper requires it. |
-| `hyper` + `hyper-util` + `http-body-util` | ts-cli | LocalAPI is HTTP/1.1 over a Unix socket. Hand-rolled HTTP parsing is error-prone (chunked encoding, header edge cases); hyper is the audited standard. `hyper-util` only for the `TokioIo` adapter; no connection pool — one conn per CLI invocation. |
+| `tokio` | ts-cli (net) | Async runtime decision fixed at project start. |
+| `hyper` + `hyper-util` + `http-body-util` (dev-dependency only, `ts-localapi`) | `ts-localapi/tests/roundtrip.rs` | No longer a runtime dependency anywhere (see the `rusty_http` row below) — kept as an independent HTTP/1.1 client in the LocalAPI server's own interop test, proving the migrated server is wire-compatible with a totally separate implementation rather than only ever talking to itself. |
 | `thiserror` | all | Error ergonomics, zero runtime cost. |
 | `tracing` | daemon/engine | Structured logging; standard. |
 | `x25519-dalek`, `chacha20poly1305`, `blake2`, `hkdf` | ts-control | Noise IK primitives (hand-rolled controlbase); see Phase 2 decisions. |
 | `h2`, `http`, `bytes` | ts-control | HTTP/2 over the Noise channel, mirroring Go's `x/net/http2`. |
 | `crypto_box` | ts-derp | NaCl box (X25519 + XSalsa20-Poly1305) for the DERP ClientInfo/ServerInfo handshake — exactly the construction Go uses. |
-| `rusty_http` (git dep on the rusty ecosystem's shared HTTP layer, pinned `rev`) | ts-control, ts-derp | Replaces the hand-rolled HTTP/1.1 head parse/serialize `controlhttp.rs` (Noise upgrade) and `derp/client.rs` (DERP upgrade) each carried — both needed the same byte-exact-head-consumption guarantee for their protocol handoff and had converged on the same shape independently (one even byte-at-a-time to avoid over-reading). `rusty_http`'s `tokio_native::AsyncTransport` was purpose-built for this migration (see its own `ARCHITECTURE.md`); its `into_parts`/`Replay` pair is what lets the more efficient buffered head parser replace the byte-at-a-time reads without losing bytes the peer bundled with its upgrade response. LocalAPI's own `hyper`-based HTTP (see the Phase 1 row above) is a different tradeoff and is not part of this migration. |
+| `rusty_http` (git dep on the rusty ecosystem's shared HTTP layer, pinned `rev`) | ts-control, ts-derp, ts-cli, ts-localapi | Replaces every hand-rolled or `hyper`-based HTTP/1.1 site in this workspace: `controlhttp.rs` (Noise upgrade) and `derp/client.rs` (DERP upgrade) first (both needed the same byte-exact-head-consumption guarantee for their protocol handoff, one even byte-at-a-time to avoid over-reading), then LocalAPI's `ts-cli` client and `ts-localapi` server, which had been `hyper`-based since Phase 1 (see the note above) rather than hand-rolled — migrated once `rusty_http`'s server-direction API (`read_request_head`/`write_response_head`, used the same way `read_response_head`/`write_request_head` already were on the client side) covered a persistent-connection server loop, not just a one-shot client. `rusty_http`'s `tokio_native::AsyncTransport` was purpose-built for the first two sites (see its own `ARCHITECTURE.md`); its `into_parts`/`Replay` pair, not needed for LocalAPI (no protocol handoff happens on that socket), is what let the Noise/DERP sites replace byte-at-a-time reads with a buffered parser without losing bytes bundled with an upgrade response. |
 | `boringtun` | ts-wg | Userspace WireGuard, pure Rust, unprivileged; the strategic WG choice. |
 | `crypto_box` | ts-disco | NaCl box for disco messages (same primitive as DERP; no new dep). |
 | `rand_core` | ts-stun, ts-magicsock | STUN transaction ids and disco ping tx ids. |
@@ -133,6 +133,21 @@ revisited if the CLI surface grows), `hex` (two 30-line functions in ts-types),
   *do* read.
 - **No connection reuse in the CLI**: one request per invocation, HTTP/1.1,
   `Connection: close` semantics. Simplest correct thing.
+- **LocalAPI's client and server migrated onto `rusty_http`** (this session,
+  after `ts-control`/`ts-derp` already had): `ts-cli/localapi.rs`'s
+  `request()` now writes/reads via `rusty_http::tokio_native::AsyncTransport`
+  instead of `hyper::client::conn::http1`; `ts-localapi`'s `serve()` gained a
+  `serve_connection` loop over the same adapter's request-direction API
+  (`read_request_head`/`write_response_head`) instead of
+  `hyper::server::conn::http1` + `service_fn`, still one task per accepted
+  connection and still serving requests on a connection until the client
+  closes it. Response reason phrases are supplied explicitly now
+  (`reason_phrase`) since `rusty_http::head::ResponseHead` doesn't derive one
+  from the status code the way `hyper::StatusCode`'s `Display` did. `hyper`
+  itself didn't leave the tree — it moved to `ts-localapi`'s
+  `[dev-dependencies]`, where `tests/roundtrip.rs` uses it as an independent
+  client to keep proving real HTTP/1.1 interop, not just this crate against
+  itself.
 
 ## Phase 2 decisions (control client)
 
