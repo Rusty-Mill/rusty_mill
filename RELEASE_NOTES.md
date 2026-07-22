@@ -23,8 +23,40 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
-## PR TBD — Incremental body reading (`BodyReader`), ahead of the `rusty_request` migration
+## PR TBD — A third adapter, `tokio_native`, for real crates.io tokio
 **2026-07-22** · (not yet pushed — link once merged)
+
+- **Context:** `rusty_request` migrated onto this crate in its own repo
+  (deleting its `http1`/`url`/`cookie`/`header`/`method`/`status`) --
+  no change here, noted for the record since this repo's own
+  `RELEASE_NOTES.md` only tracks PRs against this repo.
+- **Added:** `tokio_native::AsyncTransport` (behind a new `tokio`
+  feature) -- the same shape as `async_tokio::AsyncTransport`, but
+  driving the sans-IO core over real crates.io `tokio`'s
+  `AsyncRead`/`AsyncWrite` instead of `rusty_tokio`'s. Includes the same
+  eager/incremental (`BodyReader`) body reading both other adapters
+  have. 12 new tests; 107 total, `cargo fmt`/`clippy -D warnings` clean
+  with `--all-features` and with just `--features tokio`.
+- **Why:** resolves the gap `ARCHITECTURE.md` recorded while building
+  the first two adapters -- `rusty_tail`'s four donor sites are async
+  over real tokio, which fit neither `sync::SyncTransport` nor
+  `async_tokio::AsyncTransport`. Considered and declined: a
+  `spawn_blocking` bridge onto the sync adapter (would need a full
+  actor-task-plus-channel design to own a blocking transport for a
+  connection's whole lifetime, plus real per-call overhead) and a
+  `rusty_tail` runtime migration onto `rusty_tokio` (a far larger,
+  unrelated undertaking). See `ARCHITECTURE.md` for the full writeup.
+- **Dependency added:** `tokio` (crates.io, `default-features = false`,
+  `io-util` only for the shipped adapter; `rt`/`macros` added as a
+  dev-dependency for tests only) -- optional, behind the `tokio`
+  feature, so a consumer on a different runtime pulls in nothing extra.
+- **Known limitation, stated plainly:** like the other two adapters,
+  only exercised against in-memory duplexes in tests so far --
+  `rusty_tail`'s own migration (not done in this repo) is what proves
+  it against a real socket.
+
+## PR #5 — Incremental body reading (`BodyReader`), ahead of the `rusty_request` migration
+**2026-07-22** · [#5](https://github.com/baileyrd/rusty_http/pull/5)
 
 - **Added:** `SyncTransport::into_body_reader`/`AsyncTransport::into_body_reader`,
   returning a `BodyReader<T>` that pulls a response body one chunk at a

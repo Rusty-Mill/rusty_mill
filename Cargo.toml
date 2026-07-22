@@ -24,12 +24,41 @@ repository = "https://github.com/baileyrd/rusty_http"
 # unrelated crates, so trait/type identity has to line up with whatever
 # rev a consumer's other rusty_tokio-dependent crates already use.
 rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8", optional = true }
+# Optional (see the `tokio` feature below): a second async adapter,
+# alongside `rusty-tokio`'s, driving the sans-IO core over real crates.io
+# tokio's `AsyncRead`/`AsyncWrite` instead -- for a consumer (`rusty_tail`)
+# built on real tokio rather than this ecosystem's own runtime. Found
+# necessary while planning `rusty_tail`'s migration, not part of the
+# original mission plan -- see `ARCHITECTURE.md`. `default-features =
+# false` + just `io-util`: this crate only needs the `AsyncRead`/
+# `AsyncWrite` traits and their `AsyncReadExt`/`AsyncWriteExt` convenience
+# methods, not tokio's own net/rt/macros surface -- the consumer's own
+# tokio dependency (already enabling whatever it needs) provides those.
+tokio = { version = "1", default-features = false, features = [
+    "io-util",
+], optional = true }
+
+[dev-dependencies]
+# Same crate as the optional dependency above, unified by Cargo's normal
+# feature resolution -- but with the runtime/macro features actual tests
+# need (`rt`, `macros`) that the shipped optional dependency deliberately
+# doesn't ask for, so a consumer enabling just the `tokio` feature never
+# pulls those in.
+tokio = { version = "1", default-features = false, features = [
+    "rt",
+    "macros",
+    "io-util",
+] }
 
 [features]
 # Enables `AsyncTransport`, the async counterpart to the sync adapter. Off
 # by default so a sync-only consumer (e.g. a `rusty_tail` site once
 # migrated) never pulls in `rusty_tokio` and its transitive dependencies.
 rusty-tokio = ["dep:rusty_tokio"]
+# Enables `tokio_native::AsyncTransport`, the real-tokio counterpart to
+# `rusty-tokio`'s adapter. Off by default so a consumer on a different
+# runtime (or no async runtime at all) never pulls in real tokio.
+tokio = ["dep:tokio"]
 # Enables `cookie::CookieJar`, an RFC 6265 cookie jar. Client-only (a
 # server has no use for it) and needs no dependency of its own -- off by
 # default purely so a server-only consumer's public API surface doesn't
