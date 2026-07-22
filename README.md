@@ -17,6 +17,15 @@ parsers gain randomized panic-free fuzz-smoke harnesses. See
 [PROTOCOL.md](PROTOCOL.md) for the ts2021 + DERP + TUN + disco/STUN + ACL +
 netstack notes.
 
+Every HTTP/1.1 site in this workspace — the ts2021 Noise upgrade
+(`ts-control`), the DERP relay upgrade (`ts-derp`), and the LocalAPI
+client/server (`ts-cli`/`ts-localapi`) — runs on
+[`rusty_http`](https://github.com/baileyrd/rusty_http), the rusty
+ecosystem's one shared HTTP/1.1 message layer and `Url` type;
+[`rusty_request`](https://github.com/baileyrd/rusty_request) is the other
+consumer, using the same crate for its own HTTP client. See `DESIGN.md`'s
+dependency table for the migration record.
+
 ## Layout
 
 Cargo workspace, one crate per subsystem under [`crates/`](crates/). Live:
