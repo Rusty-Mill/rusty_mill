@@ -32,26 +32,31 @@ justification of anything added.
 ## Status
 
 **Built and tested:** `Url` (`url`), the header map (`header`), `Method`/
-`StatusCode`/`Version`, and the sans-IO message core — request/response
-head parsing + serialization (`head`), and body framing including the
-incremental chunked decoder (`body`). **Not yet built:** the sync/async
-transport adapters and the `cookies` feature — see `ARCHITECTURE.md` for
-the boundary table and remaining sequencing (adapters, then the migration
-PRs against `rusty_request`/`rusty_tail`).
+`StatusCode`/`Version`, the sans-IO message core (`head`/`body`), and both
+transport adapters — `sync::SyncTransport` over any `std::io::Read +
+Write`, and `async_tokio::AsyncTransport` over `rusty_tokio`'s
+`AsyncRead`/`AsyncWrite` (behind the `rusty-tokio` feature). **Not yet
+built:** the `cookies` feature, and any consumer migration — see
+`ARCHITECTURE.md` for the boundary table, a gap found while building the
+adapters (rusty_tail's real call sites don't fit either adapter as
+planned), and remaining sequencing.
 
 ## Getting Started
 
 ```rust
-use rusty_http::head::{parse_request_head, Outcome};
+use rusty_http::sync::SyncTransport;
+use rusty_http::body;
+use std::net::TcpStream;
 
-let buf = b"GET /a HTTP/1.1\r\nHost: example.com\r\n\r\n";
-if let Outcome::Complete { head, consumed } = parse_request_head(buf, 8192).unwrap() {
-    assert_eq!(head.target, "/a");
-    assert_eq!(consumed, buf.len());
-}
+let stream = TcpStream::connect("example.com:80")?;
+let mut t = SyncTransport::new(stream);
+// ...write a request head via `t.write_request_head(&head)`, then:
+let head = t.read_response_head(8192)?;
+let framing = body::response_framing(&head.headers, &method, head.status)?;
+let response_body = t.read_body(framing)?;
 ```
 
-`cargo test --all-features` runs 57 unit tests plus a doc test.
+`cargo test --all-features` runs 70 unit tests plus a doc test.
 
 ## Security note
 
@@ -62,5 +67,5 @@ chunked-body-framing lines are bounded against a malicious or slow peer
 caller's buffer forever — donor 6's LocalAPI server proves the core must
 parse untrusted requests, not just trusted responses, so this landed with
 the core itself rather than as a later hardening pass. The head parser and
-chunked-body decoder are fuzz targets once an adapter exists to drive them
+chunked-body decoder are fuzz targets once a real migration exercises them
 end-to-end (see `rustils`' fuzz setup for the ecosystem's convention).

@@ -21,44 +21,51 @@
 //! provides [`body::ChunkedDecoder`], the same byte-in/byte-out shape, for
 //! the incremental case.
 //!
-//! Sync and async I/O are thin adapters layered above the core -- the async
-//! adapter feature-gated on `rusty_tokio`, mirroring
-//! [`rusty_tls`](https://github.com/baileyrd/rusty_tls)'s layout. Neither
-//! adapter exists yet; see the crate's `ARCHITECTURE.md` for the planned
-//! shape and current status.
+//! Sync and async I/O are thin adapters layered above the core:
+//! [`sync::SyncTransport`] drives it over any `std::io::Read + Write`, and
+//! [`async_tokio::AsyncTransport`] (behind the `rusty-tokio` feature) drives
+//! it over [`rusty_tokio`](https://github.com/baileyrd/rusty_tokio)'s
+//! `AsyncRead`/`AsyncWrite`, mirroring
+//! [`rusty_tls`](https://github.com/baileyrd/rusty_tls)'s layout.
 //!
 //! # Scope
 //!
 //! In: request/response head parse + serialize (both directions); a header
 //! map preserving order and case-insensitivity; the three body framings as
 //! an incremental/streaming state machine; upgrade-safe head consumption;
-//! [`Url`]; an optional `cookies` feature (RFC 6265 jar, client-only, not
-//! yet built).
+//! [`Url`]; sync and async transport adapters; an optional `cookies` feature
+//! (RFC 6265 jar, client-only, not yet built).
 //!
 //! Out: HTTP/2, TLS (that's `rusty_tls` -- the two compose, neither imports
 //! the other), compression, multipart, routing frameworks.
 //!
 //! # Status
 //!
-//! `Url` and the sans-IO message core (this crate's step 2) are built and
-//! tested. Sync/async transport adapters and the `cookies` feature are not
-//! yet built -- see `ARCHITECTURE.md` for the boundary table and
-//! sequencing.
+//! `Url`, the sans-IO message core, and both transport adapters are built
+//! and tested. Not yet built: the `cookies` feature, and any consumer
+//! migration (`rusty_request`/`rusty_tail` still carry their own parsers).
+//! See `ARCHITECTURE.md` for the boundary table and remaining sequencing.
 
 mod error;
+mod transport;
 mod util;
 mod version;
 
+#[cfg(feature = "rusty-tokio")]
+pub mod async_tokio;
 pub mod body;
 pub mod head;
 pub mod header;
 pub mod method;
 pub mod status;
+pub mod sync;
 pub mod url;
 
 pub use error::{Error, Result};
 pub use header::HeaderMap;
 pub use method::Method;
 pub use status::StatusCode;
+pub use transport::Error as TransportError;
+pub use transport::Result as TransportResult;
 pub use url::Url;
 pub use version::Version;
