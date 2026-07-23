@@ -23,6 +23,19 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
+## PR #18 — Sensitive-header marking + `Debug` redaction for `HeaderMap`
+**2026-07-23** · [#18](https://github.com/baileyrd/rusty_http/pull/18)
+
+- **Added:** `HeaderMap::insert_sensitive()` / `HeaderMap::append_sensitive()`,
+  marking an entry sensitive so its value prints as the bare word
+  `Sensitive` in `Debug` output instead of its real contents (mirroring the
+  `http` crate's `HeaderValue` masking). `get`/`iter`/etc. are unaffected —
+  only `{:?}` output changes, and only for entries a caller opts into.
+- **Context:** part of a parity-loop run assessing this crate against the
+  [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see issue
+  #14. No header is marked sensitive by default, so this changes no
+  existing `Debug` output; purely additive.
+
 ## PR #16 — `Method::is_safe()` / `Method::is_idempotent()`
 **2026-07-23** · [#16](https://github.com/baileyrd/rusty_http/pull/16)
 
