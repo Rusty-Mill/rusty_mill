@@ -23,6 +23,16 @@ newest first (no version tags yet — this is pre-1.0).
 
 ---
 
+## PR #16 — `Method::is_safe()` / `Method::is_idempotent()`
+**2026-07-23** · [#16](https://github.com/baileyrd/rusty_http/pull/16)
+
+- **Added:** `Method::is_safe()` and `Method::is_idempotent()`, per RFC 7231
+  §4.2. `Method::Extension(_)` (an unrecognized method token) is `false` for
+  both.
+- **Context:** part of a parity-loop run assessing this crate against the
+  [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see issue
+  #12. Purely additive; no existing signature changed.
+
 ## PR #15 — Named `StatusCode` constants and `canonical_reason()`
 **2026-07-23** · [#15](https://github.com/baileyrd/rusty_http/pull/15)
 
