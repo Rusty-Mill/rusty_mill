@@ -36,6 +36,18 @@ newest first (no version tags yet — this is pre-1.0).
   #14. No header is marked sensitive by default, so this changes no
   existing `Debug` output; purely additive.
 
+## PR #17 — `HeaderMap::get_all()`
+**2026-07-23** · [#17](https://github.com/baileyrd/rusty_http/pull/17)
+
+- **Added:** `HeaderMap::get_all(&self, name: &str) -> impl Iterator<Item =
+  &str>` — every value for a repeated header (case-insensitive, insertion
+  order). `HeaderMap` was already a multi-map internally (`append()` keeps
+  repeats), but `get()` only ever returned the first match; there was no way
+  to read every `Set-Cookie` value off a `HeaderMap` directly before this.
+- **Context:** part of a parity-loop run assessing this crate against the
+  [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see issue
+  #13. Purely additive; no existing signature changed.
+
 ## PR #16 — `Method::is_safe()` / `Method::is_idempotent()`
 **2026-07-23** · [#16](https://github.com/baileyrd/rusty_http/pull/16)
 

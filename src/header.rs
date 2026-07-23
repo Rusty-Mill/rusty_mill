@@ -84,6 +84,16 @@ impl HeaderMap {
         self.get(name).is_some()
     }
 
+    /// Every value for `name`, case-insensitive, in insertion order --
+    /// for headers that legitimately repeat (e.g. `Set-Cookie`), where
+    /// [`Self::get`] only ever returns the first.
+    pub fn get_all<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> {
+        self.entries
+            .iter()
+            .filter(move |(k, _, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v, _)| v.as_str())
+    }
+
     /// Removes every entry for `name` (case-insensitive), returning the
     /// first removed value, if any.
     pub fn remove(&mut self, name: &str) -> Option<String> {
@@ -238,5 +248,21 @@ mod tests {
         h.append_sensitive("Set-Cookie", "session=abc123").unwrap();
         assert_eq!(h.get("set-cookie"), Some("session=abc123"));
         assert!(!format!("{h:?}").contains("abc123"));
+    }
+
+    #[test]
+    fn get_all_returns_every_value_case_insensitive() {
+        let mut h = HeaderMap::new();
+        h.append("Set-Cookie", "a=1").unwrap();
+        h.append("set-cookie", "b=2").unwrap();
+        h.append("X-Other", "irrelevant").unwrap();
+        let values: Vec<&str> = h.get_all("SET-COOKIE").collect();
+        assert_eq!(values, vec!["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn get_all_on_missing_name_is_empty() {
+        let h = HeaderMap::new();
+        assert_eq!(h.get_all("missing").count(), 0);
     }
 }
