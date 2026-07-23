@@ -35,6 +35,27 @@ newest first (no version tags yet — this is pre-1.0).
   [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see issue
   #13. Purely additive; no existing signature changed.
 
+## PR #16 — `Method::is_safe()` / `Method::is_idempotent()`
+**2026-07-23** · [#16](https://github.com/baileyrd/rusty_http/pull/16)
+
+- **Added:** `Method::is_safe()` and `Method::is_idempotent()`, per RFC 7231
+  §4.2. `Method::Extension(_)` (an unrecognized method token) is `false` for
+  both.
+- **Context:** part of a parity-loop run assessing this crate against the
+  [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see issue
+  #12. Purely additive; no existing signature changed.
+
+## PR #15 — Named `StatusCode` constants and `canonical_reason()`
+**2026-07-23** · [#15](https://github.com/baileyrd/rusty_http/pull/15)
+
+- **Added:** 61 named `StatusCode` constants (`StatusCode::OK`,
+  `StatusCode::NOT_FOUND`, ...), the codes registered in the IANA HTTP
+  Status Code Registry, plus `StatusCode::canonical_reason()` returning the
+  standard reason phrase for a known code.
+- **Context:** first PR from a parity-loop run assessing this crate against
+  the [`http`](https://docs.rs/http/1.4.2) crate (pinned v1.4.2) — see
+  issue #11. Purely additive; no existing signature changed.
+
 ## PR #8 — Cross-repo doc accuracy: `rusty_tail`'s migration is complete
 **2026-07-22** · [#8](https://github.com/baileyrd/rusty_http/pull/8)
 

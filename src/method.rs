@@ -48,6 +48,33 @@ impl Method {
         }
     }
 
+    /// Whether the method is defined as safe by RFC 7231 §4.2.1 --
+    /// conventionally read-only, generating no side effects a client
+    /// requested. `Extension` is never safe: an unrecognized method can't
+    /// be assumed to be.
+    pub fn is_safe(&self) -> bool {
+        matches!(
+            self,
+            Method::Get | Method::Head | Method::Options | Method::Trace
+        )
+    }
+
+    /// Whether the method is defined as idempotent by RFC 7231 §4.2.2 --
+    /// repeating an identical request has the same effect as sending it
+    /// once. `Extension` is never idempotent: an unrecognized method can't
+    /// be assumed to be.
+    pub fn is_idempotent(&self) -> bool {
+        matches!(
+            self,
+            Method::Get
+                | Method::Head
+                | Method::Put
+                | Method::Delete
+                | Method::Options
+                | Method::Trace
+        )
+    }
+
     /// Parses a request-line method token. Never fails -- an unrecognized
     /// token becomes [`Method::Extension`]; rejecting it is the parser's
     /// job (a malformed/empty token never reaches here, since it's split
@@ -96,5 +123,27 @@ mod tests {
     #[test]
     fn display_matches_as_str() {
         assert_eq!(Method::Get.to_string(), "GET");
+    }
+
+    #[test]
+    fn safe_methods() {
+        assert!(Method::Get.is_safe());
+        assert!(Method::Head.is_safe());
+        assert!(Method::Options.is_safe());
+        assert!(Method::Trace.is_safe());
+        assert!(!Method::Post.is_safe());
+        assert!(!Method::Put.is_safe());
+        assert!(!Method::Delete.is_safe());
+        assert!(!Method::Extension("PROPFIND".to_string()).is_safe());
+    }
+
+    #[test]
+    fn idempotent_methods() {
+        assert!(Method::Get.is_idempotent());
+        assert!(Method::Put.is_idempotent());
+        assert!(Method::Delete.is_idempotent());
+        assert!(!Method::Post.is_idempotent());
+        assert!(!Method::Patch.is_idempotent());
+        assert!(!Method::Extension("PROPFIND".to_string()).is_idempotent());
     }
 }
