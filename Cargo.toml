@@ -31,7 +31,7 @@ libc-backend = ["dep:libc"]
 
 # Linux: `rusty_libc` is the default backend; `libc` only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", branch = "main", optional = true }
+rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca", optional = true }
 libc = { version = "0.2", optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option — `rusty_libc` is
@@ -48,7 +48,7 @@ libc = "0.2"
 # the Unix termios/poll/read/winsize surface above (see `term_sys.rs`'s
 # Windows backend).
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", branch = "main", features = ["std"] }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "a223c5cda0d762619d04a50262847fbe651e751c", features = ["std"] }
 
 # The pty end-to-end tests (tests/pty.rs) drive examples/demo under a
 # pseudo-terminal.
