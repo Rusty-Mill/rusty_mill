@@ -1,0 +1,19 @@
+[package]
+name = "rusty_der"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "A minimal, zero-dependency ASN.1 BER/DER TLV encoder and decoder built on rusty_wire"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_ansder"
+keywords = ["asn1", "der", "ber", "tlv", "no-deps"]
+categories = ["encoding", "no-std"]
+
+[dependencies]
+rusty_wire = { path = "../rusty_wire", default-features = false }
+
+[features]
+default = ["std"]
+std = ["rusty_wire/std"]
+
+[dev-dependencies]
