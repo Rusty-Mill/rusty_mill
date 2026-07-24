@@ -66,6 +66,11 @@ macro_rules! private_key {
             pub fn to_state_string(&self) -> String {
                 format!("{PRIVKEY_PREFIX}{}", hex_encode(&self.to_bytes()))
             }
+
+            /// Wrap key bytes in a zeroize-on-drop SecretBytes container.
+            pub fn to_secret_bytes(&self) -> rusty_crypto_key::SecretBytes {
+                rusty_crypto_key::SecretBytes::new(self.to_bytes().to_vec())
+            }
         }
 
         impl FromStr for $name {

@@ -780,6 +780,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_crypto_key"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_http"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_http?rev=a5463a4c0f346b673a5996f26ece550c16747924#a5463a4c0f346b673a5996f26ece550c16747924"
@@ -1195,6 +1199,7 @@ name = "ts-key"
 version = "0.0.1"
 dependencies = [
  "rand_core",
+ "rusty_crypto_key",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
