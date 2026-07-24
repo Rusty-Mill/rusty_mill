@@ -390,10 +390,10 @@ version = "0.1.1"
 dependencies = [
  "criterion",
  "libc",
- "rusty_libc",
+ "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca)",
  "rusty_lines",
  "rusty_regx",
- "rusty_win32",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=a223c5cda0d762619d04a50262847fbe651e751c)",
 ]
 
 [[package]]
@@ -408,12 +408,18 @@ version = "0.0.1"
 source = "git+https://github.com/baileyrd/rusty_libc?branch=main#73aeb30e6a19c2a5c90eb5159257cfc97dcb0698"
 
 [[package]]
+name = "rusty_libc"
+version = "0.0.1"
+source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
+
+[[package]]
 name = "rusty_lines"
-version = "0.2.0"
-source = "git+https://github.com/baileyrd/rusty_lines?branch=main#9afa470b0dd195595455e709b879f10cdc95c32e"
+version = "0.4.0"
+source = "git+https://github.com/baileyrd/rusty_lines?rev=5144afb450b83af245ef12c95c9a38a8aeabf275#5144afb450b83af245ef12c95c9a38a8aeabf275"
 dependencies = [
  "libc",
- "rusty_libc",
+ "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?branch=main)",
+ "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?branch=main)",
  "unicode-width",
 ]
 
@@ -426,6 +432,11 @@ source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a
 name = "rusty_win32"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_win32?branch=main#91040f5fd48ec331d6a79be37c16c653e6420f67"
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=a223c5cda0d762619d04a50262847fbe651e751c#a223c5cda0d762619d04a50262847fbe651e751c"
 
 [[package]]
 name = "same-file"

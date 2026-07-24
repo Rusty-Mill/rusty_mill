@@ -17,7 +17,7 @@ rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "6466cd2d87
 # raw-mode terminal, emacs + vi keymaps, kill ring, undo, history search,
 # bracketed paste, $RPS1 right prompt. rush drives it through its `Hooks`
 # trait (completion, hints, highlighting, abbreviations, vi-mode flag).
-rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main", default-features = false }
+rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", rev = "5144afb450b83af245ef12c95c9a38a8aeabf275", default-features = false }
 
 # Unix job control (signals, wait, process groups, fds, rlimit) goes through
 # the `sys` facade. The backend is target-driven (see the cfgs in
@@ -28,7 +28,7 @@ rusty_lines = { git = "https://github.com/baileyrd/rusty_lines", branch = "main"
 
 # Linux: rusty_libc is the default backend; libc only when forced.
 [target.'cfg(target_os = "linux")'.dependencies]
-rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", branch = "main", optional = true }
+rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "73bf01bf20dc8de55a583cbd5719ad829076ccca", optional = true }
 libc = { version = "0.2", optional = true }
 
 # Other Unix (macOS/BSD): the libc backend is the only option (rusty_libc is
@@ -42,7 +42,7 @@ libc = "0.2"
 # std::process::Child's thread handle for the suspend-then-assign-to-job
 # sequencing that needs).
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", branch = "main", features = ["std"] }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "a223c5cda0d762619d04a50262847fbe651e751c", features = ["std"] }
 
 # The integration tests drive the built binary and also make a few syscalls of
 # their own, so they always need libc.
