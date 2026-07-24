@@ -56,6 +56,12 @@ impl WindowsChild {
             pipes: [None, None, None],
         }
     }
+
+    /// Disown the job object handle so that dropping this child or terminating
+    /// the shell process does not kill the child process tree.
+    pub fn disown(&mut self) -> Option<OwnedWinHandle> {
+        self.job.take()
+    }
 }
 
 impl Child for WindowsChild {
