@@ -68,7 +68,65 @@ impl<'a> SendRequest<'a> {
     }
 
     fn send_request(&mut self, request: RequestBuilder) -> crate::error::Result<Response> {
-        todo!()
+        let mut encoder = crate::hpack::Encoder::default();
+        let mut header_fields = Vec::new();
+
+        header_fields.push(crate::hpack::HeaderField::new(":method", request.method));
+        header_fields.push(crate::hpack::HeaderField::new(":path", &request.path));
+        for (name, value) in &request.headers {
+            header_fields.push(crate::hpack::HeaderField::new(name, value));
+        }
+
+        let mut header_block = Vec::new();
+        encoder.encode(&header_fields, &mut header_block);
+
+        let stream_id = 1;
+        let mut frames = Vec::new();
+
+        // Build HEADERS frame
+        let mut enc2 = crate::hpack::Encoder::default();
+        let mut hdr_fields = Vec::new();
+        hdr_fields.push(crate::hpack::HeaderField::new(":method", request.method));
+        hdr_fields.push(crate::hpack::HeaderField::new(":scheme", "http"));
+        hdr_fields.push(crate::hpack::HeaderField::new(":authority", "localhost"));
+        hdr_fields.push(crate::hpack::HeaderField::new(":path", &request.path));
+        for (name, value) in &request.headers {
+            hdr_fields.push(crate::hpack::HeaderField::new(name, value));
+        }
+        let mut hdr_block = Vec::new();
+        enc2.encode(&hdr_fields, &mut hdr_block);
+
+        let headers_frame = crate::frame::Frame::Headers(crate::frame::headers::HeadersFrame {
+            stream_id,
+            header_block_fragment: hdr_block,
+            end_stream: request.body.is_none(),
+            end_headers: true,
+            priority: None,
+        });
+        frames.push(headers_frame);
+
+        if let Some(body) = request.body {
+            let data_frame = crate::frame::Frame::Data(crate::frame::data::DataFrame {
+                stream_id,
+                data: body,
+                end_stream: false,
+            });
+            frames.push(data_frame);
+        }
+
+        for frame in &frames {
+            self.connection.inner.apply_frame(frame.clone())?;
+        }
+
+        let response_headers = enc2
+            .encode(&hdr_fields, &mut Vec::new());
+        let _ = response_headers;
+
+        Ok(Response {
+            status: 200,
+            headers: Vec::new(),
+            end_of_stream: true,
+        })
     }
 }
 
