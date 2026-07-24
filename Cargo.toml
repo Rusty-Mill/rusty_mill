@@ -53,6 +53,8 @@ rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "cb5dbff75b0e
 # anything past v0.6.0, but keeping the pin current avoids drifting
 # further behind before the next real need shows up.
 platform = { git = "https://github.com/baileyrd/rustils", rev = "5251808971c2e89164d4461c5cf1f45095f60dd3", optional = true }
+rusty_wire = { path = "../rusty_wire" }
+rusty_ansder = { path = "../rusty_ansder" }
 # Test-only, despite living in [dependencies] rather than
 # [dev-dependencies]: Cargo doesn't allow dev-dependencies to be
 # optional, so this is the only way to keep it out of the default
