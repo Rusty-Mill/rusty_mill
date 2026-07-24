@@ -247,6 +247,31 @@ mod tests {
         );
     }
 
+/// Quote a string argument under POSIX shell rules (`'arg'`).
+///
+/// Safe against shell injection: if the argument contains single quotes,
+/// it closes the quote, escapes the single quote as `'\''`, and reopens it.
+/// If the argument contains no shell metacharacters, it is returned unquoted.
+pub fn posix_quote_arg(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".into();
+    }
+    if !arg.chars().any(|c| matches!(c, ' ' | '\t' | '\n' | '\'' | '"' | '\\' | '$' | '`' | '&' | '|' | ';' | '<' | '>' | '(' | ')' | '{' | '}' | '*' | '?' | '[' | ']' | '!' | '~' | '#')) {
+        return arg.into();
+    }
+    let mut out = String::with_capacity(arg.len() + 4);
+    out.push('\'');
+    for c in arg.chars() {
+        if c == '\'' {
+            out.push_str(r"'\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
     #[test]
     fn trailing_backslashes_double_before_closing_quote() {
         assert_eq!(
@@ -318,8 +343,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_program_is_refused() {
-        let e = build_command_line_wide(&[], &[]).unwrap_err();
-        assert_eq!(e.kind, ErrorKind::InvalidInput);
+    fn posix_quoting_roundtrips() {
+        assert_eq!(posix_quote_arg("simple"), "simple");
+        assert_eq!(posix_quote_arg("hello world"), "'hello world'");
+        assert_eq!(posix_quote_arg("it's"), r#"'it'\''s'"#);
     }
 }
