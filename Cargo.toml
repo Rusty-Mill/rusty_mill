@@ -1,13 +1,13 @@
 [package]
-name = "rusty_der"
+name = "rusty_ansder"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "A minimal, zero-dependency ASN.1 BER/DER TLV encoder and decoder built on rusty_wire"
+description = "Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering Engine and ASN.1 DER Parser for Rusty Mill"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_ansder"
-keywords = ["asn1", "der", "ber", "tlv", "no-deps"]
-categories = ["encoding", "no-std"]
+keywords = ["rag", "ai", "qa", "search", "der"]
+categories = ["science", "encoding"]
 
 [dependencies]
 rusty_wire = { path = "../rusty_wire", default-features = false }

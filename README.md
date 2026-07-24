@@ -1,16 +1,13 @@
-# rusty_der (rusty_ansder)
+# rusty_ansder
 
 [![CI](https://github.com/baileyrd/rusty_ansder/actions/workflows/ci.yml/badge.svg)](https://github.com/baileyrd/rusty_ansder/actions/workflows/ci.yml)
 
-A minimal, **zero-dependency by default** ASN.1 BER/DER TLV encoder and decoder built on [`rusty_wire`](https://github.com/baileyrd/rusty_wire).
+Sovereign AI Retrieval-Augmented Generation (RAG) & Question Answering Engine and ASN.1 DER Parser for **Rusty Mill**.
 
-`rusty_der` provides bounds-checked, explicit-tag ASN.1 TLV reading and writing (`INTEGER`, `OCTET STRING`, `BOOLEAN`, `SEQUENCE`) without panicking, `#![no_std]` + `alloc` by default.
+## Modules
 
-## Features
-
-- Built directly on top of `rusty_wire` cursors (`Reader` / `Writer`).
-- Safe, bounds-checked ASN.1 DER length & TLV tag parsing.
-- Definite short and long length forms (ITU-T X.690).
+- `rusty_ansder::rag`: Sovereign Retrieval-Augmented Generation (RAG) Q&A engine connecting vector/keyword search with LLM context retrieval.
+- `rusty_ansder::der`: Minimal ASN.1 BER/DER TLV encoder and decoder built on [`rusty_wire`](https://github.com/baileyrd/rusty_wire).
 
 ## License
 

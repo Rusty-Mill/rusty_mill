@@ -3,7 +3,7 @@
 version = 3
 
 [[package]]
-name = "rusty_der"
+name = "rusty_ansder"
 version = "0.1.0"
 dependencies = [
  "rusty_wire",
