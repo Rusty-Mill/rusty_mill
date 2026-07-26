@@ -1,0 +1,22 @@
+[package]
+name = "rusty_gpu"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign CPU software framebuffer presenter and SIMD vector rasterizer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_gpu"
+keywords = ["gpu", "framebuffer", "rasterizer", "graphics", "no-std"]
+categories = ["graphics", "no-std"]
+
+[dependencies]
+rusty_simd = { path = "../rusty_simd" }
+rusty_gui = { path = "../rusty_gui" }
+rusty_font = { path = "../rusty_font" }
+rusty_std = { path = "../rusty_std" }
+
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { path = "../rusty_win32" }
+
+[features]
+default = []
