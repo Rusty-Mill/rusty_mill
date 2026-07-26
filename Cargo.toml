@@ -1,0 +1,10 @@
+[package]
+name = "rusty_git"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Pure Rust implementation of Git object model, index, refs, and CLI binary"
+
+[dependencies]
+rusty_diff = { path = "../rusty_diff" }
+rpath = { path = "../rpath" }
