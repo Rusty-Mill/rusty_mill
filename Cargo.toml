@@ -14,7 +14,7 @@ license = "MIT"
 # different revs of the same git dependency as two unrelated crates, so
 # their trait/type identities wouldn't match at a different rev even
 # though the source is otherwise compatible.
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8" }
+rusty_tokio = { path = "../rusty_tokio" }
 # The ecosystem's one shared TLS implementation and trust policy (see its
 # own README/ARCHITECTURE.md) -- this crate is the design's first named
 # consumer. `rusty-tokio` feature enables its async adapter, which is
@@ -24,7 +24,7 @@ rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c93
 # up ALPN protocol negotiation (`AsyncTlsStream::new_with_alpn`/
 # `negotiated_alpn_protocol`) -- this rev's own `rusty_tokio` pin is
 # unchanged (still `ac598c93`), so no matching bump is needed there.
-rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "233598faf2ffc76c38cd901019f466c1ab0e2267", features = [
+rusty_tls = { path = "../rusty_tls", features = [
     "rusty-tokio",
 ] }
 # The ecosystem's one shared HTTP/1.1 message layer + Url type (see its
@@ -35,7 +35,7 @@ rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "233598faf2ff
 # the RFC 6265 jar `Client`'s cookie store already depended on. Pinned to
 # a specific rev, same convention (and same reasoning) as `rusty_tokio`
 # above.
-rusty_http = { git = "https://github.com/baileyrd/rusty_http", rev = "7ddc011628c55330ec8dab33524b290cae927426", features = [
+rusty_http = { path = "../rusty_http", features = [
     "rusty-tokio",
     "cookies",
 ] }

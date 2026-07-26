@@ -391,7 +391,8 @@ where
     let ca_key = KeyPair::generate().unwrap();
     let ca_cert = ca_params.self_signed(&ca_key).unwrap();
 
-    let leaf_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let leaf_params =
+        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()]).unwrap();
     let leaf_key = KeyPair::generate().unwrap();
     let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).unwrap();
     let key_der = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der()));
