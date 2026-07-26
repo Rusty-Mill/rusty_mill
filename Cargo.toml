@@ -34,7 +34,7 @@ rustls-native-certs = "0.8"
 # rusty_rdp's own pinning convention for its `platform` dependency
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8", optional = true }
+rusty_tokio = { path = "../rusty_tokio", optional = true }
 
 [features]
 # Enables `AsyncTlsStream`, the async counterpart to `TlsStream`. Off by
