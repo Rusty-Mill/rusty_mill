@@ -1,0 +1,18 @@
+[package]
+name = "rusty_wiremock"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign HTTP mock server and request matcher for Rusty Mill test suites"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_wiremock"
+keywords = ["mock", "http", "wiremock", "test", "no-std"]
+categories = ["development-tools::testing", "no-std"]
+
+[dependencies]
+rusty_http = { path = "../rusty_http" }
+rusty_json = { path = "../rusty_json" }
+rusty_std = { path = "../rusty_std" }
+
+[features]
+default = []
