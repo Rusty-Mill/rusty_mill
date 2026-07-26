@@ -28,7 +28,7 @@
 //!
 //! Deliberately out of scope: macOS (no donor evidence — D13 only surveys
 //! shh/rusty_term, both Linux+Windows), job-control terminal handoff
-//! (already [`crate::term::JobControl`], D9 — a consumer composes the two),
+//! (already job control in D9 — a consumer composes the two),
 //! and resize *notification* (an already-deferred `term` facet, D9).
 
 use crate::error::Result;

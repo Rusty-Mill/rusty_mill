@@ -295,7 +295,7 @@ fn ignore_sigttou() -> Result<()> {
 /// (`tcsetpgrp(fd, pgid)`) — D1/D9's job-control terminal handoff, used
 /// both to give a foreground job the terminal and, once it stops or
 /// exits, to reclaim it for the shell's own group. Ensures `SIGTTOU` is
-/// ignored in this process first (see [`ignore_sigttou`]) rather than
+/// ignored in this process first (see `ignore_sigttou`) rather than
 /// assuming the caller remembered to.
 #[cfg(not(feature = "track-p"))]
 pub fn give_terminal(fd: i32, pgid: c::pid_t) -> Result<()> {

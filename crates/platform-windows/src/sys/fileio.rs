@@ -131,7 +131,7 @@ fn filetime_to_system_time(filetime: i64) -> SystemTime {
 
 /// (file type, size, link count, mtime) for an open handle, via
 /// `FileBasicInfo`'s attributes/`LastWriteTime` and
-/// [`file_standard_info`]'s `EndOfFile`/`NumberOfLinks`.
+/// `file_standard_info`'s `EndOfFile`/`NumberOfLinks`.
 pub fn metadata_by_handle(
     handle: &OwnedWinHandle,
     path: &OsStr,
@@ -484,7 +484,7 @@ fn reparse_offsets() -> (usize, usize) {
 /// `CreateSymbolicLinkW` ultimately drive): the print name is `target`
 /// unchanged (`to_wide_raw` — no separator normalization, so
 /// `read_link` gets an exact byte round trip, matching Linux's
-/// `readlinkat` never normalizing either); [`nt_substitute_name`] picks
+/// `readlinkat` never normalizing either); `nt_substitute_name` picks
 /// the wire form the filesystem driver actually resolves from a
 /// **separately** `\`-normalized copy (`to_wide_nt_component`), since
 /// that copy is discarded after computing the substitute name and never

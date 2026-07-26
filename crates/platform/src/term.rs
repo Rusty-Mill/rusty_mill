@@ -114,7 +114,7 @@ pub trait Terminal {
     /// call, not cached from the last `enter_raw`. This is what lets a
     /// consumer notice drift: something outside this handle (a `stty`
     /// invocation, a suspended-then-foregrounded shell) can change the
-    /// terminal's mode without going through [`enter_raw`]/[`leave_raw`]
+    /// terminal's mode without going through `enter_raw`/`leave_raw`
     /// at all, and rusty_lines' self-healing idle tick exists precisely
     /// to catch and correct that.
     fn is_raw(&self) -> bool;

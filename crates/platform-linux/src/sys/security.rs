@@ -331,7 +331,7 @@ fn build_seccomp_program() -> [c::sock_filter; 11] {
 
 /// Deny opening new `AF_INET`/`AF_INET6`/`AF_PACKET` sockets from the
 /// calling thread onward, via `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER,
-/// ...)`. Currently `x86_64`-only (see [`AUDIT_ARCH_X86_64`]'s doc
+/// ...)`. Currently `x86_64`-only (see `AUDIT_ARCH_X86_64`'s doc
 /// comment) — every other architecture reports `Unsupported`.
 #[cfg(target_arch = "x86_64")]
 pub fn block_inet_sockets() -> Result<SandboxStatus> {

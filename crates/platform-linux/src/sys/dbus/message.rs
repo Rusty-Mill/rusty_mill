@@ -27,7 +27,7 @@ const FIELD_SIGNATURE: u8 = 8;
 
 /// A D-Bus message. Construct with [`Message::method_call`] for the one
 /// direction this client's transport sends; every other field is
-/// populated from a parsed reply by [`decode`].
+/// populated from a parsed reply by `decode`.
 #[derive(Debug, Clone, Default)]
 pub struct Message {
     pub message_type: u8,

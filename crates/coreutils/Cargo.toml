@@ -1,9 +1,6 @@
 [package]
 name = "coreutils"
-description = "Reference consumer and M1 exercise ground (RFC v2 §3). Not a uutils competitor."
-# Independent of the PAL group's version — see docs/versioning.md §1
-# (an internal reference-consumer, not depended on outside this repo)
-# and CHANGELOG.md.
+description = "Modular pure-Rust implementation of core GNU/POSIX utilities"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +9,8 @@ license.workspace = true
 
 [dependencies]
 platform.workspace = true
+rusty_regx = { path = "../../../rusty_regx" }
+rpath = { path = "../../../rpath" }
 
 [dev-dependencies]
 platform-mock.workspace = true
@@ -45,6 +44,66 @@ path = "src/bin/rtee.rs"
 [[bin]]
 name = "rterm"
 path = "src/bin/rterm.rs"
+
+[[bin]]
+name = "rcp"
+path = "src/bin/rcp.rs"
+
+[[bin]]
+name = "rmv"
+path = "src/bin/rmv.rs"
+
+[[bin]]
+name = "rrm"
+path = "src/bin/rrm.rs"
+
+[[bin]]
+name = "rmkdir"
+path = "src/bin/rmkdir.rs"
+
+[[bin]]
+name = "rtouch"
+path = "src/bin/rtouch.rs"
+
+[[bin]]
+name = "rwc"
+path = "src/bin/rwc.rs"
+
+[[bin]]
+name = "rhead"
+path = "src/bin/rhead.rs"
+
+[[bin]]
+name = "rtail"
+path = "src/bin/rtail.rs"
+
+[[bin]]
+name = "rsort"
+path = "src/bin/rsort.rs"
+
+[[bin]]
+name = "runiq"
+path = "src/bin/runiq.rs"
+
+[[bin]]
+name = "rcut"
+path = "src/bin/rcut.rs"
+
+[[bin]]
+name = "rtr"
+path = "src/bin/rtr.rs"
+
+[[bin]]
+name = "rgrep"
+path = "src/bin/rgrep.rs"
+
+[[bin]]
+name = "rfind"
+path = "src/bin/rfind.rs"
+
+[[bin]]
+name = "rxargs"
+path = "src/bin/rxargs.rs"
 
 [lints]
 workspace = true

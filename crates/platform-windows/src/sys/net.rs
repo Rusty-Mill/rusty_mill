@@ -3,7 +3,7 @@
 //! Winsock plumbing).
 //!
 //! Winsock needs one-time process-lifetime initialization
-//! (`WSAStartup`) before any other call in this module — [`ensure_wsa_started`]
+//! (`WSAStartup`) before any other call in this module — `ensure_wsa_started`
 //! does that lazily, once, via [`std::sync::Once`]. There is no matching
 //! `WSACleanup`: the OS tears down every socket and the Winsock DLL's
 //! state at process exit regardless, the same pragmatic choice std's own

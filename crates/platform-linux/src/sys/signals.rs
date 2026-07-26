@@ -22,7 +22,7 @@ extern "C" fn record(signum: c::c_int) {
     PENDING.store(signum, Ordering::SeqCst);
 }
 
-/// Install [`record`] for `signum`.
+/// Install `record` for `signum`.
 #[cfg(not(feature = "track-p"))]
 pub fn install(signum: c::c_int) -> Result<()> {
     let handler: extern "C" fn(c::c_int) = record;

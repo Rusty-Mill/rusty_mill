@@ -64,7 +64,7 @@ pub fn last_win32_err(op: &'static str, path: &OsStr) -> PlatformError {
 /// or `NtCreateFile`'s number space, but a Win32-facility HRESULT
 /// (`HRESULT_FROM_WIN32`'s shape — the common case for a wrapped OS
 /// failure) carries the original Win32 code in its low 16 bits: extracted
-/// here so [`kind_of_win32`]'s classification still applies when it can,
+/// here so `kind_of_win32`'s classification still applies when it can,
 /// rather than every ConPTY failure falling back to `ErrorKind::Other`.
 /// A non-Win32-facility `HRESULT` (rare for this call — an allocation
 /// failure, say) stores its own bit pattern verbatim; still diagnosable,

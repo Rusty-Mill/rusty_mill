@@ -673,7 +673,7 @@ fn decode_job(status: c::c_int) -> ExitStatus {
 
 /// Blocking `waitpid(WUNTRACED|WCONTINUED)` on `pid` (D10): the
 /// Ctrl-Z-aware counterpart to [`wait`] — observes a stop or a resume in
-/// addition to exit/signal termination, decoded through [`decode_job`].
+/// addition to exit/signal termination, decoded through `decode_job`.
 #[cfg(not(feature = "track-p"))]
 pub fn wait_job(pid: c::pid_t) -> Result<ExitStatus> {
     let mut status: c::c_int = 0;
