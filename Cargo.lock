@@ -1236,6 +1236,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "platform"
+version = "0.9.0"
+source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.9.0"
+source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+dependencies = [
+ "libc",
+ "platform",
+]
+
+[[package]]
+name = "platform-macos"
+version = "0.9.0"
+source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+dependencies = [
+ "libc",
+ "platform",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1684,6 +1710,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-search-cloud"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusty-search-core",
+ "rusty_json",
+ "rusty_request",
+ "rusty_std",
+ "rusty_tokio",
+]
+
+[[package]]
 name = "rusty-search-core"
 version = "0.1.0"
 dependencies = [
@@ -1729,6 +1767,11 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
+ "rusty_json",
+ "rusty_regx",
+ "rusty_std",
+ "rusty_tokio",
+ "rusty_wire",
  "serde_json",
  "tokio",
 ]
@@ -1774,6 +1817,87 @@ dependencies = [
  "tokio",
  "uuid",
 ]
+
+[[package]]
+name = "rusty_http"
+version = "0.1.0"
+dependencies = [
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_json"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "rusty_libc"
+version = "0.0.1"
+
+[[package]]
+name = "rusty_regx"
+version = "0.5.0"
+
+[[package]]
+name = "rusty_request"
+version = "0.1.0"
+dependencies = [
+ "rustls-pki-types",
+ "rusty_http",
+ "rusty_tls",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
+]
+
+[[package]]
+name = "rusty_tls"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "rustls-native-certs",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_tokio"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crossbeam-deque",
+ "libc",
+ "platform",
+ "platform-linux",
+ "platform-macos",
+ "rusty_std",
+ "rusty_tokio-macros",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rusty_tokio-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_wire"
+version = "0.1.0"
 
 [[package]]
 name = "ryu"

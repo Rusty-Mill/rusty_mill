@@ -10,6 +10,11 @@ authors.workspace = true
 
 [dependencies]
 rusty-search-core = { workspace = true }
+rusty_regx = { workspace = true }
+rusty_wire = { workspace = true }
+rusty_tokio = { workspace = true }
+rusty_std = { workspace = true }
+rusty_json = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
