@@ -2059,6 +2059,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_font"
+version = "0.1.0"
+dependencies = [
+ "rusty_simd",
+ "rusty_std",
+ "rusty_wire",
+]
+
+[[package]]
+name = "rusty_gpu"
+version = "0.1.0"
+dependencies = [
+ "rusty_font",
+ "rusty_gui",
+ "rusty_simd",
+ "rusty_std",
+]
+
+[[package]]
+name = "rusty_gui"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_std",
+ "rusty_win32",
+ "rusty_wire",
+]
+
+[[package]]
+name = "rusty_libc"
+version = "0.0.1"
+
+[[package]]
 name = "rusty_lsp"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_lsp?rev=3bdbdb44046cd7e58227543eca052cc2fe564977#3bdbdb44046cd7e58227543eca052cc2fe564977"
@@ -2070,8 +2103,19 @@ dependencies = [
 
 [[package]]
 name = "rusty_regx"
+version = "0.5.0"
+
+[[package]]
+name = "rusty_simd"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_regx?rev=1249a62de68f68e821c13cecd3838d49e52e22b6#1249a62de68f68e821c13cecd3838d49e52e22b6"
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
+]
 
 [[package]]
 name = "rusty_term"
@@ -2085,6 +2129,9 @@ dependencies = [
  "libc",
  "parking_lot",
  "pollster",
+ "rusty_font",
+ "rusty_gpu",
+ "rusty_gui",
  "rusty_regx",
  "rusty_term_l13",
  "softbuffer",
@@ -2104,6 +2151,14 @@ dependencies = [
  "rusty_lsp",
  "serde_json",
 ]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_wire"
+version = "0.1.0"
 
 [[package]]
 name = "same-file"
