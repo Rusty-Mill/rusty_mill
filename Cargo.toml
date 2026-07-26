@@ -9,6 +9,8 @@ readme = "README.md"
 
 [dependencies]
 cudarc = { version = "0.19", optional = true, default-features = false }
+rusty_simd = { path = "../rusty_simd" }
+rusty_std = { path = "../rusty_std" }
 fancy-regex = "0.18.0"
 half = { version = "2", optional = true }
 memmap2 = "0.9"

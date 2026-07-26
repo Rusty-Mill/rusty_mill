@@ -900,6 +900,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rusty_libc"
+version = "0.0.1"
+
+[[package]]
 name = "rusty_llama"
 version = "0.1.0"
 dependencies = [
@@ -910,10 +914,28 @@ dependencies = [
  "minijinja",
  "pollster",
  "rayon",
+ "rusty_simd",
+ "rusty_std",
  "serde",
  "serde_json",
  "wgpu",
 ]
+
+[[package]]
+name = "rusty_simd"
+version = "0.1.0"
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
+]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
 
 [[package]]
 name = "scopeguard"
