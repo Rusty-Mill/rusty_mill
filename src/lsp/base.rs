@@ -432,21 +432,32 @@ mod tests {
 
     #[test]
     fn uri_file_path_round_trip() {
-        let uri = Uri::from_file_path("/home/user/hello world.rs").expect("absolute path");
-        assert_eq!(uri.as_str(), "file:///home/user/hello%20world.rs");
-        assert_eq!(
-            uri.to_file_path().expect("file uri"),
-            std::path::PathBuf::from("/home/user/hello world.rs")
-        );
+        if cfg!(windows) {
+            let uri = Uri::from_file_path("C:\\home\\user\\hello world.rs").expect("absolute path");
+            assert_eq!(uri.as_str(), "file:///C:/home/user/hello%20world.rs");
+            assert_eq!(
+                uri.to_file_path().expect("file uri"),
+                std::path::PathBuf::from("C:\\home\\user\\hello world.rs")
+            );
+        } else {
+            let uri = Uri::from_file_path("/home/user/hello world.rs").expect("absolute path");
+            assert_eq!(uri.as_str(), "file:///home/user/hello%20world.rs");
+            assert_eq!(
+                uri.to_file_path().expect("file uri"),
+                std::path::PathBuf::from("/home/user/hello world.rs")
+            );
+        }
         assert!(Uri::from_file_path("relative/path").is_none());
         assert!(Uri::new("https://example.com/x").to_file_path().is_none());
         // A remote host is not a local file path.
         assert!(Uri::new("file://host/x").to_file_path().is_none());
         // `localhost` is accepted as local.
-        assert_eq!(
-            Uri::new("file://localhost/x").to_file_path(),
-            Some(std::path::PathBuf::from("/x"))
-        );
+        if !cfg!(windows) {
+            assert_eq!(
+                Uri::new("file://localhost/x").to_file_path(),
+                Some(std::path::PathBuf::from("/x"))
+            );
+        }
     }
 
     #[test]
