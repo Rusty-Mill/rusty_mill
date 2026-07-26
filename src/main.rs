@@ -609,6 +609,7 @@ fn run_source(src: &str) -> i32 {
 
 fn interactive() -> std::io::Result<()> {
     vars::set_interactive(true); // `$-` includes `i` in the REPL (C41)
+    alias::init_rusty_mill_defaults();
     // The line editor lives in the rusty_lines crate (extracted from
     // this repo's former src/editor.rs); rush plugs in completion,
     // hints, highlighting, abbreviations, the vi-mode flag, and trap

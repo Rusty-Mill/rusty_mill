@@ -125,6 +125,7 @@ commands only and `&` is rejected.
   `man docs/rush.1` (or `man ./docs/rush.1` if it's not on `$MANPATH`);
   installed automatically by the Homebrew formula below, and packaged
   alongside the binary in every tagged release's tarball/zip.
+- **[examples/](examples)** — sample configuration files (`rushrc.example`, `profile.example`, `bash_env.example`) to use as starting templates for interactive and login shell customization.
 - **[completions/](completions)** — bash/zsh completion for `rush`'s own
   invocation flags (`rush <TAB>` at your regular shell's prompt) — not
   to be confused with rush's own, much larger in-shell completion engine

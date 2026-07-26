@@ -3373,6 +3373,7 @@ fn backslash_newline_continuation() {
 }
 
 /// Feed a whole script on stdin with no `-c` (the piped-script path).
+#[allow(dead_code)]
 fn rush_stdin_script(script: &str) -> (String, i32) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rush"))
         .stdin(Stdio::piped())
@@ -4612,3 +4613,47 @@ fn dollar_dash_matches_bash_across_modes() {
     // stdin script: `$-` gets `s`, not `i`.
     assert_eq!(rush_stdin_plain("echo $-\n"), "hBs\n");
 }
+
+#[test]
+fn parity_audit_edge_cases() {
+    // 1. Unset vs empty parameter expansion default forms (${v-def} vs ${v:-def})
+    assert_eq!(rush("unset v; echo [${v-default}] [${v:-default}]").0, "[default] [default]\n");
+    assert_eq!(rush("v=''; echo [${v-default}] [${v:-default}]").0, "[] [default]\n");
+
+    // 2. Pattern removal (${v#pat}, ${v##pat}, ${v%pat}, ${v%%pat})
+    assert_eq!(rush("v='foo/bar/baz.txt'; echo ${v#*/}").0, "bar/baz.txt\n");
+    assert_eq!(rush("v='foo/bar/baz.txt'; echo ${v##*/}").0, "baz.txt\n");
+    assert_eq!(rush("v='foo/bar/baz.txt'; echo ${v%.txt}").0, "foo/bar/baz\n");
+    assert_eq!(rush("v='foo/bar/baz.txt'; echo ${v%%/*}").0, "foo\n");
+
+    // 3. Pattern substitution (${v/pat/repl}, ${v//pat/repl})
+    assert_eq!(rush("v='apple banana apple'; echo ${v/apple/orange}").0, "orange banana apple\n");
+    assert_eq!(rush("v='apple banana apple'; echo ${v//apple/orange}").0, "orange banana orange\n");
+
+    // 4. Substring expansion (${v:off:len})
+    assert_eq!(rush("v='hello world'; echo ${v:6:5}").0, "world\n");
+
+    // 5. Case conversions (${v^^}, ${v,,})
+    assert_eq!(rush("v='Hello World'; echo ${v^^} ${v,,}").0, "HELLO WORLD hello world\n");
+
+    // 6. Variable indirection (${!v})
+    assert_eq!(rush("target='secret'; ptr='target'; echo ${!ptr}").0, "secret\n");
+
+    // 7. Extended test [[ ]] string compare and regex match
+    assert_eq!(rush("[[ 'abc' < 'def' ]] && echo yes").0, "yes\n");
+    assert_eq!(rush("v='12345'; [[ $v =~ ^[0-9]+$ ]] && echo numeric").0, "numeric\n");
+
+    // 8. Positional parameter forwarding ("$@")
+    assert_eq!(rush(r#"set -- a "b c" d; for x in "$@"; do echo "[$x]"; done"#).0, "[a]\n[b c]\n[d]\n");
+
+    // 9. Associative array merge (declare -A)
+    assert_eq!(rush("declare -A map; map+=([k1]=v1 [k2]=v2); echo ${map[k1]} ${map[k2]}").0, "v1 v2\n");
+
+    // 10. Case fallthrough (;& and ;;&)
+    assert_eq!(rush("case 'a' in a) echo 1 ;& b) echo 2 ;; esac").0, "1\n2\n");
+    assert_eq!(rush("case 'a' in a) echo 1 ;;& a) echo 2 ;; esac").0, "1\n2\n");
+
+    // 11. ANSI-C Quoting ($'...')
+    assert_eq!(rush(r#"echo $'hello\tworld'"#).0, "hello\tworld\n");
+}
+

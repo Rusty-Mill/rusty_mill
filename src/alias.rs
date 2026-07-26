@@ -52,6 +52,37 @@ pub fn unset_all() {
     ALIASES.with(|a| a.borrow_mut().clear());
 }
 
+/// Populates default Rusty Mill aliases to map standard GNU/POSIX tools to pure Rust implementations.
+pub fn init_rusty_mill_defaults() {
+    let defaults = [
+        ("ls", "rls"),
+        ("cat", "rcat"),
+        ("grep", "rgrep"),
+        ("find", "rfind"),
+        ("xargs", "rxargs"),
+        ("cp", "rcp"),
+        ("mv", "rmv"),
+        ("rm", "rrm"),
+        ("mkdir", "rmkdir"),
+        ("touch", "rtouch"),
+        ("wc", "rwc"),
+        ("head", "rhead"),
+        ("tail", "rtail"),
+        ("sort", "rsort"),
+        ("uniq", "runiq"),
+        ("cut", "rcut"),
+        ("tr", "rtr"),
+        ("git", "rgit"),
+        ("ssh", "shh"),
+        ("sed", "rsed"),
+        ("awk", "rawk"),
+    ];
+
+    for (k, v) in defaults {
+        set(k, v);
+    }
+}
+
 /// All aliases, name-sorted (a `BTreeMap` iterates in key order already).
 pub fn names() -> Vec<String> {
     ALIASES.with(|a| {

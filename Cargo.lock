@@ -385,15 +385,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rpath"
+version = "0.1.0"
+
+[[package]]
 name = "rush"
 version = "0.1.1"
 dependencies = [
  "criterion",
  "libc",
- "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca)",
+ "rpath",
+ "rusty_libc",
  "rusty_lines",
  "rusty_regx",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?rev=a223c5cda0d762619d04a50262847fbe651e751c)",
+ "rusty_win32",
 ]
 
 [[package]]
@@ -405,33 +410,21 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty_libc"
 version = "0.0.1"
-source = "git+https://github.com/baileyrd/rusty_libc?branch=main#73aeb30e6a19c2a5c90eb5159257cfc97dcb0698"
-
-[[package]]
-name = "rusty_libc"
-version = "0.0.1"
 source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
 
 [[package]]
 name = "rusty_lines"
 version = "0.4.0"
-source = "git+https://github.com/baileyrd/rusty_lines?rev=5144afb450b83af245ef12c95c9a38a8aeabf275#5144afb450b83af245ef12c95c9a38a8aeabf275"
 dependencies = [
  "libc",
- "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?branch=main)",
- "rusty_win32 0.1.0 (git+https://github.com/baileyrd/rusty_win32?branch=main)",
+ "rusty_libc",
+ "rusty_win32",
  "unicode-width",
 ]
 
 [[package]]
 name = "rusty_regx"
-version = "0.4.0"
-source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3#6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3"
-
-[[package]]
-name = "rusty_win32"
-version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?branch=main#91040f5fd48ec331d6a79be37c16c653e6420f67"
+version = "0.5.0"
 
 [[package]]
 name = "rusty_win32"

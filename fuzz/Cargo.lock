@@ -83,6 +83,7 @@ dependencies = [
  "rusty_libc",
  "rusty_lines",
  "rusty_regx",
+ "rusty_win32",
 ]
 
 [[package]]
@@ -96,22 +97,26 @@ dependencies = [
 [[package]]
 name = "rusty_libc"
 version = "0.0.1"
-source = "git+https://github.com/baileyrd/rusty_libc?branch=main#40a8bd1ebbe7a0d6ab602cd13dfaacefad0c5d0f"
+source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
 
 [[package]]
 name = "rusty_lines"
 version = "0.4.0"
-source = "git+https://github.com/baileyrd/rusty_lines?branch=main#88a1f336bd6cc7ebf8f255b907106028c5b1f34f"
 dependencies = [
  "libc",
  "rusty_libc",
+ "rusty_win32",
  "unicode-width",
 ]
 
 [[package]]
 name = "rusty_regx"
-version = "0.4.0"
-source = "git+https://github.com/baileyrd/rusty_regx?rev=6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3#6466cd2d87ce42e3c564b5a6a030c1dbb8aa6ff3"
+version = "0.5.0"
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=a223c5cda0d762619d04a50262847fbe651e751c#a223c5cda0d762619d04a50262847fbe651e751c"
 
 [[package]]
 name = "shlex"

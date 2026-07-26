@@ -1665,6 +1665,13 @@ fn command_substitute(src: &str) -> Result<String, String> {
 /// correctly returns `None` for both "never set" and "explicitly unset",
 /// same as real bash doesn't distinguish them either.
 fn var_raw(name: &str) -> Option<String> {
+    if let Some((base, path)) = name.split_once('.') {
+        if let Some(val) = crate::vars::get_object(base) {
+            if let Some(subval) = val.get_path(path) {
+                return Some(subval.to_display_string());
+            }
+        }
+    }
     crate::vars::get(name)
 }
 
@@ -1699,6 +1706,12 @@ fn is_valid_name(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
         && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn is_valid_name_or_path(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric() || c == '.')
 }
 
 /// An array subscript, as parsed out of a trailing `[...]` by
@@ -2129,12 +2142,12 @@ fn expand_braced(inner: &str, unquoted: bool) -> Result<String, String> {
     }
 
     let name_end = inner
-        .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric()))
+        .find(|c: char| !(c == '_' || c.is_ascii_alphanumeric() || c == '.'))
         .unwrap_or(inner.len());
     let name = &inner[..name_end];
     let rest = &inner[name_end..];
 
-    if !is_valid_name(name) {
+    if !is_valid_name_or_path(name) {
         return Err(format!("${{{inner}}}: bad substitution"));
     }
     if rest.is_empty() {

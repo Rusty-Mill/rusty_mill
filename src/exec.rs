@@ -1499,6 +1499,37 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         return with_prefix_assignments(&cmd, || run_builtin_foreground(&cmd));
     }
 
+    // Multi-stage builtins pipeline (e.g. `ls-obj | where size -gt 10 | select name`):
+    // run in-process passing object streams between stages.
+    let all_builtins = pipeline.commands.len() > 1
+        && pipeline.commands.iter().all(|stage| match stage {
+            Stage::Simple(c) => c.argv.first().is_some_and(|name| builtins::is_builtin(name)),
+            _ => false,
+        });
+
+    if all_builtins {
+        crate::value::reset_pipeline_stream();
+        let n = pipeline.commands.len();
+        let mut statuses = Vec::with_capacity(n);
+        for (i, stage) in pipeline.commands.iter().enumerate() {
+            if let Stage::Simple(cmd) = stage {
+                let st = with_prefix_assignments(cmd, || dispatch_builtin(cmd));
+                statuses.push(st);
+                let (output_objects, has_objects) = crate::value::take_pipeline_output();
+                if i + 1 < n {
+                    if has_objects {
+                        crate::value::set_pipeline_input(output_objects);
+                    }
+                } else if has_objects {
+                    let table = crate::value::format_table(&output_objects);
+                    print!("{table}");
+                }
+            }
+        }
+        crate::vars::set_pipestatus(&statuses);
+        return Ok(pipeline_status(&statuses));
+    }
+
     #[cfg(unix)]
     {
         crate::job::run_foreground(&pipeline)
@@ -1516,6 +1547,7 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
 /// *child's* fds) a builtin's redirects have to be applied to the shell's own
 /// fds — temporarily, for the duration of the call.
 fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
+    crate::value::reset_pipeline_stream();
     let mut guard = redirect_stdio(&cmd.redirects, cmd.heredoc.as_deref())?;
     let status = dispatch_builtin(cmd);
     // The no-command form of `exec` (`exec > file`, `exec 3<&-`, bare
@@ -1525,6 +1557,11 @@ fn run_builtin_foreground(cmd: &Command) -> Result<i32, String> {
     // of letting it restore on drop, as usual) is what makes that happen.
     if cmd.argv.len() == 1 && cmd.argv.first().map(String::as_str) == Some("exec") {
         guard.disarm();
+    }
+    let (output_objects, has_objects) = crate::value::take_pipeline_output();
+    if has_objects {
+        let table = crate::value::format_table(&output_objects);
+        print!("{table}");
     }
     Ok(status)
 }

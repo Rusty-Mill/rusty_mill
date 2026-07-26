@@ -26,6 +26,7 @@ pub enum VarValue {
     Scalar(String),
     Array(BTreeMap<usize, String>),
     Assoc(BTreeMap<String, String>),
+    Object(crate::value::Value),
 }
 
 struct Var {
@@ -353,11 +354,11 @@ pub fn set_shopt(name: &str, on: bool) -> bool {
     true
 }
 
-/// The dynamic special variables (C67): computed on read rather than
-/// stored. `RANDOM` is a 0..=32767 LCG (seedable by assignment);
-/// `SECONDS` counts from shell start or the last assignment;
-/// `EPOCHSECONDS`/`EPOCHREALTIME` come straight from the system clock;
-/// `LINENO` is the executing pipeline's source line.
+// The dynamic special variables (C67): computed on read rather than
+// stored. `RANDOM` is a 0..=32767 LCG (seedable by assignment);
+// `SECONDS` counts from shell start or the last assignment;
+// `EPOCHSECONDS`/`EPOCHREALTIME` come straight from the system clock;
+// `LINENO` is the executing pipeline's source line.
 thread_local! {
     // `$$` is the *original* shell's pid — it must NOT change inside a
     // forked subshell (C132), unlike `$BASHPID`. Captured at startup.
@@ -836,8 +837,51 @@ pub fn get(name: &str) -> Option<String> {
             VarValue::Scalar(s) => Some(s.clone()),
             VarValue::Array(a) => a.get(&0).cloned(),
             VarValue::Assoc(a) => a.get("0").cloned(),
+            VarValue::Object(o) => Some(o.to_display_string()),
         })
     })
+}
+
+/// Retrieve structured `Value` for a shell variable name.
+pub fn get_object(name: &str) -> Option<crate::value::Value> {
+    let name = &resolve_name(name);
+    let name = name.as_str();
+    VARS.with(|v| {
+        v.borrow().get(name).map(|x| match &x.value {
+            VarValue::Scalar(s) => crate::value::Value::String(s.clone()),
+            VarValue::Array(a) => crate::value::Value::List(
+                a.values().map(|s| crate::value::Value::String(s.clone())).collect(),
+            ),
+            VarValue::Assoc(a) => {
+                let mut map = BTreeMap::new();
+                for (k, v) in a {
+                    map.insert(k.clone(), crate::value::Value::String(v.clone()));
+                }
+                crate::value::Value::Object(map)
+            }
+            VarValue::Object(o) => o.clone(),
+        })
+    })
+}
+
+/// Store structured `Value` in a shell variable.
+pub fn set_object(name: &str, val: crate::value::Value) {
+    let name = &resolve_name(name);
+    let name = name.as_str();
+    if readonly_rejected(name) {
+        return;
+    }
+    VARS.with(|v| {
+        let mut map = v.borrow_mut();
+        let exported = map.get(name).map(|x| x.exported).unwrap_or(false);
+        map.insert(
+            name.to_string(),
+            Var {
+                value: VarValue::Object(val),
+                exported,
+            },
+        );
+    });
 }
 
 /// Whether `name` is currently declared as an *associative* array — the
@@ -932,6 +976,7 @@ pub fn readonly_listing() -> Vec<String> {
                     let elems: Vec<String> = a.iter().map(|(k, v)| format!("[{k}]=\"{v}\"")).collect();
                     format!("declare -Ar {name}=({})", elems.join(" "))
                 }
+                Some(VarValue::Object(o)) => format!("declare -r {name}=\"{}\"", o.to_display_string()),
             })
         })
         .collect()
@@ -1067,6 +1112,9 @@ pub fn set(name: &str, value: &str) {
                     a.insert("0".to_string(), value.to_string());
                 }
                 VarValue::Scalar(s) => value.clone_into(s),
+                VarValue::Object(_) => {
+                    var.value = VarValue::Scalar(value.to_string());
+                }
             },
             None => {
                 m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
@@ -1183,6 +1231,7 @@ pub fn array_get(name: &str, index: usize) -> Option<String> {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Array(a) => a.get(&index).cloned(),
             VarValue::Scalar(s) => (index == 0).then(|| s.clone()),
+            VarValue::Object(o) => (index == 0).then(|| o.to_display_string()),
             VarValue::Assoc(_) => None,
         })
     })
@@ -1196,16 +1245,11 @@ pub fn assoc_get(name: &str, key: &str) -> Option<String> {
     VARS.with(|v| {
         v.borrow().get(name).and_then(|x| match &x.value {
             VarValue::Assoc(a) => a.get(key).cloned(),
-            VarValue::Array(_) | VarValue::Scalar(_) => None,
+            VarValue::Array(_) | VarValue::Scalar(_) | VarValue::Object(_) => None,
         })
     })
 }
 
-/// `${arr[@]}`/`${arr[*]}` — every element, in key/index order (a plain
-/// scalar is just its one value, matching `array_get`'s index-0
-/// treatment). Shared between indexed and associative arrays: both
-/// ultimately just need "every value in this map," regardless of what the
-/// keys look like.
 pub fn array_values(name: &str) -> Vec<String> {
     let name = &resolve_name(name);
     let name = name.as_str();
@@ -1216,14 +1260,12 @@ pub fn array_values(name: &str) -> Vec<String> {
                 VarValue::Array(a) => a.values().cloned().collect(),
                 VarValue::Assoc(a) => a.values().cloned().collect(),
                 VarValue::Scalar(s) => vec![s.clone()],
+                VarValue::Object(o) => vec![o.to_display_string()],
             })
             .unwrap_or_default()
     })
 }
 
-/// `${!arr[@]}` for an *indexed* array — the indices actually set (gaps in
-/// a sparse array are skipped entirely, not listed); `[0]` for a plain
-/// scalar. See `assoc_keys` for an associative array's own version.
 pub fn array_indices(name: &str) -> Vec<usize> {
     let name = &resolve_name(name);
     let name = name.as_str();
@@ -1232,17 +1274,13 @@ pub fn array_indices(name: &str) -> Vec<usize> {
             .get(name)
             .map(|x| match &x.value {
                 VarValue::Array(a) => a.keys().copied().collect(),
-                VarValue::Scalar(_) => vec![0],
+                VarValue::Scalar(_) | VarValue::Object(_) => vec![0],
                 VarValue::Assoc(_) => vec![],
             })
             .unwrap_or_default()
     })
 }
 
-/// `${!arr[@]}` for an associative array — every key actually set, sorted
-/// (bash's own iteration order is unspecified — a real hash table — so
-/// this is a strictly more predictable superset, not a behavior being
-/// matched exactly; see `VarValue`'s own doc comment).
 pub fn assoc_keys(name: &str) -> Vec<String> {
     let name = &resolve_name(name);
     let name = name.as_str();
@@ -1251,17 +1289,12 @@ pub fn assoc_keys(name: &str) -> Vec<String> {
             .get(name)
             .map(|x| match &x.value {
                 VarValue::Assoc(a) => a.keys().cloned().collect(),
-                VarValue::Array(_) | VarValue::Scalar(_) => vec![],
+                VarValue::Array(_) | VarValue::Scalar(_) | VarValue::Object(_) => vec![],
             })
             .unwrap_or_default()
     })
 }
 
-/// `${#arr[@]}` — the number of elements actually set, *not* one past the
-/// highest index for an indexed array (a sparse `arr=(a b); arr[5]=x` has 3
-/// elements, not 6, verified directly); a plain scalar counts as 1, an
-/// unset name as 0. Shared between indexed and associative arrays, same
-/// reasoning as `array_values`.
 pub fn array_len(name: &str) -> usize {
     let name = &resolve_name(name);
     let name = name.as_str();
@@ -1271,7 +1304,7 @@ pub fn array_len(name: &str) -> usize {
             .map(|x| match &x.value {
                 VarValue::Array(a) => a.len(),
                 VarValue::Assoc(a) => a.len(),
-                VarValue::Scalar(_) => 1,
+                VarValue::Scalar(_) | VarValue::Object(_) => 1,
             })
             .unwrap_or(0)
     })
@@ -1310,7 +1343,7 @@ pub fn array_set(name: &str, index: usize, value: &str) {
                 }
                 // Unreachable via the normal dispatch path: `key_set`
                 // checks `is_assoc` first and calls `assoc_set` instead.
-                VarValue::Assoc(_) => {}
+                VarValue::Assoc(_) | VarValue::Object(_) => {}
             },
             None => {
                 let mut a = BTreeMap::new();
@@ -1348,7 +1381,7 @@ pub fn array_append_index(name: &str, index: usize, value: &str) {
                     var.value = VarValue::Array(a);
                 }
                 // Unreachable via the normal dispatch path — see `array_set`.
-                VarValue::Assoc(_) => {}
+                VarValue::Assoc(_) | VarValue::Object(_) => {}
             },
             None => {
                 let mut a = BTreeMap::new();
@@ -1376,7 +1409,7 @@ pub fn array_append(name: &str, elements: Vec<String>) {
                 // Unreachable via the normal dispatch path (an already-`-A`
                 // name always takes `AssignValue::Assoc` instead) — but
                 // still needs *some* fallback for exhaustiveness.
-                if matches!(var.value, VarValue::Assoc(_)) {
+                if matches!(var.value, VarValue::Assoc(_) | VarValue::Object(_)) {
                     return;
                 }
                 let a = match &mut var.value {
@@ -1389,7 +1422,7 @@ pub fn array_append(name: &str, elements: Vec<String>) {
                         let VarValue::Array(a) = &mut var.value else { unreachable!() };
                         a
                     }
-                    VarValue::Assoc(_) => unreachable!("checked above"),
+                    VarValue::Assoc(_) | VarValue::Object(_) => unreachable!("checked above"),
                 };
                 let mut next = a.keys().next_back().map_or(0, |k| k + 1);
                 for e in elements {
@@ -1441,6 +1474,7 @@ pub fn append_scalar(name: &str, value: &str) {
                 VarValue::Array(a) => a.entry(0).or_default().push_str(value),
                 VarValue::Assoc(a) => a.entry("0".to_string()).or_default().push_str(value),
                 VarValue::Scalar(s) => s.push_str(value),
+                VarValue::Object(_) => {}
             },
             None => {
                 m.insert(name.to_string(), Var { value: VarValue::Scalar(value.to_string()), exported: false });
@@ -1833,7 +1867,7 @@ pub fn exported() -> Vec<(String, String)> {
             .filter(|(_, x)| x.exported)
             .filter_map(|(k, x)| match &x.value {
                 VarValue::Scalar(s) => Some((k.clone(), s.clone())),
-                VarValue::Array(_) | VarValue::Assoc(_) => None,
+                VarValue::Array(_) | VarValue::Assoc(_) | VarValue::Object(_) => None,
             })
             .collect()
     })

@@ -29,6 +29,7 @@ pub mod parser;
 pub mod sys;
 pub mod trap;
 pub mod unparse;
+pub mod value;
 pub mod vars;
 #[cfg(not(unix))]
 pub mod winctrlc;

@@ -46,6 +46,7 @@ pub fn get(slot: u32) -> RawHandle {
 /// Point `slot` at `handle`. The slot is a plain pointer store: nothing is
 /// duplicated or closed, so whoever owns `handle` must keep it alive for as
 /// long as the slot references it.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn set(slot: u32, handle: RawHandle) -> bool {
     unsafe { SetStdHandle(slot, handle) != 0 }
 }

@@ -62,6 +62,13 @@ pub fn try_run(argv: &[String]) -> Option<i32> {
         "caller" => Some(caller_cmd()),
         "enable" => Some(enable_cmd(argv)),
         "suspend" => Some(suspend_cmd()),
+        "ls-obj" => Some(ls_obj_cmd(argv)),
+        "ps-obj" => Some(ps_obj_cmd(argv)),
+        "from-json" => Some(from_json_cmd(argv)),
+        "to-json" => Some(to_json_cmd(argv)),
+        "where" => Some(where_cmd(argv)),
+        "select" => Some(select_cmd(argv)),
+        "sort-obj" => Some(sort_obj_cmd(argv)),
         // `builtin name [args...]` (C92): run the builtin directly, so a
         // wrapper function can call the thing it shadows without recursing.
         "builtin" => Some(match argv.get(1) {
@@ -84,7 +91,8 @@ pub const NAMES: &[&str] = &[
     "getopts", "command", "type", "hash", ".", "source", "eval", "exec", "umask", "ulimit", "shopt",
     "mapfile", "readarray", "abbr", "unabbr", "pushd", "popd", "dirs", "declare", "typeset",
     "readonly", "let", "builtin", "history", "times", "help", "caller", "enable", "suspend",
-    "fc", "complete", "compgen", "compopt", "bind",
+    "fc", "complete", "compgen", "compopt", "bind", "ls-obj", "ps-obj", "from-json", "to-json",
+    "where", "select", "sort-obj",
 ];
 
 /// Whether `name` is one `try_run` dispatches — so a caller can wire up
@@ -3161,6 +3169,7 @@ fn times_cmd() -> i32 {
         let secs = ticks / 100.0; // Linux USER_HZ
         format!("{}m{:.3}s", (secs / 60.0) as u64, secs % 60.0)
     }
+    #[allow(unused_mut)]
     let mut vals = [0.0f64; 4];
     #[cfg(target_os = "linux")]
     if let Ok(stat) = std::fs::read_to_string("/proc/self/stat")
@@ -4623,11 +4632,244 @@ fn trap_cmd(argv: &[String]) -> i32 {
             Some(name) => crate::trap::set(name, command),
             None => {
                 eprintln!("trap: {spec}: invalid signal specification");
-                status = 1;
             }
         }
     }
     status
+}
+
+// --- PowerShell-like Object Cmdlets ---
+
+pub fn ls_obj_cmd(argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, Value};
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    let target_dir = argv.get(1).map(String::as_str).unwrap_or(".");
+    let entries = match fs::read_dir(target_dir) {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!("ls-obj: {target_dir}: {err}");
+            return 1;
+        }
+    };
+
+    let mut items = Vec::new();
+    for entry in entries.flatten() {
+        let metadata = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let mut map = BTreeMap::new();
+        let name = entry.file_name().to_string_lossy().to_string();
+        map.insert("name".to_string(), Value::String(name));
+        map.insert("size".to_string(), Value::Int(metadata.len() as i64));
+        map.insert("is_dir".to_string(), Value::Bool(metadata.is_dir()));
+
+        let modified_str = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_default();
+        map.insert("modified".to_string(), Value::String(modified_str));
+
+        items.push(Value::Object(map));
+    }
+
+    for item in items {
+        push_pipeline_output(item);
+    }
+    0
+}
+
+pub fn ps_obj_cmd(_argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, Value};
+    use std::collections::BTreeMap;
+
+    let mut map = BTreeMap::new();
+    map.insert("pid".to_string(), Value::Int(std::process::id() as i64));
+    map.insert("name".to_string(), Value::String("rush".to_string()));
+    push_pipeline_output(Value::Object(map));
+    0
+}
+
+pub fn from_json_cmd(_argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use std::io::Read;
+
+    let inputs = take_pipeline_input();
+    let raw_text = if !inputs.is_empty() {
+        let strings: Vec<String> = inputs.iter().map(|v| v.to_display_string()).collect();
+        strings.join("\n")
+    } else {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        buf
+    };
+
+    if raw_text.trim().is_empty() {
+        return 0;
+    }
+
+    match Value::parse_json(&raw_text) {
+        Ok(Value::List(list)) => {
+            for item in list {
+                push_pipeline_output(item);
+            }
+            0
+        }
+        Ok(val) => {
+            push_pipeline_output(val);
+            0
+        }
+        Err(err) => {
+            eprintln!("from-json: {err}");
+            1
+        }
+    }
+}
+
+pub fn to_json_cmd(argv: &[String]) -> i32 {
+    use crate::value::{take_pipeline_input, Value};
+    use std::io::Read;
+
+    let compact = argv.iter().any(|a| a == "-c" || a == "--compact");
+    let pretty = !compact;
+
+    let inputs = take_pipeline_input();
+    if !inputs.is_empty() {
+        let val = if inputs.len() == 1 {
+            inputs.into_iter().next().unwrap()
+        } else {
+            Value::List(inputs)
+        };
+        println!("{}", val.to_json(pretty));
+    } else {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        if !buf.trim().is_empty() {
+            match Value::parse_json(&buf) {
+                Ok(val) => println!("{}", val.to_json(pretty)),
+                Err(_) => {
+                    let val = Value::String(buf.trim().to_string());
+                    println!("{}", val.to_json(pretty));
+                }
+            }
+        }
+    }
+    0
+}
+
+pub fn where_cmd(argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+
+    if argv.len() < 2 {
+        eprintln!("usage: where <field> [op] [value]");
+        return 1;
+    }
+
+    let field = &argv[1];
+    let op = argv.get(2).map(String::as_str).unwrap_or("truthy");
+    let target_val_str = argv.get(3).map(String::as_str).unwrap_or("");
+
+    let inputs = take_pipeline_input();
+
+    for item in inputs {
+        let prop = item.get_path(field);
+        let matches = match (prop, op) {
+            (None, _) => false,
+            (Some(val), "truthy") => val.is_truthy(),
+            (Some(val), "-eq" | "==" | "=") => val.to_display_string() == target_val_str,
+            (Some(val), "-ne" | "!=") => val.to_display_string() != target_val_str,
+            (Some(Value::Int(i)), "-gt" | ">") => {
+                target_val_str.parse::<i64>().map(|t| i > t).unwrap_or(false)
+            }
+            (Some(Value::Int(i)), "-lt" | "<") => {
+                target_val_str.parse::<i64>().map(|t| i < t).unwrap_or(false)
+            }
+            (Some(Value::Int(i)), "-ge" | ">=") => {
+                target_val_str.parse::<i64>().map(|t| i >= t).unwrap_or(false)
+            }
+            (Some(Value::Int(i)), "-le" | "<=") => {
+                target_val_str.parse::<i64>().map(|t| i <= t).unwrap_or(false)
+            }
+            (Some(val), "-gt" | ">") => val.to_display_string().as_str() > target_val_str,
+            (Some(val), "-lt" | "<") => val.to_display_string().as_str() < target_val_str,
+            (Some(val), "-ge" | ">=") => val.to_display_string().as_str() >= target_val_str,
+            (Some(val), "-le" | "<=") => val.to_display_string().as_str() <= target_val_str,
+            (Some(val), "contains" | "matches") => val.to_display_string().contains(target_val_str),
+            _ => false,
+        };
+
+        if matches {
+            push_pipeline_output(item);
+        }
+    }
+    0
+}
+
+pub fn select_cmd(argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+    use std::collections::BTreeMap;
+
+    if argv.len() < 2 {
+        eprintln!("usage: select <field1> [field2 ...]");
+        return 1;
+    }
+
+    let fields = &argv[1..];
+    let inputs = take_pipeline_input();
+
+    for item in inputs {
+        let mut new_map = BTreeMap::new();
+        for field in fields {
+            if let Some(val) = item.get_path(field) {
+                new_map.insert(field.clone(), val);
+            } else {
+                new_map.insert(field.clone(), Value::Null);
+            }
+        }
+        push_pipeline_output(Value::Object(new_map));
+    }
+    0
+}
+
+pub fn sort_obj_cmd(argv: &[String]) -> i32 {
+    use crate::value::{push_pipeline_output, take_pipeline_input, Value};
+
+    let field = match argv.get(1) {
+        Some(f) if f != "-r" => f.clone(),
+        _ => "name".to_string(),
+    };
+    let reverse = argv.iter().any(|a| a == "-r" || a == "--reverse");
+
+    let mut inputs = take_pipeline_input();
+
+    inputs.sort_by(|a, b| {
+        let va = a.get_path(&field);
+        let vb = b.get_path(&field);
+        let cmp = match (va, vb) {
+            (Some(Value::Int(ia)), Some(Value::Int(ib))) => ia.cmp(&ib),
+            (Some(Value::Float(fa)), Some(Value::Float(fb))) => {
+                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Some(sa), Some(sb)) => sa.to_display_string().cmp(&sb.to_display_string()),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        };
+        if reverse {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
+
+    for item in inputs {
+        push_pipeline_output(item);
+    }
+    0
 }
 
 #[cfg(test)]
