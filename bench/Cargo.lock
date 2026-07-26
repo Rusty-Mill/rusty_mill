@@ -462,7 +462,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "rusty_libc"
 version = "0.0.1"
-source = "git+https://github.com/baileyrd/rusty_libc?branch=main#7da292ee9d6a3021b217cffe21a3858658885cb0"
+source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
 
 [[package]]
 name = "rusty_lines"
@@ -477,7 +477,7 @@ dependencies = [
 [[package]]
 name = "rusty_win32"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_win32?branch=main#c8b157d72c76d980fa346ef4801fe473448b869a"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=a223c5cda0d762619d04a50262847fbe651e751c#a223c5cda0d762619d04a50262847fbe651e751c"
 
 [[package]]
 name = "rustyline"
