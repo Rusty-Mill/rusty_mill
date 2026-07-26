@@ -25,6 +25,9 @@ mic = ["dep:cpal"]
 
 [dependencies]
 cpal = { version = "0.15", optional = true }
+rusty_simd = { path = "../rusty_simd" }
+rusty_wire = { path = "../rusty_wire" }
+rusty_std = { path = "../rusty_std" }
 
 # Explicit so it doesn't build (and doesn't need cpal/libasound2-dev) as
 # part of the default `cargo build`/`test --all-targets` — only under
