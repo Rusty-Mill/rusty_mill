@@ -10,7 +10,6 @@ keywords = ["compress", "deflate", "gzip", "lzma", "sans-io"]
 categories = ["compression", "no-std"]
 
 [dependencies]
-flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
 [features]
 default = []

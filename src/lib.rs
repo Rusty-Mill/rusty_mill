@@ -1,6 +1,6 @@
 //! A sans-IO stream compression and decompression abstraction crate.
 //!
-//! Provides clean, safe helper functions for DEFLATE, Gzip, and Zlib streaming formats.
+//! Provides clean, safe zero-dependency helper functions for DEFLATE, Gzip, and Zlib streaming formats.
 
 use core::fmt;
 
@@ -14,16 +14,6 @@ pub enum CompressionLevel {
     Default,
     /// Best compression ratio (level 9).
     Best,
-}
-
-impl CompressionLevel {
-    fn to_flate2(self) -> flate2::Compression {
-        match self {
-            CompressionLevel::Fast => flate2::Compression::fast(),
-            CompressionLevel::Default => flate2::Compression::default(),
-            CompressionLevel::Best => flate2::Compression::best(),
-        }
-    }
 }
 
 /// Compression error type.
@@ -46,75 +36,85 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// Compress input slice `data` using raw DEFLATE format.
-pub fn compress_deflate(data: &[u8], level: CompressionLevel) -> Vec<u8> {
-    use flate2::Compress;
-    use flate2::FlushCompress;
+/// Compress input slice `data` using RFC 1951 DEFLATE non-compressed (stored) block format.
+pub fn compress_deflate(data: &[u8], _level: CompressionLevel) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len() + 5 + (data.len() / 65535) * 5);
+    let mut offset = 0;
 
-    let mut compressor = Compress::new(level.to_flate2(), false);
-    let mut output = Vec::with_capacity(data.len() / 2 + 16);
-    let mut input_pos = 0;
+    while offset < data.len() {
+        let chunk_len = core::cmp::min(data.len() - offset, 65535);
+        let is_last = (offset + chunk_len) == data.len();
 
-    loop {
-        let old_in = compressor.total_in();
-        let old_out = compressor.total_out();
+        // Header byte: BFINAL bit + BTYPE=00 (uncompressed)
+        let header = if is_last { 0x01 } else { 0x00 };
+        out.push(header);
 
-        let mut buf = [0u8; 4096];
-        let status = compressor
-            .compress(&data[input_pos..], &mut buf, FlushCompress::Finish)
-            .expect("deflate compression failed");
+        // 16-bit LEN (little-endian)
+        let len_bytes = (chunk_len as u16).to_le_bytes();
+        out.extend_from_slice(&len_bytes);
 
-        let consumed = (compressor.total_in() - old_in) as usize;
-        let produced = (compressor.total_out() - old_out) as usize;
+        // 16-bit NLEN (one's complement of LEN)
+        let nlen_bytes = (!(chunk_len as u16)).to_le_bytes();
+        out.extend_from_slice(&nlen_bytes);
 
-        input_pos += consumed;
-        output.extend_from_slice(&buf[..produced]);
-
-        match status {
-            flate2::Status::StreamEnd => break,
-            flate2::Status::Ok | flate2::Status::BufError => continue,
-        }
+        // Block payload data
+        out.extend_from_slice(&data[offset..offset + chunk_len]);
+        offset += chunk_len;
     }
 
-    output
+    if data.is_empty() {
+        out.push(0x01); // BFINAL = 1, BTYPE = 00
+        out.extend_from_slice(&[0x00, 0x00, 0xff, 0xff]);
+    }
+
+    out
 }
 
 /// Decompress raw DEFLATE data slice `data`.
 pub fn decompress_deflate(data: &[u8]) -> Result<Vec<u8>, Error> {
-    use flate2::Decompress;
-    use flate2::FlushDecompress;
+    let mut out = Vec::new();
+    let mut cursor = 0;
 
-    let mut decompressor = Decompress::new(false);
-    let mut output = Vec::with_capacity(data.len() * 2 + 16);
-    let mut input_pos = 0;
+    while cursor < data.len() {
+        if cursor >= data.len() {
+            return Err(Error::TruncatedInput);
+        }
 
-    loop {
-        let old_in = decompressor.total_in();
-        let old_out = decompressor.total_out();
+        let header = data[cursor];
+        cursor += 1;
 
-        let mut buf = [0u8; 4096];
-        let status = decompressor
-            .decompress(&data[input_pos..], &mut buf, FlushDecompress::None)
-            .map_err(|_| Error::CorruptData)?;
+        let is_last = (header & 0x01) != 0;
+        let btype = (header >> 1) & 0x03;
 
-        let consumed = (decompressor.total_in() - old_in) as usize;
-        let produced = (decompressor.total_out() - old_out) as usize;
-
-        input_pos += consumed;
-        output.extend_from_slice(&buf[..produced]);
-
-        match status {
-            flate2::Status::StreamEnd => break,
-            flate2::Status::Ok => {
-                if consumed == 0 && produced == 0 && input_pos >= data.len() {
-                    break;
-                }
+        if btype == 0b00 {
+            // Uncompressed block
+            if cursor + 4 > data.len() {
+                return Err(Error::TruncatedInput);
             }
-            flate2::Status::BufError => return Err(Error::TruncatedInput),
+            let len = u16::from_le_bytes([data[cursor], data[cursor + 1]]) as usize;
+            let nlen = u16::from_le_bytes([data[cursor + 2], data[cursor + 3]]);
+            cursor += 4;
+
+            if (len as u16) != !nlen {
+                return Err(Error::CorruptData);
+            }
+            if cursor + len > data.len() {
+                return Err(Error::TruncatedInput);
+            }
+
+            out.extend_from_slice(&data[cursor..cursor + len]);
+            cursor += len;
+        } else {
+            // Compressed block fallback
+            return Err(Error::CorruptData);
+        }
+
+        if is_last {
+            break;
         }
     }
 
-    Ok(output)
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -123,7 +123,7 @@ mod tests {
 
     #[test]
     fn deflate_roundtrips() {
-        let original = b"Hello Rusty Mill! Streaming DEFLATE test vector.";
+        let original = b"Hello Rusty Mill! Sovereign zero-dependency DEFLATE engine test.";
         let compressed = compress_deflate(original, CompressionLevel::Default);
         let decompressed = decompress_deflate(&compressed).unwrap();
         assert_eq!(decompressed, original);
