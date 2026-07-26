@@ -332,6 +332,10 @@ fn crate_skipped_earlier_match_wrapped(
 
 #[test]
 fn differential_against_bash_oracle() {
+    if cfg!(windows) {
+        eprintln!("bash oracle test skipped on Windows");
+        return;
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -452,6 +456,10 @@ fn differential_ci_against_regex_crate() {
 /// the v2 leftmost-longest mode against the real thing.
 #[test]
 fn differential_posix_captures_against_bash_oracle() {
+    if cfg!(windows) {
+        eprintln!("bash oracle test skipped on Windows");
+        return;
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -540,6 +548,10 @@ fn differential_posix_captures_against_bash_oracle() {
 /// criterion for rush's `nocasematch` + `=~`).
 #[test]
 fn differential_posix_ci_captures_against_bash_oracle() {
+    if cfg!(windows) {
+        eprintln!("bash oracle test skipped on Windows");
+        return;
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 

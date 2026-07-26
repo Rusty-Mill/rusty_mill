@@ -169,6 +169,10 @@ const TEXTS_PER_PATTERN: u32 = 3;
 
 #[test]
 fn differential_against_bash_oracle() {
+    if cfg!(windows) {
+        eprintln!("bash oracle test skipped on Windows");
+        return;
+    }
     use std::io::Write;
     use std::process::{Command, Stdio};
 
