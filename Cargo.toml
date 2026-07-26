@@ -12,6 +12,13 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+rusty_request = { path = "../rusty_request" }
+rusty_http = { path = "../rusty_http" }
+rusty-db = { path = "../rusty_db/rusty_db" }
+rusty_json = { path = "../rusty_json" }
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_std = { path = "../rusty_std" }
+
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
