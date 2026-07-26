@@ -11,6 +11,10 @@ categories = ["science", "encoding"]
 
 [dependencies]
 rusty_wire = { path = "../rusty_wire", default-features = false }
+rusty_simd = { path = "../rusty_simd", default-features = false }
+rusty_regx = { path = "../rusty_regx" }
+rusty_json = { path = "../rusty_json" }
+rusty_std = { path = "../rusty_std" }
 
 [features]
 default = ["std"]

@@ -1,6 +1,6 @@
 //! Sovereign AI Retrieval-Augmented Generation (RAG) & Question-Answering Engine.
 //!
-//! Connects search indexing, vector retrieval, and LLM inference for sovereign Q&A.
+//! Connects search indexing, SIMD vector embedding retrieval, and LLM inference for sovereign Q&A.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -8,10 +8,10 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{string::String, string::ToString, vec::Vec};
+use alloc::{format, string::String, string::ToString, vec::Vec};
 
-/// A document chunk indexed for retrieval.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A document chunk indexed for vector retrieval.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Document {
     /// Unique document ID.
     pub id: String,
@@ -19,18 +19,20 @@ pub struct Document {
     pub title: String,
     /// Text content chunk.
     pub content: String,
+    /// Optional SIMD vector embedding.
+    pub embedding: Vec<f32>,
 }
 
-/// A search hit with relevance score.
+/// A search hit with SIMD relevance score.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
     /// Matched document.
     pub doc: Document,
-    /// Relevance score (0.0 .. 1.0).
+    /// Vector cosine similarity / SIMD dot product score.
     pub score: f32,
 }
 
-/// In-memory vector/keyword search index for RAG retrieval.
+/// In-memory vector search index for RAG retrieval.
 #[derive(Debug, Clone, Default)]
 pub struct SearchIndex {
     documents: Vec<Document>,
@@ -45,6 +47,28 @@ impl SearchIndex {
     /// Add a document to the index.
     pub fn index_doc(&mut self, doc: Document) {
         self.documents.push(doc);
+    }
+
+    /// Vector similarity search using `rusty_simd::dot_product`.
+    pub fn search_vector(&self, query_vec: &[f32], limit: usize) -> Vec<SearchHit> {
+        let mut hits = Vec::new();
+
+        for doc in &self.documents {
+            let score = if !doc.embedding.is_empty() && doc.embedding.len() == query_vec.len() {
+                rusty_simd::dot_product(&doc.embedding, query_vec)
+            } else {
+                0.0f32
+            };
+
+            hits.push(SearchHit {
+                doc: doc.clone(),
+                score,
+            });
+        }
+
+        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(core::cmp::Ordering::Equal));
+        hits.truncate(limit);
+        hits
     }
 
     /// Search indexed documents for query keywords.
@@ -78,7 +102,6 @@ impl SearchIndex {
             }
         }
 
-        // Sort descending by relevance score
         hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(core::cmp::Ordering::Equal));
         hits.truncate(limit);
         hits
@@ -124,10 +147,27 @@ mod tests {
             id: "doc1".to_string(),
             title: "Architecture.md".to_string(),
             content: "Rusty Mill uses a 4-layer sovereign Rust platform architecture.".to_string(),
+            embedding: vec![1.0, 0.0, 0.0, 1.0],
         });
 
         let engine = RagEngine::new(index);
         let ans = engine.answer("What is Rusty Mill architecture?");
         assert!(ans.contains("4-layer sovereign Rust platform"));
+    }
+
+    #[test]
+    fn simd_vector_search() {
+        let mut index = SearchIndex::new();
+        index.index_doc(Document {
+            id: "doc1".to_string(),
+            title: "Doc 1".to_string(),
+            content: "Content 1".to_string(),
+            embedding: vec![1.0, 2.0, 3.0, 4.0],
+        });
+
+        let query = vec![1.0, 2.0, 3.0, 4.0];
+        let hits = index.search_vector(&query, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].score, 30.0);
     }
 }
