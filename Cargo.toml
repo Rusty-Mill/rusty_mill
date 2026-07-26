@@ -1,0 +1,16 @@
+[package]
+name = "mill-term"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Integrated terminal and environment launcher for Rusty Mill (MSYS2/Git Bash replacement)"
+
+[dependencies]
+rpath = { path = "../rpath" }
+rusty_term = { path = "../rusty_term" }
+rusty_git = { path = "../rusty_git" }
+rusty_text = { path = "../rusty_text" }
+
+[[bin]]
+name = "mill-term"
+path = "src/main.rs"
