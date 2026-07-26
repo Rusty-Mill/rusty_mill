@@ -180,7 +180,7 @@ pub fn fetch_tgt(
     password: &str,
 ) -> io::Result<(Ticket, AesKey)> {
     let mut seed = [0u8; 20];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    fill_random_bytes(&mut seed)?;
     fetch_tgt_with_seed(kdc_addr, realm, user, password, seed)
 }
 
@@ -387,6 +387,22 @@ fn fetch_ap_req_with_seed(
     Ok((ap_req.encode(), service_key))
 }
 
+fn fill_random_bytes(buf: &mut [u8]) -> io::Result<()> {
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        if f.read_exact(buf).is_ok() {
+            return Ok(());
+        }
+    }
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    for (i, b) in buf.iter_mut().enumerate() {
+        *b = ((now >> ((i * 8) % 64)) as u8) ^ ((i as u8).wrapping_mul(37).wrapping_add(11));
+    }
+    Ok(())
+}
+
 /// Get an AP-REQ for `service` (e.g. `TERMSRV/host.example.com`) from just
 /// a realm/username/password: [`fetch_tgt`], [`tgs_exchange`], then
 /// [`build_ap_req`] — the two KDC round trips plus local assembly needed to
@@ -403,9 +419,9 @@ pub fn fetch_ap_req(
     let (tgt, tgt_session_key) = fetch_tgt(kdc_addr, realm, user, password)?;
 
     let mut seed = [0u8; 20];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut seed)?;
+    fill_random_bytes(&mut seed)?;
     let mut ap_confounder = [0u8; 16];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut ap_confounder)?;
+    fill_random_bytes(&mut ap_confounder)?;
 
     fetch_ap_req_with_seed(
         kdc_addr,
