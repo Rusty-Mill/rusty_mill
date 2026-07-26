@@ -1344,7 +1344,7 @@ impl ProcessorRelationship {
 
 /// One [`logical_processor_information`] entry — a set of logical
 /// processors (`processor_mask`, the same per-bit-a-CPU shape as
-/// [`SystemInfo`]'s `active_processor_mask`) sharing a given topology
+/// `SystemInfo`'s `active_processor_mask`) sharing a given topology
 /// relationship.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogicalProcessorInformation {

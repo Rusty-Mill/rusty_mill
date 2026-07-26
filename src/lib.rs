@@ -369,3 +369,5 @@ pub mod net;
 // — reach it via `rusty_win32::conpty::*`.
 #[cfg(windows)]
 pub mod conpty;
+#[cfg(windows)]
+pub mod windowing;

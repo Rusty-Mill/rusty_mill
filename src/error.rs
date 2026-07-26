@@ -157,6 +157,8 @@ win32_errors! {
     ERROR_INVALID_SID = 1337 => "the security ID structure is invalid",
     ERROR_SERVICE_DOES_NOT_EXIST = 1060 => "the specified service does not exist as an installed service",
     ERROR_SERVICE_ALREADY_RUNNING = 1056 => "an instance of the service is already running",
+    ERROR_PRIVILEGE_NOT_HELD = 1314 => "a required privilege is not held by the client",
+    ERROR_GEN_FAILURE = 31 => "a device attached to the system is not functioning",
 }
 
 impl core::error::Error for Win32Error {}

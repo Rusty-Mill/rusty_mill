@@ -20,6 +20,8 @@ Platform column is omitted: every row is Windows-only (the whole crate is).
 Breaking column is omitted: every row is a pure addition (no existing public
 signature needs to change for any of these).
 
+> **Status:** All candidate symbol groups identified across all categories (Strong candidates, Moderate candidates, Weak candidates, and the previously out-of-scope `registry`, `security`, `service`, `net`, and `conpty` subsystems) have been fully designed, implemented, tested, and merged as of PR #259.
+
 ## Strong candidates — concrete rush/rusty_lines consumer
 
 | Symbol | Category | Reference | Est. size | Notes |

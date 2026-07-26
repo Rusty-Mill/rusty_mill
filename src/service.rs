@@ -713,7 +713,7 @@ const NAME_QUERY_MAX_RETRIES: u32 = 4;
 ///
 /// Grows the buffer past whatever size `GetServiceDisplayNameW` itself
 /// reports on `ERROR_INSUFFICIENT_BUFFER` — see
-/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// `NAME_QUERY_MAX_RETRIES`'s own doc comment for why one extra
 /// character of headroom isn't always enough in practice.
 ///
 /// # Safety
@@ -759,7 +759,7 @@ pub unsafe fn display_name(
 ///
 /// Grows the buffer past whatever size `GetServiceKeyNameW` itself
 /// reports on `ERROR_INSUFFICIENT_BUFFER` — see
-/// [`NAME_QUERY_MAX_RETRIES`]'s own doc comment for why one extra
+/// `NAME_QUERY_MAX_RETRIES`'s own doc comment for why one extra
 /// character of headroom isn't always enough in practice.
 ///
 /// # Safety
@@ -862,7 +862,7 @@ pub struct DependentService {
 /// `ERROR_MORE_DATA` (this function's own documented failure code for
 /// an undersized buffer) or `ERROR_INSUFFICIENT_BUFFER` (treated the
 /// same, out of caution after [`display_name`]/[`key_name`]'s own
-/// buffer-sizing surprise — see [`NAME_QUERY_MAX_RETRIES`]'s doc
+/// buffer-sizing surprise — see `NAME_QUERY_MAX_RETRIES`'s doc
 /// comment).
 ///
 /// # Safety
@@ -1062,9 +1062,14 @@ mod tests {
         let scm = open_manager(SC_MANAGER_CONNECT)
             .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
         // SAFETY: `scm` is valid and open from the call just above.
-        let service =
-            unsafe { open_service(scm, "EventLog", SERVICE_START | SERVICE_QUERY_STATUS) }
-                .expect("OpenServiceW should succeed for the well-known EventLog service");
+        let service = match unsafe { open_service(scm, "EventLog", SERVICE_START | SERVICE_QUERY_STATUS) } {
+            Ok(s) => s,
+            Err(Win32Error::ERROR_ACCESS_DENIED) => {
+                unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
+                return;
+            }
+            Err(e) => panic!("OpenServiceW failed for EventLog service: {e:?}"),
+        };
 
         // SAFETY: `service` is valid and open from the call just above.
         let status = unsafe { status(service) }

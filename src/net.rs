@@ -287,8 +287,7 @@ pub fn cleanup() -> Result<(), crate::error::Win32Error> {
 /// A local or peer socket address, IPv4 or IPv6 — the `{ip, port}`
 /// representation every address-taking function in this module
 /// (`bind`/`connect`/`accept`/`sendto`/`recvfrom`/`local_addr`/
-/// `peer_addr`) uses, backed by [`to_sockaddr`]/[`from_sockaddr`]
-/// converting to/from the real `sockaddr_in`/`sockaddr_in6` wire
+/// `peer_addr`) uses, converting to/from the real `sockaddr_in`/`sockaddr_in6` wire
 /// format. `ip` octets are stored exactly as they appear on the wire
 /// (already address-order, not a multi-byte integer needing an
 /// endian conversion) — only `port` (and, for IPv6, nothing else) needs
@@ -566,7 +565,7 @@ pub unsafe fn connect(sock: RawSocket, addr: &SocketAddr) -> Result<(), crate::e
 }
 
 /// Send up to `buf.len()` bytes on a connected socket in one call —
-/// `send`, the Winsock analog of [`crate::console::write`]'s shape. `sock`
+/// `send`, the Winsock analog of `console`'s I/O shape. `sock`
 /// must already be connected (a [`SocketKind::Stream`] socket from
 /// [`accept`]/after [`connect`], or a [`SocketKind::Dgram`] socket with a
 /// default peer set via [`connect`]) — `sendto` (a later round-2 item)
@@ -622,8 +621,8 @@ pub unsafe fn recv(sock: RawSocket, buf: &mut [u8]) -> Result<usize, crate::erro
 
 /// Send `buf` to `addr` on a connectionless (typically
 /// [`SocketKind::Dgram`]) socket — `sendto`, the bare UDP round trip's
-/// send half, marshaling `addr` into a `sockaddr_in`/`sockaddr_in6` via
-/// [`to_sockaddr`] each call (unlike [`send`], which needs no address
+/// send half, marshaling `addr` into a `sockaddr_in`/`sockaddr_in6`
+/// each call (unlike [`send`], which needs no address
 /// since [`connect`] already fixed the peer).
 ///
 /// # Safety
@@ -666,7 +665,7 @@ pub unsafe fn sendto(
 /// [`SocketKind::Dgram`]) socket in one call, reporting the sender's
 /// address — `recvfrom`, the bare UDP round trip's receive half. Unlike
 /// [`recv`], this decodes the sender's `sockaddr_in`/`sockaddr_in6` back
-/// into a [`SocketAddr`] via [`from_sockaddr`] on every call, since a
+/// into a [`SocketAddr`] on every call, since a
 /// connectionless socket has no single fixed peer.
 ///
 /// # Safety
@@ -1084,7 +1083,7 @@ pub fn resolve(
 }
 
 /// Convert a 16-bit value from host to network (big-endian) byte order —
-/// `htons`. This module's own [`to_sockaddr`] already applies this
+/// `htons`. This module's own `to_sockaddr` helper already applies this
 /// conversion internally to every port it encodes; this standalone
 /// wrapper is for callers building/parsing their own raw wire fields
 /// (e.g. an application-level protocol) rather than going through

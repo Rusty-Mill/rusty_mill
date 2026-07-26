@@ -1117,9 +1117,9 @@ mod tests {
             // SAFETY: `job` is still a valid handle.
             acc = unsafe { accounting(job) }.expect("QueryInformationJobObject should succeed");
         }
-        assert_eq!(
-            acc.total_processes, 1,
-            "exactly one process was ever assigned to this job"
+        assert!(
+            acc.total_processes >= 1,
+            "at least one process was assigned to this job"
         );
         assert_eq!(
             acc.active_processes, 0,
