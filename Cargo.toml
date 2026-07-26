@@ -1,0 +1,18 @@
+[package]
+name = "rusty_font"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign TrueType/OpenType font table parser and SIMD-accelerated glyph rasterizer"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_font"
+keywords = ["font", "truetype", "rasterizer", "ttf", "no-std"]
+categories = ["text-processing", "no-std"]
+
+[dependencies]
+rusty_wire = { path = "../rusty_wire" }
+rusty_simd = { path = "../rusty_simd" }
+rusty_std = { path = "../rusty_std" }
+
+[features]
+default = []
