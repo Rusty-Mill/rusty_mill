@@ -7,6 +7,10 @@ repository.workspace = true
 description = "Database-agnostic query builder and driver abstraction (the SQLAlchemy-Core-like layer of rusty_db)"
 
 [dependencies]
+rusty_tokio = { workspace = true }
+rusty_wire = { workspace = true }
+rusty_json = { workspace = true }
+rusty_std = { workspace = true }
 async-trait.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

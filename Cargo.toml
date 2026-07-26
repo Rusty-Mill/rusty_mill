@@ -21,6 +21,10 @@ rusty-db-derive = { path = "crates/rusty-db-derive", version = "0.1.0" }
 rusty-db-sqlite = { path = "crates/rusty-db-sqlite", version = "0.1.0" }
 rusty-db-postgres = { path = "crates/rusty-db-postgres", version = "0.1.0" }
 rusty-db-mysql = { path = "crates/rusty-db-mysql", version = "0.1.0" }
+rusty_tokio = { path = "../rusty_tokio" }
+rusty_wire = { path = "../rusty_wire" }
+rusty_json = { path = "../rusty_json" }
+rusty_std = { path = "../rusty_std" }
 async-trait = "0.1"
 thiserror = "1"
 futures-core = "0.3"
