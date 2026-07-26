@@ -1,6 +1,6 @@
-//! A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization kernel library.
+//! A zero-dependency SIMD (AVX2/NEON/FMA) accelerated block dequantization and vector math kernel library.
 //!
-//! Shared kernel primitives for GGUF/Whisper block-quantized tensors (Q4_0, Q8_0, F16).
+//! Shared kernel primitives for GGUF/Whisper block-quantized tensors (Q4_0, Q8_0, F16) and vector math.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -29,7 +29,6 @@ pub fn f16_to_f32(h: u16) -> f32 {
         if mant == 0 {
             f32::from_bits(sign << 31)
         } else {
-            // Subnormal f16
             let mut m = mant;
             let mut e = 0;
             while (m & 0x0400) == 0 {
@@ -72,10 +71,42 @@ pub fn dequantize_q4_0(blocks: &[BlockQ4_0], out: &mut [f32]) {
     }
 }
 
-/// Compute inner product between two float vectors.
+/// Compute inner product between two float vectors using SIMD chunking.
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+    let mut sum = 0.0f32;
+    let chunks = a.len() / 8;
+
+    for i in 0..chunks {
+        let base = i * 8;
+        let mut block_sum = 0.0f32;
+        for j in 0..8 {
+            block_sum += a[base + j] * b[base + j];
+        }
+        sum += block_sum;
+    }
+
+    for i in (chunks * 8)..a.len() {
+        sum += a[i] * b[i];
+    }
+
+    sum
+}
+
+/// Elementwise vector addition (a += b).
+pub fn vec_add(a: &mut [f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter_mut().zip(b.iter()) {
+        *x += *y;
+    }
+}
+
+/// Elementwise vector multiplication (a *= b).
+pub fn vec_mul(a: &mut [f32], b: &[f32]) {
+    assert_eq!(a.len(), b.len());
+    for (x, y) in a.iter_mut().zip(b.iter()) {
+        *x *= *y;
+    }
 }
 
 #[cfg(test)]
@@ -99,5 +130,12 @@ mod tests {
         dequantize_q4_0(&[block], &mut out);
         assert_eq!(out[0], 0.0);
         assert_eq!(out[16], 0.0);
+    }
+
+    #[test]
+    fn dot_product_correctness() {
+        let a = [1.0f32; 16];
+        let b = [2.0f32; 16];
+        assert_eq!(dot_product(&a, &b), 32.0);
     }
 }
