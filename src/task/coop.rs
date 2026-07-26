@@ -1,5 +1,5 @@
 //! Public access to this crate's cooperative scheduling budget -- see
-//! [`crate::coop`]'s (crate-private) module docs for the full mechanism
+//! `crate::coop`'s (crate-private) module docs for the full mechanism
 //! this sits on top of. Exposed for custom poll loops (via
 //! [`consume_budget`]/[`has_budget_remaining`]) or code that deliberately
 //! wants to opt a future out of the ambient budget (via

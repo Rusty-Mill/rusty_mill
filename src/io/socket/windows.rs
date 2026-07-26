@@ -176,7 +176,12 @@ fn wsa_error() -> io::Error {
     // SAFETY: no arguments; reads the calling thread's last-error slot,
     // which `WSAStartup` guarantees is populated after any failed
     // Winsock call.
-    io::Error::from_raw_os_error(unsafe { WinSock::WSAGetLastError() })
+    let code = unsafe { WinSock::WSAGetLastError() };
+    if code == WinSock::WSAENOTCONN || code == WinSock::WSAEALREADY || code == WinSock::WSAEINPROGRESS {
+        io::Error::new(io::ErrorKind::WouldBlock, "Winsock socket not connected yet")
+    } else {
+        io::Error::from_raw_os_error(code)
+    }
 }
 
 /// A bare, non-blocking socket -- not yet bound or connected. Split out
@@ -455,8 +460,26 @@ pub(crate) fn peek_from(sock: RawSocket, buf: &mut [u8]) -> io::Result<(usize, S
 /// zero-length peek still reports the next datagram's source, without
 /// needing any buffer to receive data into.
 pub(crate) fn peek_sender(sock: RawSocket) -> io::Result<SocketAddr> {
-    let (_n, addr) = peek_from(sock, &mut [])?;
-    Ok(addr)
+    let mut storage: SOCKADDR_STORAGE = unsafe { mem::zeroed() };
+    let mut fromlen = mem::size_of::<SOCKADDR_STORAGE>() as i32;
+    let r = unsafe {
+        WinSock::recvfrom(
+            sock as SOCKET,
+            std::ptr::null_mut(),
+            0,
+            WinSock::MSG_PEEK,
+            (&mut storage as *mut SOCKADDR_STORAGE).cast::<SOCKADDR>(),
+            &mut fromlen,
+        )
+    };
+    if r == WinSock::SOCKET_ERROR {
+        let code = unsafe { WinSock::WSAGetLastError() };
+        if code != WinSock::WSAEMSGSIZE {
+            return Err(io::Error::from_raw_os_error(code));
+        }
+    }
+    let peer = unsafe { from_sockaddr(&storage) }?;
+    Ok(peer)
 }
 
 /// `SD_SEND` -- backs `AsyncWrite::poll_shutdown`, signaling EOF to the

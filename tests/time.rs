@@ -32,8 +32,8 @@ fn interval_at_second_tick_is_exactly_one_period_after_start() {
 fn poll_tick_is_pending_before_the_deadline_then_ready_at_it() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let start = Instant::now() + Duration::from_millis(30);
-        let period = Duration::from_millis(10);
+        let start = Instant::now() + Duration::from_millis(200);
+        let period = Duration::from_millis(100);
         let mut ticker = interval_at(start, period);
 
         // Polling manually, well before `start`, rather than `.await`ing

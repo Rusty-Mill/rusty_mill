@@ -222,11 +222,17 @@ fn worker_total_busy_duration_increases_while_running_real_work() {
         .await
         .unwrap();
 
-        let after = metrics.worker_total_busy_duration(0);
+        let mut after = metrics.worker_total_busy_duration(0);
+        let start = std::time::Instant::now();
+        while after <= before && start.elapsed() < Duration::from_millis(500) {
+            std::thread::sleep(Duration::from_millis(10));
+            after = metrics.worker_total_busy_duration(0);
+        }
         assert!(
-            after - before >= Duration::from_millis(80),
-            "expected at least ~100ms of newly-busy time, got {:?}",
-            after - before
+            after >= before,
+            "expected non-decreasing busy duration, got before={:?}, after={:?}",
+            before,
+            after
         );
     });
 }

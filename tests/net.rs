@@ -35,11 +35,13 @@ fn many_concurrent_tcp_connections() {
 
         let server = rusty_tokio::spawn(async move {
             for _ in 0..50 {
-                let (stream, _peer) = listener.accept().await.unwrap();
+                let (mut stream, _peer) = listener.accept().await.unwrap();
                 rusty_tokio::spawn(async move {
                     let mut buf = [0u8; 8];
                     let n = stream.read(&mut buf).await.unwrap();
                     stream.write_all(&buf[..n]).await.unwrap();
+                    let _ = stream.flush().await;
+                    let _ = stream.shutdown().await;
                 });
             }
         });

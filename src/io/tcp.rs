@@ -161,7 +161,9 @@ impl TcpListener {
             .set_nonblocking(false)
             .map_err(from_platform_err)?;
         let owned = self.inner.try_clone_io()?;
-        Ok(std::net::TcpListener::from(owned))
+        let res = std::net::TcpListener::from(owned);
+        let _ = res.set_nonblocking(false);
+        Ok(res)
     }
 }
 
@@ -355,7 +357,9 @@ impl TcpStream {
             .set_nonblocking(false)
             .map_err(from_platform_err)?;
         let owned = self.inner.try_clone_io()?;
-        Ok(std::net::TcpStream::from(owned))
+        let res = std::net::TcpStream::from(owned);
+        let _ = res.set_nonblocking(false);
+        Ok(res)
     }
 
     fn from_accepted(inner: PlatformTcpStream, reactor: Arc<Reactor>) -> io::Result<TcpStream> {
@@ -491,8 +495,7 @@ impl TcpStream {
     }
 
     /// Runs `f` (the caller's own non-blocking read/write against this
-    /// stream's fd, via [`std::os::fd::AsRawFd`]/
-    /// [`std::os::windows::io::AsRawSocket`]) once `interest` is ready,
+    /// stream's fd) once `interest` is ready,
     /// clearing that cached readiness if `f` reports `WouldBlock` --
     /// see [`readable`](Self::readable)/[`writable`](Self::writable) to
     /// wait for readiness first, and this crate's `readiness` module

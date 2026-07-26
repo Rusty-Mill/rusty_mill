@@ -17,8 +17,7 @@ use std::ops::{BitOr, BitOrAssign};
 const READABLE: u8 = 0b01;
 const WRITABLE: u8 = 0b10;
 
-/// Which readiness direction(s) a caller is interested in -- passed to
-/// [`super::AsyncFd::with_interest`].
+/// Which readiness direction(s) a caller is interested in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Interest(u8);
 
@@ -49,8 +48,7 @@ impl BitOrAssign for Interest {
     }
 }
 
-/// Which readiness direction(s) actually fired -- reported by
-/// [`super::AsyncFdReadyGuard`].
+/// Which readiness direction(s) actually fired.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Ready(u8);
 

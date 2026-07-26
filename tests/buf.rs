@@ -179,8 +179,18 @@ fn recv_buf_from_truncates_to_the_buffers_remaining_capacity_like_a_real_datagra
         // semantics, not held back for a later read.
         let mut storage = [0u8; 4];
         let mut dst: &mut [u8] = &mut storage;
-        let (n, _from) = b.recv_buf_from(&mut dst).await.unwrap();
-        assert_eq!(n, 4);
-        assert_eq!(&storage, b"0123");
+        #[cfg(not(windows))]
+        {
+            let (n, _from) = b.recv_buf_from(&mut dst).await.unwrap();
+            assert_eq!(n, 4);
+            assert_eq!(&storage, b"0123");
+        }
+        #[cfg(windows)]
+        {
+            // Windows Winsock reports WSAEMSGSIZE (10040) when receiving a datagram larger than the buffer.
+            let res = b.recv_buf_from(&mut dst).await;
+            assert!(res.is_err());
+            assert_eq!(res.unwrap_err().raw_os_error(), Some(10040));
+        }
     });
 }

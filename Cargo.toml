@@ -16,6 +16,7 @@ members = ["rusty_tokio-macros"]
 [dependencies]
 # See "Why a separate crate" in rusty_tokio-macros' own docs.
 rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
+rusty_std = { path = "../rusty_std" }
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/

@@ -52,7 +52,7 @@ fn tcp_stream_connect_accepts_a_str_tuple() {
 fn tcp_stream_connect_resolves_a_hostname_via_dns() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
-        let listener = TcpListener::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = TcpListener::bind_addrs("localhost:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
         let server = rusty_tokio::spawn(async move {

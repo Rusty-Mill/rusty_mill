@@ -87,8 +87,8 @@ fn is_finished_reflects_completion_on_both_handle_kinds() {
         let handle = rusty_tokio::spawn(async { 42 });
         let abort_handle = handle.abort_handle();
 
-        // Give the task a chance to actually run to completion.
-        while !handle.is_finished() {
+        // Give the task a chance to actually run to completion on both handles.
+        while !handle.is_finished() || !abort_handle.is_finished() {
             rusty_tokio::task::yield_now().await;
         }
         assert!(handle.is_finished());

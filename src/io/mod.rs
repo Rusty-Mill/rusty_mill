@@ -18,7 +18,7 @@
 //! docs for the small remainder that's still hand-rolled on both), shaped
 //! identically enough between the two backends that `tcp.rs`/`udp.rs`/
 //! `unix.rs` each need only a `#[cfg]`-gated type alias, not their own OS
-//! branching. [`UnixDatagram`] is the one exception -- rustils has no
+//! branching. `UnixDatagram` is the one exception -- rustils has no
 //! `AF_UNIX` datagram support at all, so `unix_datagram.rs` wraps
 //! `std::os::unix::net::UnixDatagram` directly instead; see that
 //! module's own docs for why.

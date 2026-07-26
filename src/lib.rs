@@ -107,7 +107,7 @@
 //! - [`io`]: a reactor (`epoll` on Linux, `kevent` on macOS, IOCP + the
 //!   AFD-poll trick on Windows) plus non-blocking `TcpStream` /
 //!   `TcpListener` / `UdpSocket` (all three cross-platform) and
-//!   `UnixStream` / `UnixListener` / [`io::UnixDatagram`] (`AF_UNIX`,
+//!   `UnixStream` / `UnixListener` / `UnixDatagram` (`AF_UNIX`,
 //!   Unix-only -- see the platform-support note below; the last of these
 //!   built directly on `std::os::unix::net::UnixDatagram`
 //!   rather than a rustils concrete type -- rustils has no `AF_UNIX`
@@ -175,16 +175,16 @@
 //!   `std::fs::File`'s `&mut self`-based API with this crate's
 //!   `AsyncRead`/`AsyncWrite`/`AsyncSeek` traits, and what happens to an
 //!   in-flight operation if its future is dropped before completing.
-//! - [`process`]: [`process::Command`], mirroring `std::process::
-//!   Command`'s builder API, but `spawn()`'s [`process::Child`] gives
+//! - `process`: `process::Command`, mirroring `std::process::
+//!   Command`'s builder API, but `spawn()`'s `process::Child` gives
 //!   async access to piped `stdin`/`stdout`/`stderr`
-//!   ([`process::ChildStdin`]/[`process::ChildStdout`]/
-//!   [`process::ChildStderr`]) and its `wait()` doesn't block a worker
+//!   (`process::ChildStdin`/`process::ChildStdout`/
+//!   `process::ChildStderr`) and its `wait()` doesn't block a worker
 //!   thread. Built directly on `std::process`, not rustils -- rustils'
 //!   own process abstraction hands piped stdio back as an object-safe,
 //!   deliberately fd-hiding `File` trait (for Windows portability),
 //!   which can't be reactor-registered; `process`'s own module docs
-//!   have the full reasoning, the same call [`io::UnixDatagram`] already
+//!   have the full reasoning, the same call `UnixDatagram` already
 //!   made for an analogous reason. A piped child's stdio is a genuine
 //!   pipe (readiness-driven through the reactor, unlike `fs::File`'s
 //!   spawn_blocking-per-operation shape); `wait()` itself still runs on
@@ -192,9 +192,9 @@
 //!   rustils exposes anything pollable for exit (a `pidfd` on Linux, or
 //!   `kevent`'s `EVFILT_PROC` on macOS, would each need their own
 //!   from-scratch reactor integration).
-//! - [`signal`]: [`signal::ctrl_c`] resolves once on the next `SIGINT`;
-//!   [`signal::signal`] returns a [`signal::Signal`] that fires every
-//!   time a given [`signal::SignalKind`] arrives, for as long as it's
+//! - `signal`: `signal::ctrl_c` resolves once on the next `SIGINT`;
+//!   `signal::signal` returns a `signal::Signal` that fires every
+//!   time a given `signal::SignalKind` arrives, for as long as it's
 //!   held. Built on the self-pipe trick -- the actual OS signal handler
 //!   only ever does an async-signal-safe `write(2)` to a pre-created
 //!   pipe, with everything else (tracking which listeners care, waking
@@ -263,7 +263,7 @@
 //!   developed and tested on Linux -- treat the macOS and Windows
 //!   reactor paths as reviewed-but-unverified until someone runs *this*
 //!   crate's test suite on the real OS, not just rustils' or mio's own.
-//!   `AF_UNIX` (`unix.rs`/`unix_datagram.rs`) and [`process`]/[`signal`]
+//!   `AF_UNIX` (`unix.rs`/`unix_datagram.rs`) and `process`/`signal`
 //!   are Unix-only and simply absent from the crate on Windows (no
 //!   `#[cfg]`-gated stub methods that would panic at runtime) -- there's
 //!   no portable equivalent to fall back to, matching how tokio itself

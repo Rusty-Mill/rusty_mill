@@ -52,6 +52,7 @@ fn next_chunk(mut reader: std::fs::ReadDir) -> Chunk {
     (buf, Some(reader), Ok(()))
 }
 
+#[allow(clippy::large_enum_variant)]
 enum State {
     /// A batch of already-read entries (possibly empty), plus the
     /// underlying `std::fs::ReadDir` to pull the next batch from once
@@ -74,7 +75,7 @@ enum State {
 }
 
 /// A stream of a directory's entries -- see [`read_dir`]. Reads ahead in
-/// chunks of [`CHUNK_SIZE`] entries per [`crate::spawn_blocking`] round
+/// chunks of `CHUNK_SIZE` entries per [`crate::spawn_blocking`] round
 /// trip (rather than one round trip per entry) the way real tokio's own
 /// implementation does, buffering the rest locally for subsequent
 /// [`next_entry`](Self::next_entry) calls to hand out without touching
@@ -103,7 +104,7 @@ impl ReadDir {
     /// Cancel-safe: dropping this call's future before it resolves
     /// loses nothing -- any batch already dispatched to the blocking
     /// pool keeps running and is picked up by the next call instead
-    /// (see [`State::Busy`]'s own docs).
+    /// (see `State::Busy`'s own docs).
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
         std::future::poll_fn(|cx| self.poll_next_entry(cx)).await
     }

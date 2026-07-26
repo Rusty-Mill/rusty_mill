@@ -157,7 +157,7 @@ impl File {
 
     /// The current cap on how many bytes a single `poll_read`/
     /// `poll_write` call dispatches to the blocking pool at once. See
-    /// [`DEFAULT_MAX_BUF_SIZE`]'s docs for why this exists at all.
+    /// `DEFAULT_MAX_BUF_SIZE`'s docs for why this exists at all.
     pub fn max_buf_size(&self) -> usize {
         self.max_buf_size
     }
@@ -255,7 +255,7 @@ impl File {
 
     /// Hands this file back out as a plain, blocking `std::fs::File` --
     /// only if nothing is currently in flight on it (`Busy`) and it
-    /// hasn't been [`Poisoned`](State::Poisoned) by a previous panic;
+    /// hasn't been `Poisoned` by a previous panic;
     /// `Err(self)` otherwise, so the caller can decide whether to wait
     /// (e.g. by awaiting an in-progress operation to completion first)
     /// or give up rather than losing the file. Unlike every other method
