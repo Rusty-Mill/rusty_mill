@@ -1,0 +1,23 @@
+[package]
+name = "rusty_gui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign OS windowing, event loop, and clipboard manager crate"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_gui"
+keywords = ["gui", "window", "event", "clipboard", "no-std"]
+categories = ["gui", "no-std"]
+
+[dependencies]
+rusty_wire = { path = "../rusty_wire" }
+rusty_std = { path = "../rusty_std" }
+
+[target.'cfg(windows)'.dependencies]
+rusty_win32 = { path = "../rusty_win32" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rusty_libc = { path = "../rusty_libc" }
+
+[features]
+default = []
