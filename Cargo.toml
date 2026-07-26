@@ -1,0 +1,16 @@
+[package]
+name = "rusty_err"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A #![no_std] + alloc sovereign error trait, context extension, and proc-macro error derive library"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_err"
+keywords = ["error", "context", "derive", "no-std"]
+categories = ["rust-patterns", "no-std"]
+
+[dependencies]
+rusty_std = { path = "../rusty_std" }
+
+[features]
+default = []
