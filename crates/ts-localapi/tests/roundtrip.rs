@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! End-to-end: serve the LocalAPI over a real Unix socket and drive it with
 //! an HTTP/1.1 client, exactly as `ts-cli` does. A mock backend stands in for
 //! the engine so the test is hermetic.

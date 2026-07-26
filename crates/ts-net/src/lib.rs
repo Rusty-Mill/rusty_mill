@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 //! Embeddable node: a userspace TCP/IP stack (smoltcp) on the tailnet, with
 //! **no TUN device and no root**.
 //!

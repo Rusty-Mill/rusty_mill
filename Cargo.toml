@@ -6,7 +6,7 @@ members = ["crates/*", "xtask"]
 version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/baileyrd/rusty_tail"
+repository = "https://github.com/baileyrd/rusty_tailscale"
 
 [workspace.dependencies]
 # Each dependency is justified in DESIGN.md before entering the tree.
@@ -33,7 +33,7 @@ http = "1"
 crypto_box = { version = "0.9", features = ["salsa20"] }
 boringtun = "0.7"
 # Shared sans-IO HTTP/1.1 layer (rusty ecosystem) — justified in DESIGN.md:
-rusty_http = { git = "https://github.com/baileyrd/rusty_http", rev = "a5463a4c0f346b673a5996f26ece550c16747924" }
+rusty_http = { path = "../rusty_http" }
 rusty_crypto_key = { path = "../rusty_crypto_key" }
 
 # Intra-workspace crates

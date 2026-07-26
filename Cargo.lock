@@ -786,7 +786,6 @@ version = "0.1.0"
 [[package]]
 name = "rusty_http"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_http?rev=a5463a4c0f346b673a5996f26ece550c16747924#a5463a4c0f346b673a5996f26ece550c16747924"
 dependencies = [
  "tokio",
 ]

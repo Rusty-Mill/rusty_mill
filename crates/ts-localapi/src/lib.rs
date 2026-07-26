@@ -15,12 +15,15 @@
 //! an independent client for `tests/roundtrip.rs`, proving real HTTP/1.1
 //! interop rather than just this crate testing itself.
 
+#![allow(dead_code, unused_imports)]
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusty_http::head::{RequestHead, ResponseHead};
 use rusty_http::tokio_native::AsyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use ts_types::{MaskedPrefs, PingResult, Prefs, Status};
 
@@ -57,6 +60,7 @@ pub enum ServeError {
 /// The socket is created with `0o600` permissions: on Linux the Go daemon
 /// authenticates LocalAPI callers by socket peer credentials, and restricting
 /// the mode is our first line of defence until we implement the same check.
+#[cfg(unix)]
 pub async fn serve<B: LocalBackend>(
     socket_path: impl AsRef<Path>,
     backend: B,
@@ -77,10 +81,25 @@ pub async fn serve<B: LocalBackend>(
     }
 }
 
+#[cfg(not(unix))]
+pub async fn serve<B: LocalBackend>(
+    socket_path: impl AsRef<Path>,
+    _backend: B,
+) -> Result<(), ServeError> {
+    Err(ServeError::Bind {
+        path: socket_path.as_ref().to_path_buf(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "Unix domain sockets are not supported on this platform",
+        ),
+    })
+}
+
 /// Serves every request on one connection until the client closes it or a
 /// framing error occurs -- either ends the loop the same way `hyper`'s
 /// `serve_connection` did (logged at debug by the caller, not surfaced as a
 /// server-level error).
+#[cfg(unix)]
 async fn serve_connection<B: LocalBackend>(
     stream: UnixStream,
     backend: &B,
@@ -108,6 +127,7 @@ async fn serve_connection<B: LocalBackend>(
 }
 
 /// Removes a stale socket, binds a fresh one, and tightens its permissions.
+#[cfg(unix)]
 fn bind(path: &Path) -> Result<UnixListener, ServeError> {
     if let Some(dir) = path.parent()
         && !dir.as_os_str().is_empty()

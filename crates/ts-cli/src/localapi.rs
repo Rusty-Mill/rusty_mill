@@ -8,11 +8,14 @@
 //! HTTP/1.1 framing is `rusty_http`'s job, not `hyper`'s, anymore -- see
 //! `DESIGN.md`'s dependency table.
 
+#![allow(dead_code, unused_imports)]
+
 use std::path::PathBuf;
 
 use rusty_http::head::RequestHead;
 use rusty_http::tokio_native::AsyncTransport;
 use rusty_http::{HeaderMap, Method, StatusCode, Version};
+#[cfg(unix)]
 use tokio::net::UnixStream;
 
 /// Default tailscaled socket path on Linux.
@@ -29,14 +32,13 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("localapi http error: {0}")]
+    #[error("LocalAPI HTTP transport error: {0}")]
     Http(#[from] rusty_http::TransportError),
-    #[error("localapi request build error: {0}")]
+    #[error("LocalAPI request construction error: {0}")]
     Request(#[from] rusty_http::Error),
-    /// Non-2xx response; body is tailscaled's error text.
-    #[error("tailscaled returned {status}: {body}")]
-    Api { status: StatusCode, body: String },
-    #[error("cannot decode tailscaled response: {0}")]
+    #[error("LocalAPI HTTP status {0}")]
+    Status(StatusCode),
+    #[error("LocalAPI JSON decode error: {0}")]
     Decode(#[from] serde_json::Error),
 }
 
@@ -49,8 +51,25 @@ impl LocalApi {
         Self { socket }
     }
 
+    #[cfg(not(unix))]
+    async fn request(
+        &self,
+        _method: Method,
+        _path_and_query: &str,
+        _body: Vec<u8>,
+    ) -> Result<Vec<u8>, Error> {
+        Err(Error::Connect {
+            path: self.socket.clone(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Unix domain sockets are not supported on this platform",
+            ),
+        })
+    }
+
     /// Sends one request and returns the response body, requiring a 2xx
     /// status.
+    #[cfg(unix)]
     async fn request(
         &self,
         method: Method,

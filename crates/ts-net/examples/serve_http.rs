@@ -13,9 +13,12 @@
 //! ```
 
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(target_os = "linux")]
 use ts_net::{Node, NodeConfig, TcpStream};
 
 const USAGE: &str = "\
@@ -78,6 +81,10 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() {}
+
+#[cfg(target_os = "linux")]
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     tracing_subscriber_init();
@@ -133,6 +140,7 @@ async fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+#[cfg(target_os = "linux")]
 async fn handle(mut stream: TcpStream) {
     let peer = stream.peer_addr();
     // Read the request headers (until the blank line) — enough to be a polite

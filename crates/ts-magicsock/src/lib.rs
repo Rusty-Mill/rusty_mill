@@ -19,10 +19,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind as PlatformErrorKind, PlatformError};
-use platform::net::UdpSocket as PlatformUdpSocket;
-use platform_linux::LinuxUdpSocket;
 use rand_core::{OsRng, RngCore};
-use tokio::io::unix::AsyncFd;
 use ts_derp::DerpSender;
 use ts_disco::{Message, TxId};
 use ts_key::DiscoPrivate;
@@ -421,15 +418,19 @@ fn primary_local_ip(dst: IpAddr) -> Option<IpAddr> {
     if ip.is_unspecified() { None } else { Some(ip) }
 }
 
+#[cfg(target_os = "linux")]
+use platform_linux::LinuxUdpSocket;
+#[cfg(target_os = "linux")]
+use tokio::io::unix::AsyncFd;
+
 /// The magic socket's UDP transport: a `platform_linux::LinuxUdpSocket`
-/// (rustils' D16 Net surface) driven non-blocking through tokio's own
-/// `AsyncFd` — the same "rustils-backed fd on tokio's reactor" shape
-/// `ts-tun`'s `TunFd` established, not a new pattern. `rusty_tokio`'s
-/// `io/udp.rs` proves the same wrapping end to end.
+/// on Linux or a `tokio::net::UdpSocket` on non-Linux targets.
+#[cfg(target_os = "linux")]
 pub struct MagicUdp {
     fd: AsyncFd<LinuxUdpSocket>,
 }
 
+#[cfg(target_os = "linux")]
 impl MagicUdp {
     fn bind(addr: SocketAddr) -> io::Result<Self> {
         let sock = LinuxUdpSocket::bind(addr).map_err(from_platform_err)?;
@@ -472,11 +473,39 @@ impl MagicUdp {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub struct MagicUdp {
+    inner: tokio::net::UdpSocket,
+}
+
+#[cfg(not(target_os = "linux"))]
+impl MagicUdp {
+    fn bind(addr: SocketAddr) -> io::Result<Self> {
+        let std_sock = std::net::UdpSocket::bind(addr)?;
+        std_sock.set_nonblocking(true)?;
+        let inner = tokio::net::UdpSocket::from_std(std_sock)?;
+        Ok(Self { inner })
+    }
+
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    pub async fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        self.inner.send_to(buf, addr).await
+    }
+
+    pub async fn recv_from(&self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        self.inner.recv_from(buf).await
+    }
+}
+
 /// Maps a rustils [`PlatformError`] to [`io::Error`], keeping the
 /// operation/path context in the error's `Display` (via `source`) while
 /// giving `AsyncFd::try_io` an accurate [`io::ErrorKind`] to recognize
 /// `WouldBlock` by — `platform-linux` already maps `EAGAIN` to
 /// `ErrorKind::WouldBlock`, so this just carries that through.
+#[allow(dead_code)]
 fn from_platform_err(e: PlatformError) -> io::Error {
     let kind = match e.kind {
         PlatformErrorKind::NotFound => io::ErrorKind::NotFound,
