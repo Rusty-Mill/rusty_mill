@@ -1,62 +1,77 @@
-//! `rsed` — stream editor for filtering and transforming text
+//! `rsed` — a real (subset) sed stream editor. See `rusty_text::sed`'s
+//! module doc for exactly what's implemented.
 
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
-use rusty_text::SedSubst;
+
+use rusty_text::SedScript;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
-    let mut expr: Option<String> = None;
+    let mut script_parts: Vec<String> = Vec::new();
+    let mut suppress_auto_print = false;
     let mut files = Vec::new();
 
     let mut i = 1;
     while i < args.len() {
-        if args[i] == "-e" && i + 1 < args.len() {
-            expr = Some(args[i + 1].clone());
-            i += 2;
-        } else if !args[i].starts_with('-') {
-            if expr.is_none() {
-                expr = Some(args[i].clone());
-            } else {
-                files.push(&args[i]);
+        match args[i].as_str() {
+            "-e" if i + 1 < args.len() => {
+                script_parts.push(args[i + 1].clone());
+                i += 2;
             }
-            i += 1;
-        } else {
-            i += 1;
+            "-n" => {
+                suppress_auto_print = true;
+                i += 1;
+            }
+            arg if !arg.starts_with('-') => {
+                if script_parts.is_empty() {
+                    script_parts.push(arg.to_string());
+                } else {
+                    files.push(arg.to_string());
+                }
+                i += 1;
+            }
+            _ => i += 1,
         }
     }
 
-    let expr_str = match expr {
-        Some(e) => e,
-        None => {
-            eprintln!("Usage: rsed [-e] 's/pattern/replacement/g' [file...]");
-            std::process::exit(1);
-        }
-    };
+    if script_parts.is_empty() {
+        eprintln!("Usage: rsed [-n] [-e 'script']... ['script'] [file...]");
+        eprintln!("Commands: s/pat/rep/[gpiN], d, p, q, =. Addresses: N, $, /re/, addr1,addr2.");
+        std::process::exit(1);
+    }
 
-    let sed_subst = SedSubst::parse(&expr_str)?;
+    let script = SedScript::parse(&script_parts.join(";"))?;
 
-    let process_reader = |reader: &mut dyn BufRead| -> io::Result<()> {
-        for line in reader.lines() {
-            let l = line?;
-            let transformed = sed_subst.apply(&l);
-            println!("{}", transformed);
-        }
-        Ok(())
-    };
-
+    let mut lines: Vec<String> = Vec::new();
     if files.is_empty() {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        process_reader(&mut reader)?;
+        for line in io::stdin().lock().lines() {
+            lines.push(line?);
+        }
     } else {
-        for f in files {
+        for f in &files {
             let win_path = rpath::posix_to_win32(f);
             let file = fs::File::open(Path::new(&win_path))?;
-            let mut reader = BufReader::new(file);
-            process_reader(&mut reader)?;
+            for line in BufReader::new(file).lines() {
+                lines.push(line?);
+            }
+        }
+    }
+
+    let mut state = script.new_state();
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+    use std::io::Write;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let is_last = idx + 1 == lines.len();
+        let quit = script.run_line(&mut state, idx + 1, is_last, line, suppress_auto_print, |l| {
+            let _ = writeln!(out, "{l}");
+        });
+        if quit {
+            break;
         }
     }
 
