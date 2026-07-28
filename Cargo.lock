@@ -2075,6 +2075,7 @@ dependencies = [
  "rusty_gui",
  "rusty_simd",
  "rusty_std",
+ "rusty_win32",
 ]
 
 [[package]]

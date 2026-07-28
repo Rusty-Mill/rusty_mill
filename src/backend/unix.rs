@@ -8,6 +8,24 @@ use std::os::unix::io::RawFd;
 /// be restored exactly on exit.
 static ORIGINAL_TERMIOS: Mutex<Option<libc::termios>> = Mutex::new(None);
 
+/// `tcgetattr` fails with `ENOTTY` whenever `STDIN_FILENO` isn't a real
+/// controlling tty — always true when stdin is piped or redirected. That's
+/// an inherent limitation (a terminal emulator's raw-mode host handling
+/// requires a real tty to put in raw mode), not a transient or unusual
+/// failure, but the bare `io::Error::last_os_error()` gave no hint why.
+/// This turns it into an actionable message while preserving the original
+/// error for diagnostics.
+fn not_a_real_console_error() -> std::io::Error {
+    let underlying = std::io::Error::last_os_error();
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "rusty_term must run attached to a real tty: stdin appears to be piped, \
+             redirected, or otherwise non-interactive, so tcgetattr failed ({underlying})"
+        ),
+    )
+}
+
 /// Unit type implementing [`Backend`](crate::backend::Backend) for Unix-likes.
 pub struct UnixBackend;
 
@@ -165,7 +183,7 @@ impl crate::backend::Backend for UnixBackend {
             if enabled {
                 let mut termios = std::mem::zeroed();
                 if libc::tcgetattr(libc::STDIN_FILENO, &mut termios) == -1 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(not_a_real_console_error());
                 }
                 // Stash the original so it can be restored verbatim on exit.
                 *ORIGINAL_TERMIOS.lock() = Some(termios);

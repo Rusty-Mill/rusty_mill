@@ -7,6 +7,27 @@ test; nothing below is aspirational.
 
 ---
 
+## 2026-07-27 — Actionable error when stdin/stdout aren't a real console
+
+### 🩹 Fixed
+- **Clear error instead of a bare OS code when run with piped/redirected
+  stdio.** `set_raw_mode` (both backends) previously propagated
+  `GetConsoleMode`/`tcgetattr`'s raw failure straight through —
+  `Os { code: 6, "The handle is invalid" }` on Windows, an unexplained
+  `ENOTTY` on Unix — with no indication of *why*. Running attached to a
+  real console is a hard requirement (a terminal emulator's raw-mode host
+  handling has no meaning without one), not a transient failure, so both
+  backends now recognize this specific failure and return a
+  `io::ErrorKind::Unsupported` error stating plainly that stdin/stdout
+  need to be a real, unredirected console/tty, with the original OS error
+  preserved alongside for diagnostics. Surfaced by `mill-term` (a new
+  consumer calling `rusty_term::runtime::run` directly) hitting this exact
+  error when smoke-tested under piped stdio; confirmed the *unmodified*
+  binary failed identically before this fix, i.e. this was a real,
+  hittable UX gap, not specific to any one caller.
+
+---
+
 ## 2026-07-23 — Accessibility tree (C20)
 
 ### ✨ Added

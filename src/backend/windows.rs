@@ -56,6 +56,26 @@ fn hresult_to_io_error(hr: i32) -> std::io::Error {
     }
 }
 
+/// `GetConsoleMode` fails with `ERROR_INVALID_HANDLE` (raw OS error 6)
+/// whenever `GetStdHandle(STD_INPUT_HANDLE)`/`GetStdHandle(STD_OUTPUT_HANDLE)`
+/// aren't real, attached console handles — always true when stdin/stdout are
+/// piped or redirected. That's an inherent limitation (a terminal emulator's
+/// raw-mode host handling requires a real console to put in raw mode), not
+/// a transient or unusual failure, but the bare `io::Error::last_os_error()`
+/// ("The handle is invalid") gave no hint why. This turns it into an
+/// actionable message while preserving the original error for diagnostics.
+fn not_a_real_console_error() -> std::io::Error {
+    let underlying = std::io::Error::last_os_error();
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        format!(
+            "rusty_term must run attached to a real console: stdin/stdout appear to be \
+             piped, redirected, or otherwise non-interactive, so GetConsoleMode failed \
+             ({underlying})"
+        ),
+    )
+}
+
 impl Backend for WindowsBackend {
     fn spawn_shell(
         &self,
@@ -219,7 +239,7 @@ impl Backend for WindowsBackend {
                 if GetConsoleMode(hin, &mut in_mode) == 0
                     || GetConsoleMode(hout, &mut out_mode) == 0
                 {
-                    return Err(std::io::Error::last_os_error());
+                    return Err(not_a_real_console_error());
                 }
                 *ORIGINAL_MODES.lock() = Some((in_mode, out_mode));
                 // Raw input: no line buffering, echo, or Ctrl-C handling, but do
