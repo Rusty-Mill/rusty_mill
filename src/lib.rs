@@ -73,6 +73,49 @@ impl PartialEq for SecretBytes {
 
 impl Eq for SecretBytes {}
 
+#[cfg(feature = "std")]
+mod file {
+    use super::SecretBytes;
+    use std::io;
+    use std::path::Path;
+
+    impl SecretBytes {
+        /// Persists this secret to `path`, creating (or truncating) it with
+        /// permissions restricted to the owner only.
+        ///
+        /// On Unix this opens the file with mode `0600` from the moment of
+        /// creation (`O_CREAT` and the mode are applied atomically by the
+        /// OS, so there is no window where the file exists world-readable).
+        /// **On Windows there is currently no equivalent ACL restriction**
+        /// applied — the file inherits whatever permissions its containing
+        /// directory grants. That gap is a known, documented limitation,
+        /// not a silent claim of parity with the Unix behavior.
+        pub fn save_to_file(&self, path: &Path) -> io::Result<()> {
+            use std::io::Write;
+            #[cfg_attr(not(unix), allow(unused_mut))]
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut f = options.open(path)?;
+            f.write_all(&self.buf)?;
+            f.flush()
+        }
+
+        /// Loads a secret previously written by [`Self::save_to_file`].
+        /// Does not itself verify or tighten the file's permissions —
+        /// callers on Windows should not rely on this path being
+        /// access-restricted (see [`Self::save_to_file`]'s doc comment).
+        pub fn load_from_file(path: &Path) -> io::Result<Self> {
+            let buf = std::fs::read(path)?;
+            Ok(SecretBytes { buf })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +134,36 @@ mod tests {
         let s3 = SecretBytes::new(vec![0xAA, 0xBB, 0xDD]);
         assert_eq!(s1, s2);
         assert_ne!(s1, s3);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn save_then_load_round_trips_real_file_contents() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("rusty_crypto_key_test_{}.bin", std::process::id()));
+
+        let secret = SecretBytes::new(vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        secret.save_to_file(&path).expect("save should succeed");
+        let loaded = SecretBytes::load_from_file(&path).expect("load should succeed");
+        assert_eq!(secret, loaded);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[cfg(all(feature = "std", unix))]
+    #[test]
+    fn save_to_file_restricts_permissions_to_owner_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("rusty_crypto_key_test_perms_{}.bin", std::process::id()));
+
+        let secret = SecretBytes::new(vec![1, 2, 3]);
+        secret.save_to_file(&path).expect("save should succeed");
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "file should be owner-only read/write");
+
+        let _ = std::fs::remove_file(&path);
     }
 }

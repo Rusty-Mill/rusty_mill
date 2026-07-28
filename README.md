@@ -4,7 +4,7 @@
 
 A zeroize-on-drop key storage micro-crate for Rust.
 
-`rusty_crypto_key` provides `SecretBytes`, a secure key container that volatile-zeroes memory on `Drop`, redacts debug prints, and performs constant-time equality comparisons.
+`rusty_crypto_key` provides `SecretBytes`, a secure key container that volatile-zeroes memory on `Drop`, redacts debug prints, and performs constant-time equality comparisons. Behind the default `std` feature, `save_to_file`/`load_from_file` persist a secret to disk, restricted to `0600` (owner read/write only) on Unix; Windows has no equivalent ACL restriction applied yet.
 
 ## License
 
