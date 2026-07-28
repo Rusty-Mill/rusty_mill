@@ -344,6 +344,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_libc"
+version = "0.0.1"
+
+[[package]]
 name = "rusty_lsp"
 version = "0.6.2"
 dependencies = [
@@ -357,6 +361,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_std"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
+]
+
+[[package]]
 name = "rusty_tokio"
 version = "0.1.0"
 dependencies = [
@@ -366,6 +378,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-macos",
+ "rusty_std",
  "rusty_tokio-macros",
  "windows-sys 0.59.0",
 ]
@@ -378,6 +391,10 @@ dependencies = [
  "quote",
  "syn",
 ]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
 
 [[package]]
 name = "same-file"
