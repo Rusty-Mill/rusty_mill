@@ -14,7 +14,6 @@ rusty_wire = { path = "../rusty_wire" }
 rusty_regx = { path = "../rusty_regx" }
 rusty_json = { path = "../rusty_json" }
 rusty_compress = { path = "../rusty_compress" }
-rusty_crypto = { path = "../rusty_crypto" }
 rusty_std = { path = "../rusty_std" }
 rusty_sync = { path = "../rusty_sync" }
 rusty_time = { path = "../rusty_time" }

@@ -164,10 +164,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpath"
+version = "0.1.0"
+
+[[package]]
 name = "rush"
 version = "0.1.1"
 dependencies = [
  "libc",
+ "rpath",
  "rusty_libc 0.0.1 (git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca)",
  "rusty_lines",
  "rusty_regx",
@@ -191,7 +196,6 @@ dependencies = [
  "rusty_audio",
  "rusty_codec",
  "rusty_compress",
- "rusty_crypto",
  "rusty_err",
  "rusty_font",
  "rusty_gpu",
@@ -225,18 +229,6 @@ name = "rusty_compress"
 version = "0.1.0"
 
 [[package]]
-name = "rusty_crypto"
-version = "0.1.0"
-dependencies = [
- "rusty_crypto_key",
- "rusty_wire",
-]
-
-[[package]]
-name = "rusty_crypto_key"
-version = "0.1.0"
-
-[[package]]
 name = "rusty_err"
 version = "0.1.0"
 dependencies = [
@@ -260,6 +252,7 @@ dependencies = [
  "rusty_gui",
  "rusty_simd",
  "rusty_std",
+ "rusty_win32 0.1.0",
 ]
 
 [[package]]
@@ -381,8 +374,7 @@ dependencies = [
 name = "rusty_vulkan"
 version = "0.1.0"
 dependencies = [
- "rusty_gpu",
- "rusty_std",
+ "rusty_win32 0.1.0",
 ]
 
 [[package]]

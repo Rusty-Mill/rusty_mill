@@ -1,6 +1,6 @@
 //! Sovereign bare-metal kernel-to-application demonstration binary for the **Rusty Mill** stack.
 //! Executes the full software pipeline:
-//! Level 0 (`rusty_libc`/`rusty_win32`) ➔ Level 1 (`rusty_std`, `rusty_sync`, `rusty_time`, `rusty_err`, `rusty_codec`, `rusty_crypto`, `rusty_font`, `rusty_audio`, `rusty_jinja`) ➔ Level 2 (`rusty_tokio`, `rusty_http`, `rusty_gui`, `rusty_gpu`, `rusty_vulkan`) ➔ Level 3/4 (`rush`, `rusty_term`).
+//! Level 0 (`rusty_libc`/`rusty_win32`) ➔ Level 1 (`rusty_std`, `rusty_sync`, `rusty_time`, `rusty_err`, `rusty_codec`, `rusty_font`, `rusty_audio`, `rusty_jinja`) ➔ Level 2 (`rusty_tokio`, `rusty_http`, `rusty_gui`, `rusty_gpu`, `rusty_vulkan`) ➔ Level 3/4 (`rush`, `rusty_term`).
 
 extern crate alloc;
 
