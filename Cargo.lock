@@ -43,10 +43,10 @@ dependencies = [
 name = "mill-term"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "rpath",
  "rusty_git",
  "rusty_term",
- "rusty_text",
 ]
 
 [[package]]
@@ -121,6 +121,10 @@ name = "rpath"
 version = "0.1.0"
 
 [[package]]
+name = "rusty_compress"
+version = "0.1.0"
+
+[[package]]
 name = "rusty_diff"
 version = "0.1.0"
 
@@ -129,12 +133,9 @@ name = "rusty_git"
 version = "0.1.0"
 dependencies = [
  "rpath",
+ "rusty_compress",
  "rusty_diff",
 ]
-
-[[package]]
-name = "rusty_regx"
-version = "0.5.0"
 
 [[package]]
 name = "rusty_term"
@@ -146,14 +147,6 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rusty_text"
-version = "0.1.0"
-dependencies = [
- "rpath",
- "rusty_regx",
 ]
 
 [[package]]
