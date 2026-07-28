@@ -268,6 +268,13 @@ pub mod handle;
 #[cfg(windows)]
 pub use handle::{RawHandle, close, create_pipe, duplicate, pipe_bytes_available, set_inheritable};
 
+// `dynlib`'s three-item surface (`load_library`/`get_proc_address`/
+// `free_library`) is deliberately not re-exported at the crate root,
+// for the same reason as `job`'s/`fs`'s/etc. — reach it via
+// `rusty_win32::dynlib::*`.
+#[cfg(windows)]
+pub mod dynlib;
+
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]

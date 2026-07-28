@@ -62,6 +62,21 @@ const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: u32 = 0x2;
 const FILE_SHARE_READ: u32 = 0x0000_0001;
 const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const OPEN_EXISTING: u32 = 3;
+/// `CreateFileW`'s `dwCreationDisposition`: always create a new file,
+/// truncating one that already exists — [`create_file`]'s counterpart to
+/// Unix `O_CREAT | O_TRUNC`.
+const CREATE_ALWAYS: u32 = 2;
+/// `CreateFileW`'s `dwCreationDisposition`: open the file if it exists,
+/// else create it — [`create_file`]'s counterpart to Unix `O_CREAT`
+/// without `O_TRUNC`.
+const OPEN_ALWAYS: u32 = 4;
+/// `CreateFileW`'s `dwDesiredAccess` bit — read access. Public: callers
+/// building their own `desired_access` for [`open_file`] need it (mirrors
+/// [`crate::pipe::GENERIC_READ`], duplicated here per this crate's
+/// per-module FFI-constant convention).
+pub const GENERIC_READ: u32 = 0x8000_0000;
+/// `CreateFileW`'s `dwDesiredAccess` bit — write access.
+pub const GENERIC_WRITE: u32 = 0x4000_0000;
 /// `CreateFileW`'s flag to open the reparse point itself (its stored
 /// target) rather than following it — the Windows analog of `O_NOFOLLOW`,
 /// and the primitive [`readlink`] needs to report a link's target instead
@@ -260,6 +275,20 @@ unsafe extern "system" {
         number_of_bytes_to_unlock_low: u32,
         number_of_bytes_to_unlock_high: u32,
         overlapped: *mut Overlapped,
+    ) -> i32;
+    fn ReadFile(
+        file: RawHandle,
+        buffer: *mut u8,
+        bytes_to_read: u32,
+        bytes_read: *mut u32,
+        overlapped: *mut core::ffi::c_void,
+    ) -> i32;
+    fn WriteFile(
+        file: RawHandle,
+        buffer: *const u8,
+        bytes_to_write: u32,
+        bytes_written: *mut u32,
+        overlapped: *mut core::ffi::c_void,
     ) -> i32;
 }
 
@@ -931,6 +960,122 @@ pub fn read_dir(pattern: &str) -> Result<ReadDir, Win32Error> {
         handle,
         pending: Some(data),
     })
+}
+
+/// Open an existing regular file for content I/O — `CreateFileW` with
+/// [`OPEN_EXISTING`], the Windows counterpart of `rusty_libc::fd::open`
+/// with `O_RDONLY`/`O_WRONLY`/`O_RDWR` and no `O_CREAT`. `desired_access`
+/// is [`GENERIC_READ`]/[`GENERIC_WRITE`] (or both ORed).
+pub fn open_file(path: &str, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    create_file_impl(path, desired_access, OPEN_EXISTING)
+}
+
+/// Create a new regular file (or open-and-truncate an existing one) for
+/// content I/O — `CreateFileW` with [`CREATE_ALWAYS`], the Windows
+/// counterpart of `rusty_libc::fd::open` with `O_CREAT | O_TRUNC`.
+pub fn create_file(path: &str, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    create_file_impl(path, desired_access, CREATE_ALWAYS)
+}
+
+/// Open a regular file, creating it if it doesn't already exist (without
+/// truncating one that does) — `CreateFileW` with [`OPEN_ALWAYS`], the
+/// Windows counterpart of `rusty_libc::fd::open` with `O_CREAT` and no
+/// `O_TRUNC`.
+pub fn open_or_create_file(path: &str, desired_access: u32) -> Result<RawHandle, Win32Error> {
+    create_file_impl(path, desired_access, OPEN_ALWAYS)
+}
+
+fn create_file_impl(
+    path: &str,
+    desired_access: u32,
+    creation_disposition: u32,
+) -> Result<RawHandle, Win32Error> {
+    let wide: Vec<u16> = path.encode_utf16().chain(core::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string; sharing both
+    // read and write with other opens matches Unix `open`'s default (no
+    // exclusive lock); `security_attributes = NULL` and
+    // `FILE_ATTRIBUTE_NORMAL` are documented-valid defaults for a plain
+    // file; `template_file = NULL` is ignored except for `CREATE_NEW`
+    // (which this module never passes as `creation_disposition`).
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            desired_access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            core::ptr::null(),
+            creation_disposition,
+            FILE_ATTRIBUTE_NORMAL,
+            core::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle as isize == -1 {
+        Err(Win32Error::last())
+    } else {
+        Ok(handle)
+    }
+}
+
+/// Read up to `buf.len()` bytes from `handle` — `ReadFile` against a
+/// regular file handle from [`open_file`]/[`create_file`]/
+/// [`open_or_create_file`]. Returns `0` at end-of-file.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid handle opened with
+/// [`GENERIC_READ`].
+pub unsafe fn read_file(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Win32Error> {
+    let mut bytes_read: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte writable buffer;
+    // `bytes_read` is a valid out-pointer; `lpOverlapped = NULL` requests a
+    // synchronous (blocking) read, a documented valid input for a handle
+    // opened without `FILE_FLAG_OVERLAPPED`.
+    let ok = unsafe {
+        ReadFile(
+            handle,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            &mut bytes_read,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(bytes_read as usize)
+    }
+}
+
+/// Write `buf` to `handle` — `WriteFile` against a regular file handle from
+/// [`create_file`]/[`open_or_create_file`]/[`open_file`]. May write fewer
+/// bytes than `buf.len()` (a short write); callers that need all of `buf`
+/// written should loop.
+///
+/// # Safety
+///
+/// `handle` must be a currently-open, valid handle opened with
+/// [`GENERIC_WRITE`].
+pub unsafe fn write_file(handle: RawHandle, buf: &[u8]) -> Result<usize, Win32Error> {
+    let mut bytes_written: u32 = 0;
+    // SAFETY: `handle` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid, `buf.len()`-byte readable buffer;
+    // `bytes_written` is a valid out-pointer; `lpOverlapped = NULL` requests
+    // a synchronous (blocking) write, a documented valid input for a handle
+    // opened without `FILE_FLAG_OVERLAPPED`.
+    let ok = unsafe {
+        WriteFile(
+            handle,
+            buf.as_ptr(),
+            buf.len() as u32,
+            &mut bytes_written,
+            core::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        Err(Win32Error::last())
+    } else {
+        Ok(bytes_written as usize)
+    }
 }
 
 #[cfg(test)]
