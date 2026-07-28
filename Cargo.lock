@@ -265,6 +265,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_libc"
+version = "0.0.1"
+
+[[package]]
 name = "rusty_request"
 version = "0.1.0"
 dependencies = [
@@ -274,6 +278,14 @@ dependencies = [
  "rusty_http",
  "rusty_tls",
  "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
 ]
 
 [[package]]
@@ -295,6 +307,7 @@ dependencies = [
  "platform",
  "platform-linux",
  "platform-macos",
+ "rusty_std",
  "rusty_tokio-macros",
  "windows-sys 0.59.0",
 ]
@@ -307,6 +320,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
 
 [[package]]
 name = "schannel"
