@@ -1,7 +1,11 @@
-//! `rgit` — pure Rust Git CLI command
+//! `rgit` — a real (if intentionally scoped-down) pure-Rust Git CLI.
+//! See `rusty_git`'s own crate-level doc for what's genuinely implemented
+//! vs. known, documented gaps.
 
 use std::env;
 use std::path::Path;
+
+use rusty_git::objects::{read_object, ObjectKind};
 use rusty_git::Repository;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -22,6 +26,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let repo = Repository::init(path)?;
             println!("Initialized empty Git repository in {}", repo.git_dir.display());
         }
+        "add" => {
+            let cwd = env::current_dir()?;
+            let repo = Repository::open(&cwd)?;
+            let paths: Vec<String> = args[2..].to_vec();
+            if paths.is_empty() {
+                eprintln!("Nothing specified, nothing added.\nUsage: rgit add <path>...");
+                std::process::exit(1);
+            }
+            repo.add(&paths)?;
+        }
         "status" => {
             let cwd = env::current_dir()?;
             let repo = Repository::open(&cwd)?;
@@ -30,7 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if entries.is_empty() {
                 println!("nothing to commit, working tree clean");
             } else {
-                println!("Untracked files / modifications:");
                 for e in entries {
                     println!("\t{}: {}", e.status, e.path);
                 }
@@ -54,13 +67,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let logs = repo.log()?;
             for l in logs {
                 println!("commit {}", l.hash);
-                println!("    {}\n", l.message);
+                println!("Author: {}", l.author);
+                println!("\n    {}\n", l.message);
             }
         }
         "diff" => {
             let cwd = env::current_dir()?;
-            let _ = Repository::open(&cwd)?;
-            println!("Diff engine powered by rusty_diff (no active working tree diffs)");
+            let repo = Repository::open(&cwd)?;
+            let index = repo.index()?;
+            let entries = repo.status()?;
+            let mut printed_any = false;
+            for e in entries {
+                if e.status != "modified (not staged)" {
+                    continue;
+                }
+                let Some(idx_entry) = index.get(&e.path) else { continue };
+                let old_oid = rusty_git::sha1::hex(&idx_entry.hash);
+                let (kind, old_content) = read_object(&repo.git_dir, &old_oid)?;
+                if kind != ObjectKind::Blob {
+                    continue;
+                }
+                let new_content = std::fs::read(repo.work_tree.join(&e.path))?;
+                let old_text = String::from_utf8_lossy(&old_content);
+                let new_text = String::from_utf8_lossy(&new_content);
+                print!("{}", rusty_diff::format_unified_diff(&e.path, &e.path, &old_text, &new_text));
+                printed_any = true;
+            }
+            if !printed_any {
+                println!("(no unstaged modifications to a tracked file)");
+            }
         }
         "branch" => {
             let cwd = env::current_dir()?;

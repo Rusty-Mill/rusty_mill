@@ -8,3 +8,12 @@ description = "Pure Rust implementation of Git object model, index, refs, and CL
 [dependencies]
 rusty_diff = { path = "../rusty_diff" }
 rpath = { path = "../rpath" }
+# Loose-object storage: git wraps every object in a zlib stream. rusty_compress's
+# `compress_deflate` only emits RFC 1951 "stored" (uncompressed) blocks today, not
+# real Huffman-coded ones, but stored blocks are a fully spec-legal DEFLATE
+# encoding and real git/zlib decompress them without complaint -- verified via
+# `git cat-file` interop tests in this crate. `decompress_deflate` is the
+# corresponding limitation: it can only read stored-block streams (i.e. objects
+# this crate wrote itself), not arbitrary real repos' Huffman-compressed objects.
+# See src/zlib.rs's module doc for the honest read/write asymmetry this implies.
+rusty_compress = { path = "../rusty_compress" }
