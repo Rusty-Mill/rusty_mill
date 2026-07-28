@@ -1,4 +1,4 @@
-/// Stub module for response types.
+//! Client-side response type.
 
 /// An HTTP/2 response that has been received.
 #[derive(Debug)]

@@ -2,182 +2,93 @@
 
 use crate::connect;
 use crate::error::{ErrorCode, Result};
+use crate::frame::{Frame, GoAwayFrame};
 
 use super::builder::Builder;
+use super::send_request::{RequestBuilder, SendRequest};
 
-/// Core client HTTP/2 connection state.
-#[allow(dead_code)]
+/// Core client HTTP/2 connection state: the frame-level driver
+/// ([`connect::Connection`]) plus the stream-ID bookkeeping and HPACK
+/// encoding needed to turn a [`RequestBuilder`] into wire frames.
+#[derive(Debug)]
 pub struct Connection {
-    /// Connection-level state machine.
     inner: connect::Connection,
+    requests: SendRequest,
 }
 
 impl Connection {
     /// Build a new client connection with the given builder.
     pub fn new(builder: Builder) -> Self {
         let settings = builder.to_settings();
-        let inner = connect::Connection::new(settings, connect::PeerType::Server);
-        Connection { inner }
+        let inner = connect::Connection::new(settings, connect::PeerType::Client);
+        Connection { inner, requests: SendRequest::new(1) }
     }
 
     /// Apply a received frame to the connection state machine.
-    #[allow(dead_code)]
-    pub fn apply(&mut self, frame: crate::frame::Frame) -> Result<Vec<crate::frame::Frame>> {
+    pub fn apply(&mut self, frame: Frame) -> Result<Vec<Frame>> {
         self.inner.apply(frame)
     }
 
-    /// Return the stream ID that the next outgoing stream will use.
-    /// Returns `None` if the stream space is exhausted.
-    pub fn next_stream_id(&self) -> Option<u32> {
-        if self.inner.peer_type == connect::PeerType::Server {
-            Some(self.inner.next_stream_id)
-        } else {
-            Some(self.inner.next_stream_id)
-        }
+    /// Return the stream ID the next outgoing request will use.
+    pub fn next_stream_id(&self) -> u32 {
+        self.requests.next_stream_id()
     }
 
-    /// Send a GOAWAY frame with the provided error code.
-    pub fn send_goaway(&mut self, error_code: ErrorCode, debug_data: &[u8]) {
-        let frame = crate::frame::GoAwayFrame {
-            last_stream_id: 0,
-            error_code,
-            debug_data: debug_data.to_vec(),
-        };
-        let mut buf = Vec::new();
-        frame.encode(&mut buf);
-        let _ = buf;
+    /// Build a GOAWAY frame with the provided error code, for the caller's
+    /// transport to write to the wire.
+    pub fn send_goaway(&mut self, error_code: ErrorCode, debug_data: &[u8]) -> Frame {
+        Frame::GoAway(GoAwayFrame { last_stream_id: 0, error_code, debug_data: debug_data.to_vec() })
     }
 
-    /// Create a `SendRequest` handle for this connection.
-    pub fn send_request(&self) -> SendRequest {
-        SendRequest { connection: self }
-    }
-}
-
-/// A handle to send requests on the client connection.
-///
-/// The `SendRequest` object is the main entry point for sending HTTP/2
-/// requests.  It may be cloned cheaply to create multiple handles.
-pub struct SendRequest<'a> {
-    connection: &'a Connection,
-}
-
-impl<'a> SendRequest<'a> {
-    fn new(connection: &'a Connection) -> Self {
-        SendRequest { connection }
-    }
-
-    fn send_request(&mut self, request: RequestBuilder) -> crate::error::Result<Response> {
-        let mut encoder = crate::hpack::Encoder::default();
-        let mut header_fields = Vec::new();
-
-        header_fields.push(crate::hpack::HeaderField::new(":method", request.method));
-        header_fields.push(crate::hpack::HeaderField::new(":path", &request.path));
-        for (name, value) in &request.headers {
-            header_fields.push(crate::hpack::HeaderField::new(name, value));
-        }
-
-        let mut header_block = Vec::new();
-        encoder.encode(&header_fields, &mut header_block);
-
-        let stream_id = 1;
-        let mut frames = Vec::new();
-
-        // Build HEADERS frame
-        let mut enc2 = crate::hpack::Encoder::default();
-        let mut hdr_fields = Vec::new();
-        hdr_fields.push(crate::hpack::HeaderField::new(":method", request.method));
-        hdr_fields.push(crate::hpack::HeaderField::new(":scheme", "http"));
-        hdr_fields.push(crate::hpack::HeaderField::new(":authority", "localhost"));
-        hdr_fields.push(crate::hpack::HeaderField::new(":path", &request.path));
-        for (name, value) in &request.headers {
-            hdr_fields.push(crate::hpack::HeaderField::new(name, value));
-        }
-        let mut hdr_block = Vec::new();
-        enc2.encode(&hdr_fields, &mut hdr_block);
-
-        let headers_frame = crate::frame::Frame::Headers(crate::frame::headers::HeadersFrame {
-            stream_id,
-            header_block_fragment: hdr_block,
-            end_stream: request.body.is_none(),
-            end_headers: true,
-            priority: None,
-        });
-        frames.push(headers_frame);
-
-        if let Some(body) = request.body {
-            let data_frame = crate::frame::Frame::Data(crate::frame::data::DataFrame {
-                stream_id,
-                data: body,
-                end_stream: false,
-            });
-            frames.push(data_frame);
-        }
-
+    /// Encode `request` onto a freshly allocated stream, apply its frames
+    /// to this connection's state machine (opening the stream and
+    /// accounting for flow control), and return the frames a transport
+    /// should write to the wire.
+    pub fn send_request(&mut self, request: RequestBuilder) -> Result<Vec<Frame>> {
+        let stream_id = self.requests.next_stream_id();
+        self.requests.send(request)?;
+        let frames = self.requests.take_frames(stream_id).unwrap_or_default();
         for frame in &frames {
-            self.connection.inner.apply_frame(frame.clone())?;
+            self.inner.apply_frame(frame.clone())?;
         }
-
-        let response_headers = enc2
-            .encode(&hdr_fields, &mut Vec::new());
-        let _ = response_headers;
-
-        Ok(Response {
-            status: 200,
-            headers: Vec::new(),
-            end_of_stream: true,
-        })
+        Ok(frames)
     }
 }
 
-/// A builder for constructing an HTTP/2 request.
-pub struct RequestBuilder {
-    method: &'static str,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Option<Vec<u8>>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl RequestBuilder {
-    pub fn new(method: &'static str, path: &str) -> Self {
-        RequestBuilder {
-            method,
-            path: path.to_string(),
-            headers: Vec::new(),
-            body: None,
+    #[test]
+    fn client_connection_allocates_odd_stream_ids() {
+        let conn = Connection::new(Builder::new());
+        assert_eq!(conn.next_stream_id(), 1);
+    }
+
+    #[test]
+    fn sending_a_request_produces_a_headers_frame_and_advances_the_stream_id() {
+        let mut conn = Connection::new(Builder::new());
+        let request = RequestBuilder::new("GET", "https://example.com/").end_of_stream();
+        let frames = conn.send_request(request).unwrap();
+        assert!(matches!(frames.as_slice(), [Frame::Headers(_)]));
+        assert_eq!(conn.next_stream_id(), 3);
+    }
+
+    #[test]
+    fn sending_a_request_with_a_body_produces_headers_then_data() {
+        let mut conn = Connection::new(Builder::new());
+        let request = RequestBuilder::new("POST", "/x").body(b"hi".to_vec());
+        let frames = conn.send_request(request).unwrap();
+        assert!(matches!(frames.as_slice(), [Frame::Headers(_), Frame::Data(_)]));
+    }
+
+    #[test]
+    fn send_goaway_builds_a_goaway_frame() {
+        let mut conn = Connection::new(Builder::new());
+        let frame = conn.send_goaway(ErrorCode::NoError, b"bye");
+        match frame {
+            Frame::GoAway(g) => assert_eq!(g.debug_data, b"bye"),
+            other => panic!("expected GOAWAY, got {other:?}"),
         }
     }
-
-    /// Add a header to the request.
-    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.push((name.into(), value.into()));
-        self
-    }
-
-    /// Set the body of the request.
-    pub fn body(mut self, body: Vec<u8>) -> Self {
-        self.body = Some(body);
-        self
-    }
-
-    fn build(&self) -> crate::frame::HeadersFrame {
-        // Encode method, path and headers into a header block.
-        crate::frame::HeadersFrame {
-            stream_id: 0,
-            end_stream: false,
-            end_headers: false,
-            priority: None,
-            header_block_fragment: Vec::new(),
-        }
-    }
-}
-
-/// An HTTP/2 response that has been received.
-pub struct Response {
-    /// The HTTP status code.
-    pub status: u16,
-    /// The response headers.
-    pub headers: Vec<crate::hpack::HeaderField>,
-    /// Whether this frame carries END_STREAM.
-    pub end_of_stream: bool,
 }

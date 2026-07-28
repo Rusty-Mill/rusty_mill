@@ -1,8 +1,23 @@
-# Rusty H2 — Full RFC 9113/7541 Implementation
+# Rusty H2 — Status Report (Codec Complete, Connection Driver Unfinished)
+
+> **Superseded (2026-07-27):** the gap described below is fixed.
+> `src/client/`, `src/server/`, and `src/connect/` are now declared in
+> `lib.rs` and part of the compiled crate: `connect/mod.rs`'s stub types
+> (`FlowControl`, `Encoder`, `Decoder`, `H2Error`, `Frame`, `StreamEntry`)
+> were replaced with real logic built on the crate's actual `error`,
+> `hpack`, `frame`, and `stream` types, and `client`/`server` were fixed to
+> compile against them. 88 lib tests + 3 client-connection tests + 13
+> integration tests pass; `cargo clippy --all-targets` is clean. See the
+> top-level `README.md` for what's real and its "Known gaps" section for
+> what's still deliberately unimplemented (PUSH_PROMISE delivery,
+> mid-connection window resize, `poll_accept`, async I/O). The stub
+> inventory below (module structure, per-symbol "Stub" table) is kept as
+> a historical record of what this file originally described — it no
+> longer reflects the current source.
 
 ## Architecture Overview
 
-`rusty_h2` is a from-scratch HTTP/2 implementation built directly from RFC 9113 (HTTP/2) and RFC 7541 (HPACK). The codebase spans 37 source files across 3,761+ lines of Rust, covering every layer of the HTTP/2 protocol from the wire format to the connection driver API.
+`rusty_h2` is a from-scratch HTTP/2 implementation built directly from RFC 9113 (HTTP/2) and RFC 7541 (HPACK). The codebase spans 37 source files across 3,761+ lines of Rust attempting every layer of the HTTP/2 protocol from the wire format to the connection driver API — see the gap note above for which of those layers actually compile and run today.
 
 ### Module Structure
 
@@ -133,9 +148,11 @@ Full state machine with all transitions from RFC 9113 §5.1:
 - Invalid transitions rejected as stream errors
 - Closed stream rejects further events
 
-### Connection Driver (RFC 9113 §5) — CORE COMPLETE
+### Connection Driver (RFC 9113 §5) — NOT COMPILED (see gap note at top)
 
-The connection state machine manages the full lifecycle:
+The connection state machine was *intended* to manage the full lifecycle
+described below, but `src/connect/` is not declared as a module in
+`lib.rs` and does not currently compile:
 
 - **Settings Negotiation**: RFC 9113 §6.5 — initial connection settings, SETTINGS/SETTINGS_ACK exchange, dynamic parameter update (ENABLE_PUSH, HEADER_TABLE_SIZE, INITIAL_WINDOW_SIZE, MAX_FRAME_SIZE, MAX_CONCURRENT_STREAMS, MAX_HEADER_LIST_SIZE)
 - **Preface Validation**: RFC 9113 §3.4 — client preface ("PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n") + initial SETTINGS frame validation
@@ -152,7 +169,7 @@ The connection state machine manages the full lifecycle:
 
 **6 stream + 4 frame + 16 hpack = 25 core tests**
 
-## Phase 4–5: Client/Server API (Complete)
+## Phase 4–5: Client/Server API (NOT COMPILED — see gap note at top)
 
 ### Client Module (h2 Crate Parity)
 
@@ -193,7 +210,7 @@ The connection state machine manages the full lifecycle:
 - Case-insensitive header name lookup
 - Response encoder roundtrip
 
-## Phase 6: Connection Driver Integration (Complete)
+## Phase 6: Connection Driver Integration (NOT COMPILED — see gap note at top)
 
 ### Core Connection State Machine
 
@@ -233,7 +250,13 @@ Client and server handlers route incoming frames to appropriate handlers:
 
 ## Phase 7: Test Coverage Summary
 
-**Total: 66 tests, 66 passing**
+**As claimed by this report's own authoring commit: 66 tests, 66 passing.
+Verified 2026-07-27: `cargo test` on the actual compiled crate (`frame`,
+`hpack`, `stream`, `error` — the only modules `lib.rs` declares) runs 75
+tests (59 lib unit tests + 3 HPACK RFC vector tests + 13 integration
+tests), all passing. The "Client/Server" row below (11 tests) is source
+that exists in `src/client/`/`src/server/` but never compiles or runs as
+part of this crate — see the gap note at the top of this file.**
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
@@ -241,7 +264,7 @@ Client and server handlers route incoming frames to appropriate handlers:
 | Frame types | 19 | All 10 frame types, frame header, Unknown passthrough, padding, general roundtrip |
 | Stream | 6 | State machine transitions, lifecycle, RST_STREAM, error handling |
 | Connection preface | 4 | Valid/invalid/truncated preface |
-| Client/Server | 11 | Request builder, encoding, response builder, decoder, URI parsing, stream ID tracking |
+| Client/Server | 11 (never compiled — not real) | Request builder, encoding, response builder, decoder, URI parsing, stream ID tracking |
 
 ## API Surface (h2 Crate Parity)
 
@@ -288,8 +311,9 @@ These are the remaining phases for full h2 crate parity:
 ## Build & Test
 
 ```bash
-cargo check          # Compiles clean
-cargo test --all-features  # 66 tests passing
+cargo check   # compiles clean
+cargo test    # 75 tests passing (verified 2026-07-27)
 ```
 
-No warnings, no errors. Edition 2021. Rust 1.70+ compatible.
+No warnings, no errors, on the crate as `lib.rs` actually declares it
+(`frame`, `hpack`, `stream`, `error`). Edition 2021. Rust 1.70+ compatible.

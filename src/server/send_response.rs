@@ -1,7 +1,8 @@
 //! Handles to send a response (mirrors h2::server::SendResponse).
 
-use crate::error::{ErrorCode, H2Error, Result};
+use crate::error::{ErrorCode, Result};
 use crate::frame;
+use crate::hpack;
 
 /// A handle to send a response to a client request.
 #[derive(Debug)]
@@ -19,21 +20,23 @@ impl SendResponse {
         }
     }
 
-    /// Send response headers.
-    pub fn send_response(&mut self, status: u16) -> Result<SendStream> {
-        // Encode a HEADERS frame with the status code and end_headers flag.
-        let mut flags = frame::header::Flags::NONE;
-        flags |= frame::header::Flags::END_HEADERS;
+    /// Encode response headers carrying `status` into a HEADERS frame,
+    /// returning it for the caller's transport to write to the wire,
+    /// along with a [`SendStream`] handle for the response body.
+    pub fn send_response(&mut self, status: u16) -> Result<(frame::Frame, SendStream)> {
+        let mut encoder = hpack::Encoder::new(hpack::DEFAULT_HEADER_TABLE_SIZE);
+        let mut header_block = Vec::new();
+        encoder.encode(&[hpack::HeaderField::new(":status", status.to_string())], &mut header_block);
 
-        let header =
-            frame::header::FrameHeader::new(0, frame::FrameType::Headers, flags, self.stream_id);
+        let headers_frame = frame::HeadersFrame {
+            stream_id: self.stream_id,
+            end_stream: false,
+            end_headers: true,
+            priority: None,
+            header_block_fragment: header_block,
+        };
 
-        // We would construct a proper `HeadersFrame` here with the status code
-        // and any headers.  For now we just acknowledge.
-        let mut buf = Vec::new();
-        header.encode(&mut buf);
-
-        Ok(self.send_stream.clone())
+        Ok((frame::Frame::Headers(headers_frame), self.send_stream.clone()))
     }
 
     /// Set the maximum frame size for this stream.
@@ -53,32 +56,45 @@ impl SendStream {
         SendStream { stream_id }
     }
 
-    /// Write body data.
-    pub fn send_data(&mut self, data: Vec<u8>) {
-        let frame = frame::DataFrame::new(self.stream_id, data, false);
-        let mut buf = Vec::new();
-        frame.encode(&mut buf);
-        // Queue `buf` for transport-layer write.
-        let _ = buf;
+    /// Build a DATA frame carrying `data`, for the caller's transport to
+    /// write and apply to the connection.
+    pub fn send_data(&mut self, data: Vec<u8>) -> frame::Frame {
+        frame::Frame::Data(frame::DataFrame::new(self.stream_id, data, false))
     }
 
-    /// Write body data and signal end of stream.
-    pub fn send_data_eos(&mut self, data: Vec<u8>) {
-        let frame = frame::DataFrame::new(self.stream_id, data, true);
-        let mut buf = Vec::new();
-        frame.encode(&mut buf);
-        // Queue `buf` for transport-layer write.
-        let _ = buf;
+    /// Build a DATA frame carrying `data` with `END_STREAM` set.
+    pub fn send_data_eos(&mut self, data: Vec<u8>) -> frame::Frame {
+        frame::Frame::Data(frame::DataFrame::new(self.stream_id, data, true))
     }
 
-    /// Reset the response stream with an error.
-    pub fn reset(&mut self, code: ErrorCode) {
-        let frame = frame::RstStreamFrame {
-            stream_id: self.stream_id,
-            error_code: code,
-        };
-        let mut buf = Vec::new();
-        frame.encode(&mut buf);
-        let _ = buf;
+    /// Build an RST_STREAM frame resetting this stream with `code`.
+    pub fn reset(&mut self, code: ErrorCode) -> frame::Frame {
+        frame::Frame::RstStream(frame::RstStreamFrame { stream_id: self.stream_id, error_code: code })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_response_encodes_the_status_into_a_headers_frame() {
+        let mut resp = SendResponse::new(1);
+        let (frame, _stream) = resp.send_response(200).unwrap();
+        let frame::Frame::Headers(h) = &frame else { panic!("expected HEADERS, got {frame:?}") };
+        assert!(!h.header_block_fragment.is_empty());
+
+        let mut decoder = hpack::Decoder::new(hpack::DEFAULT_HEADER_TABLE_SIZE);
+        let fields = decoder.decode(&h.header_block_fragment).unwrap();
+        assert_eq!(fields[0].name, b":status");
+        assert_eq!(fields[0].value, b"200");
+    }
+
+    #[test]
+    fn send_stream_builds_data_and_rst_stream_frames() {
+        let mut stream = SendStream::new(1);
+        assert!(matches!(stream.send_data(b"hi".to_vec()), frame::Frame::Data(d) if !d.end_stream));
+        assert!(matches!(stream.send_data_eos(b"bye".to_vec()), frame::Frame::Data(d) if d.end_stream));
+        assert!(matches!(stream.reset(ErrorCode::Cancel), frame::Frame::RstStream(_)));
     }
 }

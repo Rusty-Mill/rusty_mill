@@ -7,7 +7,6 @@ use crate::frame;
 use crate::frame::header::Flags;
 use crate::hpack;
 use crate::hpack::Encoder;
-use crate::stream;
 
 /// A client-side request builder.
 ///
@@ -80,13 +79,13 @@ impl RequestBuilder {
 
         // Build HPACK header block.
         let mut encoder = Encoder::new(4096);
-        let mut header_fields = Vec::new();
-
         // RFC 7540 §8.1.2.3: method, scheme, authority must appear in order.
-        header_fields.push(hpack::HeaderField::new(":method", self.method));
-        header_fields.push(hpack::HeaderField::new(":scheme", &*self.scheme));
-        header_fields.push(hpack::HeaderField::new(":authority", &*self.authority));
-        header_fields.push(hpack::HeaderField::new(":path", &*self.path));
+        let mut header_fields = vec![
+            hpack::HeaderField::new(":method", self.method),
+            hpack::HeaderField::new(":scheme", &*self.scheme),
+            hpack::HeaderField::new(":authority", &*self.authority),
+            hpack::HeaderField::new(":path", &*self.path),
+        ];
 
         for (name, value) in &self.headers {
             header_fields.push(hpack::HeaderField::new(name.as_str(), value.as_str()));
@@ -126,6 +125,7 @@ impl RequestBuilder {
 }
 
 /// A handle to send requests on a client connection.
+#[derive(Debug)]
 pub struct SendRequest {
     stream_id: u32,
     /// Maps request → response.
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(headers_frame.stream_id, 7);
         assert!(headers_frame.end_stream);
         assert!(headers_frame.end_headers);
-        assert!(headers_frame.header_block_fragment.len() > 0);
+        assert!(!headers_frame.header_block_fragment.is_empty());
     }
 
     #[test]

@@ -58,10 +58,10 @@ impl Builder {
     pub fn to_settings(&self) -> ServerSettings {
         let mut settings = ServerSettings::new();
         settings.max_concurrent_streams = Some(self.max_concurrent_streams);
-        settings.initial_window_size = Some(self.initial_stream_window_size);
-        settings.max_frame_size = Some(self.max_frame_size);
-        settings.max_header_list_size = Some(self.max_header_list_size);
-        settings.enable_push = if self.enable_push { Some(1) } else { Some(0) };
+        settings.initial_window_size = self.initial_stream_window_size;
+        settings.max_frame_size = self.max_frame_size;
+        settings.max_header_list_size = Some(self.max_header_list_size as u32);
+        settings.enable_push = self.enable_push;
         settings
     }
 

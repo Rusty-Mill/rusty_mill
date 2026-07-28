@@ -8,7 +8,6 @@ use std::task::Poll;
 
 use super::builder::Builder;
 use super::send_response::SendResponse;
-use super::send_stream::SendStream;
 
 /// A server connection (mirrors h2::server::Connection).
 #[derive(Debug)]
@@ -25,7 +24,15 @@ impl Connection {
         Connection { inner }
     }
 
+    /// Apply a received frame to the connection state machine.
+    pub fn apply(&mut self, frame: frame::Frame) -> crate::error::Result<Vec<frame::Frame>> {
+        self.inner.apply(frame)
+    }
+
     /// Accept a new inbound request.
+    ///
+    /// Always pending: turning a HEADERS frame observed by [`Self::apply`]
+    /// into a queued [`IncomingRequest`] isn't implemented yet.
     pub fn poll_accept(&mut self) -> Poll<Option<IncomingRequest>> {
         Poll::Pending
     }

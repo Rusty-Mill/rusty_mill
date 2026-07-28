@@ -178,7 +178,7 @@ fn settings_frame_roundtrip() {
     let hdr = FrameHeader::decode(&wire).unwrap();
     assert_eq!(hdr.frame_type, FrameType::Settings);
     assert_eq!(hdr.stream_id, 0);
-    assert!((hdr.length as usize) % 6 == 0, "settings payload must be 6-byte multiples");
+    assert!((hdr.length as usize).is_multiple_of(6), "settings payload must be 6-byte multiples");
 
     let decoded_frame = Frame::decode(&hdr, &wire[FRAME_HEADER_LEN..]).unwrap();
     match decoded_frame {
