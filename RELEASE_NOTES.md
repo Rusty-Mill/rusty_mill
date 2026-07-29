@@ -7,6 +7,24 @@ commit instead.
 
 ---
 
+## Add docs/USAGE.md: practical guide to running the loop well
+**2026-07-29**
+
+- **Added:** `docs/USAGE.md`, linked from the README's "Running it" section.
+  The README says what the tool is and how to invoke it; this covers how to
+  get a useful result out of it — the three model roles and how to pick them,
+  the call-count formula for budgeting a run, difficulty/split-size tuning,
+  reading `report.json` rationales, the edit engine's unique-anchor constraint
+  as it applies to authoring a starting skill, and implementing `Environment`
+  for a real task.
+- The tuning guidance is drawn from this repo's own logged run history rather
+  than invented: the four consecutive experiments below (`full_claude` →
+  `full_claude_bigtrain` → `smoke_claude_hard_bigval` →
+  `smoke_claude_hard_bigtrain`) are summarized as a table, since together they
+  demonstrate the single thing that determines whether a run produces anything
+  — benchmark difficulty and training-set diversity, not epochs.
+- Docs only; no code changes.
+
 ## Support Qwen via DashScope's OpenAI-compatible mode (parity-loop issue #8)
 **2026-07-23** · [PR #14](https://github.com/baileyrd/rusty_SkillOpt/pull/14)
 

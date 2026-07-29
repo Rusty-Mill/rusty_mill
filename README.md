@@ -61,6 +61,10 @@ that crate's factory, without touching the engine.
 
 ## Running it
 
+For a practical guide to running this well — choosing the three models, sizing
+a run and its call budget, making the benchmark hard enough to produce signal,
+and reading `report.json` — see [docs/USAGE.md](docs/USAGE.md).
+
 ```bash
 cargo test --workspace
 
