@@ -7,6 +7,59 @@ commit instead.
 
 ---
 
+## Add `aisf_validation` env + 40 real labeled scenarios for AISF's validation stage
+**2026-07-29**
+
+- **Added:** `AisfValidationEnv` + `AisfValidationParams`
+  (`crates/skillopt-envs/src/aisf_validation.rs`), `aisf_triage`'s
+  sibling for AISF's `validation` stage — a JSONL-backed benchmark, not a
+  copy of `aisf_triage` with renamed fields: `ValidationScenario`'s shape
+  (`pr_number`/`diff`/`tests_passed`/`test_summary`) is genuinely
+  different from a GitHub issue list, and `score` reads `verdict`
+  (`Pass`/`Fail`/`NeedsHuman`), not `priority`, off `eval-stage`'s JSON
+  output. Same two programmatic signals as triage's scorer (correct
+  answer, no audit-log denials), same known limitation (AISF's
+  `validate()` silently defaults to `NeedsHuman` when `report_validation`
+  is never called, indistinguishable here from a genuine `NeedsHuman`
+  label).
+- **Required wiring `eval-stage validation` on AISF's side first** — it
+  didn't exist before this (only `triage` was wired up). See AISF's own
+  `RELEASE_NOTES.md` for the full detail: `ValidationScenario`,
+  scenario-driven `read_pr_diff`/`run_tests` mocks, and a placeholder
+  `Implemented`/`Triaged`/`Signal` construction to call
+  `pipeline::validate` (which takes the typed pipeline handoff, not a
+  bare `Signal`, unlike `pipeline::triage`). `AisfStageBackend` needed
+  **zero changes** — the AISF stage name was always a plain string
+  parameter.
+- **Added:** `configs/aisf_validation_example.yaml`,
+  `skills/aisf_validation_initial.md` (a copy of AISF's real
+  `prompts/validation.md`), `data/aisf_validation_labels.jsonl` (40
+  scenarios: 24 train / 8 val / 8 test, 16 Pass / 12 Fail / 12
+  NeedsHuman, every split representing all three verdicts) and
+  `data/aisf_validation_labels.md` (the labeling rubric — see there for
+  what actually distinguishes the three verdicts; the interesting class
+  is `NeedsHuman`, scenarios where `tests_passed: true` alone is *not* a
+  safe signal: committed secrets, tests disabled/deleted rather than
+  fixed, scope creep into security-sensitive code, a weakened permission
+  check, a migration or force-push the test suite can't cover).
+- **One real asymmetry with `aisf_triage`, stated honestly rather than
+  hidden:** AISF's `eval-stage` has no `claude_cli`/MCP-bridge driver for
+  `validation` yet, only `triage` — so unlike triage, this executor role
+  can't run fully live without a real `ANTHROPIC_API_KEY` yet. Verified
+  everything short of that: `AisfValidationEnv` parsed all 40 real rows
+  through `build_env`; `eval --split train` against the real config
+  reached AISF's subprocess, delivered the scenario, and correctly hit
+  the "claude_cli not wired up for validation" error when no key was
+  set; setting even a fake `ANTHROPIC_API_KEY` confirmed the *other*
+  dispatch path is also reached correctly (a real HTTPS connection
+  attempt to `api.anthropic.com` for `validate {pr_number=801}`, failing
+  only on this sandbox's known TLS/cert gap, not a wiring bug).
+- 9 new unit tests in `aisf_validation.rs` (parsing/partitioning,
+  scenario round-trip, malformed-line reporting, and the same
+  correct/denied/wrong/unparseable/missing-audit scoring matrix
+  `aisf_triage`'s tests cover). 68 tests total across the workspace, all
+  passing; `cargo fmt`/`clippy` clean.
+
 ## `aisf_stage` runs fully live too: AISF's own claude_cli + MCP bridge
 **2026-07-29**
 

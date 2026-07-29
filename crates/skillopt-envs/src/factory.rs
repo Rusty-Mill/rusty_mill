@@ -3,12 +3,13 @@ use std::sync::Arc;
 use skillopt_core::{EnvConfig, Environment};
 
 use crate::aisf_triage::{AisfTriageEnv, AisfTriageParams};
+use crate::aisf_validation::{AisfValidationEnv, AisfValidationParams};
 use crate::synthetic_arithmetic::{SyntheticArithmeticEnv, SyntheticArithmeticParams};
 
-/// Instantiates an [`Environment`] by name. `synthetic_arithmetic` and
-/// `aisf_triage` are the built-in benchmarks today; new ones register here
-/// the same way SkillOpt registers new benchmarks under
-/// `skillopt/envs/<name>/`.
+/// Instantiates an [`Environment`] by name. `synthetic_arithmetic`,
+/// `aisf_triage`, and `aisf_validation` are the built-in benchmarks
+/// today; new ones register here the same way SkillOpt registers new
+/// benchmarks under `skillopt/envs/<name>/`.
 pub fn build_env(cfg: &EnvConfig) -> anyhow::Result<Arc<dyn Environment>> {
     match cfg.name.as_str() {
         "synthetic_arithmetic" => {
@@ -26,8 +27,14 @@ pub fn build_env(cfg: &EnvConfig) -> anyhow::Result<Arc<dyn Environment>> {
                 .map_err(|e| anyhow::anyhow!("invalid params for aisf_triage env: {e}"))?;
             Ok(Arc::new(AisfTriageEnv::new(params)?))
         }
+        "aisf_validation" => {
+            let params: AisfValidationParams = serde_yaml::from_value(cfg.params.clone())
+                .map_err(|e| anyhow::anyhow!("invalid params for aisf_validation env: {e}"))?;
+            Ok(Arc::new(AisfValidationEnv::new(params)?))
+        }
         other => anyhow::bail!(
-            "unknown environment: {other:?} (known: synthetic_arithmetic, aisf_triage)"
+            "unknown environment: {other:?} (known: synthetic_arithmetic, aisf_triage, \
+             aisf_validation)"
         ),
     }
 }

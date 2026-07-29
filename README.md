@@ -51,7 +51,8 @@ crates/
                    network-free Mock backend for tests and dry runs
   skillopt-envs/   Environment impls: a deterministic, offline synthetic
                    arithmetic word-problem benchmark with programmatic scoring,
-                   plus aisf_triage, a JSONL-backed real-scenario benchmark
+                   plus aisf_triage and aisf_validation, JSONL-backed
+                   real-scenario benchmarks
   skillopt-cli/    the `skillopt` binary (`train`, `eval` subcommands)
 configs/example.yaml   example run configuration
 skills/initial.md      example starting skill document
@@ -128,7 +129,22 @@ stage name, e.g. `"triage"`; `aisf_binary_path` points at AISF's built
 which loads hand-labeled scenarios from a JSONL file
 (`crates/skillopt-envs/src/aisf_triage.rs`) instead of generating a
 synthetic distribution — the data-driven counterpart to
-`synthetic_arithmetic`. Only AISF's `triage` stage is wired up so far.
+`synthetic_arithmetic`.
+
+AISF's `validation` stage is wired up the same way — `configs/
+aisf_validation_example.yaml` (`model: validation`) and `env: { name:
+aisf_validation }` (`crates/skillopt-envs/src/aisf_validation.rs`), a
+genuinely separate `Environment` from `aisf_triage` (a PR review isn't a
+GitHub issue list — different scenario shape, different scorer field:
+`verdict`, not `priority`). `AisfStageBackend` needed zero changes to
+support it — the stage name was always a plain string. One real
+asymmetry, stated honestly rather than papered over: AISF's own
+`eval-stage` has no `claude_cli`/MCP-bridge driver for `validation` yet
+(only `triage`), so running this executor role live currently still
+needs a real `ANTHROPIC_API_KEY` — verified up to exactly that boundary
+in this project's own sandbox (parsing, wire format, and both driver
+dispatch paths all confirmed correct; the actual live model call is the
+one piece not yet possible here).
 
 No `ANTHROPIC_API_KEY` in your environment? `AisfStageBackend` sets
 `EVAL_STAGE_DRIVER=claude_cli` on the spawned `eval-stage` process
@@ -196,8 +212,9 @@ Built as a broad-but-bounded first pass:
 - **Benchmark**: one deterministic synthetic environment
   (`synthetic_arithmetic`) so the whole loop is testable without network
   access or API keys — see `crates/skillopt-envs/src/synthetic_arithmetic.rs`.
-  Also `aisf_triage`, a JSONL-backed real-scenario benchmark for
-  `aisf_stage`'s triage agent (`crates/skillopt-envs/src/aisf_triage.rs`).
+  Also `aisf_triage`/`aisf_validation`, JSONL-backed real-scenario
+  benchmarks for `aisf_stage`'s triage/validation agents
+  (`crates/skillopt-envs/src/aisf_{triage,validation}.rs`).
   Adding a real benchmark (e.g. a QA dataset) means implementing
   `Environment` and registering it in `skillopt-envs`'s factory.
 - **Not implemented**: a WebUI/monitoring dashboard, a MiniMax backend, and
