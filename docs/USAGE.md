@@ -70,6 +70,10 @@ cargo run -p skillopt-cli -- eval --config configs/smoke_claude_hard.yaml \
     --skill out/smoke_claude_hard/best_skill.md --split test
 ```
 
+No `ANTHROPIC_API_KEY` but a working `claude` CLI session (`claude -p "hi"`
+answers)? Use `configs/claude_cli_example.yaml` instead — same idea, no key
+required. See §8 for `claude_cli`'s constraints.
+
 ---
 
 ## 3. Picking the three models
@@ -222,6 +226,7 @@ see earlier ones' effects.
 | `openai_compatible` (Qwen) | `base_url: https://dashscope.aliyuncs.com/compatible-mode/v1` | DashScope compat mode. `configs/qwen_example.yaml` — verified against the documented contract, not a live call. |
 | `azure_openai` | `base_url` = resource endpoint, `model` = **deployment name**, `api_key_env` (default `AZURE_OPENAI_API_KEY`), optional `api_version` | Needs its own provider: `api-key` header, deployment in the URL. `configs/azure_openai_example.yaml`. |
 | `aisf_stage` | `model` = **AISF stage name** (e.g. `"triage"`), `aisf_binary_path` = path to AISF's built `software-factory` binary | Not a chat API — drives a real, governed, multi-turn agent stage via AISF's `eval-stage` subcommand as a subprocess per rollout. Only for `executor`; `optimizer`/`reflector` should stay plain chat backends. `configs/aisf_triage_example.yaml`. |
+| `claude_cli` | `model` (passed straight through as `--model`) | Shells out to `claude -p` instead of a raw HTTP call — no `ANTHROPIC_API_KEY` needed, just a working `claude` CLI session (tools disabled, no session persistence: a plain single-turn completion). Works for any role. `configs/claude_cli_example.yaml`. |
 | `mock` | — | Network-free. Dry runs and tests only. |
 
 Write these provider strings exactly as spelled above — `openai_compatible`,
@@ -238,6 +243,15 @@ model in §4 undercounts it badly — one `aisf_stage` "executor call" is
 actually a whole tool-use loop, several real API calls hidden inside a
 single `chat()`. Recompute your `val_batch_size`/`train_size` budget
 assuming several calls per rollout, not one, before sizing a real run.
+
+If you're in a sandbox with a working `claude` CLI session but no
+`ANTHROPIC_API_KEY` (this project's own development environment is one),
+`claude_cli` is what actually gets you a *real* run rather than a mock
+one — every other backend in this table needs a portable API key
+`claude_cli` doesn't. It cannot stand in for `aisf_stage`'s executor role,
+though: that role needs a governed tool-use loop, and `claude_cli`
+deliberately runs with all built-in tools disabled, as a plain text
+completion.
 
 ---
 

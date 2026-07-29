@@ -7,6 +7,52 @@ commit instead.
 
 ---
 
+## Add `claude_cli` backend: real runs without an `ANTHROPIC_API_KEY`
+**2026-07-29**
+
+- **Added:** `Provider::ClaudeCli` + `ClaudeCliBackend`
+  (`crates/skillopt-model/src/claude_cli.rs`). Shells out to the `claude`
+  CLI's non-interactive print mode (`claude -p`) instead of a raw Anthropic
+  HTTP request — useful wherever a working `claude` CLI session exists
+  (e.g. an OAuth-authenticated Claude Code sandbox) but no portable
+  `ANTHROPIC_API_KEY` is available. Confirmed the actual gap this closes,
+  in this project's own development sandbox: a plain `curl` to
+  `api.anthropic.com` 401s with no key, while `claude -p "hi"` already
+  answers with no further setup.
+- All the CLI's built-in tools are disabled (`--tools ""`) and sessions
+  aren't persisted (`--no-session-persistence`) — a plain single-turn
+  text completion (system prompt via `--system-prompt-file`, one user
+  turn on stdin), matching every existing `ChatBackend` call site
+  (`Engine` never sends more than one system message plus one user
+  message per `chat()` call). **Not** a substitute for `aisf_stage`'s
+  executor role, which genuinely needs a governed tool-use loop this
+  backend deliberately doesn't provide.
+- `config.rs` gets one new `Provider` variant, no new `BackendConfig`
+  field — `model` passes straight through as `--model`. No key
+  resolution: the CLI's own session is the auth, not something this
+  process holds.
+- **First genuinely live, full end-to-end run in this project's
+  history.** Every prior "real" run in this repo's own log needed a live
+  `ANTHROPIC_API_KEY` this environment never had; every `aisf_stage`
+  verification so far stopped at `MissingApiKey`. Ran
+  `configs/claude_cli_example.yaml` (smoke-scale: 4 train / 2 val / 2
+  test, 1 epoch, batch 2, all three roles on `claude_cli`) to completion
+  against `synthetic_arithmetic`: **0/2 steps accepted, val 1.0 → 1.0,
+  test 1.0** in ~1m43s — correct behavior at this tiny/easy scale (nothing
+  to fix), with genuinely contextual optimizer rationales in
+  `report.json` ("Reinforces isolating the relevant operation and
+  ignoring distractor details...", "Add guidance for handling multi-step
+  or worded arithmetic problems...") rather than canned text, confirming
+  real model calls drove every rollout/reflect/optimize step, not a mock.
+- New tests: message-partitioning (system+user, user-only, multiple user
+  messages joined, empty/system-only errors), a spawn-failure path
+  (`PATH` overridden to exclude `claude`, restored afterward since it's a
+  process-global env var), and an `#[ignore]`d live smoke test
+  (`tests/claude_cli_smoke.rs`, no sibling checkout needed unlike
+  `aisf_stage`'s) — run and passing in this same sandbox.
+- 59 tests total across the workspace, all passing (6 new); `cargo
+  fmt`/`clippy` clean.
+
 ## Author 40 real hand-labeled triage scenarios for `aisf_triage`
 **2026-07-29**
 

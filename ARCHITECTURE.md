@@ -16,7 +16,7 @@ crate, so new providers/benchmarks are additive and never touch the engine.
 
 | Port | Adapter(s) | Notes |
 | ---- | ---------- | ----- |
-| `ChatBackend` (`skillopt-core::traits`) | `AnthropicBackend`, `OpenAiCompatBackend`, `AzureOpenAiBackend`, `AisfStageBackend`, `MockBackend` (`skillopt-model`) | engine only ever holds `Arc<dyn ChatBackend>`; Mock is network-free, used in tests and CLI dry runs. `AisfStageBackend` runs a whole multi-turn, governed tool-use loop (a real AISF factory stage, via its `eval-stage` subcommand) inside one `chat()` call — the trait never promised "one API call," so this needed no signature change. |
+| `ChatBackend` (`skillopt-core::traits`) | `AnthropicBackend`, `OpenAiCompatBackend`, `AzureOpenAiBackend`, `AisfStageBackend`, `ClaudeCliBackend`, `MockBackend` (`skillopt-model`) | engine only ever holds `Arc<dyn ChatBackend>`; Mock is network-free, used in tests and CLI dry runs. `AisfStageBackend` runs a whole multi-turn, governed tool-use loop (a real AISF factory stage, via its `eval-stage` subcommand) inside one `chat()` call — the trait never promised "one API call," so this needed no signature change. `ClaudeCliBackend` shells out to the `claude` CLI's print mode (a plain single-turn completion, tools disabled) instead of a raw Anthropic HTTP call, for environments with a working CLI session but no portable API key. |
 | `Environment` (`skillopt-core::traits`) | `SyntheticArithmeticEnv`, `AisfTriageEnv` (`skillopt-envs`) | programmatic `score()` keeps the validation gate independent of any LLM call. `AisfTriageEnv` loads hand-labeled scenarios from a JSONL file instead of generating a synthetic distribution. |
 
 ## Structure
@@ -27,7 +27,7 @@ literal at the crate boundary rather than a module-level convention:
   anchor-based skill-edit engine, YAML config, batch scheduler, and `Engine`
   (the training loop)
 - `skillopt-model` — `ChatBackend` adapters (Anthropic, OpenAI-compatible,
-  Azure OpenAI, AISF stage, Mock)
+  Azure OpenAI, AISF stage, Claude CLI, Mock)
 - `skillopt-envs` — `Environment` adapters (a synthetic benchmark, plus a
   JSONL-backed one for real AISF scenarios)
 - `skillopt-cli` — the `skillopt` binary wiring config → adapters → `Engine`

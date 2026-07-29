@@ -5,6 +5,7 @@ use skillopt_core::{BackendConfig, ChatBackend, Provider};
 use crate::aisf_stage::AisfStageBackend;
 use crate::anthropic::AnthropicBackend;
 use crate::azure_openai::AzureOpenAiBackend;
+use crate::claude_cli::ClaudeCliBackend;
 use crate::mock::MockBackend;
 use crate::openai_compat::OpenAiCompatBackend;
 
@@ -88,6 +89,10 @@ pub fn build_backend(cfg: &BackendConfig) -> anyhow::Result<Arc<dyn ChatBackend>
                 cfg.model.clone(),
             )))
         }
+        // No key resolution here: `claude`'s own CLI session (OAuth or
+        // whatever else it's configured with) is the auth, not something
+        // this process holds or validates.
+        Provider::ClaudeCli => Ok(Arc::new(ClaudeCliBackend::new(cfg.model.clone()))),
     }
 }
 

@@ -25,6 +25,10 @@ pub enum Provider {
     // behavior ever changes.
     #[serde(rename = "aisf_stage")]
     AisfStage,
+    // Same reasoning as `aisf_stage` above: derive-correct already, spelled
+    // out explicitly anyway.
+    #[serde(rename = "claude_cli")]
+    ClaudeCli,
     Mock,
 }
 
@@ -35,6 +39,8 @@ pub struct BackendConfig {
     /// reinterprets this as the AISF pipeline stage to drive (e.g.
     /// `"triage"`) -- the same kind of per-provider reinterpretation
     /// `azure_openai` already does (`model` = deployment name there).
+    /// `claude_cli` passes this straight through as `claude -p`'s
+    /// `--model` argument (e.g. `"sonnet"` or a full model name).
     pub model: String,
     #[serde(default)]
     pub base_url: Option<String>,
@@ -198,6 +204,10 @@ env:
         assert_eq!(
             serde_yaml::from_str::<Provider>("aisf_stage").unwrap(),
             Provider::AisfStage
+        );
+        assert_eq!(
+            serde_yaml::from_str::<Provider>("claude_cli").unwrap(),
+            Provider::ClaudeCli
         );
         assert_eq!(
             serde_yaml::from_str::<Provider>("mock").unwrap(),

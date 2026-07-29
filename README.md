@@ -46,7 +46,8 @@ crates/
                    (training loop orchestration)
   skillopt-model/  ChatBackend impls: Anthropic Messages API, OpenAI-compatible
                    chat completions (OpenAI/local), Azure OpenAI, aisf_stage
-                   (a real governed agent, driven as a subprocess), and a
+                   (a real governed agent, driven as a subprocess), claude_cli
+                   (shells out to the `claude` CLI's print mode), and a
                    network-free Mock backend for tests and dry runs
   skillopt-envs/   Environment impls: a deterministic, offline synthetic
                    arithmetic word-problem benchmark with programmatic scoring,
@@ -129,6 +130,31 @@ which loads hand-labeled scenarios from a JSONL file
 synthetic distribution — the data-driven counterpart to
 `synthetic_arithmetic`. Only AISF's `triage` stage is wired up so far.
 
+### No API key, but a working `claude` CLI session: `claude_cli`
+
+`provider: claude_cli` shells out to the `claude` CLI's non-interactive
+print mode (`claude -p`) instead of calling the Anthropic API directly.
+Useful wherever a working `claude` CLI session already exists (e.g. an
+OAuth-authenticated Claude Code sandbox) but no portable
+`ANTHROPIC_API_KEY` is available for a raw HTTP client — confirmed in this
+project's own development sandbox, where a plain `curl` to
+`api.anthropic.com` 401s with no key, but `claude -p` already has a
+working session. `model` passes straight through as `claude -p`'s
+`--model` (e.g. `"sonnet"`). All the CLI's own built-in tools are disabled
+(`--tools ""`) and sessions aren't persisted — this is a plain single-turn
+text completion, matching every existing `ChatBackend` call site
+(`Engine` never sends more than one system message plus one user message
+per `chat()` call). That also means it's a fit for the `executor`,
+`optimizer`, or `reflector` role in any config using a plain chat
+environment (e.g. `synthetic_arithmetic`) — but **not** a substitute for
+`aisf_stage`'s executor role, which genuinely needs a governed tool-use
+loop this backend deliberately doesn't provide. See
+`configs/claude_cli_example.yaml` — verified with a real, live, complete
+training run in this project's own sandbox (`0/2 steps accepted, val
+1.0 -> 1.0, test 1.0` at smoke scale — see `RELEASE_NOTES.md`), the first
+non-mock run in this project's history that didn't need an
+`ANTHROPIC_API_KEY`.
+
 ## Config
 
 See `configs/example.yaml` for the full shape. Key `train` knobs, and their
@@ -147,9 +173,11 @@ rough SkillOpt-training analogy:
 Built as a broad-but-bounded first pass:
 
 - **Backends**: Anthropic, any OpenAI-compatible endpoint (including local
-  runners like Ollama), Azure OpenAI, and `aisf_stage` (a real multi-turn,
-  governed agent stage, driven as a subprocess), behind a `ChatBackend`
-  trait, plus a Mock backend for offline tests.
+  runners like Ollama), Azure OpenAI, `aisf_stage` (a real multi-turn,
+  governed agent stage, driven as a subprocess), and `claude_cli` (shells
+  out to the `claude` CLI's print mode — no API key needed, just a working
+  CLI session), behind a `ChatBackend` trait, plus a Mock backend for
+  offline tests.
 - **Benchmark**: one deterministic synthetic environment
   (`synthetic_arithmetic`) so the whole loop is testable without network
   access or API keys — see `crates/skillopt-envs/src/synthetic_arithmetic.rs`.
