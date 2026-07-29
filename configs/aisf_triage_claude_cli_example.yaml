@@ -25,9 +25,10 @@
 # split at the end regardless of any batch-size setting, so keeping this
 # example's call budget small enough to run in a few minutes meant
 # shrinking the dataset itself, not just `batch_size`/`val_batch_size`.
-# Use the full `aisf_triage_labels.jsonl` (see
-# configs/aisf_triage_example.yaml) once you're ready to spend more real
-# `claude -p` calls on a less noisy result.
+# See configs/aisf_triage_claude_cli_full_example.yaml for this same
+# all-`claude_cli` setup against the complete 40-scenario dataset once
+# you're ready to spend more real `claude -p` calls on a less noisy
+# result.
 
 skill_path: skills/aisf_triage_initial.md
 output_dir: out/aisf_triage_claude_cli_example

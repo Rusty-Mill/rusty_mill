@@ -202,6 +202,29 @@ that sounded reasonable but didn't actually pan out got caught before it
 could regress a real agent's real production prompt, without a human
 watching the run at all.
 
+Also verified against the **complete** 40-scenario dataset, not the
+8-row subset — `configs/aisf_triage_claude_cli_full_example.yaml`, same
+setup, `labels_path: data/aisf_triage_labels.jsonl` (24 train / 8 val / 8
+test). All 24 train examples split into 6 real batches (`batch_size: 4`),
+so this is six full rollout/reflect/optimize/validate rounds, not one —
+roughly 5x the call volume and about 20-30 minutes of wall-clock time.
+Result: `0/6 steps accepted, val score 0.500 -> 0.500, test score
+0.500`. Every one of the six optimizer proposals was a real, distinct,
+plausible-sounding edit (tightening P0/P1 severity criteria, adding
+anchor examples, shifting toward impact-based reasoning) — and every one
+of them was correctly rejected, because none of them actually improved
+the held-out score. Read that val number for what it is, though:
+`val_batch_size: 2` was carried over unchanged from the smoke config, so
+the gate was only ever checking 2 of the 8 real val examples per
+decision — a noisy signal (worth 0.5 per example), not the full split.
+The final test score, by contrast, *is* over the complete 8-example test
+split (`train()` always evaluates the entire test set, uncapped by any
+batch setting) — 0.5 there is a real, if unflattering, number: AISF's
+actual `triage` prompt, unedited, gets exactly half of these particular
+held-out scenarios right. Bump `val_batch_size` to `8` for a less noisy
+gate signal on a future run, at the cost of a meaningfully longer one
+(the config file's own comment covers this trade-off).
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive

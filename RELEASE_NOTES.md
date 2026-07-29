@@ -7,6 +7,32 @@ commit instead.
 
 ---
 
+## Run the zero-API-key train loop again against the full 40-scenario dataset
+**2026-07-29**
+
+- **Added:** `configs/aisf_triage_claude_cli_full_example.yaml` — the
+  previous entry's config, unchanged except `labels_path` pointing at
+  the complete `data/aisf_triage_labels.jsonl` (24 train / 8 val / 8
+  test) instead of the 8-row smoke subset.
+- **Verified live:** `0/6 steps accepted, val score 0.500 -> 0.500,
+  test score 0.500` — six real batches (`batch_size: 4` over 24 train
+  examples), each a genuine rollout/reflect/optimize/validate round via
+  `claude -p`, roughly 5x the smoke run's call volume. Every one of the
+  six optimizer proposals was distinct and plausible (tightening P0/P1
+  criteria, adding anchor examples, shifting toward impact-based
+  reasoning); every one was correctly rejected for not actually
+  improving the held-out score.
+- **A real caveat, not swept under the rug:** `val_batch_size: 2` carried
+  over unchanged from the smoke config, so the validation gate itself
+  only ever checked 2 of the 8 real val examples per decision — a noisy
+  signal, not the full split. The final test score is not subject to
+  this: `train()` always evaluates the complete test set regardless of
+  batch settings, so `0.500` there is a real number over all 8 held-out
+  test scenarios — AISF's actual, unedited `triage` prompt gets exactly
+  half of them right. The new config's own header comment documents this
+  trade-off and how to widen the gate (`val_batch_size: 8`) on a future,
+  longer run.
+
 ## Run a real `train` loop end to end with zero API keys
 **2026-07-29**
 
