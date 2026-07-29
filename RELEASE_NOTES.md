@@ -7,6 +7,41 @@ commit instead.
 
 ---
 
+## Author 40 real hand-labeled triage scenarios for `aisf_triage`
+**2026-07-29**
+
+- **Replaced** `data/aisf_triage_labels.jsonl`'s 8 illustrative placeholder
+  rows with 40 real hand-labeled scenarios (24 train / 8 val / 8 test),
+  each judged against a stated rubric rather than by feel — see the new
+  `data/aisf_triage_labels.md` for the P0-P3 definitions, the rationale
+  for including multi-issue scenarios (AISF's triage prompt says "fetch
+  issues, classify the highest-priority one" — plural in, one priority
+  out — so a few scenarios list 2 issues and `expected_priority` is the
+  worse one, to actually exercise that judgment instead of just grading
+  single-issue classification), and the known small-split-noise
+  limitation at val/test size 8 (same lesson `docs/USAGE.md` §5 already
+  documents for `synthetic_arithmetic`).
+- Every split (train/val/test) includes all four priority levels, so the
+  validation gate is never scoring against a split silently missing a
+  class. Distribution: 12 P0 / 11 P1 / 10 P2 / 7 P3 across the 40 — a
+  deliberate skew toward P0/P1 (more support at the highest-stakes
+  boundary) rather than a flat split.
+- Categories spread across outages/availability, security (auth bypass,
+  stored XSS, tenant-isolation leak, privilege escalation, session-token
+  invalidation), payments/billing, data loss/integrity, auth, mobile,
+  browser-specific, performance, notifications, search, UI/UX, docs, and
+  low-priority enhancement requests — titles written to read like real
+  issue titles, not ones that announce their own priority.
+- Verified against the real parser, not just inline test strings: `cargo
+  run -p skillopt-cli -- eval --split train` against
+  `configs/aisf_triage_example.yaml` successfully parsed all 40 rows via
+  `AisfTriageEnv`/`build_env` and proceeded into an actual rollout attempt
+  against a real, locally built AISF binary (correctly stopping only at
+  `MissingApiKey` — no live Anthropic key in this session).
+- Data + docs only; no code changes. Existing `aisf_triage` unit tests
+  (which exercise the parser/scorer against inline fixture strings, not
+  this file) are unaffected and still pass.
+
 ## Add `aisf_stage` backend + `aisf_triage` env: optimize a real agent's prompt
 **2026-07-29**
 
