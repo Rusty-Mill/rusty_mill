@@ -175,6 +175,33 @@ rubber-stamp as `Pass`. See AISF's own `RELEASE_NOTES.md` for the real
 (previously-latent) bugs this project's live-verification work
 uncovered along the way, in both directions.
 
+Eval only exercises the executor role, though — a real `train` run needs
+`optimizer`/`reflector` live too, and with `aisf_stage` restricted to
+`executor` (see the config comments above), the natural zero-API-key
+choice for those two roles is `claude_cli` itself, the plain
+`ChatBackend` described next. `configs/aisf_triage_claude_cli_example.yaml`
+puts all three together: `executor: aisf_stage` (driving AISF's real
+`triage` agent via `claude_cli`+the MCP bridge, as above), `optimizer`/
+`reflector: claude_cli`. Since `train()` visits every training example
+each epoch and evaluates the *entire* test split at the end regardless
+of `batch_size`/`val_batch_size`, keeping a real run's call budget small
+enough to finish in a few minutes meant shrinking the dataset itself:
+`data/aisf_triage_labels_smoke.jsonl` is a genuine 8-row *subset* of the
+real 40-scenario set (4 train covering all four priorities, 2 val, 2
+test), not fabricated data. **Verified live, a complete `train` run with
+zero API keys anywhere in the chain:** `0/1 steps accepted, val score
+1.000 -> 1.000, test score 1.000`. Every piece ran for real — 4 real
+governed `triage` rollouts via `claude -p`, 4 real reflector critiques,
+one real optimizer call that proposed a genuine, well-formed edit
+("codify explicit priority-triggering criteria with concrete anchor
+examples"), which applied cleanly but then scored 0.5 on the val subset
+— worse than the unmodified skill's 1.0 — so the validation gate
+correctly rejected it and kept the original prompt as best. That's the
+loop's safety property doing exactly its job: a real optimizer proposal
+that sounded reasonable but didn't actually pan out got caught before it
+could regress a real agent's real production prompt, without a human
+watching the run at all.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive

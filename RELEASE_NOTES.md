@@ -7,6 +7,35 @@ commit instead.
 
 ---
 
+## Run a real `train` loop end to end with zero API keys
+**2026-07-29**
+
+- **Added:** `configs/aisf_triage_claude_cli_example.yaml` — every
+  role live, no `ANTHROPIC_API_KEY` anywhere: `executor: aisf_stage`
+  (AISF's real `triage` agent, driven via `claude_cli` + the MCP
+  bridge) and `optimizer`/`reflector: claude_cli`. Paired with
+  `data/aisf_triage_labels_smoke.jsonl`, a genuine 8-row subset (4
+  train / 2 val / 2 test, one of each priority in the train rows) of
+  the real 40-scenario `aisf_triage_labels.jsonl` — not fabricated
+  data, just fewer of the same real rows, sized down because `train()`
+  visits every training example each epoch and evaluates the entire
+  test split at the end regardless of `batch_size`/`val_batch_size`,
+  and this needed to finish in a few real `claude -p` calls' worth of
+  time, not dozens.
+- **Verified live:** a complete `train` run — `0/1 steps accepted, val
+  score 1.000 -> 1.000, test score 1.000`. Every call was real: 4
+  governed `triage` rollouts, 4 reflector critiques, one optimizer
+  call that proposed a real, well-formed edit ("codify explicit
+  priority-triggering criteria with concrete anchor examples"). The
+  edit applied cleanly but scored 0.5 on the val subset against the
+  unedited skill's 1.0, so the validation gate correctly rejected it
+  and kept the original prompt as best — the loop's safety property
+  working exactly as designed, with a real model on every side of it
+  and nobody watching.
+- This is the first `train` (not just `eval`) run in this project's
+  history against AISF's real governed agent rather than a mock or the
+  synthetic benchmark.
+
 ## Close the last aisf_stage asymmetry: validation gets a claude_cli path too
 **2026-07-29**
 
