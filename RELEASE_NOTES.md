@@ -7,6 +7,30 @@ commit instead.
 
 ---
 
+## Close the last aisf_stage asymmetry: validation gets a claude_cli path too
+**2026-07-29**
+
+- **Closed:** the one real asymmetry the previous entry left open. AISF
+  grew a `claude_cli`/MCP-bridge driver for its `validation` stage
+  (`mcp_bridge.rs`'s dispatch/governance/snapshot logic now serves
+  either stage, parameterized rather than duplicated) — no code changed
+  on this side of the fence at all, since `AisfStageBackend` already set
+  `EVAL_STAGE_DRIVER=claude_cli` unconditionally on every spawned
+  `eval-stage` process; AISF's own side just started honoring it for
+  `validation` too.
+- **Verified live, zero API keys anywhere in the chain:**
+  `skillopt-cli eval` against `configs/aisf_validation_example.yaml`'s
+  val split scored **0.75** (6/8 correct), matching `aisf_triage`'s own
+  live 0.75 from earlier in this project's history. One of the eight
+  scenarios directly exercises the rubric's central claim in
+  `data/aisf_validation_labels.md` — `tests_passed: true` with an
+  authorization check quietly commented out of the diff — and the real
+  governed agent, driven by `claude -p` with no API key at all, did not
+  reflexively report `Pass`.
+- README and `docs/USAGE.md` updated to describe both stages
+  symmetrically now, rather than flagging `validation` as the one that
+  still needs a real key.
+
 ## Attempt a real live `aisf_validation` run with a human-provided API key
 **2026-07-29**
 

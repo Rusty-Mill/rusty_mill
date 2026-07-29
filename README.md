@@ -137,44 +137,43 @@ aisf_validation }` (`crates/skillopt-envs/src/aisf_validation.rs`), a
 genuinely separate `Environment` from `aisf_triage` (a PR review isn't a
 GitHub issue list — different scenario shape, different scorer field:
 `verdict`, not `priority`). `AisfStageBackend` needed zero changes to
-support it — the stage name was always a plain string. One real
-asymmetry, stated honestly rather than papered over: AISF's own
-`eval-stage` has no `claude_cli`/MCP-bridge driver for `validation` yet
-(only `triage`), so running this executor role live still needs a real
-`ANTHROPIC_API_KEY`.
+support it — the stage name was always a plain string.
 
-That path was actually attempted, with a real key supplied by a human,
-against this config's val split. It surfaced a real bug one level down,
-in AISF itself, not in anything here: AISF's `reqwest` client trusted
+For a while there was one real asymmetry here, stated honestly rather
+than papered over: AISF's own `eval-stage` had no `claude_cli`/
+MCP-bridge driver for `validation` (only `triage`), so running this
+executor role live needed a real `ANTHROPIC_API_KEY`. That path was
+actually attempted, with a real key supplied by a human, and surfaced a
+real bug one level down in AISF itself: its `reqwest` client trusted
 only a bundled Mozilla root list, so it couldn't get past this sandbox's
 TLS-intercepting egress proxy even though that proxy's CA was already
-installed system-wide — every prior "reached the expected
-TLS-certificate failure" note in AISF's own history turned out to be
-this, not simply a missing key. Fixed upstream in AISF (switched to
-`rustls-tls-native-roots`; see AISF's own `RELEASE_NOTES.md`). With that
-fix, the same run got through the TLS handshake and reached the real
-Anthropic API for the first time in either project's history — which
-then correctly rejected the request with an insufficient-credit-balance
-error: a genuine API-level response, not a network failure. So the
-boundary has moved, precisely: parsing, wire format, both driver
-dispatch paths, and now the network path to Anthropic itself are all
-confirmed live and correct. A real model completion for `validation`
-still hasn't happened in this project's history — but only because that
-specific key's account had no available credit, not for any technical
-reason.
+installed system-wide. Fixed upstream in AISF
+(`rustls-tls-native-roots`), which got the run through to a genuine,
+distinct API-level rejection (insufficient credit on that key's
+account) rather than a network failure — confirming everything up to
+the model call itself was correct, with only that one key's billing
+still in the way.
 
-No `ANTHROPIC_API_KEY` in your environment? `AisfStageBackend` sets
-`EVAL_STAGE_DRIVER=claude_cli` on the spawned `eval-stage` process
-unconditionally (harmless when a real key *is* set — AISF checks for one
-first and only falls back to this) — AISF's own side then drives the same
-governed tool loop through `claude -p` via an in-process MCP server
-instead of a raw Anthropic call. **Verified end-to-end in this project's
-own sandbox with zero API keys anywhere in the chain:** `skillopt-cli
-eval` against `configs/aisf_triage_example.yaml` scored **0.75** (6/8
-correct) on the real, hand-labeled val split — a genuinely meaningful
-result from a real governed agent, not a mock. See AISF's own
-`RELEASE_NOTES.md` for the two real (previously-latent) bugs this
-uncovered along the way.
+**The asymmetry itself is now closed.** AISF grew a `claude_cli`/
+MCP-bridge driver for `validation` too — `mcp_bridge.rs`'s dispatch/
+governance/snapshot logic now serves either stage, parameterized by
+which one it's asked for rather than duplicated. No `ANTHROPIC_API_KEY`
+in your environment? `AisfStageBackend` sets `EVAL_STAGE_DRIVER=
+claude_cli` on the spawned `eval-stage` process unconditionally
+(harmless when a real key *is* set — AISF checks for one first and only
+falls back to this) — AISF's own side then drives the same governed
+tool loop through `claude -p` via an in-process MCP server instead of a
+raw Anthropic call, for `triage` and `validation` alike now. **Verified
+end-to-end in this project's own sandbox with zero API keys anywhere in
+the chain, for both stages:** `skillopt-cli eval` scored **0.75** (6/8
+correct) against `configs/aisf_triage_example.yaml`'s val split, and
+**0.75** again against `configs/aisf_validation_example.yaml`'s —
+genuinely meaningful results from a real governed agent, not a mock,
+including a scenario where `tests_passed: true` but the diff quietly
+weakened an authorization check, which the agent correctly did not
+rubber-stamp as `Pass`. See AISF's own `RELEASE_NOTES.md` for the real
+(previously-latent) bugs this project's live-verification work
+uncovered along the way, in both directions.
 
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
