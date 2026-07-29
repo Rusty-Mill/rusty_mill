@@ -17,12 +17,24 @@ pub enum Provider {
     // "azure_openai" every doc/config in this repo uses.
     #[serde(rename = "azure_openai")]
     AzureOpenAi,
+    // `snake_case` alone would already derive "aisf_stage" here (no
+    // internal-capital pitfall the way "OpenAi"/"AzureOpenAi" have), but
+    // every other provider in this file spells its wire string out
+    // explicitly rather than relying on the derive being right, and this
+    // one shouldn't be the exception that silently breaks if `rename_all`'s
+    // behavior ever changes.
+    #[serde(rename = "aisf_stage")]
+    AisfStage,
     Mock,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
     pub provider: Provider,
+    /// For every provider except `aisf_stage`, the model name. `aisf_stage`
+    /// reinterprets this as the AISF pipeline stage to drive (e.g.
+    /// `"triage"`) -- the same kind of per-provider reinterpretation
+    /// `azure_openai` already does (`model` = deployment name there).
     pub model: String,
     #[serde(default)]
     pub base_url: Option<String>,
@@ -38,6 +50,10 @@ pub struct BackendConfig {
     /// other provider. Defaults to a recent stable GA version if unset.
     #[serde(default)]
     pub api_version: Option<String>,
+    /// `aisf_stage`'s path to the built AISF `software-factory` binary.
+    /// Ignored by every other provider.
+    #[serde(default)]
+    pub aisf_binary_path: Option<PathBuf>,
 }
 
 fn default_max_tokens() -> u32 {
@@ -178,6 +194,10 @@ env:
         assert_eq!(
             serde_yaml::from_str::<Provider>("azure_openai").unwrap(),
             Provider::AzureOpenAi
+        );
+        assert_eq!(
+            serde_yaml::from_str::<Provider>("aisf_stage").unwrap(),
+            Provider::AisfStage
         );
         assert_eq!(
             serde_yaml::from_str::<Provider>("mock").unwrap(),

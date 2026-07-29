@@ -45,10 +45,12 @@ crates/
                    edit engine, YAML config, batch scheduler, the engine
                    (training loop orchestration)
   skillopt-model/  ChatBackend impls: Anthropic Messages API, OpenAI-compatible
-                   chat completions (OpenAI/local), Azure OpenAI, and a
+                   chat completions (OpenAI/local), Azure OpenAI, aisf_stage
+                   (a real governed agent, driven as a subprocess), and a
                    network-free Mock backend for tests and dry runs
   skillopt-envs/   Environment impls: a deterministic, offline synthetic
-                   arithmetic word-problem benchmark with programmatic scoring
+                   arithmetic word-problem benchmark with programmatic scoring,
+                   plus aisf_triage, a JSONL-backed real-scenario benchmark
   skillopt-cli/    the `skillopt` binary (`train`, `eval` subcommands)
 configs/example.yaml   example run configuration
 skills/initial.md      example starting skill document
@@ -102,6 +104,31 @@ deployment name in the URL instead of `model` in the body), so it's its own
 (`base_url` is the resource endpoint, `model` is the deployment name,
 `api_key_env` defaults to `AZURE_OPENAI_API_KEY`, `api_version` is optional).
 
+### Optimizing an agent's prompt inside a real system: `aisf_stage`
+
+`provider: aisf_stage` treats one stage of a real, tool-using, multi-turn
+agent system as the executor — the "skill" being trained is that agent's
+actual system prompt in production, not a synthetic benchmark stand-in.
+It's built against [AISF](https://github.com/baileyrd/AISF), an AI
+software factory with its own governance layer (every tool call gated
+outside the model's control), by driving its `eval-stage` subcommand as a
+subprocess per rollout: `chat()` writes the candidate skill to a scratch
+`FACTORY_PROMPTS_DIR`, pipes the example's scenario JSON to `eval-stage`'s
+stdin, and returns its JSON output (report + full audit log) unparsed for
+the environment to score.
+
+Nothing about this needed engine or trait changes — `ChatBackend::chat`'s
+signature never promised "one API call," so a whole multi-turn, governed
+tool-use loop running inside a single `chat()` call satisfies it exactly
+the way a single Anthropic request does. See
+`configs/aisf_triage_example.yaml` (`model` is reinterpreted as the AISF
+stage name, e.g. `"triage"`; `aisf_binary_path` points at AISF's built
+`software-factory` binary) and the paired `env: { name: aisf_triage }`,
+which loads hand-labeled scenarios from a JSONL file
+(`crates/skillopt-envs/src/aisf_triage.rs`) instead of generating a
+synthetic distribution — the data-driven counterpart to
+`synthetic_arithmetic`. Only AISF's `triage` stage is wired up so far.
+
 ## Config
 
 See `configs/example.yaml` for the full shape. Key `train` knobs, and their
@@ -120,11 +147,14 @@ rough SkillOpt-training analogy:
 Built as a broad-but-bounded first pass:
 
 - **Backends**: Anthropic, any OpenAI-compatible endpoint (including local
-  runners like Ollama), and Azure OpenAI, behind a `ChatBackend` trait, plus
-  a Mock backend for offline tests.
+  runners like Ollama), Azure OpenAI, and `aisf_stage` (a real multi-turn,
+  governed agent stage, driven as a subprocess), behind a `ChatBackend`
+  trait, plus a Mock backend for offline tests.
 - **Benchmark**: one deterministic synthetic environment
   (`synthetic_arithmetic`) so the whole loop is testable without network
   access or API keys — see `crates/skillopt-envs/src/synthetic_arithmetic.rs`.
+  Also `aisf_triage`, a JSONL-backed real-scenario benchmark for
+  `aisf_stage`'s triage agent (`crates/skillopt-envs/src/aisf_triage.rs`).
   Adding a real benchmark (e.g. a QA dataset) means implementing
   `Environment` and registering it in `skillopt-envs`'s factory.
 - **Not implemented**: a WebUI/monitoring dashboard, a MiniMax backend, and

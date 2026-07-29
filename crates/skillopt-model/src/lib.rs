@@ -1,9 +1,11 @@
+pub mod aisf_stage;
 pub mod anthropic;
 pub mod azure_openai;
 pub mod factory;
 pub mod mock;
 pub mod openai_compat;
 
+pub use aisf_stage::AisfStageBackend;
 pub use anthropic::AnthropicBackend;
 pub use azure_openai::AzureOpenAiBackend;
 pub use factory::build_backend;

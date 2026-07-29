@@ -7,6 +7,57 @@ commit instead.
 
 ---
 
+## Add `aisf_stage` backend + `aisf_triage` env: optimize a real agent's prompt
+**2026-07-29**
+
+- **Added:** `Provider::AisfStage` + `AisfStageBackend`
+  (`crates/skillopt-model/src/aisf_stage.rs`). Treats one stage of a real,
+  tool-using, multi-turn agent as the executor by driving
+  [AISF](https://github.com/baileyrd/AISF)'s new `eval-stage` subcommand
+  as a subprocess per rollout — writes the candidate skill to a scratch
+  `FACTORY_PROMPTS_DIR`, pipes the example's scenario JSON to stdin,
+  returns the JSON output unparsed. **No `skillopt-core` engine/trait
+  changes** — `ChatBackend::chat`'s signature never promised "one API
+  call," so a whole governed tool-use loop running inside a single
+  `chat()` satisfies it exactly like a single Anthropic request would.
+  `config.rs` gets one new `Provider` variant and one new `BackendConfig`
+  field (`aisf_binary_path`), the same kind of additive config-only change
+  Azure OpenAI added — `model` is reinterpreted as the AISF stage name
+  (e.g. `"triage"`) for this provider, the same reinterpretation Azure
+  already does for `model` (deployment name).
+- **Added:** `AisfTriageEnv` + `AisfTriageParams`
+  (`crates/skillopt-envs/src/aisf_triage.rs`), the data-driven counterpart
+  to `synthetic_arithmetic`: loads hand-labeled scenarios from a JSONL
+  file (one `LabeledRow` per line, a `split` field instead of separate
+  train/val/test files) instead of generating a distribution. `score`
+  reads two programmatic signals straight off `eval-stage`'s JSON output
+  — priority match, and whether the audit log contains any `deny`
+  decision — no LLM judge. **Known limitation, stated explicitly:** AISF's
+  own triage stage silently defaults to `P2` when `report_triage` is never
+  called at all, so that failure mode is indistinguishable from a genuine
+  `P2` here unless the expected priority also happens to be `P2` — a
+  property of `eval-stage`'s current output shape, not something this
+  scorer can see past.
+- **Added:** `configs/aisf_triage_example.yaml`, `skills/aisf_triage_initial.md`
+  (a copy of AISF's real `prompts/triage.md`), and
+  `data/aisf_triage_labels.jsonl` (8 illustrative hand-labeled scenarios —
+  a demonstration of the format, not the full labeled set a real training
+  run would want). Verified end-to-end against a real, locally built AISF
+  binary: `cargo run -p skillopt-cli -- eval` with this config correctly
+  reaches the subprocess, delivers the scenario, and surfaces AISF's own
+  `MissingApiKey` error cleanly (no live Anthropic key available in this
+  session, so a real model-driven rollout is unverified — the same
+  limitation both projects already disclose).
+- New tests: `aisf_stage`'s marker-extraction (round-tripped against the
+  real `skillopt_core::prompts::executor_system_prompt`, not a copy of its
+  format string), factory wiring (missing `aisf_binary_path` errors), and
+  an `#[ignore]`d subprocess-boundary test (`tests/aisf_stage_smoke.rs`,
+  needs a sibling AISF checkout, no API key) proving the wire format is
+  correct up to AISF's own missing-key check. `aisf_triage`'s JSONL
+  parsing/split-partitioning and scoring (correct+clean, correct+denied,
+  wrong, unparseable, missing-audit) are all plain unit tests. 53 tests
+  total across the workspace, all passing; `cargo fmt`/`clippy` clean.
+
 ## Add docs/USAGE.md: practical guide to running the loop well
 **2026-07-29**
 

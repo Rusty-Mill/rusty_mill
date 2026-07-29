@@ -221,6 +221,7 @@ see earlier ones' effects.
 | `openai_compatible` (local) | `base_url: http://localhost:11434/v1`, **no** `api_key_env` | Ollama; auth header is omitted entirely when no key is configured. `configs/ollama_example.yaml`. |
 | `openai_compatible` (Qwen) | `base_url: https://dashscope.aliyuncs.com/compatible-mode/v1` | DashScope compat mode. `configs/qwen_example.yaml` — verified against the documented contract, not a live call. |
 | `azure_openai` | `base_url` = resource endpoint, `model` = **deployment name**, `api_key_env` (default `AZURE_OPENAI_API_KEY`), optional `api_version` | Needs its own provider: `api-key` header, deployment in the URL. `configs/azure_openai_example.yaml`. |
+| `aisf_stage` | `model` = **AISF stage name** (e.g. `"triage"`), `aisf_binary_path` = path to AISF's built `software-factory` binary | Not a chat API — drives a real, governed, multi-turn agent stage via AISF's `eval-stage` subcommand as a subprocess per rollout. Only for `executor`; `optimizer`/`reflector` should stay plain chat backends. `configs/aisf_triage_example.yaml`. |
 | `mock` | — | Network-free. Dry runs and tests only. |
 
 Write these provider strings exactly as spelled above — `openai_compatible`,
@@ -229,6 +230,14 @@ not `open_ai_compatible` (there's a regression test pinning this).
 Local models are the cheapest way to iterate on *config and difficulty tuning*;
 switch to a hosted optimizer once you care about the resulting skill, since
 edit quality is where the strong model earns its cost.
+
+`aisf_stage` is a different kind of backend from the rest of this table:
+the other five are "call an LLM," this one is "run a real multi-turn agent
+under governance and treat the whole thing as one chat call." The cost
+model in §4 undercounts it badly — one `aisf_stage` "executor call" is
+actually a whole tool-use loop, several real API calls hidden inside a
+single `chat()`. Recompute your `val_batch_size`/`train_size` budget
+assuming several calls per rollout, not one, before sizing a real run.
 
 ---
 
@@ -250,7 +259,11 @@ impl Environment for MyEnv {
 
 Register it in `crates/skillopt-envs/src/factory.rs` and name it in your
 config's `env.name`. Nothing in `skillopt-core` changes — that's the point of
-the trait boundary.
+the trait boundary. `AisfTriageEnv`
+(`crates/skillopt-envs/src/aisf_triage.rs`) is a worked example of this for
+a real, hand-labeled scenario set (JSONL, one example per line, a `split`
+field instead of separate train/val/test files) rather than a generated
+distribution.
 
 The one design rule: **`score` must be programmatic and deterministic.** The
 validation gate is only trustworthy because scoring never involves a model

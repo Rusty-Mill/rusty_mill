@@ -1,0 +1,8 @@
+{"id": "aisf-triage-t01", "split": "train", "scenario": {"issues": [{"number": 201, "title": "Checkout button dead on Safari", "labels": ["bug", "checkout"]}]}, "expected_priority": "P0"}
+{"id": "aisf-triage-t02", "split": "train", "scenario": {"issues": [{"number": 202, "title": "Typo in the onboarding email subject line", "labels": ["docs"]}]}, "expected_priority": "P3"}
+{"id": "aisf-triage-t03", "split": "train", "scenario": {"issues": [{"number": 203, "title": "Dashboard chart labels overlap on narrow screens", "labels": ["bug", "ui"]}]}, "expected_priority": "P2"}
+{"id": "aisf-triage-t04", "split": "train", "scenario": {"issues": [{"number": 204, "title": "Password reset emails never arrive", "labels": ["bug", "auth"]}]}, "expected_priority": "P0"}
+{"id": "aisf-triage-t05", "split": "train", "scenario": {"issues": [{"number": 205, "title": "Add dark mode toggle to settings page", "labels": ["enhancement"]}]}, "expected_priority": "P3"}
+{"id": "aisf-triage-v01", "split": "val", "scenario": {"issues": [{"number": 206, "title": "Export-to-CSV silently drops rows over 10k", "labels": ["bug", "data"]}]}, "expected_priority": "P1"}
+{"id": "aisf-triage-v02", "split": "val", "scenario": {"issues": [{"number": 207, "title": "API returns 500 for all authenticated requests", "labels": ["bug", "api", "outage"]}]}, "expected_priority": "P0"}
+{"id": "aisf-triage-te01", "split": "test", "scenario": {"issues": [{"number": 208, "title": "Sidebar icon slightly misaligned in Firefox", "labels": ["bug", "ui"]}]}, "expected_priority": "P3"}
