@@ -7,6 +7,39 @@ commit instead.
 
 ---
 
+## Attempt a real live `aisf_validation` run with a human-provided API key
+**2026-07-29**
+
+- **Attempted:** a genuinely live `aisf_stage` executor run against
+  `configs/aisf_validation_example.yaml`'s val split, using a real
+  `ANTHROPIC_API_KEY` a human supplied directly in conversation (used
+  only as an in-memory environment variable for the duration of the
+  commands that needed it — never written to any file, config, or
+  commit in either repo).
+- **Found and fixed a real bug, but in AISF, not here:** the run failed
+  with a TLS handshake error (`invalid peer certificate: UnknownIssuer`)
+  against this sandbox's TLS-intercepting egress proxy, even though that
+  proxy's CA was already installed system-wide — AISF's `reqwest` client
+  only trusted a bundled Mozilla root list, never the OS store. Every
+  prior "reached the expected TLS-certificate failure at the first real
+  Anthropic API call" note in AISF's own `CLAUDE.md` history turned out
+  to be this exact bug, not simply an absent key — the two are
+  indistinguishable from the caller's side without a real key on hand.
+  Fixed upstream in AISF (`rustls-tls` → `rustls-tls-native-roots`,
+  still pure-Rust rustls, no openssl-sys); see AISF's own
+  `RELEASE_NOTES.md`.
+- **Verified live, past that fix:** the run reached the real Anthropic
+  API for the first time in either project's history and got a genuine,
+  distinct API-level response back — an insufficient-credit-balance
+  rejection, not a network error. The boundary from the previous entry's
+  "the actual live model call is the one piece not yet possible here"
+  has moved precisely to that: everything up to and including the
+  network path to Anthropic is now confirmed live and correct; a real
+  model *completion* for `validation` still hasn't happened, purely
+  because that specific key's account had no available credit.
+- README updated to describe this precisely rather than repeat the
+  now-stale "not yet possible" framing.
+
 ## Add `aisf_validation` env + 40 real labeled scenarios for AISF's validation stage
 **2026-07-29**
 

@@ -140,11 +140,28 @@ GitHub issue list — different scenario shape, different scorer field:
 support it — the stage name was always a plain string. One real
 asymmetry, stated honestly rather than papered over: AISF's own
 `eval-stage` has no `claude_cli`/MCP-bridge driver for `validation` yet
-(only `triage`), so running this executor role live currently still
-needs a real `ANTHROPIC_API_KEY` — verified up to exactly that boundary
-in this project's own sandbox (parsing, wire format, and both driver
-dispatch paths all confirmed correct; the actual live model call is the
-one piece not yet possible here).
+(only `triage`), so running this executor role live still needs a real
+`ANTHROPIC_API_KEY`.
+
+That path was actually attempted, with a real key supplied by a human,
+against this config's val split. It surfaced a real bug one level down,
+in AISF itself, not in anything here: AISF's `reqwest` client trusted
+only a bundled Mozilla root list, so it couldn't get past this sandbox's
+TLS-intercepting egress proxy even though that proxy's CA was already
+installed system-wide — every prior "reached the expected
+TLS-certificate failure" note in AISF's own history turned out to be
+this, not simply a missing key. Fixed upstream in AISF (switched to
+`rustls-tls-native-roots`; see AISF's own `RELEASE_NOTES.md`). With that
+fix, the same run got through the TLS handshake and reached the real
+Anthropic API for the first time in either project's history — which
+then correctly rejected the request with an insufficient-credit-balance
+error: a genuine API-level response, not a network failure. So the
+boundary has moved, precisely: parsing, wire format, both driver
+dispatch paths, and now the network path to Anthropic itself are all
+confirmed live and correct. A real model completion for `validation`
+still hasn't happened in this project's history — but only because that
+specific key's account had no available credit, not for any technical
+reason.
 
 No `ANTHROPIC_API_KEY` in your environment? `AisfStageBackend` sets
 `EVAL_STAGE_DRIVER=claude_cli` on the spawned `eval-stage` process
