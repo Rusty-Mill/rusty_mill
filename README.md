@@ -130,6 +130,19 @@ which loads hand-labeled scenarios from a JSONL file
 synthetic distribution — the data-driven counterpart to
 `synthetic_arithmetic`. Only AISF's `triage` stage is wired up so far.
 
+No `ANTHROPIC_API_KEY` in your environment? `AisfStageBackend` sets
+`EVAL_STAGE_DRIVER=claude_cli` on the spawned `eval-stage` process
+unconditionally (harmless when a real key *is* set — AISF checks for one
+first and only falls back to this) — AISF's own side then drives the same
+governed tool loop through `claude -p` via an in-process MCP server
+instead of a raw Anthropic call. **Verified end-to-end in this project's
+own sandbox with zero API keys anywhere in the chain:** `skillopt-cli
+eval` against `configs/aisf_triage_example.yaml` scored **0.75** (6/8
+correct) on the real, hand-labeled val split — a genuinely meaningful
+result from a real governed agent, not a mock. See AISF's own
+`RELEASE_NOTES.md` for the two real (previously-latent) bugs this
+uncovered along the way.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive
@@ -146,9 +159,11 @@ text completion, matching every existing `ChatBackend` call site
 (`Engine` never sends more than one system message plus one user message
 per `chat()` call). That also means it's a fit for the `executor`,
 `optimizer`, or `reflector` role in any config using a plain chat
-environment (e.g. `synthetic_arithmetic`) — but **not** a substitute for
-`aisf_stage`'s executor role, which genuinely needs a governed tool-use
-loop this backend deliberately doesn't provide. See
+environment (e.g. `synthetic_arithmetic`) — but this backend itself is
+**not** a substitute for a governed tool-use loop, so it can't drive
+`aisf_stage`'s executor role directly (that role needs `aisf_stage`
+itself; see above for how *that* gets a no-key path of its own, via
+AISF's own separate `claude -p` + MCP bridge, not this backend). See
 `configs/claude_cli_example.yaml` — verified with a real, live, complete
 training run in this project's own sandbox (`0/2 steps accepted, val
 1.0 -> 1.0, test 1.0` at smoke scale — see `RELEASE_NOTES.md`), the first

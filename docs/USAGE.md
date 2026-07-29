@@ -248,10 +248,16 @@ If you're in a sandbox with a working `claude` CLI session but no
 `ANTHROPIC_API_KEY` (this project's own development environment is one),
 `claude_cli` is what actually gets you a *real* run rather than a mock
 one — every other backend in this table needs a portable API key
-`claude_cli` doesn't. It cannot stand in for `aisf_stage`'s executor role,
-though: that role needs a governed tool-use loop, and `claude_cli`
-deliberately runs with all built-in tools disabled, as a plain text
-completion.
+`claude_cli` doesn't. This `claude_cli` *backend* can't stand in for
+`aisf_stage`'s executor role directly (that role needs a governed
+tool-use loop, and this backend deliberately runs with all built-in tools
+disabled, as a plain text completion) — but `aisf_stage` gets its own,
+separate no-key path: `AisfStageBackend` always sets
+`EVAL_STAGE_DRIVER=claude_cli` on the spawned `eval-stage` process, and
+AISF's own side drives the governed loop through `claude -p` via an
+in-process MCP server instead. Verified end-to-end in this project's own
+sandbox with zero API keys anywhere: `eval` against
+`configs/aisf_triage_example.yaml` scored 0.75 on the real val split.
 
 ---
 

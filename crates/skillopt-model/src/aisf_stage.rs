@@ -105,6 +105,13 @@ impl ChatBackend for AisfStageBackend {
             .arg("eval-stage")
             .arg(&self.stage)
             .env("FACTORY_PROMPTS_DIR", &scratch.0)
+            // Harmless when a real ANTHROPIC_API_KEY is set in this
+            // process's own environment -- AISF's eval-stage checks for
+            // a key first and only consults this as a fallback -- but it
+            // means a sandbox with a working `claude` CLI session and no
+            // key (this crate's own development sandbox, for one) just
+            // works without the caller having to remember to export it.
+            .env("EVAL_STAGE_DRIVER", "claude_cli")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

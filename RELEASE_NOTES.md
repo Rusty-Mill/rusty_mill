@@ -7,6 +7,48 @@ commit instead.
 
 ---
 
+## `aisf_stage` runs fully live too: AISF's own claude_cli + MCP bridge
+**2026-07-29**
+
+- **Changed:** `AisfStageBackend::chat` now sets `EVAL_STAGE_DRIVER=
+  claude_cli` on the spawned `eval-stage` process unconditionally
+  (`crates/skillopt-model/src/aisf_stage.rs`). Harmless when a real
+  `ANTHROPIC_API_KEY` is already set — AISF checks for a key first and
+  only consults this as a fallback — but it means a sandbox with a
+  working `claude` CLI session and no key just works, without the caller
+  remembering to export anything themselves.
+- **What changed on AISF's side** (see its own `RELEASE_NOTES.md` for the
+  full detail): `eval-stage triage` now has a second driver alongside its
+  original Anthropic-API one. `EVAL_STAGE_DRIVER=claude_cli` routes it
+  through `claude -p` instead, talking to a new in-process MCP server
+  (AISF's `src/mcp_bridge.rs`) that exposes `fetch_github_issues`/
+  `comment_on_issue`/`report_triage` directly — every call still gated
+  through AISF's own `governance::authorize()` first, so which model is
+  driving never changes what's allowed to happen. Prints the exact same
+  JSON outcome shape either way, so nothing on this side (`AisfStageBackend`,
+  `AisfTriageEnv`) needed to change to consume it.
+- **This is the first fully live, zero-API-key run of the `aisf_triage`
+  executor role — not just the optimizer/reflector `claude_cli` already
+  unlocked last entry.** `skillopt-cli eval --config
+  configs/aisf_triage_example.yaml --split val` scored **0.75** (6/8
+  correct) against the real, hand-labeled 8-example val split: a
+  genuinely meaningful signal from a real governed triage agent, no API
+  key anywhere in the entire chain (rusty_skillopt → AISF's `eval-stage` →
+  the MCP bridge → `claude -p` → real tool calls → a real classification).
+- Two real, previously-latent bugs surfaced and got fixed on AISF's side
+  while getting this to actually complete (both would have affected the
+  original Anthropic-driven path too — no prior run ever had a real key
+  to get far enough to hit either one): `tracing_subscriber::fmt()`'s
+  stdout-by-default writer was silently corrupting `eval-stage`'s
+  single-JSON-line-on-stdout contract whenever `FACTORY_PROMPTS_DIR` was
+  set (which this backend always sets) — the very first attempt at this
+  end-to-end run scored a flat 0.0 across every val example before that
+  fix landed, 0.75 after. See AISF's `RELEASE_NOTES.md` for the second
+  bug (the MCP bridge's output-file write timing) and both fixes in full.
+- No code changes needed in `skillopt-core`, `skillopt-envs`, or
+  `AisfTriageEnv`'s scoring logic — the one-line env var addition in
+  `AisfStageBackend` is the entire integration surface on this side.
+
 ## Add `claude_cli` backend: real runs without an `ANTHROPIC_API_KEY`
 **2026-07-29**
 
