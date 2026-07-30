@@ -294,6 +294,15 @@ rather than assumed, this didn't trade away the benchmark's central
 property: the test split's two genuine `NeedsHuman` scenarios both
 still scored correctly. See `RELEASE_NOTES.md` for the full step-by-step.
 
+That edit was applied for real too: AISF's actual
+`prompts/validation.md` now includes both lines in production, and
+`skills/aisf_validation_initial.md` here was synced to match. Same
+caveat as triage's: the `0.75` eval and `0/12`/`1/12` train scores
+documented above for `aisf_validation` were measured against the
+pre-fix wording — accurate history, not something rerunning these
+configs today will reproduce, since they now start from the
+already-improved skill.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive

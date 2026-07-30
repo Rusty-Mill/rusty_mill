@@ -7,6 +7,22 @@ commit instead.
 
 ---
 
+## Close the loop on `aisf_validation` too: apply and sync
+**2026-07-30**
+
+- **Changed (in AISF, upstream):** the previous entry's accepted edit
+  is now real — AISF's actual `prompts/validation.md` includes both
+  new lines in production. See AISF's own `RELEASE_NOTES.md`/`CLAUDE.md`
+  for the full write-up, including the deliberate update to
+  `original::VALIDATION`.
+- **Changed (here):** `skills/aisf_validation_initial.md` synced to
+  match byte-for-byte.
+- **Documented explicitly:** every `aisf_validation` eval/train score
+  in this repo's history so far (`0.75` eval, `0/12`/`1/12` accepted)
+  was measured against the pre-fix wording — accurate history, but
+  rerunning these configs today starts from the already-improved
+  skill and won't reproduce those numbers.
+
 ## Widen the validation gate on `aisf_validation` too — another real find
 **2026-07-30**
 
