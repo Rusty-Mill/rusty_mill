@@ -7,6 +7,48 @@ commit instead.
 
 ---
 
+## Author a harder benchmark for both skills — one holds, one doesn't
+**2026-07-30**
+
+- **Added:** `data/aisf_triage_hard_labels.jsonl` and
+  `data/aisf_validation_hard_labels.jsonl`, 24 new hand-labeled
+  scenarios each (12 train / 6 val / 6 test), plus their `.md` labeling
+  notes and `configs/aisf_{triage,validation}_hard_example.yaml`. No
+  code changes anywhere — `AisfTriageEnv`/`AisfValidationEnv` are
+  already parameterized by `labels_path`, so a harder benchmark is
+  purely new data. Each scenario is built around a specific reasoning
+  seam: for triage, cases that reproduce reliably in a common flow but
+  are genuinely trivial (stress-testing the applied P2/P3 fix's own
+  boundary), misleading GitHub labels, severity hidden behind a
+  cosmetic-looking wrapper, tone-as-a-false-signal, and bounded-segment
+  blast-radius judgment calls; for validation, diffs engineered to look
+  "simple" while quietly weakening a security control (the exact seam
+  the applied Pass-default fix opened up), `test_summary` text that
+  does or doesn't actually contradict `tests_passed`, and irreversible
+  changes a test suite structurally can't validate.
+- **Verified live, and the result is a genuine asymmetry:**
+  `aisf_validation` scored a perfect **1.000** on both the hard val and
+  test splits (6/6 each) — it held under direct adversarial pressure on
+  its own fix's exact seam. `aisf_triage` did not: **0.333** val (2/6),
+  **0.500** test (3/6).
+- **Went one level deeper than the aggregate score, on purpose:**
+  invoked `eval-stage triage` directly for each of the 12 held-out hard
+  examples to see which ones missed and why, not just the mean. 3 of 7
+  misses were exactly the predicted failure mode — a tooltip typo, a
+  stale copyright year, and a momentary UI flicker, all three genuinely
+  `P3`, all three reported as `P2` — the applied fix's "reproduces
+  reliably in a common flow" rule over-generalizing past where it
+  should stop. The other 4 misses were harder blast-radius calls (a
+  bounded-segment total block; a calmly-worded real payment bug) that
+  went in both directions, not one consistent bias — noted honestly as
+  genuinely harder judgment, not all cleanly attributable to a model
+  error.
+- **Conclusion:** ceiling on a benchmark means the benchmark's
+  exhausted, not that there's nothing left — confirmed two different
+  ways now (this, and the earlier coarse-vs-wide validation-gate
+  finding). The P2/P3 rule has a real, specific, actionable next
+  target; `aisf_validation`'s fix held up and doesn't need one yet.
+
 ## Run a fresh baseline eval against the updated validation skill
 **2026-07-30**
 

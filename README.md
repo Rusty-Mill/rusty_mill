@@ -310,6 +310,42 @@ exactly, the training run's own recorded numbers for the accepted
 candidate. This skill now scores at ceiling on its own dataset, same
 conclusion as triage's.
 
+**Both skills at ceiling doesn't mean "done improving" — it means
+"this benchmark's exhausted."** `configs/aisf_triage_hard_example.yaml`
+and `configs/aisf_validation_hard_example.yaml` (paired with
+`data/aisf_{triage,validation}_hard_labels.jsonl`, 24 new hand-labeled
+scenarios each, no code changes needed — same `Environment` impls, just
+a different `labels_path`) exist to answer that question properly:
+deliberately adversarial cases engineered around the exact seams each
+applied fix introduced. See each dataset's own `.md` labeling notes for
+the full category breakdown and reasoning.
+
+**The result is a genuine asymmetry, not a uniform outcome either
+way:** `aisf_validation` held — a perfect **1.000** on both the hard
+val and test splits (6/6 each), including diffs specifically built to
+look "simple" while quietly weakening a security control, exactly the
+seam its own applied fix opened up. `aisf_triage` did not: **0.333**
+val (2/6), **0.500** test (3/6). Digging into which of the 12
+held-out examples missed (not just the aggregate score) shows a real
+pattern, not noise: 3 of the 7 misses (all three "reproduces reliably
+in a common flow, but is genuinely trivial" test cases — a tooltip
+typo, a stale copyright year, a momentary cart-counter flicker) were
+all reported as `P2` when they should be `P3` — the applied fix's own
+new rule over-generalizing "reproduces reliably in a common flow" past
+where it should stop. The other 4 misses were blast-radius judgment
+calls (a bounded-user-segment total block; a calmly-worded but real
+payment bug) that went in *both* directions (2 over-classified, 2
+under-classified) rather than one consistent bias — genuinely harder
+judgment, and in at least one case (a checkout bug labeled `P1` here)
+a call reasonable people could make differently, not simply a model
+error to correct.
+
+That's a real, actionable next target: the P2/P3 rule needs a second
+pass, not from scratch. Training against `aisf_triage_hard_example.yaml`
+(same shape as the earlier `_full_deep_` configs — `val_batch_size: 8`,
+`epochs: 2`) is the natural next step; `aisf_validation` doesn't need
+one yet, since it held.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive
