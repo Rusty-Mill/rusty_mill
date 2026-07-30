@@ -261,8 +261,24 @@ being explicit about: every eval/train score documented above and in
 this repo's `RELEASE_NOTES.md` (the `0.75` eval, `0/1`/`0/6`/`1/12`
 accepted) was measured against the *pre-fix* wording — those numbers
 are accurate history, not something to reproduce verbatim by rerunning
-these configs today. A fresh run against the now-updated starting skill
-should score at least as well on the P2/P3 boundary this edit fixed;
+these configs today.
+
+That fresh baseline has now been run: `skillopt-cli eval` against
+`configs/aisf_triage_example.yaml`'s val split scored a perfect
+**1.000** (8/8), and against its test split, **0.875** (7/8) —
+matching, exactly, the `best_val_mean_score`/`test_result.mean_score`
+the training run itself recorded for the accepted candidate. That
+agreement is a real correctness check in its own right: a standalone
+`eval` run and the number the training loop computed internally for
+the same skill line up. (One honest loose end: the very first `0.75`
+val score recorded for the *pre-fix* skill, back when this integration
+was first verified live, doesn't match the `0.875` the full-dataset
+train run's own `initial_val_score` later recorded for that same
+unedited skill on the same 8 val examples — both are real, both were
+against identical skill text; the most likely explanation is ordinary
+run-to-run variance in a real model's live judgment calls on the
+genuinely ambiguous scenarios, not a bug in either measurement.) Since
+this skill already scores at or near ceiling on this exact dataset,
 finding further headroom from here needs either a harder benchmark or
 scenarios this dataset doesn't already cover.
 

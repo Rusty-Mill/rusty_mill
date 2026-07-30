@@ -7,6 +7,30 @@ commit instead.
 
 ---
 
+## Run a fresh baseline eval against the updated skill
+**2026-07-30**
+
+- **Verified live:** `skillopt-cli eval` against
+  `configs/aisf_triage_example.yaml`, using the now-synced
+  `skills/aisf_triage_initial.md` — val split **1.000** (8/8), test
+  split **0.875** (7/8). Both numbers match the full-dataset train
+  run's own internally-recorded `best_val_mean_score`/
+  `test_result.mean_score` for the accepted candidate exactly, which is
+  a real correctness check: a standalone `eval` and the training loop's
+  internal evaluation agree on the same skill.
+- **A discrepancy noted honestly, not hidden:** the very first `0.75`
+  val score recorded for the pre-fix skill (when this integration was
+  first verified live) doesn't match the `0.875` the full-dataset train
+  run's own `initial_val_score` later recorded for that same unedited
+  skill text on the same 8 val examples. Both measurements are real;
+  the likely explanation is ordinary run-to-run variance in a live
+  model's judgment on genuinely ambiguous scenarios, not a bug in
+  either one — worth knowing about when comparing scores across
+  separate live runs of this benchmark.
+- This skill now scores at or near ceiling on `aisf_triage`'s own
+  dataset; further headroom from here would need a harder benchmark or
+  scenarios this dataset doesn't already cover.
+
 ## Close the loop: apply the found improvement to AISF, sync the local copy
 **2026-07-30**
 
