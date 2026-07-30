@@ -7,6 +7,36 @@ commit instead.
 
 ---
 
+## Widen the validation gate: the prompt wasn't actually already optimal
+**2026-07-30**
+
+- **Added:** `configs/aisf_triage_claude_cli_full_deep_example.yaml` —
+  the full-dataset config with two changes aimed at giving a real
+  improvement an actual chance to be found and confirmed:
+  `val_batch_size: 8` (the entire val split, not a 2-example sample —
+  sixteen possible score values instead of three) and `epochs: 2`
+  (twelve optimizer attempts instead of six, so a rejected direction's
+  rationale gets a real second round via the rejection buffer).
+- **Verified live:** `1/12 steps accepted, val score 0.875 -> 1.000,
+  test score 0.875` — roughly 220 real `claude -p` calls, about an
+  hour of wall-clock time. The accepted edit was one well-targeted
+  line clarifying that a reproducible-but-minor UI bug is `P2`, not
+  `P3` — it directly fixed a real failure mode and took val to a
+  perfect 1.0. Test score rose from the previous entry's `0.500`
+  (the original, unedited prompt) to **0.875** (7/8) with the edit
+  applied. Every other proposal, including all 6 tried in the second
+  epoch, was correctly rejected — mostly because val was already at
+  its 1.0 ceiling by then, leaving no further room to detect an
+  improvement against.
+- **This overturns the previous entry's framing, not just adds to
+  it.** `0/6 steps accepted` on the coarse 2-example gate looked like
+  "the prompt is already as good as it gets"; it was actually "this
+  gate's resolution couldn't detect the real improvement that was
+  there." A real, model-found, model-confirmed improvement to a real
+  agent's real production prompt, with no human in the loop and no API
+  key anywhere in the chain, is exactly the result this whole
+  `aisf_stage` integration was built to make possible.
+
 ## Run the zero-API-key train loop again against the full 40-scenario dataset
 **2026-07-29**
 

@@ -225,6 +225,33 @@ held-out scenarios right. Bump `val_batch_size` to `8` for a less noisy
 gate signal on a future run, at the cost of a meaningfully longer one
 (the config file's own comment covers this trade-off).
 
+That bump was itself worth doing, and it changed the answer.
+`configs/aisf_triage_claude_cli_full_deep_example.yaml` reruns the same
+full dataset with `val_batch_size: 8` (the entire val split — sixteen
+possible score values instead of three) and `epochs: 2` (twelve
+optimizer attempts instead of six, so a rejected direction's rationale
+gets a real second round via the rejection buffer). Roughly 220 real
+`claude -p` calls, about an hour of wall-clock time. Result: **`1/12
+steps accepted, val score 0.875 -> 1.000, test score 0.875`** — up from
+the coarse-gate run's `0.500`. The accepted edit was a single,
+well-targeted line: *"A user-facing display or UI bug that reliably
+reproduces during a common, ordinary usage flow ... is P2, even if it
+looks minor; reserve P3 only for cosmetic issues that require rare,
+unsupported, or contrived conditions to trigger"* — it directly fixed a
+real failure mode (reproducible-but-minor UI bugs getting misfiled as
+P3 instead of P2) and took val to a perfect 1.0. Every one of the
+remaining 11 proposals (including all 6 tried in the second epoch) was
+correctly rejected — mostly because val was already at its ceiling of
+1.0 by then, so there was no more room left to detect an improvement
+against. Test score went from 0.500 (the original, unedited prompt) to
+**0.875** (7/8) with the accepted edit applied — a real, meaningful,
+model-found-and-confirmed improvement to a real agent's real production
+prompt, entirely without a human in the loop or an API key anywhere in
+the chain. So: no, the original skill wasn't already perfect — the
+first full-dataset run's `0/6 accepted` said more about that run's
+validation gate than about the skill. Widening the gate is what
+actually answered the question.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive
