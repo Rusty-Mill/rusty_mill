@@ -7,6 +7,21 @@ commit instead.
 
 ---
 
+## Sync the local triage skill with AISF's second applied fix
+**2026-07-30**
+
+- **Changed (in AISF, upstream):** the previous entry's two confirmed
+  fixes are now real — AISF's actual `prompts/triage.md` includes all
+  four new lines in production. See AISF's own `RELEASE_NOTES.md`/
+  `CLAUDE.md`.
+- **Changed (here):** `skills/aisf_triage_initial.md` synced to match
+  byte-for-byte. No fresh baseline eval run this time — the skill is
+  known, from the same training run, to score `1.0` val / `0.833` test
+  against `data/aisf_triage_hard_labels.jsonl` (see the previous
+  entry), and one specific miss (`aisf-triage-hard-18`) is already
+  documented as an open, unaddressed gap rather than something a
+  re-run would newly reveal.
+
 ## Train against the hard triage benchmark: real progress, real remainder
 **2026-07-30**
 
