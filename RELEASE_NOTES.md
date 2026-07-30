@@ -7,6 +7,32 @@ commit instead.
 
 ---
 
+## Train against the hard triage benchmark: real progress, real remainder
+**2026-07-30**
+
+- **Verified live:** `train` against `configs/aisf_triage_hard_example.yaml`
+  — `2/6 steps accepted, val score 0.500 -> 1.000, test score 0.833`
+  (5/6), up from the pre-training `0.500` test baseline. Two edits
+  accepted, four new lines total: priority driven by actual impact
+  rather than a GitHub label or the reporter's framing (fixes the
+  misleading-label category); disregard alarmist/all-caps title
+  language (fixes the tone category); and two lines reinforcing that
+  any PII/credential/access-control signal is an automatic `P0`
+  regardless of how cosmetic the report looks (fixes the
+  cosmetic-wrapper-hides-a-leak category).
+- **Read honestly, not glossed over:** the final test run still misses
+  `aisf-triage-hard-18` (the momentary cart-counter flicker) — still
+  `P2` instead of `P3`. None of the 6 batches this run tried proposed
+  an edit to the original P2/P3 rule itself, the one hypothesized to be
+  over-generalizing; every edit targeted a different category instead.
+  Real, confirmed progress on two of the six categories the hard
+  benchmark was built to probe; the specific rule it was originally
+  built to stress-test is still exactly where it was.
+- Not applied back to AISF yet, pending a decision on whether to run a
+  further round first (more epochs, or nudging the rejection buffer
+  toward the still-failing category) versus applying what's already
+  confirmed now and iterating later.
+
 ## Author a harder benchmark for both skills — one holds, one doesn't
 **2026-07-30**
 

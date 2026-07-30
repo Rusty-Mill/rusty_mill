@@ -346,6 +346,34 @@ pass, not from scratch. Training against `aisf_triage_hard_example.yaml`
 `epochs: 2`) is the natural next step; `aisf_validation` doesn't need
 one yet, since it held.
 
+That training run has now happened: **`2/6 steps accepted, val score
+0.500 -> 1.000, test score 0.833`** (5/6) — up from the pre-training
+`0.500` test baseline. Two edits were accepted, adding four lines total:
+one making priority driven by actual impact rather than a GitHub label
+or the reporter's own framing (directly fixing the misleading-label
+category), one instructing the agent to disregard alarmist or all-caps
+title language (directly fixing the tone category), and two reinforcing
+that any PII/credential/access-control signal is an automatic `P0`
+regardless of how cosmetic the surrounding report looks (directly
+targeting the cosmetic-wrapper-hides-a-real-leak category). Real,
+specific, confirmed fixes to two of the six failure categories the hard
+benchmark was built to probe.
+
+**What it didn't fix, read honestly rather than glossed over:** the
+final test run still misses exactly one example —
+`aisf-triage-hard-18`, the momentary cart-counter flicker, still scored
+`P2` instead of `P3`. None of the six batches this run tried proposed
+an edit to the original P2/P3 rule itself (the one hypothesized to be
+over-generalizing) — every accepted or attempted edit targeted a
+*different* category. So the specific "reproduces reliably in a common
+flow" boundary this hard set was built to stress-test is still exactly
+where it was; two other real weaknesses got found and fixed instead.
+That's a genuinely useful outcome, not a failed one — but it means this
+skill isn't done being improved against its own hard benchmark, and a
+further round (more epochs, or a rejection-buffer nudge specifically
+toward the still-failing category) is a real, legitimate next step,
+not busywork.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive
