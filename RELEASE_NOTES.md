@@ -7,6 +7,18 @@ commit instead.
 
 ---
 
+## Run a fresh baseline eval against the updated validation skill
+**2026-07-30**
+
+- **Verified live:** `skillopt-cli eval` against
+  `configs/aisf_validation_example.yaml`, using the now-synced
+  `skills/aisf_validation_initial.md` — val split **1.000** (8/8), test
+  split **1.000** (8/8). Both match the full-dataset train run's own
+  internally-recorded numbers for the accepted candidate exactly, same
+  cross-check as triage's fresh baseline.
+- This skill now scores at ceiling on `aisf_validation`'s own dataset,
+  same conclusion as `aisf_triage`'s equivalent entry.
+
 ## Close the loop on `aisf_validation` too: apply and sync
 **2026-07-30**
 

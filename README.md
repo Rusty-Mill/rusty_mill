@@ -303,6 +303,13 @@ pre-fix wording — accurate history, not something rerunning these
 configs today will reproduce, since they now start from the
 already-improved skill.
 
+That fresh baseline has been run too: `skillopt-cli eval` against
+`configs/aisf_validation_example.yaml` scored a perfect **1.000** on
+both the val split (8/8) and the test split (8/8) — matching,
+exactly, the training run's own recorded numbers for the accepted
+candidate. This skill now scores at ceiling on its own dataset, same
+conclusion as triage's.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive
