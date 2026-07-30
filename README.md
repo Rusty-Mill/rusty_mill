@@ -252,6 +252,20 @@ first full-dataset run's `0/6 accepted` said more about that run's
 validation gate than about the skill. Widening the gate is what
 actually answered the question.
 
+That accepted edit was applied for real: AISF's actual
+`prompts/triage.md` now includes this line in production (see AISF's
+own `RELEASE_NOTES.md`), and `skills/aisf_triage_initial.md` here was
+synced to match, so it stays a genuinely *current* copy of AISF's real
+prompt rather than a frozen pre-fix snapshot. One consequence worth
+being explicit about: every eval/train score documented above and in
+this repo's `RELEASE_NOTES.md` (the `0.75` eval, `0/1`/`0/6`/`1/12`
+accepted) was measured against the *pre-fix* wording — those numbers
+are accurate history, not something to reproduce verbatim by rerunning
+these configs today. A fresh run against the now-updated starting skill
+should score at least as well on the P2/P3 boundary this edit fixed;
+finding further headroom from here needs either a harder benchmark or
+scenarios this dataset doesn't already cover.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive

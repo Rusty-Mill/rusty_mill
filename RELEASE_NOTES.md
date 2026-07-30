@@ -7,6 +7,28 @@ commit instead.
 
 ---
 
+## Close the loop: apply the found improvement to AISF, sync the local copy
+**2026-07-30**
+
+- **Changed (in AISF, upstream):** the previous entry's accepted edit
+  is now real, not just a training artifact — AISF's actual
+  `prompts/triage.md` includes the new P2/P3 line in production. See
+  AISF's own `RELEASE_NOTES.md`/`CLAUDE.md` for the full write-up on
+  that side, including the deliberate update to `original::TRIAGE`
+  (the constant that exists specifically to force a conscious update
+  on an intentional reword, not silent drift).
+- **Changed (here):** `skills/aisf_triage_initial.md` synced to match
+  byte-for-byte, so it stays a genuinely current copy of AISF's real
+  prompt rather than a frozen pre-fix snapshot.
+- **Documented explicitly, not left implicit:** every eval/train score
+  in this repo's history so far (`0.75` eval, `0/1`/`0/6`/`1/12`
+  accepted) was measured against the *pre-fix* wording. Those numbers
+  are accurate as history; rerunning the existing example configs
+  today starts from the already-improved skill, so they won't
+  reproduce those exact numbers. A fresh baseline eval against the
+  updated skill hasn't been run yet — the next natural step if further
+  headroom is worth looking for.
+
 ## Widen the validation gate: the prompt wasn't actually already optimal
 **2026-07-30**
 
