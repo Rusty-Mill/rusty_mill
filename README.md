@@ -282,6 +282,18 @@ this skill already scores at or near ceiling on this exact dataset,
 finding further headroom from here needs either a harder benchmark or
 scenarios this dataset doesn't already cover.
 
+The same widened-gate question was asked of `aisf_validation` too —
+`configs/aisf_validation_claude_cli_full_deep_example.yaml`, identical
+shape (`val_batch_size: 8`, `epochs: 2`), against the full 40-scenario
+validation dataset. Same conclusion: **`1/12 steps accepted, val score
+0.750 -> 1.000, test score 1.000`** — a clean 8/8 on held-out test. The
+accepted edit added two lines (test outcomes always override how a
+diff "looks"; simple, self-contained diffs with `tests_passed: true`
+default to `Pass` without extra scrutiny) — and, checked explicitly
+rather than assumed, this didn't trade away the benchmark's central
+property: the test split's two genuine `NeedsHuman` scenarios both
+still scored correctly. See `RELEASE_NOTES.md` for the full step-by-step.
+
 ### No API key, but a working `claude` CLI session: `claude_cli`
 
 `provider: claude_cli` shells out to the `claude` CLI's non-interactive

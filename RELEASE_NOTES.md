@@ -7,6 +7,33 @@ commit instead.
 
 ---
 
+## Widen the validation gate on `aisf_validation` too — another real find
+**2026-07-30**
+
+- **Added:** `configs/aisf_validation_claude_cli_full_deep_example.yaml`
+  — the `aisf_validation` sibling of
+  `aisf_triage_claude_cli_full_deep_example.yaml`: `val_batch_size: 8`
+  (the entire val split) and `epochs: 2` (twelve optimizer attempts),
+  every role live via `claude -p`, zero API keys anywhere in the chain,
+  against the full 40-scenario `data/aisf_validation_labels.jsonl`.
+- **Verified live:** `1/12 steps accepted, val score 0.750 -> 1.000,
+  test score 1.000` — a clean 8/8 on the held-out test split. The
+  accepted edit added two lines: one hardening that a failing test
+  always means `Fail` regardless of how the diff looks, and one
+  narrowly scoped to "simple, self-contained diffs where `tests_passed`
+  is true" defaulting to `Pass` without escalating scrutiny beyond what
+  the change warrants. Confirmed this didn't trade away the
+  benchmark's central property: the test split's two genuine
+  `NeedsHuman` scenarios (a weakened auth check, a disabled test
+  reported as a clean pass — see `data/aisf_validation_labels.md`'s
+  rubric) both still scored correctly. Eleven other proposals across
+  both epochs were tried and correctly rejected, mostly because val was
+  already at its 1.0 ceiling.
+- Same shape as the `aisf_triage` result, same conclusion: a real,
+  model-found, model-confirmed improvement to a real agent's real
+  production prompt, with no human in the loop and no API key anywhere
+  in the chain.
+
 ## Run a fresh baseline eval against the updated skill
 **2026-07-30**
 
