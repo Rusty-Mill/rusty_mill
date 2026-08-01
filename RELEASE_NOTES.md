@@ -23,6 +23,57 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## ADR-0002 D3: runtime decision closed — compio 0.18.0, after checking all three
+**2026-08-01**
+
+- **Changed:** ran the same source-level spike (stable-Rust build + real
+  program + driver/reactor source inspection) against glommio 0.9.0 and monoio
+  0.2.4 that had just been run against compio, rather than pin-and-move-on
+  after finding compio's stated rationale was wrong.
+- **Found:** none of the three runtimes expose a public seam for injecting
+  simulated per-operation disk I/O — glommio's `Reactor` is even more
+  monolithic than compio's (`pub(crate)`, single non-generic `Rc`, no
+  alternate-backend cfg selection at all); monoio's `Driver` trait is
+  genuinely public and `Runtime<D>` is generic over it, but that trait only
+  covers executor scheduling, not the actual read/write/fsync dispatch (which
+  is `pub(crate)` and hardcoded to a closed enum). This neutralizes
+  DST-pluggability as a differentiator entirely — D4's own `Storage`/`Clock`
+  trait abstraction is what actually delivers DST, regardless of runtime.
+- **Also reconfirmed, not stale:** DataDog/glommio#707 ("call for
+  maintainers") is still open and unresolved; monoio's io_uring feature-parity
+  gap and slow maintenance pace (flagged by Iggy) still hold as of a fresh
+  2026-08-01 check.
+- **Decided:** compio, pinned to exactly `0.18.0` (not a range), stays the
+  Phase 1 runtime — now on the strength of dependency modularity and
+  maintainer responsiveness rather than the falsified driver-swappability
+  claim. D3 in ADR-0002 is closed, not provisional.
+
+## ADR-0002 D3: compio validation spike — core rationale falsified, decision reopened
+**2026-08-01**
+
+- **Changed:** ran the D3 validation spike the ADR called for. Built and ran a
+  minimal compio (0.19.1) file-I/O program in this environment and read the
+  actual `compio-driver`/`compio-runtime` source rather than relying on docs.
+- **Fixed (a wrong claim in the original ADR):** D3's stated reason for
+  preferring compio over glommio/monoio — "the only one of the three engineered
+  to let the I/O driver be swapped for a simulated one" — is false. `Proactor`
+  and `Runtime` are non-generic, and the `Driver` type is chosen entirely at
+  compile time from a closed set of built-in backends; there's no public trait
+  a downstream crate can implement to inject a simulated driver. This does not
+  block D4's testing strategy (which abstracts at the team's own `Storage`/
+  `Clock` trait boundary, not the runtime's internals), but the specific reason
+  given for picking compio was wrong and needed correcting, not quietly kept.
+- **Found (new, unplanned):** current compio (0.19.0/0.19.1) does not compile
+  on stable Rust — an unconditional use of the newly-and-not-yet-stably
+  stabilized `cfg_select!` std macro. Confirmed via bisection: `compio` 0.18.0
+  builds cleanly on stable, 0.19.0 does not. Likely temporary (stable Rust's
+  ~6-week release cycle should catch up), but real today.
+- **Known limitation:** D3 is intentionally left open rather than force-closed
+  — the ADR now names two concrete paths to finalize it (pin to 0.18.0 and
+  accept the non-pluggable-driver finding, or re-run this same source-level
+  check against glommio/monoio) rather than picking one without the same rigor
+  applied to the alternatives.
+
 ## ADR-0002: Phase 1 foundational decisions
 **2026-08-01**
 
