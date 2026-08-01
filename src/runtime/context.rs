@@ -155,11 +155,7 @@ impl Handle {
     /// Which scheduling flavor this handle's runtime was built with --
     /// see [`super::RuntimeFlavor`].
     pub fn runtime_flavor(&self) -> super::RuntimeFlavor {
-        if self.is_current_thread() {
-            super::RuntimeFlavor::CurrentThread
-        } else {
-            super::RuntimeFlavor::MultiThread
-        }
+        self.shared.flavor()
     }
 
     /// An opaque identifier for this handle's runtime, unique among
