@@ -23,6 +23,21 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Repo setup — minimal CI workflow + main branch
+**2026-08-01**
+
+- **Added:** `main` branch on `origin`, created from the governance-scaffolding
+  commit and now the repo's default branch.
+- **Added:** `.github/workflows/ci.yml` — a minimal `check` job (name matches the
+  required-status-check convention in the repo-config reference) that no-ops green
+  until a `Cargo.toml` exists, then automatically runs `cargo fmt`/`clippy`/`test`.
+  Exists now so branch protection has a real check to gate on rather than one
+  that's never reported.
+- **Known limitation:** branch protection on `main` is still unset — no tool in
+  this environment reaches GitHub's branch-protection or repo-settings API, so
+  that (require PR, require the `check` status, require up-to-date branches, and
+  disabling squash/rebase merge in repo settings) remains a manual step.
+
 ## Repo setup — Phase 1 scope doc + governance scaffolding
 **2026-08-01**
 
