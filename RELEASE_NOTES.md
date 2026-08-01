@@ -23,6 +23,25 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## ADR-0002: Phase 1 foundational decisions
+**2026-08-01**
+
+- **Added:** `docs/adr/0002-phase1-foundational-decisions.md` — resolves all four
+  `docs/phase1-scope.md` §6 open questions with cited research: skip Kafka
+  wire-protocol compatibility (build on `rusty_wire`); defer the VSR-vs-Raft
+  choice to Phase 2 but lean VSR and require consensus-ready storage primitives
+  now (durable/committed-offset split, truncatable log tail, epoch/fencing-token
+  field); compio as a provisional runtime choice pending a validation spike;
+  coexist with NATS JetStream behind an explicit, criteria-based re-evaluation
+  gate rather than replacing it outright.
+- **Added:** a concrete DST testing strategy (injectable `Storage`/`Clock`
+  traits from the first storage-engine commit, three minimal fault-injection
+  tests) and a set of "consumer gates" the storage engine must clear before
+  Phase 1 is considered done.
+- **Known limitation:** the runtime choice (D3) is explicitly provisional —
+  the ADR names a validation spike that hasn't run yet. No implementation
+  lands in this change; this is research/ADR only, per the scope doc's gate.
+
 ## Repo setup — minimal CI workflow + main branch
 **2026-08-01**
 
