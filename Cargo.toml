@@ -90,6 +90,35 @@ io-uring-reactor = ["dep:io-uring"]
 # and what's deliberately not (waker clone/drop/self-wake stats,
 # resource/async-op instrumentation for `sync` primitives).
 tracing = ["dep:tracing"]
+# N OS threads, each pinned to its own CPU core (Linux; a harmless
+# no-op pin elsewhere), each running its own independent scheduler
+# queue, reactor, timer driver, and blocking pool -- no shared
+# injector, no cross-core work-stealing. A task lands on a core once,
+# at spawn time (`Runtime::spawn`'s round-robin, or whichever core's
+# own thread a nested `crate::spawn` happens to run on), and stays
+# there. See `runtime::thread_per_core`'s module docs. Pure scheduler
+# plumbing -- no new dependency -- so this is just an opt-in surface
+# gate, off by default like every other flavor-selecting feature here.
+thread-per-core = []
+# Real io_uring-backed positional file I/O (Linux only) -- `openat`,
+# `read`/`write` at an explicit offset, `fsync`/`fdatasync`, `close`,
+# `unlink`, `rename`, `fallocate` -- as a new [`io::UringFile`] type,
+# separate from [`fs::File`] (which stays 100% `spawn_blocking`; see
+# that module's own docs for why a borrowed-buffer `AsyncRead`/
+# `AsyncWrite` file type can't safely do this). Owned-buffer I/O
+# (`io::IoBuf`/`io::IoBufMut`/`io::BufResult`), the same shape
+# `tokio-uring`/`monoio`/`compio` all use, and for the same reason:
+# an io_uring read/write hands the kernel a raw pointer for the whole
+# operation's duration, and an ordinary Rust `Future` can be dropped
+# mid-poll at any point, so the buffer has to be *owned* by the
+# in-flight operation (not borrowed from a caller who might vanish)
+# for as long as the kernel might still complete into it -- see
+# `io::uring_fs`'s module docs for the cancellation-safety argument in
+# full and the tests that hold it to that bar under Miri/ASAN. Off by
+# default, Linux-only, same posture as `io-uring-reactor` above (which
+# this is independent of -- separate ring, separate feature; a build
+# can enable either, neither, or both).
+io-uring-fs = ["dep:io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
@@ -163,3 +192,27 @@ required-features = ["futures-io-compat"]
 [[test]]
 name = "tracing_instrumentation"
 required-features = ["tracing"]
+
+[[example]]
+name = "thread_per_core_uring_smoke"
+required-features = ["thread-per-core", "io-uring-fs"]
+
+[[test]]
+name = "thread_per_core_uring_fs"
+required-features = ["thread-per-core", "io-uring-fs"]
+
+[[test]]
+name = "uring_fs_cancellation"
+required-features = ["io-uring-fs"]
+
+[[test]]
+name = "uring_fs_segment_roll"
+required-features = ["io-uring-fs"]
+
+[[test]]
+name = "uring_fs_sim_driver"
+required-features = ["io-uring-fs"]
+
+[[test]]
+name = "rusty_stream_segment_log_recovery"
+required-features = ["io-uring-fs"]

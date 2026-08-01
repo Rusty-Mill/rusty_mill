@@ -21,6 +21,8 @@ mod context;
 mod current_thread;
 mod id;
 mod metrics;
+#[cfg(feature = "thread-per-core")]
+mod thread_per_core;
 mod worker;
 
 pub use context::{EnterGuard, Handle, TryCurrentError};
@@ -182,13 +184,19 @@ pub(crate) struct Shared {
     /// [`Builder::thread_stack_size`] -- read by [`worker::spawn_worker`]
     /// for each worker thread's own name/stack size.
     pub(crate) thread_config: ThreadConfig,
-    /// Whether this runtime was built via
-    /// [`Builder::new_current_thread`] -- checked by `time::pause`,
-    /// which (matching tokio) only makes sense on that flavor: pausing
-    /// wall-clock time shared by every task on the runtime would be
-    /// incoherent if other worker threads could be concurrently relying
-    /// on real timing.
-    is_current_thread: bool,
+    /// Which scheduling flavor built this `Shared` -- for the
+    /// `thread-per-core` flavor, one independent `Shared` per core, each
+    /// tagged [`RuntimeFlavor::ThreadPerCore`] rather than
+    /// [`RuntimeFlavor::CurrentThread`] even though its `local` field is
+    /// the exact same single-queue [`LocalQueues::CurrentThread`] shape
+    /// -- see [`Shared::is_current_thread`]/`time::pause`'s docs for why
+    /// that distinction (not just "does this `Shared` have a shared
+    /// injector or not") is the one that actually matters: pausing
+    /// wall-clock time shared by every task on the runtime is only
+    /// coherent when nothing else is concurrently relying on real
+    /// timing, which is exactly as untrue for one core among several as
+    /// it is for a genuine multi-threaded pool.
+    flavor: RuntimeFlavor,
     /// See [`Builder::name`].
     name: Option<String>,
     /// This runtime's opaque identity -- see [`Id`]/[`Handle::id`].
@@ -355,7 +363,11 @@ impl Shared {
     }
 
     pub(crate) fn is_current_thread(&self) -> bool {
-        self.is_current_thread
+        self.flavor == RuntimeFlavor::CurrentThread
+    }
+
+    pub(crate) fn flavor(&self) -> RuntimeFlavor {
+        self.flavor
     }
 
     // -- RuntimeMetrics accessors -- plain atomic loads (or a lock also
@@ -409,11 +421,14 @@ impl Shared {
 enum Flavor {
     MultiThread,
     CurrentThread,
+    #[cfg(feature = "thread-per-core")]
+    ThreadPerCore,
 }
 
 /// Which scheduling flavor a [`Runtime`] was built with -- see
-/// [`Builder::new_current_thread`]/[`Builder::new_multi_thread`],
-/// returned by [`Handle::runtime_flavor`].
+/// [`Builder::new_current_thread`]/[`Builder::new_multi_thread`]/
+/// [`Builder::new_thread_per_core`], returned by
+/// [`Handle::runtime_flavor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RuntimeFlavor {
@@ -423,6 +438,14 @@ pub enum RuntimeFlavor {
     /// Executes tasks across a pool of worker threads -- see
     /// [`Builder::new_multi_thread`].
     MultiThread,
+    /// One independent scheduler/reactor/timer per CPU core, no
+    /// cross-core work-stealing -- see [`Builder::new_thread_per_core`].
+    /// Only constructible behind the `thread-per-core` feature, but
+    /// always a match target here (like every other `#[non_exhaustive]`
+    /// variant, external code already needs a wildcard arm) so this
+    /// enum's shape doesn't change across feature builds.
+    #[cfg(feature = "thread-per-core")]
+    ThreadPerCore,
 }
 
 /// Configures and builds a [`Runtime`].
@@ -481,16 +504,47 @@ impl Builder {
         }
     }
 
-    /// Only meaningful for the multi-threaded flavor -- see
-    /// [`Builder::new_current_thread`].
+    /// One dedicated, pinned OS thread per CPU core (see
+    /// `thread_per_core`'s module docs), each with its own scheduler
+    /// queue, reactor, and timer driver -- no shared injector, no
+    /// cross-core work-stealing. [`worker_threads`](Self::worker_threads)
+    /// sets the core count (defaults to
+    /// [`std::thread::available_parallelism`], same as
+    /// [`Builder::new`]). Only available behind the `thread-per-core`
+    /// feature.
+    #[cfg(feature = "thread-per-core")]
+    pub fn new_thread_per_core() -> Self {
+        Builder {
+            flavor: Flavor::ThreadPerCore,
+            worker_threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            max_blocking_threads: 32,
+            thread_config: ThreadConfig {
+                name: ThreadNameSource::Default,
+                stack_size: None,
+            },
+            thread_keep_alive: Duration::from_secs(10),
+            name: None,
+        }
+    }
+
+    /// The worker-thread (or, for [`Builder::new_thread_per_core`], core)
+    /// count -- meaningless for [`Builder::new_current_thread`], which
+    /// has nothing to configure here.
     ///
     /// # Panics
-    /// Panics if `n` is zero, or if called on a current-thread builder
-    /// (where it has nothing to configure).
+    /// Panics if `n` is zero, or if called on a current-thread builder.
     pub fn worker_threads(mut self, n: usize) -> Self {
         assert!(n > 0, "a runtime needs at least one worker thread");
+        let supports_worker_threads = match self.flavor {
+            Flavor::MultiThread => true,
+            Flavor::CurrentThread => false,
+            #[cfg(feature = "thread-per-core")]
+            Flavor::ThreadPerCore => true,
+        };
         assert!(
-            self.flavor == Flavor::MultiThread,
+            supports_worker_threads,
             "worker_threads has no effect on a runtime built with \
              Builder::new_current_thread()"
         );
@@ -559,6 +613,76 @@ impl Builder {
     }
 
     pub fn build(self) -> std::io::Result<Runtime> {
+        #[cfg(feature = "thread-per-core")]
+        if self.flavor == Flavor::ThreadPerCore {
+            return self.build_thread_per_core();
+        }
+        self.build_single()
+    }
+
+    /// Builds one independent `Shared` -- its own reactor, timer driver,
+    /// and blocking pool, with a single-queue (`LocalQueues::CurrentThread`)
+    /// scheduler and no OS thread of its own yet -- shared by
+    /// [`Builder::build_single`]'s current-thread path (exactly one of
+    /// these, driven by whichever thread calls `block_on`) and
+    /// [`Builder::build_thread_per_core`] (one of these per core, each
+    /// handed to its own dedicated pinned worker thread). `flavor` is
+    /// the only thing that differs between those two callers.
+    fn new_core_shared(&self, flavor: RuntimeFlavor) -> std::io::Result<Arc<Shared>> {
+        let reactor = Arc::new(Reactor::new()?);
+        reactor.start();
+        let timer = Arc::new(TimerDriver::new());
+        timer.start();
+        let blocking_pool = BlockingPool::new(
+            self.max_blocking_threads,
+            self.thread_config.clone(),
+            self.thread_keep_alive,
+        );
+        Ok(Arc::new(Shared {
+            injector: Injector::new(),
+            local: LocalQueues::CurrentThread(Mutex::new(std::collections::VecDeque::new())),
+            park_lock: Mutex::new(()),
+            park_condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+            torn_down: AtomicBool::new(false),
+            shutting_down: AtomicBool::new(false),
+            shutdown_signal: Notify::new(),
+            active_tasks: AtomicUsize::new(0),
+            drain_lock: Mutex::new(()),
+            drain_condvar: Condvar::new(),
+            steal_counts: vec![AtomicU64::new(0)],
+            park_counts: vec![AtomicU64::new(0)],
+            park_unpark_counts: vec![AtomicU64::new(0)],
+            busy_duration_nanos: vec![AtomicU64::new(0)],
+            reactor,
+            timer,
+            blocking_pool,
+            thread_config: self.thread_config.clone(),
+            flavor,
+            name: self.name.clone(),
+            id: Id::next(),
+        }))
+    }
+
+    fn build_single(self) -> std::io::Result<Runtime> {
+        let is_current_thread = self.flavor == Flavor::CurrentThread;
+
+        // A current-thread runtime has exactly one local queue -- the
+        // calling thread's, registered as "worker 0" for the duration
+        // of each `block_on` call (see `current_thread::block_on`) --
+        // and nothing to steal from or share with, so no OS threads are
+        // spawned for it at all. Reuses `new_core_shared` for exactly
+        // that single-`Shared`, no-worker-thread shape.
+        if is_current_thread {
+            let shared = self.new_core_shared(RuntimeFlavor::CurrentThread)?;
+            return Ok(Runtime {
+                kind: RuntimeKind::Single {
+                    shared,
+                    workers: None,
+                },
+            });
+        }
+
         let reactor = Arc::new(Reactor::new()?);
         reactor.start();
         let timer = Arc::new(TimerDriver::new());
@@ -569,65 +693,48 @@ impl Builder {
             self.thread_keep_alive,
         );
 
-        let is_current_thread = self.flavor == Flavor::CurrentThread;
-        // A current-thread runtime has exactly one local queue -- the
-        // calling thread's, registered as "worker 0" for the duration
-        // of each `block_on` call (see `current_thread::block_on`) --
-        // and nothing to steal from or share with, so no OS threads are
-        // spawned for it at all.
-        let queue_count = if is_current_thread {
-            1
-        } else {
-            self.worker_threads
-        };
+        let queue_count = self.worker_threads;
         let steal_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
         let park_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
         let park_unpark_counts = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
         let busy_duration_nanos = (0..queue_count).map(|_| AtomicU64::new(0)).collect();
 
-        // For the multi-threaded flavor, each worker's `Worker<Arc<Task>>`
-        // has to be created up front (to hand out its `Stealer` for
-        // `Shared` to hold), then handed off *out* of `Shared` to
-        // whichever thread ends up actually running as that index --
-        // `Worker` is `!Sync`, so it can't live centrally in `Shared`
-        // the way the old `Mutex`-guarded queues did.
-        let (local, local_workers) = if is_current_thread {
-            (
-                LocalQueues::CurrentThread(Mutex::new(std::collections::VecDeque::new())),
-                None,
-            )
-        } else {
-            // `new_fifo()`, not `new_lifo()`: LIFO would put a
-            // self-rescheduled task (e.g. one that just called
-            // `task::yield_now()`) right back on top of its own local
-            // queue, where it gets popped again immediately -- starving
-            // any sibling task sitting lower in the same queue instead
-            // of giving it the turn `yield_now`'s own contract promises
-            // ("letting the scheduler run other queued work before it's
-            // polled again"). `tests/runtime.rs`'s
-            // `yield_now_lets_two_same_queue_tasks_interleave` encodes
-            // exactly this fairness guarantee. FIFO does mean a thief's
-            // `steal()` and the owner's own `pop()` contend on the same
-            // end of the deque (see `crossbeam_deque`'s own docs) rather
-            // than the opposite ends LIFO would give them -- in practice
-            // this doesn't meaningfully hurt stealing (still lock-free,
-            // still retries through transient contention), it's the
-            // *owner draining its own queue faster than the OS can
-            // schedule an idle sibling to even attempt a steal* that
-            // needs a large-enough workload to reliably observe, not a
-            // FIFO-vs-LIFO question -- see
-            // `worker_steal_count_increments_when_a_sibling_steals_work`'s
-            // own comment in `tests/metrics.rs`.
-            let local_workers: Vec<Worker<Arc<task::Task>>> = (0..self.worker_threads)
-                .map(|_| Worker::new_fifo())
-                .collect();
-            let stealers = local_workers.iter().map(Worker::stealer).collect();
-            (LocalQueues::MultiThread { stealers }, Some(local_workers))
-        };
+        // Each worker's `Worker<Arc<Task>>` has to be created up front
+        // (to hand out its `Stealer` for `Shared` to hold), then handed
+        // off *out* of `Shared` to whichever thread ends up actually
+        // running as that index -- `Worker` is `!Sync`, so it can't
+        // live centrally in `Shared` the way the old `Mutex`-guarded
+        // queues did.
+        //
+        // `new_fifo()`, not `new_lifo()`: LIFO would put a
+        // self-rescheduled task (e.g. one that just called
+        // `task::yield_now()`) right back on top of its own local
+        // queue, where it gets popped again immediately -- starving
+        // any sibling task sitting lower in the same queue instead
+        // of giving it the turn `yield_now`'s own contract promises
+        // ("letting the scheduler run other queued work before it's
+        // polled again"). `tests/runtime.rs`'s
+        // `yield_now_lets_two_same_queue_tasks_interleave` encodes
+        // exactly this fairness guarantee. FIFO does mean a thief's
+        // `steal()` and the owner's own `pop()` contend on the same
+        // end of the deque (see `crossbeam_deque`'s own docs) rather
+        // than the opposite ends LIFO would give them -- in practice
+        // this doesn't meaningfully hurt stealing (still lock-free,
+        // still retries through transient contention), it's the
+        // *owner draining its own queue faster than the OS can
+        // schedule an idle sibling to even attempt a steal* that
+        // needs a large-enough workload to reliably observe, not a
+        // FIFO-vs-LIFO question -- see
+        // `worker_steal_count_increments_when_a_sibling_steals_work`'s
+        // own comment in `tests/metrics.rs`.
+        let local_workers: Vec<Worker<Arc<task::Task>>> = (0..self.worker_threads)
+            .map(|_| Worker::new_fifo())
+            .collect();
+        let stealers = local_workers.iter().map(Worker::stealer).collect();
 
         let shared = Arc::new(Shared {
             injector: Injector::new(),
-            local,
+            local: LocalQueues::MultiThread { stealers },
             park_lock: Mutex::new(()),
             park_condvar: Condvar::new(),
             shutdown: AtomicBool::new(false),
@@ -645,23 +752,53 @@ impl Builder {
             timer,
             blocking_pool,
             thread_config: self.thread_config,
-            is_current_thread,
+            flavor: RuntimeFlavor::MultiThread,
             name: self.name,
             id: Id::next(),
         });
 
-        let workers = local_workers.map(|local_workers| {
-            local_workers
-                .into_iter()
-                .enumerate()
-                .map(|(idx, local_worker)| worker::spawn_worker(shared.clone(), idx, local_worker))
-                .collect()
-        });
+        let workers = local_workers
+            .into_iter()
+            .enumerate()
+            .map(|(idx, local_worker)| worker::spawn_worker(shared.clone(), idx, local_worker))
+            .collect();
 
         Ok(Runtime {
-            shared,
-            workers,
-            is_current_thread,
+            kind: RuntimeKind::Single {
+                shared,
+                workers: Some(workers),
+            },
+        })
+    }
+
+    /// [`Builder::new_thread_per_core`]'s build path: `self.worker_threads`
+    /// independent `Shared`s (see [`Builder::new_core_shared`]), each
+    /// handed to its own dedicated, pinned worker thread (see
+    /// `thread_per_core::spawn_core_worker`) -- no shared injector, no
+    /// stealer list, nothing connecting the N cores at the scheduler
+    /// level at all beyond [`Runtime::spawn`]'s own round-robin choice
+    /// of which core a freshly spawned task starts on.
+    #[cfg(feature = "thread-per-core")]
+    fn build_thread_per_core(self) -> std::io::Result<Runtime> {
+        let n = self.worker_threads.max(1);
+        let mut cores = Vec::with_capacity(n);
+        for _ in 0..n {
+            cores.push(self.new_core_shared(RuntimeFlavor::ThreadPerCore)?);
+        }
+        let workers = cores
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(idx, shared)| {
+                thread_per_core::spawn_core_worker(shared, idx, self.thread_config.clone())
+            })
+            .collect();
+        Ok(Runtime {
+            kind: RuntimeKind::PerCore {
+                cores,
+                workers,
+                next: AtomicUsize::new(0),
+            },
         })
     }
 
@@ -781,9 +918,10 @@ impl LocalRuntime {
         // equivalent plain `Runtime`.
         let _worker_guard = worker::enter_as_worker(0);
 
+        let shared = self.rt.primary_shared().clone();
         let mut future = std::pin::pin!(future);
         let waker = Waker::from(Arc::new(LocalRuntimeWaker {
-            shared: self.rt.shared.clone(),
+            shared: shared.clone(),
         }));
         let mut cx = Context::from_waker(&waker);
 
@@ -793,16 +931,16 @@ impl LocalRuntime {
             }
 
             let mut ran_any = false;
-            while let Some(task) = self.rt.shared.next_task(0) {
+            while let Some(task) = shared.next_task(0) {
                 let start = Instant::now();
                 task.run();
-                self.rt.shared.add_busy_duration(0, start.elapsed());
+                shared.add_busy_duration(0, start.elapsed());
                 ran_any = true;
             }
             while let Some(task) = self.local.next_local_task() {
                 let start = Instant::now();
                 task.run();
-                self.rt.shared.add_busy_duration(0, start.elapsed());
+                shared.add_busy_duration(0, start.elapsed());
                 ran_any = true;
             }
             if ran_any {
@@ -819,7 +957,7 @@ impl LocalRuntime {
             // not instantly, and `LocalRuntimeWaker` below wakes this
             // exact condvar regardless of which queue's task caused the
             // wake.
-            self.rt.shared.park(0);
+            shared.park(0);
         }
     }
 }
@@ -845,13 +983,31 @@ impl Wake for LocalRuntimeWaker {
     }
 }
 
-/// A running instance of the hand-rolled runtime: a worker-thread pool
-/// plus its I/O reactor and timer driver. Dropping it shuts everything
-/// down and joins every background thread.
+/// A running instance of the hand-rolled runtime: either one scheduler
+/// pool sharing a single reactor/timer ([`RuntimeKind::Single`] --
+/// [`Builder::new_multi_thread`]/[`Builder::new_current_thread`]), or one
+/// independent reactor/timer/scheduler queue per CPU core
+/// ([`RuntimeKind::PerCore`] -- [`Builder::new_thread_per_core`]).
+/// Dropping it shuts everything down and joins every background thread.
 pub struct Runtime {
-    shared: Arc<Shared>,
-    workers: Option<Vec<std::thread::JoinHandle<()>>>,
-    is_current_thread: bool,
+    kind: RuntimeKind,
+}
+
+enum RuntimeKind {
+    Single {
+        shared: Arc<Shared>,
+        workers: Option<Vec<std::thread::JoinHandle<()>>>,
+    },
+    #[cfg(feature = "thread-per-core")]
+    PerCore {
+        /// One `Shared` per pinned core -- see `thread_per_core`'s
+        /// module docs. Never empty (`Builder::build_thread_per_core`
+        /// floors the core count at 1).
+        cores: Vec<Arc<Shared>>,
+        workers: Vec<std::thread::JoinHandle<()>>,
+        /// [`Runtime::spawn`]'s round-robin cursor into `cores`.
+        next: AtomicUsize,
+    },
 }
 
 impl Runtime {
@@ -863,18 +1019,91 @@ impl Runtime {
         Builder::new()
     }
 
+    /// The `Shared` every "pick one representative core" operation
+    /// (`handle`/`metrics`/`enter`/`block_on`'s own ambient context) uses
+    /// -- the runtime's only `Shared` for [`RuntimeKind::Single`], or
+    /// core 0 for [`RuntimeKind::PerCore`] (see [`Runtime::spawn`]'s docs
+    /// for why core 0 specifically, and [`Runtime::core_handle`] for
+    /// reaching any other core directly).
+    fn primary_shared(&self) -> &Arc<Shared> {
+        match &self.kind {
+            RuntimeKind::Single { shared, .. } => shared,
+            #[cfg(feature = "thread-per-core")]
+            RuntimeKind::PerCore { cores, .. } => &cores[0],
+        }
+    }
+
+    /// Every `Shared` this runtime owns -- one for [`RuntimeKind::Single`],
+    /// one per core for [`RuntimeKind::PerCore`] -- in the order shutdown
+    /// should tear them down (order doesn't actually matter here; each
+    /// core is fully independent).
+    fn all_shared(&self) -> Vec<&Arc<Shared>> {
+        match &self.kind {
+            RuntimeKind::Single { shared, .. } => vec![shared],
+            #[cfg(feature = "thread-per-core")]
+            RuntimeKind::PerCore { cores, .. } => cores.iter().collect(),
+        }
+    }
+
+    /// Takes every worker `JoinHandle` this runtime owns, leaving none
+    /// behind -- idempotent (a second call returns an empty `Vec`), same
+    /// as the plain `Option::take` every shutdown path already relied on
+    /// for [`RuntimeKind::Single`].
+    fn take_workers(&mut self) -> Vec<std::thread::JoinHandle<()>> {
+        match &mut self.kind {
+            RuntimeKind::Single { workers, .. } => workers.take().unwrap_or_default(),
+            #[cfg(feature = "thread-per-core")]
+            RuntimeKind::PerCore { workers, .. } => std::mem::take(workers),
+        }
+    }
+
+    /// How many CPU cores this runtime is pinned across -- `1` for every
+    /// flavor except [`RuntimeKind::PerCore`]. See
+    /// [`Builder::new_thread_per_core`].
+    #[cfg(feature = "thread-per-core")]
+    pub fn num_cores(&self) -> usize {
+        match &self.kind {
+            RuntimeKind::Single { .. } => 1,
+            RuntimeKind::PerCore { cores, .. } => cores.len(),
+        }
+    }
+
+    /// A [`Handle`] bound to exactly one core's own `Shared` -- unlike
+    /// [`Runtime::handle`] (always core 0), lets a caller reach any of
+    /// the N cores directly, e.g. to `spawn` something deliberately
+    /// pinned rather than round-robin-placed by [`Runtime::spawn`].
+    ///
+    /// # Panics
+    /// Panics if `idx >= self.num_cores()`.
+    #[cfg(feature = "thread-per-core")]
+    pub fn core_handle(&self, idx: usize) -> Handle {
+        match &self.kind {
+            RuntimeKind::Single { shared, .. } => {
+                assert_eq!(idx, 0, "this runtime has exactly one core (index 0)");
+                Handle {
+                    shared: shared.clone(),
+                }
+            }
+            RuntimeKind::PerCore { cores, .. } => Handle {
+                shared: cores[idx].clone(),
+            },
+        }
+    }
+
     pub fn handle(&self) -> Handle {
         Handle {
-            shared: self.shared.clone(),
+            shared: self.primary_shared().clone(),
         }
     }
 
     /// A live view into this runtime's scheduler and blocking pool --
     /// see [`RuntimeMetrics`] for what's on it. Equivalent to
-    /// `self.handle().metrics()`.
+    /// `self.handle().metrics()`. For [`RuntimeKind::PerCore`], this is
+    /// core 0's own view specifically -- see [`Runtime::core_handle`]`(i)
+    /// .metrics()` for any other core.
     pub fn metrics(&self) -> RuntimeMetrics {
         RuntimeMetrics {
-            shared: self.shared.clone(),
+            shared: self.primary_shared().clone(),
         }
     }
 
@@ -889,12 +1118,27 @@ impl Runtime {
     /// Spawn a future onto the pool. It starts running as soon as a
     /// worker picks it up, independent of whether anything ever awaits
     /// the returned handle.
+    ///
+    /// For [`RuntimeKind::PerCore`], this round-robins across every
+    /// core's own `Shared` to choose the task's home core -- once picked,
+    /// it never migrates: every re-wake reschedules onto that same core's
+    /// queue (see `thread_per_core`'s module docs). A task spawned from
+    /// *inside* another task via the ordinary ambient `crate::spawn`
+    /// instead lands on whichever core is currently running its parent,
+    /// bypassing this round-robin entirely.
     pub fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
     where
         F: Future + Send + 'static,
         F::Output: Send + 'static,
     {
-        task::spawn(&self.shared, future)
+        match &self.kind {
+            RuntimeKind::Single { shared, .. } => task::spawn(shared, future),
+            #[cfg(feature = "thread-per-core")]
+            RuntimeKind::PerCore { cores, next, .. } => {
+                let idx = next.fetch_add(1, Ordering::Relaxed) % cores.len();
+                task::spawn(&cores[idx], future)
+            }
+        }
     }
 
     /// Run a genuinely blocking closure on a dedicated thread pool
@@ -916,28 +1160,39 @@ impl Runtime {
     /// current-thread flavor (see [`Builder::new_current_thread`]),
     /// there is no worker pool -- spawned tasks run interleaved with
     /// polls of `future` itself, entirely on this call's own thread; see
-    /// `current_thread`'s module docs.
+    /// `current_thread`'s module docs. On the thread-per-core flavor
+    /// (see [`Builder::new_thread_per_core`]), `future` itself still
+    /// runs right here on the calling thread (which isn't one of the
+    /// pinned cores), but anything it spawns lands on core 0's queue --
+    /// momentarily shared, safely (it's `Mutex`-guarded), between this
+    /// call and core 0's own dedicated worker thread, exactly like the
+    /// multi-threaded flavor's worker pool picking up a `block_on`-nested
+    /// spawn.
     pub fn block_on<F: Future>(&self, future: F) -> F::Output {
-        let _guard = context::enter(self.shared.clone());
-        if self.is_current_thread {
-            current_thread::block_on(&self.shared, future)
+        let shared = self.primary_shared().clone();
+        let _guard = context::enter(shared.clone());
+        if shared.is_current_thread() {
+            current_thread::block_on(&shared, future)
         } else {
             block_on_inner(future)
         }
     }
 
-    /// The four steps every shutdown path ends with: flip the hard
-    /// `shutdown` flag so worker threads stop picking up new tasks, wake
-    /// anything still parked so it re-checks that flag promptly instead
-    /// of waiting out its own park timeout, and tear down the reactor
-    /// and timer threads. Both are simple event loops with nothing of
-    /// the caller's left to wait on once told to stop, so this always
-    /// joins them regardless of which shutdown path called it.
+    /// The four steps every shutdown path ends with, for every `Shared`
+    /// this runtime owns: flip the hard `shutdown` flag so worker
+    /// threads stop picking up new tasks, wake anything still parked so
+    /// it re-checks that flag promptly instead of waiting out its own
+    /// park timeout, and tear down the reactor and timer threads. Both
+    /// are simple event loops with nothing of the caller's left to wait
+    /// on once told to stop, so this always joins them regardless of
+    /// which shutdown path called it.
     fn stop_scheduling_and_reactor(&self) {
-        self.shared.shutdown.store(true, Ordering::Release);
-        self.shared.wake_all_parked();
-        self.shared.reactor.shutdown();
-        self.shared.timer.shutdown();
+        for shared in self.all_shared() {
+            shared.shutdown.store(true, Ordering::Release);
+            shared.wake_all_parked();
+            shared.reactor.shutdown();
+            shared.timer.shutdown();
+        }
     }
 
     /// Signals shutdown and returns immediately -- doesn't wait for
@@ -953,13 +1208,17 @@ impl Runtime {
     /// might hold something worth letting finish cleanly (a flush, a
     /// file close) -- this method gives them no time at all.
     pub fn shutdown_background(mut self) {
-        self.shared.begin_graceful_shutdown();
-        if !self.shared.teardown_once() {
+        for shared in self.all_shared() {
+            shared.begin_graceful_shutdown();
+        }
+        if !self.primary_shared().teardown_once() {
             return;
         }
         self.stop_scheduling_and_reactor();
-        self.shared.blocking_pool.signal_shutdown();
-        self.workers.take();
+        for shared in self.all_shared() {
+            shared.blocking_pool.signal_shutdown();
+        }
+        self.take_workers();
     }
 
     /// Signals shutdown, then waits up to `timeout` for every
@@ -977,40 +1236,48 @@ impl Runtime {
     /// a `spawn_blocking` closure in a blocking syscall this crate has
     /// no way to preempt) will still be here when `timeout` elapses, at
     /// which point this stops waiting and tears down anyway, the same
-    /// as `shutdown_background` would.
+    /// as `shutdown_background` would. For [`RuntimeKind::PerCore`],
+    /// every core is drained (each against the same overall `deadline`)
+    /// before any of them is actually torn down.
     pub fn shutdown_timeout(mut self, timeout: Duration) {
-        self.shared.begin_graceful_shutdown();
+        for shared in self.all_shared() {
+            shared.begin_graceful_shutdown();
+        }
         let deadline = Instant::now() + timeout;
-        self.shared.wait_for_tasks_drain(deadline);
-        if !self.shared.teardown_once() {
+        for shared in self.all_shared() {
+            shared.wait_for_tasks_drain(deadline);
+        }
+        if !self.primary_shared().teardown_once() {
             return;
         }
         self.stop_scheduling_and_reactor();
-        self.shared.blocking_pool.signal_shutdown();
-        self.shared.blocking_pool.wait_for_drain(Some(deadline));
-        if let Some(workers) = self.workers.take() {
-            for w in workers {
-                let _ = w.join();
-            }
+        for shared in self.all_shared() {
+            shared.blocking_pool.signal_shutdown();
+            shared.blocking_pool.wait_for_drain(Some(deadline));
+        }
+        for w in self.take_workers() {
+            let _ = w.join();
         }
     }
 }
 
 impl Drop for Runtime {
     fn drop(&mut self) {
-        self.shared.begin_graceful_shutdown();
-        if !self.shared.teardown_once() {
+        for shared in self.all_shared() {
+            shared.begin_graceful_shutdown();
+        }
+        if !self.primary_shared().teardown_once() {
             // `shutdown_background`/`shutdown_timeout` already ran this
             // (they consume `self` by value, so this `drop` still runs
             // once their body returns) -- nothing left to do.
             return;
         }
         self.stop_scheduling_and_reactor();
-        self.shared.blocking_pool.shutdown();
-        if let Some(workers) = self.workers.take() {
-            for w in workers {
-                let _ = w.join();
-            }
+        for shared in self.all_shared() {
+            shared.blocking_pool.shutdown();
+        }
+        for w in self.take_workers() {
+            let _ = w.join();
         }
     }
 }
