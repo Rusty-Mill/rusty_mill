@@ -118,14 +118,19 @@ but deferring detailed rationale to a forthcoming post
 (https://iggy.apache.org/blogs/2026/02/27/thread-per-core-io_uring/), TigerBeetle
 VSR internals (https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vsr.md).
 
-### D3 — Runtime: compio, provisional — spike run, core rationale did not survive it
+### D3 — Runtime: compio (pinned to 0.18.0) — decided, after two rounds of spikes
 
-**Decision (revised 2026-08-01, spike now run):** compio remains the working
-choice for Phase 1, but the specific rationale below that justified preferring
-it over glommio/monoio — driver-swappability — is **falsified** by the spike.
-It survives only because D4 already sidesteps the need for it (explained under
-"Spike results"). This is now a weaker, more conditional pick than originally
-written, not a confirmed one — treat D3 as still open, not closed by this spike.
+**Decision (final, 2026-08-01):** compio, pinned to `=0.18.0`, is the Phase 1
+runtime. Reached in two rounds: the first spike falsified the original
+driver-swappability rationale for compio specifically; rather than quietly keep
+a wrong reason or pick a replacement without equal scrutiny, the same
+source-level check was then run against glommio and monoio too (see "Spike
+results, path (b)" below). All three fail the DST-pluggability test the same
+way, which neutralizes it as a differentiator and makes D4's own
+`Storage`/`Clock` abstraction load-bearing regardless of which runtime is
+chosen. On the axes that remain real — stable-Rust buildability, maintenance
+health, audit surface — compio still comes out ahead, for reasons that have
+nothing to do with the original claim.
 
 **Original decision (2026-08-01, pre-spike):** compio is the working choice for
 the thread-per-core/io_uring runtime, but this is explicitly provisional — not a
@@ -223,12 +228,13 @@ this environment and inspected the crate's actual source, not just its docs.
   `compio` latest without either accepting a nightly-toolchain dependency or
   deliberately pinning back to 0.18.0.
 
-**Revised status:** D3 is not resolved by this spike — it's better-informed and
-more honest about its risk than before. Two concrete, sourced findings now exist
-that weren't available when this ADR was first drafted. Before this decision can
-be called final: either (a) pin to `compio` 0.18.0, explicitly accept that its
-internal driver cannot be swapped for DST purposes (relying entirely on D4's
-higher-level trait abstraction instead), and set a reminder to re-check stable
+**Status after this first round:** D3 was not resolved by this spike alone — it
+was better-informed and more honest about its risk than before, but not final.
+Two concrete, sourced findings now existed that weren't available when this ADR
+was first drafted. Closing this out required either (a) pin to `compio` 0.18.0,
+explicitly accept that its internal driver cannot be swapped for DST purposes
+(relying entirely on D4's higher-level trait abstraction instead), and set a
+reminder to re-check stable
 Rust's `cfg_select` stabilization before upgrading past 0.18.0; or (b) re-run
 this same source-level check (stable-Rust buildability, actual public
 pluggability) against glommio and monoio before picking between the three, since
@@ -248,6 +254,89 @@ crates.io (`Proactor`/`Driver`/`Runtime` definitions), local build/bisect
 against `compio` 0.15.0–0.19.1 on rustc 1.94.1 (stable) and rustc
 1.99.0-nightly 2026-07-31, rust-lang/rust#152944 (cfg_select stabilization
 tracking) and #115585 (original cfg_select tracking issue).
+
+**Spike results (2026-08-01), path (b) — glommio and monoio, same rigor:**
+
+Rather than pin-and-move-on, ran the identical check (minimal real program,
+stable-Rust build, source inspection of the actual driver/reactor/op-dispatch
+layer) against glommio 0.9.0 and monoio 0.2.4.
+
+*glommio 0.9.0:*
+- Builds clean on stable Rust with default features — no equivalent of compio's
+  regression.
+- Functional: a real `DmaFile` create/write/fdatasync/read cycle ran correctly
+  in this environment (kernel 6.18.5, well above the ≥5.8 floor; the default
+  `memlock` ulimit here, 8192, was sufficient — worth re-checking against
+  whatever ulimits the actual deployment target enforces, since this is a
+  documented friction point elsewhere, just not one this sandbox happened to
+  hit). Required manually aligning the write buffer to `file.alignment()` —
+  glommio's `DmaFile` is O_DIRECT-based, so callers own alignment; a real
+  storage-engine cost, arguably also a feature for a project that wants precise
+  control over its I/O path.
+- Driver-swappability: **also false, more so than compio.** `Reactor`
+  (`glommio-0.9.0/src/reactor.rs`) is `pub(crate)`, held as a single
+  non-generic `Rc<Reactor>` on `LocalExecutor`. Unlike compio, there isn't even
+  a closed set of alternate backends selected by cfg — `glommio-0.9.0/src/sys/`
+  contains only `uring.rs`; the crate is Linux/io_uring-only by construction,
+  no polling/IOCP fallback at all. No public seam exists here either.
+- Maintenance: re-checked DataDog/glommio#707 ("call for glommio maintainers,"
+  opened 2026-03-10) — still open, no resolution, as of this spike. The
+  bus-factor risk flagged in the original research is unresolved and current,
+  not stale.
+
+*monoio 0.2.4:*
+- Builds clean on stable Rust, functional (file create/write/fsync/read cycle
+  ran correctly).
+- Driver-swappability: **genuinely more nuanced than the other two, but the
+  practical answer is the same.** monoio's `Driver` (`monoio-0.2.4/src/driver/
+  mod.rs`) is an actual `pub trait`, and `Runtime<D>` (`src/runtime.rs`) is
+  generic over it — `IoUringDriver` and `LegacyDriver` (mio-based) both
+  implement it, and in principle a third party could implement `Driver` for a
+  custom type. But `Driver` only governs executor-level scheduling (`with`,
+  `submit`, `park`, `park_timeout`, `unpark`) — it does not cover individual
+  I/O operations. Actual op dispatch (open/read/write/fsync) goes through
+  `OpAble` (`src/driver/op.rs`), which is `pub(crate)` and hard-matches a
+  closed `Inner` enum (`Uring | Legacy`), not parameterized by `D: Driver`. So
+  the one public trait in reach of this design doesn't cover the thing DST
+  fault-injection would actually need to intercept (per-operation behavior on
+  read/write/fsync). Net result: no usable public seam here either, despite the
+  more promising-looking API surface.
+- Feature parity/maintenance, re-checked fresh (not relying on Iggy's
+  potentially-stale assessment): still confirmed behind on io_uring feature
+  parity as of this research, and maintenance pace described as not keeping up
+  with io_uring's evolution, patches arriving mainly reactively. Iggy's
+  original assessment holds; it was not stale.
+
+**What this changes:** the DST-pluggability axis — the reason D3 originally
+leaned toward compio — turns out to differentiate **none** of the three. All
+three require the same thing: the team's own `Storage`/`Clock` trait
+abstraction from D4, sitting above whichever runtime is chosen, because none of
+the three expose a per-operation I/O seam a downstream crate can hook. That's
+actually a useful result — it means D4's approach is validated as necessary
+regardless of D3's outcome, and D3 can now be decided on the axes that remain
+real: stable-Rust buildability, maintenance health, and audit/dependency
+surface.
+
+**Final decision (2026-08-01):** compio, pinned to 0.18.0, remains the pick —
+for different reasons than originally written, not the original ones. Reasoning
+on the axes that survived scrutiny: glommio carries a live, unresolved
+bus-factor risk (open maintainer-succession issue) and the least modular/most
+monolithic dependency structure of the three; monoio has independently
+reconfirmed io_uring feature-parity gaps and a maintenance pace that doesn't
+track io_uring's evolution; compio's regression is narrow (one recent release,
+plausibly self-resolving as `cfg_select` reaches stable Rust), its dependency
+structure is the most modular of the three (pull only the `compio-*` crates a
+feature needs), and Iggy's own experience found its maintainers responsive.
+Action item: pin `compio = "=0.18.0"` explicitly in the eventual `Cargo.toml`
+(not a bare `"0.19"`-style range that would silently pick up the broken
+release), and revisit the pin once `cfg_select` ships on a stable Rust release.
+
+Sources (glommio/monoio spike): direct source inspection of `glommio` 0.9.0
+(`Reactor`, `LocalExecutor`, `src/sys/`) and `monoio` 0.2.4 (`Driver` trait,
+`Runtime<D>`, `OpAble`, `Inner` enum) from crates.io; local build/run of both on
+rustc 1.94.1 (stable) in this environment; DataDog/glommio#707 re-checked
+2026-08-01; WebSearch re-check of monoio io_uring feature parity/maintenance
+pace, 2026-08-01.
 
 ### D4 — Testing strategy: injectable disk/clock traits from commit one, not a runtime-replacement bet
 
@@ -351,12 +440,12 @@ decisions above, so they aren't scattered:
 - Disk and Clock access behind injectable traits from the first commit, with a
   real and a simulated implementation shipping together (D4)
 - **Revised, post-spike:** the D3 assumption that a runtime's internal I/O
-  driver would itself be swapped for a simulated one is not how this works for
-  compio (confirmed false by source inspection) and should not be assumed for
-  glommio/monoio either without the same check. The team's own `Storage`/`Clock`
-  traits (D4) are the actual seam — the real implementation calls into whatever
-  runtime is chosen, the simulated implementation never touches the runtime's
-  I/O driver at all. Storage-engine code must not call runtime I/O APIs
+  driver would itself be swapped for a simulated one does not hold for any of
+  compio, glommio, or monoio — confirmed false by source inspection of all
+  three. The team's own `Storage`/`Clock` traits (D4) are the actual seam — the
+  real implementation calls into whatever runtime is chosen, the simulated
+  implementation never touches the runtime's I/O driver at all. Storage-engine
+  code must not call runtime I/O APIs
   directly outside the `Storage`/`Clock` trait boundary, or this seam breaks.
 
 ## Consumer gates
@@ -364,10 +453,8 @@ decisions above, so they aren't scattered:
 Phase 1's storage engine is not considered done until:
 - The three minimal DST tests in D4 pass against both the real and simulated
   disk implementations.
-- D3 is finalized via one of the two paths its spike results call for: pin to
-  `compio` 0.18.0 and accept the non-pluggable-driver finding (mitigated by
-  D4), or re-run the same source-level check against glommio and monoio before
-  choosing between the three.
+- The `Cargo.toml` pins `compio = "=0.18.0"` exactly (not a range that could
+  silently pick up the 0.19.x stable-Rust regression), per D3's final decision.
 - The primitives listed under "Storage engine implications" exist and are
   exercised by at least one test each.
 - At least one pilot workload (per D5) is running on rusty_stream in a
@@ -378,7 +465,9 @@ Phase 1's storage engine is not considered done until:
 - Full Kafka wire-protocol compatibility, in any form, for Phase 1 or as a
   default future direction (D1).
 - Any consensus implementation (VSR or Raft) landing as Phase 1 code (D2).
-- Treating compio as beyond-question final before the D3 spike runs (D3).
+- Assuming any runtime's internal I/O driver is swappable for a simulated one
+  — confirmed false for all three of compio, glommio, and monoio (D3).
+  Simulated I/O only ever happens through D4's own `Storage`/`Clock` traits.
 - Betting DST tooling on `madsim`/`turmoil` as a runtime-replacement strategy
   (D4).
 - Declaring NATS JetStream deprecated or unsupported for new work (D5).

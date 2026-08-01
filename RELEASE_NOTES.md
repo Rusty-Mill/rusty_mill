@@ -23,6 +23,31 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## ADR-0002 D3: runtime decision closed — compio 0.18.0, after checking all three
+**2026-08-01**
+
+- **Changed:** ran the same source-level spike (stable-Rust build + real
+  program + driver/reactor source inspection) against glommio 0.9.0 and monoio
+  0.2.4 that had just been run against compio, rather than pin-and-move-on
+  after finding compio's stated rationale was wrong.
+- **Found:** none of the three runtimes expose a public seam for injecting
+  simulated per-operation disk I/O — glommio's `Reactor` is even more
+  monolithic than compio's (`pub(crate)`, single non-generic `Rc`, no
+  alternate-backend cfg selection at all); monoio's `Driver` trait is
+  genuinely public and `Runtime<D>` is generic over it, but that trait only
+  covers executor scheduling, not the actual read/write/fsync dispatch (which
+  is `pub(crate)` and hardcoded to a closed enum). This neutralizes
+  DST-pluggability as a differentiator entirely — D4's own `Storage`/`Clock`
+  trait abstraction is what actually delivers DST, regardless of runtime.
+- **Also reconfirmed, not stale:** DataDog/glommio#707 ("call for
+  maintainers") is still open and unresolved; monoio's io_uring feature-parity
+  gap and slow maintenance pace (flagged by Iggy) still hold as of a fresh
+  2026-08-01 check.
+- **Decided:** compio, pinned to exactly `0.18.0` (not a range), stays the
+  Phase 1 runtime — now on the strength of dependency modularity and
+  maintainer responsiveness rather than the falsified driver-swappability
+  claim. D3 in ADR-0002 is closed, not provisional.
+
 ## ADR-0002 D3: compio validation spike — core rationale falsified, decision reopened
 **2026-08-01**
 
