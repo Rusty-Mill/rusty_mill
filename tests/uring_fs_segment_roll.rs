@@ -92,7 +92,9 @@ fn segment_roll_fallocate_write_rename_then_unlink_the_retired_segment() {
         let retired = UringFile::create(&retired_path).await.unwrap();
         retired.close().await.unwrap();
         assert!(retired_path.exists());
-        rusty_tokio::io::uring_remove_file(&retired_path).await.unwrap();
+        rusty_tokio::io::uring_remove_file(&retired_path)
+            .await
+            .unwrap();
         assert!(!retired_path.exists());
 
         // The still-live, rolled segment is untouched by retiring the
@@ -129,7 +131,12 @@ fn open_options_create_new_fails_if_the_file_already_exists() {
     let path = dir.join("exists.dat");
 
     rt.block_on(async {
-        UringFile::create(&path).await.unwrap().close().await.unwrap();
+        UringFile::create(&path)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
 
         let err = UringFile::options()
             .write(true)

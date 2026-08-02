@@ -177,8 +177,14 @@ fn wsa_error() -> io::Error {
     // which `WSAStartup` guarantees is populated after any failed
     // Winsock call.
     let code = unsafe { WinSock::WSAGetLastError() };
-    if code == WinSock::WSAENOTCONN || code == WinSock::WSAEALREADY || code == WinSock::WSAEINPROGRESS {
-        io::Error::new(io::ErrorKind::WouldBlock, "Winsock socket not connected yet")
+    if code == WinSock::WSAENOTCONN
+        || code == WinSock::WSAEALREADY
+        || code == WinSock::WSAEINPROGRESS
+    {
+        io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Winsock socket not connected yet",
+        )
     } else {
         io::Error::from_raw_os_error(code)
     }

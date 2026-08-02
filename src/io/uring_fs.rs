@@ -972,8 +972,9 @@ impl OpDriver for SimDriver {
                     // `buf_len` describe exactly that buffer's
                     // still-valid memory, same invariant the real
                     // io_uring-backed driver relies on.
-                    let dst =
-                        unsafe { std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize) };
+                    let dst = unsafe {
+                        std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize)
+                    };
                     dst[..n].copy_from_slice(&file.data[pos..pos + n]);
                     Ok(n as i32)
                 }
@@ -1051,7 +1052,9 @@ impl OpDriver for SimDriver {
             Err(io::Error::from_raw_os_error(libc::EBADF))
         } else {
             let end = (offset + len) as usize;
-            inner.grow_to(handle, end).map_err(io::Error::from_raw_os_error)
+            inner
+                .grow_to(handle, end)
+                .map_err(io::Error::from_raw_os_error)
         };
         drop(inner);
         Box::pin(std::future::ready(result))
@@ -1065,7 +1068,9 @@ impl OpDriver for SimDriver {
             let new_len = len as usize;
             let current_len = inner.files[&handle].data.len();
             if new_len >= current_len {
-                inner.grow_to(handle, new_len).map_err(io::Error::from_raw_os_error)
+                inner
+                    .grow_to(handle, new_len)
+                    .map_err(io::Error::from_raw_os_error)
             } else {
                 let shrink = (current_len - new_len) as u64;
                 let file = inner.files.get_mut(&handle).unwrap();
@@ -1239,7 +1244,11 @@ impl OpenOptions {
         path: impl AsRef<Path>,
     ) -> io::Result<UringFile> {
         let handle = driver
-            .open(path.as_ref().to_path_buf(), self.raw_flags(), self.mode as u32)
+            .open(
+                path.as_ref().to_path_buf(),
+                self.raw_flags(),
+                self.mode as u32,
+            )
             .await?;
         Ok(UringFile {
             handle,
@@ -1269,7 +1278,9 @@ pub struct UringFile {
 
 impl std::fmt::Debug for UringFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("UringFile").field("handle", &self.handle).finish()
+        f.debug_struct("UringFile")
+            .field("handle", &self.handle)
+            .finish()
     }
 }
 
@@ -1295,13 +1306,23 @@ impl UringFile {
 
     /// Like [`open`](Self::open), but against an explicit [`OpDriver`]
     /// -- see this module's top-level `OpDriver` docs.
-    pub async fn open_on(driver: Arc<dyn OpDriver>, path: impl AsRef<Path>) -> io::Result<UringFile> {
-        OpenOptions::new().read(true).write(true).open_on(driver, path).await
+    pub async fn open_on(
+        driver: Arc<dyn OpDriver>,
+        path: impl AsRef<Path>,
+    ) -> io::Result<UringFile> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open_on(driver, path)
+            .await
     }
 
     /// Like [`create`](Self::create), but against an explicit
     /// [`OpDriver`].
-    pub async fn create_on(driver: Arc<dyn OpDriver>, path: impl AsRef<Path>) -> io::Result<UringFile> {
+    pub async fn create_on(
+        driver: Arc<dyn OpDriver>,
+        path: impl AsRef<Path>,
+    ) -> io::Result<UringFile> {
         OpenOptions::new()
             .read(true)
             .write(true)
@@ -1334,7 +1355,10 @@ impl UringFile {
     pub async fn read_at<B: IoBufMut>(&self, mut buf: B, pos: u64) -> BufResult<usize, B> {
         let ptr = buf.stable_mut_ptr() as usize;
         let len = buf.bytes_total() as u32;
-        let (result, keepalive) = self.driver.read_at(self.handle, ptr, len, pos, Box::new(buf)).await;
+        let (result, keepalive) = self
+            .driver
+            .read_at(self.handle, ptr, len, pos, Box::new(buf))
+            .await;
         let mut buf = *keepalive
             .downcast::<B>()
             .expect("OpDriver returned a buffer of a different type than it was given");
@@ -1360,7 +1384,10 @@ impl UringFile {
     pub async fn write_at<B: IoBuf>(&self, buf: B, pos: u64) -> BufResult<usize, B> {
         let ptr = buf.stable_ptr() as usize;
         let len = buf.bytes_init() as u32;
-        let (result, keepalive) = self.driver.write_at(self.handle, ptr, len, pos, Box::new(buf)).await;
+        let (result, keepalive) = self
+            .driver
+            .write_at(self.handle, ptr, len, pos, Box::new(buf))
+            .await;
         let buf = *keepalive
             .downcast::<B>()
             .expect("OpDriver returned a buffer of a different type than it was given");

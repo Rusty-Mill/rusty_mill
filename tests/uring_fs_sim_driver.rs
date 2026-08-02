@@ -72,7 +72,9 @@ fn injected_torn_write_reports_success_but_only_partially_lands() {
     let driver: Arc<dyn OpDriver> = sim.clone();
 
     rt.block_on(async {
-        let file = UringFile::create_on(driver, "/virtual/torn.dat").await.unwrap();
+        let file = UringFile::create_on(driver, "/virtual/torn.dat")
+            .await
+            .unwrap();
 
         sim.inject_torn_write(0.5);
         let payload = vec![0xAAu8; 100];
@@ -120,9 +122,7 @@ fn fsync_lies_then_crash_and_reopen_rolls_back_past_it() {
 
         // Now fsync starts lying.
         sim.set_fsync_lies(true);
-        let result = file
-            .write_at(b"looks-durable-but-isnt".to_vec(), 14)
-            .await;
+        let result = file.write_at(b"looks-durable-but-isnt".to_vec(), 14).await;
         result.0.unwrap();
         file.fsync().await.unwrap(); // reports Ok -- the lie
         file.close().await.unwrap();
