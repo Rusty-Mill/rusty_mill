@@ -209,6 +209,10 @@ name = "uring_fs_cancellation"
 required-features = ["io-uring-fs"]
 
 [[test]]
+name = "uring_fs_global_driver"
+required-features = ["io-uring-fs"]
+
+[[test]]
 name = "uring_fs_segment_roll"
 required-features = ["io-uring-fs"]
 

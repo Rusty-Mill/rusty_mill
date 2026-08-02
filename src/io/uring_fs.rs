@@ -742,7 +742,18 @@ impl OpFuture {
 /// pluggable alternative.
 static GLOBAL_DRIVER: Mutex<Option<Arc<dyn OpDriver>>> = Mutex::new(None);
 
-fn global_driver() -> io::Result<Arc<dyn OpDriver>> {
+/// Returns the one, process-wide, lazily started real io_uring
+/// [`OpDriver`] every [`UringFile`] operation and free function in this
+/// module defaults to -- the same instance every call, started on first
+/// use. This is the only way to obtain a real (non-[`SimDriver`]) driver
+/// from outside this crate: `IoUringDriver` itself has no public
+/// constructor, since this module's own docs are explicit that one ring
+/// is the deliberate design here (not a per-core throughput setup), and
+/// exposing a second construction path would let a caller undermine
+/// that invariant. Pass the returned `Arc` to any `OpDriver`-generic
+/// code (e.g. a `*_on` function in this module, or your own) that needs
+/// the real driver rather than a `UringFile`.
+pub fn global_driver() -> io::Result<Arc<dyn OpDriver>> {
     let mut guard = GLOBAL_DRIVER.lock().unwrap();
     if let Some(driver) = &*guard {
         return Ok(driver.clone());

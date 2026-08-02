@@ -92,8 +92,9 @@ pub use unix::{
 pub use unix_datagram::UnixDatagram;
 #[cfg(all(target_os = "linux", feature = "io-uring-fs"))]
 pub use uring_fs::{
-    remove_file as uring_remove_file, remove_file_on as uring_remove_file_on, rename as uring_rename,
-    rename_on as uring_rename_on, BoxFuture as UringBoxFuture, BufResult, IoBuf, IoBufMut,
-    IoUringDriver, OpDriver, OpenOptions as UringOpenOptions, SimDriver, UringFile,
+    global_driver as uring_global_driver, remove_file as uring_remove_file,
+    remove_file_on as uring_remove_file_on, rename as uring_rename, rename_on as uring_rename_on,
+    BoxFuture as UringBoxFuture, BufResult, IoBuf, IoBufMut, IoUringDriver, OpDriver,
+    OpenOptions as UringOpenOptions, SimDriver, UringFile,
 };
 pub use util::{empty, repeat, sink, Empty, Repeat, Sink};
