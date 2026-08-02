@@ -14,18 +14,16 @@
 //! vice versa. A connection holds whichever lock it needs only for the
 //! duration of one dispatch, never across a network read/write.
 //!
+//! A frame claiming a body longer than `MAX_FRAME_LEN` gets its connection
+//! ended immediately, before the oversized buffer is ever allocated or a
+//! byte of the (possibly nonexistent) body is read — a client can claim a
+//! multi-gigabyte body, but this never pays for that claim.
+//!
 //! ## What this pass does not do
 //!
 //! - No graceful shutdown — [`serve`] runs until its listener errors or the
 //!   task is aborted; there's no signal to drain in-flight connections
 //!   first.
-//! - A malformed frame (garbage length prefix, a body that never fully
-//!   arrives) currently just ends that connection when the read fails or
-//!   times out at the OS level — no explicit frame-size sanity cap yet, so
-//!   a client claiming a multi-gigabyte body would make this allocate that
-//!   much before finding out the rest never arrives. Fine for a scaffold
-//!   talking to a trusted client; a real deployment needs a cap before
-//!   this is internet-facing.
 
 use std::sync::Arc;
 
@@ -35,6 +33,12 @@ use rusty_tokio::sync::Mutex;
 use crate::consumer::ConsumerOffsets;
 use crate::protocol::{self, Request, Response};
 use crate::retention::Log;
+
+/// The largest frame body [`handle_connection`] will allocate a buffer
+/// for. A client's declared length past this is rejected before any
+/// allocation or read of the body happens -- see this module's top-level
+/// docs.
+const MAX_FRAME_LEN: u32 = 16 * 1024 * 1024; // 16 MiB
 
 /// Everything a connection needs to dispatch a request — a `Log` and a
 /// `ConsumerOffsets`, each independently lockable. Cheap to clone (two
@@ -75,8 +79,15 @@ async fn handle_connection(stream: TcpStream, state: AppState) -> std::io::Resul
             Err(e) => return Err(e),
         }
 
-        let len = protocol::frame_len(header) as usize;
-        let mut body = vec![0u8; len];
+        let len = protocol::frame_len(header);
+        if len > MAX_FRAME_LEN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("frame length {len} exceeds the {MAX_FRAME_LEN}-byte cap"),
+            ));
+        }
+
+        let mut body = vec![0u8; len as usize];
         stream.read_exact(&mut body).await?;
 
         let response = match protocol::decode_request(&body) {
@@ -424,6 +435,47 @@ mod tests {
                 offset: Some(Offset(20))
             }
         );
+
+        server.abort();
+    }
+
+    /// A frame header claiming a body past `MAX_FRAME_LEN` ends the
+    /// connection immediately -- the server never asks for the (in this
+    /// test, never sent) body, so the client's next read sees the
+    /// connection close rather than hanging waiting for a response.
+    #[rusty_tokio::test]
+    async fn a_frame_claiming_more_than_the_cap_ends_the_connection() {
+        let (server, addr) = spawn_server().await;
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        let oversized_len = MAX_FRAME_LEN + 1;
+        client
+            .write_all(&oversized_len.to_be_bytes())
+            .await
+            .unwrap();
+
+        let mut buf = [0u8; 1];
+        let result = client.read_exact(&mut buf).await;
+        assert!(result.is_err());
+
+        server.abort();
+    }
+
+    /// A frame whose encoded length lands exactly on `MAX_FRAME_LEN` -- not
+    /// just comfortably under it -- is still accepted and round-trips
+    /// normally. The cap rejects what's past the limit, not the limit
+    /// itself.
+    #[rusty_tokio::test]
+    async fn a_frame_at_exactly_the_cap_is_still_accepted() {
+        let (server, addr) = spawn_server().await;
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        // `Request::Produce`'s encoding is 1 (opcode) + 4 (u32 payload len)
+        // + payload.len() bytes -- pick a payload that makes the total
+        // exactly `MAX_FRAME_LEN`, the actual boundary the server checks.
+        let payload = vec![7u8; (MAX_FRAME_LEN - 5) as usize];
+        let produced = send_request(&client, &Request::Produce { payload }).await;
+        assert_eq!(produced, Response::Produced { offset: Offset(0) });
 
         server.abort();
     }

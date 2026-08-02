@@ -22,7 +22,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
 | `manifest::Manifest` | a dedicated `Segment` of `Opened`/`Deleted` events | What `retention::Log::open` reads to discover which segments exist — `rusty_tokio::io::OpDriver` has no directory-listing operation, so this is that discovery made durable. Same reused-`Segment` pattern as `ConsumerOffsets`. See "Data flow" below. |
 | `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
-| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. See "Data flow" below for what's still missing (no graceful shutdown, no frame-size cap). |
+| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. Rejects a frame claiming a body over `MAX_FRAME_LEN` before allocating anything for it. See "Data flow" below for what's still missing (no graceful shutdown). |
 | `client::Client` | `rusty_tokio::io::TcpStream` | The client-side counterpart of `server::serve` — `docs/phase1-scope.md` §2's "Client SDK — Rust first," the last item on Phase 1's scope list. One `Client` per connection, `produce`/`fetch`/`commit`/`last_committed` methods matching the four `Request` variants one-to-one. |
 
 ## Structure
@@ -93,16 +93,21 @@ a `ConsumerOffsets`, each shared across every connection via its own
 to defer — nothing about the thread-per-core runtime guarantees two
 connections land on the same core; two separate locks so a `Commit` never
 waits on `Log`'s lock and vice versa) — and writing the framed `Response`
-back. A connection ends cleanly on `UnexpectedEof` (the peer disconnected) or
-propagates a real I/O error. Verified against real loopback TCP sockets and a
-real `Log`/`ConsumerOffsets` (both backed by `SimDriver`) in `server.rs`'s
-own tests — `rusty_tokio` has no network fault injection, only `SimDriver`
-has disk fault injection, so this is real networking, not simulated.
+back. Before reading a frame's body, `handle_connection` checks its declared
+length against `MAX_FRAME_LEN` (16 MiB) and ends the connection immediately
+if it's over — a client claiming a multi-gigabyte body never gets that much
+allocated, and the connection closes before any of the (possibly
+nonexistent) body is even read. A connection otherwise ends cleanly on
+`UnexpectedEof` (the peer disconnected) or propagates a real I/O error.
+Verified against real loopback TCP sockets and a real `Log`/`ConsumerOffsets`
+(both backed by `SimDriver`) in `server.rs`'s own tests, including the exact
+`MAX_FRAME_LEN` boundary (accepted) and one byte over it (rejected) —
+`rusty_tokio` has no network fault injection, only `SimDriver` has disk
+fault injection, so this is real networking, not simulated.
 
-**Still missing, stated plainly:** no graceful shutdown. No frame-size
-sanity cap (a client claiming a multi-gigabyte body gets that much allocated
-before the read fails) — fine for a trusted client, not yet for anything
-internet-facing.
+**Still missing, stated plainly:** no graceful shutdown — `serve` runs
+until its listener errors or the task is aborted, with no signal to drain
+in-flight connections first.
 
 `client::Client` is `server::serve`'s counterpart: `Client::connect` opens
 one `TcpStream`, and `produce`/`fetch`/`commit`/`last_committed` each encode

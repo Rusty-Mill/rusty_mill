@@ -23,6 +23,23 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Frame-size sanity cap on the server
+**2026-08-02**
+
+- **Added:** `server::MAX_FRAME_LEN` (16 MiB) — `handle_connection` checks
+  a frame's declared body length against it right after reading the 4-byte
+  header, before allocating a buffer or reading a single byte of the body.
+  A client claiming a longer body gets its connection ended immediately
+  with an `InvalidData` error instead of the server allocating (and then
+  waiting on) whatever the client claimed.
+- 2 new tests (66 total): a frame one byte over the cap ends the connection
+  before the (in the test, never sent) body is read, and a frame whose
+  encoded length lands exactly on the cap — not just comfortably under it —
+  still round-trips normally.
+- **Known limitations, stated plainly:** still no graceful shutdown on the
+  server (unchanged by this PR). `MAX_FRAME_LEN` is a fixed constant, not
+  yet configurable per deployment.
+
 ## Manifest persistence, closing `retention.rs`'s two documented recovery gaps
 **2026-08-02**
 
