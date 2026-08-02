@@ -118,19 +118,37 @@ but deferring detailed rationale to a forthcoming post
 (https://iggy.apache.org/blogs/2026/02/27/thread-per-core-io_uring/), TigerBeetle
 VSR internals (https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/internals/vsr.md).
 
-### D3 — Runtime: compio (pinned to 0.18.0) — decided, after two rounds of spikes
+### D3 — Runtime: `rusty_tokio` (`thread-per-core` + `io-uring-fs`) — decided, after three rounds of spikes
 
-**Decision (final, 2026-08-01):** compio, pinned to `=0.18.0`, is the Phase 1
-runtime. Reached in two rounds: the first spike falsified the original
-driver-swappability rationale for compio specifically; rather than quietly keep
-a wrong reason or pick a replacement without equal scrutiny, the same
-source-level check was then run against glommio and monoio too (see "Spike
-results, path (b)" below). All three fail the DST-pluggability test the same
-way, which neutralizes it as a differentiator and makes D4's own
-`Storage`/`Clock` abstraction load-bearing regardless of which runtime is
-chosen. On the axes that remain real — stable-Rust buildability, maintenance
-health, audit surface — compio still comes out ahead, for reasons that have
-nothing to do with the original claim.
+**Decision (final, revised 2026-08-01):** `rusty_tokio` — RustyMill's own
+hand-rolled async runtime — with its `thread-per-core` and `io-uring-fs`
+features, is the Phase 1 runtime. This **supersedes** the earlier compio
+decision recorded below, kept intact as the record of how this comparison
+actually evolved rather than quietly rewritten. Round 1 falsified compio's
+stated rationale; round 2 checked glommio and monoio with the same rigor and
+found the same DST-pluggability gap in all three, closing D3 on compio for
+reasons unrelated to the original claim; round 3 (this one) checked
+`rusty_tokio` — previously ruled out only because it lacked thread-per-core
+scheduling and real io_uring file I/O — after those two gaps were closed by a
+real implementation (`baileyrd/rusty_tokio#252` → `#253`), verified directly
+rather than taken on trust. See "Spike results, round 3" below for exactly
+what was checked and how.
+
+**Round 2 decision (2026-08-01, superseded by round 3 below):** compio,
+pinned to `=0.18.0`, is the Phase 1 runtime. Reached in two rounds: the first
+spike falsified the original driver-swappability rationale for compio
+specifically; rather than quietly keep a wrong reason or pick a replacement
+without equal scrutiny, the same source-level check was then run against
+glommio and monoio too (see "Spike results, path (b)" below). All three fail
+the DST-pluggability test the same way, which neutralizes it as a
+differentiator and makes D4's own `Storage`/`Clock` abstraction load-bearing
+regardless of which runtime is chosen. On the axes that remain real —
+stable-Rust buildability, maintenance health, audit surface — compio still
+came out ahead of glommio/monoio at that point, for reasons that had nothing
+to do with the original claim. This reasoning is preserved below because it's
+still exactly right as a comparison *among those three* — it's `rusty_tokio`
+entering the comparison newly-qualified that changes the outcome, not a flaw
+found in this round-2 reasoning itself.
 
 **Original decision (2026-08-01, pre-spike):** compio is the working choice for
 the thread-per-core/io_uring runtime, but this is explicitly provisional — not a
@@ -317,19 +335,20 @@ regardless of D3's outcome, and D3 can now be decided on the axes that remain
 real: stable-Rust buildability, maintenance health, and audit/dependency
 surface.
 
-**Final decision (2026-08-01):** compio, pinned to 0.18.0, remains the pick —
-for different reasons than originally written, not the original ones. Reasoning
-on the axes that survived scrutiny: glommio carries a live, unresolved
-bus-factor risk (open maintainer-succession issue) and the least modular/most
-monolithic dependency structure of the three; monoio has independently
-reconfirmed io_uring feature-parity gaps and a maintenance pace that doesn't
-track io_uring's evolution; compio's regression is narrow (one recent release,
-plausibly self-resolving as `cfg_select` reaches stable Rust), its dependency
-structure is the most modular of the three (pull only the `compio-*` crates a
-feature needs), and Iggy's own experience found its maintainers responsive.
-Action item: pin `compio = "=0.18.0"` explicitly in the eventual `Cargo.toml`
-(not a bare `"0.19"`-style range that would silently pick up the broken
-release), and revisit the pin once `cfg_select` ships on a stable Rust release.
+**Round 2 outcome (superseded — see round 3 below):** compio, pinned to
+0.18.0, was the pick at this point — for different reasons than originally
+written, not the original ones. Reasoning on the axes that survived scrutiny:
+glommio carries a live, unresolved bus-factor risk (open maintainer-succession
+issue) and the least modular/most monolithic dependency structure of the
+three; monoio has independently reconfirmed io_uring feature-parity gaps and a
+maintenance pace that doesn't track io_uring's evolution; compio's regression
+is narrow (one recent release, plausibly self-resolving as `cfg_select`
+reaches stable Rust), its dependency structure is the most modular of the
+three (pull only the `compio-*` crates a feature needs), and Iggy's own
+experience found its maintainers responsive. This round did not consider
+`rusty_tokio` — at the time, it lacked thread-per-core scheduling and real
+io_uring file I/O, and had never been spiked at all. Round 3 below is what
+changed that.
 
 Sources (glommio/monoio spike): direct source inspection of `glommio` 0.9.0
 (`Reactor`, `LocalExecutor`, `src/sys/`) and `monoio` 0.2.4 (`Driver` trait,
@@ -338,53 +357,159 @@ rustc 1.94.1 (stable) in this environment; DataDog/glommio#707 re-checked
 2026-08-01; WebSearch re-check of monoio io_uring feature parity/maintenance
 pace, 2026-08-01.
 
-### D4 — Testing strategy: injectable disk/clock traits from commit one, not a runtime-replacement bet
+**Spike results (2026-08-01), round 3 — `rusty_tokio`:**
 
-**Decision:** The storage engine is built from its first commit behind an
-injectable `Storage`/`Disk` trait and a `Clock` trait. A real io_uring-backed
-implementation and an in-process `SimDisk`/`SimClock` (byte-level fault
-injection: torn writes, partial writes, fsync that silently fails or reorders
-completions, disk-full, corruption — all seeded and replayable) ship together.
-This is *not* a bet on `madsim` or `turmoil` as a runtime replacement.
+`rusty_tokio` was initially out of the D3 comparison for two concrete reasons,
+found by reading its source directly: its scheduler was multi-threaded
+work-stealing, not thread-per-core, and its `fs::File` was entirely
+`spawn_blocking` — no io_uring involvement in file I/O at all (the existing
+`io-uring-reactor` feature only covers *socket* readiness via
+`IORING_OP_POLL_ADD`, never a file). Those two gaps were written up as a
+concrete engineering handoff (`baileyrd/rusty_tokio#252`) and filed as an
+issue rather than assumed away. `baileyrd/rusty_tokio#253` closed it with a
+real implementation — verified here directly, not taken on the PR description's
+word:
+
+- *Builds clean on stable Rust:* `cargo +stable build --features
+  thread-per-core,io-uring-fs` — no nightly requirement, unlike compio 0.19.x.
+- *Real io_uring file I/O, not spawn_blocking:* straced the new
+  `thread_per_core_uring_smoke` example (`strace -f -e trace=io_uring_enter,
+  io_uring_setup,pread64,pwrite64,openat`). File operations go through
+  `io_uring_enter`; the only `pread64` calls observed were the dynamic linker
+  loading `libc.so.6` at process startup, not application data — confirmed by
+  inspecting their actual byte content (ELF program-header bytes at a fixed
+  offset), not assumed from the syscall name alone.
+- *Genuine per-core scheduling, not just per-core threads:* straced
+  `sched_setaffinity` calls pinning four distinct threads to CPU cores
+  `[0]`/`[1]`/`[2]`/`[3]`. Source confirms this isn't cosmetic:
+  `Builder::build_thread_per_core` (`src/runtime/mod.rs`) loops
+  `for _ in 0..n { cores.push(self.new_core_shared(...)) }`, and
+  `new_core_shared` constructs a fresh `Reactor::new()` + `TimerDriver::new()`
+  per call — each core's socket/timer reactor is a genuinely independent
+  instance, not a shared one wearing a per-core label.
+- *One honest nuance, not a shortfall:* the file-I/O side (`IoUringDriver` in
+  `src/io/uring_fs.rs`) is a single process-wide ring, not one ring per core —
+  confirmed via `static GLOBAL_DRIVER: Mutex<Option<Arc<dyn OpDriver>>>` and
+  the module's own top-of-file docs: "this isn't a throughput-oriented
+  per-core ring setup... it's the minimum needed for correct, real io_uring
+  file I/O." This is a deliberate, clearly-documented choice, not a gap
+  against what was actually asked for — this ADR's own §4 already ruled out
+  competing with Iggy/Redpanda on raw throughput, and the shared-ring design
+  is exactly the kind of complexity that tradeoff says to avoid. It does mean
+  disk-I/O submission itself synchronizes across cores through one driver
+  thread; only the *scheduling* (task execution, socket/timer readiness) is
+  fully per-core. Worth knowing, not disqualifying.
+- *Cancellation safety verified under real ASAN, not just described:* ran the
+  exact command documented in `src/io/uring_fs.rs`'s own module docs
+  (`RUSTFLAGS="-Zsanitizer=address" cargo +nightly test --features
+  io-uring-fs -Zbuild-std --target x86_64-unknown-linux-gnu --test
+  uring_fs_cancellation`) — clean, no use-after-free or double-free detected
+  dropping an in-flight `read_at`/`write_at` before completion.
+- *The DST seam this ADR's D4 needs, delivered as a side effect, not
+  requested as a hard requirement:* `UringFile` is generic over an `OpDriver`
+  trait; `IoUringDriver` (real) and `SimDriver` (in-memory, deterministic,
+  with `inject_torn_write`/`set_fsync_lies`/`set_disk_full_at`/
+  `crash_and_reopen`) both implement it. `tests/uring_fs_sim_driver.rs` (7
+  tests) and `tests/rusty_stream_segment_log_recovery.rs` (4 tests) exercise
+  exactly the fault classes D4 asked for — torn writes, lying fsyncs,
+  disk-full, repeated crash/recovery cycles — and all pass. Full suite run:
+  `tests/uring_fs_cancellation.rs` (2), `tests/uring_fs_segment_roll.rs` (4),
+  `tests/thread_per_core_uring_fs.rs` (4), `tests/uring_fs_sim_driver.rs` (7),
+  `tests/rusty_stream_segment_log_recovery.rs` (4) — 21/21 pass.
+- *Dependency footprint, re-measured with the new features on:* `cargo tree`
+  reports 28 crates (`thread-per-core` adds zero new dependencies — pure
+  scheduler plumbing; `io-uring-fs` adds the same `io-uring` crate
+  `io-uring-reactor` already depended on, plus its few transitives), up from
+  26 at default. Still roughly a tenth of compio's 231-crate `--all-features`
+  tree, and org-owned end to end.
+
+**Why this changes D3's answer:** round 2 closed on compio specifically
+because it was "the most modular, most responsive" among three third-party
+crates that all failed the DST-pluggability test identically. `rusty_tokio`
+was never in that comparison — it wasn't a candidate, it was a gap-filled
+afterthought until its two disqualifying gaps closed for real. With both
+closed and independently verified: it has a materially smaller dependency
+tree than any of the three (28 vs. compio's 231), it's org-owned rather than
+a third-party dependency (the sovereignty/audit goal this whole ADR keeps
+returning to), it doesn't carry compio's stable-Rust regression, and it ships
+a genuine DST fault-injection seam that D4 asked for as an aspiration and got
+as a working implementation. There is no axis left where compio still wins.
+
+Sources (`rusty_tokio` spike): direct source inspection of
+`src/runtime/mod.rs`, `src/runtime/thread_per_core.rs`,
+`src/io/uring_fs.rs` at commit `54fc16c` (baileyrd/rusty_tokio); local
+build/test/strace/ASAN runs in this environment, 2026-08-01;
+`baileyrd/rusty_tokio#252` (the handoff issue this ADR's D3 gap-analysis
+produced) and `#253` (the implementation PR that closed it).
+
+### D4 — Testing strategy: `rusty_tokio`'s `SimDriver` (`io-uring-fs`), not a hand-rolled injectable trait
+
+**Decision (revised 2026-08-01 — the seam now exists, not just the plan):**
+Originally scoped as: the storage engine builds its own injectable
+`Storage`/`Disk` trait and `Clock` trait from the first commit, with a real
+implementation and an in-process simulated one shipping together. That plan
+is now superseded by something better than what it asked for: `rusty_tokio`'s
+`io-uring-fs` feature (adopted in D3) already ships exactly this seam —
+`UringFile` is generic over an `OpDriver` trait, with `IoUringDriver` (real
+io_uring) and `SimDriver` (in-memory, deterministic, seeded fault injection)
+both implementing it. rusty_stream's storage engine builds directly on
+`OpDriver`/`SimDriver` rather than hand-rolling a parallel abstraction that
+would just duplicate it. This is *not* a bet on `madsim` or `turmoil` as a
+runtime replacement, and it's not a bet on an unimplemented plan either — the
+tests in `rusty_tokio`'s `tests/uring_fs_sim_driver.rs` and
+`tests/rusty_stream_segment_log_recovery.rs` (verified passing, see D3) are a
+working reference for exactly this pattern, not a target to build toward.
 
 **Reasoning:** rusty_stream Phase 1 is single-node — the non-determinism that
 actually needs controlling is disk timing/ordering and process crashes, not
 network partitions. `madsim` and `turmoil` are primarily network simulators built
 by intercepting Tokio internals; their disk-simulation support is thin to
 nonexistent, and neither has documented compatibility with an io_uring
-thread-per-core runtime. Building a purpose-built `Disk`/`Clock` trait pair gives
-full control over exactly the fault classes a storage engine needs to prove,
-independent of the runtime choice in D3 — this mirrors how TigerBeetle and
-comparable Rust storage projects (KayaDB, S2) actually structured their DST.
+thread-per-core runtime. A purpose-built `Disk`/`Clock`-shaped trait pair gives
+full control over exactly the fault classes a storage engine needs to
+prove — this mirrors how TigerBeetle and comparable Rust storage projects
+(KayaDB, S2) actually structured their DST, and it's no longer merely a plan
+mirroring theirs: `rusty_tokio`'s `SimDriver` (`inject_torn_write`,
+`set_fsync_lies`, `set_disk_full_at`, `crash_and_reopen`) is that pattern,
+already built, already org-owned, already exercised by tests that match the
+three minimal scenarios below almost line for line.
 
-**Sequencing risk with D3, flagged explicitly:** if rusty_stream later wants
-network-level DST for Phase 2 clustering (via `madsim`/`turmoil`), that pulls
-toward a Tokio-based runtime, or toward an unproven wrapping of an io_uring
-runtime behind Tokio's task model. The disk/clock trait-injection approach here
-is runtime-agnostic and should proceed regardless of the D3 spike outcome; but if
-network-level DST tooling is wanted down the line, the runtime decision needs to
-be revisited with that constraint in view before Phase 2 clustering work starts.
+**Sequencing risk with D3, now resolved rather than merely flagged:** the
+original concern was that network-level DST (`madsim`/`turmoil`) for Phase 2
+clustering would pull toward a Tokio-based runtime, creating tension with an
+io_uring thread-per-core choice. Since D3 landed on `rusty_tokio` — org-owned
+code, not a third-party crate to fight for compatibility with — that tension
+is gone: a future network-fault-injection seam for Phase 2 can be added to
+`rusty_tokio` directly, the same way the `io-uring-fs`/`SimDriver` seam was,
+rather than requiring a `madsim`/`turmoil` integration this crate was never
+going to have.
 
-**Minimal viable first DST tests** (write these against the storage engine before
-considering it Phase-1-complete — see consumer gates):
+**Minimal viable first DST tests** (write these against the storage engine
+before considering it Phase-1-complete — see consumer gates; a directly
+analogous version of each already exists and passes against `rusty_tokio`'s
+`SimDriver` in `tests/rusty_stream_segment_log_recovery.rs`, confirmed in D3 —
+rusty_stream's own tests should follow that shape against its actual segment
+format, not start from scratch):
 1. **Crash during segment roll** — seeded fault kills the process mid-roll;
    recovery must never lose an offset acknowledged before the roll began, and
    must land on a single consistent active segment.
 2. **Torn write on last segment** — corrupt/truncate the tail of the active
    segment mid-record; recovery must detect the incomplete record via
    length/checksum and truncate to the last valid boundary, never crash or
-   silently serve corrupt data.
+   silently serve corrupt data. (`SimDriver::inject_torn_write` — verified,
+   see D3.)
 3. **fsync fault** — simulate fsync reporting success without persisting, or
    reordering completion versus subsequent writes; verify the durability
    boundary matches the configured fsync policy exactly under simulated
-   crash-and-restart.
+   crash-and-restart. (`SimDriver::set_fsync_lies` — verified, see D3.)
 
 Sources: TigerBeetle's DST writeup
 (https://tigerbeetle.com/blog/2023-07-11-we-put-a-distributed-database-in-the-browser/),
 DST primer (https://www.amplifypartners.com/blog-posts/a-dst-primer-for-unit-test-maxxers),
 madsim (https://github.com/madsim-rs/madsim), turmoil
 (https://docs.rs/turmoil/latest/turmoil/), S2's DST writeup
-(https://s2.dev/blog/dst), KayaDB (https://lib.rs/crates/kaya-io).
+(https://s2.dev/blog/dst), KayaDB (https://lib.rs/crates/kaya-io). See D3 for
+`rusty_tokio`-specific sources (`src/io/uring_fs.rs`, `#252`/`#253`).
 
 ### D5 — NATS JetStream: coexist with an explicit re-evaluation gate, not an outright replacement
 
@@ -437,24 +562,26 @@ decisions above, so they aren't scattered:
 - Truncatable uncommitted log tail (D2)
 - Epoch/fencing-token field in segment/index metadata (D2)
 - No Raft-specific invariants hard-coded into recovery logic (D2)
-- Disk and Clock access behind injectable traits from the first commit, with a
-  real and a simulated implementation shipping together (D4)
-- **Revised, post-spike:** the D3 assumption that a runtime's internal I/O
-  driver would itself be swapped for a simulated one does not hold for any of
-  compio, glommio, or monoio — confirmed false by source inspection of all
-  three. The team's own `Storage`/`Clock` traits (D4) are the actual seam — the
-  real implementation calls into whatever runtime is chosen, the simulated
-  implementation never touches the runtime's I/O driver at all. Storage-engine
-  code must not call runtime I/O APIs
-  directly outside the `Storage`/`Clock` trait boundary, or this seam breaks.
+- Storage I/O built directly on `rusty_tokio`'s `OpDriver`/`UringFile`
+  (`io-uring-fs` feature), with `SimDriver` as the simulated implementation —
+  not a hand-rolled parallel trait (D3, D4).
+- **Revised, post-spike (round 3):** the D3 round-1/round-2 finding that no
+  third-party runtime's internal I/O driver was swappable for a simulated one
+  (confirmed false for compio, glommio, and monoio by source inspection) is
+  now moot for the chosen runtime — `rusty_tokio`'s `io-uring-fs` driver *is*
+  swappable, by design, via the public `OpDriver` trait, and this was verified
+  working, not just claimed. Storage-engine code should be written directly
+  against `UringFile`/`OpDriver` rather than a redundant abstraction on top.
 
 ## Consumer gates
 
 Phase 1's storage engine is not considered done until:
-- The three minimal DST tests in D4 pass against both the real and simulated
-  disk implementations.
-- The `Cargo.toml` pins `compio = "=0.18.0"` exactly (not a range that could
-  silently pick up the 0.19.x stable-Rust regression), per D3's final decision.
+- The three minimal DST tests in D4 pass against both `IoUringDriver` (real)
+  and `SimDriver` (simulated) — reference versions already exist and pass in
+  `rusty_tokio`'s own test suite (see D3); rusty_stream's versions should
+  match that shape against its actual segment format.
+- The `Cargo.toml` depends on `rusty_tokio` with the `thread-per-core` and
+  `io-uring-fs` features enabled, per D3's final decision — not compio.
 - The primitives listed under "Storage engine implications" exist and are
   exercised by at least one test each.
 - At least one pilot workload (per D5) is running on rusty_stream in a
@@ -465,9 +592,13 @@ Phase 1's storage engine is not considered done until:
 - Full Kafka wire-protocol compatibility, in any form, for Phase 1 or as a
   default future direction (D1).
 - Any consensus implementation (VSR or Raft) landing as Phase 1 code (D2).
-- Assuming any runtime's internal I/O driver is swappable for a simulated one
-  — confirmed false for all three of compio, glommio, and monoio (D3).
-  Simulated I/O only ever happens through D4's own `Storage`/`Clock` traits.
+- Hand-rolling a separate `Storage`/`Clock` injectable-trait abstraction now
+  that `rusty_tokio`'s `OpDriver`/`SimDriver` already provides this seam —
+  build on it directly instead (D3, D4).
+- A per-core io_uring ring for file I/O — `rusty_tokio`'s `io-uring-fs`
+  deliberately uses one process-wide ring; chasing per-core I/O parallelism
+  would be optimizing for throughput this ADR's §4 already ruled out of scope
+  (D3).
 - Betting DST tooling on `madsim`/`turmoil` as a runtime-replacement strategy
   (D4).
 - Declaring NATS JetStream deprecated or unsupported for new work (D5).
@@ -479,9 +610,11 @@ wire-protocol compatibility layer, WASM transforms, consumer-group rebalancing).
 ## Alternatives considered
 
 Covered inline per decision above (D1: full Kafka compat; D2: adopt `openraft`
-now, or adopt VSR now; D3: glommio, monoio; D4: `madsim`/`turmoil` as the primary
-DST mechanism; D5: replace JetStream outright). Not repeated here to avoid
-duplicating the reasoning sections.
+now, or adopt VSR now; D3: compio, glommio, monoio — each spiked with equal
+rigor and superseded by `rusty_tokio` once its two disqualifying gaps closed;
+D4: `madsim`/`turmoil` as the primary DST mechanism, and a hand-rolled trait
+duplicating what `rusty_tokio` already ships; D5: replace JetStream outright).
+Not repeated here to avoid duplicating the reasoning sections.
 
 ## Consequences
 
@@ -490,11 +623,13 @@ duplicating the reasoning sections.
 - Phase 2 clustering work starts with the concrete consensus protocol still
   undecided, carrying a small reevaluation cost when the forcing function
   arrives, in exchange for not building unused generality now (D2).
-- The runtime choice is not fully locked in until the D3 spike runs — Phase 1
-  storage-engine work should not deeply couple to compio-specific APIs before
-  that spike completes.
-- DST infrastructure (disk/clock trait injection) is a first-class, non-optional
-  part of the initial storage-engine commit, not a follow-up task (D4).
+- The Phase 1 runtime is `rusty_tokio`, org-owned rather than a third-party
+  dependency — this ADR's own repo-inspection process is now a template for
+  vetting future `rusty_tokio` changes the same way, not a one-off exercise
+  (D3).
+- DST infrastructure (`OpDriver`/`SimDriver`-based fault injection) is
+  already real, not a first-milestone task — the storage engine's initial
+  commit builds on an existing, tested seam rather than creating one (D4).
 - Two operational systems (rusty_stream and NATS JetStream) run in parallel
   through Phase 1 and early Phase 2, with an explicit, criteria-based
   re-evaluation gate rather than an open-ended coexistence (D5).

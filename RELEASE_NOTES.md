@@ -23,6 +23,37 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## ADR-0002 D3 reopened and reversed: `rusty_tokio` replaces compio as the Phase 1 runtime
+**2026-08-01**
+
+- **Changed:** the Phase 1 runtime decision flips from compio (pinned 0.18.0)
+  to `rusty_tokio` (RustyMill's own runtime), with its `thread-per-core` and
+  `io-uring-fs` features. `rusty_tokio` was previously out of the D3
+  comparison entirely — it lacked thread-per-core scheduling and had no
+  io_uring file I/O (`fs::File` was 100% `spawn_blocking`). Those two gaps
+  were written up as a concrete handoff (`baileyrd/rusty_tokio#252`) and
+  filed as an issue; `baileyrd/rusty_tokio#253` closed it with a real
+  implementation.
+- **Verified, not taken on trust:** builds clean on stable Rust; straced the
+  new example and confirmed real `io_uring_enter` calls for file ops (not
+  `spawn_blocking`); confirmed genuine per-core reactor instantiation via
+  `sched_setaffinity` and source inspection; ran the documented ASAN
+  cancellation-safety command for real (clean, no UAF/double-free); ran all
+  21 new tests (cancellation, segment-roll, thread-per-core, `SimDriver`
+  fault injection, segment-log crash recovery) — all pass; re-measured
+  dependency footprint at 28 crates (still roughly a tenth of compio's 231).
+- **Bonus:** `rusty_tokio`'s `io-uring-fs` ships an `OpDriver` trait with a
+  real `SimDriver` (torn writes, lying fsyncs, disk-full, crash/reopen) —
+  exactly what ADR-0002 D4 asked for as a plan, delivered as a working
+  implementation. D4 now builds directly on `OpDriver`/`SimDriver` instead of
+  hand-rolling a parallel `Storage`/`Clock` trait.
+- **Known limitation, stated plainly, not a shortfall:** `rusty_tokio`'s
+  `io-uring-fs` uses one process-wide io_uring ring, not one per core —
+  a deliberate, documented choice (correctness over per-core I/O throughput),
+  consistent with this project's own stance on not chasing throughput
+  records. Only the *scheduling* side (tasks, sockets, timers) is fully
+  per-core; disk I/O submission still synchronizes through one driver thread.
+
 ## ADR-0002 D3: runtime decision closed — compio 0.18.0, after checking all three
 **2026-08-01**
 
