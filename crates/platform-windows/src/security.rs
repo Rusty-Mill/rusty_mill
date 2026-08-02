@@ -5,7 +5,9 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use platform::error::Result;
-use platform::security::{CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus};
+use platform::security::{
+    CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus, TrustAnchors,
+};
 
 use crate::sys::security as syssec;
 
@@ -16,6 +18,22 @@ pub struct WindowsCsprng;
 impl Csprng for WindowsCsprng {
     fn fill_random(&self, buf: &mut [u8]) -> Result<()> {
         syssec::fill_random(buf)
+    }
+}
+
+/// The Windows backend's [`TrustAnchors`] capability (rustils#88): the
+/// system ROOT certificate store, enumerated. Stateless — every call
+/// reopens and re-enumerates, mirroring [`WindowsCsprng`], so a machine
+/// that has just had a root installed doesn't keep serving the old set
+/// for the life of the process.
+///
+/// Carries Windows' lazy-population fidelity limit; see
+/// [`TrustAnchors`] and `sys::security::load_anchors`.
+pub struct WindowsTrustAnchors;
+
+impl TrustAnchors for WindowsTrustAnchors {
+    fn load_anchors(&self) -> Result<Vec<Vec<u8>>> {
+        syssec::load_anchors()
     }
 }
 

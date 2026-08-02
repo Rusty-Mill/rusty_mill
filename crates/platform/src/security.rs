@@ -169,6 +169,65 @@ pub trait Sandbox {
     fn block_inet_sockets(&self) -> Result<SandboxStatus>;
 }
 
+/// Access to the operating system's trust anchors: the root certificates
+/// a TLS client checks a presented certificate chain against (rustils#88,
+/// the "B1" slice of `docs/design-discussion-tls.md`, forced by
+/// `rusty_tls` dropping `rustls-native-certs`).
+///
+/// ## Why this is here and TLS is not
+///
+/// This trait answers *where does this OS keep its root certificates and
+/// how do I read the bytes* — OS personality, shaped differently on every
+/// platform, which is exactly what this crate exists to absorb. It does
+/// **not** parse, validate, or verify anything: no chain building, no
+/// signature checks, no ASN.1. That is protocol cryptography and stays
+/// permanently outside this workspace (`docs/design-discussion-tls.md`
+/// Option A/D). Certificates cross this boundary as raw DER bytes for the
+/// same reason every other byte-oriented surface here does (RFC v2 §5.2)
+/// — the consumer's TLS layer owns every interpretation of them.
+///
+/// ## Best-effort, on every platform
+///
+/// The anchor set this returns is **not** a faithful reproduction of what
+/// the OS itself would trust, and no implementation of this trait can
+/// make it one. Three limits, none of which are fixable at this layer:
+///
+/// 1. **Windows' ROOT store is lazily populated** via AuthRoot, so
+///    enumerating it can miss a root the OS chain engine would have
+///    fetched on demand — producing a validation failure the OS itself
+///    would not have.
+/// 2. **macOS anchor enumeration is a reconstruction, not an API.** The
+///    one-call form returns built-in roots only; effective trust needs
+///    walking per-domain trust settings.
+/// 3. **A flat list cannot express distrust.** OS stores carry explicit
+///    distrust and constrained-root records; a `Vec<Vec<u8>>` has no way
+///    to say "never accept this one," so a consumer validating against
+///    this output can accept a chain the OS itself would reject.
+///
+/// These are the same limits `rustls-native-certs` carries industry-wide.
+/// They are documented rather than papered over, and a consumer that
+/// needs true OS-policy semantics wants the platform's own chain
+/// verification API instead — deliberately not offered here, since Linux
+/// has no such API at all (`design-discussion-tls.md`, option B2).
+pub trait TrustAnchors {
+    /// Load the OS trust anchors as DER-encoded certificates.
+    ///
+    /// **Individual anchors that fail to load or parse are skipped**, not
+    /// reported: real trust stores routinely contain a few entries this
+    /// crate can't read, and failing the whole call over one of them
+    /// would make the common case unusable.
+    ///
+    /// **Zero usable anchors is an error**, never an empty `Vec`. A
+    /// caller that got `Ok(vec![])` and passed it to a TLS verifier would
+    /// be trusting nothing and would fail every connection with a
+    /// confusing per-connection error; failing here instead makes the
+    /// real problem — no readable trust store — visible at its source.
+    /// Backends report this as [`ErrorKind::NotFound`].
+    ///
+    /// [`ErrorKind::NotFound`]: crate::error::ErrorKind::NotFound
+    fn load_anchors(&self) -> Result<Vec<Vec<u8>>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

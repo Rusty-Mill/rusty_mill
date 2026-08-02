@@ -6,7 +6,10 @@
 
 use std::path::Path;
 
-use platform::security::{CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus};
+use platform::error::ErrorKind;
+use platform::security::{
+    CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus, TrustAnchors,
+};
 
 /// `fill_random` fills the whole buffer, and two consecutive calls don't
 /// return the same bytes (the one property every named consumer — a
@@ -98,4 +101,53 @@ fn mock_credential_store_conforms() {
 #[test]
 fn windows_credential_store_conforms() {
     assert_credential_store_behavior(&platform_windows::WindowsCredentialStore);
+}
+
+// --- TrustAnchors (rustils#88) -----------------------------------------
+
+/// The three contract rules every backend owes, per
+/// `platform::security::TrustAnchors`. Kept textually identical to
+/// `platform-linux/tests/security_parity.rs`'s copy, the same convention
+/// this suite already follows for its other assertion sets.
+fn assert_trust_anchors_behavior(anchors: &dyn TrustAnchors) {
+    let loaded = anchors.load_anchors().expect("load_anchors");
+
+    assert!(
+        !loaded.is_empty(),
+        "a successful load must never return an empty anchor set"
+    );
+
+    for (i, der) in loaded.iter().enumerate() {
+        assert!(!der.is_empty(), "anchor {i} is empty");
+        assert_eq!(
+            der[0], 0x30,
+            "anchor {i} does not begin with the DER SEQUENCE tag — not a certificate"
+        );
+    }
+
+    let again = anchors.load_anchors().expect("second load_anchors");
+    assert_eq!(loaded, again, "two loads disagreed");
+}
+
+#[test]
+fn mock_trust_anchors_conforms() {
+    assert_trust_anchors_behavior(&platform_mock::MockTrustAnchors::new());
+}
+
+#[test]
+fn empty_trust_store_fails_closed_rather_than_returning_nothing() {
+    let empty = platform_mock::MockTrustAnchors::empty();
+    let err = empty
+        .load_anchors()
+        .expect_err("an empty store must fail, not return an empty Vec");
+    assert_eq!(err.kind, ErrorKind::NotFound);
+}
+
+/// Live-verified against the real ROOT certificate store
+/// (`CertOpenSystemStoreW`/`CertEnumCertificatesInStore`) — actual OS
+/// state on the CI runner, not a mock. This is the leg that would catch
+/// a CF/Win32 ownership mistake in the enumeration loop.
+#[test]
+fn windows_trust_anchors_conforms() {
+    assert_trust_anchors_behavior(&platform_windows::WindowsTrustAnchors);
 }

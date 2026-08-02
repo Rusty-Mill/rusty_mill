@@ -6,7 +6,7 @@
 
 use std::ffi::OsStr;
 
-use platform::error::{ErrorKind, Result};
+use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 
 use crate::ffi::win32_surface as w;
 use crate::sys::errmap::{self, nt_err};
@@ -108,4 +108,85 @@ pub fn credential_get(target_name: &OsStr) -> Result<Option<Vec<u8>>> {
         w::CredFree(pcred as *const std::ffi::c_void);
     }
     Ok(Some(secret))
+}
+
+// --- TrustAnchors (rustils#88) ----------------------------------------
+
+/// Enumerate the system ROOT certificate store, returning each anchor's
+/// DER bytes.
+///
+/// `CertOpenSystemStoreW(NULL, "ROOT")` + `CertEnumCertificatesInStore`
+/// in a loop + `CertCloseStore`. Each enumeration step returns a
+/// `CERT_CONTEXT` borrowed from the store (not an allocation the caller
+/// frees — the store owns it, and passing it back in as the `prev`
+/// argument is what advances the iteration), so this copies the DER out
+/// rather than holding pointers past the loop.
+///
+/// **Fidelity limit, documented rather than worked around** (see
+/// `platform::security::TrustAnchors`): Windows populates the ROOT store
+/// lazily via AuthRoot, so enumeration returns the roots currently
+/// cached on the machine — not necessarily every root the OS chain
+/// engine would have fetched on demand mid-validation. An anchor set
+/// read this way can therefore be missing a root the OS itself would
+/// have trusted. There is no enumeration API that avoids this; the only
+/// fix is using the OS's own chain verification instead, which is a
+/// different surface this workspace deliberately does not offer (Linux
+/// has no counterpart to it).
+pub fn load_anchors() -> Result<Vec<Vec<u8>>> {
+    let store_name = to_wide_nul(OsStr::new("ROOT"));
+    // SAFETY: `hprov` is `HCRYPTPROV_LEGACY`, an integer handle type
+    // (not a pointer) — `0` is the documented "use the default provider"
+    // value for opening a named system store. `store_name` is a valid
+    // NUL-terminated wide string alive across the call.
+    let store = unsafe { w::CertOpenSystemStoreW(0, store_name.as_ptr()) };
+    if store.is_null() {
+        return Err(errmap::last_win32_err(
+            "CertOpenSystemStoreW(ROOT)",
+            OsStr::new("ROOT"),
+        ));
+    }
+
+    let mut anchors: Vec<Vec<u8>> = Vec::new();
+    let mut ctx: *mut w::CERT_CONTEXT = std::ptr::null_mut();
+    loop {
+        // SAFETY: `store` is open for the whole loop; `ctx` is either
+        // null (start of enumeration) or the context the previous
+        // iteration returned, which is exactly what this call expects to
+        // advance from. The returned context is owned by the store.
+        ctx = unsafe { w::CertEnumCertificatesInStore(store, ctx) };
+        if ctx.is_null() {
+            break;
+        }
+        // SAFETY: a non-null context from the enumerator points at a
+        // valid `CERT_CONTEXT` whose `pbCertEncoded`/`cbCertEncoded`
+        // describe the DER encoding, valid until the enumeration
+        // advances or the store closes — both strictly after this copy.
+        let der = unsafe {
+            let c = &*ctx;
+            if c.pbCertEncoded.is_null() || c.cbCertEncoded == 0 {
+                // Per-anchor tolerance, same contract as every backend:
+                // an entry we can't read is skipped, not fatal.
+                continue;
+            }
+            std::slice::from_raw_parts(c.pbCertEncoded, c.cbCertEncoded as usize).to_vec()
+        };
+        anchors.push(der);
+    }
+
+    // SAFETY: `store` was opened above and is closed exactly once here;
+    // the enumeration has finished, so no borrowed context outlives it,
+    // and every DER was copied out rather than referenced. Flags `0`
+    // means "close normally, don't check for outstanding references".
+    unsafe {
+        w::CertCloseStore(store, 0);
+    }
+
+    if anchors.is_empty() {
+        return Err(PlatformError::new(
+            ErrorKind::NotFound,
+            OsCode::None,
+            "ROOT certificate store held no usable certificates",
+        ));
+    }
+    Ok(anchors)
 }

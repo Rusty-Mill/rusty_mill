@@ -13,7 +13,7 @@ can't give it). A backend that cannot honor a line gets a numbered
 entry in `../divergences.md` citing the OS limitation — never
 implementation convenience.
 
-## Scope (all three Security surface slices)
+## Scope (all four Security surface slices)
 
 RFC v2 R5+, decision D15.
 
@@ -176,8 +176,89 @@ calls shape exactly, not an invented combined API.
   architecture reports `Unsupported` rather than installing a filter
   that assumes the wrong arch.
 
+## `TrustAnchors` (fourth slice, rustils#88)
+
+`rusty_tls` is the forcing consumer: it dropped `rustls-native-certs` to
+hand-roll trust-anchor loading, and rather than grow three per-OS
+backends in a crate that had none, that mechanism lands here. This is the
+"B1" slice `docs/design-discussion-tls.md` researched and parked, gated
+in on 2026-08-02 — see that document's *B1 reopened* section for why it
+is here and why the TLS protocol itself never will be.
+
+**One method, raw DER out.** `load_anchors() -> Result<Vec<Vec<u8>>>`.
+This surface answers only *where does this OS keep its root certificates
+and how do I read the bytes*. It never parses, validates, or verifies:
+no chain building, no signature checks, no ASN.1. Certificates cross the
+boundary as bytes for the same reason every other byte-oriented surface
+here does (RFC v2 §5.2), and every interpretation of them belongs to the
+consumer's TLS layer.
+
+### Guaranteed on every backend
+
+1. **Per-anchor errors are tolerated, not reported.** An entry that
+   can't be read or decoded is skipped. Real trust stores routinely
+   carry a few damaged entries, and one must not cost the caller the
+   other several hundred.
+2. **Zero usable anchors is an error, never `Ok(vec![])`.**
+   `ErrorKind::NotFound`. A caller handed an empty set would trust
+   nothing and fail every connection with a confusing per-connection
+   error; failing at the source names the real problem.
+3. **Stateless.** Every call re-reads. A machine whose trust store just
+   changed does not keep serving the old set for the life of the
+   process.
+
+### Per-backend mechanism
+
+| Backend | Mechanism |
+|---|---|
+| `platform-linux` | `SSL_CERT_FILE`, else `SSL_CERT_DIR`, else first existing distro bundle file, else first existing distro cert directory — first match wins *exclusively*, never a union |
+| `platform-bsd` (macOS) | `SecTrustCopyAnchorCertificates` (Security.framework) |
+| `platform-bsd` (other BSDs) | The same file probing as Linux, with BSD paths |
+| `platform-windows` | `CertOpenSystemStoreW("ROOT")` + `CertEnumCertificatesInStore` |
+| `platform-mock` | Exactly the anchors the test pinned; `empty()` stages the fail-closed path |
+
+Bundle-before-directory is what lets one Linux policy cover every distro
+without special-casing: RHEL ships only a bundle, Debian ships both a
+bundle and a directory of hashed symlinks pointing at the same
+certificates. Preferring the bundle reads one file instead of several
+hundred symlinks, and never double-loads.
+
+### Best-effort — three fidelity limits, on every platform
+
+The anchor set is **not** a faithful reproduction of what the OS itself
+would trust, and no implementation of this trait can make it one. These
+are documented rather than papered over, and are the same limits
+`rustls-native-certs` carries industry-wide:
+
+1. **Windows' ROOT store is lazily populated** via AuthRoot, so
+   enumeration can miss a root the OS chain engine would have fetched on
+   demand — producing a validation failure the OS itself would not have.
+2. **macOS anchor enumeration is a reconstruction, not an API.** The
+   one-call form returns built-in roots only; effective trust needs
+   walking per-domain trust settings. Doing so is a strictly larger
+   surface, deliberately left as follow-up rather than smuggled in.
+3. **A flat list cannot express distrust.** OS stores carry explicit
+   distrust and constrained-root records; `Vec<Vec<u8>>` has no way to
+   say "never accept this one," so a consumer validating against this
+   output can accept a chain the OS itself would reject.
+
+A consumer needing true OS-policy semantics wants the platform's own
+chain *verification* API instead — option B2 in
+`../design-discussion-tls.md`, deliberately not offered here because
+Linux has no counterpart to it at all, and a Linux backend would mean
+hand-rolling X.509 path validation: precisely the cryptography this
+workspace refuses, through a door labelled "narrow."
+
 ## Deliberately unspecified
 
+- Which anchors `load_anchors` returns, or how many — that is whatever
+  the host machine trusts, so the parity suite asserts the *shape* of
+  the answer (non-empty, DER-tagged, stable across two calls) and never
+  a particular anchor set. Pinning one would test the CI image rather
+  than the backend.
+- Whether `load_anchors` reflects OS trust *policy* — it reflects the
+  anchor list, which is a different and strictly weaker claim (see the
+  three fidelity limits above).
 - Any statistical randomness-quality property (entropy estimate,
   distribution uniformity, resistance to specific cryptanalytic
   attacks) — this trait asserts behavior (fills the buffer, doesn't

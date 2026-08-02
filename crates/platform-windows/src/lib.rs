@@ -67,7 +67,7 @@ pub use process::{WindowsChild, WindowsSpawner};
 #[cfg(windows)]
 pub use pty::{WindowsPty, WindowsPtyMaster};
 #[cfg(windows)]
-pub use security::{WindowsCredentialStore, WindowsCsprng, WindowsSandbox};
+pub use security::{WindowsCredentialStore, WindowsCsprng, WindowsSandbox, WindowsTrustAnchors};
 #[cfg(windows)]
 pub use signals::WindowsSignalSource;
 #[cfg(windows)]

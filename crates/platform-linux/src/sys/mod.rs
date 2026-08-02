@@ -11,4 +11,5 @@ pub mod security;
 pub mod signals;
 pub mod spawn;
 pub mod termios;
+pub mod trust_anchors;
 pub mod tun;

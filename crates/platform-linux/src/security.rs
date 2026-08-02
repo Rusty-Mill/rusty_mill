@@ -4,10 +4,13 @@
 use std::path::Path;
 
 use platform::error::Result;
-use platform::security::{CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus};
+use platform::security::{
+    CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus, TrustAnchors,
+};
 
 use crate::sys::secret_service;
 use crate::sys::security as syssec;
+use crate::sys::trust_anchors;
 
 /// The Linux backend's [`Csprng`] capability. Stateless — every call is
 /// a fresh `getrandom(2)` syscall, mirroring [`crate::LinuxNet`].
@@ -16,6 +19,20 @@ pub struct LinuxCsprng;
 impl Csprng for LinuxCsprng {
     fn fill_random(&self, buf: &mut [u8]) -> Result<()> {
         syssec::fill_random(buf)
+    }
+}
+
+/// The Linux backend's [`TrustAnchors`] capability (rustils#88).
+/// Stateless — every call re-probes and re-reads, mirroring
+/// [`LinuxCsprng`]. Deliberately uncached: a system that has just had
+/// `update-ca-certificates` run on it should not keep serving the old
+/// anchor set for the life of the process, and callers load anchors once
+/// at TLS-config construction rather than per connection.
+pub struct LinuxTrustAnchors;
+
+impl TrustAnchors for LinuxTrustAnchors {
+    fn load_anchors(&self) -> Result<Vec<Vec<u8>>> {
+        trust_anchors::load_anchors()
     }
 }
 
