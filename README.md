@@ -20,7 +20,7 @@ the same undocumented AFD-poll protocol mio's own Windows backend uses,
 cited directly as this project's reference point (see "Platform support"
 below). Socket lifecycle (bind/connect/accept/addressing) is built on top
 of [`rustils`](https://github.com/baileyrd/rustils)'
-`platform`/`platform-linux`/`platform-macos` crates on Linux/macOS, and
+`platform`/`platform-linux`/`platform-bsd` crates on Linux/macOS/BSD, and
 directly on `windows-sys` on Windows, rather than reimplemented a second
 time -- see "Built on rustils" below for exactly which seam that is and
 which two syscalls stayed hand-rolled because rustils' API can't support
@@ -288,24 +288,29 @@ them yet.
   shared in-flight-blocking-call state machine, so there's nothing else
   meaningful to poll in between.
 
-  **This crate's macOS and Windows integrations have never run on real
-  hardware.** It's developed and tested on Linux only; the kqueue
+  **This crate's macOS/BSD and Windows integrations have never run on
+  real hardware.** It's developed and tested on Linux only; the kqueue
   reactor and the `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of
-  rustils' `platform-macos` are verified with `cargo check --target
-  x86_64-apple-darwin` (real macOS `libc` bindings, real type-checking)
-  but nothing beyond that. `platform-macos` itself is better off: it has
-  real `macos-latest` CI upstream, which already caught a genuine
-  `AF_UNIX` bug the cross-check alone couldn't -- so the socket layer is
-  solid, but this crate's own reactor integration on top of it is still
-  reviewed-but-unverified until someone actually runs *this* crate's
-  `cargo test` on a Mac. The Windows IOCP+AFD reactor and its hand-rolled
-  `windows-sys` socket layer carry the identical caveat, verified only
-  with `cargo check --target x86_64-pc-windows-gnu --all-targets` -- and
-  with no upstream equivalent to `platform-macos`'s real CI leg backing
-  the socket layer this time, since that layer is entirely this crate's
-  own code (see "Built on rustils" below). Treat both non-Linux reactor
-  paths as reviewed-but-unverified until someone runs *this* crate's own
-  test suite on the real OS.
+  rustils' `platform-bsd` are verified with `cargo check --target
+  x86_64-apple-darwin`/`x86_64-unknown-freebsd`/`x86_64-unknown-netbsd`
+  (real target-specific `libc` bindings, real type-checking) -- OpenBSD
+  and DragonFly can't even get that much here, no prebuilt `std` for
+  either target in this sandbox -- but nothing beyond that. `platform-bsd`
+  itself is better off: it has real `macos-latest`/FreeBSD-VM/OpenBSD-VM
+  CI upstream, which already caught two genuine `AF_UNIX` bugs (one on
+  Darwin, one OpenBSD-specific) the cross-checks alone couldn't -- so the
+  socket layer is solid on the targets that CI actually runs, but this
+  crate's own reactor integration on top of it is still
+  reviewed-but-unverified on every target until someone actually runs
+  *this* crate's `cargo test` on the real OS. The Windows IOCP+AFD
+  reactor and its hand-rolled `windows-sys` socket layer carry the
+  identical caveat, verified only with `cargo check --target
+  x86_64-pc-windows-gnu --all-targets` -- and with no upstream equivalent
+  to `platform-bsd`'s real CI legs backing the socket layer this time,
+  since that layer is entirely this crate's own code (see "Built on
+  rustils" below). Treat every non-Linux reactor path as
+  reviewed-but-unverified until someone runs *this* crate's own test
+  suite on the real OS.
 - **Async filesystem I/O** (`fs::File`): a regular file can't be
   registered with `epoll`/`kevent`'s readiness model the way a socket
   can -- the kernel considers it always "ready", and the actual disk
@@ -741,14 +746,46 @@ match `platform_linux` closely enough (same method names, same
 surface included from day one -- and, it turned out, `UnixStream`/
 `UnixListener` included from day one too, not just TCP/UDP) that
 `io/tcp.rs`/`io/udp.rs`/`io/unix.rs` need only a `#[cfg]`-gated type
-alias between `platform_linux`/`platform_macos`, not their own branching.
-The same two hand-rolled exceptions above apply on macOS too, for the
+alias between `platform_linux`/`platform_bsd`, not their own branching.
+The same two hand-rolled exceptions above apply on macOS/BSD too, for the
 same reasons.
 [rustils#53](https://github.com/baileyrd/rustils/pull/53) then added a
 real `macos-latest` CI leg for `platform-macos`, which caught a genuine
 `AF_UNIX` behavioral bug the cross-target `cargo check` this crate still
-relies on could not have found -- see the macOS caveat above for what
+relies on could not have found -- see the macOS/BSD caveat above for what
 that does and doesn't cover on *this* crate's side of the boundary.
+
+Generic BSD followed the identical pattern one OS later: this crate's own
+kqueue reactor (`io/reactor/kqueue.rs`) is genuinely OS-agnostic across
+the whole BSD family -- `kqueue`/`kevent` don't differ -- but had nothing
+to pair it with beyond macOS until
+[rustils#86](https://github.com/baileyrd/rustils/pull/87) widened
+`platform-macos` into `platform-bsd`
+(`macos`/`freebsd`/`openbsd`/`netbsd`/`dragonfly`), renaming every public
+type (`MacosTcpStream` -> `BsdTcpStream`, etc.) and adding real
+FreeBSD/OpenBSD VM CI legs alongside the existing `macos-latest` one --
+which caught a second genuine `AF_UNIX` divergence, this time OpenBSD's
+own `sun_path` padding behavior on a bound socket's `getsockname`, the
+same way #53's macOS leg caught the first one. Picking that up
+(`#116`) needed widening every `target_os = "macos"` gate this crate
+itself has for socket/reactor code the same way, plus two smaller,
+BSD-only findings of its own: `NetBSD`'s `libc::kevent` binding uses
+wider `u32` `filter`/`flags` fields where every other target in the gate
+uses `i16`/`u16` (a real struct-layout divergence `cargo check --target
+x86_64-unknown-netbsd` caught, fixed by taking those two `change()`
+parameters as a common `i64` and casting `as _` into whichever the live
+target's field actually is), and `pipe2(2)` -- absent on Linux's own
+non-portable-extension-inventing terms and, it turns out, absent on
+*Darwin specifically* rather than "on non-Linux" generally: FreeBSD,
+OpenBSD, NetBSD, and DragonFly all picked it up years ago, so
+`io/pipe.rs`/`signal.rs`'s "Linux" arm now covers those four too, leaving
+only macOS on the two-step `pipe`+`fcntl` fallback. `UnixStream::peer_cred`
+stayed Linux/macOS-only rather than guessed at for generic BSD --
+peer-credential retrieval genuinely diverges per BSD (FreeBSD's
+`LOCAL_PEERCRED`, OpenBSD's `getpeereid(2)` with no pid at all, NetBSD's
+`LOCAL_PEEREID`) and no verified implementation exists yet, so `UCred`
+simply doesn't exist on those targets rather than risk shipping an
+unverified guess at any of the three.
 
 Windows is the one exception to "socket setup goes through rustils":
 `rustils` does have a `platform-windows` crate, but its net module
@@ -759,9 +796,9 @@ missing pieces on top of it anyway. `io/socket/windows.rs` goes straight
 to `windows-sys` instead (Microsoft's own low-level FFI bindings, the
 same crate mio itself depends on for its entire Windows backend),
 providing `WindowsTcpListener`/`WindowsTcpStream`/`WindowsUdpSocket` with
-the identical inherent-method surface `platform_linux`/`platform_macos`
+the identical inherent-method surface `platform_linux`/`platform_bsd`
 give their concrete types, so `io/tcp.rs`/`io/udp.rs` need only a third
-`#[cfg]`-gated type alias, same as the Linux/macOS split. The two
+`#[cfg]`-gated type alias, same as the Linux/macOS/BSD split. The two
 hand-rolled exceptions above (non-blocking connect, `&self`-based
 read/write) apply here too, plus a third that's Windows-specific:
 `SO_REUSEPORT` has no Windows equivalent at all, so
@@ -775,14 +812,20 @@ cross-platform networking libraries make).
 This is a real, working runtime, not a toy -- but it's honest about its
 edges instead of papering over them:
 
-- **Linux, macOS, and Windows -- not generic BSD.** All three now have a
-  reactor backend (`epoll`, `kevent`, and IOCP+the AFD-poll trick,
-  respectively -- see the caveat above for what "have" means for the
-  latter two: reviewed, compile-checked, never run on real hardware).
-  Generic BSD (FreeBSD/OpenBSD/etc.) could likely reuse the `kevent`
-  reactor as-is, but `platform-macos` itself only claims
-  `target_os = "macos"`, not BSD generally, so there's no socket layer
-  to pair it with yet either.
+- **Linux, macOS/BSD, and Windows.** All three now have a reactor backend
+  (`epoll`, `kevent`, and IOCP+the AFD-poll trick, respectively -- see
+  the caveat above for what "have" means for the latter two: reviewed,
+  compile-checked, never run on real hardware). Generic BSD (FreeBSD/
+  OpenBSD/NetBSD/DragonFly) shares the same `kevent` reactor as macOS --
+  `kqueue` doesn't differ across the family -- paired with rustils'
+  `platform-bsd` (widened from macOS-only in rustils#86) for the socket
+  layer underneath it. Verification is uneven across the five: macOS,
+  FreeBSD, and NetBSD are cross-compile-checked from this Linux sandbox
+  (`cargo check --target x86_64-apple-darwin`/`x86_64-unknown-freebsd`/
+  `x86_64-unknown-netbsd`); OpenBSD and DragonFly can't be, for lack of a
+  prebuilt `std` for either target here -- `platform-bsd` itself covers
+  OpenBSD with real CI (a VM job), this crate's own reactor code doesn't.
+  See #116.
 - **`AsyncRead`/`AsyncWrite` are this crate's own traits, not tokio's or
   `futures-io`'s.** Same shape, so generic code within this project works
   the same way, but a third-party codec/framing crate built against

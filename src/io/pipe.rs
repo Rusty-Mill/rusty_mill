@@ -93,12 +93,23 @@ fn set_nonblocking(fd: BorrowedFd<'_>, nonblocking: bool) -> io::Result<()> {
 }
 
 /// A fresh, non-blocking, `CLOEXEC` anonymous pipe (`pipe2(2)`/`pipe(2)`)
-/// -- the same platform split (one atomic call on Linux, two steps on
-/// macOS) [`super::socket::new_unix_socket`] uses, for the same reason.
-/// Backs the free function [`pipe`].
+/// -- the same platform split (one atomic call everywhere but Darwin,
+/// two steps there) [`super::socket::new_unix_socket`] uses, for the
+/// same reason: `pipe2` is a Linux extension original to that platform,
+/// but every BSD in this crate's gate except macOS itself has since
+/// picked it up too (FreeBSD 10.0, OpenBSD 5.7, NetBSD 6.0, DragonFly
+/// 3.7) -- only Darwin genuinely lacks it, the same asymmetry
+/// `platform-bsd`'s own docs found for `SOCK_CLOEXEC`/`accept4`. Backs
+/// the free function [`pipe`].
 fn new_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as c_int; 2];
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     // SAFETY: `fds` is a valid, exclusively-borrowed 2-element out-param
     // for the call's duration.
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };

@@ -23,12 +23,12 @@ rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "3ab2361e4b8b
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/
-# `platform-macos` -- the concrete per-OS socket backends -- only make
+# `platform-bsd` -- the concrete per-OS socket backends -- only make
 # sense, and only build, on their respective OS. Pinned to the same rev
 # across all three so they all resolve to the identical `platform`
 # crate instance (mixing revs would make e.g. `platform::error::
 # PlatformError` from one checkout a different type than from another).
-platform = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+platform = { git = "https://github.com/baileyrd/rustils", rev = "863687cac2177d01e0d6da3f827b7fedf4709c07" }
 # The scheduler's per-worker local run queues and cross-worker stealing
 # (`runtime::Shared`) -- issue #8's lock-free swap. Not hand-rolled: a
 # Chase-Lev deque is real unsafe concurrent code, and this project has
@@ -124,7 +124,7 @@ thread-per-core = []
 io-uring-fs = ["dep:io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "863687cac2177d01e0d6da3f827b7fedf4709c07" }
 # Optional (see the `io-uring-reactor` feature below): handles ring
 # setup/mmap and SQE/CQE layout safely -- issue #9 explicitly named this
 # crate (what tokio-uring/glommio/monoio are all built on) as the usual
@@ -138,14 +138,20 @@ platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b
 # `[dependencies]` purposes.
 io-uring = { version = "0.6", optional = true }
 
-[target.'cfg(target_os = "macos")'.dependencies]
-platform-macos = { git = "https://github.com/baileyrd/rustils", rev = "dbf57020b7020965557c9c3d058ad3e9ca875235" }
+# `platform-bsd` (rustils#48/#86): the `kevent`-based reactor backend
+# (`io/reactor/kqueue.rs`) is shared by every OS in this gate -- kqueue
+# itself doesn't differ across them -- so this one dependency covers
+# macOS and generic BSD alike, matching `platform-bsd`'s own gate
+# exactly (they must agree, or this crate would either fail to resolve
+# a dependency it needs, or pull one in it can't use). See #116.
+[target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
+platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "863687cac2177d01e0d6da3f827b7fedf4709c07" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Not `platform-windows` (rustils' own Windows backend): as of the
 # pinned rev above, that crate's net module predates rustils#41's
 # "reactor consumer" escape hatch (non-blocking toggle, `AsRawSocket`,
-# `From<OwnedSocket>`) that `platform-linux`/`platform-macos` both
+# `From<OwnedSocket>`) that `platform-linux`/`platform-bsd` both
 # gained specifically for this project -- see `socket/mod.rs`'s and
 # `socket/windows.rs`'s own docs. `windows-sys` is Microsoft's own
 # low-level FFI bindings, the same crate mio itself depends on for its

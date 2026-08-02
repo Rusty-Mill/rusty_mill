@@ -85,9 +85,13 @@ pub use tcp::{
 pub use udp::{UdpSocket, MAX_UDP_DATAGRAM_SIZE};
 #[cfg(unix)]
 pub use unix::{
-    gid_t, pid_t, uid_t, OwnedUnixReadHalf, OwnedUnixWriteHalf, UCred, UnixListener, UnixReadHalf,
+    gid_t, pid_t, uid_t, OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf,
     UnixReuniteError, UnixSocket, UnixSocketAddr, UnixStream, UnixWriteHalf,
 };
+// `UnixStream::peer_cred`'s return type -- not available on generic BSD
+// yet, see that method's own docs, so `UCred` doesn't exist there either.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::UCred;
 #[cfg(unix)]
 pub use unix_datagram::UnixDatagram;
 #[cfg(all(target_os = "linux", feature = "io-uring-fs"))]

@@ -1,12 +1,12 @@
 //! The sliver of raw-`libc` socket code this crate still needs after
-//! adopting `rustils`' `platform_linux`/`platform_macos` crates for
+//! adopting `rustils`' `platform_linux`/`platform_bsd` crates for
 //! socket lifecycle (bind/listen/accept/UDP), addressing, and socket
 //! options -- see `tcp.rs`/`udp.rs`, which use those directly.
 //!
 //! Two things are deliberately still hand-rolled here on *every* OS
 //! instead:
 //!
-//! - **Non-blocking `connect`.** `{Linux,Macos}TcpStream::connect`
+//! - **Non-blocking `connect`.** `{Linux,Bsd}TcpStream::connect`
 //!   creates a *blocking* socket and calls a blocking `connect(2)`
 //!   internally -- correct for rustils' own blocking-I/O consumers, but
 //!   exactly wrong for an async runtime: it would stall a whole worker
@@ -32,11 +32,17 @@
 //! `to_sockaddr_un` below mirror `new_tcp_socket`/`connect`/`to_sockaddr`
 //! exactly, just packing a `sockaddr_un` from a `Path` instead of a
 //! `sockaddr_{in,in6}` from a `SocketAddr` -- rustils' own
-//! `{Linux,Macos}UnixStream::connect` is blocking for the same reason its
+//! `{Linux,Bsd}UnixStream::connect` is blocking for the same reason its
 //! TCP counterpart is, and for the same reason has no "bare socket, don't
 //! connect yet" constructor to build an async version on top of.
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 use super::from_platform_err;
 use libc::{c_int, sockaddr, sockaddr_in, sockaddr_in6, sockaddr_storage, socklen_t};
 use std::io;
@@ -176,17 +182,26 @@ pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
         // otherwise-unowned, and wrapped exactly once.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
-        // macOS has no `SOCK_NONBLOCK`/`SOCK_CLOEXEC` socket-type flags
-        // -- that's a Linux extension -- so both are set via `fcntl`
-        // right after creation instead of atomically at `socket(2)`
-        // time (the same reasoning `platform_macos::sys::net`'s own
-        // socket-creating calls document). This leaves a window
-        // (between `socket()` returning and the `fcntl` calls
-        // completing) where a concurrent `fork` elsewhere in the
-        // process could inherit this fd; this crate never forks, so
-        // that window is never exercised in practice.
+        // No BSD in this gate has `SOCK_NONBLOCK`/`SOCK_CLOEXEC`
+        // socket-type flags -- that's a Linux extension -- so both are
+        // set via `fcntl` right after creation instead of atomically at
+        // `socket(2)` time (the same reasoning `platform_bsd::sys::net`'s
+        // own socket-creating calls document; see that crate's docs for
+        // why this is the correct portable choice across the whole BSD
+        // family even though four of the five targets here do have
+        // `SOCK_CLOEXEC` individually). This leaves a window (between
+        // `socket()` returning and the `fcntl` calls completing) where a
+        // concurrent `fork` elsewhere in the process could inherit this
+        // fd; this crate never forks, so that window is never exercised
+        // in practice.
         //
         // SAFETY: plain integer arguments, no memory referenced.
         let fd = unsafe { libc::socket(domain_for(addr), libc::SOCK_STREAM, 0) };
@@ -194,14 +209,14 @@ pub(crate) fn new_tcp_socket(addr: SocketAddr) -> io::Result<OwnedFd> {
         // SAFETY: `fd` was just returned by `socket(2)` and is valid,
         // otherwise-unowned, and wrapped exactly once.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        // `set_nonblocking` is `pub` in `platform_macos::sys::net` (it
+        // `set_nonblocking` is `pub` in `platform_bsd::sys::net` (it
         // only needs `&OwnedFd`, not one of that crate's own concrete
         // types), so it's reused directly rather than hand-rolled a
         // second time. `set_cloexec` is private there, unlike
-        // `set_nonblocking` -- platform-macos's own socket-creating
+        // `set_nonblocking` -- platform-bsd's own socket-creating
         // calls need it internally but never expose it standalone, so
         // this one `fcntl` stays hand-rolled.
-        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
+        platform_bsd::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
         use std::os::fd::AsRawFd;
         // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
         // sole variadic argument `F_SETFD` expects.
@@ -232,9 +247,15 @@ pub(crate) fn new_unix_socket() -> io::Result<OwnedFd> {
         // otherwise-unowned, and wrapped exactly once.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
-        // See `new_tcp_socket`'s macOS arm for why this is two steps
+        // See `new_tcp_socket`'s BSD arm for why this is two steps
         // instead of one atomic `socket(2)` call.
         //
         // SAFETY: plain integer arguments, no memory referenced.
@@ -243,7 +264,7 @@ pub(crate) fn new_unix_socket() -> io::Result<OwnedFd> {
         // SAFETY: `fd` was just returned by `socket(2)` and is valid,
         // otherwise-unowned, and wrapped exactly once.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
+        platform_bsd::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
         use std::os::fd::AsRawFd;
         // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
         // sole variadic argument `F_SETFD` expects.
@@ -272,9 +293,15 @@ pub(crate) fn unix_socketpair() -> io::Result<(OwnedFd, OwnedFd)> {
             )
         })?;
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
-        // See `new_unix_socket`'s macOS arm for why this is two steps
+        // See `new_unix_socket`'s BSD arm for why this is two steps
         // (`socketpair(2)` itself, then flipping each end non-blocking
         // and `CLOEXEC` separately) instead of one atomic call.
         //
@@ -284,11 +311,17 @@ pub(crate) fn unix_socketpair() -> io::Result<(OwnedFd, OwnedFd)> {
     // SAFETY: both fds were just returned by `socketpair(2)` above and
     // are valid, otherwise-unowned, and each wrapped exactly once.
     let (a, b) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
         use std::os::fd::AsRawFd;
         for fd in [&a, &b] {
-            platform_macos::sys::net::set_nonblocking(fd, true).map_err(from_platform_err)?;
+            platform_bsd::sys::net::set_nonblocking(fd, true).map_err(from_platform_err)?;
             // SAFETY: `fd` is caller-owned and open; `FD_CLOEXEC` is the
             // sole variadic argument `F_SETFD` expects.
             if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
@@ -318,9 +351,15 @@ pub(crate) fn new_unix_datagram_socket() -> io::Result<OwnedFd> {
         // otherwise-unowned, and wrapped exactly once.
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
-        // See `new_unix_socket`'s macOS arm for why this is two steps
+        // See `new_unix_socket`'s BSD arm for why this is two steps
         // instead of one atomic `socket(2)` call.
         //
         // SAFETY: plain integer arguments, no memory referenced.
@@ -329,7 +368,7 @@ pub(crate) fn new_unix_datagram_socket() -> io::Result<OwnedFd> {
         // SAFETY: `fd` was just returned by `socket(2)` and is valid,
         // otherwise-unowned, and wrapped exactly once.
         let owned = unsafe { OwnedFd::from_raw_fd(fd) };
-        platform_macos::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
+        platform_bsd::sys::net::set_nonblocking(&owned, true).map_err(from_platform_err)?;
         use std::os::fd::AsRawFd;
         // SAFETY: `owned` is caller-owned and open; `FD_CLOEXEC` is the
         // sole variadic argument `F_SETFD` expects.
@@ -423,12 +462,20 @@ fn to_sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, socklen_t)> {
     }
     let len = sun_path_offset() + bytes.len() + 1;
     // BSD's `sockaddr_un` (unlike Linux's) carries a leading `sun_len`
-    // byte -- see `to_sockaddr`'s `sockaddr_in`/`sockaddr_in6` arms above
-    // for the same distinction on the TCP side, and rustils'
-    // `platform-macos::sys::net::to_sockaddr_un` for confirmation this
+    // byte -- universal across the whole BSD family (it's the 4.4BSD
+    // sockaddr layout, not a Darwin-only quirk; see `platform-bsd`'s own
+    // docs) -- see `to_sockaddr`'s `sockaddr_in`/`sockaddr_in6` arms
+    // above for the same distinction on the TCP side, and rustils'
+    // `platform-bsd::sys::net::to_sockaddr_un` for confirmation this
     // field is filled in (to the same filled-prefix length `len` computed
     // below) rather than left zero.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     {
         addr.sun_len = len as u8;
     }

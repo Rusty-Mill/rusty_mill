@@ -1,5 +1,5 @@
 //! The I/O reactor: one background thread blocked in the OS's readiness
-//! syscall (`epoll_wait` on Linux, `kevent` on macOS), translating
+//! syscall (`epoll_wait` on Linux, `kevent` on macOS/BSD), translating
 //! readiness events into waker calls. Level-triggered, on purpose --
 //! edge-triggered epoll/kqueue demands that every reader drain a fd
 //! until it sees `EWOULDBLOCK` or risk missing events forever, which is
@@ -31,9 +31,21 @@ mod io_uring;
 #[cfg(all(target_os = "linux", feature = "io-uring-reactor"))]
 pub(crate) use io_uring::Reactor;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 mod kqueue;
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 pub(crate) use kqueue::Reactor;
 
 #[cfg(target_os = "windows")]

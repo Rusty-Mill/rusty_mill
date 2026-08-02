@@ -12,17 +12,30 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
-// (`platform_linux` on Linux, `platform_macos` on macOS), identical
+// (`platform_linux` on Linux, `platform_bsd` on macOS/BSD), identical
 // logic below regardless of which; on Windows, `socket::windows`'s own
 // hand-rolled type.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 use platform::net::UdpSocket as _;
 
 #[cfg(target_os = "linux")]
 use platform_linux::LinuxUdpSocket as PlatformUdpSocket;
 
-#[cfg(target_os = "macos")]
-use platform_macos::MacosUdpSocket as PlatformUdpSocket;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+use platform_bsd::BsdUdpSocket as PlatformUdpSocket;
 
 #[cfg(target_os = "windows")]
 use socket::windows::WindowsUdpSocket as PlatformUdpSocket;

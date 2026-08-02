@@ -16,13 +16,20 @@ use std::time::Duration;
 // `PlatformTcpListener`/`PlatformTcpStream` are the only OS-specific
 // names in this file: rustils' concrete types cover bind/accept/
 // addressing/`set_nodelay` on the two backends it has (`platform_linux`
-// on Linux, `platform_macos` on macOS -- see `socket/mod.rs`'s docs for
-// what stays hand-rolled on top of either one). On Windows, where
+// on Linux, `platform_bsd` on macOS/BSD -- see `socket/mod.rs`'s docs
+// for what stays hand-rolled on top of either one). On Windows, where
 // rustils has no net backend at all, `socket::windows`'s own hand-rolled
 // types provide the identical inherent-method surface directly (no
 // trait needed there -- see that module's own docs). Everything below
 // this point is identical logic regardless of which of the three it is.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 use platform::net::{TcpListener as _, TcpStream as _};
 
 #[cfg(target_os = "linux")]
@@ -30,10 +37,14 @@ use platform_linux::{
     LinuxTcpListener as PlatformTcpListener, LinuxTcpStream as PlatformTcpStream,
 };
 
-#[cfg(target_os = "macos")]
-use platform_macos::{
-    MacosTcpListener as PlatformTcpListener, MacosTcpStream as PlatformTcpStream,
-};
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+use platform_bsd::{BsdTcpListener as PlatformTcpListener, BsdTcpStream as PlatformTcpStream};
 
 #[cfg(target_os = "windows")]
 use socket::windows::{

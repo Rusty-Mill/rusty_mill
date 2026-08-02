@@ -1,17 +1,24 @@
-//! The macOS backend: `kevent` plus a software `EVFILT_USER` event
+//! The macOS/BSD backend: `kevent` plus a software `EVFILT_USER` event
 //! (rather than a separate wake fd like Linux's `eventfd` -- kqueue has
 //! a built-in way to do this without one) to wake it early for
-//! registration/shutdown.
+//! registration/shutdown. `kqueue`/`kevent`/`EVFILT_*` don't differ
+//! across macOS, FreeBSD, OpenBSD, NetBSD, or DragonFly -- this file has
+//! no OS-specific branches at all, gated in as a block by
+//! `reactor/mod.rs` for exactly that reason (see #116).
 //!
 //! Untested on real hardware as of this writing -- this sandbox is
-//! Linux-only, so this file is verified with `cargo check --target
-//! x86_64-apple-darwin` (real macOS `libc` bindings, real type-checking)
-//! but has never actually been linked or run on macOS. Treat it as
+//! Linux-only. Verification varies by target, mirroring `platform-bsd`'s
+//! own per-target honesty (see that crate's docs): `cargo check --target
+//! x86_64-apple-darwin`/`x86_64-unknown-freebsd`/`x86_64-unknown-netbsd`
+//! (real target-specific `libc` bindings, real type-checking) all pass,
+//! but none of the five has ever actually linked or run this file --
+//! OpenBSD and DragonFly can't even be cross-compile-checked from here
+//! (no prebuilt `std` for either target). Treat every target as
 //! reviewed-but-unverified until someone runs the test suite on real
-//! hardware -- unlike `socket/mod.rs`'s macOS half, which now builds on
-//! rustils' `platform-macos` and inherits that crate's own real
-//! `macos-latest` CI (see rustils#48/#52/#53); this reactor is this
-//! crate's own code with no such upstream coverage.
+//! hardware -- unlike `socket/mod.rs`'s macOS/BSD half, which now builds
+//! on rustils' `platform-bsd` and inherits that crate's own real
+//! `macos-latest`/FreeBSD-VM/OpenBSD-VM CI (see rustils#48/#52/#53/#86);
+//! this reactor is this crate's own code with no such upstream coverage.
 
 use super::{Interest, ScheduledIo};
 use std::collections::HashMap;
@@ -35,12 +42,20 @@ fn empty_kevent() -> libc::kevent {
     unsafe { mem::zeroed() }
 }
 
-fn change(ident: usize, filter: i16, flags: u16, fflags: u32) -> libc::kevent {
+/// `libc::kevent`'s `filter`/`flags` fields are `i16`/`u16` on
+/// macOS/FreeBSD/OpenBSD/DragonFly but `u32`/`u32` on NetBSD -- a real
+/// struct-layout divergence `cargo check --target x86_64-unknown-netbsd`
+/// caught (see this file's own docs), not something inferred from the
+/// other four. `filter`/`flags` are taken here as `i64` (losslessly wide
+/// enough for every one of those representations) and cast with `as _`
+/// into whichever the live target's field actually is, rather than
+/// hard-coding one platform's widths.
+fn change(ident: usize, filter: i64, flags: i64, fflags: u32) -> libc::kevent {
     let mut ev = empty_kevent();
     ev.ident = ident;
-    ev.filter = filter;
-    ev.flags = flags;
-    ev.fflags = fflags;
+    ev.filter = filter as _;
+    ev.flags = flags as _;
+    ev.fflags = fflags as _;
     ev
 }
 
@@ -64,8 +79,8 @@ impl Reactor {
         // staying "ready" forever after the first trigger.
         let wake_ev = change(
             WAKE_IDENT,
-            libc::EVFILT_USER,
-            libc::EV_ADD | libc::EV_CLEAR,
+            libc::EVFILT_USER as i64,
+            (libc::EV_ADD | libc::EV_CLEAR) as i64,
             0,
         );
         // SAFETY: `kq_fd` is valid and freshly created; `&wake_ev` is
@@ -124,7 +139,7 @@ impl Reactor {
                     std::ptr::null(),
                     0,
                     events.as_mut_ptr(),
-                    events.len() as i32,
+                    events.len() as _,
                     std::ptr::null(),
                 )
             };
@@ -163,8 +178,8 @@ impl Reactor {
     fn wake(&self) {
         let ev = change(
             WAKE_IDENT,
-            libc::EVFILT_USER,
-            libc::EV_ADD,
+            libc::EVFILT_USER as i64,
+            libc::EV_ADD as i64,
             libc::NOTE_TRIGGER,
         );
         // SAFETY: `kq_fd` is valid; `&ev` is a valid single-element
@@ -184,8 +199,18 @@ impl Reactor {
     pub(crate) fn register(&self, fd: RawFd) -> io::Result<Arc<ScheduledIo>> {
         let io = Arc::new(ScheduledIo::new());
         let changes = [
-            change(fd as usize, libc::EVFILT_READ, libc::EV_ADD, 0),
-            change(fd as usize, libc::EVFILT_WRITE, libc::EV_ADD, 0),
+            change(
+                fd as usize,
+                libc::EVFILT_READ as i64,
+                libc::EV_ADD as i64,
+                0,
+            ),
+            change(
+                fd as usize,
+                libc::EVFILT_WRITE as i64,
+                libc::EV_ADD as i64,
+                0,
+            ),
         ];
         let mut errors = [empty_kevent(); 2];
         // SAFETY: `kq_fd` is valid; `changes` is a valid 2-element
@@ -196,9 +221,9 @@ impl Reactor {
             libc::kevent(
                 self.kq_fd,
                 changes.as_ptr(),
-                changes.len() as i32,
+                changes.len() as _,
                 errors.as_mut_ptr(),
-                errors.len() as i32,
+                errors.len() as _,
                 std::ptr::null(),
             )
         };
@@ -212,8 +237,18 @@ impl Reactor {
     pub(crate) fn deregister(&self, fd: RawFd) {
         self.registry.lock().unwrap().remove(&fd);
         let changes = [
-            change(fd as usize, libc::EVFILT_READ, libc::EV_DELETE, 0),
-            change(fd as usize, libc::EVFILT_WRITE, libc::EV_DELETE, 0),
+            change(
+                fd as usize,
+                libc::EVFILT_READ as i64,
+                libc::EV_DELETE as i64,
+                0,
+            ),
+            change(
+                fd as usize,
+                libc::EVFILT_WRITE as i64,
+                libc::EV_DELETE as i64,
+                0,
+            ),
         ];
         let mut errors = [empty_kevent(); 2];
         // SAFETY: see `register`. A per-change `EV_ERROR` (e.g. the
@@ -226,9 +261,9 @@ impl Reactor {
             libc::kevent(
                 self.kq_fd,
                 changes.as_ptr(),
-                changes.len() as i32,
+                changes.len() as _,
                 errors.as_mut_ptr(),
-                errors.len() as i32,
+                errors.len() as _,
                 std::ptr::null(),
             );
         }

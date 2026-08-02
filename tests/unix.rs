@@ -343,6 +343,9 @@ fn unix_take_error_is_none_on_healthy_sockets() {
     let _ = std::fs::remove_file(&path);
 }
 
+// `UnixStream::peer_cred` isn't available on generic BSD yet -- see that
+// method's own docs (rusty_tokio#116).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn unix_peer_cred_reports_this_same_process_on_both_ends() {
     // Both ends of this connection are the current process (it both
