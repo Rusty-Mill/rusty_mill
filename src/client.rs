@@ -194,7 +194,13 @@ mod tests {
             .await
             .unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = rusty_tokio::spawn(server::serve(listener, state));
+        let (shutdown_tx, shutdown_rx) = rusty_tokio::sync::watch::channel(false);
+        // Every test using this helper tears down via `server.abort()`,
+        // not graceful shutdown -- leaking the sender keeps
+        // `shutdown_rx.changed()` pending for this server's lifetime;
+        // `server.rs`'s own tests exercise graceful shutdown directly.
+        std::mem::forget(shutdown_tx);
+        let server = rusty_tokio::spawn(server::serve(listener, state, shutdown_rx));
         (server, addr)
     }
 

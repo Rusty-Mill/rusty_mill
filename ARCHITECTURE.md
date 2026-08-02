@@ -22,7 +22,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
 | `manifest::Manifest` | a dedicated `Segment` of `Opened`/`Deleted` events | What `retention::Log::open` reads to discover which segments exist — `rusty_tokio::io::OpDriver` has no directory-listing operation, so this is that discovery made durable. Same reused-`Segment` pattern as `ConsumerOffsets`. See "Data flow" below. |
 | `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
-| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. Rejects a frame claiming a body over `MAX_FRAME_LEN` before allocating anything for it. See "Data flow" below for what's still missing (no graceful shutdown). |
+| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. Rejects a frame claiming a body over `MAX_FRAME_LEN` before allocating anything for it, and shuts down gracefully — draining in-flight connections rather than aborting them — via a `watch::Receiver<bool>`. See "Data flow" below. |
 | `client::Client` | `rusty_tokio::io::TcpStream` | The client-side counterpart of `server::serve` — `docs/phase1-scope.md` §2's "Client SDK — Rust first," the last item on Phase 1's scope list. One `Client` per connection, `produce`/`fetch`/`commit`/`last_committed` methods matching the four `Request` variants one-to-one. |
 
 ## Structure
@@ -105,9 +105,13 @@ Verified against real loopback TCP sockets and a real `Log`/`ConsumerOffsets`
 `rusty_tokio` has no network fault injection, only `SimDriver` has disk
 fault injection, so this is real networking, not simulated.
 
-**Still missing, stated plainly:** no graceful shutdown — `serve` runs
-until its listener errors or the task is aborted, with no signal to drain
-in-flight connections first.
+`serve` shuts down gracefully rather than only via a hard `abort`: it takes
+a `rusty_tokio::sync::watch::Receiver<bool>`, and its caller sending `true`
+on the paired `Sender` stops the accept loop from taking any *new*
+connection while every connection already in flight, tracked in a
+`rusty_tokio::task::JoinSet`, keeps running until it finishes on its own —
+`serve` itself only returns once the last one has drained. Nothing in
+flight is cut off just because shutdown was requested.
 
 `client::Client` is `server::serve`'s counterpart: `Client::connect` opens
 one `TcpStream`, and `produce`/`fetch`/`commit`/`last_committed` each encode

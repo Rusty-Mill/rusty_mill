@@ -23,6 +23,32 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Graceful shutdown on the server
+**2026-08-02**
+
+- **Changed:** `server::serve`'s signature gained a
+  `shutdown: rusty_tokio::sync::watch::Receiver<bool>` parameter. Its caller
+  holds the paired `Sender`; sending `true` stops the accept loop from
+  taking any *new* connection while every connection already in flight —
+  tracked in a `rusty_tokio::task::JoinSet` rather than a plain
+  `Vec<JoinHandle<_>>` — keeps running until it finishes on its own (the
+  peer disconnects, or a real I/O error). `serve` itself returns `Ok(())`
+  only once the last one has drained; nothing in flight is aborted just
+  because shutdown was requested. Built on `rusty_tokio::select!` (2 to 5
+  branches, no `if` guards) racing `listener.accept()` against
+  `shutdown.changed()`.
+- 1 new test (67 total): a connection open before shutdown is requested
+  keeps serving requests normally after the request, and only finishes
+  (letting `serve` itself return, no `.abort()` needed) once the client
+  actually disconnects.
+- **Known limitations, stated plainly:** this is the last of the three
+  gaps this file has been tracking since the socket-integration entry
+  above (consumer-offset wire exposure, frame-size cap, and now graceful
+  shutdown are all closed). There's still no bound on how long a slow or
+  stuck connection can hold up a drain — a real deployment wanting a hard
+  shutdown deadline would need to layer a timeout on top of awaiting
+  `serve` itself, not something this pass adds.
+
 ## Frame-size sanity cap on the server
 **2026-08-02**
 
