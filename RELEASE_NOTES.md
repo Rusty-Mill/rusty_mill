@@ -23,6 +23,43 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Manifest persistence, closing `retention.rs`'s two documented recovery gaps
+**2026-08-02**
+
+- **Added:** `src/manifest.rs`'s `Manifest` — a dedicated `Segment` of
+  `Opened`/`Deleted` events, replayed on `Manifest::open_on` to reconstruct
+  which segments currently exist and their real creation times. Same
+  reused-`Segment` pattern `ConsumerOffsets` already uses, rather than a
+  second hand-rolled recovery path. Every event is synced immediately
+  (unlike a regular record append) — segment lifecycle changes are rare
+  structural events, not the hot per-record path fsync policy exists to
+  make configurable.
+- **Changed:** `retention::Log::open` no longer takes an
+  `existing_base_offsets: &[Offset]` parameter — it reads the manifest
+  instead. `Log::create` now also creates a manifest and records its
+  initial segment. `roll()` records a new segment's `Opened` event right
+  after creating its file (not before); `delete_oldest_closed` records a
+  `Deleted` event before actually removing the file, not after — both
+  orderings chosen so a crash between the manifest write and the file
+  operation leaves only a harmless orphan file, never a manifest entry
+  pointing at a segment that isn't there.
+- **Fixed:** recovered closed segments now carry their real creation time
+  (from the manifest), not the moment `Log::open` happened to run — the
+  second gap `retention.rs`'s docs previously called out. Time-based
+  retention is now accurate across a restart, not just within one
+  process's uptime.
+- 7 new tests (64 total): 4 in `manifest.rs` (empty manifest, ordered
+  replay, a deleted segment drops out of the live list, a torn event is
+  truncated away not served) and 3 in `retention.rs` (the existing
+  recovery test updated for the new `Log::open` signature, a deleted
+  segment stays deleted across a restart, and a recovered segment's age is
+  real rather than reset at open).
+- **Known limitations, stated plainly:** a crash between deleting a
+  segment's manifest entry and removing its file leaves an orphan file on
+  disk — wasted space, cleaned up manually, never a correctness problem.
+  Still no graceful shutdown or frame-size cap on the server (unchanged by
+  this PR).
+
 ## Client SDK: the last item on Phase 1's scope list
 **2026-08-02**
 

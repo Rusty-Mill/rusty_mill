@@ -20,6 +20,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
 | `clock::Clock` | `SystemClock` (real, production), `SimClock` (deterministic, manually advanced) | Exists for the same reason `OpDriver` does — `retention::Log`'s time-based retention has to be provable without a test actually sleeping. Our own trait (unlike `OpDriver`): `rusty_tokio` has no clock abstraction to build on here. |
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
+| `manifest::Manifest` | a dedicated `Segment` of `Opened`/`Deleted` events | What `retention::Log::open` reads to discover which segments exist — `rusty_tokio::io::OpDriver` has no directory-listing operation, so this is that discovery made durable. Same reused-`Segment` pattern as `ConsumerOffsets`. See "Data flow" below. |
 | `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
 | `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. See "Data flow" below for what's still missing (no graceful shutdown, no frame-size cap). |
 | `client::Client` | `rusty_tokio::io::TcpStream` | The client-side counterpart of `server::serve` — `docs/phase1-scope.md` §2's "Client SDK — Rust first," the last item on Phase 1's scope list. One `Client` per connection, `produce`/`fetch`/`commit`/`last_committed` methods matching the four `Request` variants one-to-one. |
@@ -52,10 +53,21 @@ cross `RetentionPolicy::max_segment_bytes`, syncing the retired segment before
 it's ever read from again (so a crash right after a roll can't lose records this
 process already considered safely closed). `Log::enforce_retention` then deletes
 closed segments by size (`max_total_bytes`) or age (`max_segment_age_millis`,
-via `Clock`) — oldest first, active segment never touched. `Log::open` recovers
-from an explicit list of segment base offsets rather than scanning the
-directory, because `OpDriver` has no directory-listing operation at all (see
-`retention.rs`'s own docs for the manifest-persistence gap this leaves open).
+via `Clock`) — oldest first, active segment never touched.
+
+`manifest::Manifest` is what makes `Log::open` possible without scanning the
+directory (`OpDriver` has no directory-listing operation at all): a dedicated
+`Segment` of `Opened`/`Deleted` events, replayed on open to reconstruct which
+segments currently exist and when each was created — reusing `Segment`'s own
+recovery machinery rather than a second hand-rolled one, the same way
+`ConsumerOffsets` does. Every manifest event is synced immediately (unlike a
+regular record append), and a segment's manifest event is always ordered
+around its file on disk so a crash between the two leaves only a harmless
+orphan, never a phantom reference: `Log` creates a new segment file *then*
+calls `record_opened`, and calls `record_deleted` *before* actually removing
+a segment file. Recovering each segment's real creation time from the
+manifest also means time-based retention stays accurate across a restart,
+not just within one process's uptime.
 
 `consumer::ConsumerOffsets` tracks each consumer's last-committed offset the
 same way: `commit` encodes `[consumer_id][offset]` as one record and appends

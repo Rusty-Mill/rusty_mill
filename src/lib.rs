@@ -18,6 +18,7 @@
 pub mod client;
 pub mod clock;
 pub mod consumer;
+pub mod manifest;
 pub mod offset;
 pub mod protocol;
 pub mod record;
