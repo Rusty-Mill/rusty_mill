@@ -104,7 +104,9 @@ independently abandonable:
 | 2b-i | Certificate signature verification | **landed** |
 | 2b-ii | Path building and RFC 5280 §6.1 validation — chain to an anchor, expiry, `basicConstraints`/`keyUsage`, path length, EKU | **landed** |
 | 2b-iii | Name matching (hostname, IP) and name constraints | **landed** |
-| 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
+| 3a | TLS 1.3 key schedule — HKDF-Expand-Label, the secret schedule, traffic keys, Finished | **landed** |
+| 3b | Handshake message encoding/parsing and the transcript hash | not started |
+| 3c | The client state machine — key exchange, CertificateVerify, driving it all | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
 
@@ -194,6 +196,26 @@ top, because this is precisely the distinction that gets lost.
 A stage "ships" only when it meets the bar in §5. A stage that cannot meet the
 bar does not land behind the flag either — the flag is not a place to park
 code that does not work.
+
+Stage 3 splits three ways on the same principle as 2 and 2b: 3a is arithmetic
+over byte strings with no state and no peer, 3b is parsing hostile input, 3c is
+a state machine that talks to someone. Three different failure modes, three
+different test strategies.
+
+3a is where RFC 8448 pays off a third time. It publishes every PRK, every
+`info` string, and every expanded secret at every step, so the tests check
+individual derivations rather than that a handshake works — which matters,
+because a key schedule that is self-consistent but wrong interoperates
+perfectly with itself and with nothing else, and a round-trip test cannot see
+the difference when both sides are the code under test.
+
+One thing 3a got wrong first, worth recording because the reasoning was
+reasonable: `HKDF-Expand-Label` outputs of different lengths do *not* share a
+prefix, even though plain HKDF-Expand produces a stream and RFC 5869 alone
+would suggest they do. The requested length is a field of `HkdfLabel` and so
+part of the `info`. The test was written the other way round and failed
+immediately — free domain separation by output length, discovered by asserting
+the opposite.
 
 ### 5. The shipping bar
 

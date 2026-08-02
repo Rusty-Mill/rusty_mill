@@ -60,8 +60,11 @@ one artifact to ship and no team/language boundary to split across:
   `handrolled::name` — server name matching (no Common Name fallback, ever)
   and name-constraint enforcement — plus `path::verify_peer_certificate`, the
   combined entry point that does both and so cannot be half-performed. With
-  that, path validation is complete: the remaining stages are the handshake
-  itself. See [Non-goals](#non-goals) and ADR-0002.
+  that, path validation is complete. Stage 3a adds `handrolled::schedule`,
+  the TLS 1.3 key schedule — where every key the protocol uses comes from, and
+  where they are bound to the handshake transcript that produced them. The
+  handshake messages and the state machine that drives them (3b, 3c) are not
+  built. See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

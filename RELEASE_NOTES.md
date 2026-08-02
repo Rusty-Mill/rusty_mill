@@ -22,6 +22,37 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 3a: the TLS 1.3 key schedule
+**2026-08-02**
+
+- **Added:** `handrolled::schedule` (rusty_tls#25) — RFC 8446 §7.1.
+  `HKDF-Expand-Label`, `Derive-Secret`, the early/handshake/master secret
+  schedule, traffic key and IV derivation, `finished_key`, the Finished MAC
+  with constant-time verification, and the key-update step, over SHA-256 and
+  SHA-384.
+- **Added:** a known-answer suite against RFC 8448's published intermediate
+  values — every extracted secret, every `"derived"` step, every traffic
+  secret. Checked derivation by derivation rather than by round trip, because
+  a key schedule that is self-consistent but wrong interoperates perfectly
+  with itself and a round-trip test cannot see the difference.
+- **Added:** the two hand-rolled suites now meet in the middle. The traffic
+  keys `handrolled_record_kat.rs` takes as *inputs* are derived here from the
+  schedule, and keys derived here decrypt the RFC's own 679-octet wire record
+  through the hand-rolled record layer. Neither module was written against the
+  other; both were written against the same trace.
+- **Known limitation, stated plainly:** this is arithmetic over byte strings
+  and nothing else. It does not encode or parse handshake messages, does not
+  accumulate the transcript (a caller supplies a finished hash), does not do
+  key exchange, and does not talk to a peer. Those are stages 3b and 3c, and
+  until they exist there is no handshake here — only the keys one would use.
+- **Known limitation, stated plainly:** the server's Finished `verify_data` is
+  not covered by a known-answer test. Its transcript runs through the server's
+  CertificateVerify, and RFC 8448 does not publish that hash as a labelled
+  value; computing it needs the handshake messages themselves, which is 3b.
+  The client's `verify_data` *is* covered, since its transcript is published.
+
+---
+
 ## Hand-rolled TLS engine, stage 2b-iii: name matching and name constraints
 **2026-08-02**
 
