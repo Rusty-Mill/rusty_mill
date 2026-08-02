@@ -23,6 +23,42 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Cargo project scaffolded: first real `Segment` storage code lands
+**2026-08-02**
+
+- **Added:** `Cargo.toml` depending on `rusty_tokio` (pinned `git` `rev`,
+  `thread-per-core` + `io-uring-fs` features, per ADR-0002 D3) — the first
+  real code in this repo.
+- **Added:** `src/record.rs` — on-disk record framing (`[len][crc32][payload]`),
+  hand-rolled CRC-32/ISO-HDLC (no new dependency — this project treats every
+  dependency as audit surface, per ADR-0002's whole D3 thread).
+- **Added:** `src/offset.rs` — `Offset`/`DurableOffset`/`CommittedOffset`/
+  `Epoch`, the ADR-0002 D2 primitives a future consensus layer needs without
+  a storage-format migration.
+- **Added:** `src/segment.rs` — a real, working append-only `Segment`: create,
+  append, read, sync, and crash recovery (truncates a torn tail rather than
+  serving it). Built directly on `rusty_tokio`'s `OpDriver`/`UringFile`, not a
+  hand-rolled parallel trait, per ADR-0002 D4. 14 tests pass, including
+  working versions of all three of D4's minimal DST scenarios (crash/recovery
+  cycles, torn write, lying fsync) against `SimDriver`.
+- **Added:** `src/retention.rs`, `src/consumer.rs` — module stubs (docs only,
+  no implementation) for segment rolling/deletion and per-consumer offset
+  tracking, scoped but deliberately not designed yet.
+- **Fixed (blocking, upstream):** `rusty_tokio` could not be consumed as a
+  Cargo `git` dependency by any external project — its `Cargo.toml` used
+  `path = "../rusty_std"`-style sibling-repo dependencies, which only
+  resolve inside its own multi-repo dev checkout. Filed and verified fixed
+  upstream (`baileyrd/rusty_tokio#254`, closed via `rusty_std`/`rusty_libc`/
+  `rusty_win32` converting to pinned `git` dependencies, matching the
+  existing `rustils` pattern) before this scaffold could build at all.
+  Re-verified the actual fix — not just that the issue closed — with a
+  build against a completely fresh `CARGO_HOME`.
+- **Known limitation:** the on-disk index is dense and in-memory only, not
+  the sparse on-disk index `docs/phase1-scope.md` §2 describes — real,
+  useful, but a narrower slice than the full Phase 1 scope. No fsync policy
+  configuration yet (`Segment::sync` exists; when to call it is left to the
+  caller). No wire protocol integration (ADR-0002 D1) yet.
+
 ## ADR-0002 D3 reopened and reversed: `rusty_tokio` replaces compio as the Phase 1 runtime
 **2026-08-01**
 

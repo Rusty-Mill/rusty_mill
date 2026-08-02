@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(
             decode(&encoded),
             Err(DecodeError::PayloadTruncated {
-                declared: 18,
+                declared: 17, // "hello segment log" is 17 bytes
                 available: 3,
             })
         );

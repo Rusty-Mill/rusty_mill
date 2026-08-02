@@ -11,13 +11,13 @@ deliberate rather than reflexive consensus choice for Phase 2).
 
 ## Boundaries
 <!-- Domain logic vs. I/O and framework details (ports-and-adapters).
-     List the ports (interfaces) and the adapters that implement them.
-     Nothing real to list yet — no code has landed. Fill in once the storage
-     engine and wire-protocol layer exist. -->
+     List the ports (interfaces) and the adapters that implement them. -->
 
 | Port | Adapter(s) | Notes |
 | ---- | ---------- | ----- |
-|      |            |       |
+| `rusty_tokio::io::OpDriver` | `IoUringDriver` (real, production), `SimDriver` (deterministic, seeded fault injection) | Not our own trait — `segment::Segment` builds directly on `rusty_tokio`'s seam (ADR-0002 D3/D4) rather than a parallel hand-rolled one. Swapped at the call site (`Segment::create_on`/`open_on` take `Arc<dyn OpDriver>`), not via config. |
+| `record::{encode, decode}` | pure functions, no I/O | The framing/checksum boundary — deliberately synchronous and driver-independent so it's unit-testable without any runtime at all (see `record.rs`'s own tests). |
+| `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -27,7 +27,19 @@ deliberate rather than reflexive consensus choice for Phase 2).
      hard fault isolation. Note here if/why this repo has already crossed that line. -->
 
 ## Data flow
-<!-- Diagram or short walkthrough of a request/event through the system -->
+`Segment::append` encodes a payload (`record::encode` — length + CRC32 framing),
+writes it at the segment's current write position via `UringFile::write_at`, and
+returns the new record's `Offset`. Nothing is synced to disk until `Segment::sync`
+calls `fsync` explicitly and returns the new `DurableOffset` — callers choose when
+to sync, not `append` itself (configurable fsync policy, `docs/phase1-scope.md`
+§2, is a Phase 1 follow-up: the seam exists, a policy on top of it doesn't yet).
+
+`Segment::open_on` is the recovery path: replays every record from the last known
+header to EOF, and truncates the file (`set_len`) at the first record that fails
+to decode — a torn write or a checksum mismatch — rather than serving a partial
+or corrupt record. This is exercised directly by `segment.rs`'s own tests against
+`SimDriver`'s fault injection (torn writes, lying `fsync`, crash-and-reopen),
+matching ADR-0002 D4's three minimal DST scenarios.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.

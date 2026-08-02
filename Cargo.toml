@@ -11,7 +11,7 @@ publish = false
 # not a branch reference, so a future rusty_tokio change can't silently
 # change what this crate builds against. Bump deliberately, re-verify the
 # same way.
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "54fc16cec2f7152131f7dae6c265ba3892bffdda", features = [
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "5a97dfa246e82173e0a122fe126c3dea9b9618c2", features = [
     "thread-per-core",
     "io-uring-fs",
 ] }
