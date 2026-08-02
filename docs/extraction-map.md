@@ -457,6 +457,11 @@ mode-0600-with-stale-cleanup bind (rusty_tail LocalAPI, shh agent).
 **No TLS obligation**: shh and rusty_tail hand-roll wire crypto over
 plain TCP; rdp's rustls is optional and injected. rusty_rdp converges
 cheapest — its `net.rs` is already generic over `Read + Write`.
+*Settled 2026-08-02 (rustils#70)*: the injected layer became a crate —
+`rusty_tls` wraps rustls behind one seam for the whole ecosystem, with
+`rusty_request` and `rusty_rdp` migrated onto it. It depends on nothing
+in this workspace, so this obligation stays at zero permanently rather
+than pending. See `design-discussion-tls.md`'s Resolution.
 
 **Landed (TCP slice) 2026-07-19** — `platform::net::{Net, TcpStream,
 TcpListener}`, see `docs/behavior/net.md` and the convergence roadmap's

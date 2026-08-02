@@ -23,6 +23,14 @@ below, and all cutting the same direction: B1 is *best-effort* anchor
 loading, materially less faithful than OS verification (B2) on Windows and
 macOS.
 
+**Resolved 2026-08-02.** The question this document was written to inform is
+now answered — not by rustils, but by `rusty_tls`, a new ecosystem crate that
+took the seam and settled it. Option A shipped; B1's recorded gate condition
+is explicitly *not* met, and the evidence against it hardened. rustils' side
+of the seam is "nothing," which is now a finding rather than a default. See
+*Resolution* at the end; the research below stands unchanged as the reasoning
+that anticipated it.
+
 ## Context: the standing stance, restated precisely
 
 The stance is not "rustils has no opinion on TLS." It is three specific,
@@ -436,10 +444,108 @@ Keeping that stance and eventually landing B1 are fully compatible.
    surveyed, and its optional server's TLS shape still rests on D16's record
    rather than source.
 
-## What this document does not decide
+## Resolution (2026-08-02) — `rusty_tls` settled the seam
 
-Whether B1 ever gets built, on what timeline, or in what exact shape — and
-nothing here weakens §3: `rusty_request` has no HTTPS code path today, so no
-gate is passed and no code follows from this document. This is the input to
-the owner's call that rustils#70 asked to have on record, not the call
-itself.
+rustils#70 was left open pending "the resulting seam actually being decided
+and this repo's side of it clear." It now is. The deciding artifact is
+[`rusty_tls`](https://github.com/baileyrd/rusty_tls) (surveyed at
+`22c30a3`), whose stated purpose is "one TLS implementation, one trust
+policy, for the whole rusty ecosystem — so no consumer ever rolls its own TLS
+again." It wraps rustls behind a seam consumers import instead of importing
+rustls directly.
+
+**The single most load-bearing fact: `rusty_tls` does not depend on rustils
+at all.** Not `platform`, not any backend, nothing. Its whole dependency set
+is `rustls`, `rustls-native-certs`, and optionally `rusty_tokio`. The seam
+between the two repos is empty by construction, which is the strongest
+available form of the answer this document recommended.
+
+### Option A shipped, exactly as specified
+
+- Client side, sync (`TlsStream`) and async (`AsyncTlsStream`, behind a
+  `rusty-tokio` feature), both over the same `TrustPolicy`. `rusty_request`
+  (async) and `rusty_rdp` (sync, client-side) are migrated onto it. Server
+  side (`TlsAcceptor`/`TlsServerStream`) exists, sync only, with no consumer
+  migrated yet.
+- The async adapter drives a sans-IO `rustls::ClientConnection` over
+  `rusty_tokio`'s own `AsyncRead`/`AsyncWrite`. `rusty_tls`'s manifest is
+  explicit that this belongs there and not in the runtime — "the runtime
+  stays TLS-free" — which is need 9's wire seam confirmed complete from the
+  other side, and confirms the #41/#48/#59 sequence delivered everything the
+  consumer needed.
+- Nothing in rustils changed to make any of this possible, which is what
+  Option A predicted: it "requires nothing."
+
+### B1's gate condition is negated, by name
+
+The recorded gate was: *a hand-rolled-family consumer needs OS trust anchors
+**without** taking `rustls-native-certs`, and is observed hand-rolling anchor
+loading at real call sites.*
+
+`rusty_tls` took `rustls-native-certs`. `TrustPolicy::System` is a dozen
+lines around `load_native_certs()` — no distro path probing, no cert-store
+reading, no hand-rolled anchor loading anywhere in the crate. The gate names
+the one dependency that would falsify it, and the ecosystem's designated TLS
+chokepoint chose exactly that dependency.
+
+This is a second instance of the CredentialStore-shaped signal the
+2026-07-21 amendment already recorded for `rusty_provider`, and a stronger
+one: `rusty_provider` was one consumer solving its own problem, whereas
+`rusty_tls` is the crate whose entire reason to exist is to stop consumers
+rolling their own. If anyone in this ecosystem were going to hand-roll anchor
+loading, it would have been this crate, and it didn't. **B1 stays parked, and
+should now be understood as parked indefinitely rather than pending** —
+absent something displacing `rustls-native-certs`, the forcing signal has no
+plausible source left.
+
+### Independent corroboration of the 2026-07-21 corrections
+
+`rusty_tls`'s own `TrustPolicy::System` doc comment reproduces all three
+fidelity limits this document's amendment corrected — Windows' lazily
+populated ROOT store, macOS anchor enumeration not carrying trust-settings
+semantics, and a flat DER list being unable to express distrust — reached
+independently and documented as an honest contract rather than papered over.
+The amended survey was right, and its facts are now confirmed by a second
+source that had to live with them.
+
+### The open questions, answered where `rusty_tls` answers them
+
+1. **Does B1 wait for its gate, or is a speculative build acceptable?**
+   Waits. The evidence that argued for waiting got stronger, not weaker.
+2. **Which domain would B1 land in?** Unchanged and still moot;
+   `security` remains the recommendation if it ever gates, which also keeps
+   `net.md`'s "Deliberately unspecified — any TLS/crypto" line true.
+3. **Linux anchor-source policy?** Moot while parked. Worth recording that
+   `rusty_tls` honors `SSL_CERT_FILE`/`SSL_CERT_DIR` ahead of distro paths —
+   one of the options this document listed, now with a working reference
+   implementation behind it.
+4. **Who is the consumer for gating purposes — `rusty_request` or
+   `rusty_tokio`?** **Neither.** This document said the anchor-loading call
+   sites "will live wherever the TLS layer does"; the TLS layer turned out to
+   live in a third crate that was not among the candidates. `rusty_tls` is
+   the consumer of record for any future B1 gate, and the answer changes the
+   shape of the question: a single chokepoint is far less likely to produce
+   duplicated hand-rolling than several independent consumers would have
+   been.
+5. **Residue.** `rusty_llama` remains unsurveyed. `rusty_tls`'s server side
+   having no migrated consumer is where that would land if its optional
+   server ever gets verified — the one thread this resolution leaves hanging,
+   and it is a `rusty_tls` thread, not a rustils one.
+
+### What this changes in rustils
+
+Nothing in code. The stance was already correct and the seam already
+complete; this resolution converts "no consumer has forced TLS" from an
+absence of evidence into a positive finding — the ecosystem built the layer
+somewhere else, on purpose, and needed nothing from here to do it.
+`docs/behavior/net.md` and `docs/extraction-map.md`'s D16 note now point at
+`rusty_tls` as the realized seam rather than at a hypothetical one.
+
+## What this document still does not decide
+
+Whether B1 ever gets built, on what timeline, or in what exact shape.
+§3 is unweakened: the gate is not passed, so no code follows from this
+document. What changed on 2026-08-02 is the *likelihood*, not the rule — a
+parked slice with no plausible forcing consumer left is still a parked slice,
+and if `rusty_tls` ever drops `rustls-native-certs` and starts probing distro
+paths itself, the gate reopens exactly as written.
