@@ -194,10 +194,14 @@ from the other two slices (see below).
 
 - Any TLS/crypto behavior — out of scope for this trait by design (see
   Scope above); consumers layer their own wire security over the plain
-  `TcpStream`. The full design research on why this stays true — and
-  which one narrow piece (OS trust-anchor access) could ever land
-  elsewhere in the PAL under §3's gate — is
-  `../design-discussion-tls.md` (rustils#70).
+  `TcpStream`. Settled 2026-08-02 (rustils#70): the ecosystem's TLS layer
+  is `rusty_tls`, which wraps a TLS engine over this trait's plain stream.
+  That stays true permanently — no TLS/crypto protocol work lands in this
+  workspace. Same day, the one narrow non-crypto piece (OS trust-anchor
+  access, "B1") *did* gate in and is pending implementation as a
+  `platform::security` slice, consumer of record `rusty_tls` — which is
+  why it lands beside `Csprng` and not here, keeping this line true.
+  Full research and the reopening note: `../design-discussion-tls.md`.
 - The exact `ErrorKind` `unix_connect` reports for a `path` that never
   named any socket file at all, as opposed to a stale-but-present one —
   asserted only as "fails, not hangs," not pinned to one `ErrorKind`
