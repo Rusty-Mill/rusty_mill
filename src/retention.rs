@@ -11,27 +11,21 @@
 //! `crate::clock::SimClock` in tests, the same seam pairing
 //! `rusty_tokio::io::SimDriver` uses for disk faults).
 //!
-//! ## What this scaffold deliberately does not do
+//! ## Recovery
 //!
-//! `rusty_tokio::io::OpDriver` has no directory-listing operation (`SimDriver`
-//! has no concept of "list files in a directory" at all — it only knows
-//! about paths it's been explicitly told about), so `Log::open` cannot
-//! discover which segments exist by scanning the directory the way a naive
-//! implementation might. It takes an explicit list of base offsets instead —
-//! effectively a manifest, whose actual on-disk persistence is real design
-//! work this scaffold doesn't attempt yet (a small manifest file, most
-//! likely, tracked separately from the segments themselves). A caller today
-//! has to already know which segments exist; that's a real gap for a
-//! restart-and-recover path, not a hidden one.
+//! `rusty_tokio::io::OpDriver` has no directory-listing operation
+//! (`SimDriver` has no concept of "list files in a directory" at all — it
+//! only knows about paths it's been explicitly told about), so `Log::open`
+//! cannot discover which segments exist by scanning the directory the way a
+//! naive implementation might. It reads `crate::manifest::Manifest`
+//! instead — a durable, replayable record of which segments exist and when
+//! each was created, kept alongside the segments themselves. See that
+//! module's own docs for the format and the crash-safety ordering between
+//! a manifest write and the segment file it describes.
 //!
-//! A closed segment recovered via `Log::open` also has no real creation
-//! timestamp (that isn't stored anywhere on disk yet either — see
-//! [`Log::open`]'s own docs) — its age starts counting from the moment it
-//! was *opened*, not when it was actually created. Time-based retention is
-//! therefore only accurate within a single process's uptime right now, not
-//! across a restart. Worth fixing before this matters in practice
-//! (persisting each segment's creation time in its header alongside epoch/
-//! base_offset), not fixed in this pass.
+//! Recovering each segment's real creation time from the manifest also
+//! means time-based retention is accurate across a restart, not just
+//! within one process's uptime, the way it was before the manifest existed.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,6 +33,7 @@ use std::sync::Arc;
 use rusty_tokio::io::{uring_remove_file_on, OpDriver};
 
 use crate::clock::Clock;
+use crate::manifest::Manifest;
 use crate::offset::{Epoch, Offset};
 use crate::record;
 use crate::segment::Segment;
@@ -72,8 +67,8 @@ struct ClosedSegment {
 
 /// A durable log: one active segment plus zero or more closed ones, in one
 /// directory, with size/time-based rolling and retention. See this module's
-/// top-level docs for what's deliberately not implemented yet (manifest
-/// persistence, cross-restart segment ages).
+/// top-level docs and `crate::manifest`'s for how recovery discovers which
+/// segments exist.
 pub struct Log {
     dir: PathBuf,
     driver: Arc<dyn OpDriver>,
@@ -82,6 +77,7 @@ pub struct Log {
     closed: Vec<ClosedSegment>,
     active: Segment,
     active_created_at_millis: u64,
+    manifest: Manifest,
 }
 
 impl Log {
@@ -89,8 +85,12 @@ impl Log {
         dir.join(format!("{:020}.log", base_offset.0))
     }
 
+    fn manifest_path(dir: &Path) -> PathBuf {
+        dir.join("manifest.log")
+    }
+
     /// Starts a brand-new, empty log in `dir` with a single active segment
-    /// at offset 0.
+    /// at offset 0, and a fresh manifest recording it.
     pub async fn create(
         driver: Arc<dyn OpDriver>,
         clock: Arc<dyn Clock>,
@@ -102,6 +102,12 @@ impl Log {
         let path = Self::segment_path(&dir, base);
         let active = Segment::create_on(driver.clone(), &path, base, Epoch::INITIAL).await?;
         let active_created_at_millis = clock.now_millis();
+
+        let mut manifest = Manifest::create_on(driver.clone(), Self::manifest_path(&dir)).await?;
+        manifest
+            .record_opened(base, active_created_at_millis)
+            .await?;
+
         Ok(Log {
             dir,
             driver,
@@ -110,42 +116,40 @@ impl Log {
             closed: Vec::new(),
             active,
             active_created_at_millis,
+            manifest,
         })
     }
 
-    /// Recovers a log from `dir`, given the base offsets of every segment
-    /// that exists (ascending order; the last one is treated as active).
-    /// See this module's top-level docs for why this can't discover segments
-    /// on its own, and for the age caveat this recovery path carries.
+    /// Recovers a log from `dir` by reading its manifest — no caller-supplied
+    /// segment list needed. See `crate::manifest`'s docs for how that
+    /// recovery works and what it guarantees across a crash.
     pub async fn open(
         driver: Arc<dyn OpDriver>,
         clock: Arc<dyn Clock>,
         dir: impl Into<PathBuf>,
         policy: RetentionPolicy,
-        existing_base_offsets: &[Offset],
     ) -> std::io::Result<Log> {
         let dir = dir.into();
-        let (&active_offset, closed_offsets) =
-            existing_base_offsets.split_last().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Log::open needs at least one existing base offset -- use Log::create for a fresh log",
-                )
-            })?;
+        let (manifest, live) = Manifest::open_on(driver.clone(), Self::manifest_path(&dir)).await?;
+        let (active_entry, closed_entries) = live.split_last().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Log::open found an empty manifest -- use Log::create for a fresh log",
+            )
+        })?;
 
-        let opened_at = clock.now_millis();
-        let mut closed = Vec::with_capacity(closed_offsets.len());
-        for &base in closed_offsets {
-            let path = Self::segment_path(&dir, base);
+        let mut closed = Vec::with_capacity(closed_entries.len());
+        for entry in closed_entries {
+            let path = Self::segment_path(&dir, entry.base_offset);
             let segment = Segment::open_on(driver.clone(), &path).await?;
             closed.push(ClosedSegment {
                 segment,
                 path,
-                created_at_millis: opened_at, // see this module's docs -- real age is unknown across a restart
+                created_at_millis: entry.created_at_millis,
             });
         }
 
-        let active_path = Self::segment_path(&dir, active_offset);
+        let active_path = Self::segment_path(&dir, active_entry.base_offset);
         let active = Segment::open_on(driver.clone(), &active_path).await?;
 
         Ok(Log {
@@ -155,7 +159,8 @@ impl Log {
             policy,
             closed,
             active,
-            active_created_at_millis: opened_at,
+            active_created_at_millis: active_entry.created_at_millis,
+            manifest,
         })
     }
 
@@ -212,6 +217,12 @@ impl Log {
         let epoch = self.active.epoch(); // Phase 1 has no consensus yet -- always Epoch::INITIAL
         let new_active = Segment::create_on(self.driver.clone(), &path, next_base, epoch).await?;
         let new_created_at = self.clock.now_millis();
+        // The segment file exists before the manifest is told about it --
+        // see `crate::manifest`'s docs for why that ordering, not the
+        // reverse, is the crash-safe one.
+        self.manifest
+            .record_opened(next_base, new_created_at)
+            .await?;
 
         let mut retired = std::mem::replace(&mut self.active, new_active);
         // A closed segment is never appended to again -- sync it now so a
@@ -259,6 +270,12 @@ impl Log {
 
     async fn delete_oldest_closed(&mut self) -> std::io::Result<()> {
         let oldest = self.closed.remove(0);
+        // Manifest first, file second -- see `crate::manifest`'s docs for
+        // why a crash between the two must leave an orphan file rather
+        // than a phantom manifest entry.
+        self.manifest
+            .record_deleted(oldest.segment.base_offset())
+            .await?;
         uring_remove_file_on(self.driver.clone(), &oldest.path).await
     }
 }
@@ -375,18 +392,89 @@ mod tests {
 
         drop(log);
         let driver = driver.crash_and_reopen();
-        let log = Log::open(
-            driver,
-            clock,
-            "/log",
-            no_retention(40),
-            &[Offset(0), Offset(1)],
-        )
-        .await
-        .unwrap();
+        let log = Log::open(driver, clock, "/log", no_retention(40))
+            .await
+            .unwrap();
 
         assert_eq!(log.closed_segment_count(), 1);
         assert_eq!(log.read(a).await.unwrap(), b"first record");
         assert_eq!(log.read(b).await.unwrap(), b"second record");
+    }
+
+    /// A segment deleted by retention before a restart must not reappear
+    /// after one -- the manifest's `Deleted` event is what makes that
+    /// durable, not just an in-memory fact this process forgets on exit.
+    #[rusty_tokio::test]
+    async fn a_deleted_segment_stays_deleted_across_a_restart() {
+        let driver = SimDriver::new();
+        let clock = Arc::new(SimClock::new());
+        let policy = RetentionPolicy {
+            max_segment_bytes: 40,
+            max_total_bytes: Some(1), // effectively "keep no closed segments"
+            max_segment_age_millis: None,
+        };
+        let mut log = Log::create(driver.clone(), clock.clone(), "/log", policy)
+            .await
+            .unwrap();
+
+        log.append(b"first record").await.unwrap(); // segment 0, still active
+        log.append(b"second record").await.unwrap(); // rolls; segment 0 closes, then gets deleted
+        log.active.sync().await.unwrap();
+        assert_eq!(log.closed_segment_count(), 0);
+
+        drop(log);
+        let driver = driver.crash_and_reopen();
+        let policy = RetentionPolicy {
+            max_segment_bytes: 40,
+            max_total_bytes: Some(1),
+            max_segment_age_millis: None,
+        };
+        let log = Log::open(driver, clock, "/log", policy).await.unwrap();
+
+        assert_eq!(log.closed_segment_count(), 0);
+        assert_eq!(log.read(Offset(1)).await.unwrap(), b"second record");
+        assert!(log.read(Offset(0)).await.is_err());
+    }
+
+    /// The manifest persists each segment's real creation time, so
+    /// time-based retention recovered from a restart doesn't restart the
+    /// clock at the moment of recovery -- a segment already old enough to
+    /// age out before the crash is still old enough to age out right after
+    /// `Log::open`, without needing a fresh `enforce_retention` window to
+    /// elapse first.
+    #[rusty_tokio::test]
+    async fn recovered_segment_ages_are_real_not_reset_at_open() {
+        let driver = SimDriver::new();
+        let clock = Arc::new(SimClock::new());
+        let policy = RetentionPolicy {
+            max_segment_bytes: 40,
+            max_total_bytes: None,
+            max_segment_age_millis: Some(1_000),
+        };
+        let mut log = Log::create(driver.clone(), clock.clone(), "/log", policy)
+            .await
+            .unwrap();
+
+        log.append(b"first record").await.unwrap();
+        log.append(b"second record").await.unwrap(); // rolls -- segment 0 closes
+        log.active.sync().await.unwrap();
+        assert_eq!(log.closed_segment_count(), 1);
+
+        clock.advance(1_100); // segment 0 is already past max_segment_age_millis
+
+        drop(log);
+        let driver = driver.crash_and_reopen();
+        let policy = RetentionPolicy {
+            max_segment_bytes: 40,
+            max_total_bytes: None,
+            max_segment_age_millis: Some(1_000),
+        };
+        let mut log = Log::open(driver, clock, "/log", policy).await.unwrap();
+
+        // No further clock advance -- if the recovered segment's age were
+        // (wrongly) reset to zero at open, this would find nothing to
+        // delete yet.
+        log.enforce_retention().await.unwrap();
+        assert_eq!(log.closed_segment_count(), 0);
     }
 }
