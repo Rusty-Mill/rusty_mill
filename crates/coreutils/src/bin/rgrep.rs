@@ -40,12 +40,10 @@ fn search_dir(dir: &Path, re: &Regex, invert: bool, line_nums: bool) -> io::Resu
             let path = entry.path();
             if path.is_dir() {
                 search_dir(&path, re, invert, line_nums)?;
-            } else {
-                if let Ok(file) = fs::File::open(&path) {
-                    let reader = BufReader::new(file);
-                    let display_path = rpath::win32_to_posix(&path.to_string_lossy());
-                    let _ = search_reader(reader, re, invert, line_nums, &display_path, true);
-                }
+            } else if let Ok(file) = fs::File::open(&path) {
+                let reader = BufReader::new(file);
+                let display_path = rpath::win32_to_posix(&path.to_string_lossy());
+                let _ = search_reader(reader, re, invert, line_nums, &display_path, true);
             }
         }
     }

@@ -46,11 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("rrm: cannot remove directory '{}': {}", target, e);
                 }
             }
-        } else {
-            if let Err(e) = fs::remove_file(path) {
-                if !force {
-                    eprintln!("rrm: cannot remove file '{}': {}", target, e);
-                }
+        } else if let Err(e) = fs::remove_file(path) {
+            if !force {
+                eprintln!("rrm: cannot remove file '{}': {}", target, e);
             }
         }
     }

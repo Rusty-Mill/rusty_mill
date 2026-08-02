@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut full_args = base_args;
     full_args.extend(items);
 
-    let status = Command::new(&cmd_name).args(&full_args).status()?;
+    let status = Command::new(cmd_name).args(&full_args).status()?;
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
