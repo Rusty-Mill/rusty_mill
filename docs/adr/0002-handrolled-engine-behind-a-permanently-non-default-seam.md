@@ -211,10 +211,29 @@ read as a step toward it.
 
 - Stage 2 (X.509 chain validation) is the next unit of work, and pairs with the
   trust-anchor loading already landed in rusty_tls#24.
-- Fuzz targets for the record parser (bar item 4) are not part of Stage 1 and
-  are owed. Stage 1's parser is small and total — every length is checked
-  before use and there is no `unsafe` in the crate — but "small and total" is
-  an argument for expecting fuzzing to find nothing, not for skipping it.
+- Fuzz targets were owed after stages 1 and 2a and are now delivered, in two
+  forms, because one form could not do both jobs. `fuzz/` holds coverage-guided
+  libFuzzer targets for the DER reader and the certificate parser; they need
+  nightly and sustained runtime, so they are something a person runs
+  deliberately, not something that guards a branch.
+  `tests/handrolled_fuzz.rs` is the stable, deterministic counterpart that
+  runs on every pull request, seeded from the machine's real trust anchors and
+  mutating them rather than generating noise.
+
+  This was worth doing rather than assuming. The reasoning for expecting it to
+  find nothing — a small, total parser with every length checked and no
+  `unsafe` anywhere — was sound and also wrong: the first run found an
+  infinite loop in `ExtendedKeyUsage`'s iterator, reachable from any
+  certificate a peer chooses to send. `Reader::read` deliberately does not
+  consume a value whose tag is wrong (that is what makes `OPTIONAL` fields
+  work), so an `extendedKeyUsage` containing a non-OID yielded the same error
+  forever. It parsed, it did not panic, it never returned. Fifty hand-written
+  tests, including thirty in a rejection suite, did not find it, because
+  nobody writes a test for a loop they did not know could spin.
+
+  The lesson is recorded here rather than in a commit message: for this
+  engine, "the code is simple enough that fuzzing would be a formality" is not
+  a reason to skip fuzzing. It is the argument that was made, and it lost.
 - A differential gap is knowingly left open: rustls' `AeadKey` is publicly
   constructible only at its maximum length of 32 bytes, so the byte-identity
   differential covers AES-256-GCM and ChaCha20-Poly1305 but *not*

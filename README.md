@@ -76,6 +76,21 @@ RUSTDOCFLAGS='--cfg rusty_tls_handrolled' \
 so without it the module is missing from `cargo doc` and its doctests quietly
 do not run.)
 
+Its parsers are fuzzed two ways. `tests/handrolled_fuzz.rs` runs with the
+command above on every change — seeded from the machine's own trust anchors
+and mutating them, because random bytes are rejected at the first octet and
+never reach anything interesting. For a deliberate longer run, `fuzz/` has
+coverage-guided libFuzzer targets:
+
+```bash
+RUSTFLAGS='--cfg rusty_tls_handrolled' cargo +nightly fuzz run der_reader
+RUSTFLAGS='--cfg rusty_tls_handrolled' cargo +nightly fuzz run certificate
+```
+
+This was not a formality: the first run found an infinite loop reachable from
+any certificate a peer chooses to send, which fifty hand-written tests had
+missed.
+
 The cfg is the half that carries the guarantee. Cargo features are unified
 across a dependency graph, so a feature alone would let any crate in a
 consumer's tree switch this on for everyone else in that build; a `--cfg` flag
