@@ -23,6 +23,38 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Wire exposure for consumer-offset commits
+**2026-08-02**
+
+- **Added:** `protocol::Request::Commit { consumer_id, offset }` and
+  `Request::LastCommitted { consumer_id }`, with matching
+  `Response::Committed` and `Response::LastCommitted { offset:
+  Option<Offset> }` — the write/read pair for consumer offsets that
+  `Produce`/`Fetch` already are for the log itself. `LastCommitted` for a
+  consumer that's never committed returns `offset: None`, not an error — a
+  fresh consumer is expected, not exceptional. New `write_str`/`read_str`
+  helpers encode a consumer ID as a length-prefixed UTF-8 string; invalid
+  UTF-8 or a truncated request decode to a real `ProtocolError`, not a
+  panic.
+- **Changed:** `server::AppState` now holds both `log: Arc<Mutex<Log>>` and
+  `consumer_offsets: Arc<Mutex<ConsumerOffsets>>`, replacing `serve`'s
+  previous bare `Arc<Mutex<Log>>` parameter. Two separate locks, not one
+  covering both — a `Commit`/`LastCommitted` request never waits on `Log`'s
+  lock, and vice versa. `dispatch` gained the two new match arms; the
+  `ConsumerOffsets`'s wire exposure `README.md`/`ARCHITECTURE.md` previously
+  flagged as still open now exists.
+- 12 new tests (53 total): 8 in `protocol.rs` (round trips for both new
+  request/response pairs, an empty consumer ID, a truncated `Commit`
+  request, an invalid-UTF-8 consumer ID), 4 in `server.rs` against **real
+  loopback TCP sockets** — commit then read back via `LastCommitted`, an
+  unknown consumer reads back `None`, a later commit overwrites an earlier
+  one for the same consumer, and two consumers committing concurrently stay
+  independent (the same cross-connection safety property the `Log` tests
+  already covered, now for the other lock).
+- **Known limitations, stated plainly:** still no graceful shutdown, still
+  no frame-size sanity cap — both called out in the previous entry, neither
+  touched by this change.
+
 ## Socket integration: `rusty_stream` is now a real TCP server
 **2026-08-02**
 
