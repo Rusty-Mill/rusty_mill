@@ -19,16 +19,20 @@
 //! byte of the (possibly nonexistent) body is read — a client can claim a
 //! multi-gigabyte body, but this never pays for that claim.
 //!
-//! ## What this pass does not do
-//!
-//! - No graceful shutdown — [`serve`] runs until its listener errors or the
-//!   task is aborted; there's no signal to drain in-flight connections
-//!   first.
+//! [`serve`] shuts down gracefully on request: its caller holds the
+//! `rusty_tokio::sync::watch::Sender<bool>` half of the channel whose
+//! `Receiver` half is passed in, and sending `true` stops the accept loop
+//! from taking any *new* connection while every connection already
+//! in-flight keeps running until it finishes on its own (the peer
+//! disconnects, or a real I/O error) — `serve` itself returns only once
+//! the last one has. Nothing is aborted just because shutdown was
+//! requested.
 
 use std::sync::Arc;
 
 use rusty_tokio::io::{TcpListener, TcpStream};
-use rusty_tokio::sync::Mutex;
+use rusty_tokio::sync::{watch, Mutex};
+use rusty_tokio::task::JoinSet;
 
 use crate::consumer::ConsumerOffsets;
 use crate::protocol::{self, Request, Response};
@@ -50,17 +54,42 @@ pub struct AppState {
     pub consumer_offsets: Arc<Mutex<ConsumerOffsets>>,
 }
 
-/// Accepts connections on `listener` forever, spawning one task per
-/// connection, until `listener` itself errors (e.g. the underlying socket
-/// closed) or this task is aborted.
-pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
+/// Accepts connections on `listener`, spawning one task per connection,
+/// until `listener` itself errors, `shutdown` is told to close (`true`),
+/// or this task is aborted. On a graceful shutdown, every connection
+/// already accepted is drained (awaited to its own natural completion,
+/// not aborted) before this returns — see this module's top-level docs.
+pub async fn serve(
+    listener: TcpListener,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let mut connections: JoinSet<std::io::Result<()>> = JoinSet::new();
+
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        let state = state.clone();
-        rusty_tokio::spawn(async move {
-            let _ = handle_connection(stream, state).await;
-        });
+        // `select!`'s arms can't `return`/`break` directly (they're
+        // spliced into a `poll_fn` closure, a separate control-flow
+        // boundary) -- each arm evaluates to a plain value instead, and
+        // the actual `return`/`break` happens below, back in `serve`'s
+        // own scope.
+        let accepted = rusty_tokio::select! {
+            result = listener.accept() => Some(result),
+            _ = shutdown.changed() => None,
+        };
+        let Some(result) = accepted else {
+            break; // shutdown requested -- stop accepting new connections
+        };
+        match result {
+            Ok((stream, _addr)) => {
+                let state = state.clone();
+                connections.spawn(async move { handle_connection(stream, state).await });
+            }
+            Err(e) => return Err(e),
+        }
     }
+
+    while connections.join_next().await.is_some() {}
+    Ok(())
 }
 
 /// One connection's request/response loop: read a framed request, dispatch
@@ -182,7 +211,16 @@ mod tests {
         let state = test_state().await;
         let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = rusty_tokio::spawn(serve(listener, state));
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        // Every test using this helper tears down via `server.abort()`,
+        // not graceful shutdown -- leaking the sender keeps
+        // `shutdown_rx.changed()` pending for this server's lifetime
+        // instead of every caller having to hold and thread through a
+        // sender it never uses. See
+        // `shutdown_stops_accepting_and_drains_in_flight_connections`
+        // for a test that actually exercises the sender.
+        std::mem::forget(shutdown_tx);
+        let server = rusty_tokio::spawn(serve(listener, state, shutdown_rx));
         (server, addr)
     }
 
@@ -478,5 +516,46 @@ mod tests {
         assert_eq!(produced, Response::Produced { offset: Offset(0) });
 
         server.abort();
+    }
+
+    /// Requesting shutdown stops the accept loop, but a connection already
+    /// in flight keeps working until it disconnects on its own -- and
+    /// `serve` itself returns `Ok(())` once that happens, with no abort
+    /// needed.
+    #[rusty_tokio::test]
+    async fn shutdown_stops_accepting_and_drains_in_flight_connections() {
+        let state = test_state().await;
+        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let server = rusty_tokio::spawn(serve(listener, state, shutdown_rx));
+
+        let client = TcpStream::connect(addr).await.unwrap();
+        let produced = send_request(
+            &client,
+            &Request::Produce {
+                payload: b"before shutdown".to_vec(),
+            },
+        )
+        .await;
+        assert_eq!(produced, Response::Produced { offset: Offset(0) });
+
+        shutdown_tx.send(true).unwrap();
+
+        // The already-open connection is unaffected by the shutdown
+        // request -- it keeps serving requests normally.
+        let fetched = send_request(&client, &Request::Fetch { offset: Offset(0) }).await;
+        assert_eq!(
+            fetched,
+            Response::Fetched {
+                payload: b"before shutdown".to_vec()
+            }
+        );
+
+        // Only once the client disconnects does the connection -- and
+        // then `serve` itself, once it's drained -- actually finish.
+        drop(client);
+        let result = server.await.unwrap();
+        assert!(result.is_ok());
     }
 }

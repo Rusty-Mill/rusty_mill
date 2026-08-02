@@ -18,8 +18,11 @@ from the other end. All built directly on `rusty_tokio`'s `thread-per-core` +
 decided, including multiple rounds of build/test/strace/ASAN verification, not
 just documentation review).
 
-Still open: no graceful shutdown on the server. See
-[RELEASE_NOTES.md](./RELEASE_NOTES.md) for the full history.
+Every gap this document previously tracked as "still open" (segment manifest
+persistence, the frame-size cap, graceful shutdown) is now closed — see
+[RELEASE_NOTES.md](./RELEASE_NOTES.md) for the full history and each
+change's own stated known limitations (smaller, ongoing ones like
+`MAX_FRAME_LEN` not yet being configurable per deployment).
 
 ## Getting started
 ```bash
