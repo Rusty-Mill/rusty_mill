@@ -20,8 +20,8 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
 | `clock::Clock` | `SystemClock` (real, production), `SimClock` (deterministic, manually advanced) | Exists for the same reason `OpDriver` does — `retention::Log`'s time-based retention has to be provable without a test actually sleeping. Our own trait (unlike `OpDriver`): `rusty_tokio` has no clock abstraction to build on here. |
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
-| `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. |
-| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against a shared `Log`, encodes `Response`s back. See "Data flow" below for what's still missing (consumer-offset commits have no wire exposure, no graceful shutdown). |
+| `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
+| `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. See "Data flow" below for what's still missing (no graceful shutdown, no frame-size cap). |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -65,28 +65,31 @@ rather than a second hand-rolled recovery path.
 
 `protocol::{Request, Response}` encode/decode to `[opcode/status][body]` using
 `rusty_wire::{Reader, Writer}` for every primitive read/write — `Produce`
-(append a payload) and `Fetch` (read one record back), matching Phase 1's
-actual storage surface. `frame`/`frame_len` add the 4-byte length prefix a
-real socket layer needs to know how many bytes make up one message.
+(append a payload) and `Fetch` (read one record back) against the log,
+`Commit` (persist a consumer's offset) and `LastCommitted` (read it back,
+`Option<Offset>` — `None` for a consumer that's never committed, not an
+error) against `ConsumerOffsets`. `frame`/`frame_len` add the 4-byte length
+prefix a real socket layer needs to know how many bytes make up one message.
 
 `server::serve` is that socket layer: accepts connections on a
 `rusty_tokio::io::TcpListener`, spawns one task per connection, and each
 connection loops reading a 4-byte length header, reading that many more
-bytes, decoding a `Request`, dispatching it against one `Log` shared across
-every connection via `rusty_tokio::sync::Mutex` (a real cross-core-safe lock,
-not an optimization to defer — nothing about the thread-per-core runtime
-guarantees two connections land on the same core), and writing the framed
-`Response` back. A connection ends cleanly on `UnexpectedEof` (the peer
-disconnected) or propagates a real I/O error. Verified against real loopback
-TCP sockets and a real `Log` (backed by `SimDriver`) in `server.rs`'s own
-tests — `rusty_tokio` has no network fault injection, only `SimDriver` has
-disk fault injection, so this is real networking, not simulated.
+bytes, decoding a `Request`, dispatching it against `AppState` — a `Log` and
+a `ConsumerOffsets`, each shared across every connection via its own
+`rusty_tokio::sync::Mutex` (real cross-core-safe locks, not an optimization
+to defer — nothing about the thread-per-core runtime guarantees two
+connections land on the same core; two separate locks so a `Commit` never
+waits on `Log`'s lock and vice versa) — and writing the framed `Response`
+back. A connection ends cleanly on `UnexpectedEof` (the peer disconnected) or
+propagates a real I/O error. Verified against real loopback TCP sockets and a
+real `Log`/`ConsumerOffsets` (both backed by `SimDriver`) in `server.rs`'s
+own tests — `rusty_tokio` has no network fault injection, only `SimDriver`
+has disk fault injection, so this is real networking, not simulated.
 
-**Still missing, stated plainly:** no consumer-offset commit request in the
-wire protocol — `ConsumerOffsets` has no wire exposure at all yet. No
-graceful shutdown. No frame-size sanity cap (a client claiming a
-multi-gigabyte body gets that much allocated before the read fails) — fine
-for a trusted client, not yet for anything internet-facing.
+**Still missing, stated plainly:** no graceful shutdown. No frame-size
+sanity cap (a client claiming a multi-gigabyte body gets that much allocated
+before the read fails) — fine for a trusted client, not yet for anything
+internet-facing.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.

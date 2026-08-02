@@ -1,21 +1,21 @@
 //! The socket integration `protocol.rs` explicitly deferred: a real
 //! `rusty_tokio` TCP listener, a connection loop that reads a framed
 //! [`crate::protocol::Request`] off the wire, dispatches it against a real
-//! [`crate::retention::Log`], and writes the encoded
-//! [`crate::protocol::Response`] back.
+//! [`crate::retention::Log`]/[`crate::consumer::ConsumerOffsets`], and
+//! writes the encoded [`crate::protocol::Response`] back.
 //!
-//! One [`Log`] is shared across every connection via `rusty_tokio::sync::
-//! Mutex` — `Log::append` needs `&mut self`, and nothing about the
+//! [`AppState`]'s `Log` and `ConsumerOffsets` are each shared across every
+//! connection via their own `rusty_tokio::sync::Mutex` — `Log::append`/
+//! `ConsumerOffsets::commit` need `&mut self`, and nothing about the
 //! thread-per-core runtime guarantees every connection lands on the same
 //! core, so a real cross-core-safe lock is the correct default here, not an
-//! optimization to defer. A connection holds the lock only for the
+//! optimization to defer. Two separate locks, not one covering both: a
+//! `Commit`/`LastCommitted` request never needs to wait on `Log`'s lock, and
+//! vice versa. A connection holds whichever lock it needs only for the
 //! duration of one dispatch, never across a network read/write.
 //!
 //! ## What this pass does not do
 //!
-//! - No consumer-offset commit request in the wire protocol yet — only
-//!   `Produce`/`Fetch` exist in `protocol.rs`. `ConsumerOffsets` has no
-//!   wire exposure at all yet.
 //! - No graceful shutdown — [`serve`] runs until its listener errors or the
 //!   task is aborted; there's no signal to drain in-flight connections
 //!   first.
@@ -32,18 +32,29 @@ use std::sync::Arc;
 use rusty_tokio::io::{TcpListener, TcpStream};
 use rusty_tokio::sync::Mutex;
 
+use crate::consumer::ConsumerOffsets;
 use crate::protocol::{self, Request, Response};
 use crate::retention::Log;
+
+/// Everything a connection needs to dispatch a request — a `Log` and a
+/// `ConsumerOffsets`, each independently lockable. Cheap to clone (two
+/// `Arc`s) — every connection task gets its own handle to the same shared
+/// state, not a copy of it.
+#[derive(Clone)]
+pub struct AppState {
+    pub log: Arc<Mutex<Log>>,
+    pub consumer_offsets: Arc<Mutex<ConsumerOffsets>>,
+}
 
 /// Accepts connections on `listener` forever, spawning one task per
 /// connection, until `listener` itself errors (e.g. the underlying socket
 /// closed) or this task is aborted.
-pub async fn serve(listener: TcpListener, log: Arc<Mutex<Log>>) -> std::io::Result<()> {
+pub async fn serve(listener: TcpListener, state: AppState) -> std::io::Result<()> {
     loop {
         let (stream, _addr) = listener.accept().await?;
-        let log = log.clone();
+        let state = state.clone();
         rusty_tokio::spawn(async move {
-            let _ = handle_connection(stream, log).await;
+            let _ = handle_connection(stream, state).await;
         });
     }
 }
@@ -51,7 +62,7 @@ pub async fn serve(listener: TcpListener, log: Arc<Mutex<Log>>) -> std::io::Resu
 /// One connection's request/response loop: read a framed request, dispatch
 /// it, write the framed response, repeat until the peer disconnects or a
 /// real I/O error occurs.
-async fn handle_connection(stream: TcpStream, log: Arc<Mutex<Log>>) -> std::io::Result<()> {
+async fn handle_connection(stream: TcpStream, state: AppState) -> std::io::Result<()> {
     loop {
         let mut header = [0u8; 4];
         match stream.read_exact(&mut header).await {
@@ -69,7 +80,7 @@ async fn handle_connection(stream: TcpStream, log: Arc<Mutex<Log>>) -> std::io::
         stream.read_exact(&mut body).await?;
 
         let response = match protocol::decode_request(&body) {
-            Ok(req) => dispatch(req, &log).await,
+            Ok(req) => dispatch(req, &state).await,
             Err(e) => Response::Error {
                 message: format!("{e:?}"),
             },
@@ -81,10 +92,10 @@ async fn handle_connection(stream: TcpStream, log: Arc<Mutex<Log>>) -> std::io::
     }
 }
 
-async fn dispatch(req: Request, log: &Arc<Mutex<Log>>) -> Response {
+async fn dispatch(req: Request, state: &AppState) -> Response {
     match req {
         Request::Produce { payload } => {
-            let mut log = log.lock().await;
+            let mut log = state.log.lock().await;
             match log.append(&payload).await {
                 Ok(offset) => Response::Produced { offset },
                 Err(e) => Response::Error {
@@ -93,12 +104,30 @@ async fn dispatch(req: Request, log: &Arc<Mutex<Log>>) -> Response {
             }
         }
         Request::Fetch { offset } => {
-            let log = log.lock().await;
+            let log = state.log.lock().await;
             match log.read(offset).await {
                 Ok(payload) => Response::Fetched { payload },
                 Err(e) => Response::Error {
                     message: e.to_string(),
                 },
+            }
+        }
+        Request::Commit {
+            consumer_id,
+            offset,
+        } => {
+            let mut offsets = state.consumer_offsets.lock().await;
+            match offsets.commit(&consumer_id, offset).await {
+                Ok(()) => Response::Committed,
+                Err(e) => Response::Error {
+                    message: e.to_string(),
+                },
+            }
+        }
+        Request::LastCommitted { consumer_id } => {
+            let offsets = state.consumer_offsets.lock().await;
+            Response::LastCommitted {
+                offset: offsets.last_committed(&consumer_id),
             }
         }
     }
@@ -118,6 +147,32 @@ mod tests {
             max_total_bytes: None,
             max_segment_age_millis: None,
         }
+    }
+
+    async fn test_state() -> AppState {
+        let driver = SimDriver::new();
+        let clock = Arc::new(SimClock::new());
+        let log = Log::create(driver.clone(), clock, "/log", unbounded_policy())
+            .await
+            .unwrap();
+        let consumer_offsets = ConsumerOffsets::create_on(driver, "/offsets")
+            .await
+            .unwrap();
+        AppState {
+            log: Arc::new(Mutex::new(log)),
+            consumer_offsets: Arc::new(Mutex::new(consumer_offsets)),
+        }
+    }
+
+    async fn spawn_server() -> (
+        rusty_tokio::JoinHandle<std::io::Result<()>>,
+        std::net::SocketAddr,
+    ) {
+        let state = test_state().await;
+        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = rusty_tokio::spawn(serve(listener, state));
+        (server, addr)
     }
 
     async fn send_request(stream: &TcpStream, req: &Request) -> Response {
@@ -140,17 +195,7 @@ mod tests {
     /// exercises real sockets rather than a simulated network.
     #[rusty_tokio::test]
     async fn produce_then_fetch_round_trips_over_a_real_socket() {
-        let driver = SimDriver::new();
-        let clock = Arc::new(SimClock::new());
-        let log = Log::create(driver, clock, "/log", unbounded_policy())
-            .await
-            .unwrap();
-        let log = Arc::new(Mutex::new(log));
-
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = rusty_tokio::spawn(serve(listener, log));
-
+        let (server, addr) = spawn_server().await;
         let client = TcpStream::connect(addr).await.unwrap();
 
         let produced = send_request(
@@ -177,17 +222,7 @@ mod tests {
     /// `Response::Error`, not a dropped connection or a panic.
     #[rusty_tokio::test]
     async fn fetching_an_unknown_offset_returns_an_error_response() {
-        let driver = SimDriver::new();
-        let clock = Arc::new(SimClock::new());
-        let log = Log::create(driver, clock, "/log", unbounded_policy())
-            .await
-            .unwrap();
-        let log = Arc::new(Mutex::new(log));
-
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = rusty_tokio::spawn(serve(listener, log));
-
+        let (server, addr) = spawn_server().await;
         let client = TcpStream::connect(addr).await.unwrap();
         let response = send_request(&client, &Request::Fetch { offset: Offset(0) }).await;
         assert!(matches!(response, Response::Error { .. }));
@@ -200,17 +235,7 @@ mod tests {
     /// connection's task actually runs on.
     #[rusty_tokio::test]
     async fn two_concurrent_clients_share_one_log_safely() {
-        let driver = SimDriver::new();
-        let clock = Arc::new(SimClock::new());
-        let log = Log::create(driver, clock, "/log", unbounded_policy())
-            .await
-            .unwrap();
-        let log = Arc::new(Mutex::new(log));
-
-        let listener = TcpListener::bind_addrs("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let server = rusty_tokio::spawn(serve(listener, log));
-
+        let (server, addr) = spawn_server().await;
         let client_a = TcpStream::connect(addr).await.unwrap();
         let client_b = TcpStream::connect(addr).await.unwrap();
 
@@ -248,6 +273,155 @@ mod tests {
             send_request(&client_b, &Request::Fetch { offset: off_b }).await,
             Response::Fetched {
                 payload: b"from b".to_vec()
+            }
+        );
+
+        server.abort();
+    }
+
+    /// A commit for a consumer, read back via `LastCommitted` on the same
+    /// (or a different) connection -- the write/read pair this module
+    /// exists to expose, end to end over a real socket.
+    #[rusty_tokio::test]
+    async fn commit_then_last_committed_round_trips_over_a_real_socket() {
+        let (server, addr) = spawn_server().await;
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        let committed = send_request(
+            &client,
+            &Request::Commit {
+                consumer_id: "reader-1".to_string(),
+                offset: Offset(7),
+            },
+        )
+        .await;
+        assert_eq!(committed, Response::Committed);
+
+        let last = send_request(
+            &client,
+            &Request::LastCommitted {
+                consumer_id: "reader-1".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(
+            last,
+            Response::LastCommitted {
+                offset: Some(Offset(7))
+            }
+        );
+
+        server.abort();
+    }
+
+    /// `LastCommitted` for a consumer that has never committed comes back
+    /// as `offset: None`, not an error -- a fresh consumer is expected,
+    /// not exceptional.
+    #[rusty_tokio::test]
+    async fn last_committed_for_an_unknown_consumer_returns_none() {
+        let (server, addr) = spawn_server().await;
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        let last = send_request(
+            &client,
+            &Request::LastCommitted {
+                consumer_id: "never-seen".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(last, Response::LastCommitted { offset: None });
+
+        server.abort();
+    }
+
+    /// A later commit for the same consumer overwrites the earlier one --
+    /// `LastCommitted` always reflects the most recent commit, matching
+    /// `ConsumerOffsets`'s own last-write-wins semantics.
+    #[rusty_tokio::test]
+    async fn a_later_commit_overwrites_an_earlier_one_for_the_same_consumer() {
+        let (server, addr) = spawn_server().await;
+        let client = TcpStream::connect(addr).await.unwrap();
+
+        for offset in [Offset(1), Offset(2), Offset(3)] {
+            let committed = send_request(
+                &client,
+                &Request::Commit {
+                    consumer_id: "reader-1".to_string(),
+                    offset,
+                },
+            )
+            .await;
+            assert_eq!(committed, Response::Committed);
+        }
+
+        let last = send_request(
+            &client,
+            &Request::LastCommitted {
+                consumer_id: "reader-1".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(
+            last,
+            Response::LastCommitted {
+                offset: Some(Offset(3))
+            }
+        );
+
+        server.abort();
+    }
+
+    /// Two consumers committing against the same shared `ConsumerOffsets`
+    /// stay independent -- the same cross-connection safety property
+    /// `two_concurrent_clients_share_one_log_safely` verifies for `Log`,
+    /// but for the other lock this module holds.
+    #[rusty_tokio::test]
+    async fn two_consumers_committing_concurrently_stay_independent() {
+        let (server, addr) = spawn_server().await;
+        let client_a = TcpStream::connect(addr).await.unwrap();
+        let client_b = TcpStream::connect(addr).await.unwrap();
+
+        let a = send_request(
+            &client_a,
+            &Request::Commit {
+                consumer_id: "reader-a".to_string(),
+                offset: Offset(10),
+            },
+        )
+        .await;
+        let b = send_request(
+            &client_b,
+            &Request::Commit {
+                consumer_id: "reader-b".to_string(),
+                offset: Offset(20),
+            },
+        )
+        .await;
+        assert_eq!(a, Response::Committed);
+        assert_eq!(b, Response::Committed);
+
+        assert_eq!(
+            send_request(
+                &client_a,
+                &Request::LastCommitted {
+                    consumer_id: "reader-a".to_string()
+                }
+            )
+            .await,
+            Response::LastCommitted {
+                offset: Some(Offset(10))
+            }
+        );
+        assert_eq!(
+            send_request(
+                &client_b,
+                &Request::LastCommitted {
+                    consumer_id: "reader-b".to_string()
+                }
+            )
+            .await,
+            Response::LastCommitted {
+                offset: Some(Offset(20))
             }
         );
 
