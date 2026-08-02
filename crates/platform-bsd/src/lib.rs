@@ -85,6 +85,13 @@
 //! CI inside a VM, and `x86_64-unknown-freebsd`/`x86_64-unknown-netbsd`
 //! get a fast cross-compile pre-check alongside the Windows one.
 //!
+//! That gate paid for itself on its first run, exactly as #48's did:
+//! OpenBSD failed `bsd_unix_conforms` on a second, distinct `sun_path`
+//! divergence — `getsockname` on a *bound* socket returning the path
+//! with the rest of the buffer as NUL padding. Every static check
+//! passed on that code. See `sys::net::from_sockaddr_un`. Widening the
+//! gate on inference alone would have shipped it.
+//!
 //! DragonFly is the one target in the gate with neither: no prebuilt
 //! `std` for `cargo check --target` (tier 3) and no CI runner. It is
 //! included because its socket surface is FreeBSD's, but that is

@@ -73,6 +73,30 @@ and **`coreutils`**.
   last two are in the gate by inheritance from FreeBSD's socket
   surface, which is an inference, not a measurement.
 
+- **Fixed a real OpenBSD `AF_UNIX` divergence the new VM job caught on
+  its first run** — the second time a real-OS leg has immediately
+  justified itself here, after #48's Darwin bug. `getsockname` on a
+  *bound* socket returns the path followed by the rest of `sun_path` as
+  NUL padding rather than shrinking `len` to the path length, so
+  `local_addr()` reported `Some("/tmp/….sock\0\0…")` instead of
+  `Some("/tmp/….sock")`. `from_sockaddr_un` had popped a single
+  trailing NUL, which is exactly right on Linux and Darwin (where `len`
+  is `offset + strlen + 1`) and wrong wherever `len` spans the buffer.
+
+  Now truncates at the first NUL inside the `len`-bounded window —
+  `sun_path` read as the C string it is. Correct whether or not a
+  kernel shrinks `len`, bound or unbound, and it subsumes the Darwin
+  fix from #48 (an all-zero buffer truncates to empty, i.e. `None`).
+  Sound because `to_sockaddr_un` refuses embedded NULs, so no real path
+  can be cut short. No `docs/divergences.md` entry: this brings OpenBSD
+  in line with the documented `platform::net` contract rather than
+  recording a permanent difference from it — same call #48 made.
+
+  Worth stating plainly: every static check passed on the buggy code.
+  `cargo check`/`clippy` for freebsd and netbsd, the macOS leg, and the
+  FreeBSD VM leg were all green; only OpenBSD executing the assertion
+  caught it.
+
 - `net_parity.rs`'s three real-backend tests moved into one
   `#[cfg(any(…))]`-gated `mod bsd` rather than carrying three copies
   of a now-five-armed gate; `net_nonblocking.rs`'s file-level gate

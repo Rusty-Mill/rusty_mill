@@ -485,25 +485,35 @@ fn to_sockaddr_un(path: &Path) -> Result<(c::sockaddr_un, c::socklen_t)> {
 /// Unpack a kernel-filled `sockaddr_un` back into a path, or `None` for
 /// an unnamed (anonymous) `AF_UNIX` endpoint.
 ///
-/// Darwin quirk, found live on real hardware (not caught by
-/// cross-compile-check alone): unlike Linux, `getpeername`/`getsockname`
-/// on an anonymous/unbound endpoint here does not shrink the returned
-/// `len` back to the header-only size — `len` can still span the whole
-/// zeroed `sun_path` buffer even though no path was ever written. Rather
-/// than trust `len` to signal "no path" (the Linux-only assumption the
-/// `len <= offset` check below made), an all-zero `sun_path` is treated
-/// as unbound regardless of what `len` claims: `to_sockaddr_un` already
-/// refuses any path containing an embedded NUL byte, so a real bound
-/// path can never come back as entirely zero bytes.
+/// The returned `len` cannot be trusted to delimit the path. Two
+/// separate real-hardware findings, neither catchable by
+/// cross-compile-check:
 ///
-/// Confirmed on Darwin only; whether the other BSDs shrink `len` the
-/// way Linux does is untested (rustils#86). It doesn't matter which way
-/// they behave — the all-zero check is a superset of the `len` check,
-/// so both the shrinking and non-shrinking kernels land on `None` here.
-/// The FreeBSD and OpenBSD CI legs run `bsd_unix_conforms`, which
-/// asserts exactly this ("an unbound connecting client has no peer
-/// path"), so a third behavior nobody predicted would surface as a test
-/// failure rather than as a wrong `PathBuf`.
+/// - **Darwin** (rustils#48, its first `macos-latest` run): on an
+///   anonymous/unbound endpoint, `len` is not shrunk back to the
+///   header-only size — it can span the whole zeroed `sun_path` even
+///   though no path was ever written, so the Linux-only `len <= offset`
+///   test alone reported `Some("\0\0…")` instead of `None`.
+/// - **OpenBSD** (rustils#86, its first VM run): the same non-shrinking
+///   behavior, but on a *bound* socket — `getsockname` returns the path
+///   followed by the rest of the buffer as NUL padding, so popping a
+///   single trailing NUL (enough on Linux and Darwin, where `len` is
+///   exactly `offset + strlen + 1`) left the padding attached and
+///   produced `Some("/tmp/….sock\0\0…")`.
+///
+/// So `len` only ever bounds where the path *might* end, never where it
+/// does. `sun_path` is a C string, and this now reads it as one:
+/// truncate at the first NUL within the `len`-bounded window. That is
+/// correct on a kernel that shrinks `len` and on one that doesn't, for
+/// bound and unbound endpoints alike, and it subsumes both fixes above —
+/// an unbound endpoint's all-zero buffer truncates to empty, which is
+/// `None`.
+///
+/// Sound because `to_sockaddr_un` refuses any path containing an
+/// embedded NUL, so no legitimate path can be cut short by this.
+/// `bsd_unix_conforms` (`net_parity.rs`) pins both halves — the bound
+/// listener's `local_addr` and the unbound client's `peer_addr` — and
+/// runs on the macOS, FreeBSD and OpenBSD legs.
 fn from_sockaddr_un(addr: &c::sockaddr_un, len: c::socklen_t) -> Result<Option<PathBuf>> {
     let offset = sun_path_offset();
     let len = len as usize;
@@ -519,11 +529,8 @@ fn from_sockaddr_un(addr: &c::sockaddr_un, len: c::socklen_t) -> Result<Option<P
     }
     let path_len = (len - offset).min(addr.sun_path.len());
     let mut bytes: Vec<u8> = addr.sun_path[..path_len].iter().map(|&b| b as u8).collect();
-    if bytes.iter().all(|&b| b == 0) {
-        return Ok(None);
-    }
-    if bytes.last() == Some(&0) {
-        bytes.pop();
+    if let Some(nul) = bytes.iter().position(|&b| b == 0) {
+        bytes.truncate(nul);
     }
     if bytes.is_empty() {
         return Ok(None);
