@@ -1,6 +1,6 @@
 [package]
 name = "rusty_tokio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives."
 license = "MIT"
