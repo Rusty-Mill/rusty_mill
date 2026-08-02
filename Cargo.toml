@@ -4,6 +4,7 @@ exclude = ["fuzz"]
 members = [
     "crates/platform",
     "crates/platform-mock",
+    "crates/platform-parity",
     "crates/platform-linux",
     "crates/platform-windows",
     "crates/platform-bsd",
@@ -13,12 +14,13 @@ members = [
 
 [workspace.package]
 # The PAL group's shared version (platform/platform-linux/
-# platform-windows/platform-mock/platform-bsd only — winargv and
+# platform-windows/platform-mock/platform-bsd/platform-parity only —
+# winargv and
 # coreutils version independently, see docs/versioning.md §1). Bump
 # rule: docs/versioning.md §2 (any public API change bumps the middle
 # component; nothing else does). See CHANGELOG.md for what each bump
 # was.
-version = "0.22.0"
+version = "0.22.1"
 edition = "2021"
 rust-version = "1.75"
 repository = "https://github.com/baileyrd/rustils"
@@ -29,6 +31,7 @@ publish = false
 [workspace.dependencies]
 platform = { path = "crates/platform" }
 platform-mock = { path = "crates/platform-mock" }
+platform-parity = { path = "crates/platform-parity" }
 platform-linux = { path = "crates/platform-linux" }
 platform-windows = { path = "crates/platform-windows" }
 platform-bsd = { path = "crates/platform-bsd" }

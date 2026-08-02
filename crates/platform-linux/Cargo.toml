@@ -25,6 +25,7 @@ rusty_libc = { git = "https://github.com/baileyrd/rusty_libc", rev = "dfa4e8c1f9
 track-p = ["dep:rusty_libc"]
 
 [dev-dependencies]
+platform-parity.workspace = true
 platform-mock.workspace = true
 
 [lints]

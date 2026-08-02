@@ -1,10 +1,13 @@
 # Behavior Spec — security (Csprng, CredentialStore, Sandbox)
 
-The parity suite (`crates/platform-linux/tests/security_parity.rs` and
-`crates/platform-windows/tests/security_parity.rs`, kept in the same
-shape — mock assertion unconditional, real backend gated behind its own
-OS — the Net suite established) asserts the `Csprng`/`CredentialStore`
-spec against every backend. `Sandbox`'s real Linux enforcement is
+The parity suite asserts the `Csprng`/`CredentialStore`/`TrustAnchors`
+spec against every backend. Its assertion sets live once, in
+`crates/platform-parity`; each backend's `tests/security_parity.rs`
+records only which of them apply to it plus its own OS-specific
+expectations, and `crates/platform-mock/tests/parity_conformance.rs`
+runs them against the mock. `Sandbox` has no shared set — its whole
+contract is a `SandboxStatus` that legitimately differs per backend and
+per host kernel, so there is no cross-backend behavior to assert. `Sandbox`'s real Linux enforcement is
 exercised separately, in
 `crates/platform-linux/tests/security_sandbox.rs` — see that file's own
 doc comment for why (confinement is irreversible for the calling

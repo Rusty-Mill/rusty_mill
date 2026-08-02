@@ -1,10 +1,14 @@
 # Behavior Spec — net (Net / TcpStream / TcpListener / UdpSocket)
 
-The parity suite (`crates/platform-linux/tests/net_parity.rs`,
-`crates/platform-windows/tests/net_parity.rs`, and (net-only, rustils#48)
-`crates/platform-bsd/tests/net_parity.rs`, all three kept textually
-identical — the same convention `parity.rs` established) asserts this
-spec against every backend. A backend that cannot honor a line gets a
+The parity suite asserts this spec against every backend. Its assertion
+sets — `assert_net_behavior`, `assert_unix_behavior`,
+`assert_udp_behavior` — live once, in `crates/platform-parity`; each
+backend's `tests/net_parity.rs` records only which of them apply to it,
+and `crates/platform-mock/tests/parity_conformance.rs` runs them against
+the mock. They were three textually-identical copies until
+`platform-bsd` made net's third backend, which was the extraction
+trigger those copies' own doc comments had recorded (rustils#88
+follow-up). A backend that cannot honor a line gets a
 numbered entry in `../divergences.md` citing the OS limitation — never
 implementation convenience.
 

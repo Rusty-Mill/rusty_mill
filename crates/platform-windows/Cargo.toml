@@ -15,6 +15,7 @@ winargv.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+platform-parity.workspace = true
 platform-mock.workspace = true
 
 [lints]

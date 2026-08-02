@@ -19,6 +19,7 @@ platform.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+platform-parity.workspace = true
 platform-mock.workspace = true
 
 [lints]
