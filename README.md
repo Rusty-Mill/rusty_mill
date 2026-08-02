@@ -18,7 +18,7 @@ from the other end. All built directly on `rusty_tokio`'s `thread-per-core` +
 decided, including multiple rounds of build/test/strace/ASAN verification, not
 just documentation review).
 
-Still open: no graceful shutdown or frame-size cap on the server. See
+Still open: no graceful shutdown on the server. See
 [RELEASE_NOTES.md](./RELEASE_NOTES.md) for the full history.
 
 ## Getting started
