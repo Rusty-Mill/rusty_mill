@@ -30,14 +30,15 @@
 //!   piece here that decides anything: whether a certificate was signed by a
 //!   given key. Authorship, never authority — it builds no chain, reads no
 //!   clock, and checks no constraint.
-//! - [`path`] — certification path building and validation (stage 2b-ii).
-//!   Answers whether a chain exists from a peer's certificate to a trust
-//!   anchor. Does **not** check that the certificate is valid for any
-//!   particular name; that is stage 2b-iii.
+//! - [`path`] — certification path building and validation (stage 2b-ii),
+//!   plus `verify_peer_certificate`, the combined entry point a TLS client
+//!   wants.
+//! - [`name`] — server name matching and name constraints (stage 2b-iii).
+//!   The piece that turns "a trusted CA issued this" into "this certificate
+//!   is for the server I asked for".
 //!
-//! Name matching and name constraints (stage 2b-iii), the 1.3 handshake (3),
-//! TLS 1.2 (4), and the server side (5) are not built. The ADR carries the
-//! order and the bar each must clear.
+//! The 1.3 handshake (3), TLS 1.2 (4), and the server side (5) are not built.
+//! The ADR carries the order and the bar each must clear.
 //!
 //! # What is deliberately *not* here
 //!
@@ -47,6 +48,7 @@
 //! module's testing strategy can see.
 
 pub mod der;
+pub mod name;
 pub mod path;
 pub mod record;
 pub mod verify;

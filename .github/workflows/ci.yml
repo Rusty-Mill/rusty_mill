@@ -82,7 +82,8 @@ jobs:
                    handrolled_x509_corpus \
                    handrolled_fuzz \
                    handrolled_verify \
-                   handrolled_path; do
+                   handrolled_path \
+                   handrolled_name; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
             echo "$t: $n tests"

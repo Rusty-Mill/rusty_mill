@@ -22,6 +22,43 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 2b-iii: name matching and name constraints
+**2026-08-02**
+
+- **Added:** `handrolled::name` (rusty_tls#25) — server name matching against
+  `subjectAltName` (DNS with single-label wildcards, IP by octet) and RFC 5280
+  §4.2.1.10 name-constraint enforcement across a path.
+- **Added:** `path::verify_peer_certificate`, which does path validation and
+  name matching in one call. The two checks are easy to separate and
+  disastrous to separate, so they are offered together.
+- **Changed:** name constraints are now *enforced* rather than fail-closed by
+  accident. Previously `nameConstraints` landed in the parser's unhandled
+  critical extensions and every constrained chain was refused wholesale;
+  recognising the extension removed that blanket refusal, so the enforcement
+  is load-bearing where it was not before. A constraint type this
+  implementation cannot evaluate (`directoryName`, `rfc822Name`, URI) is an
+  error rather than a skipped entry — recognising an extension without
+  enforcing it is worse than not recognising it.
+- **Changed:** `TrustAnchor` now carries the anchor's own name constraints
+  alongside its name and key. Dropping them silently unconstrained a
+  constrained root, which is exactly how an enterprise limits a private CA to
+  its own namespace. Found by a test written to check something else.
+- **Security:** no Common Name fallback, ever — a certificate with no
+  `subjectAltName` matches nothing. Partial wildcards, wildcards outside the
+  leftmost label, whole-TLD wildcards (`*.com`), and names containing a NUL
+  (CVE-2009-2408) are refused, each with its own test.
+- **Known limitation, stated plainly:** the whole-TLD wildcard rule is a crude
+  stand-in for a public suffix list this crate does not carry. It stops
+  `*.com` and does not pretend to stop `*.co.uk`.
+- **Known limitation, stated plainly:** `directoryName`, `rfc822Name`, and URI
+  name constraints are not evaluated, and a chain carrying one is refused
+  rather than validated. Some real CAs use `directoryName` constraints, so
+  this is a genuine capability gap on the safe side of one.
+
+With this, path validation is complete.
+
+---
+
 ## Hand-rolled TLS engine, stage 2b-ii: path building and validation
 **2026-08-02**
 

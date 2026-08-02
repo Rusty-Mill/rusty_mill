@@ -75,6 +75,27 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   by construction — `nameConstraints` is critical, unknown critical extensions
   are refused, so a name-constrained intermediate is rejected rather than
   having its constraint ignored.
+- **Hand-rolled engine, stage 2b-iii: name matching and name constraints**
+  (rusty_tls#25). `handrolled::name` matches a server name against a
+  certificate's `subjectAltName` — DNS names with single-label wildcards, and
+  IP addresses by octet — and enforces RFC 5280 §4.2.1.10 name constraints
+  across a path. `path::verify_peer_certificate` combines path validation and
+  name matching in one call, because the two are easy to separate and
+  disastrous to separate.
+
+  There is **no Common Name fallback**, ever: a certificate with no
+  `subjectAltName` matches nothing. Partial wildcards, wildcards outside the
+  leftmost label, whole-TLD wildcards, and names containing a NUL
+  (CVE-2009-2408) are all refused.
+
+  Name constraints are now enforced rather than being fail-closed by accident
+  of the unknown-critical-extension rule. A constraint type this
+  implementation cannot evaluate — `directoryName`, `rfc822Name`, URI — is an
+  error rather than a skipped entry, because recognising an extension without
+  enforcing it is worse than not recognising it. `TrustAnchor` carries its own
+  constraints, so a constrained root stays constrained.
+
+  With this, path validation is complete.
 
 ### Changed
 ### Fixed
