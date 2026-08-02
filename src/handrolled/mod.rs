@@ -26,8 +26,12 @@
 //!   certificate-shaped sits on.
 //! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
 //!   what a certificate says and decides nothing about whether to believe it.
+//! - [`verify`] — certificate signature verification (stage 2b-i). The first
+//!   piece here that decides anything: whether a certificate was signed by a
+//!   given key. Authorship, never authority — it builds no chain, reads no
+//!   clock, and checks no constraint.
 //!
-//! Path validation (stage 2b), the 1.3 handshake (3), TLS 1.2 (4), and the
+//! Path validation (stage 2b-ii), the 1.3 handshake (3), TLS 1.2 (4), and the
 //! server side (5) are not built. The ADR carries the order and the bar each
 //! must clear.
 //!
@@ -40,4 +44,5 @@
 
 pub mod der;
 pub mod record;
+pub mod verify;
 pub mod x509;

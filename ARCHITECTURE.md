@@ -51,7 +51,11 @@ one artifact to ship and no team/language boundary to split across:
   only oracle independent of rustls), and a rejection suite. Stage 2a adds
   `handrolled::der` (a strict DER reader) and `handrolled::x509` (certificate
   parsing) — **parsing only**: they report what a certificate says and decide
-  nothing about whether to believe it, which is stage 2b and does not exist.
+  nothing about whether to believe it. Stage 2b-i adds `handrolled::verify`,
+  the first piece that decides anything: whether a certificate was signed by a
+  given key. Authorship, never authority — it builds no chain, reads no clock,
+  and enforces no constraint, so it cannot make a trust decision on its own
+  and its docs say so. Path validation is stage 2b-ii and does not exist.
   See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
