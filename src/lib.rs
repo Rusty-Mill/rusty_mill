@@ -20,6 +20,7 @@ pub mod protocol;
 pub mod record;
 pub mod retention;
 pub mod segment;
+pub mod server;
 
 pub use clock::{Clock, SimClock, SystemClock};
 pub use consumer::ConsumerOffsets;
@@ -27,3 +28,4 @@ pub use offset::{CommittedOffset, DurableOffset, Epoch, Offset};
 pub use protocol::{ProtocolError, Request, Response};
 pub use retention::{Log, RetentionPolicy};
 pub use segment::Segment;
+pub use server::serve;

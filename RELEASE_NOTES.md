@@ -23,6 +23,29 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Socket integration: `rusty_stream` is now a real TCP server
+**2026-08-02**
+
+- **Added:** `src/server.rs`'s `serve` — a real `rusty_tokio::io::
+  TcpListener` accept loop, one task per connection, each decoding a framed
+  `Request`, dispatching it against a `Log` shared across every connection
+  via `rusty_tokio::sync::Mutex`, and writing the framed `Response` back.
+  This is the piece `protocol.rs` explicitly deferred — `rusty_stream`
+  actually speaks its own wire protocol over a real socket now.
+- 3 new tests (41 total), all against **real loopback TCP sockets**, not
+  simulated ones (`rusty_tokio` has no network fault injection, only
+  `SimDriver` has disk fault injection) — produce-then-fetch round trip,
+  fetching an unknown offset returns a real `Error` response instead of
+  dropping the connection, and two concurrent clients sharing one `Log`
+  land at distinct offsets safely.
+- **Known limitations, stated plainly:** no consumer-offset commit request
+  in the wire protocol yet (`ConsumerOffsets` has no wire exposure at all);
+  no graceful shutdown (`serve` runs until aborted or the listener errors,
+  no draining of in-flight connections); no frame-size sanity cap (a client
+  claiming a multi-gigabyte body gets that much allocated before the rest
+  fails to arrive) — fine for a trusted client, a real deployment needs a
+  cap before this is internet-facing.
+
 ## Wire protocol integration started: message encoding on `rusty_wire`
 **2026-08-02**
 
