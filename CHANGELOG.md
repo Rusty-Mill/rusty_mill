@@ -14,10 +14,60 @@ during that period to make the reconstruction meaningful.
 
 Three independently-versioned lines, per `docs/versioning.md` §1:
 **the PAL group** (`platform`/`platform-linux`/`platform-windows`/
-`platform-mock`/`platform-bsd`, sharing one number), **`winargv`**,
+`platform-mock`/`platform-bsd`, plus the dev-only `platform-parity`,
+sharing one number), **`winargv`**,
 and **`coreutils`**.
 
-## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd`)
+## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
+
+### 0.22.1
+
+- **Extracted the shared parity assertions into `platform-parity`**, a
+  new test-support crate. `assert_net_behavior`/`assert_unix_behavior`/
+  `assert_udp_behavior` and `assert_csprng_behavior`/
+  `assert_credential_store_behavior`/`assert_trust_anchors_behavior` now
+  live once; each backend's `tests/*_parity.rs` records only *which* sets
+  apply to it, plus its own OS-specific expectations. Mock conformance
+  moved to `platform-mock/tests/parity_conformance.rs`, where it runs
+  once rather than being re-declared in every backend suite.
+
+  `z`, not `y`: no public item's shape changed. `platform-parity` is a
+  `dev-dependency` only and never enters a shipped dependency graph.
+
+  This is the follow-up `net_parity.rs` and `security_parity.rs` each
+  recorded in their own doc comments — *extract once a third backend
+  would otherwise mean a third copy*. `platform-bsd` made net's third
+  (rustils#48/#86) and `TrustAnchors` made security's (rustils#88).
+
+  **The trigger was set at the right place, and the copies had already
+  started to rot by the time it fired.** Two ways, both found while
+  extracting:
+  - `platform-bsd`'s `assert_net_behavior` had lost two explanatory
+    comments the other two still carried — harmless in itself, and
+    exactly how three copies stop being one spec.
+  - `assert_credential_store_behavior` had genuinely **diverged**:
+    Windows scoped its test service name by process id, Linux used a
+    fixed string. Against a real per-user OS credential store, two
+    concurrently-running test binaries sharing a fixed name can see each
+    other's writes. The pid-scoped version is correct and is what the
+    shared crate carries, so extracting fixed a latent flake rather than
+    only deduplicating text — the same class of bug the net suite had
+    already fixed once, when `assert_unix_behavior`'s socket path gained
+    a per-backend label.
+
+  Coverage is unchanged: 175 unique tests before and after. The only
+  renames are `mock_security_conforms`/`linux_security_conforms` →
+  `mock_csprng_conforms`/`linux_csprng_conforms`, which is what those
+  assertions actually test. The drop in total *executions* (179 → 176)
+  is the mock suite running once instead of three times.
+
+  `Sandbox` deliberately has no shared set: its whole contract is a
+  `SandboxStatus` that legitimately differs per backend and per host
+  kernel, so there is no cross-backend behavior to assert.
+
+  Not extracted, and still two copies: the Fs `parity.rs` suites
+  (linux/windows). The rule is to extract at the third, and Fs has no
+  third backend.
 
 ### 0.22.0
 

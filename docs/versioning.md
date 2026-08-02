@@ -16,7 +16,8 @@ three groups instead of flattening to either extreme (one version for
 everything, or six independent ones):
 
 - **The PAL group — `platform`, `platform-linux`, `platform-windows`,
-  `platform-mock`, and (since rustils#48) `platform-bsd` — stays
+  `platform-mock`, (since rustils#48) `platform-bsd`, and (since the
+  rustils#88 follow-up) the dev-only `platform-parity` — stays
   lockstep**, one shared version. These crates change together in
   practice, not in theory: every Net slice this phase touched all the
   then-existing members in the same PR (the trait, both real backends,
@@ -46,7 +47,7 @@ everything, or six independent ones):
 
 Mechanically: give `winargv` and `coreutils` their own `version = "…"`
 field (dropping `version.workspace = true`), while `platform`/
-`platform-linux`/`platform-windows`/`platform-mock`/`platform-bsd`
+`platform-linux`/`platform-windows`/`platform-mock`/`platform-bsd`/`platform-parity`
 keep sharing `[workspace.package].version`.
 
 `publish = false` stays as-is; crates.io publication is a separate,

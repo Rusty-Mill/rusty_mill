@@ -12,3 +12,6 @@ platform.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+platform-parity.workspace = true
