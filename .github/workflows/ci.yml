@@ -61,11 +61,11 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: sudo -E env "PATH=$PATH" cargo test -p platform-linux --test tun_parity
 
-  # rustils#48: platform-macos's own real-hardware verification. A
+  # rustils#48: platform-bsd's real-hardware verification on Darwin. A
   # separate job, not a `test` matrix leg — `cargo test --workspace` on
   # macOS would also try to build coreutils' bin targets, which call
   # `coreutils::native::spawner()` unconditionally; that module is gated
-  # `#[cfg(any(target_os = "linux", windows))]` because platform-macos is
+  # `#[cfg(any(target_os = "linux", windows))]` because platform-bsd is
   # deliberately net-only (no process/fs slice — RFC v2 §3, no consumer
   # has forced one), so those bins simply don't compile there yet. Scoped
   # to the three crates that actually run on macOS today, the same
@@ -79,9 +79,65 @@ jobs:
         with:
           components: clippy
       - name: clippy (warnings are errors)
-        run: cargo clippy -p platform -p platform-mock -p platform-macos --all-targets -- -D warnings
+        run: cargo clippy -p platform -p platform-mock -p platform-bsd --all-targets -- -D warnings
       - name: test
-        run: cargo test -p platform -p platform-mock -p platform-macos
+        run: cargo test -p platform -p platform-mock -p platform-bsd
+
+  # rustils#86: the same real-hardware gate for the non-Darwin half of
+  # platform-bsd's cfg. GitHub Actions has no native BSD runner, so these
+  # boot a real FreeBSD/OpenBSD VM on the ubuntu host and run the suite
+  # inside it — the point being that `cargo check --target` alone is not
+  # enough here, which #48 proved: its macos-latest leg caught a genuine
+  # Darwin `AF_UNIX` divergence (`sys::net::from_sockaddr_un`) that no
+  # amount of cross-compiling would have surfaced. Widening a cfg gate on
+  # the strength of "the syscalls should be the same" and no runner is
+  # exactly what #86 was filed to avoid.
+  #
+  # Same `-p` scoping as the macos job above, for the same coreutils
+  # reason. `usesh: true` runs the script inside the guest; `prepare`
+  # installs the guest's own Rust, since the host toolchain is Linux ELF
+  # and cannot execute there.
+  #
+  # `cargo test` only, no `clippy` — deliberately. These guests use the
+  # OS's packaged Rust, and both ports split `clippy` out of the base
+  # `rust` package, so a clippy step here would fail on guest packaging
+  # rather than on this repo's code. Lints are the cross-compile-check
+  # job's business anyway: it runs `clippy -D warnings` against
+  # `x86_64-unknown-freebsd` with a real rustup toolchain, on the same
+  # source these jobs execute. What only a VM can do is run the syscalls
+  # — so that is all these do.
+  #
+  # Not covered by any job here, and stated rather than left to
+  # inference: NetBSD gets cross-compile-check coverage only (below),
+  # and DragonFly gets neither — tier 3, no prebuilt std, no runner.
+  # Both are in the cfg gate on the strength of a shared BSD socket
+  # surface, which is weaker evidence than these two legs provide. See
+  # platform-bsd's lib.rs "verification status".
+  freebsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: test in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y rust
+          run: |
+            cargo test -p platform -p platform-mock -p platform-bsd
+
+  openbsd:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: test in an OpenBSD VM
+        uses: vmactions/openbsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg_add -I rust
+          run: |
+            cargo test -p platform -p platform-mock -p platform-bsd
 
   unsafe-scope:
     # RFC v2 §6: unsafe is confined to backend sys/ module trees. This job
@@ -134,15 +190,37 @@ jobs:
   # errors in minutes. The windows-latest matrix leg above remains the real
   # gate — this is a pre-check, not a replacement. (Practice borrowed from
   # rusty_win32, an R2 extraction donor — see docs/extraction-map.md.)
+  #
+  # rustils#86 added the same pre-check shape for the BSD targets, ahead
+  # of the freebsd/openbsd VM jobs above (which take minutes to boot a
+  # guest). `x86_64-apple-darwin` and `x86_64-unknown-netbsd` are here
+  # too: neither has a runner in this workspace, so for NetBSD this is
+  # the *only* coverage it gets, and for Darwin it is the same pre-check
+  # the macos job backstops. OpenBSD and DragonFly are tier 3 with no
+  # prebuilt std and cannot be checked this way at all — OpenBSD has its
+  # VM leg instead, DragonFly has nothing (see platform-bsd's lib.rs).
   cross-compile-check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-gnu, x86_64-apple-darwin, x86_64-unknown-freebsd, x86_64-unknown-netbsd
           components: clippy
       - name: cargo check (windows target, all targets)
         run: cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
       - name: cargo clippy (windows target, warnings are errors)
         run: cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+      # Scoped to the crates that build on these targets, not
+      # `--workspace`: coreutils' bins are `#[cfg(any(target_os =
+      # "linux", windows))]` for the reason the macos job's own comment
+      # explains, so a workspace-wide check here would fail on a gap
+      # that is deliberate.
+      - name: cargo clippy (BSD targets, warnings are errors)
+        run: |
+          for target in x86_64-apple-darwin x86_64-unknown-freebsd x86_64-unknown-netbsd; do
+            echo "::group::$target"
+            cargo clippy -p platform -p platform-mock -p platform-bsd \
+              --target "$target" --all-targets -- -D warnings
+            echo "::endgroup::"
+          done

@@ -168,7 +168,7 @@ that's a distinct, already-deferred facet, not folded into this slice either.
 
 ## What stays out of scope
 
-- **macOS**: no `platform-macos` PTY backend yet — no donor evidence for it
+- **macOS/BSD**: no `platform-bsd` PTY backend yet — no donor evidence for it
   (D13 only surveys shh/rusty_term, both Linux+Windows). Reports
   `ErrorKind::Unsupported`, the same posture `WindowsTun` took for its own
   missing-donor gap (Phase 8).

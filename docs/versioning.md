@@ -16,16 +16,17 @@ three groups instead of flattening to either extreme (one version for
 everything, or six independent ones):
 
 - **The PAL group — `platform`, `platform-linux`, `platform-windows`,
-  `platform-mock`, and (since rustils#48) `platform-macos` — stays
+  `platform-mock`, and (since rustils#48) `platform-bsd` — stays
   lockstep**, one shared version. These crates change together in
   practice, not in theory: every Net slice this phase touched all the
   then-existing members in the same PR (the trait, both real backends,
   and the mock), because a trait method that exists on `platform` and
-  not on one backend doesn't compile. `platform-macos` joined the group
-  at whatever version was already current (its own arrival changed no
-  existing crate's public item shape, so it did not itself force a
-  bump) rather than starting independently, for the identical reason:
-  `platform-macos 0.9.0` means nothing without knowing which
+  not on one backend doesn't compile. `platform-bsd` joined the group
+  (as `platform-macos`; renamed in rustils#86 when its cfg gate widened
+  past Darwin) at whatever version was already current — its own arrival
+  changed no existing crate's public item shape, so it did not itself
+  force a bump — rather than starting independently, for the identical
+  reason: `platform-bsd 0.9.0` means nothing without knowing which
   `platform` 0.9.0 it implements. Independent per-crate SemVer here
   would mean bookkeeping five version numbers that must already move
   in lockstep to stay buildable — busywork with no compatibility
@@ -45,8 +46,8 @@ everything, or six independent ones):
 
 Mechanically: give `winargv` and `coreutils` their own `version = "…"`
 field (dropping `version.workspace = true`), while `platform`/
-`platform-linux`/`platform-windows`/`platform-mock` keep sharing
-`[workspace.package].version`.
+`platform-linux`/`platform-windows`/`platform-mock`/`platform-bsd`
+keep sharing `[workspace.package].version`.
 
 `publish = false` stays as-is; crates.io publication is a separate,
 later decision, not implied by anything in this document.

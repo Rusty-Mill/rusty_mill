@@ -526,6 +526,28 @@ No `docs/divergences.md` entry: this brings macOS behavior in line
 with the documented `platform::net` contract, not a permanent
 divergence from it.
 
+**Widened (`platform-macos` → `platform-bsd`) 2026-08-02** — rustils#86,
+the direct follow-up to the entry above. `rusty_tokio`#116 wanted the
+same `kevent` reactor on FreeBSD/OpenBSD; the reactor was reusable but
+the socket layer under it existed only for Darwin, so a *third*
+hand-rolled `libc` socket lifecycle was about to be written — the
+duplication #48 exists to prevent, one OS over. Crate and public types
+renamed (`MacosNet` → `BsdNet`, …), gate widened to
+`any(macos, freebsd, openbsd, netbsd, dragonfly)`, PAL group 0.20.0 →
+0.21.0.
+
+Zero implementation change, for a reason worth recording: #48's
+Darwin-shaped code turns out to be the *intersection* of the BSDs, not
+a Darwin special case. Only the `sin_len` family is universal; the
+`SOCK_CLOEXEC`/`accept4` absences are Darwin's alone (the other four
+BSDs have both), so writing for Darwin had already produced the
+portable subset. `ffi::libc_surface` stays that intersection on
+purpose. Real FreeBSD and OpenBSD VM CI legs now join the `macos` job
+— #48's own bug above being the argument for why `cargo check
+--target` alone wasn't acceptable here. NetBSD is compile-checked
+only and DragonFly is unverified entirely; both are labeled as such in
+`platform-bsd`'s `lib.rs` rather than folded into a green checkmark.
+
 **Landed (`TcpStream::set_read_timeout`) 2026-07-20** — added while
 starting the rusty_rdp convergence this entry names as cheapest;
 rusty_rdp's `examples/connect.rs` idles a read loop out via

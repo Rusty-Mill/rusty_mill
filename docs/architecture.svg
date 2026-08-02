@@ -35,7 +35,7 @@
   <rect x="24" y="442" width="640" height="86" rx="8" fill="#f4eef7" stroke="#a184b3" stroke-width="1.5"/>
   <text x="40" y="466" font-size="14" font-weight="700" fill="#5a3d6e">LAYER 1 — OS Implementation (all unsafe lives here)</text>
   <text x="40" y="488" font-size="13" fill="#1f2530">platform-linux (libc floor · rusty_libc track-p) · platform-windows (windows-sys floor)</text>
-  <text x="40" y="507" font-size="13" fill="#1f2530">platform-macos (net-only slice)</text>
+  <text x="40" y="507" font-size="13" fill="#1f2530">platform-bsd (net-only slice · macOS · FreeBSD · OpenBSD · NetBSD · DragonFly)</text>
 
   <!-- ══════════ LAYER 0 — OS Kernel ══════════ -->
   <rect x="24" y="544" width="640" height="60" rx="8" fill="#f1f2f4" stroke="#8b93a1" stroke-width="1.5"/>

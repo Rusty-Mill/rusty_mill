@@ -117,7 +117,7 @@ asymmetric, and every design option inherits that asymmetry.
   replacement, Network.framework, owns the connection down to the socket —
   it does not layer over a stream someone else owns, which is exactly the
   wrong shape for wrapping `rusty_tokio::io::TcpStream`.
-- Repo-local caveat: `platform-macos` is deliberately net-only and thin.
+- Repo-local caveat: `platform-bsd` is deliberately net-only and thin.
   Anything here means linking Security.framework — a whole new framework
   admission for that backend, not a marginal addition.
 

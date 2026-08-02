@@ -1,26 +1,32 @@
 //! Live verification for the raw-fd + non-blocking escape hatch
 //! (rustils#41, ported here as part of rustils#48's first slice),
 //! mirroring `platform-linux/tests/net_nonblocking.rs` exactly for the
-//! macOS socket types. macOS-only and inherent-impl-only by design (see
+//! BSD socket types. BSD-only and inherent-impl-only by design (see
 //! `net.rs`'s module doc) — not part of the cross-backend
 //! `docs/behavior/net.md` spec or the shared `net_parity.rs` suite.
 //!
-//! `#![cfg(target_os = "macos")]`: integration test files don't inherit
-//! the library crate's own `#![cfg(target_os = "macos")]` — each one
-//! needs its own gate, or `cargo check --target x86_64-pc-windows-gnu
-//! --all-targets` (or the native Linux run) tries to build this file
-//! too, where `libc`'s Darwin surface isn't even a dependency
+//! The top-level `#![cfg(any(...))]`: integration test files don't
+//! inherit the library crate's own gate — each one needs its own copy,
+//! kept textually identical to `lib.rs`'s, or `cargo check --target
+//! x86_64-pc-windows-gnu --all-targets` (or the native Linux run) tries
+//! to build this file too, where `libc` isn't even a dependency
 //! (target-gated in `Cargo.toml`). The exact mistake
 //! `platform-linux`'s own copy of this file already fixed once.
 //!
-//! Not runnable on this workspace's own CI today (no macOS runner) —
-//! validated via `cargo check`/`clippy --target x86_64-apple-darwin`
-//! only.
+//! Runs for real on the macOS, FreeBSD and OpenBSD CI legs
+//! (rustils#48/#86); NetBSD gets `cargo check --target` coverage only,
+//! and DragonFly neither.
 //!
 //! `#![allow(unsafe_code)]`: this file makes raw `libc` calls directly
-//! (bypassing `platform-macos`'s own code entirely) specifically to
+//! (bypassing `platform-bsd`'s own code entirely) specifically to
 //! verify the actual kernel-visible state a wrapper call produced.
-#![cfg(target_os = "macos")]
+#![cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
 #![allow(unsafe_code)]
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -28,7 +34,7 @@ use std::os::fd::AsRawFd;
 
 use platform::error::ErrorKind;
 use platform::net::{TcpListener as _, TcpStream as _, UdpSocket as _};
-use platform_macos::{MacosTcpListener, MacosTcpStream, MacosUdpSocket};
+use platform_bsd::{BsdTcpListener, BsdTcpStream, BsdUdpSocket};
 
 fn loopback(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
@@ -44,7 +50,7 @@ fn is_nonblocking(fd: &impl AsRawFd) -> bool {
 
 #[test]
 fn concrete_tcp_constructors_bypass_the_boxed_trait() {
-    let listener = MacosTcpListener::bind(loopback(0)).expect("bind");
+    let listener = BsdTcpListener::bind(loopback(0)).expect("bind");
     let addr = listener.local_addr().expect("local_addr");
     assert_ne!(addr.port(), 0);
 
@@ -55,7 +61,7 @@ fn concrete_tcp_constructors_bypass_the_boxed_trait() {
         assert_eq!(&buf[..n], b"ping");
     });
 
-    let mut client = MacosTcpStream::connect(addr).expect("connect");
+    let mut client = BsdTcpStream::connect(addr).expect("connect");
     client.write(b"ping").expect("client write");
     drop(client);
     handle.join().expect("server thread");
@@ -63,7 +69,7 @@ fn concrete_tcp_constructors_bypass_the_boxed_trait() {
 
 #[test]
 fn set_nonblocking_actually_changes_kernel_flags_not_just_returns_ok() {
-    let listener = MacosTcpListener::bind(loopback(0)).expect("bind");
+    let listener = BsdTcpListener::bind(loopback(0)).expect("bind");
     assert!(
         !is_nonblocking(&listener),
         "a freshly bound listener starts blocking"
@@ -88,7 +94,7 @@ fn set_nonblocking_actually_changes_kernel_flags_not_just_returns_ok() {
 
 #[test]
 fn nonblocking_accept_with_no_pending_connection_returns_would_block_not_hang() {
-    let listener = MacosTcpListener::bind(loopback(0)).expect("bind");
+    let listener = BsdTcpListener::bind(loopback(0)).expect("bind");
     listener.set_nonblocking(true).expect("set_nonblocking");
 
     // No connection is pending — a blocking accept would hang forever;
@@ -102,7 +108,7 @@ fn nonblocking_accept_with_no_pending_connection_returns_would_block_not_hang() 
 
 #[test]
 fn nonblocking_udp_recv_with_no_datagram_returns_would_block_not_hang() {
-    let sock = MacosUdpSocket::bind(loopback(0)).expect("bind");
+    let sock = BsdUdpSocket::bind(loopback(0)).expect("bind");
     sock.set_nonblocking(true).expect("set_nonblocking");
 
     let mut buf = [0u8; 16];
@@ -112,7 +118,7 @@ fn nonblocking_udp_recv_with_no_datagram_returns_would_block_not_hang() {
 
 #[test]
 fn as_raw_fd_reports_a_real_open_fd() {
-    let sock = MacosUdpSocket::bind(loopback(0)).expect("bind");
+    let sock = BsdUdpSocket::bind(loopback(0)).expect("bind");
     let raw = sock.as_raw_fd();
     assert!(raw >= 0, "must be a real fd, not a sentinel");
 
@@ -141,8 +147,8 @@ fn from_owned_fd_adopts_an_externally_created_socket() {
     let addr = std_sock.local_addr().expect("std local_addr");
     let fd: std::os::fd::OwnedFd = std_sock.into();
 
-    let sock = MacosUdpSocket::from(fd);
-    let peer = MacosUdpSocket::bind(loopback(0)).expect("bind peer");
+    let sock = BsdUdpSocket::from(fd);
+    let peer = BsdUdpSocket::bind(loopback(0)).expect("bind peer");
     let peer_addr = peer.local_addr().expect("local_addr");
 
     peer.send_to(b"hello", addr).expect("send_to adopted sock");

@@ -6,13 +6,12 @@
 //! copy, deliberately kept identical rather than factored out now,
 //! matching the existing precedent.
 //!
-//! Not runnable on this workspace's own CI today (no macOS runner) —
-//! validated via `cargo check`/`clippy --target x86_64-apple-darwin`
-//! only, same as the rest of this crate. `macos_*` tests reference
-//! `platform_macos::MacosNet` by full path *inside* their
-//! `#[cfg(target_os = "macos")]` gate rather than a top-level `use`, so
-//! the file still compiles (mock tests only) on every other host —
-//! the same discipline `net_parity.rs`'s Linux/Windows copies already
+//! The `bsd` module's tests run for real on three CI legs — macOS
+//! (rustils#48), and FreeBSD and OpenBSD in a VM (rustils#86). They live
+//! inside one `#[cfg(any(...))]`-gated module, referencing
+//! `platform_bsd::BsdNet` by full path rather than a top-level `use`, so
+//! the file still compiles (mock tests only) on Linux and Windows hosts
+//! — the same discipline `net_parity.rs`'s Linux/Windows copies already
 //! use for their own OS-specific types.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -203,20 +202,34 @@ fn mock_udp_conforms() {
     assert_udp_behavior(&platform_mock::MockNet);
 }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_net_conforms() {
-    assert_net_behavior(&platform_macos::MacosNet);
-}
+/// The real-backend half of the suite. One `cfg` on the module rather
+/// than one per test: the gate has five arms now (rustils#86) and
+/// repeating it three times is three chances for the copies to drift
+/// apart. Must stay textually identical to the crate's own `lib.rs`
+/// gate — a test that silently stops compiling on a target the crate
+/// still claims is exactly the regression this suite exists to catch.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+mod bsd {
+    use super::{assert_net_behavior, assert_udp_behavior, assert_unix_behavior};
 
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_unix_conforms() {
-    assert_unix_behavior(&platform_macos::MacosNet, "macos");
-}
+    #[test]
+    fn bsd_net_conforms() {
+        assert_net_behavior(&platform_bsd::BsdNet);
+    }
 
-#[cfg(target_os = "macos")]
-#[test]
-fn macos_udp_conforms() {
-    assert_udp_behavior(&platform_macos::MacosNet);
+    #[test]
+    fn bsd_unix_conforms() {
+        assert_unix_behavior(&platform_bsd::BsdNet, "bsd");
+    }
+
+    #[test]
+    fn bsd_udp_conforms() {
+        assert_udp_behavior(&platform_bsd::BsdNet);
+    }
 }

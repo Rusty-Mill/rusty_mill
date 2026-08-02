@@ -1,5 +1,5 @@
 //! Raw socket primitives (rustils#48, net-only slice) — ported from
-//! `platform-linux::sys::net`, differing exactly where Darwin's syscall
+//! `platform-linux::sys::net`, differing exactly where the BSD syscall
 //! surface differs from Linux's (this crate's `lib.rs` doc comment has
 //! the inventory): no `SOCK_CLOEXEC`/`SOCK_NONBLOCK` socket-type flags
 //! (close-on-exec is set after the fact via `fcntl(F_SETFD)`), no
@@ -8,6 +8,14 @@
 //! `sun_len`), handled by building each one via `zeroed()` + field
 //! assignment rather than a full struct literal so the extra field
 //! never needs naming.
+//!
+//! Written for Darwin first and widened to generic BSD in rustils#86.
+//! Only the third difference is truly universal; the first two describe
+//! Darwin, and the other four BSDs in the gate do have `SOCK_CLOEXEC`
+//! and `accept4`. Nothing here changed to widen it, because the
+//! Darwin-shaped path is the *intersection* of the five — correct
+//! everywhere, optimal on one. `set_cloexec` below carries what that
+//! costs.
 
 #![allow(unsafe_code)]
 
@@ -62,6 +70,18 @@ fn net_err(op: &'static str) -> PlatformError {
 /// surface has no thread-safety story broader than that today, and
 /// Linux's own `SOCK_CLOEXEC` avoiding the race entirely is exactly the
 /// asymmetry this module's doc comment flags rather than papers over.
+///
+/// Since rustils#86 that asymmetry is no longer Linux-vs-BSD but
+/// Darwin-vs-everyone: FreeBSD, OpenBSD, NetBSD and DragonFly all have
+/// `SOCK_CLOEXEC` and `accept4` too, so on four of this crate's five
+/// targets the race is one this function *chooses* rather than one the
+/// kernel imposes. Kept deliberately: a single code path across the
+/// gate, at the cost of an atomicity nothing in this workspace depends
+/// on yet. Closing it means admitting `SOCK_CLOEXEC`/`accept4` to
+/// `ffi::libc_surface` behind a per-OS `cfg` and splitting every
+/// socket-creating function below — mechanical, and pinned by the
+/// `tests/` suites, but not free, and not warranted without a consumer
+/// that needs it.
 fn set_cloexec(fd: &OwnedFd) -> Result<()> {
     use std::os::fd::AsRawFd;
     // SAFETY: `fd` is caller-owned and valid; `FD_CLOEXEC` is the sole
@@ -181,8 +201,9 @@ fn new_tcp_socket(addr: SocketAddr) -> Result<OwnedFd> {
         SocketAddr::V6(_) => c::AF_INET6,
     };
     // SAFETY: plain integer arguments, no memory referenced. No
-    // `SOCK_CLOEXEC` on Darwin (this module's doc comment) — `set_cloexec`
-    // below is the second step that stands in for it.
+    // `SOCK_CLOEXEC` in this crate's libc surface (this module's doc
+    // comment) — `set_cloexec` below is the second step that stands in
+    // for it.
     let fd = unsafe { c::socket(family, c::SOCK_STREAM, 0) };
     if fd < 0 {
         return Err(net_err("socket"));
@@ -256,9 +277,9 @@ pub fn tcp_listen(addr: SocketAddr) -> Result<OwnedFd> {
     Ok(fd)
 }
 
-/// `accept` (no `accept4` on Darwin — this module's doc comment) +
-/// `fcntl(F_SETFD, FD_CLOEXEC)` on the returned fd, returning the
-/// accepted connection and the peer's address.
+/// `accept` (no `accept4` in this crate's libc surface — this module's
+/// doc comment) + `fcntl(F_SETFD, FD_CLOEXEC)` on the returned fd,
+/// returning the accepted connection and the peer's address.
 pub fn tcp_accept(listen_fd: &OwnedFd) -> Result<(OwnedFd, SocketAddr)> {
     use std::os::fd::AsRawFd;
     // SAFETY: `storage`/`len` are valid, exclusively borrowed out-params
@@ -306,16 +327,20 @@ pub fn set_nodelay(fd: &OwnedFd, nodelay: bool) -> Result<()> {
 }
 
 /// `setsockopt(SOL_SOCKET, SO_RCVTIMEO, ...)`. `None` sets an all-zero
-/// `timeval`, which `SO_RCVTIMEO` treats as "no timeout" on Darwin the
-/// same as on Linux.
+/// `timeval`, which `SO_RCVTIMEO` treats as "no timeout" on the BSDs
+/// the same as on Linux.
 pub fn set_read_timeout(fd: &OwnedFd, timeout: Option<Duration>) -> Result<()> {
     use std::os::fd::AsRawFd;
     let tv = match timeout {
         Some(d) => c::timeval {
             tv_sec: d.as_secs() as c::time_t,
-            // Unlike Linux's `suseconds_t` (an `i64` `From<u32>`
-            // accepts directly), Darwin's is `i32` — a plain `as`
-            // narrows the same way `tv_sec`'s cast above already does.
+            // `suseconds_t` is the one type in this module that varies
+            // *within* the gate, not just against Linux: `i32` on
+            // Darwin, `long` on the other BSDs (so `i64` on their 64-bit
+            // targets). Linux's is an `i64` that `From<u32>` accepts
+            // directly; a plain `as` is what covers all of them at once,
+            // narrowing or widening as the target requires, the same way
+            // `tv_sec`'s cast above already does for `time_t`.
             tv_usec: d.subsec_micros() as c::suseconds_t,
         },
         None => c::timeval {
@@ -470,6 +495,15 @@ fn to_sockaddr_un(path: &Path) -> Result<(c::sockaddr_un, c::socklen_t)> {
 /// as unbound regardless of what `len` claims: `to_sockaddr_un` already
 /// refuses any path containing an embedded NUL byte, so a real bound
 /// path can never come back as entirely zero bytes.
+///
+/// Confirmed on Darwin only; whether the other BSDs shrink `len` the
+/// way Linux does is untested (rustils#86). It doesn't matter which way
+/// they behave — the all-zero check is a superset of the `len` check,
+/// so both the shrinking and non-shrinking kernels land on `None` here.
+/// The FreeBSD and OpenBSD CI legs run `bsd_unix_conforms`, which
+/// asserts exactly this ("an unbound connecting client has no peer
+/// path"), so a third behavior nobody predicted would surface as a test
+/// failure rather than as a wrong `PathBuf`.
 fn from_sockaddr_un(addr: &c::sockaddr_un, len: c::socklen_t) -> Result<Option<PathBuf>> {
     let offset = sun_path_offset();
     let len = len as usize;
