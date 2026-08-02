@@ -17,5 +17,17 @@ yanked = "deny"
 [sources]
 # D-12: rusty_libc is a deliberate rev-pinned git dependency (the Track P
 # backend). Any other git source is a policy violation, not a warning.
+#
+# rusty_regx and rpath joined the list when coreutils' dependencies on
+# them moved from `path = "../../../…"` to rev-pinned git. Those path
+# deps resolved only on a machine with both repos checked out beside
+# the rustils clone, so a fresh clone — and every CI runner — failed at
+# `cargo metadata` before compiling anything, taking the whole
+# workspace down with it. Same treatment as rusty_libc: pin the rev,
+# bump deliberately, never track a branch.
 unknown-git = "deny"
-allow-git = ["https://github.com/baileyrd/rusty_libc"]
+allow-git = [
+    "https://github.com/baileyrd/rusty_libc",
+    "https://github.com/baileyrd/rusty_regx",
+    "https://github.com/baileyrd/rpath",
+]

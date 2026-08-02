@@ -9,8 +9,24 @@ license.workspace = true
 
 [dependencies]
 platform.workspace = true
-rusty_regx = { path = "../../../rusty_regx" }
-rpath = { path = "../../../rpath" }
+# Pinned git dependencies, matching the `rusty_libc` treatment in
+# `platform-linux/Cargo.toml`: one source of truth, not a vendored fork.
+# Bump the rev deliberately; never track a branch.
+#
+# These were `path = "../../../rusty_regx"` / `"../../../rpath"`, which
+# only resolve on a machine that happens to have those repos checked out
+# as siblings of the rustils clone. Nothing else does — a fresh clone,
+# and every CI runner, failed at `cargo metadata` before compiling a
+# single line, which took the whole workspace down with it (`test`,
+# `miri`, `deny` and `cross-compile-check` all run workspace-wide).
+#
+# For local co-development against a working tree, add a `[patch]` to
+# the *workspace root* manifest rather than reverting these lines —
+# e.g. `[patch."https://github.com/baileyrd/rusty_regx"]
+# rusty_regx = { path = "../rusty_regx" }` — so the checked-in build
+# stays reproducible for everyone who doesn't have that tree.
+rusty_regx = { git = "https://github.com/baileyrd/rusty_regx", rev = "93c5541d6713750141476c87d6cd774629e1ae3a" }
+rpath = { git = "https://github.com/baileyrd/rpath", rev = "a54684f82efc2abed1a94ef9773ecfaa2dea65c3" }
 
 [dev-dependencies]
 platform-mock.workspace = true
