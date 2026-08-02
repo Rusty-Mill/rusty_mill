@@ -507,8 +507,11 @@ them yet.
   indefinitely). Also `Semaphore`: caps concurrency at N permits, fair
   (FIFO) like tokio's own -- both borrowed (`SemaphorePermit`) and
   `Arc`-owned (`OwnedSemaphorePermit`, for holding a permit across a
-  spawned task boundary) permit flavors, plus `acquire_many` for
-  reserving more than one permit at once. Also `watch`: a single-
+  spawned task boundary) permit flavors, `acquire_many` for reserving
+  more than one permit at once, and `close`/`is_closed` for shutting
+  a semaphore down (every queued and future `acquire`/`try_acquire`
+  call then fails with `AcquireError`/`TryAcquireError` instead of
+  ever granting a new permit). Also `watch`: a single-
   latest-value broadcast (`watch::channel`/`Sender`/`Receiver`) --
   `changed().await` resolves once the value's been updated since this
   receiver last saw it, no queue and no lagging (a receiver that misses

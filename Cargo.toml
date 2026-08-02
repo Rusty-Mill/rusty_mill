@@ -1,6 +1,6 @@
 [package]
 name = "rusty_tokio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "A hand-rolled, from-scratch async runtime: multi-threaded work-stealing scheduler, epoll-based reactor, timers, and async sync primitives."
 license = "MIT"
@@ -16,7 +16,10 @@ members = ["rusty_tokio-macros"]
 [dependencies]
 # See "Why a separate crate" in rusty_tokio-macros' own docs.
 rusty_tokio-macros = { path = "rusty_tokio-macros", version = "0.1.0" }
-rusty_std = { path = "../rusty_std" }
+# Pinned git dep, not a path dep: a `git = "..."` Cargo dependency on
+# this crate clones only this one repository, so a sibling `../rusty_std`
+# checkout doesn't exist for any external consumer -- see #254.
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "3ab2361e4b8bc873ecd8404178cac7288fbff2b7" }
 libc = "0.2"
 # `platform` is pure portable trait/type definitions (no I/O, no OS
 # dependency), so it's used on every target. `platform-linux`/
