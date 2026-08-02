@@ -10,7 +10,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reverse = args.contains(&"-r".to_string());
     let numeric = args.contains(&"-n".to_string());
 
-    let files: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let files: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
     let mut lines = Vec::new();
 
     if files.is_empty() {
@@ -34,7 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lines.sort_by(|a, b| {
             let num_a: f64 = a.trim().parse().unwrap_or(0.0);
             let num_b: f64 = b.trim().parse().unwrap_or(0.0);
-            num_a.partial_cmp(&num_b).unwrap_or(std::cmp::Ordering::Equal)
+            num_a
+                .partial_cmp(&num_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     } else {
         lines.sort();

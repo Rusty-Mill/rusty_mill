@@ -6,7 +6,11 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
-    let paths: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let paths: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if paths.len() < 2 {
         eprintln!("Usage: rmv <source...> <destination>");
@@ -42,7 +46,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Err(_e) = fs::rename(src_path, &final_dst) {
             // Fallback to copy + remove if rename across file systems fails
             if let Err(copy_err) = fs::copy(src_path, &final_dst) {
-                eprintln!("rmv: cannot move '{}' to '{}': {}", src_str, final_dst.display(), copy_err);
+                eprintln!(
+                    "rmv: cannot move '{}' to '{}': {}",
+                    src_str,
+                    final_dst.display(),
+                    copy_err
+                );
             } else {
                 let _ = fs::remove_file(src_path);
             }

@@ -7,7 +7,11 @@ use std::io::{self, Read};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let delete = args.contains(&"-d".to_string());
-    let non_opts: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let non_opts: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if non_opts.is_empty() {
         eprintln!("Usage: rtr [-d] SET1 [SET2]");

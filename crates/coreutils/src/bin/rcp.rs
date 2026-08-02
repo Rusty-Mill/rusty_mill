@@ -31,7 +31,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let recursive = args.contains(&"-r".to_string()) || args.contains(&"-R".to_string());
-    let paths: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let paths: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if paths.len() < 2 {
         eprintln!("rcp: missing destination file operand");
@@ -70,7 +74,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Err(e) = copy_recursive(src_path, &final_dst) {
-            eprintln!("rcp: error copying '{}' to '{}': {}", src_str, final_dst.display(), e);
+            eprintln!(
+                "rcp: error copying '{}' to '{}': {}",
+                src_str,
+                final_dst.display(),
+                e
+            );
         }
     }
 

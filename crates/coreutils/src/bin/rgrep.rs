@@ -1,10 +1,10 @@
 //! `rgrep` — print lines matching a POSIX-ERE pattern using `rusty_regx`
 
+use rusty_regx::Regex;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, BufReader};
 use std::path::Path;
-use rusty_regx::Regex;
 
 fn search_reader<R: BufRead>(
     reader: R,
@@ -33,12 +33,7 @@ fn search_reader<R: BufRead>(
     Ok(())
 }
 
-fn search_dir(
-    dir: &Path,
-    re: &Regex,
-    invert: bool,
-    line_nums: bool,
-) -> io::Result<()> {
+fn search_dir(dir: &Path, re: &Regex, invert: bool, line_nums: bool) -> io::Result<()> {
     if dir.is_dir() {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -64,7 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let line_numbers = args.contains(&"-n".to_string());
     let recursive = args.contains(&"-r".to_string()) || args.contains(&"-R".to_string());
 
-    let non_opts: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let non_opts: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if non_opts.is_empty() {
         eprintln!("Usage: rgrep [-i] [-v] [-n] [-r] PATTERN [FILE...]");
@@ -79,7 +78,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pattern_str.to_string()
     };
 
-    let re = Regex::new(&final_pattern).map_err(|e| format!("Invalid regex '{}': {:?}", pattern_str, e))?;
+    let re = Regex::new(&final_pattern)
+        .map_err(|e| format!("Invalid regex '{}': {:?}", pattern_str, e))?;
     let files = &non_opts[1..];
 
     if recursive && files.is_empty() {

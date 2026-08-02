@@ -20,7 +20,11 @@ fn count_reader<R: Read>(mut reader: R) -> io::Result<Counts> {
     let lines = text.lines().count();
     let words = text.split_whitespace().count();
 
-    Ok(Counts { lines, words, bytes })
+    Ok(Counts {
+        lines,
+        words,
+        bytes,
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -36,7 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (count_lines, count_words, count_bytes)
     };
 
-    let files: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let files: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if files.is_empty() {
         let counts = count_reader(io::stdin())?;
@@ -44,7 +52,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    let mut total = Counts { lines: 0, words: 0, bytes: 0 };
+    let mut total = Counts {
+        lines: 0,
+        words: 0,
+        bytes: 0,
+    };
     for f in &files {
         let win_path = rpath::posix_to_win32(f);
         let path = Path::new(&win_path);
@@ -69,9 +81,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_counts(counts: &Counts, l: bool, w: bool, c: bool, name: &str) {
     let mut out = String::new();
-    if l { out.push_str(&format!("{:8} ", counts.lines)); }
-    if w { out.push_str(&format!("{:8} ", counts.words)); }
-    if c { out.push_str(&format!("{:8} ", counts.bytes)); }
+    if l {
+        out.push_str(&format!("{:8} ", counts.lines));
+    }
+    if w {
+        out.push_str(&format!("{:8} ", counts.words));
+    }
+    if c {
+        out.push_str(&format!("{:8} ", counts.bytes));
+    }
     if !name.is_empty() {
         out.push_str(name);
     }

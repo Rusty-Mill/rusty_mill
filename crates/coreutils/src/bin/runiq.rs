@@ -11,7 +11,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let duplicates_only = args.contains(&"-d".to_string());
     let unique_only = args.contains(&"-u".to_string());
 
-    let files: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let files: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
     let mut lines = Vec::new();
 
     if files.is_empty() {
