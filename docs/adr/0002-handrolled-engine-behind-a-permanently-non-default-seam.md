@@ -101,7 +101,8 @@ independently abandonable:
 | --- | --- | --- |
 | 1 | TLS 1.3 record layer — AEAD framing over an established connection | **landed** |
 | 2a | DER decoding and X.509 certificate parsing | **landed** |
-| 2b | Path validation — signatures up the chain, expiry, name constraints, EKU, name matching | not started |
+| 2b-i | Certificate signature verification | **landed** |
+| 2b-ii | Path validation — chain building, expiry, `basicConstraints`/`keyUsage`, path length, name constraints, EKU, name matching | not started |
 | 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
@@ -112,6 +113,29 @@ together with the parser it depends on, with no opportunity to be wrong about
 only one of them. 2a takes hostile input and decides nothing; 2b decides
 everything and takes only what 2a produced. They fail differently and are
 worth reviewing separately.
+
+2b splits for the same reason 2 did, and the boundary is the same kind: 2b-i
+answers "who signed this", 2b-ii answers "should we believe them". The first
+is a cryptographic fact with one right answer; the second is a policy
+question with a dozen interacting rules. Landing them together would have
+made it impossible to be confident about only one.
+
+Two things learned in 2b-i are worth carrying forward rather than
+rediscovering:
+
+- **Real certificates corrected a design error.** The first implementation
+  read the elliptic curve off the signature algorithm — `ecdsa-with-SHA256`
+  implying P-256. That is wrong: the algorithm names a *hash*, the key names
+  the curve, and RFC 5758 does not pair them. Three roots in the trust store
+  are P-384 keys signed with SHA-256, and they are the only reason it was
+  caught. No generated test certificate would have produced that combination,
+  because `rcgen`'s presets pair curve and hash by convention.
+- **SHA-1 is refused, and refusing costs nothing.** 28 of 152 roots carry
+  SHA-1 self-signatures, which sounds like a reason to accept it and is not: a
+  trust anchor's self-signature is never checked in RFC 5280 §6.1 path
+  validation, which starts from the anchor's key. Refusing means SHA-1 can
+  never authenticate a link *inside* a chain, which is where chosen-prefix
+  collisions actually matter.
 
 The split draws a line that then has to stay drawn: **2a validates nothing**.
 A parsed certificate is an attacker-supplied document that has been given

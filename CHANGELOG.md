@@ -49,6 +49,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   framing, so it cannot silently degrade into testing nothing.
   `fuzz/` adds coverage-guided libFuzzer targets for deliberate longer runs
   (nightly; 7.1M executions clean at the time of landing).
+- **Hand-rolled engine, stage 2b-i: certificate signature verification**
+  (rusty_tls#25). `handrolled::verify` answers whether a certificate was
+  signed by a given key, over RSA PKCS#1 v1.5 with SHA-256/384/512, ECDSA with
+  SHA-256/384 on P-256 and P-384, and Ed25519. SHA-1, MD5, and RSASSA-PSS are
+  refused rather than verified, and refusal is always an error and never a
+  qualified success.
+
+  **This proves authorship, not authority.** It builds no chain, reads no
+  clock, and checks no constraint, so it cannot make a trust decision by
+  itself — an attacker can sign their own certificate. Path validation is
+  stage 2b-ii. ADR-0002's staging table records the split.
 
 ### Fixed
 - **An infinite loop in `handrolled::x509::ExtendedKeyUsage`'s iterator**,
