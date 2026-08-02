@@ -18,13 +18,19 @@ repository = "https://github.com/baileyrd/rusty_tls"
 # other option rustls supports but adds a C/Bindgen build dependency this
 # crate doesn't need).
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
-# `TrustPolicy::System`'s only implementation: reads OS trust anchors
-# (Windows ROOT store / macOS Security.framework / Linux distro cert
-# bundle, honoring `SSL_CERT_FILE`/`SSL_CERT_DIR`) as DER, matching the
-# ecosystem's rustils design-discussion-tls.md survey of what each platform
-# actually offers. No separate `rustls-pki-types` dependency is needed —
-# `rustls::pki_types` re-exports it.
-rustls-native-certs = "0.8"
+# `TrustPolicy::System`'s only implementation: `platform::security::
+# TrustAnchors`, the rustils "B1" slice (rustils#88), which reads OS trust
+# anchors as raw DER — Windows ROOT store, macOS Security.framework, Linux
+# and the other BSDs' cert bundles honoring `SSL_CERT_FILE`/`SSL_CERT_DIR`.
+# Replaced `rustls-native-certs` (rusty_tls#24): the ecosystem decided this
+# crate should not depend on a third-party implementation of the one piece
+# of the TLS problem that is pure OS personality rather than cryptography.
+# See rustils' docs/design-discussion-tls.md, "B1 reopened".
+#
+# The trait crate is target-independent; exactly one backend is pulled in
+# per target below. Rev-pinned per rustils' docs/versioning.md §3: a
+# sibling-repo git dependency pins a commit, never a branch.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 # Optional (see the `rusty-tokio` feature below): the async adapter drives
 # the same sans-IO `rustls::ClientConnection` over `rusty_tokio`'s own
 # `AsyncRead`/`AsyncWrite` traits and reactor, the way the mission's
@@ -34,7 +40,22 @@ rustls-native-certs = "0.8"
 # rusty_rdp's own pinning convention for its `platform` dependency
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
-rusty_tokio = { path = "../rusty_tokio", optional = true }
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6d3bb05a45a393e4cf902013b05189dd168f6106", optional = true }
+
+# Exactly one `platform` backend per target — the same shape rustils'
+# own `coreutils` uses. `TrustPolicy::System` is the only caller; every
+# other `TrustPolicy` variant is pure rustls and target-independent.
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+
+# The gate is textually rustils' own `platform-bsd` gate: every OS whose
+# trust store is either Security.framework (macOS) or a PEM bundle (the
+# rest).
+[target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
+platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 
 [features]
 # Enables `AsyncTlsStream`, the async counterpart to `TlsStream`. Off by

@@ -3,7 +3,12 @@
 One TLS implementation, one trust policy, for the whole rusty ecosystem — so
 no consumer (`rusty_request`, `rusty_rdp`, and eventually `rusty_tail`) ever
 rolls its own TLS again. Wraps [rustls](https://docs.rs/rustls) behind a
-seam: **consumers import `rusty_tls`, never `rustls`.** That seam is the
+seam: **consumers import `rusty_tls`, never `rustls`.**
+OS trust anchors come from
+[`platform::security::TrustAnchors`](https://github.com/baileyrd/rustils)
+rather than a third-party crate — reading a trust store is OS
+personality, not cryptography, so it lives in the crate this ecosystem
+keeps OS personality in (rusty_tls#24). That seam is the
 product — what sits behind it can be replaced piece by piece later without
 any consumer changing a line. See `ARCHITECTURE.md` for the full design and
 `docs/design-discussion-tls.md`'s upstream record (rustils#70) for why this
