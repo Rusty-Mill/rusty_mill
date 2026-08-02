@@ -10,8 +10,11 @@ publish = false
 # io-uring-fs both built, tested, straced, and ASAN-checked in that ADR) --
 # not a branch reference, so a future rusty_tokio change can't silently
 # change what this crate builds against. Bump deliberately, re-verify the
-# same way.
-rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "5a97dfa246e82173e0a122fe126c3dea9b9618c2", features = [
+# same way. Bumped past 5a97dfa2 to pick up `uring_global_driver` (issue
+# #256) -- the only public way to obtain a real, production
+# `Arc<dyn OpDriver>`, which `main.rs`'s standalone server needs and
+# nothing before this commit could get.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "193ff3c630e90500831e9f38b534986deccc88eb", features = [
     "thread-per-core",
     "io-uring-fs",
 ] }

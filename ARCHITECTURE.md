@@ -24,6 +24,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
 | `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. Rejects a frame claiming a body over `MAX_FRAME_LEN` before allocating anything for it, and shuts down gracefully — draining in-flight connections rather than aborting them — via a `watch::Receiver<bool>`. See "Data flow" below. |
 | `client::Client` | `rusty_tokio::io::TcpStream` | The client-side counterpart of `server::serve` — `docs/phase1-scope.md` §2's "Client SDK — Rust first," the last item on Phase 1's scope list. One `Client` per connection, `produce`/`fetch`/`commit`/`last_committed` methods matching the four `Request` variants one-to-one. |
+| `src/main.rs` | `rusty_tokio::io::uring_global_driver` (real, production) | The standalone server binary — wires a real `Log`/`ConsumerOffsets` (backed by the real production `OpDriver`, not `SimDriver`) to `server::serve` over a real bound `TcpListener`, with `Ctrl-C` triggering graceful shutdown. Blocked entirely until `baileyrd/rusty_tokio#256` exposed a public way to obtain that real driver — before that, only in-process tests (via `SimDriver`) could run `rusty_stream` at all. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -124,6 +125,18 @@ not safe to share across concurrent callers — nothing multiplexes responses
 back to a specific in-flight request on one connection — so concurrent use
 means one `Client` per task, the same tradeoff `AppState` makes explicit on
 the server side.
+
+`src/main.rs` is what actually runs all of the above outside a test: it
+calls `rusty_tokio::io::uring_global_driver()` for the one real,
+production `Arc<dyn OpDriver>` this process uses, then `Log::open` (falling
+back to `Log::create` if `RUSTY_STREAM_DATA_DIR` has nothing yet) and
+`ConsumerOffsets::open_on`/`create_on` the same way, builds an `AppState`,
+binds a real `TcpListener`, and awaits `rusty_tokio::signal::ctrl_c()` to
+trigger `serve`'s graceful shutdown. Before `rusty_tokio#256` landed, this
+file couldn't exist at all — every `Segment`/`Log`/`ConsumerOffsets`
+constructor takes an explicit `Arc<dyn OpDriver>` by design (ADR-0002 D4),
+and `SimDriver` was the only one anything outside `rusty_tokio` could
+construct.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.
