@@ -70,9 +70,7 @@ fn assert_credential_store_behavior(store: &dyn CredentialStore) {
     assert_eq!(store.available(), CredentialStoreStatus::Available);
     assert_eq!(store.get(&svc, "alice").unwrap(), None);
 
-    store
-        .set(&svc, "alice", b"alice-secret")
-        .unwrap();
+    store.set(&svc, "alice", b"alice-secret").unwrap();
     store.set(&svc, "bob", b"bob-secret").unwrap();
     assert_eq!(
         store.get(&svc, "alice").unwrap(),
@@ -83,9 +81,7 @@ fn assert_credential_store_behavior(store: &dyn CredentialStore) {
         Some(b"bob-secret".to_vec())
     );
 
-    store
-        .set(&svc, "alice", b"new-secret")
-        .unwrap();
+    store.set(&svc, "alice", b"new-secret").unwrap();
     assert_eq!(
         store.get(&svc, "alice").unwrap(),
         Some(b"new-secret".to_vec())

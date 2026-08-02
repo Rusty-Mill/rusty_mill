@@ -85,9 +85,9 @@ the expected shape, rather than asserting on the very first read.
   is the same judgment call `Sandbox` already makes for macOS/Windows
   confinement: no invented design without a consumer to validate it
   against.
-- macOS: no backend at all (not even an `Unsupported` stub) — the
+- macOS/BSD: no backend at all (not even an `Unsupported` stub) — the
   same "no consumer, no speculative surface" call; nothing currently
-  imports `platform-macos`'s crate expecting a `Tun` impl to exist.
+  imports `platform-bsd`'s crate expecting a `Tun` impl to exist.
 - TAP (Ethernet-framed) devices, multi-queue TUN, `IFF_NO_PI` toggling
   as a caller-visible option (this backend always requests
   `IFF_NO_PI`, matching `ts-tun`), IPv6 addressing, and any routing

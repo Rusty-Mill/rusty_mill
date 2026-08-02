@@ -41,7 +41,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match fs::File::open(path) {
             Ok(file) => {
                 if files.len() > 1 {
-                    if idx > 0 { println!(); }
+                    if idx > 0 {
+                        println!();
+                    }
                     println!("==> {} <==", f);
                 }
                 let reader = BufReader::new(file);

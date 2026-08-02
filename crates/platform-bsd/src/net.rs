@@ -17,39 +17,39 @@ use platform::net::{Net, TcpListener, TcpStream, UdpSocket, UnixListener, UnixSt
 use crate::sys::fdio;
 use crate::sys::net as sysnet;
 
-/// The macOS backend's [`Net`] capability. Stateless, mirroring
-/// [`crate::MacosNet`]'s Linux counterpart `LinuxNet`.
-pub struct MacosNet;
+/// The BSD backend's [`Net`] capability. Stateless, mirroring
+/// [`crate::BsdNet`]'s Linux counterpart `LinuxNet`.
+pub struct BsdNet;
 
-impl Net for MacosNet {
+impl Net for BsdNet {
     fn tcp_connect(&self, addr: SocketAddr) -> Result<Box<dyn TcpStream>> {
-        Ok(Box::new(MacosTcpStream::connect(addr)?))
+        Ok(Box::new(BsdTcpStream::connect(addr)?))
     }
 
     fn tcp_listen(&self, addr: SocketAddr) -> Result<Box<dyn TcpListener>> {
-        Ok(Box::new(MacosTcpListener::bind(addr)?))
+        Ok(Box::new(BsdTcpListener::bind(addr)?))
     }
 
     fn unix_connect(&self, path: &Path) -> Result<Box<dyn UnixStream>> {
-        Ok(Box::new(MacosUnixStream::connect(path)?))
+        Ok(Box::new(BsdUnixStream::connect(path)?))
     }
 
     fn unix_listen(&self, path: &Path) -> Result<Box<dyn UnixListener>> {
-        Ok(Box::new(MacosUnixListener::bind(path)?))
+        Ok(Box::new(BsdUnixListener::bind(path)?))
     }
 
     fn udp_bind(&self, addr: SocketAddr) -> Result<Box<dyn UdpSocket>> {
-        Ok(Box::new(MacosUdpSocket::bind(addr)?))
+        Ok(Box::new(BsdUdpSocket::bind(addr)?))
     }
 }
 
 /// A connected TCP stream backed by an `OwnedFd`. Public for std
 /// interop (RFC v2 §5.1).
-pub struct MacosTcpStream {
+pub struct BsdTcpStream {
     fd: OwnedFd,
 }
 
-impl MacosTcpStream {
+impl BsdTcpStream {
     /// `socket` + `connect`, blocking until the connection completes or
     /// fails.
     pub fn connect(addr: SocketAddr) -> Result<Self> {
@@ -64,7 +64,7 @@ impl MacosTcpStream {
     }
 }
 
-impl TcpStream for MacosTcpStream {
+impl TcpStream for BsdTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         fdio::read(&self.fd, buf)
     }
@@ -90,30 +90,30 @@ impl TcpStream for MacosTcpStream {
     }
 }
 
-impl AsFd for MacosTcpStream {
+impl AsFd for BsdTcpStream {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for MacosTcpStream {
+impl AsRawFd for BsdTcpStream {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl From<OwnedFd> for MacosTcpStream {
+impl From<OwnedFd> for BsdTcpStream {
     fn from(fd: OwnedFd) -> Self {
         Self { fd }
     }
 }
 
 /// A listening TCP socket backed by an `OwnedFd`.
-pub struct MacosTcpListener {
+pub struct BsdTcpListener {
     fd: OwnedFd,
 }
 
-impl MacosTcpListener {
+impl BsdTcpListener {
     /// `socket` + `SO_REUSEADDR` + `bind` + `listen`.
     pub fn bind(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
@@ -121,11 +121,11 @@ impl MacosTcpListener {
         })
     }
 
-    /// `accept` (no `accept4` on Darwin), returning the concrete
-    /// [`MacosTcpStream`] directly.
-    pub fn accept(&self) -> Result<(MacosTcpStream, SocketAddr)> {
+    /// `accept` (no `accept4` in this crate's libc surface), returning
+    /// the concrete [`BsdTcpStream`] directly.
+    pub fn accept(&self) -> Result<(BsdTcpStream, SocketAddr)> {
         let (fd, peer) = sysnet::tcp_accept(&self.fd)?;
-        Ok((MacosTcpStream { fd }, peer))
+        Ok((BsdTcpStream { fd }, peer))
     }
 
     /// Toggle `O_NONBLOCK` on the underlying fd.
@@ -134,9 +134,9 @@ impl MacosTcpListener {
     }
 }
 
-impl TcpListener for MacosTcpListener {
+impl TcpListener for BsdTcpListener {
     fn accept(&self) -> Result<(Box<dyn TcpStream>, SocketAddr)> {
-        let (stream, peer) = MacosTcpListener::accept(self)?;
+        let (stream, peer) = BsdTcpListener::accept(self)?;
         Ok((Box::new(stream), peer))
     }
 
@@ -145,30 +145,30 @@ impl TcpListener for MacosTcpListener {
     }
 }
 
-impl AsFd for MacosTcpListener {
+impl AsFd for BsdTcpListener {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for MacosTcpListener {
+impl AsRawFd for BsdTcpListener {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl From<OwnedFd> for MacosTcpListener {
+impl From<OwnedFd> for BsdTcpListener {
     fn from(fd: OwnedFd) -> Self {
         Self { fd }
     }
 }
 
 /// A connected Unix domain stream socket backed by an `OwnedFd`.
-pub struct MacosUnixStream {
+pub struct BsdUnixStream {
     fd: OwnedFd,
 }
 
-impl MacosUnixStream {
+impl BsdUnixStream {
     /// `socket` + `connect`.
     pub fn connect(path: &Path) -> Result<Self> {
         Ok(Self {
@@ -182,7 +182,7 @@ impl MacosUnixStream {
     }
 }
 
-impl UnixStream for MacosUnixStream {
+impl UnixStream for BsdUnixStream {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         fdio::read(&self.fd, buf)
     }
@@ -200,30 +200,30 @@ impl UnixStream for MacosUnixStream {
     }
 }
 
-impl AsFd for MacosUnixStream {
+impl AsFd for BsdUnixStream {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for MacosUnixStream {
+impl AsRawFd for BsdUnixStream {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl From<OwnedFd> for MacosUnixStream {
+impl From<OwnedFd> for BsdUnixStream {
     fn from(fd: OwnedFd) -> Self {
         Self { fd }
     }
 }
 
 /// A listening Unix domain socket backed by an `OwnedFd`.
-pub struct MacosUnixListener {
+pub struct BsdUnixListener {
     fd: OwnedFd,
 }
 
-impl MacosUnixListener {
+impl BsdUnixListener {
     /// `socket` + `bind` (stale-cleanup retried once) + mode-`0600`
     /// `chmod` + `listen`.
     pub fn bind(path: &Path) -> Result<Self> {
@@ -232,11 +232,11 @@ impl MacosUnixListener {
         })
     }
 
-    /// `accept` (no `accept4` on Darwin), returning the concrete
-    /// [`MacosUnixStream`] directly.
-    pub fn accept(&self) -> Result<(MacosUnixStream, Option<PathBuf>)> {
+    /// `accept` (no `accept4` in this crate's libc surface), returning
+    /// the concrete [`BsdUnixStream`] directly.
+    pub fn accept(&self) -> Result<(BsdUnixStream, Option<PathBuf>)> {
         let (fd, peer) = sysnet::unix_accept(&self.fd)?;
-        Ok((MacosUnixStream { fd }, peer))
+        Ok((BsdUnixStream { fd }, peer))
     }
 
     /// Toggle `O_NONBLOCK` on the underlying fd.
@@ -245,9 +245,9 @@ impl MacosUnixListener {
     }
 }
 
-impl UnixListener for MacosUnixListener {
+impl UnixListener for BsdUnixListener {
     fn accept(&self) -> Result<(Box<dyn UnixStream>, Option<PathBuf>)> {
-        let (stream, peer) = MacosUnixListener::accept(self)?;
+        let (stream, peer) = BsdUnixListener::accept(self)?;
         Ok((Box::new(stream), peer))
     }
 
@@ -256,30 +256,30 @@ impl UnixListener for MacosUnixListener {
     }
 }
 
-impl AsFd for MacosUnixListener {
+impl AsFd for BsdUnixListener {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for MacosUnixListener {
+impl AsRawFd for BsdUnixListener {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl From<OwnedFd> for MacosUnixListener {
+impl From<OwnedFd> for BsdUnixListener {
     fn from(fd: OwnedFd) -> Self {
         Self { fd }
     }
 }
 
 /// A UDP datagram socket backed by an `OwnedFd`.
-pub struct MacosUdpSocket {
+pub struct BsdUdpSocket {
     fd: OwnedFd,
 }
 
-impl MacosUdpSocket {
+impl BsdUdpSocket {
     /// `socket` + `bind`.
     pub fn bind(addr: SocketAddr) -> Result<Self> {
         Ok(Self {
@@ -293,7 +293,7 @@ impl MacosUdpSocket {
     }
 }
 
-impl UdpSocket for MacosUdpSocket {
+impl UdpSocket for BsdUdpSocket {
     fn send_to(&self, buf: &[u8], addr: SocketAddr) -> Result<usize> {
         sysnet::udp_send_to(&self.fd, buf, addr)
     }
@@ -307,19 +307,19 @@ impl UdpSocket for MacosUdpSocket {
     }
 }
 
-impl AsFd for MacosUdpSocket {
+impl AsFd for BsdUdpSocket {
     fn as_fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
-impl AsRawFd for MacosUdpSocket {
+impl AsRawFd for BsdUdpSocket {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
     }
 }
 
-impl From<OwnedFd> for MacosUdpSocket {
+impl From<OwnedFd> for BsdUdpSocket {
     fn from(fd: OwnedFd) -> Self {
         Self { fd }
     }

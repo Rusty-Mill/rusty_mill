@@ -9,7 +9,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cmd_name = "echo".to_string();
     let mut base_args = Vec::new();
 
-    let non_opts: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let non_opts: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
     if !non_opts.is_empty() {
         cmd_name = non_opts[0].clone();
         base_args = non_opts[1..].iter().map(|s| (*s).clone()).collect();
@@ -32,9 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut full_args = base_args;
     full_args.extend(items);
 
-    let status = Command::new(&cmd_name)
-        .args(&full_args)
-        .status()?;
+    let status = Command::new(cmd_name).args(&full_args).status()?;
 
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));

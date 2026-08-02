@@ -2,27 +2,34 @@
 
 The parity suite (`crates/platform-linux/tests/net_parity.rs`,
 `crates/platform-windows/tests/net_parity.rs`, and (net-only, rustils#48)
-`crates/platform-macos/tests/net_parity.rs`, all three kept textually
+`crates/platform-bsd/tests/net_parity.rs`, all three kept textually
 identical — the same convention `parity.rs` established) asserts this
 spec against every backend. A backend that cannot honor a line gets a
 numbered entry in `../divergences.md` citing the OS limitation — never
 implementation convenience.
 
-`platform-macos` (landed rustils#48, forced by `rusty_tokio`'s
-hand-rolled macOS/BSD socket lifecycle duplicating what this trait
-already solved for Linux) implements exactly this spec with no
-behavioral divergence from it — every difference from
-`platform-linux`'s implementation (no `SOCK_CLOEXEC`/`SOCK_NONBLOCK`/
-`accept4`, an extra `sin_len`-style sockaddr field) is mechanism-only,
-invisible at this trait's boundary, so it earns no entry in
-`../divergences.md`. `platform-macos` is `fs`/`process`/`security`/
-`term`/`signals`-free — a deliberately net-only slice; those surfaces
-follow only if a consumer forces them, the same RFC v2 §3 discipline
-every other surface in this workspace already follows. Not yet run on
-real hardware by this workspace's own CI (no macOS runner today) —
-validated so far via `cargo check`/`clippy --target
-x86_64-apple-darwin`, mirroring how `platform-windows` was originally
-developed from a Linux host.
+`platform-bsd` (landed rustils#48 as `platform-macos`, forced by
+`rusty_tokio`'s hand-rolled macOS/BSD socket lifecycle duplicating what
+this trait already solved for Linux; renamed and widened past Darwin in
+rustils#86 when `rusty_tokio`#116 was about to hand-roll a third)
+implements exactly this spec with no behavioral divergence from it —
+every difference from `platform-linux`'s implementation (no
+`SOCK_CLOEXEC`/`SOCK_NONBLOCK`/`accept4`, an extra `sin_len`-style
+sockaddr field) is mechanism-only, invisible at this trait's boundary,
+so it earns no entry in `../divergences.md`. `platform-bsd` is
+`fs`/`process`/`security`/`term`/`signals`-free — a deliberately
+net-only slice; those surfaces follow only if a consumer forces them,
+the same RFC v2 §3 discipline every other surface in this workspace
+already follows.
+
+Its `cfg` gate covers `macos`/`freebsd`/`openbsd`/`netbsd`/`dragonfly`,
+but this spec is only *asserted* against the first three: those have CI
+legs running `net_parity.rs` on real kernels (macOS natively,
+FreeBSD/OpenBSD in a VM). NetBSD compiles in CI but is never executed,
+and DragonFly is neither compiled nor executed — both are in the gate on
+the strength of a shared BSD socket surface, which is an inference, not
+a measurement. Read a green CI accordingly: it is evidence for three of
+the five.
 
 ## Scope (all three D16 slices — TCP, Unix domain sockets, UDP)
 

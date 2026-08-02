@@ -583,6 +583,47 @@ list and `docs/extraction-map.md`'s D16 entry are both updated for this
 slice; `fs`/`process`/`security`/`term`/`signals` stay out of scope
 until a consumer forces them (RFC v2 §3), same as every other surface.
 
+**Widened (`platform-macos` → `platform-bsd`, generic BSD) 2026-08-02**
+— rustils#86. The same forcing function, one OS over: `rusty_tokio`#116
+wanted the `kevent` reactor on FreeBSD/OpenBSD, and the reactor itself
+was reusable (all the BSDs implement `kqueue`) but had no `platform`
+socket layer to sit on for anything but Darwin — so it was about to
+hand-roll a *third* socket lifecycle against raw `libc`, the exact
+duplication #48 was filed to stop. Gate widened from
+`target_os = "macos"` to
+`any(macos, freebsd, openbsd, netbsd, dragonfly)`, crate and every
+public type renamed (`MacosNet` → `BsdNet`, etc.), PAL group bumped
+0.20.0 → 0.21.0 per `docs/versioning.md` §2.
+
+The interesting finding is that **the implementation needed no
+change at all**, and why. Of #48's three documented BSD-vs-Linux
+differences, only the third — the `sin_len`/`sin6_len`/`sun_len`
+leading byte — is genuinely universal (it's the 4.4BSD sockaddr layout
+every BSD inherited). The first two are *Darwin's alone*: FreeBSD,
+OpenBSD, NetBSD and DragonFly all have `SOCK_CLOEXEC`/`SOCK_NONBLOCK`
+and `accept4`. So the Darwin-shaped code #48 wrote is the
+*intersection* of the five targets rather than a Darwin special case —
+correct everywhere, optimal only on macOS. `ffi::libc_surface` stays
+that intersection deliberately: admitting `SOCK_CLOEXEC`/`accept4`
+would compile on four targets and break the fifth. The price is the
+fork+exec race between `socket`/`accept` and the follow-up
+`fcntl(F_SETFD, FD_CLOEXEC)` — a race four of the five could have
+avoided atomically, accepted to keep one code path instead of two, and
+documented at `sys::net::set_cloexec` along with exactly what closing
+it would take.
+
+Verified, not assumed — which was the issue's own condition, on the
+strength of #48's own history (its `macos` job caught the `AF_UNIX`
+`len` bug that cross-compiling could not). Real FreeBSD and OpenBSD VM
+jobs (`vmactions/*-vm`) now run the full suite alongside the
+`macos-latest` job, and `cross-compile-check` gained clippy legs for
+`x86_64-apple-darwin`/`-freebsd`/`-netbsd`. **Coverage is honestly
+partial and labeled as such**: three of the five gated targets execute
+(macOS, FreeBSD, OpenBSD), NetBSD compiles but never runs, DragonFly
+does neither — tier 3, no prebuilt `std`, no runner. Those last two sit
+in the gate by inheritance from FreeBSD's socket surface, an inference
+rather than a measurement, and `platform-bsd`'s own `lib.rs` says so.
+
 ## Phase 6 — Security surface (D15)
 
 **Lands here**, staged narrow-to-wide:

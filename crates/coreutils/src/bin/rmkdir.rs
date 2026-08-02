@@ -7,7 +7,11 @@ use std::path::Path;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let create_parents = args.contains(&"-p".to_string());
-    let targets: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let targets: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if targets.is_empty() {
         eprintln!("Usage: rmkdir [-p] <directory...>");

@@ -1,9 +1,9 @@
 //! `rfind` — search for files in a directory hierarchy
 
+use rusty_regx::Regex;
 use std::env;
 use std::fs;
 use std::path::Path;
-use rusty_regx::Regex;
 
 fn walk_dir(
     dir: &Path,

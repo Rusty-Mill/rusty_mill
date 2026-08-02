@@ -14,10 +14,96 @@ during that period to make the reconstruction meaningful.
 
 Three independently-versioned lines, per `docs/versioning.md` §1:
 **the PAL group** (`platform`/`platform-linux`/`platform-windows`/
-`platform-mock`/`platform-macos`, sharing one number), **`winargv`**,
+`platform-mock`/`platform-bsd`, sharing one number), **`winargv`**,
 and **`coreutils`**.
 
-## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-macos`)
+## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd`)
+
+### 0.21.0
+
+- **Renamed `platform-macos` → `platform-bsd`, widening its `cfg` gate
+  from `target_os = "macos"` to
+  `any(macos, freebsd, openbsd, netbsd, dragonfly)`** (rustils#86,
+  follow-up to #48). Every public item renames with it:
+  `MacosNet`/`MacosTcpStream`/`MacosTcpListener`/`MacosUnixStream`/
+  `MacosUnixListener`/`MacosUdpSocket` → `Bsd*`. Breaking for any
+  consumer naming the old crate or types — hence the `y` bump per
+  `docs/versioning.md` §2 — though nothing in this workspace or
+  outside it imports them yet, which is precisely why the rename
+  happened now rather than after `rusty_tokio` picked the crate up.
+
+  Forced the same way #48 itself was: `rusty_tokio`#116 wanted the
+  `kevent` reactor on FreeBSD/OpenBSD, found no `platform` socket layer
+  to sit it on for anything but Darwin, and was about to hand-roll a
+  *third* socket lifecycle against raw `libc` — the exact duplication
+  #48 was filed to stop, one OS over.
+
+  **No implementation change.** This is the part worth being precise
+  about, because the issue asked for it to be verified rather than
+  assumed. Of the three BSD-vs-Linux differences #48 documented, only
+  the third (`sin_len`/`sin6_len`/`sun_len`, the 4.4BSD sockaddr
+  layout) is universal across the BSDs. The other two are Darwin's
+  alone: FreeBSD, OpenBSD, NetBSD and DragonFly all *do* have
+  `SOCK_CLOEXEC`/`SOCK_NONBLOCK` and `accept4`. The crate's existing
+  Darwin-shaped code is therefore the *intersection* of the five
+  targets — correct everywhere, optimal on one — and widening the gate
+  needed no new code paths. The cost is a fork+exec race between
+  `socket`/`accept` and the follow-up `fcntl(F_SETFD, FD_CLOEXEC)`
+  which four of the five targets could have avoided atomically;
+  accepted deliberately (one code path over two) and documented at
+  `sys::net::set_cloexec`, `ffi::libc_surface`, and the crate root,
+  along with what closing it would take. `ffi::libc_surface` stays the
+  intersection on purpose: admitting `SOCK_CLOEXEC`/`accept4` would
+  compile on four targets and break the fifth.
+
+- **Real-BSD CI** (rustils#86). Two new jobs run the full
+  `platform`/`platform-mock`/`platform-bsd` suite inside a real
+  FreeBSD and a real OpenBSD VM (`vmactions/*-vm`), joining the
+  `macos-latest` job #48/#53 added. `cross-compile-check` also grew
+  `x86_64-apple-darwin`/`x86_64-unknown-freebsd`/`x86_64-unknown-netbsd`
+  clippy legs as a fast pre-check.
+
+  This was the issue's own condition — #53's macOS runner caught a
+  genuine Darwin `AF_UNIX` divergence that `cargo check --target`
+  could not have, so widening a gate on inference alone was explicitly
+  ruled out. Stated plainly, since a green CI now means less than it
+  looks: **three of the five targets in the gate are executed**
+  (macOS, FreeBSD, OpenBSD), **NetBSD is compiled but never run**, and
+  **DragonFly is neither** — tier 3, no prebuilt `std`, no runner. The
+  last two are in the gate by inheritance from FreeBSD's socket
+  surface, which is an inference, not a measurement.
+
+- **Fixed a real OpenBSD `AF_UNIX` divergence the new VM job caught on
+  its first run** — the second time a real-OS leg has immediately
+  justified itself here, after #48's Darwin bug. `getsockname` on a
+  *bound* socket returns the path followed by the rest of `sun_path` as
+  NUL padding rather than shrinking `len` to the path length, so
+  `local_addr()` reported `Some("/tmp/….sock\0\0…")` instead of
+  `Some("/tmp/….sock")`. `from_sockaddr_un` had popped a single
+  trailing NUL, which is exactly right on Linux and Darwin (where `len`
+  is `offset + strlen + 1`) and wrong wherever `len` spans the buffer.
+
+  Now truncates at the first NUL inside the `len`-bounded window —
+  `sun_path` read as the C string it is. Correct whether or not a
+  kernel shrinks `len`, bound or unbound, and it subsumes the Darwin
+  fix from #48 (an all-zero buffer truncates to empty, i.e. `None`).
+  Sound because `to_sockaddr_un` refuses embedded NULs, so no real path
+  can be cut short. No `docs/divergences.md` entry: this brings OpenBSD
+  in line with the documented `platform::net` contract rather than
+  recording a permanent difference from it — same call #48 made.
+
+  Worth stating plainly: every static check passed on the buggy code.
+  `cargo check`/`clippy` for freebsd and netbsd, the macOS leg, and the
+  FreeBSD VM leg were all green; only OpenBSD executing the assertion
+  caught it.
+
+- `net_parity.rs`'s three real-backend tests moved into one
+  `#[cfg(any(…))]`-gated `mod bsd` rather than carrying three copies
+  of a now-five-armed gate; `net_nonblocking.rs`'s file-level gate
+  widened to match. Both must stay textually identical to `lib.rs`'s.
+  `ios`/`tvos`/`watchos` are deliberately *not* in the gate: Darwin, so
+  they would very likely work, but nothing in CI could verify them
+  (RFC v2 §3).
 
 ### 0.20.0
 

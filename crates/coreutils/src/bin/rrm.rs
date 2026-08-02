@@ -6,10 +6,16 @@ use std::path::Path;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
-    let recursive = args.contains(&"-r".to_string()) || args.contains(&"-R".to_string()) || args.contains(&"-rf".to_string());
+    let recursive = args.contains(&"-r".to_string())
+        || args.contains(&"-R".to_string())
+        || args.contains(&"-rf".to_string());
     let force = args.contains(&"-f".to_string()) || args.contains(&"-rf".to_string());
 
-    let targets: Vec<&String> = args.iter().skip(1).filter(|a| !a.starts_with('-')).collect();
+    let targets: Vec<&String> = args
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .collect();
 
     if targets.is_empty() {
         if !force {
@@ -40,11 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("rrm: cannot remove directory '{}': {}", target, e);
                 }
             }
-        } else {
-            if let Err(e) = fs::remove_file(path) {
-                if !force {
-                    eprintln!("rrm: cannot remove file '{}': {}", target, e);
-                }
+        } else if let Err(e) = fs::remove_file(path) {
+            if !force {
+                eprintln!("rrm: cannot remove file '{}': {}", target, e);
             }
         }
     }
