@@ -22,6 +22,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
 | `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. Four request types: `Produce`/`Fetch` against the log, `Commit`/`LastCommitted` against a consumer's offset. |
 | `server::serve` | `rusty_tokio::io::{TcpListener, TcpStream}` | The socket adapter: accepts connections, decodes framed `Request`s, dispatches against `AppState`'s `Log` and `ConsumerOffsets` (each behind its own lock), encodes `Response`s back. See "Data flow" below for what's still missing (no graceful shutdown, no frame-size cap). |
+| `client::Client` | `rusty_tokio::io::TcpStream` | The client-side counterpart of `server::serve` — `docs/phase1-scope.md` §2's "Client SDK — Rust first," the last item on Phase 1's scope list. One `Client` per connection, `produce`/`fetch`/`commit`/`last_committed` methods matching the four `Request` variants one-to-one. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -90,6 +91,18 @@ has disk fault injection, so this is real networking, not simulated.
 sanity cap (a client claiming a multi-gigabyte body gets that much allocated
 before the read fails) — fine for a trusted client, not yet for anything
 internet-facing.
+
+`client::Client` is `server::serve`'s counterpart: `Client::connect` opens
+one `TcpStream`, and `produce`/`fetch`/`commit`/`last_committed` each encode
+a `Request`, frame it, write it, read one framed `Response` back, and decode
+it — the same `frame`/`encode_request`/`decode_response` primitives
+`server.rs`'s own tests used directly before this existed. A
+`Response::Error` from the server is unwrapped into `ClientError::Server`
+rather than left for every caller to match on individually. One `Client` is
+not safe to share across concurrent callers — nothing multiplexes responses
+back to a specific in-flight request on one connection — so concurrent use
+means one `Client` per task, the same tradeoff `AppState` makes explicit on
+the server side.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.
