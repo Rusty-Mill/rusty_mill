@@ -236,7 +236,10 @@ fn a_lying_fsync_loses_only_the_record_it_lied_about() {
 
         // Still fully usable -- the recovered tail is exactly after the
         // one record that really was durable.
-        recovered.append(b"first-record-after-recovery").await.unwrap();
+        recovered
+            .append(b"first-record-after-recovery")
+            .await
+            .unwrap();
         assert_eq!(recovered.read_all().await.unwrap().len(), 2);
     });
 }

@@ -43,8 +43,6 @@ mod lookup;
 #[cfg(unix)]
 mod pipe;
 pub(crate) mod reactor;
-#[cfg(all(target_os = "linux", feature = "io-uring-fs"))]
-mod uring_fs;
 mod readiness;
 mod simplex;
 pub(crate) mod socket;
@@ -56,6 +54,8 @@ mod udp;
 mod unix;
 #[cfg(unix)]
 mod unix_datagram;
+#[cfg(all(target_os = "linux", feature = "io-uring-fs"))]
+mod uring_fs;
 mod util;
 
 pub use addr::ToSocketAddrs;
