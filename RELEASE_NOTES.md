@@ -23,6 +23,27 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Consumer offset tracking: `ConsumerOffsets`, built on `Segment` directly
+**2026-08-02**
+
+- **Added:** `src/consumer.rs`'s `ConsumerOffsets` — tracks each consumer's
+  last-committed `Offset`, backed by a dedicated `Segment` of commit records
+  (`[consumer_id][offset]`) rather than a new storage primitive. `open_on`
+  replays every commit and keeps only the last one per consumer
+  (last-write-wins), reusing `Segment`'s existing torn-write/checksum
+  recovery instead of a second hand-rolled recovery path.
+- 5 new tests (26 total): independent tracking across consumers, in-memory
+  view updates immediately on commit, recovery correctly replays to the
+  latest commit per consumer, and a torn (never-synced) commit is dropped on
+  recovery rather than served — the same fault-injection rigor as every
+  other module here.
+- **Known limitation:** one `ConsumerOffsets` file grows forever — no
+  compaction (`docs/phase1-scope.md` §2 already scopes compaction out of
+  Phase 1 entirely, so this isn't a surprise, but it's worth naming: a
+  long-lived deployment with many consumers committing frequently will want
+  this addressed before it matters in practice, not just implicitly deferred
+  the way `retention.rs`'s own known limitations are already tracked).
+
 ## Retention module: segment rolling, size/time-based deletion, `Clock` seam
 **2026-08-02**
 

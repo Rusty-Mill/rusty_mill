@@ -10,19 +10,17 @@
 //!
 //! Explicitly out of scope for Phase 1 (`docs/phase1-scope.md` §2):
 //! multi-broker replication, Kafka wire-protocol compatibility, WASM
-//! transforms, consumer-group rebalancing. `consumer` below is a module
-//! stub — its real shape is scoped separately, not implied by this
-//! scaffold.
+//! transforms, consumer-group rebalancing.
 
 pub mod clock;
+pub mod consumer;
 pub mod offset;
 pub mod record;
 pub mod retention;
 pub mod segment;
 
-pub mod consumer;
-
 pub use clock::{Clock, SimClock, SystemClock};
+pub use consumer::ConsumerOffsets;
 pub use offset::{CommittedOffset, DurableOffset, Epoch, Offset};
 pub use retention::{Log, RetentionPolicy};
 pub use segment::Segment;
