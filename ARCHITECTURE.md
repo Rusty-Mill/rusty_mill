@@ -41,6 +41,15 @@ one artifact to ship and no team/language boundary to split across:
   `TlsAcceptor` (needed for session resumption to actually trigger).
 - `server` — `TlsAcceptor` (config) and `TlsServerStream` (the sync server
   adapter it produces).
+- `handrolled` (feature `handrolled-engine` **and** `--cfg
+  rusty_tls_handrolled`) — the alternative engine behind the seam, reachable
+  by neither by default and by neither accidentally. Nothing else in this
+  crate depends on it; no type listed in [Boundaries](#boundaries) routes
+  through it. Its one stage so far is `handrolled::record`, a TLS 1.3 record
+  layer (RFC 8446 §5) tested three ways: byte-identical differential output
+  against rustls' own `MessageEncrypter`, RFC 8448 known-answer vectors (the
+  only oracle independent of rustls), and a rejection suite. See
+  [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and
@@ -96,3 +105,14 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and their tr
   engine. If a future differential-testing experiment wants to explore an
   alternative backend behind the same seam, that happens explicitly,
   never silently promoted to default.
+
+  That experiment now exists — the `handrolled` module (rusty_tls#25), whose
+  first stage is a TLS 1.3 record layer — and this non-goal is unchanged by
+  it. [ADR-0002](./docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md)
+  turns "explicitly, never silently" from an intention into a mechanism:
+  reaching that module requires both the `handrolled-engine` cargo feature
+  *and* `--cfg rusty_tls_handrolled`, because cargo features are unified
+  across a dependency graph (any crate in a consumer's tree could enable one
+  for everybody) and a `--cfg` flag is not. Cryptographic *primitives* remain
+  out of scope entirely at every stage: the engine hand-rolls protocol, and
+  AES-GCM/ChaCha20-Poly1305/X25519/SHA-2 stay `ring`.

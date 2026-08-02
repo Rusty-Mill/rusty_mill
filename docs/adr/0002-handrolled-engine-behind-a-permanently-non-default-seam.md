@@ -1,0 +1,215 @@
+# ADR-0002: A hand-rolled TLS engine behind a permanently non-default seam
+
+Status: Accepted
+Date: 2026-08-02
+
+## Context
+
+`rustls` is the one dependency this crate exists to wrap. Everything else
+here — `TlsStream`, `AsyncTlsStream`, `TrustPolicy`, `TlsAcceptor` — is
+adapter code around it. For an ecosystem whose stated purpose is hand-rolling
+its own stack, the protocol implementation is the largest remaining borrowed
+piece, and `README.md` already promises the seam exists precisely so that
+"what sits behind it can be replaced piece by piece later without any consumer
+changing a line."
+
+rusty_tls#25 proposes taking that sentence literally. This ADR is the record
+the issue asks for, and it exists because of an asymmetry worth stating
+plainly:
+
+> A wrong regex crate returns wrong matches, and you notice. A wrong TLS
+> implementation silently accepts a forged certificate or leaks a session key,
+> and you do not notice — an attacker does.
+
+Every other hand-rolled component in this ecosystem fails loudly. This one
+fails silently, in someone else's favor. That asymmetry — not the difficulty
+of the code — is what this decision is organized around.
+
+`ARCHITECTURE.md`'s non-goals already say rustls stays the engine and that an
+alternative backend "happens explicitly, never silently promoted to default."
+That was a statement of intent. This ADR converts it into a mechanism, because
+intent does not survive contact with `cargo` feature unification.
+
+## Decision
+
+### 1. The engine ships behind two independent gates, not one
+
+The hand-rolled engine compiles only when **both** of these hold:
+
+1. the cargo feature `handrolled-engine` is enabled, **and**
+2. the cfg flag `rusty_tls_handrolled` is set (via `RUSTFLAGS`).
+
+Neither is on by default, and neither alone does anything.
+
+The two gates are not redundant, because they fail differently:
+
+- **A cargo feature alone is not sufficient.** Cargo features are *unified*
+  across the dependency graph. If any crate anywhere in a consumer's tree —
+  a transitive dependency five levels down, a dev-dependency leaking through
+  a shared build — enables `rusty_tls/handrolled-engine`, every other user of
+  `rusty_tls` in that build gets it too. Nobody has to opt in for everybody to
+  be opted in. That is the exact "feature unification surprise" rusty_tls#25
+  names, and a feature flag cannot defend against it because unification is
+  what features are *for*.
+- **A cfg flag is not unified.** `--cfg` comes from `RUSTFLAGS`, which is set
+  by the person running the build, not by any crate in the graph. A dependency
+  cannot set it on your behalf. There is no transitive path to it.
+
+So the cfg is the gate that actually carries the guarantee, and the feature is
+what keeps `ring` out of the dependency graph for everyone who is not using
+this. Together they mean `rusty_request` and `rusty_rdp` cannot land on the
+hand-rolled path by accident — only by a deliberate, local, visible act by
+whoever invokes `cargo`.
+
+This is the same construction `tokio` uses for `tokio_unstable` and
+`getrandom` uses for its custom backend. It is not novel; it is the known tool
+for "must not be reachable by feature unification," which is why it is the one
+chosen here.
+
+### 2. Enabling the feature without the cfg is a documented no-op, not a silent one
+
+`feature = "handrolled-engine"` without `--cfg rusty_tls_handrolled` compiles a
+stub `handrolled` module whose only content is documentation explaining what
+is missing and how to enable it. A silent no-op would be a footgun ("I turned
+the feature on, where is the module?"); a `compile_error!` would break
+`cargo build --all-features`, which this repo's CI runs and which any consumer
+is entitled to run. The stub is the option that is neither silent nor
+explosive.
+
+### 3. Never the default. This does not expire.
+
+`rustls` is what every consumer gets. There is no version of this crate in
+which the hand-rolled engine becomes the default, becomes a default feature,
+or gets promoted on the grounds that its tests pass.
+
+That last clause is the load-bearing one. "The tests pass" is the confidence
+that precedes most TLS vulnerabilities — Heartbleed, goto fail, and BERserk
+all shipped with passing test suites. A test suite proves the absence of the
+bugs someone thought of. The relevant bugs here are the ones nobody thought of,
+found by an adversary who is looking, later, on purpose.
+
+Superseding this decision requires superseding this ADR explicitly, with the
+argument written down. It is not something a future PR gets to do as a side
+effect of a green CI run.
+
+### 4. Staging order, and what "shipping" a stage means
+
+Per rusty_tls#25, ordered by value ÷ risk, each stage independently useful and
+independently abandonable:
+
+| Stage | Scope | Status |
+| --- | --- | --- |
+| 1 | TLS 1.3 record layer — AEAD framing over an established connection | **landed** |
+| 2 | X.509 chain validation — DER parsing, signatures, expiry, name constraints, EKU | not started |
+| 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
+| 4 | TLS 1.2 — only if a real peer forces it | not started |
+| 5 | Server side — last, or never | not started |
+
+A stage "ships" only when it meets the bar in §5. A stage that cannot meet the
+bar does not land behind the flag either — the flag is not a place to park
+code that does not work.
+
+### 5. The shipping bar
+
+From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
+
+1. **Differential testing against rustls.** Same input, both engines,
+   byte-identical output.
+2. **Interop against real servers**, plus the existing hermetic rejection
+   suite passing identically on both engines.
+3. **Every rejection path tested to actually reject.** The dangerous failure
+   is accepting something bad, and no happy-path test catches it.
+4. **Fuzz the parsers.** DER and record parsing take hostile input by
+   definition.
+5. **Known-answer tests from RFC vectors**, which are the only oracle in this
+   list that is independent of rustls. Differential testing cannot catch a
+   misreading of the spec that both implementations share — most realistically,
+   one where this crate's author read rustls' source and reproduced its
+   interpretation rather than the RFC's. Stage 1 uses RFC 8448 for exactly
+   this reason, and every later stage should find its equivalent.
+
+### 6. Cryptographic primitives stay on `ring`, for now
+
+X25519, AES-GCM, ChaCha20-Poly1305, SHA-2, and P-256 are **not** in scope for
+any stage above. Hand-rolling primitives is a distinct and much harder project
+than hand-rolling the protocol over them, and its central correctness property
+— constant-time execution — is not testable by differential testing, KATs, or
+fuzzing. Every technique on the §5 list is blind to a timing side channel.
+
+The protocol layers get hand-rolled; the primitives underneath stay `ring`.
+Revisiting that is its own issue, with its own ADR, and nothing here should be
+read as a step toward it.
+
+## Alternatives considered
+
+- **Keep `rustls` permanently, build nothing.** Status quo, and still the right
+  default regardless of what this produces. Rejected as the *only* answer
+  because it forecloses the seam's entire stated purpose. Not rejected as the
+  default answer — it remains that, permanently, per §3.
+- **Cargo feature alone, no cfg gate.** Rejected: it does not deliver the
+  guarantee rusty_tls#25 asks for. Feature unification means a transitive
+  dependency can enable it for a consumer who never asked, which is precisely
+  the accident the issue says must be impossible.
+- **cfg gate alone, no cargo feature.** Rejected on dependency hygiene: the
+  engine needs `ring` as a direct dependency, and an unconditional dependency
+  would land in every consumer's tree — including `Cargo.lock`, `cargo deny`
+  output, and audit surface — for code they can never reach. (`ring` is already
+  present transitively via rustls, so the feature costs nothing in *build*
+  terms; this is about the dependency graph being an honest description of what
+  is compiled.)
+- **Hand-roll and promote to default once tests pass.** Rejected — contradicts
+  `ARCHITECTURE.md`'s non-goal directly, and see §3 on why "the tests pass" is
+  not the reassurance it sounds like.
+- **Do this in `rustils` instead.** Already rejected there: rustils'
+  `docs/design-discussion-tls.md` researched hand-rolled TLS as "Option D" and
+  recorded it *researched-and-declined* on unverifiable-correctness grounds.
+  TLS is protocol, not OS personality, so it stays out of the PAL. Behind this
+  crate's own opt-in flag is the only place it fits.
+- **Start at TLS 1.2.** Rejected — larger attack surface, more legacy
+  construction (CBC, MAC-then-encrypt, renegotiation), and no learning benefit
+  over 1.3.
+- **Start at the handshake rather than the record layer.** Rejected — the
+  record layer is the smallest piece with a real test oracle on both sides
+  (RFC 8448 vectors *and* a byte-for-byte differential against rustls'
+  `MessageEncrypter`), and the handshake needs a working record layer under it
+  regardless.
+
+## Consequences
+
+**Accepted:**
+
+- A second implementation of the most security-sensitive code in the ecosystem
+  now exists in this repo. It is unreachable by default and unreachable by
+  accident, but it exists, and it will be read by people who assume anything
+  in a repo is meant to be used. §3 and the module docs both say otherwise, in
+  the places someone would actually look.
+- Testing the engine requires a CI job with `RUSTFLAGS`, because
+  `--all-features` alone does not reach it. Without that job the code would be
+  compiled by nobody and tested by nobody — worse than not having it. One CI
+  job is added per this ADR, and a stage that is not covered by it has not
+  landed.
+- `cargo build --all-features` on a consumer's machine silently does nothing
+  new, which is the intended outcome and also a mild surprise. §2's stub module
+  is the mitigation.
+
+**Created:**
+
+- Stage 2 (X.509 chain validation) is the next unit of work, and pairs with the
+  trust-anchor loading already landed in rusty_tls#24.
+- Fuzz targets for the record parser (bar item 4) are not part of Stage 1 and
+  are owed. Stage 1's parser is small and total — every length is checked
+  before use and there is no `unsafe` in the crate — but "small and total" is
+  an argument for expecting fuzzing to find nothing, not for skipping it.
+- A differential gap is knowingly left open: rustls' `AeadKey` is publicly
+  constructible only at its maximum length of 32 bytes, so the byte-identity
+  differential covers AES-256-GCM and ChaCha20-Poly1305 but *not*
+  AES-128-GCM. AES-128-GCM is covered instead by RFC 8448 known-answer
+  vectors, which is a stronger oracle in kind (independent of rustls) but a
+  narrower one in coverage (fixed inputs, not a matrix). Closing it properly
+  needs either an upstream rustls change or a real handshake with
+  `enable_secret_extraction`.
+
+**Foreclosed:**
+
+- Promoting the hand-rolled engine to default, without superseding this ADR.
+- Hand-rolling cryptographic primitives under any stage listed here (§6).

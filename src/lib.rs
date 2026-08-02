@@ -53,6 +53,32 @@ mod error;
 mod server;
 mod trust;
 
+#[cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+pub mod handrolled;
+
+/// The hand-rolled engine is *not* compiled into this build.
+///
+/// You are seeing this stub because the `handrolled-engine` cargo feature is
+/// enabled but `--cfg rusty_tls_handrolled` is not set. Both are required,
+/// and the cfg is the one that carries the guarantee: cargo features are
+/// unified across a dependency graph, so a feature alone would let any crate
+/// in a consumer's tree enable a hand-rolled TLS implementation for every
+/// other crate in that build. A `--cfg` flag comes from `RUSTFLAGS` and
+/// cannot be set by a dependency.
+///
+/// To actually build it:
+///
+/// ```text
+/// RUSTFLAGS='--cfg rusty_tls_handrolled' \
+///     cargo test --features handrolled-engine
+/// ```
+///
+/// Before you do: this is an opt-in experiment, permanently non-default, and
+/// `rustls` remains the engine behind every type this crate exports. See
+/// `docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md`.
+#[cfg(all(feature = "handrolled-engine", not(rusty_tls_handrolled)))]
+pub mod handrolled {}
+
 #[cfg(feature = "rusty-tokio")]
 pub use async_client::AsyncTlsStream;
 #[cfg(feature = "rusty-tokio")]
