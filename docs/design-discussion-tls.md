@@ -23,13 +23,16 @@ below, and all cutting the same direction: B1 is *best-effort* anchor
 loading, materially less faithful than OS verification (B2) on Windows and
 macOS.
 
-**Resolved 2026-08-02.** The question this document was written to inform is
-now answered — not by rustils, but by `rusty_tls`, a new ecosystem crate that
-took the seam and settled it. Option A shipped; B1's recorded gate condition
-is explicitly *not* met, and the evidence against it hardened. rustils' side
-of the seam is "nothing," which is now a finding rather than a default. See
-*Resolution* at the end; the research below stands unchanged as the reasoning
-that anticipated it.
+**Resolved 2026-08-02, then partially reopened the same day.** The question
+this document was written to inform was answered by `rusty_tls`, a new
+ecosystem crate that took the seam: Option A shipped, and B1's gate condition
+was found explicitly *not* met. Hours later the owner decided to hand-roll
+`rusty_tls`'s trust-anchor loading (rusty_tls#24) and to land it here rather
+than there — which satisfies B1's gate exactly as written. **Option A's
+resolution stands and is permanent; B1 is now gated-in and pending
+implementation, not parked.** See *Resolution* and the *B1 reopened* note
+that follows it. The research below stands unchanged as the reasoning that
+anticipated both.
 
 ## Context: the standing stance, restated precisely
 
@@ -541,11 +544,78 @@ somewhere else, on purpose, and needed nothing from here to do it.
 `docs/behavior/net.md` and `docs/extraction-map.md`'s D16 note now point at
 `rusty_tls` as the realized seam rather than at a hypothetical one.
 
+## B1 reopened (2026-08-02, same day) — decided in, pending implementation
+
+It changed within hours. The owner decided to hand-roll `rusty_tls`'s
+trust-anchor loading rather than keep `rustls-native-certs`
+([rusty_tls#24](https://github.com/baileyrd/rusty_tls/issues/24)), and to
+implement it **here**, as the `platform::security` B1 slice, with `rusty_tls`
+depending on it — option (b) of the two layerings that issue put up.
+
+**The gate fired exactly as written.** Its condition was: *a
+hand-rolled-family consumer needs OS trust anchors **without** taking
+`rustls-native-certs`, and is observed hand-rolling anchor loading at real
+call sites.* The section above closed on "the gate stays written as-is and
+reopens on its own terms if that ever changes" — which is precisely what
+happened. Worth recording as evidence the gate was drafted well: it named the
+one falsifying dependency, so when the decision to drop that dependency
+arrived, no judgment call was needed to know the gate had opened.
+
+One honest caveat on the gate's own terms: the classic §3 signal is
+*observed* duplication at real call sites, and here the duplication is
+*decided* rather than observed — `rusty_tls`'s hand-rolled loader does not
+exist yet. This is closer to the Sandbox precedent (owner explicitly accepts
+a speculative build against a validated donor design) than to the Csprng one
+(retire call sites that already exist). That is a legitimate mode this repo
+has used before, but it should be named rather than blurred: **B1 is being
+built on a decision, not on observed duplication.** The named consumer is
+real and the design reference is real; the call sites are still ahead of us.
+
+### What this settles from the open questions
+
+- **Q2 (which domain):** `security`, as recommended — beside `Csprng`, as
+  trust *material*. Keeps `net.md`'s "Deliberately unspecified — any
+  TLS/crypto" line true forever.
+- **Q4 (consumer of record):** `rusty_tls`. Not `rusty_request`, not
+  `rusty_tokio` — an answer this document could not have predicted, since the
+  crate did not exist when the question was written.
+- **Q1 (wait, or speculative build):** overtaken. The owner chose to build.
+- **Q3 (Linux anchor-source policy):** now the live design question, and the
+  one carrying most of the real content. `SSL_CERT_FILE`/`SSL_CERT_DIR`
+  first, then distro paths; the unresolved part is `/etc/ssl/certs` being
+  both a bundle file and a directory of hashed symlinks on Debian — which
+  wins, and are directories enumerated. `platform-mock` has to assert an
+  answer either way.
+
+### What does not change
+
+- **Option A is permanent.** The protocol/crypto engine stays out of rustils.
+  B1 landing here reopens neither C, D, nor E, and `rusty_tls`'s own
+  hand-rolled-engine work
+  ([rusty_tls#25](https://github.com/baileyrd/rusty_tls/issues/25)) is
+  explicitly scoped to stay behind a non-default feature flag in that repo,
+  not to migrate here. Option D stays researched-and-declined.
+- **B1's contract stays best-effort**, with all three fidelity limits intact
+  (Windows' lazily populated ROOT store, macOS enumeration lacking
+  trust-settings semantics, a DER list unable to express distrust).
+  Hand-rolling does not fix them and must not claim to — though walking macOS
+  trust-settings domains, rather than accepting the one-call answer, is the
+  one place a hand-rolled version could genuinely improve on
+  `rustls-native-certs`.
+- **Raw DER at the boundary.** No ASN.1 types in rustils; parsing stays
+  consumer-side. `rusty_provider`'s config builder remains the semantics
+  reference: warn per bad cert, fail closed on zero.
+- **The seam stops being empty.** The *Resolution* section's headline finding
+  — that `rusty_tls` depends on nothing in this workspace — expires when this
+  lands. That was a property worth having, and trading it is the real cost of
+  option (b); it buys putting per-OS code in the crate that exists for per-OS
+  code, plus hermetic consumer tests via `platform-mock`.
+
 ## What this document still does not decide
 
-Whether B1 ever gets built, on what timeline, or in what exact shape.
-§3 is unweakened: the gate is not passed, so no code follows from this
-document. What changed on 2026-08-02 is the *likelihood*, not the rule — a
-parked slice with no plausible forcing consumer left is still a parked slice,
-and if `rusty_tls` ever drops `rustls-native-certs` and starts probing distro
-paths itself, the gate reopens exactly as written.
+B1's exact shape, timeline, or Linux probing policy — and §3 is unweakened in
+one specific way: a decision to build is not itself a specification. The next
+artifact is a follow-up issue against this repo pinning the slice down (one
+method, raw DER out, best-effort semantics, three backends plus
+`platform-mock`, Q3 answered). That issue, not this document, is what §3's
+table wants, and no code should land here before it exists.
