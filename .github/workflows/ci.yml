@@ -39,3 +39,57 @@ jobs:
       - name: No source yet
         if: steps.check.outputs.exists == 'false'
         run: echo "No Cargo.toml yet — skipping Rust build/test until source lands."
+
+  # The hand-rolled engine (rusty_tls#25) needs `--cfg rusty_tls_handrolled`
+  # on top of its cargo feature — see
+  # docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md.
+  # The `build` job above therefore never compiles a line of it, even under
+  # `--all-features`, which is exactly the point of the cfg gate and exactly
+  # why this second job has to exist: code nobody compiles is worse than code
+  # nobody wrote.
+  handrolled-engine:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: --cfg rusty_tls_handrolled
+      # rustdoc does not inherit RUSTFLAGS. Without this the module is absent
+      # from `cargo doc` and its doctests silently do not run.
+      RUSTDOCFLAGS: --cfg rusty_tls_handrolled
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy
+        run: cargo clippy --all-targets --features handrolled-engine -- -D warnings
+
+      - name: Test
+        run: cargo test --features handrolled-engine --verbose
+
+      - name: Prove the gated tests actually ran
+        # Every handrolled test file is `#![cfg(all(feature = "...", cfg))]`,
+        # so a typo in the cfg name — here, in Cargo.toml's check-cfg, or in
+        # the source — compiles all three down to zero tests and still reports
+        # success. A green job that ran nothing is the failure mode this
+        # guards against.
+        run: |
+          for t in handrolled_record_kat \
+                   handrolled_record_differential \
+                   handrolled_record_rejection; do
+            n=$(cargo test --features handrolled-engine --test "$t" -- --list \
+                  | grep -c ': test$')
+            echo "$t: $n tests"
+            if [ "$n" -eq 0 ]; then
+              echo "::error::$t compiled to zero tests — is --cfg rusty_tls_handrolled reaching it?"
+              exit 1
+            fi
+          done
+          # Same trap, different flag: the module's doctests only run when
+          # RUSTDOCFLAGS carries the cfg as well.
+          d=$(cargo test --features handrolled-engine --doc -- --list | grep -c ': test$')
+          echo "doctests: $d"
+          if [ "$d" -lt 2 ]; then
+            echo "::error::the handrolled module's doctests did not run — is RUSTDOCFLAGS set?"
+            exit 1
+          fi

@@ -41,6 +41,16 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d9
 # (rustils' docs/versioning.md §3: a bare SHA carries the same guarantee
 # as a tag).
 rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6d3bb05a45a393e4cf902013b05189dd168f6106", optional = true }
+# The AEAD primitives under the hand-rolled record layer (see the
+# `handrolled-engine` feature, and docs/adr/0002-*.md §6). The engine
+# hand-rolls the *protocol*; AES-GCM and ChaCha20-Poly1305 stay `ring`,
+# because the correctness property that matters for a primitive —
+# constant-time execution — is invisible to every testing technique the
+# hand-rolled work relies on (differential, KAT, fuzz). Optional so it is
+# absent from the dependency graph of anyone not running the experiment;
+# already present transitively as rustls' own crypto provider, so enabling
+# this adds no new code to a build, only a direct edge.
+ring = { version = "0.17", optional = true }
 
 # Exactly one `platform` backend per target — the same shape rustils'
 # own `coreutils` uses. `TrustPolicy::System` is the only caller; every
@@ -62,6 +72,18 @@ platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce9642
 # default so a sync-only consumer (e.g. `rusty_rdp`) never pulls in
 # `rusty_tokio` and its transitive dependencies.
 rusty-tokio = ["dep:rusty_tokio"]
+# Half of the gate on the hand-rolled TLS engine (rusty_tls#25). The other
+# half is `--cfg rusty_tls_handrolled`, and BOTH are required — see
+# docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md.
+# The short version: cargo features are unified across a dependency graph, so
+# a feature alone would let any crate in a consumer's tree switch on a
+# hand-rolled TLS implementation for everyone else in that build. A `--cfg`
+# flag comes from RUSTFLAGS and no dependency can reach it. So this feature
+# exists to keep `ring` out of the dependency graph of everyone not running
+# the experiment; the cfg is what carries the guarantee.
+# Never a default feature, permanently. That is a binding decision recorded in
+# the ADR, not an intention.
+handrolled-engine = ["dep:ring"]
 
 [dev-dependencies]
 # Generates throwaway certificates (wrong hostname, expired, untrusted
@@ -78,3 +100,6 @@ time = "0.3"
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
+# `rusty_tls_handrolled` is set via RUSTFLAGS, not by cargo, so it has to be
+# declared here or every build warns about it as an unexpected cfg.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rusty_tls_handrolled)'] }

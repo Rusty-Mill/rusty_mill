@@ -56,6 +56,32 @@ let mut tls = acceptor.accept(sock)?;
 ## Architecture
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for boundaries, key decisions, and data flow.
 
+## The hand-rolled engine (not the default, and not becoming one)
+There is a second implementation behind the seam — `handrolled`, whose first
+stage is a TLS 1.3 record layer (rusty_tls#25). **rustls is still the engine
+for everything this crate exports**, and that does not change when the
+hand-rolled code looks finished. A wrong regex crate returns wrong matches and
+you notice; a wrong TLS implementation accepts a forged certificate and you do
+not.
+
+So it takes two gates to reach, and `--all-features` alone is not enough:
+
+```bash
+RUSTFLAGS='--cfg rusty_tls_handrolled' \
+RUSTDOCFLAGS='--cfg rusty_tls_handrolled' \
+    cargo test --features handrolled-engine
+```
+
+(`RUSTDOCFLAGS` as well as `RUSTFLAGS`: rustdoc does not inherit the latter,
+so without it the module is missing from `cargo doc` and its doctests quietly
+do not run.)
+
+The cfg is the half that carries the guarantee. Cargo features are unified
+across a dependency graph, so a feature alone would let any crate in a
+consumer's tree switch this on for everyone else in that build; a `--cfg` flag
+comes from `RUSTFLAGS` and no dependency can reach it. See
+[ADR-0002](./docs/adr/0002-handrolled-engine-behind-a-permanently-non-default-seam.md).
+
 ## Development
 ```bash
 cargo build
