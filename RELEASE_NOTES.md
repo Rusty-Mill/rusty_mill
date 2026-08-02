@@ -22,6 +22,107 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 2b-i: certificate signature verification
+**2026-08-02**
+
+- **Added:** `handrolled::verify` (rusty_tls#25) — the first hand-rolled code
+  that decides anything rather than reporting it. Answers whether a
+  certificate was signed by a given key, over RSA PKCS#1 v1.5 with
+  SHA-256/384/512, ECDSA with SHA-256/384 on P-256 and P-384, and Ed25519.
+- **Added:** deliberate refusals, each an error and never a qualified success
+  — SHA-1 and MD5 as weak, RSASSA-PSS as unsupported, unrecognised curves
+  (P-521, secp256k1) rather than approximating them with the nearest
+  supported one. No configuration relaxes any of it. Refusing SHA-1 loses no
+  trust anchors: a root's self-signature is never checked during RFC 5280
+  §6.1 path validation, which starts from the anchor's key.
+- **Fixed before landing:** the first implementation read the elliptic curve
+  off the signature algorithm, which is wrong — the algorithm names a hash,
+  the key names the curve, and RFC 5758 does not pair them. Three P-384 roots
+  signed with SHA-256 in the local trust store caught it; no generated
+  certificate would have, since `rcgen`'s presets always pair curve and hash.
+- **Known limitation, stated plainly:** this proves authorship, not authority.
+  It builds no chain, reads no clock, and enforces no constraint, so it cannot
+  make a trust decision on its own — an attacker can sign their own
+  certificate. Path validation is stage 2b-ii and does not exist yet.
+
+---
+
+## Fuzz the hand-rolled parsers, and fix the hang it found
+**2026-08-02**
+
+- **Fixed:** an infinite loop in `handrolled::x509::ExtendedKeyUsage`'s
+  iterator, found by the new fuzzer on its first run. `Reader::read` does not
+  consume a value whose tag is wrong — that is what makes `OPTIONAL` fields
+  work — so an `extendedKeyUsage` containing a non-OID yielded the same error
+  forever and the iterator never returned `None`. It parsed, it did not panic,
+  it never came back: a denial of service reachable from any certificate a
+  peer sends. `GeneralNames` shared the shape and the latent bug. Reachable
+  only behind both gates, so no released configuration was affected.
+- **Added:** `tests/handrolled_fuzz.rs`, running on stable in CI on every
+  change. Mutates a real seed corpus (the machine's own trust anchors) rather
+  than generating noise, because random bytes are rejected at the first octet
+  and never reach anything interesting. Asserts canonicality — anything the
+  DER reader accepts must re-encode to exactly the accepted bytes — plus field
+  provenance, determinism, and iterator termination. Measures its own reach
+  (56% of mutants parse, 85% reach ten or more DER values) and fails if that
+  drops, so it cannot silently degrade into testing nothing.
+- **Added:** `fuzz/` — coverage-guided libFuzzer targets for deliberate longer
+  runs on nightly. 7.1M executions clean at the time of landing.
+- **Changed:** ADR-0002 now records the reasoning that failed here. "The code
+  is simple enough that fuzzing would be a formality" was the argument, and it
+  lost.
+
+---
+
+## Hand-rolled TLS engine, stage 2a: DER decoding and X.509 parsing
+**2026-08-02**
+
+- **Added:** `handrolled::der` (rusty_tls#25) — a strict DER reader that
+  refuses every non-canonical encoding DER forbids: indefinite and non-minimal
+  lengths, the high-tag-number form, non-minimal and negative `INTEGER`s,
+  non-canonical `BOOLEAN`s, malformed OIDs and `BIT STRING`s, trailing data.
+  Nothing recurses on input structure, so nesting cannot become stack depth.
+- **Added:** `handrolled::x509` — certificate parsing that keeps
+  `tbsCertificate`, `issuer`, and `subject` as borrows of the original input
+  rather than re-encoding them. Understands `basicConstraints`, `keyUsage`,
+  `extendedKeyUsage`, and `subjectAltName`; collects and reports critical
+  extensions it does *not* understand, so a validator can comply with RFC 5280
+  §6.1.3(f).
+- **Added:** 50 tests across four oracles, including a corpus of 152 real root
+  CAs — the only coverage that can catch a strict parser being strict about
+  the wrong thing.
+- **Known limitation, stated plainly:** this validates nothing. Parsing
+  returning `Ok` says a certificate is well-formed, not that any claim in it is
+  true. An embedded NUL in a `dNSName` is deliberately preserved rather than
+  dropped or rejected (CVE-2009-2408), because hiding it from the name matcher
+  that must defend against it would be worse.
+
+---
+
+## Hand-rolled TLS engine, stage 1: the TLS 1.3 record layer
+**2026-08-02**
+
+- **Added:** `handrolled::record` (rusty_tls#25) — RFC 8446 §5 AEAD protection
+  and framing over an established connection, for AES-128-GCM, AES-256-GCM,
+  and ChaCha20-Poly1305, with a sequence counter that refuses to wrap rather
+  than reuse a nonce.
+- **Added:** the `handrolled-engine` cargo feature, which does nothing without
+  `--cfg rusty_tls_handrolled` as well. Two gates because cargo features are
+  unified across a dependency graph — a feature alone would let any crate in a
+  consumer's tree enable hand-rolled TLS for everyone else in that build — and
+  a `--cfg` flag comes from RUSTFLAGS, where no dependency can reach it.
+- **Added:** ADR-0002, recording "never the default" as a binding decision
+  rather than an intention, plus the staging order and the bar each stage must
+  clear.
+- **Added:** 33 tests over three oracles — byte-identical differential output
+  against rustls' own `MessageEncrypter`, RFC 8448 known-answer vectors (the
+  only oracle independent of rustls), and a rejection suite.
+- **Known limitation, stated plainly:** `rustls` remains the engine behind
+  every type this crate exports, permanently. Nothing in the public API routes
+  through the hand-rolled module, and no released configuration reaches it.
+
+---
+
 ## Load OS trust anchors via `platform`, not `rustls-native-certs`
 **2026-08-02**
 
