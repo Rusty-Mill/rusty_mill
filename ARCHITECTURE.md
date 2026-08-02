@@ -20,6 +20,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
 | `clock::Clock` | `SystemClock` (real, production), `SimClock` (deterministic, manually advanced) | Exists for the same reason `OpDriver` does — `retention::Log`'s time-based retention has to be provable without a test actually sleeping. Our own trait (unlike `OpDriver`): `rusty_tokio` has no clock abstraction to build on here. |
 | `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
+| `protocol::{encode_request, decode_request, encode_response, decode_response}` | pure functions, no I/O, built on `rusty_wire::{Reader, Writer}` | The wire-protocol boundary (ADR-0002 D1) — same "pure and synchronous, testable without a runtime" shape as `record`. No socket adapter exists yet; see "Data flow" below for exactly what's missing. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -60,6 +61,16 @@ it to a dedicated `Segment`, rather than a second storage engine. `open_on`
 replays every commit record and keeps only the last one per consumer
 (last-write-wins) — reusing `Segment`'s existing torn-write/checksum recovery
 rather than a second hand-rolled recovery path.
+
+`protocol::{Request, Response}` encode/decode to `[opcode/status][body]` using
+`rusty_wire::{Reader, Writer}` for every primitive read/write — `Produce`
+(append a payload) and `Fetch` (read one record back), matching Phase 1's
+actual storage surface. `frame`/`frame_len` add the 4-byte length prefix a
+real socket layer needs to know how many bytes make up one message. **Nothing
+here is wired to a socket yet** — no `rusty_tokio` listener, no connection
+loop decoding a `Request`, dispatching it to a `Log`, and encoding the
+`Response` back. That integration is the next real step in this codebase, not
+implied by `protocol.rs` existing.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.

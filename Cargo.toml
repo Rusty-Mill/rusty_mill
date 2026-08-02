@@ -15,3 +15,7 @@ rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "5a97dfa2
     "thread-per-core",
     "io-uring-fs",
 ] }
+# ADR-0002 D1: rusty_stream's own protocol, built on rusty_wire's Reader/
+# Writer byte-cursor primitives rather than a redundant hand-rolled one.
+# Pinned rev, same reasoning as rusty_tokio above.
+rusty_wire = { git = "https://github.com/baileyrd/rusty_wire", rev = "4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b" }
