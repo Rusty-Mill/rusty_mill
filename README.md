@@ -46,6 +46,15 @@ Both environment variables are optional (defaults shown above). An existing
 is created only if none exists. `Ctrl-C` triggers graceful shutdown (drains
 in-flight connections, doesn't cut them off — see `server::serve`'s docs).
 
+### Container image
+A `Dockerfile` exists (multi-stage build, ships just the release binary) —
+**not verified with a real `docker build`/`docker run`**, stated plainly:
+no Docker daemon was available in the environment that wrote it. Verify
+before relying on it for a real deployment. `RUSTY_STREAM_ADDR` defaults to
+`0.0.0.0:7420` inside the image (not `127.0.0.1`, so other containers can
+reach it); `RUSTY_STREAM_DATA_DIR` defaults to `/data`, meant to be mounted
+as a volume.
+
 ## Architecture
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for boundaries, key decisions, and data flow.
 

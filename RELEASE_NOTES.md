@@ -23,6 +23,21 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## A Dockerfile for the standalone server
+**2026-08-02**
+
+- **Added:** `Dockerfile` (multi-stage: full Rust image to build, minimal
+  `debian:bookworm-slim` to ship just the release binary) and
+  `.dockerignore`. `RUSTY_STREAM_ADDR` defaults to `0.0.0.0:7420` inside
+  the image (not `127.0.0.1`, so other containers can reach it);
+  `RUSTY_STREAM_DATA_DIR` defaults to `/data`, meant to be mounted as a
+  volume. Written for `baileyrd/deft-data-sharing-sample`'s
+  `docker-compose.yml`, which builds against this image via a git build
+  context.
+- **Known limitation, stated plainly:** not verified with a real `docker
+  build`/`docker run` — no Docker daemon was available in the environment
+  that wrote it. Verify before relying on it for a real deployment.
+
 ## A real standalone server binary
 **2026-08-02**
 
