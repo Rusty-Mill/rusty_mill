@@ -37,8 +37,12 @@
 //!   The piece that turns "a trusted CA issued this" into "this certificate
 //!   is for the server I asked for".
 //!
-//! The 1.3 handshake (3), TLS 1.2 (4), and the server side (5) are not built.
-//! The ADR carries the order and the bar each must clear.
+//! - [`schedule`] — the TLS 1.3 key schedule (stage 3a). Where every key the
+//!   protocol uses comes from, and where they get bound to the handshake
+//!   transcript that produced them.
+//!
+//! The rest of the handshake (3b, 3c), TLS 1.2 (4), and the server side (5)
+//! are not built. The ADR carries the order and the bar each must clear.
 //!
 //! # What is deliberately *not* here
 //!
@@ -51,5 +55,6 @@ pub mod der;
 pub mod name;
 pub mod path;
 pub mod record;
+pub mod schedule;
 pub mod verify;
 pub mod x509;

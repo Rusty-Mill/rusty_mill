@@ -96,6 +96,22 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   constraints, so a constrained root stays constrained.
 
   With this, path validation is complete.
+- **Hand-rolled engine, stage 3a: the TLS 1.3 key schedule** (rusty_tls#25).
+  `handrolled::schedule` implements RFC 8446 §7.1 — `HKDF-Expand-Label`,
+  `Derive-Secret`, the early/handshake/master secret schedule, traffic key and
+  IV derivation, `finished_key`, the Finished MAC with constant-time
+  verification, and the key-update step. SHA-256 and SHA-384.
+
+  Checked against RFC 8448's published intermediate values rather than by
+  round trip: every extracted secret, every `"derived"` step, every traffic
+  secret, and the traffic keys the record-layer suite was independently
+  verified against — so the two suites now meet in the middle, and keys
+  derived here decrypt the RFC's own wire record through the hand-rolled
+  record layer.
+
+  This is arithmetic over byte strings only. The handshake messages, the
+  transcript's accumulation, the key exchange, and anything that talks to a
+  peer are stages 3b and 3c.
 
 ### Changed
 ### Fixed
