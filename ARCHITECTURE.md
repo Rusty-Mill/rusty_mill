@@ -19,6 +19,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `record::{encode, decode}` | pure functions, no I/O | The framing/checksum boundary — deliberately synchronous and driver-independent so it's unit-testable without any runtime at all (see `record.rs`'s own tests). |
 | `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
 | `clock::Clock` | `SystemClock` (real, production), `SimClock` (deterministic, manually advanced) | Exists for the same reason `OpDriver` does — `retention::Log`'s time-based retention has to be provable without a test actually sleeping. Our own trait (unlike `OpDriver`): `rusty_tokio` has no clock abstraction to build on here. |
+| `consumer::ConsumerOffsets` | a dedicated `Segment` of commit records | Not a new storage primitive — reuses `Segment`'s own append/recover machinery for consumer-offset commits, replayed last-write-wins on open. See "Data flow" below. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -52,6 +53,13 @@ via `Clock`) — oldest first, active segment never touched. `Log::open` recover
 from an explicit list of segment base offsets rather than scanning the
 directory, because `OpDriver` has no directory-listing operation at all (see
 `retention.rs`'s own docs for the manifest-persistence gap this leaves open).
+
+`consumer::ConsumerOffsets` tracks each consumer's last-committed offset the
+same way: `commit` encodes `[consumer_id][offset]` as one record and appends
+it to a dedicated `Segment`, rather than a second storage engine. `open_on`
+replays every commit record and keeps only the last one per consumer
+(last-write-wins) — reusing `Segment`'s existing torn-write/checksum recovery
+rather than a second hand-rolled recovery path.
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.
