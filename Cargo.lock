@@ -75,25 +75,25 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "platform"
-version = "0.9.0"
-source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
-name = "platform-linux"
-version = "0.9.0"
-source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+name = "platform-bsd"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
 dependencies = [
  "libc",
  "platform",
 ]
 
 [[package]]
-name = "platform-macos"
-version = "0.9.0"
-source = "git+https://github.com/baileyrd/rustils?rev=dbf57020b7020965557c9c3d058ad3e9ca875235#dbf57020b7020965557c9c3d058ad3e9ca875235"
+name = "platform-linux"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
 dependencies = [
  "libc",
  "platform",
@@ -141,8 +141,8 @@ dependencies = [
  "io-uring",
  "libc",
  "platform",
+ "platform-bsd",
  "platform-linux",
- "platform-macos",
  "rusty_std",
  "rusty_tokio-macros",
  "tracing",

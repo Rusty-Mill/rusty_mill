@@ -147,7 +147,16 @@ fn install_handler(signum: c_int) -> io::Result<()> {
 
 fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as c_int; 2];
-    #[cfg(target_os = "linux")]
+    // See `io::pipe::new_pipe`'s equivalent comment: `pipe2` is a Linux
+    // extension originally, but every BSD in this crate's gate except
+    // Darwin has since picked it up too -- only macOS genuinely lacks it.
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
     // SAFETY: `fds` is a valid, exclusively-borrowed 2-element out-param
     // for the call's duration.
     let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) };

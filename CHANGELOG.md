@@ -27,6 +27,20 @@ anything prior to v0.2.0.
   queued waiter with `AcquireError` and fails every subsequent
   `acquire`/`try_acquire` call the same way, without disturbing permits
   already held. ([#122](https://github.com/baileyrd/rusty_tokio/issues/122))
+- `io::uring_global_driver()`: the only public way to obtain a real,
+  production `Arc<dyn OpDriver>` (io_uring-fs feature) from outside this
+  crate -- exposes the existing process-wide singleton `UringFile::open`/
+  `create` already use internally, rather than adding a second way to
+  construct an `IoUringDriver`.
+  ([#256](https://github.com/baileyrd/rusty_tokio/issues/256))
+- Generic BSD (FreeBSD/OpenBSD/NetBSD/DragonFly) reactor and socket
+  support, alongside the existing macOS backend -- the `kevent` reactor
+  is unchanged (kqueue doesn't differ across the family), built on
+  rustils' `platform-bsd` (widened from macOS-only `platform-macos`) for
+  the socket layer. `UnixStream::peer_cred`/`UCred` stay Linux/macOS-only
+  for now -- peer-credential retrieval genuinely diverges per BSD and no
+  verified implementation exists yet for any of them.
+  ([#116](https://github.com/baileyrd/rusty_tokio/issues/116))
 
 ### Fixed
 

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
-// (`platform_linux` on Linux, `platform_macos` on macOS), identical logic
+// (`platform_linux` on Linux, `platform_bsd` on macOS/BSD), identical logic
 // below regardless of which -- both shaped identically to their TCP
 // counterparts, minus `set_nodelay` (no Nagle buffering on `AF_UNIX`) and
 // minus `local_addr`/`peer_addr`, which bypass rustils entirely (see
@@ -28,10 +28,14 @@ use platform_linux::{
     LinuxUnixListener as PlatformUnixListener, LinuxUnixStream as PlatformUnixStream,
 };
 
-#[cfg(target_os = "macos")]
-use platform_macos::{
-    MacosUnixListener as PlatformUnixListener, MacosUnixStream as PlatformUnixStream,
-};
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+use platform_bsd::{BsdUnixListener as PlatformUnixListener, BsdUnixStream as PlatformUnixStream};
 
 /// An `AF_UNIX` address: a filesystem pathname, a Linux/Android
 /// abstract-namespace name (a kernel-assigned identifier with no
@@ -568,6 +572,16 @@ impl UnixStream {
     /// `connect` or `pair` to create the *other* end of this socket.
     /// See [`UCred`]'s own docs for how each platform actually obtains
     /// these.
+    ///
+    /// Not available on generic BSD (only Linux and macOS) -- unlike
+    /// `bind`/`connect`/`accept`, peer-credential retrieval genuinely
+    /// diverges per BSD (FreeBSD's `LOCAL_PEERCRED`, OpenBSD's
+    /// `getpeereid(2)` with no pid at all, NetBSD's `LOCAL_PEEREID`),
+    /// and no verified implementation exists for any of them yet -- see
+    /// #116. `socket/mod.rs`'s docs cover the general pattern this crate
+    /// follows: don't guess at an OS-specific API without a way to
+    /// verify it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn peer_cred(&self) -> io::Result<UCred> {
         ucred::get_peer_cred(self.inner.as_raw_fd())
     }
@@ -964,9 +978,12 @@ pub type pid_t = i32;
 /// The effective credentials of the process on the other end of a
 /// [`UnixStream`] -- see [`UnixStream::peer_cred`]. Obtained via
 /// `SO_PEERCRED` on Linux, or `LOCAL_PEEREPID` (for the pid) plus
-/// `getpeereid(2)` (for the uid/gid) on macOS -- the two platforms this
-/// crate builds on report a peer's credentials through genuinely
-/// different mechanisms, unlike most other socket options here.
+/// `getpeereid(2)` (for the uid/gid) on macOS -- the two platforms
+/// [`UnixStream::peer_cred`] supports report a peer's credentials
+/// through genuinely different mechanisms, unlike most other socket
+/// options here. Not available on generic BSD yet -- see that method's
+/// own docs.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UCred {
     uid: uid_t,
@@ -974,6 +991,7 @@ pub struct UCred {
     pid: Option<pid_t>,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl UCred {
     /// The peer's effective user ID.
     pub fn uid(&self) -> uid_t {
@@ -994,6 +1012,7 @@ impl UCred {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod ucred {
     use super::UCred;
     use std::io;
