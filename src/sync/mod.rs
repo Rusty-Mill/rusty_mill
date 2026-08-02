@@ -23,5 +23,7 @@ pub use rwlock::{
     OwnedRwLockMappedWriteGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock,
     RwLockMappedWriteGuard, RwLockReadGuard, RwLockWriteGuard,
 };
-pub use semaphore::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
+pub use semaphore::{
+    AcquireError, OwnedSemaphorePermit, Semaphore, SemaphorePermit, TryAcquireError,
+};
 pub use set_once::{SetOnce, SetOnceError};

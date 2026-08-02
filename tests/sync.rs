@@ -1,5 +1,5 @@
 use rusty_tokio::sync::{
-    mpsc, oneshot, Mutex, MutexGuard, Notify, OnceCell, RwLock, Semaphore, SetOnce,
+    mpsc, oneshot, Mutex, MutexGuard, Notify, OnceCell, RwLock, Semaphore, SetOnce, TryAcquireError,
 };
 use rusty_tokio::Runtime;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -429,7 +429,7 @@ fn semaphore_caps_concurrency_at_the_configured_permit_count() {
             let concurrent = concurrent.clone();
             let max_concurrent = max_concurrent.clone();
             handles.push(rusty_tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
+                let _permit = semaphore.acquire().await.unwrap();
                 let now = concurrent.fetch_add(1, Ordering::SeqCst) + 1;
                 max_concurrent.fetch_max(now, Ordering::SeqCst);
                 rusty_tokio::time::sleep(Duration::from_millis(20)).await;
@@ -456,14 +456,14 @@ fn semaphore_grants_queued_waiters_in_fifo_order() {
     let order: Arc<std::sync::Mutex<Vec<u32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     rt.block_on(async {
-        let held = semaphore.acquire().await; // exhaust the single permit
+        let held = semaphore.acquire().await.unwrap(); // exhaust the single permit
 
         let mut handles = Vec::new();
         for i in 0..5u32 {
             let semaphore = semaphore.clone();
             let order = order.clone();
             handles.push(rusty_tokio::spawn(async move {
-                let _permit = semaphore.acquire().await;
+                let _permit = semaphore.acquire().await.unwrap();
                 order.lock().unwrap().push(i);
             }));
             // Give each task a real chance to actually queue, in order,
@@ -485,7 +485,7 @@ fn semaphore_acquire_many_reserves_all_requested_permits_at_once() {
     let rt = Runtime::new().unwrap();
     let semaphore = Semaphore::new(3);
     rt.block_on(async {
-        let permit = semaphore.acquire_many(2).await;
+        let permit = semaphore.acquire_many(2).await.unwrap();
         assert_eq!(semaphore.available_permits(), 1);
         drop(permit);
         assert_eq!(semaphore.available_permits(), 3);
@@ -496,7 +496,7 @@ fn semaphore_acquire_many_reserves_all_requested_permits_at_once() {
 fn semaphore_try_acquire_fails_when_not_enough_permits_are_free() {
     let semaphore = Semaphore::new(1);
     let _held = semaphore.try_acquire().unwrap();
-    assert!(semaphore.try_acquire().is_none());
+    assert!(semaphore.try_acquire().is_err());
 }
 
 #[test]
@@ -504,7 +504,7 @@ fn semaphore_owned_permit_moves_into_a_spawned_task() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let semaphore = Arc::new(Semaphore::new(1));
-        let permit = semaphore.clone().acquire_owned().await;
+        let permit = semaphore.clone().acquire_owned().await.unwrap();
         let handle = rusty_tokio::spawn(async move {
             // Holding the only permit here, moved in from outside --
             // the point of `acquire_owned` over the borrowed form.
@@ -520,7 +520,7 @@ fn owned_semaphore_permit_num_permits_and_semaphore_accessors() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let semaphore = Arc::new(Semaphore::new(5));
-        let permit = semaphore.clone().acquire_many_owned(3).await;
+        let permit = semaphore.clone().acquire_many_owned(3).await.unwrap();
         assert_eq!(permit.num_permits(), 3);
         assert!(Arc::ptr_eq(permit.semaphore(), &semaphore));
         assert_eq!(semaphore.available_permits(), 2);
@@ -534,8 +534,8 @@ fn owned_semaphore_permit_merge_combines_permits_and_releases_both_together() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let semaphore = Arc::new(Semaphore::new(5));
-        let mut a = semaphore.clone().acquire_many_owned(2).await;
-        let b = semaphore.clone().acquire_many_owned(1).await;
+        let mut a = semaphore.clone().acquire_many_owned(2).await.unwrap();
+        let b = semaphore.clone().acquire_many_owned(1).await.unwrap();
         assert_eq!(semaphore.available_permits(), 2);
 
         a.merge(b);
@@ -555,8 +555,8 @@ fn owned_semaphore_permit_merge_panics_across_different_semaphores() {
     rt.block_on(async {
         let sem_a = Arc::new(Semaphore::new(2));
         let sem_b = Arc::new(Semaphore::new(2));
-        let mut a = sem_a.acquire_owned().await;
-        let b = sem_b.acquire_owned().await;
+        let mut a = sem_a.acquire_owned().await.unwrap();
+        let b = sem_b.acquire_owned().await.unwrap();
         a.merge(b);
     });
 }
@@ -567,7 +567,7 @@ fn semaphore_const_new_is_usable_in_a_static() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         assert_eq!(SEM.available_permits(), 2);
-        let _permit = SEM.acquire().await;
+        let _permit = SEM.acquire().await.unwrap();
         assert_eq!(SEM.available_permits(), 1);
     });
 }
@@ -604,11 +604,11 @@ fn forget_permits_does_not_wake_or_grant_any_queued_waiter() {
     let rt = Runtime::new().unwrap();
     rt.block_on(async {
         let semaphore = Arc::new(Semaphore::new(1));
-        let _held = semaphore.acquire().await; // exhaust the single permit
+        let _held = semaphore.acquire().await.unwrap(); // exhaust the single permit
 
         let semaphore2 = semaphore.clone();
         let waiter = rusty_tokio::spawn(async move {
-            let _permit = semaphore2.acquire().await;
+            let _permit = semaphore2.acquire().await.unwrap();
         });
 
         // Give the waiter a chance to actually queue.
@@ -622,6 +622,77 @@ fn forget_permits_does_not_wake_or_grant_any_queued_waiter() {
         assert!(
             timed_out.is_err(),
             "forget_permits must not grant a permit to a queued waiter"
+        );
+    });
+}
+
+#[test]
+fn semaphore_is_closed_reflects_close_and_is_idempotent() {
+    let semaphore = Semaphore::new(1);
+    assert!(!semaphore.is_closed());
+    semaphore.close();
+    assert!(semaphore.is_closed());
+    // Closing an already-closed semaphore is a no-op, not an error.
+    semaphore.close();
+    assert!(semaphore.is_closed());
+}
+
+#[test]
+fn semaphore_try_acquire_after_close_fails_closed_even_with_permits_free() {
+    let semaphore = Semaphore::new(3);
+    semaphore.close();
+    assert_eq!(
+        semaphore.try_acquire().unwrap_err(),
+        TryAcquireError::Closed
+    );
+    assert_eq!(
+        semaphore.try_acquire_many(2).unwrap_err(),
+        TryAcquireError::Closed
+    );
+}
+
+#[test]
+fn semaphore_acquire_after_close_fails_closed_immediately() {
+    let rt = Runtime::new().unwrap();
+    let semaphore = Semaphore::new(3);
+    semaphore.close();
+    rt.block_on(async {
+        assert!(semaphore.acquire().await.is_err());
+    });
+}
+
+#[test]
+fn semaphore_close_wakes_queued_waiters_with_an_error() {
+    let rt = Runtime::builder().worker_threads(2).build().unwrap();
+    let semaphore = Arc::new(Semaphore::new(1));
+
+    rt.block_on(async {
+        let held = semaphore.acquire().await.unwrap(); // exhaust the single permit
+
+        let semaphore2 = semaphore.clone();
+        let waiter = rusty_tokio::spawn(async move { semaphore2.acquire().await.is_err() });
+
+        // Give the waiter a real chance to actually queue before closing.
+        rusty_tokio::task::yield_now().await;
+        semaphore.close();
+
+        let was_err = rusty_tokio::time::timeout(Duration::from_millis(200), waiter)
+            .await
+            .expect("close must wake the queued waiter instead of leaving it hanging")
+            .unwrap();
+        assert!(
+            was_err,
+            "queued waiter should resolve to AcquireError on close"
+        );
+
+        // The permit held before close was still valid, and releasing it
+        // (dropping `held`) doesn't resurrect the closed semaphore.
+        drop(held);
+        assert!(semaphore.is_closed());
+        assert_eq!(semaphore.available_permits(), 1);
+        assert_eq!(
+            semaphore.try_acquire().unwrap_err(),
+            TryAcquireError::Closed
         );
     });
 }
