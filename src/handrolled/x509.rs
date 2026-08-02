@@ -315,6 +315,7 @@ pub struct Extensions<'a> {
     key_usage: Option<KeyUsage>,
     extended_key_usage: Option<&'a [u8]>,
     subject_alt_name: Option<&'a [u8]>,
+    name_constraints: Option<&'a [u8]>,
     unhandled_critical: Vec<ObjectIdentifier<'a>>,
 }
 
@@ -363,6 +364,22 @@ impl<'a> Extensions<'a> {
     /// cannot be collapsed into an empty iterator.
     pub const fn has_extended_key_usage(&self) -> bool {
         self.extended_key_usage.is_some()
+    }
+
+    /// The raw `NameConstraints` contents, if present.
+    ///
+    /// Left uninterpreted here for the same reason `subjectAltName` is:
+    /// deciding what a constraint *means* is a validator's job, and this
+    /// module does not validate. [`super::name`] evaluates it.
+    ///
+    /// Recognising the extension has a consequence worth being explicit
+    /// about: before this was understood, a name-constrained certificate
+    /// landed in [`Extensions::unhandled_critical`] and every validator
+    /// refused the chain. Now it does not, so whatever consumes this **must**
+    /// actually enforce the constraint. Recognising an extension without
+    /// enforcing it is strictly worse than not recognising it.
+    pub const fn name_constraints(&self) -> Option<&'a [u8]> {
+        self.name_constraints
     }
 
     /// Critical extensions this parser did not interpret.
@@ -859,6 +876,11 @@ fn read_extensions(mut list: Reader<'_>) -> Result<Extensions<'_>> {
                 let names = inner.read(Tag::SEQUENCE)?;
                 inner.finish()?;
                 extensions.subject_alt_name = Some(names.contents);
+            }
+            oid::NAME_CONSTRAINTS => {
+                let constraints = inner.read(Tag::SEQUENCE)?;
+                inner.finish()?;
+                extensions.name_constraints = Some(constraints.contents);
             }
             unknown => {
                 if critical {

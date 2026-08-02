@@ -626,18 +626,22 @@ fn an_unknown_noncritical_extension_is_ignored() {
     validate(&chain, &options()).expect("a non-critical unknown extension is ignorable");
 }
 
-/// Name constraints are not implemented, and the safety of that rests
-/// entirely on the check above: `nameConstraints` MUST be critical, so a
-/// name-constrained intermediate is refused rather than having its constraint
-/// silently ignored.
+/// Name constraints used to be unimplemented, and were fail-closed by
+/// construction: `nameConstraints` must be critical, unknown critical
+/// extensions were refused, so a name-constrained intermediate was rejected
+/// wholesale rather than having its constraint ignored.
 ///
-/// This test exists to make that dependency explicit. If someone ever relaxes
-/// the unknown-critical-extension rule without implementing name constraints,
-/// this fails and says why.
+/// Stage 2b-iii implemented them, which removed that blanket refusal. This
+/// test changed with it, and the change is the point: a constrained
+/// intermediate is now *enforced* rather than refused, and a leaf outside the
+/// subtree is still rejected — by the constraint itself instead of by the
+/// critical-extension rule standing in for it.
+///
+/// If someone ever removes name-constraint enforcement, this fails.
 #[test]
-fn a_name_constrained_intermediate_is_refused_rather_than_ignored() {
-    // id-ce-nameConstraints, 2.5.29.30, with a permittedSubtrees of
-    // dNSName:"example.org" — a constraint the baseline leaf violates.
+fn a_name_constrained_intermediate_is_enforced_rather_than_refused_wholesale() {
+    // id-ce-nameConstraints, 2.5.29.30, permitting only dNSName
+    // "example.org" — which the baseline leaf (example.com) violates.
     let mut extension = CustomExtension::from_oid_content(
         &[2, 5, 29, 30],
         vec![
@@ -656,18 +660,80 @@ fn a_name_constrained_intermediate_is_refused_rather_than_ignored() {
     });
 
     match validate(&chain, &options()) {
-        Err(PathError::UnhandledCriticalExtension(oid)) => {
-            assert_eq!(
-                oid,
-                vec![0x55, 0x1d, 0x1e],
-                "expected nameConstraints (2.5.29.30) to be the unhandled extension"
-            );
-        }
-        other => panic!(
-            "a name-constrained intermediate must be refused while name \
-             constraints are unimplemented, got {other:?}"
+        Err(PathError::Name(_)) => {}
+        Err(PathError::UnhandledCriticalExtension(_)) => panic!(
+            "nameConstraints is being treated as unknown again — the parser \
+             stopped recognising it, or enforcement was removed"
         ),
+        other => panic!("a leaf outside its CA's permitted subtree was accepted: {other:?}"),
     }
+}
+
+/// Name constraints apply to *every* certificate below the constraining CA,
+/// not only to the end-entity certificate. An intermediate may carry a
+/// `subjectAltName` too, and RFC 5280 §6.1.4 constrains it just the same.
+///
+/// This case was found by mutation testing: restricting the check to the leaf
+/// left every other name-constraint test passing.
+#[test]
+fn name_constraints_apply_to_intermediates_below_the_constraining_ca() {
+    let mut extension = CustomExtension::from_oid_content(
+        &[2, 5, 29, 30],
+        vec![
+            0x30, 0x11, 0xa0, 0x0f, 0x30, 0x0d, 0x82, 0x0b, b'e', b'x', b'a', b'm', b'p', b'l',
+            b'e', b'.', b'o', b'r', b'g',
+        ],
+    );
+    extension.set_criticality(true);
+
+    // root (constrained to example.org) -> mid (SAN outside it) -> leaf (fine)
+    let root_key = KeyPair::generate().expect("key");
+    let mut root_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    root_params.distinguished_name = named("nc root");
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    root_params.custom_extensions = vec![extension];
+    let root = root_params.self_signed(&root_key).expect("signs");
+
+    let mid_key = KeyPair::generate().expect("key");
+    let mut mid_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    mid_params.distinguished_name = named("nc intermediate");
+    mid_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    mid_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    // The violation lives on the intermediate, not the leaf.
+    mid_params.subject_alt_names = vec![SanType::DnsName(
+        "intermediate.evil.test".try_into().unwrap(),
+    )];
+    let mid = mid_params
+        .signed_by(&mid_key, &root, &root_key)
+        .expect("signs");
+
+    let leaf_key = KeyPair::generate().expect("key");
+    let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    leaf_params.subject_alt_names = vec![SanType::DnsName("www.example.org".try_into().unwrap())];
+    leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &mid, &mid_key)
+        .expect("signs");
+
+    let (root_der, mid_der, leaf_der) =
+        (root.der().to_vec(), mid.der().to_vec(), leaf.der().to_vec());
+    let root_cert = Certificate::parse(&root_der).expect("parses");
+    let mid_cert = Certificate::parse(&mid_der).expect("parses");
+    let leaf_cert = Certificate::parse(&leaf_der).expect("parses");
+
+    assert!(
+        matches!(
+            validate_path(
+                &leaf_cert,
+                &[mid_cert],
+                &[TrustAnchor::from_certificate(&root_cert)],
+                &options(),
+            ),
+            Err(PathError::Name(_))
+        ),
+        "an intermediate's own SAN escaped its CA's name constraints"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -923,4 +989,119 @@ fn rustls_agrees_on_the_chains_where_both_answer_the_same_question() {
             "{label}: we said {ours}, rustls said {theirs}"
         );
     }
+}
+
+/// The per-CA constraint loop, exercised where only it can be: a constrained
+/// *intermediate* with another intermediate below it that violates the
+/// constraint.
+///
+/// The companion test above puts the constraint on the root, which reaches
+/// enforcement through `TrustAnchor`'s own constraints instead — so it passes
+/// even if the loop over intermediate CAs is broken. Mutation testing found
+/// exactly that hole, and this closes it.
+#[test]
+fn a_constrained_intermediate_constrains_the_intermediate_below_it() {
+    let mut extension = CustomExtension::from_oid_content(
+        &[2, 5, 29, 30],
+        vec![
+            0x30, 0x11, 0xa0, 0x0f, 0x30, 0x0d, 0x82, 0x0b, b'e', b'x', b'a', b'm', b'p', b'l',
+            b'e', b'.', b'o', b'r', b'g',
+        ],
+    );
+    extension.set_criticality(true);
+
+    // root (unconstrained) -> mid1 (constrained) -> mid2 (violates) -> leaf
+    let root_key = KeyPair::generate().expect("key");
+    let mut root_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    root_params.distinguished_name = named("deep root");
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let root = root_params.self_signed(&root_key).expect("signs");
+
+    let mid1_key = KeyPair::generate().expect("key");
+    let mut mid1_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    mid1_params.distinguished_name = named("deep mid1");
+    mid1_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    mid1_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    mid1_params.custom_extensions = vec![extension];
+    let mid1 = mid1_params
+        .signed_by(&mid1_key, &root, &root_key)
+        .expect("signs");
+
+    let mid2_key = KeyPair::generate().expect("key");
+    let mut mid2_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    mid2_params.distinguished_name = named("deep mid2");
+    mid2_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    mid2_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    // The violation is here, on an intermediate rather than on the leaf.
+    mid2_params.subject_alt_names = vec![SanType::DnsName("mid2.evil.test".try_into().unwrap())];
+    let mid2 = mid2_params
+        .signed_by(&mid2_key, &mid1, &mid1_key)
+        .expect("signs");
+
+    let leaf_key = KeyPair::generate().expect("key");
+    let mut leaf_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    leaf_params.subject_alt_names = vec![SanType::DnsName("www.example.org".try_into().unwrap())];
+    leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &mid2, &mid2_key)
+        .expect("signs");
+
+    let (root_der, mid1_der, mid2_der, leaf_der) = (
+        root.der().to_vec(),
+        mid1.der().to_vec(),
+        mid2.der().to_vec(),
+        leaf.der().to_vec(),
+    );
+    let root_cert = Certificate::parse(&root_der).expect("parses");
+    let leaf_cert = Certificate::parse(&leaf_der).expect("parses");
+    let intermediates = [
+        Certificate::parse(&mid2_der).expect("parses"),
+        Certificate::parse(&mid1_der).expect("parses"),
+    ];
+
+    assert!(
+        matches!(
+            validate_path(
+                &leaf_cert,
+                &intermediates,
+                &[TrustAnchor::from_certificate(&root_cert)],
+                &options(),
+            ),
+            Err(PathError::Name(_))
+        ),
+        "an intermediate escaped the name constraints of the CA above it"
+    );
+
+    // The same shape with a compliant mid2 SAN validates, so the refusal is
+    // about the constraint rather than about the depth.
+    let mut mid2_ok_params = CertificateParams::new(Vec::<String>::new()).expect("params");
+    mid2_ok_params.distinguished_name = named("deep mid2");
+    mid2_ok_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    mid2_ok_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    mid2_ok_params.subject_alt_names =
+        vec![SanType::DnsName("mid2.example.org".try_into().unwrap())];
+    let mid2_ok = mid2_ok_params
+        .signed_by(&mid2_key, &mid1, &mid1_key)
+        .expect("signs");
+    let leaf_ok = {
+        let mut p = CertificateParams::new(Vec::<String>::new()).expect("params");
+        p.subject_alt_names = vec![SanType::DnsName("www.example.org".try_into().unwrap())];
+        p.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        p.signed_by(&leaf_key, &mid2_ok, &mid2_key).expect("signs")
+    };
+
+    let (m2, lf) = (mid2_ok.der().to_vec(), leaf_ok.der().to_vec());
+    let leaf_cert = Certificate::parse(&lf).expect("parses");
+    let intermediates = [
+        Certificate::parse(&m2).expect("parses"),
+        Certificate::parse(&mid1_der).expect("parses"),
+    ];
+    validate_path(
+        &leaf_cert,
+        &intermediates,
+        &[TrustAnchor::from_certificate(&root_cert)],
+        &options(),
+    )
+    .expect("a compliant intermediate validates");
 }

@@ -34,24 +34,23 @@
 //! from any public CA for any site — which is a real and well-understood
 //! attack, not a theoretical gap.
 //!
-//! # Name constraints, and why not implementing them is safe here
+//! # Name constraints
 //!
-//! RFC 5280 §4.2.1.10 name constraints are not implemented. That would be a
-//! serious hole in most designs, because a name-constrained intermediate is
-//! constrained precisely so it *cannot* issue for names outside its subtree,
-//! and ignoring the constraint hands it the whole namespace.
+//! RFC 5280 §4.2.1.10 name constraints are enforced, via [`super::name`]. Each
+//! CA's permitted and excluded subtrees apply to every certificate below it in
+//! the path, and a chain violating any of them is refused.
 //!
-//! It is not a hole here, and the reason is structural rather than lucky:
-//! `nameConstraints` MUST be marked critical (§4.2.1.10), [`super::x509`]
-//! reports every critical extension it does not understand, and this module
-//! **rejects** any certificate with one. So a name-constrained intermediate
-//! does not get its constraint ignored — the whole chain is refused.
+//! Until stage 2b-iii they were *not* implemented, and were fail-closed by
+//! construction rather than by enforcement: `nameConstraints` must be
+//! critical, [`super::x509`] reported critical extensions it did not
+//! understand, and this module refused them. Safe, and it cost real
+//! capability — every name-constrained chain was refused wholesale.
 //!
-//! That is the correct failure direction, and it has a real cost: chains
-//! through name-constrained intermediates, which genuinely exist, are refused
-//! rather than validated. That is a capability gap, and it is exactly the sort
-//! of thing that gets "fixed" later by relaxing the critical-extension check.
-//! It must not be. The fix is to implement name constraints.
+//! Recognising the extension removed that blanket refusal, which makes the
+//! enforcement below load-bearing in a way it was not before. This is why a
+//! constraint type [`super::name`] cannot evaluate is an *error* rather than a
+//! skipped entry: a constraint that is parsed and ignored is strictly worse
+//! than one that was never recognised at all.
 //!
 //! # Path building is a search, and searches are attackable
 //!
@@ -63,6 +62,9 @@
 //! across the entire search. Both are hard limits that end the search rather
 //! than merely discouraging it, and no certificate can raise either.
 
+use super::name::{
+    check_name_constraints, check_name_constraints_body, verify_server_name, NameError, ServerName,
+};
 use super::verify::{verify_signature, VerifyError};
 use super::x509::{oid, Certificate, SubjectPublicKeyInfo};
 use crate::handrolled::der::ObjectIdentifier;
@@ -82,6 +84,17 @@ pub struct TrustAnchor<'a> {
     pub subject: &'a [u8],
     /// The anchor's public key, which terminates the chain of signatures.
     pub public_key: SubjectPublicKeyInfo<'a>,
+    /// The anchor's `NameConstraints` body, if it has one.
+    ///
+    /// RFC 5280 §6.1.1 takes an anchor's permitted and excluded subtrees as
+    /// *inputs* to validation rather than reading them from a certificate, so
+    /// they are a field here rather than something recovered later. They are
+    /// applied to every certificate in the path.
+    ///
+    /// Dropping them would silently unconstrain a constrained root, which is
+    /// how enterprise deployments limit a private CA to their own namespace —
+    /// exactly the case where the constraint is the whole point.
+    pub name_constraints: Option<&'a [u8]>,
 }
 
 impl<'a> TrustAnchor<'a> {
@@ -96,6 +109,7 @@ impl<'a> TrustAnchor<'a> {
         Self {
             subject: certificate.subject(),
             public_key: certificate.subject_public_key_info(),
+            name_constraints: certificate.extensions().name_constraints(),
         }
     }
 }
@@ -209,6 +223,9 @@ pub enum PathError {
     /// A signature in an otherwise plausible path did not verify, or used an
     /// algorithm this implementation refuses.
     Signature(VerifyError),
+    /// A name constraint was violated, or the end-entity certificate did not
+    /// authenticate the requested server name.
+    Name(NameError),
 }
 
 impl core::fmt::Display for PathError {
@@ -237,6 +254,7 @@ impl core::fmt::Display for PathError {
                 f.write_str("path search budget exhausted before a path was found")
             }
             Self::Signature(err) => write!(f, "signature: {err}"),
+            Self::Name(err) => write!(f, "name: {err}"),
         }
     }
 }
@@ -245,6 +263,7 @@ impl std::error::Error for PathError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Signature(err) => Some(err),
+            Self::Name(err) => Some(err),
             _ => None,
         }
     }
@@ -253,6 +272,12 @@ impl std::error::Error for PathError {
 impl From<VerifyError> for PathError {
     fn from(err: VerifyError) -> Self {
         Self::Signature(err)
+    }
+}
+
+impl From<NameError> for PathError {
+    fn from(err: NameError) -> Self {
+        Self::Name(err)
     }
 }
 
@@ -299,6 +324,7 @@ pub fn validate_path(
 
     match search(
         end_entity,
+        end_entity,
         intermediates,
         anchors,
         options,
@@ -322,6 +348,7 @@ pub fn validate_path(
 /// stack is bounded regardless of input.
 #[allow(clippy::too_many_arguments)]
 fn search(
+    end_entity: &Certificate<'_>,
     current: &Certificate<'_>,
     intermediates: &[Certificate<'_>],
     anchors: &[TrustAnchor<'_>],
@@ -344,7 +371,10 @@ fn search(
         *budget -= 1;
         match verify_signature(current, &anchor.public_key) {
             Ok(()) => {
-                if let Err(err) = check_path_length(intermediates, used) {
+                if let Err(err) = finalize(anchor, end_entity, intermediates, used) {
+                    // A completed path failing a whole-path rule is not fatal
+                    // to the search: a different ordering, or a different
+                    // anchor, may still work.
                     record(best, err);
                     continue;
                 }
@@ -387,6 +417,7 @@ fn search(
 
         used.push(index);
         if let Some(anchor) = search(
+            end_entity,
             candidate,
             intermediates,
             anchors,
@@ -402,6 +433,36 @@ fn search(
     }
 
     None
+}
+
+/// The rules that can only be checked once a whole path exists.
+///
+/// Path length and name constraints both depend on what sits above a
+/// certificate, so neither can be decided while the search is still choosing.
+fn finalize(
+    anchor: &TrustAnchor<'_>,
+    end_entity: &Certificate<'_>,
+    intermediates: &[Certificate<'_>],
+    used: &[usize],
+) -> Result<(), PathError> {
+    check_path_length(intermediates, used)?;
+
+    // Ordered from the anchor down: intermediates in reverse, end-entity last.
+    let mut chain: Vec<&Certificate<'_>> = used.iter().rev().map(|&i| &intermediates[i]).collect();
+    chain.push(end_entity);
+
+    // The anchor constrains the whole path, if it constrains anything.
+    if let Some(body) = anchor.name_constraints {
+        check_name_constraints_body(body, &chain)?;
+    }
+
+    // Each CA constrains everything below it. The end-entity certificate
+    // constrains nothing, so it is never the constraining certificate.
+    for position in 0..chain.len().saturating_sub(1) {
+        check_name_constraints(chain[position], &chain[position + 1..])?;
+    }
+
+    Ok(())
 }
 
 fn record(best: &mut PathError, candidate: PathError) {
@@ -525,4 +586,26 @@ fn check_path_length(intermediates: &[Certificate<'_>], used: &[usize]) -> Resul
     }
 
     Ok(())
+}
+
+/// Validate a path **and** check that the certificate authenticates
+/// `server_name`.
+///
+/// The entry point a TLS client wants. [`validate_path`] alone answers only
+/// "did a trusted CA issue this", which on its own accepts any certificate
+/// from any public CA for any site — so the two checks are offered together,
+/// in one call that cannot be half-performed by forgetting the second.
+///
+/// The name check runs first: it is far cheaper than path building, and a
+/// certificate that does not name the server the caller asked for cannot be
+/// made acceptable by any chain.
+pub fn verify_peer_certificate(
+    end_entity: &Certificate<'_>,
+    intermediates: &[Certificate<'_>],
+    anchors: &[TrustAnchor<'_>],
+    server_name: &ServerName<'_>,
+    options: &PathOptions,
+) -> Result<VerifiedPath, PathError> {
+    verify_server_name(end_entity, server_name)?;
+    validate_path(end_entity, intermediates, anchors, options)
 }

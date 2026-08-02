@@ -103,7 +103,7 @@ independently abandonable:
 | 2a | DER decoding and X.509 certificate parsing | **landed** |
 | 2b-i | Certificate signature verification | **landed** |
 | 2b-ii | Path building and RFC 5280 §6.1 validation — chain to an anchor, expiry, `basicConstraints`/`keyUsage`, path length, EKU | **landed** |
-| 2b-iii | Name matching (hostname, IP) and name constraints | not started |
+| 2b-iii | Name matching (hostname, IP) and name constraints | **landed** |
 | 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
@@ -138,20 +138,28 @@ rediscovering:
   never authenticate a link *inside* a chain, which is where chosen-prefix
   collisions actually matter.
 
-2b-ii split once more, leaving name matching and name constraints for 2b-iii.
-That split has a property worth recording, because it is load-bearing rather
-than convenient: **name constraints being unimplemented is fail-closed, and
-only by construction.** `nameConstraints` MUST be marked critical (RFC 5280
-§4.2.1.10), the parser reports critical extensions it does not understand, and
-`validate_path` refuses any certificate carrying one. So a name-constrained
-intermediate is refused outright rather than having its constraint ignored.
+2b-ii split once more, leaving name matching and name constraints for 2b-iii,
+which has now landed and closed that gap. The arrangement in between is worth
+keeping on the record, because the shape recurs: **name constraints were
+fail-closed by construction rather than by enforcement.** `nameConstraints`
+MUST be critical (RFC 5280 §4.2.1.10), the parser reported critical extensions
+it did not understand, and `validate_path` refused any certificate carrying
+one — so a name-constrained intermediate was refused outright rather than
+having its constraint ignored. Safe, and it cost real capability.
 
-The cost is real — chains through name-constrained intermediates, which exist,
-are refused — and the danger is specific: someone will eventually be tempted to
-relax the unknown-critical-extension rule to make those chains work. That would
-silently convert a capability gap into a security hole. The fix is to implement
-name constraints, and a test named for exactly this dependency fails if the rule
-is relaxed without them.
+2b-iii recognised the extension, which removed that blanket refusal and made
+the new enforcement load-bearing in a way it had not been. That transition is
+the dangerous kind, and two rules came out of it that later stages should
+inherit:
+
+- **Recognising an extension without enforcing it is strictly worse than not
+  recognising it.** A constraint type `handrolled::name` cannot evaluate is
+  therefore an error, not a skipped entry.
+- **A trust anchor's own constraints have to travel with it.** `TrustAnchor`
+  carries a name, a key, *and* constraints. Dropping them would silently
+  unconstrain a constrained root, which is exactly how enterprise deployments
+  limit a private CA to their own namespace. This was found by a test, not by
+  design — see below.
 
 Also measured in 2b-ii, and worth knowing before writing 2b-iii: **webpki does
 not enforce RFC 5280 §6.1.4(n)**. An intermediate marked `cA` whose `keyUsage`
@@ -159,6 +167,22 @@ omits `keyCertSign` is accepted by rustls and refused here. That is one of
 three places this crate is deliberately stricter than the differential oracle,
 so the oracle cannot be used as a specification — only as a cross-check on the
 cases where both are answering the same question.
+
+Mutation testing earned its place again in 2b-iii, and differently from
+before. Two mutations survived the suite as originally written, and both were
+real gaps rather than test-quality nits:
+
+- Applying name constraints only to the end-entity certificate passed every
+  test, because every test had the constraint one level above the leaf. RFC
+  5280 §6.1.4 constrains *every* certificate below the constraining CA, and an
+  intermediate can carry a `subjectAltName` too.
+- Dropping a trust anchor's own constraints passed as well, because
+  `TrustAnchor` was not carrying them at all.
+
+The second is the more interesting: the test that exposed it was written to
+check something else and failed for a reason its author had not considered.
+That is what a test suite is for, and it only works if a failing test is read
+rather than reshaped until it passes.
 
 The split draws a line that then has to stay drawn: **2a validates nothing**.
 A parsed certificate is an attacker-supplied document that has been given
