@@ -75,16 +75,16 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "platform"
-version = "0.21.0"
-source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "platform-bsd"
-version = "0.21.0"
-source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
 dependencies = [
  "libc",
  "platform",
@@ -92,8 +92,8 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.21.0"
-source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
 dependencies = [
  "libc",
  "platform",
