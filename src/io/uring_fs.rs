@@ -1244,11 +1244,7 @@ impl OpenOptions {
         path: impl AsRef<Path>,
     ) -> io::Result<UringFile> {
         let handle = driver
-            .open(
-                path.as_ref().to_path_buf(),
-                self.raw_flags(),
-                self.mode as u32,
-            )
+            .open(path.as_ref().to_path_buf(), self.raw_flags(), self.mode)
             .await?;
         Ok(UringFile {
             handle,
