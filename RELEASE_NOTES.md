@@ -23,6 +23,31 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Client SDK: the last item on Phase 1's scope list
+**2026-08-02**
+
+- **Added:** `src/client.rs`'s `Client` — `docs/phase1-scope.md` §2's
+  "Client SDK — Rust first," implemented last of the six Phase 1 scope
+  items. `Client::connect` opens one `rusty_tokio::io::TcpStream`;
+  `produce`/`fetch`/`commit`/`last_committed` each encode a `Request`, frame
+  it, write it, and decode the framed `Response` back — the same
+  hand-framing `server.rs`'s own tests previously had to do inline, now a
+  real reusable API. A `Response::Error` from the server surfaces as
+  `ClientError::Server`, not a panic or a silently dropped message.
+- 5 new tests (58 total), all against a real spawned `server::serve` over a
+  real loopback socket: produce-then-fetch and commit-then-last-committed
+  round trips through the client API, an unknown consumer reads back `None`
+  not an error, fetching an unknown offset comes back as
+  `ClientError::Server`, and two independent clients against the same
+  server stay independent.
+- **Known limitations, stated plainly:** one `Client` wraps one connection
+  and is not safe to call from two tasks concurrently — nothing multiplexes
+  responses back to a specific in-flight request, so concurrent use means
+  one `Client` per task (or a lock around it), the same tradeoff
+  `server::AppState` makes explicit on the other side. No connection
+  pooling, retry, or reconnect logic — a dropped connection is a dropped
+  connection.
+
 ## Wire exposure for consumer-offset commits
 **2026-08-02**
 

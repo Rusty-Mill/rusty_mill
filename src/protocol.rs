@@ -14,14 +14,12 @@
 //! `crate::record`'s framing has no I/O in it: testable without any runtime
 //! at all.
 //!
-//! ## What this pass does not do
-//!
-//! No socket integration yet — no `rusty_tokio` listener, no connection
-//! loop dispatching decoded [`Request`]s to a real [`crate::retention::Log`]
-//! and encoding [`Response`]s back. [`frame`]/[`frame_len`] exist because a
-//! real socket layer needs length-prefixed framing to know how many bytes
-//! to read before a message can even be decoded — but nothing here actually
-//! reads or writes a socket. That's the next real step, not this one.
+//! [`frame`]/[`frame_len`] exist because a real socket layer needs
+//! length-prefixed framing to know how many bytes to read before a message
+//! can even be decoded — this module only encodes/decodes bytes, it never
+//! reads or writes a socket itself. See [`crate::server`] for the
+//! `rusty_tokio` listener/connection loop built on top of these, and
+//! [`crate::client`] for the client-side counterpart.
 
 use rusty_wire::{Reader, Writer};
 

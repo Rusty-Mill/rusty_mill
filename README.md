@@ -6,16 +6,17 @@ scoped deliberately to avoid re-deriving Kafka wholesale. See
 [docs/phase1-scope.md](./docs/phase1-scope.md) for the full research brief.
 
 ## Status
-Phase 1 core is functionally complete and reachable over the network: an
+Phase 1's full `docs/phase1-scope.md` §2 scope list is now implemented: an
 append-only `Segment` (framing, recovery, offset tracking) rolled and retained
 by `retention::Log`, per-consumer offset tracking (`ConsumerOffsets`), a wire
-protocol built on `rusty_wire` (`protocol.rs`), and `server::serve` — a real
+protocol built on `rusty_wire` (`protocol.rs`), `server::serve` — a real
 `rusty_tokio` TCP server dispatching `Produce`/`Fetch` (against the log) and
 `Commit`/`LastCommitted` (against consumer offsets) requests against shared
-state. All built directly on `rusty_tokio`'s `thread-per-core` + `io-uring-fs`
-(ADR-0002 D3/D4 — see [docs/adr/](./docs/adr/) for how that was decided,
-including multiple rounds of build/test/strace/ASAN verification, not just
-documentation review).
+state — and `client::Client`, the Rust client SDK driving that same protocol
+from the other end. All built directly on `rusty_tokio`'s `thread-per-core` +
+`io-uring-fs` (ADR-0002 D3/D4 — see [docs/adr/](./docs/adr/) for how that was
+decided, including multiple rounds of build/test/strace/ASAN verification, not
+just documentation review).
 
 Still open: no graceful shutdown or frame-size cap on the server;
 `retention::Log::open`'s manifest-persistence gap (see `retention.rs`'s own
