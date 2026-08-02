@@ -102,7 +102,8 @@ independently abandonable:
 | 1 | TLS 1.3 record layer — AEAD framing over an established connection | **landed** |
 | 2a | DER decoding and X.509 certificate parsing | **landed** |
 | 2b-i | Certificate signature verification | **landed** |
-| 2b-ii | Path validation — chain building, expiry, `basicConstraints`/`keyUsage`, path length, name constraints, EKU, name matching | not started |
+| 2b-ii | Path building and RFC 5280 §6.1 validation — chain to an anchor, expiry, `basicConstraints`/`keyUsage`, path length, EKU | **landed** |
+| 2b-iii | Name matching (hostname, IP) and name constraints | not started |
 | 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
@@ -136,6 +137,28 @@ rediscovering:
   validation, which starts from the anchor's key. Refusing means SHA-1 can
   never authenticate a link *inside* a chain, which is where chosen-prefix
   collisions actually matter.
+
+2b-ii split once more, leaving name matching and name constraints for 2b-iii.
+That split has a property worth recording, because it is load-bearing rather
+than convenient: **name constraints being unimplemented is fail-closed, and
+only by construction.** `nameConstraints` MUST be marked critical (RFC 5280
+§4.2.1.10), the parser reports critical extensions it does not understand, and
+`validate_path` refuses any certificate carrying one. So a name-constrained
+intermediate is refused outright rather than having its constraint ignored.
+
+The cost is real — chains through name-constrained intermediates, which exist,
+are refused — and the danger is specific: someone will eventually be tempted to
+relax the unknown-critical-extension rule to make those chains work. That would
+silently convert a capability gap into a security hole. The fix is to implement
+name constraints, and a test named for exactly this dependency fails if the rule
+is relaxed without them.
+
+Also measured in 2b-ii, and worth knowing before writing 2b-iii: **webpki does
+not enforce RFC 5280 §6.1.4(n)**. An intermediate marked `cA` whose `keyUsage`
+omits `keyCertSign` is accepted by rustls and refused here. That is one of
+three places this crate is deliberately stricter than the differential oracle,
+so the oracle cannot be used as a specification — only as a cross-check on the
+cases where both are answering the same question.
 
 The split draws a line that then has to stay drawn: **2a validates nothing**.
 A parsed certificate is an attacker-supplied document that has been given

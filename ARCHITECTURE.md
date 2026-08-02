@@ -55,8 +55,11 @@ one artifact to ship and no team/language boundary to split across:
   the first piece that decides anything: whether a certificate was signed by a
   given key. Authorship, never authority — it builds no chain, reads no clock,
   and enforces no constraint, so it cannot make a trust decision on its own
-  and its docs say so. Path validation is stage 2b-ii and does not exist.
-  See [Non-goals](#non-goals) and ADR-0002.
+  and its docs say so. Stage 2b-ii adds `handrolled::path` — chain building
+  and RFC 5280 §6.1 validation to a trust anchor. It still does **not** check
+  that a certificate is valid for any particular name (stage 2b-iii), so it
+  cannot decide a TLS connection on its own either. See
+  [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

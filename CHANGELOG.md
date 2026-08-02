@@ -60,7 +60,23 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   clock, and checks no constraint, so it cannot make a trust decision by
   itself — an attacker can sign their own certificate. Path validation is
   stage 2b-ii. ADR-0002's staging table records the split.
+- **Hand-rolled engine, stage 2b-ii: path building and RFC 5280 §6.1
+  validation** (rusty_tls#25). `handrolled::path` finds and validates a chain
+  from a peer's certificate to a trust anchor: name chaining, signatures at
+  every link, validity periods, `basicConstraints` `cA`, `keyUsage`
+  `keyCertSign`, `pathLenConstraint`, unhandled critical extensions, and the
+  end-entity certificate's extended key usage. Path search is bounded by both
+  depth and a total signature-verification budget, since the intermediates are
+  attacker-supplied.
 
+  **Still not a complete trust decision**: it does not check that the
+  certificate is valid for any particular name. Hostname and IP matching is
+  stage 2b-iii. Name constraints are also unimplemented, and are fail-closed
+  by construction — `nameConstraints` is critical, unknown critical extensions
+  are refused, so a name-constrained intermediate is rejected rather than
+  having its constraint ignored.
+
+### Changed
 ### Fixed
 - **An infinite loop in `handrolled::x509::ExtendedKeyUsage`'s iterator**,
   found by the new fuzzer. `Reader::read` does not consume a value whose tag
@@ -73,8 +89,7 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
   Reachable only with the `handrolled-engine` feature *and*
   `--cfg rusty_tls_handrolled`, so no released configuration was affected.
-### Changed
-### Fixed
+
 ### Security
 
 <!-- ## [0.1.0] - YYYY-MM-DD
