@@ -19,6 +19,73 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd`)
 
+### 0.22.0
+
+- **Added `platform::security::TrustAnchors`** (rustils#88) — the fourth
+  `security` slice, beside `Csprng`/`CredentialStore`/`Sandbox`. One
+  method, `load_anchors() -> Result<Vec<Vec<u8>>>`: the OS's root
+  certificates as raw DER. Implemented on all four backends
+  (`platform-linux`, `platform-bsd`, `platform-windows`,
+  `platform-mock`). New public trait, hence the `y` bump.
+
+  This is the "B1" slice `docs/design-discussion-tls.md` researched and
+  parked, gated in when `rusty_tls` decided to drop
+  `rustls-native-certs` and hand-roll anchor loading (rustils#70,
+  rusty_tls#24). It is deliberately the *only* TLS-adjacent thing that
+  will ever land here: it answers "where does this OS keep its roots and
+  how do I read the bytes" — OS personality — and never parses,
+  validates, or verifies anything. No chain building, no signature
+  checks, no ASN.1. Raw DER at the boundary, the §5.2 byte-oriented
+  instinct applied to certificates.
+
+  Contract, identical on every backend: per-anchor errors are tolerated
+  and skipped (real stores carry damaged entries; one must not cost the
+  caller the other several hundred); **zero usable anchors is
+  `ErrorKind::NotFound`, never `Ok(vec![])`** (an empty set would trust
+  nothing and fail every connection with a confusing per-connection
+  error); and every call re-reads, so a machine whose store just changed
+  doesn't keep serving the old set.
+
+  Mechanisms: Linux probes `SSL_CERT_FILE`, then `SSL_CERT_DIR`, then
+  the first existing distro bundle file, then the first existing distro
+  certificate directory — first match wins *exclusively*, never a union.
+  Bundle-before-directory is what lets one policy cover every distro
+  without special-casing: RHEL ships only a bundle, Debian ships both a
+  bundle and a directory of hashed symlinks over the same certificates,
+  so preferring the bundle reads one file instead of several hundred
+  symlinks and never double-loads. Windows enumerates the ROOT store
+  (`CertOpenSystemStoreW` + `CertEnumCertificatesInStore`). macOS uses
+  `SecTrustCopyAnchorCertificates`; the other BSDs use the same file
+  probing as Linux with BSD paths.
+
+  **Documented as best-effort, with three fidelity limits no
+  implementation can fix** — the same ones `rustls-native-certs` carries
+  industry-wide, and the same three `rusty_tls`'s own docs reproduce
+  independently: Windows' ROOT store is lazily populated so enumeration
+  can miss a root the chain engine would have fetched; macOS's one-call
+  anchor API returns built-in roots without per-domain trust settings;
+  and a flat DER list cannot express distrust at all, so a consumer can
+  accept a chain the OS itself would reject. The honest alternative —
+  the OS's own chain *verification* API — stays unoffered because Linux
+  has no counterpart, and a Linux backend would mean hand-rolling X.509
+  path validation: the cryptography this workspace refuses, through a
+  door labelled "narrow."
+
+- `platform-bsd` gained its first non-`net` surface (rustils#88). It also
+  gained its first non-`libc` FFI: `ffi::security_framework`, a curated
+  set of Security.framework/CoreFoundation externs, hand-declared
+  because `libc` doesn't cover Apple's frameworks and this workspace
+  takes no binding crate for them. Its doc comment records Core
+  Foundation's Create/Copy-vs-Get ownership rules, which every `unsafe`
+  block in the Darwin path cites by name.
+
+- `platform-bsd/tests/security_parity.rs` is new; the Linux and Windows
+  security parity suites grew a `TrustAnchors` section. All three copies
+  of `assert_trust_anchors_behavior` are textually identical, and this
+  is the third copy — the recorded follow-up to extract the shared
+  assertions into one crate is now due, on the same terms the net parity
+  suites already record.
+
 ### 0.21.0
 
 - **Renamed `platform-macos` → `platform-bsd`, widening its `cfg` gate

@@ -138,6 +138,17 @@ pub use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
 };
 
+// Security surface, TrustAnchors slice (rustils#88): enumerate the
+// system ROOT certificate store. `CertOpenSystemStoreW(NULL, "ROOT")`
+// opens it, `CertEnumCertificatesInStore` walks it (returning a borrowed
+// `CERT_CONTEXT` per call, NULL to end), `CertCloseStore` releases it.
+// `CERT_CONTEXT` is the struct whose `pbCertEncoded`/`cbCertEncoded`
+// carry the DER this slice hands back — read only, never interpreted
+// here (`platform::security::TrustAnchors`).
+pub use windows_sys::Win32::Security::Cryptography::{
+    CertCloseStore, CertEnumCertificatesInStore, CertOpenSystemStoreW, CERT_CONTEXT,
+};
+
 // Security surface, CredentialStore slice (RFC v2 R5+, D15, Phase 6 item
 // 2 — rustils#76): Windows' native secret store, Credential Manager.
 // `CredWriteW`/`CredReadW`/`CredFree` are the write/read/free triad;

@@ -26,7 +26,7 @@ pub use fs::MockDir;
 pub use net::MockNet;
 pub use process::MockSpawner;
 pub use pty::{MockPty, MockPtyMaster};
-pub use security::{MockCredentialStore, MockCsprng, MockSandbox};
+pub use security::{MockCredentialStore, MockCsprng, MockSandbox, MockTrustAnchors};
 pub use signals::MockSignalSource;
 pub use term::MockTerminal;
 pub use tun::{MockTun, MockTunDevice};

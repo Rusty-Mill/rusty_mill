@@ -110,5 +110,7 @@ pub mod ffi;
 pub mod sys;
 
 mod net;
+mod security;
 
 pub use net::{BsdNet, BsdTcpListener, BsdTcpStream, BsdUdpSocket, BsdUnixListener, BsdUnixStream};
+pub use security::BsdTrustAnchors;

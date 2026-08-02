@@ -32,7 +32,7 @@ pub use net::{
 };
 pub use process::{LinuxChild, LinuxSpawner};
 pub use pty::{LinuxPty, LinuxPtyMaster};
-pub use security::{LinuxCredentialStore, LinuxCsprng, LinuxSandbox};
+pub use security::{LinuxCredentialStore, LinuxCsprng, LinuxSandbox, LinuxTrustAnchors};
 pub use signals::LinuxSignalSource;
 pub use sys::identity::{group_name, user_name};
 pub use term::LinuxTerminal;

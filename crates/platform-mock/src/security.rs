@@ -12,7 +12,10 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use platform::error::Result;
-use platform::security::{CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus};
+use platform::error::{ErrorKind, OsCode, PlatformError};
+use platform::security::{
+    CredentialStore, CredentialStoreStatus, Csprng, Sandbox, SandboxStatus, TrustAnchors,
+};
 
 /// The mock backend's [`Csprng`] capability. Not thread-safe (`Cell`,
 /// like [`crate::net::MockTcpStream`]'s `read_timeout`) — this crate's
@@ -110,6 +113,84 @@ impl Sandbox for MockSandbox {
 
     fn block_inet_sockets(&self) -> Result<SandboxStatus> {
         Ok(SandboxStatus::Unsupported)
+    }
+}
+
+/// The mock backend's [`TrustAnchors`] capability (rustils#88): a
+/// faithful fake holding exactly the anchors the test put in it — like
+/// [`MockCredentialStore`] and unlike [`MockSandbox`]. "Here is a list of
+/// certificates" is genuinely fakeable without lying about a security
+/// property, because this trait makes no claim about *validity*: it only
+/// promises to hand back what the OS store holds, and a test store holds
+/// what the test says it does.
+///
+/// This exists so a TLS-using consumer can build a hermetic trust
+/// configuration — pin a throwaway test CA as the entire anchor set, with
+/// no dependence on whatever the developer's machine happens to trust.
+/// That is the whole reason the B1 slice landed here rather than in the
+/// consumer (`docs/design-discussion-tls.md`).
+///
+/// [`Default`] is deliberately **not** an empty store: an empty one fails
+/// closed (see [`TrustAnchors::load_anchors`]), so a test that forgot to
+/// configure anchors would hit a confusing `NotFound` rather than the
+/// working default every other mock here provides. `new()` seeds one
+/// syntactically-plausible anchor; use [`MockTrustAnchors::empty`] when
+/// the fail-closed path is what's under test.
+pub struct MockTrustAnchors {
+    anchors: RefCell<Vec<Vec<u8>>>,
+}
+
+impl Default for MockTrustAnchors {
+    fn default() -> Self {
+        // A DER SEQUENCE header over a short body: enough that a consumer
+        // checking "did I get bytes shaped like a certificate" sees the
+        // 0x30 tag real anchors start with, without pretending to be a
+        // certificate any verifier would accept.
+        Self {
+            anchors: RefCell::new(vec![vec![0x30, 0x82, 0x01, 0x0a]]),
+        }
+    }
+}
+
+impl MockTrustAnchors {
+    /// A store holding one placeholder anchor — the working default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A store holding exactly `anchors`.
+    pub fn with_anchors(anchors: Vec<Vec<u8>>) -> Self {
+        Self {
+            anchors: RefCell::new(anchors),
+        }
+    }
+
+    /// A store holding nothing, so [`TrustAnchors::load_anchors`] takes
+    /// its fail-closed path. For testing a consumer's behavior on a
+    /// machine with no readable trust store.
+    pub fn empty() -> Self {
+        Self::with_anchors(Vec::new())
+    }
+
+    /// Replace the stored anchor set.
+    pub fn set_anchors(&self, anchors: Vec<Vec<u8>>) {
+        *self.anchors.borrow_mut() = anchors;
+    }
+}
+
+impl TrustAnchors for MockTrustAnchors {
+    fn load_anchors(&self) -> Result<Vec<Vec<u8>>> {
+        let anchors = self.anchors.borrow().clone();
+        if anchors.is_empty() {
+            // Same contract as every real backend: zero anchors is an
+            // error, never `Ok(vec![])`.
+            return Err(PlatformError::new(
+                ErrorKind::NotFound,
+                OsCode::None,
+                "mock trust store is empty",
+            ));
+        }
+        Ok(anchors)
     }
 }
 
