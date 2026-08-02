@@ -806,3 +806,99 @@ fn one_bad_name_does_not_hide_the_others() {
     assert!(results[1].is_err());
     assert!(results[2].is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Iterator termination
+// ---------------------------------------------------------------------------
+
+/// Regression test for a hang found by `handrolled_fuzz.rs`.
+///
+/// `Reader::read` deliberately does *not* consume a value whose tag is wrong
+/// — that is what makes `OPTIONAL` fields work. The `extendedKeyUsage`
+/// iterator called it in a loop, so a `SEQUENCE OF KeyPurposeId` containing
+/// anything that is not an `OBJECT IDENTIFIER` produced the same error
+/// forever and the iterator never returned `None`.
+///
+/// It parsed. It did not panic. It never came back — a denial of service
+/// reachable from any certificate a peer chooses to send, and invisible to
+/// all fifty hand-written tests that shipped alongside it.
+#[test]
+fn a_non_oid_in_extended_key_usage_terminates_the_iterator() {
+    let eku = extension(
+        &[0x55, 0x1d, 0x25],
+        false,
+        &seq(&[&tlv(0x02, &[0x01])]), // an INTEGER where a KeyPurposeId belongs
+    );
+    let der = CertBuilder {
+        extensions: Some(vec![eku]),
+        ..Default::default()
+    }
+    .build();
+
+    let cert = Certificate::parse(&der).expect("the certificate itself is well-formed");
+    let purposes: Vec<_> = cert.extensions().extended_key_usage().collect();
+
+    assert_eq!(purposes.len(), 1, "the iterator must yield the error once");
+    assert!(purposes[0].is_err());
+    // And stay finished.
+    assert_eq!(cert.extensions().extended_key_usage().count(), 1);
+}
+
+/// A valid OID followed by a non-OID: the good entry is still delivered, and
+/// the iterator still terminates.
+#[test]
+fn extended_key_usage_stops_after_a_non_oid_without_losing_earlier_entries() {
+    let eku = extension(
+        &[0x55, 0x1d, 0x25],
+        false,
+        &seq(&[
+            &tlv(0x06, &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01]),
+            &tlv(0x02, &[0x01]),
+            &tlv(0x06, &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02]),
+        ]),
+    );
+    let der = CertBuilder {
+        extensions: Some(vec![eku]),
+        ..Default::default()
+    }
+    .build();
+
+    let cert = Certificate::parse(&der).expect("parses");
+    let purposes: Vec<_> = cert.extensions().extended_key_usage().collect();
+
+    assert_eq!(
+        purposes.len(),
+        2,
+        "serverAuth, then the error that stops it"
+    );
+    assert!(purposes[0].is_ok());
+    assert!(purposes[1].is_err());
+}
+
+/// The same guarantee for `subjectAltName`, which shares the shape even
+/// though its reads happen to consume on the paths the fuzzer reached.
+#[test]
+fn the_subject_alt_name_iterator_always_terminates() {
+    for contents in [
+        vec![0x1f, 0x81, 0x00],       // high-tag-number form
+        vec![0x82, 0x80],             // indefinite length
+        vec![0x82, 0x81, 0x01, 0x61], // non-minimal length
+        vec![0x82],                   // truncated header
+    ] {
+        let san = extension(&[0x55, 0x1d, 0x11], false, &seq(&[&contents]));
+        let der = CertBuilder {
+            extensions: Some(vec![san]),
+            ..Default::default()
+        }
+        .build();
+
+        let Ok(cert) = Certificate::parse(&der) else {
+            continue;
+        };
+        // `count()` runs the iterator to exhaustion: if it does not terminate,
+        // this test hangs rather than failing, which the harness timeout
+        // surfaces.
+        let seen = cert.extensions().subject_alt_names().count();
+        assert!(seen <= 4, "unexpectedly many names from {contents:02x?}");
+    }
+}

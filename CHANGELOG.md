@@ -40,6 +40,28 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   **This validates nothing** — no signature check, no clock, no chain, no
   name matching. That is stage 2b, which does not exist yet. ADR-0002's
   staging table is updated to record the split and why.
+- **Fuzzing for both hand-rolled parsers.** `tests/handrolled_fuzz.rs` runs on
+  every pull request on stable: a deterministic, seeded fuzzer that mutates
+  the machine's real trust anchors rather than generating random noise, and
+  asserts canonicality (anything the DER reader accepts must re-encode to
+  exactly the accepted bytes), field provenance, determinism, and termination.
+  It measures its own reach and fails if too few mutants get past the outer
+  framing, so it cannot silently degrade into testing nothing.
+  `fuzz/` adds coverage-guided libFuzzer targets for deliberate longer runs
+  (nightly; 7.1M executions clean at the time of landing).
+
+### Fixed
+- **An infinite loop in `handrolled::x509::ExtendedKeyUsage`'s iterator**,
+  found by the new fuzzer. `Reader::read` does not consume a value whose tag
+  is wrong — that is what makes `OPTIONAL` fields work — so an
+  `extendedKeyUsage` extension containing anything that is not an `OBJECT
+  IDENTIFIER` yielded the same error forever and the iterator never returned
+  `None`. A denial of service reachable from any certificate a peer sends.
+  Both this iterator and `GeneralNames` now stop when a failed read leaves the
+  cursor where it was. Regression tests added.
+
+  Reachable only with the `handrolled-engine` feature *and*
+  `--cfg rusty_tls_handrolled`, so no released configuration was affected.
 ### Changed
 ### Fixed
 ### Security

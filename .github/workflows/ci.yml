@@ -79,7 +79,8 @@ jobs:
                    handrolled_record_rejection \
                    handrolled_x509_parse \
                    handrolled_x509_rejection \
-                   handrolled_x509_corpus; do
+                   handrolled_x509_corpus \
+                   handrolled_fuzz; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
             echo "$t: $n tests"

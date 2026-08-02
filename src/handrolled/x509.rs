@@ -338,6 +338,7 @@ impl<'a> Extensions<'a> {
     pub fn subject_alt_names(&self) -> GeneralNames<'a> {
         GeneralNames {
             reader: Reader::new(self.subject_alt_name.unwrap_or(&[])),
+            stopped: false,
         }
     }
 
@@ -351,6 +352,7 @@ impl<'a> Extensions<'a> {
     pub fn extended_key_usage(&self) -> ExtendedKeyUsage<'a> {
         ExtendedKeyUsage {
             reader: Reader::new(self.extended_key_usage.unwrap_or(&[])),
+            stopped: false,
         }
     }
 
@@ -380,16 +382,27 @@ impl<'a> Extensions<'a> {
 #[derive(Clone, Debug)]
 pub struct GeneralNames<'a> {
     reader: Reader<'a>,
+    stopped: bool,
 }
 
 impl<'a> Iterator for GeneralNames<'a> {
     type Item = Result<GeneralName<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.reader.is_empty() {
+        if self.stopped || self.reader.is_empty() {
             return None;
         }
-        Some(self.read_one())
+        let before = self.reader.remaining();
+        let item = self.read_one();
+        // Some errors leave the cursor exactly where it was — a wrong tag is
+        // deliberately not consumed, so that `OPTIONAL` fields work. Yielding
+        // that error and going round again would yield it forever. Attacker
+        // input decides which error this is, so termination cannot rest on
+        // which ones happen to advance.
+        if item.is_err() && self.reader.remaining() == before {
+            self.stopped = true;
+        }
+        Some(item)
     }
 }
 
@@ -425,16 +438,25 @@ fn ia5(bytes: &[u8]) -> Result<&str> {
 #[derive(Clone, Debug)]
 pub struct ExtendedKeyUsage<'a> {
     reader: Reader<'a>,
+    stopped: bool,
 }
 
 impl<'a> Iterator for ExtendedKeyUsage<'a> {
     type Item = Result<ObjectIdentifier<'a>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.reader.is_empty() {
+        if self.stopped || self.reader.is_empty() {
             return None;
         }
-        Some(self.reader.read_oid().map_err(X509Error::from))
+        let before = self.reader.remaining();
+        let item = self.reader.read_oid().map_err(X509Error::from);
+        // See `GeneralNames::next`: a value whose tag is not `OBJECT
+        // IDENTIFIER` is left unconsumed, so without this the iterator spins
+        // on it forever. This is the bug the fuzzer found.
+        if item.is_err() && self.reader.remaining() == before {
+            self.stopped = true;
+        }
+        Some(item)
     }
 }
 
