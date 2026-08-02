@@ -23,6 +23,31 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Wire protocol integration started: message encoding on `rusty_wire`
+**2026-08-02**
+
+- **Added:** `rusty_wire` as a pinned `git` dependency (unpublished, same
+  reasoning and pattern as `rusty_tokio` — checked crates.io first, not
+  there). `rusty_wire` turned out to be a minimal byte-cursor `Reader`/
+  `Writer` utility, not a pre-made protocol — ADR-0002 D1's "extend
+  `rusty_wire`" means build `rusty_stream`'s own protocol on its primitives,
+  which is what this does.
+- **Added:** `src/protocol.rs` — `Request` (`Produce`/`Fetch`) and
+  `Response` (`Produced`/`Fetched`/`Error`) encode/decode, matching Phase
+  1's actual storage surface (`Log`/`Segment`). Pure and synchronous, same
+  "testable without a runtime" shape as `record.rs`. `frame`/`frame_len` for
+  the length-prefix a real socket layer will need.
+- 12 new tests (38 total): every message type round-trips, plus the same
+  "malformed input reports a typed error, never panics" rigor as `record.rs`
+  — truncated messages, an unknown opcode/status byte, invalid UTF-8 in an
+  error message.
+- **Known limitation, stated plainly — this is a start, not the
+  integration:** nothing here is wired to a socket. No `rusty_tokio`
+  listener, no connection loop decoding a `Request` off the wire,
+  dispatching it to a real `Log`, and encoding the `Response` back. That's
+  the next real step — `protocol.rs` existing doesn't imply it's done, and
+  the module's own docs say so directly rather than leaving it implied.
+
 ## Consumer offset tracking: `ConsumerOffsets`, built on `Segment` directly
 **2026-08-02**
 

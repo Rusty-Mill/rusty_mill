@@ -118,6 +118,7 @@ name = "rusty_stream"
 version = "0.1.0"
 dependencies = [
  "rusty_tokio",
+ "rusty_wire",
 ]
 
 [[package]]
@@ -151,6 +152,11 @@ dependencies = [
 name = "rusty_win32"
 version = "0.1.0"
 source = "git+https://github.com/baileyrd/rusty_win32?rev=a128d758c7c5683b908a48eb84d0b0e4308fc586#a128d758c7c5683b908a48eb84d0b0e4308fc586"
+
+[[package]]
+name = "rusty_wire"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_wire?rev=4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b#4f72aa50bd28b965ae44c9bb0d7df72f014ebe0b"
 
 [[package]]
 name = "syn"
