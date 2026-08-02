@@ -1,0 +1,17 @@
+[package]
+name = "rusty_stream"
+version = "0.1.0"
+edition = "2021"
+description = "Single-node durable log for RustyMill, built on rusty_wire and rusty_tokio."
+publish = false
+
+[dependencies]
+# Pinned to the exact commit verified in ADR-0002 D3 (thread-per-core +
+# io-uring-fs both built, tested, straced, and ASAN-checked in that ADR) --
+# not a branch reference, so a future rusty_tokio change can't silently
+# change what this crate builds against. Bump deliberately, re-verify the
+# same way.
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "5a97dfa246e82173e0a122fe126c3dea9b9618c2", features = [
+    "thread-per-core",
+    "io-uring-fs",
+] }
