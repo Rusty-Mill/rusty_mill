@@ -22,6 +22,45 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Load OS trust anchors via `platform`, not `rustls-native-certs`
+**2026-08-02**
+
+- **Changed:** `TrustPolicy::System` now reads OS trust anchors through
+  [`platform::security::TrustAnchors`](https://github.com/baileyrd/rustils)
+  instead of `rustls-native-certs` (rusty_tls#24). No API change, no
+  contract change — same best-effort anchor set, same three documented
+  fidelity limits, same fail-closed-on-zero behavior. Reading a trust
+  store is the one part of the TLS problem that is pure OS personality
+  rather than cryptography, so it moved to the crate this ecosystem
+  keeps OS personality in. Background: rustils' `design-discussion-tls.md`
+  ("B1 reopened") and rustils#88, which built the slice for this.
+- **Removed:** the `rustls-native-certs` dependency. Added `platform`
+  plus exactly one backend per target (`platform-linux` /
+  `platform-windows` / `platform-bsd`), all rev-pinned.
+- **Added:** `tests/system_trust.rs` — the first test `TrustPolicy::System`
+  has ever had. It stages a self-generated CA as the OS trust store via
+  `SSL_CERT_FILE` and asserts three things end-to-end: a leaf from that CA
+  verifies, a leaf from *any other* CA is rejected (proving the staged set
+  is the only one in play, so the happy path isn't passing by falling back
+  to the machine's real store), and an `SSL_CERT_FILE` naming no usable
+  certificate fails closed rather than silently falling back. Verified to
+  fail when the implementation is deliberately broken, so it isn't passing
+  vacuously. Linux/BSD only — Windows and macOS don't honor
+  `SSL_CERT_FILE`, so no hermetic anchor set can be staged for them here;
+  their backends are covered by rustils' own parity suite on real runners.
+- **Fixed:** `rusty_tokio` was a `path = "../rusty_tokio"` dependency, so
+  `cargo metadata` failed in any fresh clone and CI had been red since
+  `22c30a3`. Now the rev-pinned git dependency its own comment already
+  claimed it was.
+- **Known limitation:** with `--all-features`, two versions of `platform`
+  build side by side — `rusty_tokio`'s pin resolves to an older rustils
+  commit than this crate's. Harmless today (no `platform` type crosses
+  between them) but wasteful, and it would become a real type mismatch if
+  one ever did. Fix belongs in `rusty_tokio`: bump its rustils pin to
+  match.
+
+---
+
 ## Add CRL-based revocation checking to `TrustPolicy`
 **2026-07-23**
 

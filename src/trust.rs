@@ -20,10 +20,17 @@ use crate::error::Error;
 #[derive(Debug, Clone, Default)]
 pub enum TrustPolicy {
     /// Verify against the operating system's trust anchors, loaded via
-    /// [`rustls-native-certs`](https://docs.rs/rustls-native-certs) (Windows'
-    /// ROOT store, macOS's Security.framework/keychain, or Linux's
-    /// distro-specific bundle file/directory, honoring `SSL_CERT_FILE` and
-    /// `SSL_CERT_DIR` first if either is set).
+    /// [`platform::security::TrustAnchors`] — Windows' ROOT store, macOS's
+    /// Security.framework, or a PEM bundle on Linux and the other BSDs
+    /// (honoring `SSL_CERT_FILE` and `SSL_CERT_DIR` first if either is
+    /// set).
+    ///
+    /// That loading used to be `rustls-native-certs`; it moved to
+    /// `platform` in rusty_tls#24. Reading a trust store is the one part
+    /// of the TLS problem that is pure OS personality rather than
+    /// cryptography, so it belongs in the crate this ecosystem keeps OS
+    /// personality in — see rustils' `docs/design-discussion-tls.md`.
+    /// Nothing about the contract below changed with it.
     ///
     /// **This is a best-effort anchor set, on every platform.** Windows'
     /// ROOT store is lazily populated (enumeration can miss roots the chain
@@ -76,6 +83,69 @@ pub enum TrustPolicy {
     },
 }
 
+/// Load the OS trust anchors as raw DER, from whichever `platform`
+/// backend matches this target.
+///
+/// One `cfg` arm per backend, mirroring rustils' own `platform-bsd` gate
+/// for the BSD arm. The trait is identical across all of them — only the
+/// mechanism behind it differs (registry store, framework call, file
+/// probing), which is exactly the difference this crate is buying by
+/// delegating rather than implementing (rusty_tls#24).
+///
+/// `platform` distinguishes "this host has no readable trust store" from
+/// "the store is empty" and reports the former as
+/// [`ErrorKind::NotFound`]; both collapse to [`Error::NoTrustAnchors`]
+/// here, because from a caller's perspective they are the same
+/// refuse-to-connect outcome and the distinction has no remedy at this
+/// layer.
+///
+/// [`ErrorKind::NotFound`]: platform::error::ErrorKind::NotFound
+fn system_anchors() -> Result<Vec<Vec<u8>>, Error> {
+    use platform::security::TrustAnchors;
+
+    #[cfg(target_os = "linux")]
+    let backend = platform_linux::LinuxTrustAnchors;
+    #[cfg(windows)]
+    let backend = platform_windows::WindowsTrustAnchors;
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    let backend = platform_bsd::BsdTrustAnchors;
+
+    // No backend for this target. `rustls-native-certs` degraded the same
+    // way here (an empty anchor set, then a refused connection); this
+    // reaches the identical outcome one step earlier and with a clearer
+    // error. Deliberately not a `compile_error!`: every other
+    // `TrustPolicy` variant still works on such a target, and refusing to
+    // build the whole crate over the one variant that can't would be a
+    // larger break than the gap warrants.
+    #[cfg(not(any(
+        target_os = "linux",
+        windows,
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    )))]
+    return Err(Error::NoTrustAnchors);
+
+    #[cfg(any(
+        target_os = "linux",
+        windows,
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    backend.load_anchors().map_err(|_| Error::NoTrustAnchors)
+}
+
 /// The part of building a `ClientConfig` that's identical whether the
 /// caller ends up presenting a client certificate or not: deciding how to
 /// verify the *server's* certificate, per `policy`. Shared by
@@ -86,12 +156,13 @@ fn client_config_builder(
 ) -> Result<ConfigBuilder<ClientConfig, WantsClientCert>, Error> {
     Ok(match policy {
         TrustPolicy::System => {
-            let loaded = rustls_native_certs::load_native_certs();
             let mut roots = RootCertStore::empty();
-            for cert in loaded.certs {
+            for der in system_anchors()? {
                 // Best-effort per the type's documentation: a handful of
                 // unparseable anchors in an OS store is normal, not fatal.
-                let _ = roots.add(cert);
+                // `platform` already skips what it cannot read; this skips
+                // what rustls will not accept.
+                let _ = roots.add(CertificateDer::from(der));
             }
             if roots.is_empty() {
                 return Err(Error::NoTrustAnchors);
