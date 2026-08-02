@@ -22,6 +22,37 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 2b-ii: path building and validation
+**2026-08-02**
+
+- **Added:** `handrolled::path` (rusty_tls#25) — certification path building
+  and RFC 5280 §6.1 validation. Finds a chain from a peer's certificate to a
+  trust anchor and checks name chaining, every signature in the path, validity
+  periods, `basicConstraints` `cA`, `keyUsage` `keyCertSign`,
+  `pathLenConstraint`, unhandled critical extensions, and the end-entity
+  certificate's extended key usage.
+- **Added:** hard bounds on the path search — depth and a total
+  signature-verification budget — because the intermediates are supplied by
+  the peer and an unbounded search over them is a denial of service that has
+  hit real libraries.
+- **Known limitation, stated plainly:** this is not yet a complete trust
+  decision. It does not check that a certificate is valid for any particular
+  name, so on its own it would accept any certificate from any public CA for
+  any site. Hostname and IP matching is stage 2b-iii.
+- **Known limitation, stated plainly:** name constraints are not implemented.
+  This is fail-closed by construction rather than by luck — `nameConstraints`
+  MUST be critical, unknown critical extensions are refused, so a
+  name-constrained intermediate is rejected rather than having its constraint
+  ignored. The cost is that chains through such intermediates are refused. The
+  fix is to implement name constraints, not to relax the critical-extension
+  rule, and a test is named for that dependency.
+- **Measured, not assumed:** webpki does not enforce RFC 5280 §6.1.4(n) — an
+  intermediate marked `cA` whose `keyUsage` omits `keyCertSign` is accepted by
+  rustls and refused here. One of three places this crate is deliberately
+  stricter than the differential oracle.
+
+---
+
 ## Hand-rolled TLS engine, stage 2b-i: certificate signature verification
 **2026-08-02**
 
