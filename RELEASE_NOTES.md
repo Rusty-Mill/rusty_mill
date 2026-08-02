@@ -23,6 +23,38 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## A real standalone server binary
+**2026-08-02**
+
+- **Added:** `src/main.rs` — `rusty_stream` is now something you can
+  actually run, not just a library exercised by tests. Wires
+  `rusty_tokio::io::uring_global_driver()` (the real, production
+  `Arc<dyn OpDriver>` — not `SimDriver`) to a real `Log`/`ConsumerOffsets`
+  and `server::serve` over a real bound `TcpListener`. Configuration is
+  two environment variables (`RUSTY_STREAM_ADDR`, `RUSTY_STREAM_DATA_DIR`),
+  both optional with sane defaults. Recovers an existing log/consumer
+  offsets under `RUSTY_STREAM_DATA_DIR` on startup if one exists (falling
+  back to creating fresh ones), and `Ctrl-C` triggers `serve`'s graceful
+  shutdown rather than a hard kill.
+- **Changed:** bumped the pinned `rusty_tokio` rev to pick up
+  [`baileyrd/rusty_tokio#256`](https://github.com/baileyrd/rusty_tokio/issues/256)'s
+  fix (`uring_global_driver` made public) — this is the whole reason a
+  standalone binary is possible now. Every existing test still passes
+  unmodified against the bumped rev.
+- **Verified manually, end to end, against the real binary** (not just
+  `cargo test`): started the server, ran the sample `deft-data-sharing-sample`
+  repo's real `app-a`/`app-b`/`app-c` binaries against it over a real
+  socket (produce, two independent consumers each seeing all 5 events),
+  sent `SIGINT` and confirmed the graceful-shutdown log line and a clean
+  process exit, then restarted against the same data directory and
+  confirmed both the log's records and each consumer's committed progress
+  survived — a real crash-recovery proof, not just the `SimDriver`-backed
+  version `retention.rs`'s/`consumer.rs`'s own tests already covered.
+- **Known limitations, stated plainly:** retention policy
+  (`max_segment_bytes: 128 MiB`, no size/age limits) is a fixed default,
+  not yet configurable via environment variable or config file. No
+  structured logging (plain `println!`). No metrics/health endpoint.
+
 ## Graceful shutdown on the server
 **2026-08-02**
 
