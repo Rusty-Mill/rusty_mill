@@ -48,8 +48,11 @@ one artifact to ship and no team/language boundary to split across:
   through it. Its one stage so far is `handrolled::record`, a TLS 1.3 record
   layer (RFC 8446 §5) tested three ways: byte-identical differential output
   against rustls' own `MessageEncrypter`, RFC 8448 known-answer vectors (the
-  only oracle independent of rustls), and a rejection suite. See
-  [Non-goals](#non-goals) and ADR-0002.
+  only oracle independent of rustls), and a rejection suite. Stage 2a adds
+  `handrolled::der` (a strict DER reader) and `handrolled::x509` (certificate
+  parsing) — **parsing only**: they report what a certificate says and decide
+  nothing about whether to believe it, which is stage 2b and does not exist.
+  See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

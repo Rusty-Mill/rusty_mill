@@ -58,6 +58,19 @@ ring = { version = "0.17", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 
+# Mirrors of the above, so the trust-anchor corpus test can reach the OS store
+# the same way the library does. Same crates, same pins — a dev-dependency on
+# a crate that is already a dependency adds an edge for the test target, not a
+# second copy in the graph.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+
+[target.'cfg(windows)'.dev-dependencies]
+platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+
+[target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dev-dependencies]
+platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+
 [target.'cfg(windows)'.dependencies]
 platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 
@@ -96,6 +109,22 @@ rcgen = "0.13"
 # custom validity window — rcgen depends on `time` itself but doesn't
 # re-export it. Dev-only.
 time = "0.3"
+# The hand-rolled X.509 parser's tests verify a certificate's own signature
+# from the parser's own outputs (tbs bytes + public key + signature), which is
+# the one assertion that ties parsing back to a cryptographic fact. `ring` is
+# already a dependency behind `handrolled-engine`; this makes it available to
+# the test target unconditionally so the test file compiles under the same
+# gate as the module it tests. Dev-only.
+ring = "0.17"
+# The corpus test parses the machine's real OS trust anchors, which is the
+# only coverage in this crate made of certificates nobody here generated —
+# real roots carry RSA keys, v1 structures, GeneralizedTime dates, 20-octet
+# serials, and extensions the hand-rolled parser has never seen. A strict
+# parser's real risk is being strict about the wrong thing, and no
+# hand-written rejection test can find that; only certificates that already
+# exist can. Reached exactly the way `src/trust.rs` reaches them, rather than
+# by reimplementing store discovery in a test.
+platform = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 
 [lints.rust]
 unsafe_code = "forbid"
