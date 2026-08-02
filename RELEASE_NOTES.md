@@ -23,6 +23,42 @@ reverse chronological, each linking to its PR once one exists.
 
 ---
 
+## Retention module: segment rolling, size/time-based deletion, `Clock` seam
+**2026-08-02**
+
+- **Added:** `src/retention.rs`'s `Log` — owns a sequence of `Segment`s in
+  one directory, rolls to a new one once the active segment would cross
+  `RetentionPolicy::max_segment_bytes`, and deletes closed segments via
+  `Log::enforce_retention` by size (`max_total_bytes`) or age
+  (`max_segment_age_millis`) — oldest first, active segment never touched.
+  A retiring segment is synced as part of the roll itself, not left to the
+  caller, so a crash right after a roll can't lose records this process
+  already considered safely closed.
+- **Added:** `src/clock.rs`'s `Clock` trait, `SystemClock` (real),
+  `SimClock` (deterministic, manually advanced) — the same
+  real/simulated pairing `rusty_tokio::io::OpDriver`/`SimDriver` already
+  established, applied to time so retention age checks are provable without
+  a test actually sleeping. Unlike `OpDriver`, this is `rusty_stream`'s own
+  trait — `rusty_tokio` has no clock abstraction to build on.
+- **Added:** `Segment::byte_len()` — what `Log` uses to decide when to roll.
+- 7 new tests (21 total), including: crossing the size threshold actually
+  rolls; size-based retention deletes the right segment and only that one;
+  time-based retention leaves a segment alone until the simulated clock
+  actually crosses the age window, then deletes it; and a full
+  create-append-roll-crash-reopen cycle recovers both the closed and active
+  segment correctly.
+- **Known limitation, stated plainly:** `Log::open` recovers from an
+  explicit list of segment base offsets, not directory scanning —
+  `rusty_tokio::io::OpDriver` has no directory-listing operation at all
+  (`SimDriver` only knows paths it's been told about), so this is a real
+  constraint, not a shortcut. In practice this means a manifest of which
+  segments exist needs to be persisted somewhere before a real
+  restart-and-recover path works — not built in this pass. Recovered closed
+  segments also don't have a real creation timestamp yet (not persisted
+  anywhere on disk), so time-based retention is only accurate within a
+  single process's uptime, not across a restart, until segment creation
+  time gets added to the on-disk header alongside epoch/base_offset.
+
 ## Cargo project scaffolded: first real `Segment` storage code lands
 **2026-08-02**
 

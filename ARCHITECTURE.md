@@ -18,6 +18,7 @@ deliberate rather than reflexive consensus choice for Phase 2).
 | `rusty_tokio::io::OpDriver` | `IoUringDriver` (real, production), `SimDriver` (deterministic, seeded fault injection) | Not our own trait — `segment::Segment` builds directly on `rusty_tokio`'s seam (ADR-0002 D3/D4) rather than a parallel hand-rolled one. Swapped at the call site (`Segment::create_on`/`open_on` take `Arc<dyn OpDriver>`), not via config. |
 | `record::{encode, decode}` | pure functions, no I/O | The framing/checksum boundary — deliberately synchronous and driver-independent so it's unit-testable without any runtime at all (see `record.rs`'s own tests). |
 | `offset::{DurableOffset, CommittedOffset, Epoch}` | — (value types, no adapter) | The ADR-0002 D2 primitives a future consensus layer attaches to; `segment::Segment` is the only thing that currently produces/consumes them. |
+| `clock::Clock` | `SystemClock` (real, production), `SimClock` (deterministic, manually advanced) | Exists for the same reason `OpDriver` does — `retention::Log`'s time-based retention has to be provable without a test actually sleeping. Our own trait (unlike `OpDriver`): `rusty_tokio` has no clock abstraction to build on here. |
 
 ## Structure
 <!-- Greenfield default (see references/scan-and-defaults.md): modular monolith,
@@ -40,6 +41,17 @@ to decode — a torn write or a checksum mismatch — rather than serving a part
 or corrupt record. This is exercised directly by `segment.rs`'s own tests against
 `SimDriver`'s fault injection (torn writes, lying `fsync`, crash-and-reopen),
 matching ADR-0002 D4's three minimal DST scenarios.
+
+`retention::Log` owns a sequence of `Segment`s and drives the same flow across
+more than one: `Log::append` rolls to a new segment once the active one would
+cross `RetentionPolicy::max_segment_bytes`, syncing the retired segment before
+it's ever read from again (so a crash right after a roll can't lose records this
+process already considered safely closed). `Log::enforce_retention` then deletes
+closed segments by size (`max_total_bytes`) or age (`max_segment_age_millis`,
+via `Clock`) — oldest first, active segment never touched. `Log::open` recovers
+from an explicit list of segment base offsets rather than scanning the
+directory, because `OpDriver` has no directory-listing operation at all (see
+`retention.rs`'s own docs for the manifest-persistence gap this leaves open).
 
 ## Key decisions
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their tradeoffs.

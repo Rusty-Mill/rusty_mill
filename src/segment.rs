@@ -166,6 +166,13 @@ impl Segment {
         self.len() == 0
     }
 
+    /// This segment file's current size in bytes (header included) — what
+    /// `retention::Log` uses to decide when to roll to a new segment and
+    /// how much space closed segments are holding.
+    pub fn byte_len(&self) -> u64 {
+        self.write_pos
+    }
+
     /// Appends `payload` as a new record. Does **not** fsync — call
     /// [`sync`](Self::sync) explicitly, per whatever fsync policy the
     /// caller wants (`docs/phase1-scope.md` §2: "WAL-durable, fsync policy
