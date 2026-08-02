@@ -76,7 +76,10 @@ jobs:
         run: |
           for t in handrolled_record_kat \
                    handrolled_record_differential \
-                   handrolled_record_rejection; do
+                   handrolled_record_rejection \
+                   handrolled_x509_parse \
+                   handrolled_x509_rejection \
+                   handrolled_x509_corpus; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
             echo "$t: $n tests"

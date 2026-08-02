@@ -100,10 +100,25 @@ independently abandonable:
 | Stage | Scope | Status |
 | --- | --- | --- |
 | 1 | TLS 1.3 record layer — AEAD framing over an established connection | **landed** |
-| 2 | X.509 chain validation — DER parsing, signatures, expiry, name constraints, EKU | not started |
+| 2a | DER decoding and X.509 certificate parsing | **landed** |
+| 2b | Path validation — signatures up the chain, expiry, name constraints, EKU, name matching | not started |
 | 3 | TLS 1.3 handshake, client side — key schedule, X25519, transcript, Finished | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
+
+Stage 2 is split because the original single row was two units of work with
+different risk profiles. Bundling them would have meant landing a validator
+together with the parser it depends on, with no opportunity to be wrong about
+only one of them. 2a takes hostile input and decides nothing; 2b decides
+everything and takes only what 2a produced. They fail differently and are
+worth reviewing separately.
+
+The split draws a line that then has to stay drawn: **2a validates nothing**.
+A parsed certificate is an attacker-supplied document that has been given
+structure, and `Certificate::parse` returning `Ok` is not evidence for
+anything the certificate claims. Until 2b exists there is no trust decision
+available from that module at all — which its own documentation says at the
+top, because this is precisely the distinction that gets lost.
 
 A stage "ships" only when it meets the bar in §5. A stage that cannot meet the
 bar does not land behind the flag either — the flag is not a place to park

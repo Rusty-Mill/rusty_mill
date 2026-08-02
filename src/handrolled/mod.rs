@@ -22,9 +22,14 @@
 //!
 //! - [`record`] — the TLS 1.3 record layer (stage 1): AEAD protection and
 //!   framing for an already-established connection.
+//! - [`der`] — a strict DER reader (stage 2a), the foundation everything
+//!   certificate-shaped sits on.
+//! - [`x509`] — certificate parsing (stage 2a). **Parsing only**: it reports
+//!   what a certificate says and decides nothing about whether to believe it.
 //!
-//! Stages 2–5 (X.509 validation, the 1.3 handshake, TLS 1.2, the server side)
-//! are not built. The ADR carries the order and the bar each must clear.
+//! Path validation (stage 2b), the 1.3 handshake (3), TLS 1.2 (4), and the
+//! server side (5) are not built. The ADR carries the order and the bar each
+//! must clear.
 //!
 //! # What is deliberately *not* here
 //!
@@ -33,4 +38,6 @@
 //! correctness property — constant-time execution — that none of this
 //! module's testing strategy can see.
 
+pub mod der;
 pub mod record;
+pub mod x509;
