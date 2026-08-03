@@ -196,6 +196,22 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
   Still behind both gates, and `rustls` remains the engine behind every
   exported type. Nothing in the public API routes through this.
+- **Hand-rolled engine, stage 5: the TLS 1.3 server** (rusty_tls#25).
+  `handrolled::sign` produces handshake signatures — the first thing in the
+  module that holds a private key rather than only checking one — and
+  `handrolled::server` is the sans-IO server handshake, the mirror of
+  `handrolled::client`. A real `rustls` client completes handshakes against it
+  with ECDSA P-256, P-384, and Ed25519 server keys.
+
+  Not supported, and refused rather than half-built: client certificates,
+  session resumption, tickets, 0-RTT, TLS 1.2, and HelloRetryRequest
+  generation.
+- **Fixed:** the client did not check that a ServerHello echoed the
+  `legacy_session_id` it sent, which RFC 8446 §4.1.3 requires. Found by
+  mutating the *server* and watching this crate's own client accept the result.
+- **Fixed:** the client's HelloRetryRequest path built a second ClientHello
+  with a fresh `random` and session id. RFC 8446 §4.1.2 enumerates what a
+  retried hello may change and neither is on the list.
 - **Hand-rolled engine, stage 4a: the version boundary** (rusty_tls#25). The
   client now parses TLS alerts wherever they can arrive — in the clear before
   the ServerHello, inside the protected flight, and after the handshake — and

@@ -699,3 +699,84 @@ fn a_key_with_malformed_parameters_is_refused() {
         "an EC key with no curve named was accepted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Signing — stage 5
+// ---------------------------------------------------------------------------
+
+/// An RSA signing key uses the padding the scheme names, not always the first
+/// one.
+///
+/// This exists because a mutation collapsing all three `rsa_pss_rsae_*`
+/// schemes onto SHA-256 padding survived the server suite — which has no RSA
+/// key at all, because `rcgen` with the `ring` backend cannot generate one.
+/// The embedded key in this file can, so the test belongs here rather than
+/// where the gap was found.
+#[test]
+fn an_rsa_signing_key_uses_the_padding_its_scheme_names() {
+    use rusty_tls::handrolled::sign::SigningKey;
+
+    let material = TestKey::rsa();
+    let certificate = Certificate::parse(&material.certificate).expect("parses");
+    let spki = certificate.subject_public_key_info();
+    let key = SigningKey::rsa(&material.pkcs8).expect("the embedded RSA key loads");
+
+    assert_eq!(
+        key.schemes(),
+        &[
+            SignatureScheme::RSA_PSS_RSAE_SHA256,
+            SignatureScheme::RSA_PSS_RSAE_SHA384,
+            SignatureScheme::RSA_PSS_RSAE_SHA512,
+        ]
+    );
+
+    for scheme in key.schemes() {
+        let signature = key.sign(*scheme, MESSAGE).expect("sign");
+
+        // It verifies under its own scheme...
+        assert_eq!(
+            verify_tls13_signature(*scheme, &spki, MESSAGE, &signature),
+            Ok(()),
+            "{scheme:?} did not verify under itself"
+        );
+
+        // ...and under no other, which is what a collapsed padding table
+        // would break.
+        for other in key.schemes() {
+            if other == scheme {
+                continue;
+            }
+            assert_eq!(
+                verify_tls13_signature(*other, &spki, MESSAGE, &signature),
+                Err(VerifyError::BadSignature),
+                "a {scheme:?} signature verified as {other:?}"
+            );
+        }
+    }
+}
+
+/// A key signs the bytes it was given and nothing else.
+#[test]
+fn a_signing_key_signs_exactly_what_it_was_handed() {
+    use rusty_tls::handrolled::sign::SigningKey;
+
+    let key = TestKey::generate(&rcgen::PKCS_ED25519);
+    let certificate = Certificate::parse(&key.certificate).expect("parses");
+    let spki = certificate.subject_public_key_info();
+    let signer = SigningKey::ed25519(&key.pkcs8).expect("key");
+
+    let signature = signer
+        .sign(SignatureScheme::ED25519, MESSAGE)
+        .expect("sign");
+    assert_eq!(
+        verify_tls13_signature(SignatureScheme::ED25519, &spki, MESSAGE, &signature),
+        Ok(())
+    );
+
+    let mut altered = MESSAGE.to_vec();
+    altered[0] ^= 1;
+    assert_eq!(
+        verify_tls13_signature(SignatureScheme::ED25519, &spki, &altered, &signature),
+        Err(VerifyError::BadSignature)
+    );
+}

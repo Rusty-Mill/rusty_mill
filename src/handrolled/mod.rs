@@ -61,8 +61,13 @@
 //!   rather than content: a flight accepted in the wrong order, or with the
 //!   CertificateVerify quietly missing, still looks like a working connection.
 //!
-//! TLS 1.2 (4) and the server side (5) are not built. The ADR carries the
-//! order and the bar each must clear.
+//! - [`sign`] — producing handshake signatures (stage 5), and the first thing
+//!   here that holds a private key rather than only checking one.
+//! - [`server`] — the TLS 1.3 server handshake (stage 5). The mirror of
+//!   [`client`], and exposed differently: every byte it parses is unsolicited.
+//!
+//! TLS 1.2 (4b) is not built, and the ADR records why as a decision rather
+//! than an omission.
 //!
 //! # What is deliberately *not* here
 //!
@@ -79,6 +84,8 @@ pub mod name;
 pub mod path;
 pub mod record;
 pub mod schedule;
+pub mod server;
+pub mod sign;
 pub mod verify;
 pub mod wire;
 pub mod x509;

@@ -92,6 +92,12 @@ pub enum AlertLevel {
 }
 
 impl AlertLevel {
+    /// Decode a wire value. Shared with [`super::server`], which reads alerts
+    /// from the other direction.
+    pub(crate) const fn from_wire(value: u8) -> Self {
+        Self::from_u8(value)
+    }
+
     const fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::Warning,
@@ -113,6 +119,8 @@ pub struct AlertDescription(pub u8);
 impl AlertDescription {
     /// `close_notify(0)` — an orderly shutdown, not a failure.
     pub const CLOSE_NOTIFY: Self = Self(0);
+    /// `bad_record_mac(20)`.
+    pub const BAD_RECORD_MAC: Self = Self(20);
     /// `handshake_failure(40)`.
     pub const HANDSHAKE_FAILURE: Self = Self(40);
     /// `bad_certificate(42)`.
@@ -248,6 +256,13 @@ pub enum ClientError {
     /// between an old server and an active downgrade, which are the same
     /// bytes and very different problems.
     DowngradeDetected,
+    /// The ServerHello did not echo the `legacy_session_id` that was sent.
+    ///
+    /// RFC 8446 §4.1.3 requires the echo and §4.1.3 requires a client to abort
+    /// if it is wrong. It is a cheap binding between the ClientHello that was
+    /// sent and the ServerHello that came back, and a client that skipped it
+    /// would accept a reply to somebody else's hello.
+    SessionIdMismatch,
     /// The server did not select TLS 1.3.
     ///
     /// Covers both a missing `supported_versions` in the ServerHello and one
@@ -313,6 +328,9 @@ impl core::fmt::Display for ClientError {
             Self::DowngradeDetected => f.write_str(
                 "the server signalled a TLS 1.3 downgrade, so the ClientHello it saw was not the one sent",
             ),
+            Self::SessionIdMismatch => {
+                f.write_str("the server did not echo the session id that was sent")
+            }
             Self::NotTls13 => f.write_str("the server did not select TLS 1.3"),
             Self::UnofferedCipherSuite(suite) => {
                 write!(
@@ -535,6 +553,11 @@ enum State {
         client_hello: Vec<u8>,
         kx: KeyExchange,
         retried: bool,
+        /// Kept so a HelloRetryRequest can reuse them: RFC 8446 §4.1.2 lists
+        /// what a second ClientHello may change, and `random` and
+        /// `legacy_session_id` are not on the list.
+        random: Vec<u8>,
+        session_id: Vec<u8>,
     },
     InFlight {
         expect: Expect,
@@ -562,7 +585,7 @@ impl<'a> ClientHandshake<'a> {
     pub fn start(config: &'a ClientConfig<'a>) -> Result<(Self, Vec<u8>)> {
         let group = *config.groups.first().ok_or(ClientError::BadKeyShare)?;
         let kx = KeyExchange::generate(group)?;
-        let hello = build_client_hello(config, &kx)?;
+        let (hello, random, session_id) = build_client_hello(config, &kx, None)?;
 
         let record = plaintext_record(ContentType::Handshake, 0x0301, &hello);
         Ok((
@@ -572,6 +595,8 @@ impl<'a> ClientHandshake<'a> {
                     client_hello: hello,
                     kx,
                     retried: false,
+                    random,
+                    session_id,
                 },
                 buffer: Vec::new(),
             },
@@ -728,12 +753,25 @@ fn random_bytes(len: usize) -> Result<Vec<u8>> {
 }
 
 /// Build the ClientHello body, header included.
-fn build_client_hello(config: &ClientConfig<'_>, kx: &KeyExchange) -> Result<Vec<u8>> {
-    let random = random_bytes(32)?;
-    // RFC 8446 §D.4: a client in middlebox-compatibility mode sends a
-    // 32-octet session id it will never use, because middleboxes that predate
-    // TLS 1.3 drop handshakes that look too unlike a resumption.
-    let session_id = random_bytes(32)?;
+///
+/// `identity` is `Some` only for the second hello after a HelloRetryRequest,
+/// carrying the first one's `random` and `legacy_session_id`. RFC 8446 §4.1.2
+/// enumerates what a retried ClientHello may change and neither is on the
+/// list — a client that generated fresh ones would be sending a different
+/// hello than the one the server retried, which some servers accept and none
+/// are obliged to.
+fn build_client_hello(
+    config: &ClientConfig<'_>,
+    kx: &KeyExchange,
+    identity: Option<(&[u8], &[u8])>,
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    let (random, session_id) = match identity {
+        Some((random, session_id)) => (random.to_vec(), session_id.to_vec()),
+        // RFC 8446 §D.4: a client in middlebox-compatibility mode sends a
+        // 32-octet session id it will never use, because middleboxes that
+        // predate TLS 1.3 drop handshakes that look too unlike a resumption.
+        None => (random_bytes(32)?, random_bytes(32)?),
+    };
 
     let mut server_name = Writer::new();
     if let ServerName::Dns(name) = config.server_name {
@@ -807,7 +845,11 @@ fn build_client_hello(config: &ClientConfig<'_>, kx: &KeyExchange) -> Result<Vec
         extensions,
     };
 
-    Ok(Message::encode(HandshakeType::ClientHello, &hello.encode()))
+    Ok((
+        Message::encode(HandshakeType::ClientHello, &hello.encode()),
+        random,
+        session_id,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +878,8 @@ impl ClientHandshake<'_> {
             client_hello,
             kx,
             retried,
+            random,
+            session_id,
         } = core::mem::replace(&mut self.state, State::Failed)
         else {
             return Err(ClientError::Failed);
@@ -868,11 +912,22 @@ impl ClientHandshake<'_> {
             _ => return Err(ClientError::NotTls13),
         }
 
+        // Only now, because the field means something else below TLS 1.3: in a
+        // TLS 1.2 ServerHello it is a resumption identifier, not an echo, so a
+        // client that checked it first would report a mismatch for a server
+        // whose only sin was being old.
+        //
+        // RFC 8446 §4.1.3 requires the echo, and it binds this ServerHello to
+        // the ClientHello that was sent.
+        if hello.session_id != session_id {
+            return Err(ClientError::SessionIdMismatch);
+        }
+
         if hello.is_hello_retry_request() {
             if retried {
                 return Err(ClientError::RepeatedHelloRetryRequest);
             }
-            return self.retry(client_hello, message, &hello, hash);
+            return self.retry(client_hello, message, &hello, hash, &random, &session_id);
         }
 
         let share =
@@ -929,12 +984,15 @@ impl ClientHandshake<'_> {
     /// Handle a HelloRetryRequest: rebuild the ClientHello for the group the
     /// server asked for, and substitute the transcript RFC 8446 §4.4.1
     /// requires.
+    #[allow(clippy::too_many_arguments)]
     fn retry(
         &mut self,
         client_hello: Vec<u8>,
         message: &Message<'_>,
         hello: &ServerHello<'_>,
         hash: Hash,
+        random: &[u8],
+        session_id: &[u8],
     ) -> Result<Vec<u8>> {
         let share =
             find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::BadKeyShare)?;
@@ -948,7 +1006,8 @@ impl ClientHandshake<'_> {
         }
 
         let kx = KeyExchange::generate(group)?;
-        let second = build_client_hello(self.config, &kx)?;
+        let (second, random, session_id) =
+            build_client_hello(self.config, &kx, Some((random, session_id)))?;
 
         // §4.4.1: once a retry has happened, the transcript begins with a
         // synthetic `message_hash` message wrapping Hash(ClientHello1) rather
@@ -968,6 +1027,8 @@ impl ClientHandshake<'_> {
             client_hello: replayed,
             kx,
             retried: true,
+            random,
+            session_id,
         };
         Ok(plaintext_record(ContentType::Handshake, 0x0303, &second))
     }
@@ -1184,6 +1245,36 @@ pub enum Incoming {
 }
 
 impl Connection {
+    /// Assemble a connection from an already-completed handshake.
+    ///
+    /// `pub(crate)` because the only legitimate way to obtain one is to finish
+    /// a handshake — this exists so [`super::server`] can build the same type
+    /// from the other side rather than duplicating the record-layer and
+    /// post-handshake logic, which would be two places to get a KeyUpdate
+    /// wrong.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_parts(
+        aead: Aead,
+        hash: Hash,
+        suite: CipherSuite,
+        sealer: Sealer,
+        opener: Opener,
+        send_secret: Vec<u8>,
+        receive_secret: Vec<u8>,
+        certificates: Vec<Vec<u8>>,
+    ) -> Self {
+        Self {
+            aead,
+            hash,
+            suite,
+            sealer,
+            opener,
+            client_secret: send_secret,
+            server_secret: receive_secret,
+            certificates,
+        }
+    }
+
     /// The cipher suite in use.
     pub const fn cipher_suite(&self) -> CipherSuite {
         self.suite

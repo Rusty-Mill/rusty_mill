@@ -80,7 +80,12 @@ one artifact to ship and no team/language boundary to split across:
   interoperates. Session resumption, client certificates, and TLS 1.2 are
   refused rather than half-implemented. It is exercised both against `rustls`
   in memory and, in `handrolled_interop`, over a real socket against servers
-  nobody here configured. See [Non-goals](#non-goals) and ADR-0002.
+  nobody here configured. Stage 5 adds `handrolled::sign` (the first thing here
+  that holds a private key rather than only checking one) and
+  `handrolled::server`, the mirror handshake — verified by driving a real
+  `rustls` client against it, which matters more than the client's own interop
+  because a server's mistakes can be productive rather than merely refusing.
+  See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

@@ -110,7 +110,7 @@ independently abandonable:
 | 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | **landed** |
 | 4a | The version boundary — alerts, and the RFC 8446 §4.1.3 downgrade sentinel | **landed** |
 | 4b | TLS 1.2 itself — **still gated on a real peer forcing it, and nothing does** | not started |
-| 5 | Server side — last, or never | not started |
+| 5 | Server side — the handshake, and the first thing here that signs | **landed** |
 
 Stage 2 is split because the original single row was two units of work with
 different risk profiles. Bundling them would have meant landing a validator
@@ -439,6 +439,54 @@ accepting that expansion has not been met. If a peer someone actually needs
 turns out to force TLS 1.2, the boundary that reports it is now in place, and
 the work is a well-understood 4b. Until then the honest answer is that the
 client refuses, and now says why.
+
+Stage 5 was "last, or never". The "last" half is satisfied — every other row
+landed first — and the "never" half was a judgment about danger rather than a
+condition to measure, so unlike stage 4 there was nothing to check before
+building. What the danger actually consists of is worth writing down, because
+it changes how the module should be read: a server answers whoever connects
+rather than peers it chose, it holds a private key and signs on demand, and its
+state is per-connection and attacker-triggered. Everything before this only
+ever *checked* a signature.
+
+That last point makes the oracle matter more than it did for the client. A
+client's mistakes mostly make it refuse things it should accept, which is loud.
+A server's mistakes can make it **produce** something wrong — a signature over
+the wrong bytes, a Finished over the wrong transcript, a chain in the wrong
+order — and those are visible only to somebody checking. `rustls` checks, so a
+`rustls::ClientConnection` completing a handshake against this server is the
+test stage 5 rests on.
+
+Three findings worth carrying:
+
+- **Mutating one half found a gap in the other.** A mutation making the server
+  stop echoing `legacy_session_id` survived, because this crate's *client* was
+  not checking the echo RFC 8446 §4.1.3 requires. Chasing that turned up a
+  second, unrelated conformance bug: the client's HelloRetryRequest path built
+  a fresh ClientHello with a new `random` and session id, and §4.1.2 does not
+  list either among the things a retried hello may change. `rustls` accepts it;
+  no server is obliged to. Both are fixed, and the pairing is the argument for
+  building both halves of a protocol in one codebase — each is the other's
+  adversary.
+- **A rejection test can exercise the wrong rejection.** The first version of
+  "a client Finished that does not verify is refused" corrupted a byte of the
+  protected record, which fails at the AEAD layer several steps before the
+  Finished check — so a mutation deleting that check, the single most important
+  thing a server does, survived the entire suite. The test now needs a client
+  that controls its own keys, so it can produce a correctly encrypted Finished
+  carrying the wrong `verify_data`. Corrupting ciphertext tests the record
+  layer; only corrupting the `verify_data` tests the check.
+- **Truncated is not malformed.** A ClientHello cut short is incomplete, not
+  hostile — handshake messages span records routinely — so it is buffered and
+  waited for. Folding that into a rejection suite made a correct behaviour look
+  like a bug, and the two now have separate tests that say which is which.
+
+What stage 5 does *not* do is listed in the module's own docs rather than only
+here, because that is where somebody will look: no client certificates, no
+resumption or tickets, no 0-RTT, no TLS 1.2, and no HelloRetryRequest
+generation. A client whose `key_share` names no group the server has gets a
+`handshake_failure` rather than a retry. A retry would be strictly better and
+is not implemented; saying so beats a peer discovering it.
 
 ### 5. The shipping bar
 

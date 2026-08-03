@@ -22,6 +22,42 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 5: the TLS 1.3 server
+**2026-08-03**
+
+- **Added:** `handrolled::sign` (rusty_tls#25) — producing handshake
+  signatures, and the first thing in the engine that holds a private key rather
+  than only checking one. The key is never exposed, `Debug` says only what
+  algorithm it is, and it refuses to sign with a scheme it cannot produce
+  rather than substituting one it can.
+- **Added:** `handrolled::server` — the sans-IO TLS 1.3 server handshake, the
+  mirror of `handrolled::client`. **A real `rustls` client completes handshakes
+  against it** with ECDSA P-256, P-384, and Ed25519 server keys.
+- **Fixed:** the client did not check that a ServerHello echoed the
+  `legacy_session_id` it sent, which RFC 8446 §4.1.3 requires. This was found
+  by mutating the *server* to stop echoing and watching this crate's own client
+  accept it — each half is the other's adversary.
+- **Fixed:** the client's HelloRetryRequest path built a second ClientHello
+  with a fresh `random` and session id. RFC 8446 §4.1.2 lists what a retried
+  hello may change and neither is on it. `rustls` accepts the old behaviour;
+  no server is obliged to.
+- **Known limitation, stated plainly:** no client certificates. The server
+  never sends a CertificateRequest, so no client is ever authenticated and
+  mutual TLS is not available.
+- **Known limitation, stated plainly:** no session resumption, tickets, or
+  0-RTT. Resumption is where a server's most interesting state lives, and a
+  server that stores nothing cannot be confused about what it stored.
+- **Known limitation, stated plainly:** no HelloRetryRequest generation. A
+  client whose `key_share` names no group this server supports gets a
+  `handshake_failure` alert rather than a retry. A retry is a legitimate answer
+  and would be strictly better; it is not implemented.
+- **Known limitation, stated plainly:** the server has not been exercised over
+  a real socket by clients other than `rustls`, the way the client was in
+  `handrolled_interop`. That would mean listening on a port, which is a
+  different kind of test than this suite runs.
+
+---
+
 ## Hand-rolled TLS engine, stage 4a: the version boundary
 **2026-08-03**
 
