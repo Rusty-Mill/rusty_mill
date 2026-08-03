@@ -6,6 +6,37 @@ on:
   pull_request:
 
 jobs:
+  # `docs/versioning.md`: under the §2 rule every source change bumps
+  # something — `y` if a public item's shape moved, `z` if not — so "source
+  # changed but the version did not" is always a mistake. Thirteen PRs got
+  # this wrong in a row (rusty_tls#25), which is why it is checked here rather
+  # than left to review.
+  version-bumped:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: A source change must bump the version
+        run: |
+          # `fetch-depth: 0` above already fetched every branch, so the base
+          # is present; fetching it again shallowly would truncate it.
+          base="origin/${{ github.base_ref }}"
+
+          if ! git diff --quiet "$base"...HEAD -- src/; then
+            before=$(git show "$base":Cargo.toml | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+            after=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+            echo "src/ changed; version $before -> $after"
+            if [ "$before" = "$after" ]; then
+              echo "::error::src/ changed but Cargo.toml's version did not. See docs/versioning.md: every source change bumps y (public item shape moved) or z (it did not)."
+              exit 1
+            fi
+          else
+            echo "src/ unchanged; no version bump required"
+          fi
+
   build:
     runs-on: ubuntu-latest
     steps:

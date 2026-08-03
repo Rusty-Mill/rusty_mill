@@ -4,6 +4,14 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+
+## [0.2.0] - 2026-08-03
+
+Built and tested against `rusty_tokio` rev `6d3bb05a45a393e4cf902013b05189dd168f6106`
+and `rustils` (`platform`, `platform-linux`, `platform-windows`, `platform-bsd`) rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. See `docs/versioning.md` for why those
+revs are part of the release rather than an implementation detail.
+
 ### Added
 - **Hand-rolled TLS engine, stage 1: the TLS 1.3 record layer** (rusty_tls#25).
   A new `handrolled::record` module implementing RFC 8446 §5 — AEAD
