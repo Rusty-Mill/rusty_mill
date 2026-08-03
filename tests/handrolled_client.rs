@@ -50,6 +50,10 @@ use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
 use rusty_tls::handrolled::x509::Certificate;
 
+/// The rejection cases, shared with `handshake.rs`. This file holds the
+/// hand-rolled driver for them; that one holds the `rustls` driver.
+mod rejection;
+
 const SERVER: &str = "handrolled.example";
 
 /// Well inside the generated certificates' validity, and fixed so a test never
@@ -123,9 +127,18 @@ fn anchor(root_der: &[u8]) -> Certificate<'_> {
 }
 
 fn rustls_server(pki: &Pki) -> rustls::ServerConnection {
+    rustls_server_presenting(pki.chain.clone(), pki.key.clone_key())
+}
+
+/// As [`rustls_server`], but for a chain that did not come from [`Pki`] — the
+/// shared rejection table builds its own.
+fn rustls_server_presenting(
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+) -> rustls::ServerConnection {
     let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
         .with_no_client_auth()
-        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .with_single_cert(chain, key)
         .expect("server config");
     rustls::ServerConnection::new(Arc::new(config)).expect("server connection")
 }
@@ -928,108 +941,100 @@ fn established_with_test_server(
     }
 }
 
-/// A certificate the client has no anchor for is refused, however well-formed
-/// the rest of the handshake is.
+/// The hand-rolled driver for the shared rejection table.
+///
+/// This replaces three hand-written tests — untrusted root, wrong name,
+/// expired — that had hand-written counterparts in `handshake.rs`. The cases
+/// now live in `tests/rejection/mod.rs`, and both engines run the same rows
+/// against byte-identical certificates.
+///
+/// Every case is attempted before anything is asserted, so a table that moves
+/// reports every row that moved rather than only the first.
 #[test]
-fn a_server_with_an_untrusted_root_is_refused() {
-    let real = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
-    let other = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+fn the_shared_rejection_table_holds_for_the_handrolled_engine() {
+    rejection::assert_table_is_coherent();
 
-    // Trust `other`'s root, talk to `real`'s server.
-    let root = anchor(&other.root_der);
-    let anchors = [TrustAnchor {
-        subject: root.subject(),
-        public_key: root.subject_public_key_info(),
-        name_constraints: None,
-    }];
-    let config = ClientConfig {
-        server_name: ServerName::Dns(SERVER),
-        anchors: &anchors,
-        path: options(),
-        groups: &[NamedGroup::X25519],
-        cipher_suites: CipherSuite::SUPPORTED,
-    };
+    let mut failures = Vec::new();
 
-    let error = run_to_failure(&real, &config);
-    assert!(
-        matches!(error, ClientError::Path(_)),
-        "an untrusted root was accepted: {error:?}"
-    );
+    for case in rejection::CASES {
+        let fixture = rejection::fixture(case);
+        let root = anchor(&fixture.trusted_root_der);
+        let anchors = [TrustAnchor {
+            subject: root.subject(),
+            public_key: root.subject_public_key_info(),
+            name_constraints: None,
+        }];
+        // Expiry lives in the certificate, not in this clock — see the table's
+        // `Validity`. The instant is fixed so a verdict never depends on how
+        // long the suite took to run.
+        let mut path = options();
+        path.time = rejection::EVALUATED_AT;
+        let config = ClientConfig {
+            server_name: ServerName::Dns(case.requested_name),
+            anchors: &anchors,
+            path,
+            groups: &[NamedGroup::X25519],
+            cipher_suites: CipherSuite::SUPPORTED,
+        };
+
+        match (run_table_case(&fixture, &config), case.handrolled) {
+            (Ok(()), rejection::Outcome::Accepted) => {}
+            (Err(_), rejection::Outcome::Rejected) if case.handrolled_reason.is_none() => {
+                unreachable!("the table's coherence check forbids this")
+            }
+            (Err(error), rejection::Outcome::Rejected) => {
+                // "Refused" is not enough. A client that turned away a good
+                // chain over an unrelated failure would satisfy a bare
+                // `is_err()`, and the tests this replaced asserted the
+                // variant for exactly that reason.
+                let Some(rejection::Reason::PathValidation) = case.handrolled_reason else {
+                    unreachable!()
+                };
+                if !matches!(error, ClientError::Path(_)) {
+                    failures.push(format!(
+                        "{}: refused, but not by path validation: {error:?}",
+                        case.name
+                    ));
+                }
+            }
+            (Ok(()), rejection::Outcome::Rejected) => {
+                failures.push(format!("{}: accepted, expected a refusal", case.name));
+            }
+            (Err(error), rejection::Outcome::Accepted) => {
+                failures.push(format!("{}: refused a good chain: {error:?}", case.name));
+            }
+        }
+    }
+
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A certificate for a different name is refused even though it chains to a
-/// trusted root — the two checks are independent and both are required.
-#[test]
-fn a_certificate_for_another_name_is_refused() {
-    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, "somewhere.else.example");
-    let root = anchor(&pki.root_der);
-    let anchors = [TrustAnchor {
-        subject: root.subject(),
-        public_key: root.subject_public_key_info(),
-        name_constraints: None,
-    }];
-    let config = ClientConfig {
-        server_name: ServerName::Dns(SERVER),
-        anchors: &anchors,
-        path: options(),
-        groups: &[NamedGroup::X25519],
-        cipher_suites: CipherSuite::SUPPORTED,
-    };
+/// Drive one table case to a verdict.
+///
+/// Returns rather than panicking on a completed handshake, because the table
+/// has an accepting row — a driver that could only express failure would pass
+/// every rejection case even if it never reached the certificate.
+fn run_table_case(
+    fixture: &rejection::Fixture,
+    config: &ClientConfig<'_>,
+) -> Result<(), ClientError> {
+    let mut server = rustls_server_presenting(fixture.chain.clone(), fixture.key.clone_key());
+    let (mut client, mut to_server) = ClientHandshake::start(config)?;
 
-    let error = run_to_failure(&pki, &config);
-    assert!(
-        matches!(error, ClientError::Path(_)),
-        "a certificate for the wrong name was accepted: {error:?}"
-    );
-}
-
-/// An expired certificate is refused. Same chain, same name, a clock that has
-/// moved past its validity.
-#[test]
-fn an_expired_certificate_is_refused() {
-    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
-    let root = anchor(&pki.root_der);
-    let anchors = [TrustAnchor {
-        subject: root.subject(),
-        public_key: root.subject_public_key_info(),
-        name_constraints: None,
-    }];
-    let mut path = options();
-    path.time = NOT_AFTER + 86_400; // the day after the leaf expires
-    let config = ClientConfig {
-        server_name: ServerName::Dns(SERVER),
-        anchors: &anchors,
-        path,
-        groups: &[NamedGroup::X25519],
-        cipher_suites: CipherSuite::SUPPORTED,
-    };
-
-    let error = run_to_failure(&pki, &config);
-    assert!(
-        matches!(error, ClientError::Path(_)),
-        "an expired certificate was accepted: {error:?}"
-    );
-}
-
-/// Drive a handshake that is expected to fail, and return why.
-fn run_to_failure(pki: &Pki, config: &ClientConfig<'_>) -> ClientError {
-    let mut server = rustls_server(pki);
-    let (mut client, mut to_server) = ClientHandshake::start(config).expect("start");
-
-    for _ in 0..8 {
+    for _ in 0..16 {
         let mut stream = pump_server(&mut server, &to_server);
         to_server.clear();
         for record in take_records(&mut stream) {
-            match client.read_record(&record) {
-                Ok(reply) => to_server.extend_from_slice(&reply),
-                Err(err) => return err,
-            }
+            to_server.extend_from_slice(&client.read_record(&record)?);
         }
         if client.is_finished() {
+            return Ok(());
+        }
+        if to_server.is_empty() {
             break;
         }
     }
-    panic!("a handshake that should have failed completed");
+    Err(ClientError::Failed)
 }
 
 /// A tampered record does not decrypt, and the failure is permanent. A client

@@ -13,13 +13,16 @@ use std::sync::Arc;
 use std::thread;
 
 use rcgen::{
-    date_time_ymd, BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType,
-    IsCa, KeyPair,
+    BasicConstraints, Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::{ServerConfig, ServerConnection, StreamOwned};
 
 use rusty_tls::{TlsStream, TrustPolicy};
+
+/// The rejection cases, shared with the hand-rolled engine's suite. This file
+/// holds the `rustls` driver for them; `handrolled_client.rs` holds the other.
+mod rejection;
 
 struct TestCa {
     cert: Certificate,
@@ -79,12 +82,21 @@ fn spawn_echo_server(
     cert_der: CertificateDer<'static>,
     key_der: PrivateKeyDer<'static>,
 ) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
+    spawn_echo_server_with_chain(vec![cert_der], key_der)
+}
+
+/// As [`spawn_echo_server`], but presenting a full chain rather than a single
+/// certificate — what the shared rejection table builds.
+fn spawn_echo_server_with_chain(
+    chain: Vec<CertificateDer<'static>>,
+    key_der: PrivateKeyDer<'static>,
+) -> (std::net::SocketAddr, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let config = Arc::new(
         ServerConfig::builder()
             .with_no_client_auth()
-            .with_single_cert(vec![cert_der], key_der)
+            .with_single_cert(chain, key_der)
             .expect("valid test cert/key"),
     );
 
@@ -139,60 +151,60 @@ fn danger_no_verification_accepts_a_self_signed_certificate() {
     server.join().unwrap();
 }
 
+/// The `rustls` driver for the shared rejection table.
+///
+/// This replaces three hand-written rejection tests that had hand-written
+/// counterparts in `handrolled_client.rs`. The cases now live in
+/// `tests/rejection/mod.rs` and both engines run the same rows against the
+/// same certificates — see that module for why the two suites agreeing was a
+/// weaker claim than one table run twice.
+///
+/// Every case is attempted before anything is asserted. A `panic!` on the
+/// first mismatch would report one row and hide the rest, which is the wrong
+/// shape for a parity table: what you want to know is *which* rows moved.
 #[test]
-fn rejects_hostname_mismatch() {
-    let ca = TestCa::generate();
-    // Certificate is valid for "correct-host.test", but the client will ask
-    // to verify it against "wrong-host.test".
-    let (leaf_der, leaf_key) = ca.issue_leaf("correct-host.test", None);
-    let (addr, _server) = spawn_echo_server(leaf_der, leaf_key);
+fn the_shared_rejection_table_holds_for_rustls() {
+    rejection::assert_table_is_coherent();
 
-    let tcp = TcpStream::connect(addr).unwrap();
-    let policy = TrustPolicy::PinnedAnchors(vec![ca.root_der()]);
-    let mut tls = TlsStream::new(tcp, "wrong-host.test", &policy).unwrap();
+    let mut failures = Vec::new();
 
-    let result = tls.write_all(b"should not be sent");
-    assert!(
-        result.is_err(),
-        "handshake should fail on hostname mismatch"
-    );
-}
+    for case in rejection::CASES {
+        let fixture = rejection::fixture(case);
+        let (addr, server) =
+            spawn_echo_server_with_chain(fixture.chain.clone(), fixture.key.clone_key());
 
-#[test]
-fn rejects_expired_certificate() {
-    let ca = TestCa::generate();
-    let expired_window = Some((date_time_ymd(2000, 1, 1), date_time_ymd(2001, 1, 1)));
-    let (leaf_der, leaf_key) = ca.issue_leaf("localhost", expired_window);
-    let (addr, _server) = spawn_echo_server(leaf_der, leaf_key);
+        let tcp = TcpStream::connect(addr).unwrap();
+        let policy = TrustPolicy::PinnedAnchors(vec![CertificateDer::from(
+            fixture.trusted_root_der.clone(),
+        )]);
 
-    let tcp = TcpStream::connect(addr).unwrap();
-    let policy = TrustPolicy::PinnedAnchors(vec![ca.root_der()]);
-    let mut tls = TlsStream::new(tcp, "localhost", &policy).unwrap();
+        // `TlsStream::new` does no I/O — the handshake runs on first use, so
+        // the verdict is whatever the first write/read says.
+        let observed = match TlsStream::new(tcp, case.requested_name, &policy) {
+            Err(_) => rejection::Outcome::Rejected,
+            Ok(mut tls) => match tls.write_all(b"probe").and_then(|()| tls.flush()) {
+                Err(_) => rejection::Outcome::Rejected,
+                Ok(()) => {
+                    let mut buf = [0u8; b"probe".len()];
+                    match tls.read_exact(&mut buf) {
+                        Ok(()) if buf == *b"probe" => rejection::Outcome::Accepted,
+                        _ => rejection::Outcome::Rejected,
+                    }
+                }
+            },
+        };
 
-    let result = tls.write_all(b"should not be sent");
-    assert!(
-        result.is_err(),
-        "handshake should fail on an expired certificate"
-    );
-}
+        let _ = server.join();
 
-#[test]
-fn rejects_untrusted_root() {
-    let issuing_ca = TestCa::generate();
-    let (leaf_der, leaf_key) = issuing_ca.issue_leaf("localhost", None);
-    let (addr, _server) = spawn_echo_server(leaf_der, leaf_key);
+        if observed != case.rustls {
+            failures.push(format!(
+                "{}: expected rustls to have {:?} it, observed {:?}",
+                case.name, case.rustls, observed
+            ));
+        }
+    }
 
-    // Pin a *different* CA than the one that actually signed the leaf.
-    let unrelated_ca = TestCa::generate();
-    let tcp = TcpStream::connect(addr).unwrap();
-    let policy = TrustPolicy::PinnedAnchors(vec![unrelated_ca.root_der()]);
-    let mut tls = TlsStream::new(tcp, "localhost", &policy).unwrap();
-
-    let result = tls.write_all(b"should not be sent");
-    assert!(
-        result.is_err(),
-        "handshake should fail when the presented chain doesn't lead to a pinned anchor"
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
