@@ -23,6 +23,37 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.3.0
+**2026-08-03**
+
+**Built and tested against:** the same sibling revs as v0.2.x — `rusty_tokio`
+rev `6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved.
+
+- **Added:** the hand-rolled server generates HelloRetryRequest (#44). A client
+  that supports a group this server does, but guessed wrong about which to send
+  a `key_share` for, is now asked to try again instead of being refused. Both
+  `rustls` and this crate's own client complete handshakes through it.
+- **Added:** the hand-rolled server is driven over a real socket by
+  `openssl s_client`, verifying the chain (#45) — the first evidence about this
+  server from a stack with no shared provenance.
+- **Changed:** the hermetic rejection cases are one table run against both
+  engines rather than two suites that happened to agree (#46).
+- **Fixed:** documentation that assumed a `v0.2.0` tag, which was never cut.
+
+### Upgrade notes
+
+- **`ServerError` gained two variants** and `NoSharedGroup` narrowed in
+  meaning. Everything here is behind `handrolled-engine` *and*
+  `--cfg rusty_tls_handrolled`, so no consumer of the shipped API is affected —
+  but gated items are still public API, which is why this is `y` and not `z`.
+
+**Known limitations, stated rather than implied:** §4.1.2 is checked in part,
+not in full — the retried ClientHello is not diffed field by field against the
+first, because that would mean retaining it across the round trip and §4.4.1's
+`message_hash` substitution exists so a server need not. And still absent:
+client certificates (#42), session resumption (#43), and TLS 1.2 (#41).
+
 ## v0.2.1
 **2026-08-03**
 

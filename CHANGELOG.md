@@ -5,7 +5,38 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-03
+
+Built and tested against the same sibling revs as 0.2.x: `rusty_tokio` rev
+`6d3bb05a45a393e4cf902013b05189dd168f6106` and `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved.
+
+`y` rather than `z` under `docs/versioning.md` §2: `ServerError` gained two
+variants, and `ServerError::NoSharedGroup` now means something narrower than it
+did. Both are behind the `handrolled-engine` gate, and gated items are still
+public API — see `docs/versioning.md`.
+
 ### Added
+- **The hand-rolled server generates HelloRetryRequest** (rusty_tls#44). A
+  client that supports a group this server does but sent no `key_share` for it
+  is now asked to try again, rather than refused with `handshake_failure`. The
+  refusal was correct but was the wrong answer to the question asked: it turned
+  away a client that would have completed after one extra round trip, for a
+  reason that was not its fault.
+  - The post-retry transcript uses RFC 8446 §4.4.1's synthetic `message_hash`
+    substitution, so the server does not retain ClientHello1 across the round
+    trip. The client half has done this since #25; the two now agree.
+  - §4.1.4's "never a second retry" is enforced: a client that comes back
+    without the share it was asked for is refused, not asked again.
+  - §4.1.2 is checked **in part**: the second hello must carry the same
+    `random` and `legacy_session_id`, still offer the negotiated cipher suite
+    and TLS 1.3, and now carry a share for the requested group. It is not
+    diffed field by field, because that means retaining the first hello — the
+    thing the `message_hash` substitution exists to avoid.
+  - `ServerError::RetriedHelloStillHasNoShare` and
+    `ServerError::RetriedHelloChangedIdentity` are new; the latter sends
+    `illegal_parameter` rather than `handshake_failure`, which tells the client
+    which of its two hellos to look at.
 - **The hand-rolled server is now driven over a real socket by OpenSSL**
   (rusty_tls#45). `tests/handrolled_socket_interop.rs` binds a loopback
   listener, runs `ServerHandshake` over it, and points `openssl s_client` at
@@ -28,6 +59,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
     otherwise leave a green step that ran nothing.
 
 ### Changed
+- `ServerError::NoSharedGroup` now means the client named no group this server
+  implements, rather than "sent no usable share". The latter is a retry, and
+  telling the two apart is the whole of #44.
 - The hermetic rejection cases are now **one table run by two drivers** rather
   than two hand-written suites that happened to agree (rusty_tls#46). The cases
   live in `tests/rejection/mod.rs`; `handshake.rs` drives them through `rustls`

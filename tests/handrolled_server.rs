@@ -34,7 +34,10 @@ use time::OffsetDateTime;
 use rusty_tls::handrolled::client::{
     record_length, AlertDescription, CipherSuite, ClientConfig, ClientHandshake, Incoming,
 };
-use rusty_tls::handrolled::handshake::{messages, ClientHello, HandshakeType, Message};
+use rusty_tls::handrolled::handshake::{
+    extension, find, messages, ClientHello, HandshakeType, Message, ServerHello,
+    HELLO_RETRY_REQUEST_RANDOM,
+};
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
@@ -140,17 +143,32 @@ fn rustls_client(pki: &Pki) -> rustls::ClientConnection {
 
 /// Drive a `rustls` client against this server to completion.
 fn interop(algorithm: &'static rcgen::SignatureAlgorithm) -> rustls::ClientConnection {
+    interop_with_groups(
+        algorithm,
+        &[
+            NamedGroup::X25519,
+            NamedGroup::SecP256R1,
+            NamedGroup::SecP384R1,
+        ],
+    )
+}
+
+/// As [`interop`], but with the server's groups chosen by the caller.
+///
+/// Restricting them is how a HelloRetryRequest is *forced* rather than
+/// simulated: `rustls` sends its share for X25519, so a server that takes only
+/// P-256 has to ask it to try again.
+fn interop_with_groups(
+    algorithm: &'static rcgen::SignatureAlgorithm,
+    groups: &[NamedGroup],
+) -> rustls::ClientConnection {
     let pki = pki(algorithm);
     let key = signing_key(&pki, algorithm);
     let config = ServerConfig {
         certificates: &pki.chain,
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
-        groups: &[
-            NamedGroup::X25519,
-            NamedGroup::SecP256R1,
-            NamedGroup::SecP384R1,
-        ],
+        groups,
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -468,14 +486,17 @@ fn a_client_with_no_shared_signature_scheme_is_refused() {
 
 /// A client whose `key_share` names no group the server has is refused.
 ///
-/// A HelloRetryRequest would be the better answer; it is not implemented, and
-/// this pins the behaviour that exists rather than the one that should.
+/// "No group in common" now means what it says: not merely that the client
+/// sent no usable share, but that it named no group this server has. The
+/// former is a HelloRetryRequest — see
+/// [`a_client_that_sent_no_usable_share_is_asked_to_retry`] — and telling the
+/// two apart is the whole of `rusty_tls#44`.
 #[test]
-fn a_client_with_no_shared_group_is_refused() {
-    use rusty_tls::handrolled::handshake::extension;
-
+fn a_client_with_no_group_in_common_is_refused() {
     let record = client_hello(Edit {
         remove: vec![extension::KEY_SHARE],
+        // A group nobody implements, so there is nothing to retry *with*.
+        replace: vec![(extension::SUPPORTED_GROUPS, vec![0x00, 0x02, 0x12, 0x34])],
         ..Edit::default()
     });
 
@@ -930,4 +951,308 @@ fn a_signing_keys_debug_says_nothing_useful() {
         !rendered.contains(&format!("{:?}", key.public_key())),
         "the key bytes were rendered: {rendered}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// HelloRetryRequest — rusty_tls#44
+// ---------------------------------------------------------------------------
+
+/// Run one ClientHello at a fresh server and return what it sent back.
+///
+/// The server here supports only X25519, so a hello with no share for X25519
+/// is exactly the case a retry exists for.
+fn first_reply(record: &[u8]) -> Vec<u8> {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+    };
+    let mut server = ServerHandshake::new(&config);
+    server
+        .read_record(record)
+        .expect("the server refused a hello it should have retried")
+}
+
+/// Re-encode an existing ClientHello record with `edit` applied.
+///
+/// Distinct from [`client_hello`], which builds a *fresh* hello every call. A
+/// fresh one carries a new `random`, so a second hello built that way can only
+/// ever reach the §4.1.2 identity check — everything the server tests after it
+/// is unreachable. Reaching those needs the same hello with one thing changed,
+/// which is what this does.
+fn re_edit(record: &[u8], edit: Edit) -> Vec<u8> {
+    let parsed = messages(&record[5..]).expect("parses");
+    let mut hello = ClientHello::parse(parsed[0].body).expect("parses");
+
+    hello.extensions.retain(|e| !edit.remove.contains(&e.typ));
+    for (typ, data) in &edit.replace {
+        for extension in &mut hello.extensions {
+            if extension.typ == *typ {
+                extension.data = data;
+            }
+        }
+    }
+    if let Some(suites) = edit.cipher_suites {
+        hello.cipher_suites = suites;
+    }
+
+    let encoded = Message::encode(HandshakeType::ClientHello, &hello.encode());
+    let mut out = vec![22u8, 0x03, 0x01];
+    out.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+    out.extend_from_slice(&encoded);
+    out
+}
+
+/// Drive two ClientHellos at one server, asserting the first is retried.
+fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+    };
+    let mut server = ServerHandshake::new(&config);
+    let retry = server
+        .read_record(first)
+        .expect("the first hello should have been retried");
+    assert!(
+        !retry.is_empty(),
+        "the server answered the first hello with nothing"
+    );
+    server.read_record(second)
+}
+
+/// A hello with no share for a group the server can use gets a retry, not a
+/// refusal — and the retry is a conforming HelloRetryRequest.
+///
+/// Checked structurally rather than only by "the handshake completed", because
+/// a retry that completes against a lenient client can still be wrong in ways
+/// a stricter one would reject.
+#[test]
+fn a_client_that_sent_no_usable_share_is_asked_to_retry() {
+    let record = client_hello(Edit {
+        remove: vec![extension::KEY_SHARE],
+        ..Edit::default()
+    });
+    let sent = messages(&record[5..]).expect("parses");
+    let sent = ClientHello::parse(sent[0].body).expect("parses");
+    let session_id = sent.session_id.to_vec();
+
+    let mut reply = first_reply(&record);
+    let records = take_records(&mut reply);
+    assert_eq!(records.len(), 2, "expected a HelloRetryRequest and a CCS");
+
+    let messages = messages(&records[0][5..]).expect("parses");
+    assert_eq!(messages[0].typ, HandshakeType::ServerHello);
+    let hello = ServerHello::parse(messages[0].body).expect("parses");
+
+    assert!(
+        hello.is_hello_retry_request(),
+        "the reply was a real ServerHello, not a retry"
+    );
+    assert_eq!(hello.random, HELLO_RETRY_REQUEST_RANDOM);
+    assert_eq!(
+        hello.session_id, session_id,
+        "§4.1.3 requires the session id to be echoed, retry or not"
+    );
+
+    // The key_share of a HelloRetryRequest names a group and carries no key:
+    // the server has not generated one and will not until it knows the client
+    // can meet it there.
+    let share = find(&hello.extensions, extension::KEY_SHARE).expect("a key_share");
+    assert_eq!(
+        share,
+        NamedGroup::X25519.as_u16().to_be_bytes(),
+        "the retry did not ask for the group the server actually supports"
+    );
+
+    let versions = find(&hello.extensions, extension::SUPPORTED_VERSIONS).expect("versions");
+    assert_eq!(versions, [0x03, 0x04]);
+
+    // Appendix D.4: the compatibility CCS follows the server's *first*
+    // message, which is this one.
+    assert_eq!(records[1][0], 20, "expected a change_cipher_spec");
+}
+
+/// A real `rustls` client completes a handshake that went through a retry.
+///
+/// The forcing function is the server supporting only P-256 while `rustls`
+/// sends its share for X25519 — so the retry is not simulated, it is what
+/// `rustls` genuinely needs to be told.
+#[test]
+fn a_rustls_client_completes_through_a_hello_retry_request() {
+    let client = interop_with_groups(&rcgen::PKCS_ECDSA_P256_SHA256, &[NamedGroup::SecP256R1]);
+    assert!(!client.is_handshaking());
+    assert_eq!(
+        client.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3)
+    );
+}
+
+/// This crate's own client completes a handshake that went through a retry.
+///
+/// Worth having alongside the `rustls` one for the reason #25 recorded: each
+/// half of the protocol is the other's adversary, and the client's retry path
+/// was corrected once already by exactly this kind of cross-testing. The
+/// client offers X25519 first and also supports P-256; the server takes only
+/// P-256, so the retry is forced rather than arranged.
+#[test]
+fn this_clients_handshake_completes_through_a_hello_retry_request() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let root = Certificate::parse(&pki.root_der).expect("parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let client_config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+    let server_config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::SecP256R1],
+    };
+
+    let mut server = ServerHandshake::new(&server_config);
+    let (mut client, mut to_server) = ClientHandshake::start(&client_config).expect("start");
+
+    let mut retried = false;
+    for _ in 0..8 {
+        let mut from_server = Vec::new();
+        for record in take_records(&mut to_server) {
+            from_server.extend_from_slice(&server.read_record(&record).expect("server"));
+        }
+        to_server.clear();
+
+        let mut stream = from_server;
+        for record in take_records(&mut stream) {
+            if record[0] == 22 {
+                if let Ok(parsed) = messages(&record[5..]) {
+                    if let Ok(hello) = ServerHello::parse(parsed[0].body) {
+                        retried |= hello.is_hello_retry_request();
+                    }
+                }
+            }
+            to_server.extend_from_slice(&client.read_record(&record).expect("client"));
+        }
+
+        if client.is_finished() && server.is_finished() {
+            assert!(retried, "the handshake completed without a retry happening");
+            return;
+        }
+        if to_server.is_empty() {
+            break;
+        }
+    }
+    panic!("the handshake did not complete");
+}
+
+/// §4.1.4 forbids a second HelloRetryRequest, so a client that comes back
+/// still without the share it was asked for is refused rather than asked
+/// again.
+///
+/// A server that simply retried again would loop for as long as a peer cared
+/// to keep asking, at one key generation per round.
+#[test]
+fn a_client_that_ignores_the_retry_is_refused_rather_than_retried_again() {
+    let record = client_hello(Edit {
+        remove: vec![extension::KEY_SHARE],
+        ..Edit::default()
+    });
+
+    // Byte-identical, so `random` and `session_id` match and the *only* thing
+    // wrong with the second hello is the missing share.
+    let error = after_a_retry(&record, &record).expect_err("a second retry was sent");
+    assert_eq!(
+        error,
+        ServerError::RetriedHelloStillHasNoShare(NamedGroup::X25519)
+    );
+    assert_eq!(error.alert(), Some(AlertDescription::HANDSHAKE_FAILURE));
+}
+
+/// §4.1.2: the retried hello must be the same hello. A different `random` is a
+/// different client.
+///
+/// Both hellos here are individually valid — the second even carries a usable
+/// key share — so nothing but the identity check can catch this.
+#[test]
+fn a_retried_hello_from_a_different_client_is_refused() {
+    let first = client_hello(Edit {
+        remove: vec![extension::KEY_SHARE],
+        ..Edit::default()
+    });
+    // A fresh hello: new random, new session id, and a perfectly good share.
+    let second = client_hello(Edit::default());
+
+    let error = after_a_retry(&first, &second).expect_err("the server accepted a different hello");
+    assert_eq!(error, ServerError::RetriedHelloChangedIdentity);
+    assert_eq!(error.alert(), Some(AlertDescription::ILLEGAL_PARAMETER));
+}
+
+/// §4.1.2: the retried hello must still offer the suite the server chose from
+/// the first one.
+///
+/// This test exists because a mutation run found the check unreachable: every
+/// second hello the suite could build was a *fresh* hello, so it tripped the
+/// identity check first and nothing past it ever ran. Disabling the suite
+/// check left all 24 tests green. A client that could renegotiate the cipher
+/// suite on the second hello would have the server sign under one suite's
+/// transcript while the client read another's.
+#[test]
+fn a_retried_hello_that_dropped_the_negotiated_cipher_suite_is_refused() {
+    let first = client_hello(Edit {
+        remove: vec![extension::KEY_SHARE],
+        ..Edit::default()
+    });
+    // The same hello — same `random`, same `legacy_session_id` — offering a
+    // suite nobody implements, so it cannot contain whatever was negotiated.
+    let second = re_edit(
+        &first,
+        Edit {
+            cipher_suites: Some(vec![0x0000]),
+            ..Edit::default()
+        },
+    );
+
+    let error =
+        after_a_retry(&first, &second).expect_err("the server accepted a renegotiated suite");
+    assert_eq!(error, ServerError::RetriedHelloChangedIdentity);
+    assert_eq!(error.alert(), Some(AlertDescription::ILLEGAL_PARAMETER));
+}
+
+/// The retried hello must still offer TLS 1.3.
+///
+/// Same reachability problem as the suite check, same fix: the second hello is
+/// the first one with `supported_versions` rewritten, so the identity check
+/// passes and this one is actually reached.
+#[test]
+fn a_retried_hello_that_stopped_offering_tls13_is_refused() {
+    let first = client_hello(Edit {
+        remove: vec![extension::KEY_SHARE],
+        ..Edit::default()
+    });
+    let second = re_edit(
+        &first,
+        Edit {
+            // A one-entry list naming TLS 1.2.
+            replace: vec![(extension::SUPPORTED_VERSIONS, vec![0x02, 0x03, 0x03])],
+            ..Edit::default()
+        },
+    );
+
+    let error = after_a_retry(&first, &second).expect_err("the server accepted a downgrade");
+    assert_eq!(error, ServerError::NotTls13);
+    assert_eq!(error.alert(), Some(AlertDescription::PROTOCOL_VERSION));
 }
