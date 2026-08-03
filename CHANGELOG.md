@@ -5,6 +5,27 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Changed
+- The hermetic rejection cases are now **one table run by two drivers** rather
+  than two hand-written suites that happened to agree (rusty_tls#46). The cases
+  live in `tests/rejection/mod.rs`; `handshake.rs` drives them through `rustls`
+  and `handrolled_client.rs` through the hand-rolled client, against
+  byte-identical certificates. Adding a row now covers both engines by
+  construction instead of by someone remembering the other file.
+  - The expectation is recorded **per engine**, not shared, because there are
+    places the hand-rolled engine is deliberately stricter than `rustls`. A
+    divergence must carry a written reason; the table refuses one that does
+    not. Every row agrees today — the structure is what stops the first
+    disagreement from being resolved by deleting the row.
+  - A `accepts_a_good_chain` control row was added. A rejection table with no
+    accepting row is passed by a driver that fails everything, including one
+    broken before it reaches the certificate.
+  - Expiry is now expressed in the certificate rather than by moving the
+    client's clock, because only one of the two engines has an injectable
+    clock. It is the only form of the case that means the same thing to both.
+  - Rejections still assert `ClientError::Path(_)` on the hand-rolled side, so
+    consolidating did not weaken "refused" into "refused for any reason".
+
 ### Fixed
 - Documentation that assumed `v0.2.0` would be tagged. It was not — the first
   published tag is `v0.2.1`. `RELEASE_NOTES.md` now says so under both entries,
