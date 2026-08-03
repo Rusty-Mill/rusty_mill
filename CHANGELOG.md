@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Fixed
+- Documentation that assumed `v0.2.0` would be tagged. It was not — the first
+  published tag is `v0.2.1`. `RELEASE_NOTES.md` now says so under both entries,
+  and `docs/versioning.md`'s "pin by tag" example pointed at `tag = "v0.2.0"`,
+  which a consumer could have copied into a `Cargo.toml` that would not
+  resolve. Docs only; no source change, so no version bump under §2.
+
 ## [0.2.1] - 2026-08-03
 
 Built and tested against the same sibling revs as 0.2.0: `rusty_tokio` rev
