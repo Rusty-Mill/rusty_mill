@@ -127,6 +127,22 @@ jobs:
           RUSTDOCFLAGS: --cfg rusty_tls_handrolled -D warnings
         run: cargo doc --no-deps --all-features
 
+      # `handrolled_socket_interop` is `#[ignore]`d so it does not fail on a
+      # developer machine without OpenSSL. That reasoning does not apply here:
+      # the runner has it, and the tests are otherwise hermetic — a loopback
+      # listener and a child process, no network. So they are run explicitly
+      # rather than left permanently unexercised, which is what `#[ignore]`
+      # alone would mean.
+      #
+      # `openssl version` first, deliberately: if the binary ever stops being
+      # present, this step must fail loudly rather than run zero tests and
+      # report success.
+      - name: Socket interop against OpenSSL
+        run: |
+          openssl version
+          cargo test --features handrolled-engine \
+            --test handrolled_socket_interop -- --ignored --nocapture
+
       - name: Prove the gated tests actually ran
         # Every handrolled test file is `#![cfg(all(feature = "...", cfg))]`,
         # so a typo in the cfg name — here, in Cargo.toml's check-cfg, or in
@@ -151,6 +167,7 @@ jobs:
                    handrolled_tls_signature \
                    handrolled_client \
                    handrolled_interop \
+                   handrolled_socket_interop \
                    handrolled_server; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
