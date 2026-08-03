@@ -12,8 +12,9 @@
 //! the peer holds the matching private key is the CertificateVerify, and a
 //! client that accepted a flight without one would complete a handshake with an
 //! attacker who copied a certificate off the wire. That is why the expected
-//! message is a field of the state rather than a `match` on whatever arrived —
-//! see [`Expect`].
+//! message is a field of the state rather than a `match` on whatever arrived:
+//! the private `Expect` enum names the one message that will be accepted, and
+//! everything else is refused by default rather than by remembering to.
 //!
 //! # Sans-IO
 //!

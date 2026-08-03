@@ -489,8 +489,9 @@ pub fn verify_signed_data(
 /// A newtype over the wire value rather than an enum, because the registry is
 /// open: a peer may offer anything, and a client has to be able to hold a
 /// number it does not recognise long enough to refuse it. What it *means* is
-/// decided by [`SignatureScheme::tls13_algorithm`], which recognises a fixed
-/// set and refuses the rest.
+/// decided against the fixed set in [`SignatureScheme::TLS13_SUPPORTED`] —
+/// anything outside it is refused, and anything inside it is resolved against
+/// the key it will be checked with.
 ///
 /// See the module docs for how this differs from [`SignatureAlgorithm`], which
 /// is the same idea for certificates and follows different rules.

@@ -23,6 +23,30 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.2.1
+**2026-08-03**
+
+**Built and tested against:** the same sibling revs as v0.2.0 — `rusty_tokio`
+rev `6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved, so a consumer
+already pinned for v0.2.0 needs to change nothing.
+
+- **Fixed:** two doc comments in the `handrolled` module linked to private
+  items (`Expect`, `SignatureScheme::tls13_algorithm`). rustdoc renders those
+  as plain text, so each read as a cross-reference that silently was not one.
+- **Added:** CI now builds the documentation with `-D warnings`. `cargo test
+  --doc` runs doctests but never builds the docs, which is why nothing could
+  fail on a rustdoc lint — the two links above survived thirteen pull requests
+  for that reason and no other.
+
+**Known limitation, unchanged from v0.2.0:** a doc build with a partial feature
+set still reports unresolved links, because the crate's prose links to items
+behind `rusty-tokio` from text that is not itself feature-gated. CI documents
+with `--all-features`, which is the configuration docs.rs uses and the one
+these docs are written for. Making the prose resolve under every feature
+combination would mean splitting paragraphs across `cfg_attr`, which costs more
+in readability than it buys.
+
 ## v0.2.0
 **2026-08-03**
 
