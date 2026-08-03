@@ -22,6 +22,41 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 4a: the version boundary
+**2026-08-03**
+
+- **Added:** TLS alert parsing (rusty_tls#25), wherever an alert can arrive —
+  in the clear before the ServerHello, inside the protected flight, and after
+  the handshake. A peer's refusal is now reported with the peer's own level and
+  description instead of as a surprising content type.
+- **Added:** the RFC 8446 §4.1.3 downgrade sentinel check, separating a
+  genuinely old server from an active downgrade. Both are refused — the
+  sentinel decides only which error is returned — and that is stated in the
+  docs rather than dressed up as a gate.
+- **Fixed:** an orderly `close_notify` was being reported as a failure, because
+  alerts were not parsed at all. It is now `Incoming::Closed`. The interop
+  suite had worked around it with a comment calling the old behaviour "the
+  correct place to stop", which was a missing feature described as correct
+  behaviour.
+- **Added:** a TLS 1.2-only `rustls` server as a permanent test of the version
+  boundary. It is also the answer to a question stage 4 has to ask.
+- **Known limitation, stated plainly — and the reason stage 4b is not done:**
+  the issue defines TLS 1.2 as work to do *only if a real peer forces it*, and
+  the measurement says none does. Every host reachable from the development
+  environment negotiates TLS 1.3 — including `tls-v1-2.badssl.com`, whose whole
+  purpose is to be TLS 1.2-only — because they all terminate at an egress
+  gateway that speaks 1.3 regardless of the origin. In that environment the
+  condition cannot even be observed.
+- **Known limitation, stated plainly:** speaking TLS 1.2 would give up a
+  property the client has today — it cannot be downgraded, because it cannot
+  speak anything to be downgraded to. That is the strongest form of the
+  defence and it is free. Replacing it with a negotiated one is a real
+  expansion of a security-sensitive surface, and the condition for accepting
+  that expansion has not been met. The boundary that would report such a peer
+  is now in place.
+
+---
+
 ## Hand-rolled TLS engine: interop against real servers
 **2026-08-03**
 

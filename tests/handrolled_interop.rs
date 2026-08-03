@@ -308,10 +308,11 @@ fn fetch(host: &str) -> Result<Report, InteropError> {
                     break;
                 }
             }
+            // An orderly close. Until alerts were parsed this arrived as an
+            // unexpected content type and this loop broke on that, which was a
+            // missing feature dressed up as correct behaviour.
+            Ok(Incoming::Closed) => break,
             Ok(_) => {}
-            // A close_notify alert arrives as a content type the handshake
-            // client has no use for, which is the correct place to stop.
-            Err(ClientError::UnexpectedContentType(_)) => break,
             Err(err) => return Err(InteropError::Tls(err)),
         }
     }

@@ -78,6 +78,129 @@ use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
 use super::wire::Writer;
 use super::x509::Certificate;
 
+/// A TLS alert's severity (RFC 8446 §6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AlertLevel {
+    /// `warning(1)`. In TLS 1.3 only `close_notify` and `user_canceled` are
+    /// warnings; everything else is fatal whatever the level says.
+    Warning,
+    /// `fatal(2)`.
+    Fatal,
+    /// Any other value, preserved.
+    Unknown(u8),
+}
+
+impl AlertLevel {
+    const fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Warning,
+            2 => Self::Fatal,
+            other => Self::Unknown(other),
+        }
+    }
+}
+
+/// A TLS alert's description.
+///
+/// A newtype over the wire value rather than an enum, for the same reason
+/// [`super::verify::SignatureScheme`] is one: the registry is open, and a peer
+/// can send a number this code has never heard of. Reporting it verbatim is
+/// more useful than collapsing it to "unknown".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AlertDescription(pub u8);
+
+impl AlertDescription {
+    /// `close_notify(0)` — an orderly shutdown, not a failure.
+    pub const CLOSE_NOTIFY: Self = Self(0);
+    /// `handshake_failure(40)`.
+    pub const HANDSHAKE_FAILURE: Self = Self(40);
+    /// `bad_certificate(42)`.
+    pub const BAD_CERTIFICATE: Self = Self(42);
+    /// `certificate_expired(45)`.
+    pub const CERTIFICATE_EXPIRED: Self = Self(45);
+    /// `certificate_unknown(46)`.
+    pub const CERTIFICATE_UNKNOWN: Self = Self(46);
+    /// `illegal_parameter(47)`.
+    pub const ILLEGAL_PARAMETER: Self = Self(47);
+    /// `unknown_ca(48)`.
+    pub const UNKNOWN_CA: Self = Self(48);
+    /// `decode_error(50)`.
+    pub const DECODE_ERROR: Self = Self(50);
+    /// `decrypt_error(51)`.
+    pub const DECRYPT_ERROR: Self = Self(51);
+    /// `protocol_version(70)` — the one a peer sends when it cannot speak the
+    /// version that was offered. See the module docs on TLS 1.2.
+    pub const PROTOCOL_VERSION: Self = Self(70);
+    /// `inappropriate_fallback(86)`.
+    pub const INAPPROPRIATE_FALLBACK: Self = Self(86);
+    /// `no_application_protocol(120)`.
+    pub const NO_APPLICATION_PROTOCOL: Self = Self(120);
+
+    /// The registry name, where this code knows one.
+    pub const fn name(self) -> Option<&'static str> {
+        Some(match self.0 {
+            0 => "close_notify",
+            10 => "unexpected_message",
+            20 => "bad_record_mac",
+            22 => "record_overflow",
+            40 => "handshake_failure",
+            42 => "bad_certificate",
+            43 => "unsupported_certificate",
+            44 => "certificate_revoked",
+            45 => "certificate_expired",
+            46 => "certificate_unknown",
+            47 => "illegal_parameter",
+            48 => "unknown_ca",
+            49 => "access_denied",
+            50 => "decode_error",
+            51 => "decrypt_error",
+            70 => "protocol_version",
+            71 => "insufficient_security",
+            80 => "internal_error",
+            86 => "inappropriate_fallback",
+            90 => "user_canceled",
+            109 => "missing_extension",
+            110 => "unsupported_extension",
+            112 => "unrecognized_name",
+            116 => "certificate_required",
+            120 => "no_application_protocol",
+            _ => return None,
+        })
+    }
+}
+
+impl core::fmt::Display for AlertDescription {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.name() {
+            Some(name) => write!(f, "{name}({})", self.0),
+            None => write!(f, "alert {}", self.0),
+        }
+    }
+}
+
+/// An alert the peer sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Alert {
+    /// The severity the peer claimed.
+    pub level: AlertLevel,
+    /// What the peer objected to.
+    pub description: AlertDescription,
+}
+
+impl Alert {
+    /// Parse an alert body, which RFC 8446 §6 fixes at two octets.
+    fn parse(body: &[u8]) -> Option<Self> {
+        match body {
+            [level, description] => Some(Self {
+                level: AlertLevel::from_u8(*level),
+                description: AlertDescription(*description),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Everything the client handshake can refuse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -104,6 +227,27 @@ pub enum ClientError {
     },
     /// A record arrived carrying content the handshake has no use for.
     UnexpectedContentType(ContentType),
+    /// The peer sent an alert.
+    ///
+    /// Worth its own variant rather than collapsing into "the handshake
+    /// failed", because it is the only error carrying the *peer's* opinion of
+    /// what went wrong. A server that cannot speak TLS 1.3 says
+    /// `protocol_version` here, which is the difference between "something
+    /// broke" and "this server is too old for this client".
+    PeerAlert(Alert),
+    /// The server sent a ServerHello whose `random` carries the RFC 8446
+    /// §4.1.3 downgrade sentinel.
+    ///
+    /// The sentinel means the server *does* support TLS 1.3 but negotiated
+    /// something older — which, since this client offers nothing older, means
+    /// the ClientHello it saw was not the one that was sent.
+    ///
+    /// This changes which error is returned, not whether the handshake is
+    /// refused: a ServerHello without `supported_versions` is
+    /// [`ClientError::NotTls13`] regardless. What it buys is the distinction
+    /// between an old server and an active downgrade, which are the same
+    /// bytes and very different problems.
+    DowngradeDetected,
     /// The server did not select TLS 1.3.
     ///
     /// Covers both a missing `supported_versions` in the ServerHello and one
@@ -161,6 +305,14 @@ impl core::fmt::Display for ClientError {
             Self::UnexpectedContentType(typ) => {
                 write!(f, "unexpected content type {typ:?} during the handshake")
             }
+            Self::PeerAlert(alert) => write!(
+                f,
+                "the peer sent a {:?} alert: {}",
+                alert.level, alert.description
+            ),
+            Self::DowngradeDetected => f.write_str(
+                "the server signalled a TLS 1.3 downgrade, so the ClientHello it saw was not the one sent",
+            ),
             Self::NotTls13 => f.write_str("the server did not select TLS 1.3"),
             Self::UnofferedCipherSuite(suite) => {
                 write!(
@@ -310,6 +462,21 @@ fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Vec<u8> 
 
 /// The one-octet record servers send in middlebox-compatibility mode.
 const CHANGE_CIPHER_SPEC: u8 = 20;
+
+/// The last eight octets a TLS 1.3-capable server puts in `ServerHello.random`
+/// when it negotiates TLS 1.2 anyway (RFC 8446 §4.1.3). The `00` variant marks
+/// TLS 1.1 or below.
+const DOWNGRADE_SENTINEL_TLS12: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x01];
+/// As [`DOWNGRADE_SENTINEL_TLS12`], for TLS 1.1 and below.
+const DOWNGRADE_SENTINEL_OLDER: [u8; 8] = [0x44, 0x4f, 0x57, 0x4e, 0x47, 0x52, 0x44, 0x00];
+
+/// True if a `ServerHello.random` carries either downgrade sentinel.
+fn is_downgrade_sentinel(random: &[u8]) -> bool {
+    match random.len().checked_sub(8).map(|at| &random[at..]) {
+        Some(tail) => tail == DOWNGRADE_SENTINEL_TLS12 || tail == DOWNGRADE_SENTINEL_OLDER,
+        None => false,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // State
@@ -465,6 +632,20 @@ impl<'a> ClientHandshake<'a> {
             return Ok(Vec::new());
         }
 
+        // An alert before the ServerHello is in the clear, and is the only way
+        // a peer gets to say why it is refusing. Reporting it as an unexpected
+        // content type would throw away the one piece of diagnosis the peer
+        // offered — a server too old for this client says `protocol_version`
+        // here, and nothing else in the exchange would tell you that.
+        if ContentType::from_u8(record[0]) == ContentType::Alert
+            && matches!(self.state, State::AwaitServerHello { .. })
+        {
+            return Err(match Alert::parse(&record[HEADER_LEN..]) {
+                Some(alert) => ClientError::PeerAlert(alert),
+                None => ClientError::UnexpectedContentType(ContentType::Alert),
+            });
+        }
+
         let declared = usize::from(u16::from_be_bytes([record[3], record[4]]));
         if record.len() != HEADER_LEN + declared {
             return Err(RecordError::LengthMismatch {
@@ -490,10 +671,16 @@ impl<'a> ClientHandshake<'a> {
             }
             State::InFlight { negotiated, .. } => {
                 let opened = negotiated.opener.open(record)?;
-                if opened.typ != ContentType::Handshake {
-                    return Err(ClientError::UnexpectedContentType(opened.typ));
+                match opened.typ {
+                    ContentType::Handshake => opened.fragment,
+                    ContentType::Alert => {
+                        return Err(match Alert::parse(&opened.fragment) {
+                            Some(alert) => ClientError::PeerAlert(alert),
+                            None => ClientError::UnexpectedContentType(ContentType::Alert),
+                        })
+                    }
+                    other => return Err(ClientError::UnexpectedContentType(other)),
                 }
-                opened.fragment
             }
             State::Done(_) | State::Failed => return Err(ClientError::Failed),
         };
@@ -672,6 +859,12 @@ impl ClientHandshake<'_> {
         // `supported_versions` is offering TLS 1.2.
         match find(&hello.extensions, extension::SUPPORTED_VERSIONS) {
             Some([0x03, 0x04]) => {}
+            // No `supported_versions` means TLS 1.2 or older was selected.
+            // Either way it is refused; the sentinel only decides which error,
+            // and the distinction is worth drawing because the two look
+            // identical on the wire and are very different problems. See
+            // `ClientError::DowngradeDetected`.
+            _ if is_downgrade_sentinel(hello.random) => return Err(ClientError::DowngradeDetected),
             _ => return Err(ClientError::NotTls13),
         }
 
@@ -982,6 +1175,12 @@ pub enum Incoming {
     /// A post-handshake message answered with these bytes, which the caller
     /// must send: a KeyUpdate that requested one in return.
     Reply(Vec<u8>),
+    /// The peer closed the connection in an orderly way (`close_notify`).
+    ///
+    /// Distinct from an error: a server that has finished sending says this,
+    /// and a caller that treated it as a failure would report every completed
+    /// response as broken.
+    Closed,
 }
 
 impl Connection {
@@ -1017,6 +1216,18 @@ impl Connection {
         match opened.typ {
             ContentType::ApplicationData => Ok(Incoming::Application(opened.fragment)),
             ContentType::Handshake => self.post_handshake(&opened.fragment),
+            ContentType::Alert => match Alert::parse(&opened.fragment) {
+                // An orderly close is not a failure. Reporting it as one made
+                // every completed HTTP response look broken, which the interop
+                // suite worked around by treating an unexpected content type
+                // as "the correct place to stop" — a missing feature described
+                // as correct behaviour.
+                Some(alert) if alert.description == AlertDescription::CLOSE_NOTIFY => {
+                    Ok(Incoming::Closed)
+                }
+                Some(alert) => Err(ClientError::PeerAlert(alert)),
+                None => Err(ClientError::UnexpectedContentType(ContentType::Alert)),
+            },
             other => Err(ClientError::UnexpectedContentType(other)),
         }
     }

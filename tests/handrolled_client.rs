@@ -162,6 +162,39 @@ fn pump_server(server: &mut rustls::ServerConnection, input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// As [`pump_server`], but tolerating a server that refuses the handshake.
+///
+/// `process_new_packets` returns an error when `rustls` rejects a ClientHello
+/// — which is the *correct* behaviour for a TLS 1.2-only server faced with a
+/// client offering only 1.3. It still has an alert queued, and that alert is
+/// the whole point of the test, so the error is reported rather than asserted
+/// away.
+fn pump_server_allowing_refusal(
+    server: &mut rustls::ServerConnection,
+    input: &[u8],
+) -> (Vec<u8>, Option<String>) {
+    let mut refusal = None;
+    if !input.is_empty() {
+        let mut cursor = std::io::Cursor::new(input);
+        while server.read_tls(&mut cursor).unwrap_or(0) > 0 {
+            if let Err(err) = server.process_new_packets() {
+                refusal = Some(err.to_string());
+                break;
+            }
+        }
+    }
+    if refusal.is_none() {
+        if let Err(err) = server.process_new_packets() {
+            refusal = Some(err.to_string());
+        }
+    }
+    let mut out = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut out).expect("write_tls");
+    }
+    (out, refusal)
+}
+
 /// What a completed handshake produced, so tests can keep talking.
 struct Established {
     connection: rusty_tls::handrolled::client::Connection,
@@ -593,6 +626,10 @@ enum Shape {
     RequestClientCertificate,
     /// A `key_share` naming a group other than the one the client sent.
     WrongKeyShareGroup,
+    /// A fatal alert where the encrypted flight should be — a server changing
+    /// its mind after the ServerHello, which is where a real one would report
+    /// that it disliked something about the client.
+    AlertInsteadOfFlight,
 }
 
 impl TestServer<'_> {
@@ -769,6 +806,27 @@ impl TestServer<'_> {
 
         let mut out = Vec::new();
         out.extend_from_slice(&plaintext(22, &server_hello));
+
+        if self.shape == Shape::AlertInsteadOfFlight {
+            out.extend_from_slice(
+                &sealer
+                    .seal(ContentType::Alert, &[0x02, 0x28], 0) // fatal, handshake_failure
+                    .expect("seal"),
+            );
+            let master = schedule.into_master();
+            let secret = master.derive("s ap traffic", &transcript.hash());
+            let keys = traffic_keys(hash, &secret, aead.key_len());
+            return (
+                out,
+                ServerPost {
+                    aead,
+                    hash,
+                    secret,
+                    sealer: Sealer::new(aead, &keys.key, &keys.iv).expect("app sealer"),
+                },
+            );
+        }
+
         match self.fragment {
             None => out.extend_from_slice(
                 &sealer
@@ -1673,6 +1731,299 @@ fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
         assert!(
             !client.is_finished(),
             "an incomplete message completed a handshake"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The version boundary — stage 4
+// ---------------------------------------------------------------------------
+
+/// A TLS 1.2-only server, which is the condition stage 4 is gated on and
+/// which no reachable network peer provides.
+fn tls12_only_server(pki: &Pki) -> rustls::ServerConnection {
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS12])
+        .with_no_client_auth()
+        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .expect("server config");
+    rustls::ServerConnection::new(Arc::new(config)).expect("server connection")
+}
+
+/// A server that cannot speak TLS 1.3 is refused, and the refusal says so in
+/// the peer's own words.
+///
+/// This is the stage 4 trigger, manufactured. The issue defines TLS 1.2 as
+/// work to do "only if a real peer forces it", and no peer reachable over the
+/// network does — every endpoint tried terminates at a TLS 1.3 gateway, so the
+/// condition cannot even be observed there. `rustls` restricted to TLS 1.2 can
+/// provide it on demand.
+///
+/// What the client does today is refuse, which is correct. What it now also
+/// does is report *why*: the server sends a fatal `protocol_version` alert,
+/// and that is the whole difference between "the handshake failed" and "this
+/// server is too old for this client". Before this, the alert was discarded as
+/// an unexpected content type.
+#[test]
+fn a_server_that_cannot_speak_tls13_is_refused_in_its_own_words() {
+    use rusty_tls::handrolled::client::{AlertDescription, AlertLevel};
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = tls12_only_server(&pki);
+    let (mut client, to_server) = ClientHandshake::start(&config).expect("start");
+
+    let (mut stream, refusal) = pump_server_allowing_refusal(&mut server, &to_server);
+    assert!(
+        refusal.is_some(),
+        "the TLS 1.2-only server accepted a TLS 1.3-only ClientHello"
+    );
+    let records = take_records(&mut stream);
+    assert!(!records.is_empty(), "the server said nothing at all");
+
+    let error = client
+        .read_record(&records[0])
+        .expect_err("a TLS 1.2-only server completed a handshake");
+
+    match error {
+        ClientError::PeerAlert(alert) => {
+            assert_eq!(alert.level, AlertLevel::Fatal);
+            assert_eq!(
+                alert.description,
+                AlertDescription::PROTOCOL_VERSION,
+                "the alert was not about the version"
+            );
+            assert!(
+                alert.description.to_string().contains("protocol_version"),
+                "the alert does not name itself: {}",
+                alert.description
+            );
+        }
+        other => panic!("expected a protocol_version alert, got {other:?}"),
+    }
+}
+
+/// The RFC 8446 §4.1.3 downgrade sentinel distinguishes an old server from an
+/// active downgrade.
+///
+/// Both are refused — this changes which error is returned, not whether the
+/// handshake proceeds — and the distinction is worth drawing because the two
+/// are the same bytes on the wire and very different problems. A server that
+/// sets the sentinel *does* support TLS 1.3, so a ServerHello without
+/// `supported_versions` means the ClientHello it saw was not the one that was
+/// sent.
+#[test]
+fn the_downgrade_sentinel_is_told_apart_from_an_old_server() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    // Take a genuine ServerHello and strip `supported_versions`, with and
+    // without the sentinel in `random`.
+    let mut server = rustls_server(&pki);
+    let (_, hello) = ClientHandshake::start(&config).expect("start");
+    let mut stream = pump_server(&mut server, &hello);
+    let genuine = take_records(&mut stream).remove(0);
+
+    let build = |random: &[u8]| -> Vec<u8> {
+        let parsed = messages(&genuine[5..]).expect("parses");
+        let body = ServerHello::parse(parsed[0].body).expect("parses");
+        let mut rewritten = body.clone();
+        rewritten.random = random;
+        rewritten
+            .extensions
+            .retain(|e| e.typ != rusty_tls::handrolled::handshake::extension::SUPPORTED_VERSIONS);
+        let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+        let mut record = vec![22u8, 0x03, 0x03];
+        record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+        record.extend_from_slice(&encoded);
+        record
+    };
+
+    // An ordinary old server: no sentinel.
+    let mut plain = [0x5au8; 32];
+    plain[24..].copy_from_slice(&[0x11; 8]);
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    assert_eq!(
+        client.read_record(&build(&plain)),
+        Err(ClientError::NotTls13)
+    );
+
+    // A TLS 1.3-capable server that negotiated 1.2 anyway.
+    let mut sentinel = [0x5au8; 32];
+    sentinel[24..].copy_from_slice(b"DOWNGRD\x01");
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    assert_eq!(
+        client.read_record(&build(&sentinel)),
+        Err(ClientError::DowngradeDetected),
+        "an active downgrade was reported as an old server"
+    );
+
+    // And the TLS 1.1-and-below variant.
+    let mut older = [0x5au8; 32];
+    older[24..].copy_from_slice(b"DOWNGRD\x00");
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    assert_eq!(
+        client.read_record(&build(&older)),
+        Err(ClientError::DowngradeDetected)
+    );
+}
+
+/// An orderly close is not a failure.
+///
+/// Before alerts were parsed, a `close_notify` surfaced as an unexpected
+/// content type, and the interop suite worked around it by treating that as
+/// "the correct place to stop" — a missing feature described as correct
+/// behaviour.
+#[test]
+fn a_close_notify_is_reported_as_a_close_not_an_error() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let record = server.seal(ContentType::Alert, &[0x01, 0x00]); // warning, close_notify
+    assert_eq!(
+        connection.read(&record).expect("a close is not an error"),
+        Incoming::Closed
+    );
+}
+
+/// The alert level is read from the wire, not assumed.
+///
+/// `close_notify` is a warning and a `decrypt_error` is fatal; a client that
+/// reported every alert as fatal would be inventing severity it was told.
+#[test]
+fn an_alerts_level_is_the_one_the_peer_sent() {
+    use rusty_tls::handrolled::client::{AlertDescription, AlertLevel};
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    // warning(1), user_canceled(90) — a warning that is not a close.
+    let record = server.seal(ContentType::Alert, &[0x01, 0x5a]);
+    match connection.read(&record) {
+        Err(ClientError::PeerAlert(alert)) => {
+            assert_eq!(
+                alert.level,
+                AlertLevel::Warning,
+                "a warning was reported as something else"
+            );
+            assert_eq!(alert.description, AlertDescription(90));
+        }
+        other => panic!("expected a warning alert, got {other:?}"),
+    }
+
+    // An unrecognised level is preserved rather than collapsed.
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+    let record = server.seal(ContentType::Alert, &[0x07, 0x28]);
+    match connection.read(&record) {
+        Err(ClientError::PeerAlert(alert)) => {
+            assert_eq!(alert.level, AlertLevel::Unknown(7));
+        }
+        other => panic!("expected an unknown level, got {other:?}"),
+    }
+}
+
+/// An alert arriving where the encrypted flight should be is reported as the
+/// alert it is, not as a surprising content type.
+///
+/// This is where a real server reports that it disliked something about the
+/// ClientHello it could only discover after replying — an unacceptable
+/// signature algorithm, say. Losing the description there loses the only
+/// explanation anyone will get.
+#[test]
+fn an_alert_inside_the_flight_is_reported_as_an_alert() {
+    use rusty_tls::handrolled::client::AlertDescription;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::AlertInsteadOfFlight)
+        .expect_err("an alert instead of a flight completed a handshake");
+
+    match error {
+        ClientError::PeerAlert(alert) => {
+            assert_eq!(alert.description, AlertDescription::HANDSHAKE_FAILURE);
+        }
+        other => panic!("an encrypted alert was not reported as one: {other:?}"),
+    }
+}
+
+/// Any other alert after the handshake is an error, and names itself.
+#[test]
+fn a_fatal_alert_after_the_handshake_is_an_error() {
+    use rusty_tls::handrolled::client::AlertDescription;
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let record = server.seal(ContentType::Alert, &[0x02, 0x33]); // fatal, decrypt_error
+    match connection.read(&record) {
+        Err(ClientError::PeerAlert(alert)) => {
+            assert_eq!(alert.description, AlertDescription::DECRYPT_ERROR);
+        }
+        other => panic!("a fatal alert was not reported as one: {other:?}"),
+    }
+}
+
+/// An alert body that is not two octets is malformed, and is not guessed at.
+#[test]
+fn a_malformed_alert_is_refused_rather_than_interpreted() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    for body in [vec![], vec![0x02], vec![0x02, 0x46, 0x00]] {
+        let (mut client, _) = ClientHandshake::start(&config).expect("start");
+        let mut record = vec![21u8, 0x03, 0x03];
+        record.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        record.extend_from_slice(&body);
+        assert!(
+            matches!(
+                client.read_record(&record),
+                Err(ClientError::UnexpectedContentType(_))
+            ),
+            "a {}-octet alert body was interpreted",
+            body.len()
         );
     }
 }
