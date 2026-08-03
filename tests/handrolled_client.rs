@@ -2027,3 +2027,114 @@ fn a_malformed_alert_is_refused_rather_than_interpreted() {
         );
     }
 }
+
+/// The ServerHello must echo the `legacy_session_id` that was sent.
+///
+/// RFC 8446 §4.1.3. It is a cheap binding between the ClientHello that went
+/// out and the ServerHello that came back, and this test exists because a
+/// mutation on the *server* side — making it stop echoing — was accepted by
+/// this client. Mutating one half found a gap in the other.
+#[test]
+fn a_server_hello_that_does_not_echo_the_session_id_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = rustls_server(&pki);
+    let (mut client, hello) = ClientHandshake::start(&config).expect("start");
+    let mut stream = pump_server(&mut server, &hello);
+    let genuine = take_records(&mut stream).remove(0);
+
+    let parsed = messages(&genuine[5..]).expect("parses");
+    let body = ServerHello::parse(parsed[0].body).expect("parses");
+
+    for wrong in [&[][..], &[0x99u8; 32][..]] {
+        let mut rewritten = body.clone();
+        rewritten.session_id = wrong;
+        let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+        let mut record = vec![22u8, 0x03, 0x03];
+        record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+        record.extend_from_slice(&encoded);
+
+        let (mut fresh, _) = ClientHandshake::start(&config).expect("start");
+        assert_eq!(
+            fresh.read_record(&record),
+            Err(ClientError::SessionIdMismatch),
+            "a {}-octet session id echo was accepted",
+            wrong.len()
+        );
+    }
+
+    // And the genuine one is still accepted, so the check is not just refusing
+    // everything.
+    assert!(client.read_record(&genuine).is_ok());
+}
+
+/// A retried ClientHello keeps the `random` and `legacy_session_id` of the
+/// first.
+///
+/// RFC 8446 §4.1.2 enumerates what a second ClientHello may change, and
+/// neither is on the list. This was wrong until the session-id echo above went
+/// in: the retry path built a fresh hello with fresh values, which `rustls`
+/// happens to accept and no server is obliged to.
+#[test]
+fn a_retried_client_hello_keeps_its_identity() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = x25519_only_server(&pki);
+    let (mut client, first) = ClientHandshake::start(&config).expect("start");
+
+    let parsed = messages(&first[5..]).expect("parses");
+    let before = ClientHello::parse(parsed[0].body).expect("parses");
+    let (random, session_id) = (before.random.to_vec(), before.session_id.to_vec());
+
+    let mut stream = pump_server(&mut server, &first);
+    let retry = take_records(&mut stream)
+        .into_iter()
+        .find(|r| r[0] == 22)
+        .expect("a HelloRetryRequest");
+
+    let second = client.read_record(&retry).expect("the retry is accepted");
+    assert!(!second.is_empty(), "no second ClientHello was produced");
+
+    let parsed = messages(&second[5..]).expect("parses");
+    let after = ClientHello::parse(parsed[0].body).expect("parses");
+
+    assert_eq!(after.random, &random[..], "the retry changed `random`");
+    assert_eq!(
+        after.session_id,
+        &session_id[..],
+        "the retry changed `legacy_session_id`"
+    );
+    // The key share is the one thing that must change.
+    use rusty_tls::handrolled::handshake::{extension, find};
+    assert_ne!(
+        find(&before.extensions, extension::KEY_SHARE),
+        find(&after.extensions, extension::KEY_SHARE),
+        "the retry reused the key share the server rejected"
+    );
+}
