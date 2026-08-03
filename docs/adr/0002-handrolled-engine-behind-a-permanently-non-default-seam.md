@@ -108,7 +108,8 @@ independently abandonable:
 | 3b | Handshake message encoding/parsing and the transcript hash | **landed** |
 | 3c-i | Ephemeral key exchange, and the TLS `SignatureScheme` namespace — including RSASSA-PSS, which 2b-i refused | **landed** |
 | 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | **landed** |
-| 4 | TLS 1.2 — only if a real peer forces it | not started |
+| 4a | The version boundary — alerts, and the RFC 8446 §4.1.3 downgrade sentinel | **landed** |
+| 4b | TLS 1.2 itself — **still gated on a real peer forcing it, and nothing does** | not started |
 | 5 | Server side — last, or never | not started |
 
 Stage 2 is split because the original single row was two units of work with
@@ -386,6 +387,58 @@ wrong-name interop test whose premise an intercepting gateway removes are the
 same failure wearing different clothes. The defence is to measure what the
 test actually exercised — record counts, mutation survival, reach percentages
 — rather than to infer coverage from a passing run.
+
+Stage 4 is the one row in this table with a condition attached — "only if a
+real peer forces it" — so the first thing it needed was a measurement, not
+code. The measurement says the condition does not hold.
+
+Every host reachable from the development environment negotiates TLS 1.3,
+including `tls-v1-2.badssl.com`, an endpoint whose entire purpose is to be TLS
+1.2-only. They all present certificates from the same egress gateway, which
+terminates TLS and speaks 1.3 to us regardless of what the origin supports. So
+no reachable peer forces TLS 1.2, and in that environment none can: the gateway
+is always the peer. That is a fact about where this was built, not about the
+internet, and it is recorded because the condition cannot be re-checked from
+the artefact later.
+
+What the condition *can* be given is a peer manufactured on demand: `rustls`
+restricted to `&[&rustls::version::TLS12]` refuses a TLS 1.3-only ClientHello
+and says why. That is now a permanent test of the version boundary, and it
+found the gap 4a fixes.
+
+The gap was that the client **discarded the peer's explanation**. A TLS
+1.2-only server answers with a fatal `protocol_version` alert, and the client
+reported `UnexpectedContentType(Alert)` — a correct refusal that threw away the
+only information distinguishing "this server is too old" from "something
+broke". 4a parses alerts wherever they can arrive: in the clear before the
+ServerHello, inside the protected flight, and after the handshake. Two things
+fell out of it:
+
+- **An orderly close was being reported as a failure.** `close_notify` is an
+  alert, so it surfaced as an unexpected content type — and the interop suite
+  had a comment calling that "the correct place to stop". That was a missing
+  feature described as correct behaviour, which is the most expensive kind of
+  comment to leave in a test.
+- **The RFC 8446 §4.1.3 downgrade sentinel now separates two identical-looking
+  failures.** A server that sets it supports TLS 1.3 and negotiated something
+  older anyway, which — since this client offers nothing older — means the
+  ClientHello it saw was not the one that was sent. Both cases are refused;
+  the sentinel decides only which error is returned. Same category as 3b's
+  length-overrun check and 3c-ii's `key_share` group check, and documented the
+  same way: a check that buys diagnosis rather than a gate is worth keeping and
+  worth not overselling.
+
+**Why 4b has not been done, stated so it is a decision rather than an
+omission.** Speaking TLS 1.2 would give up a structural property the client has
+today: it cannot be downgraded, because it cannot speak anything to be
+downgraded *to*. That is the strongest form of the defence and it costs
+nothing. Replacing it with a negotiated one — sentinel checks, cipher-suite
+policy, an entirely separate record layer and key schedule — is a real
+expansion of a security-sensitive surface, and the issue's own condition for
+accepting that expansion has not been met. If a peer someone actually needs
+turns out to force TLS 1.2, the boundary that reports it is now in place, and
+the work is a well-understood 4b. Until then the honest answer is that the
+client refuses, and now says why.
 
 ### 5. The shipping bar
 

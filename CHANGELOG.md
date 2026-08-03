@@ -196,6 +196,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
   Still behind both gates, and `rustls` remains the engine behind every
   exported type. Nothing in the public API routes through this.
+- **Hand-rolled engine, stage 4a: the version boundary** (rusty_tls#25). The
+  client now parses TLS alerts wherever they can arrive — in the clear before
+  the ServerHello, inside the protected flight, and after the handshake — and
+  reports them as `ClientError::PeerAlert` with the peer's own level and
+  description.
+
+  This exists because a TLS 1.2-only server answers a TLS 1.3-only ClientHello
+  with a fatal `protocol_version` alert, and the client used to report that as
+  `UnexpectedContentType(Alert)`: a correct refusal that discarded the only
+  information distinguishing "this server is too old" from "something broke".
+
+  Also adds the RFC 8446 §4.1.3 downgrade sentinel check, which separates a
+  genuinely old server from an active downgrade. Both are refused; the sentinel
+  decides only which error is returned.
+- **Fixed:** an orderly `close_notify` was reported as a failure, because
+  alerts were not parsed. It is now `Incoming::Closed`. The interop suite had a
+  comment calling the old behaviour "the correct place to stop" — a missing
+  feature described as correct behaviour.
 - **Interop over a real socket** (`tests/handrolled_interop.rs`). The client
   completes TLS 1.3 handshakes against servers nobody here configured, using
   the machine's own trust store, and fetches real HTTP responses. `#[ignore]`d
