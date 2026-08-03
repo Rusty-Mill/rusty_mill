@@ -67,6 +67,16 @@ jobs:
         if: steps.check.outputs.exists == 'true'
         run: cargo test --all-features --verbose
 
+      # `cargo test --doc` runs the doctests but never builds the docs, so
+      # rustdoc's own lints — a link to a private item, a broken intra-doc
+      # reference — had no job that could fail on them. They are warnings by
+      # default and warnings nobody reads are not diagnostics.
+      - name: Docs
+        if: steps.check.outputs.exists == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features
+
       - name: No source yet
         if: steps.check.outputs.exists == 'false'
         run: echo "No Cargo.toml yet — skipping Rust build/test until source lands."
@@ -97,6 +107,25 @@ jobs:
 
       - name: Test
         run: cargo test --features handrolled-engine --verbose
+
+      # The `build` job's equivalent step cannot see this module at all, so a
+      # rustdoc lint in here is only reachable from a job carrying the cfg.
+      #
+      # `--all-features` rather than just `handrolled-engine`: the crate's
+      # prose links to items behind `rusty-tokio` (`AsyncTlsServerStream`,
+      # `TlsAcceptor::accept_async`), so a partial-feature doc build has
+      # unresolved links that say nothing about this module. All-features is
+      # the configuration docs.rs builds and the one these docs are written
+      # for.
+      #
+      # `-D warnings` is set here rather than on the job's `RUSTDOCFLAGS`
+      # because that variable is also what makes the doctests compile, and
+      # denying warnings for those is a different decision from denying them
+      # for the docs.
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: --cfg rusty_tls_handrolled -D warnings
+        run: cargo doc --no-deps --all-features
 
       - name: Prove the gated tests actually ran
         # Every handrolled test file is `#![cfg(all(feature = "...", cfg))]`,

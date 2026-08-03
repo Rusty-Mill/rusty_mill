@@ -5,6 +5,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-03
+
+Built and tested against the same sibling revs as 0.2.0: `rusty_tokio` rev
+`6d3bb05a45a393e4cf902013b05189dd168f6106` and `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved.
+
+`z` rather than `y` under `docs/versioning.md` §2: no public item changed
+shape. The only source edits are doc comments.
+
+### Fixed
+- Two doc comments in the `handrolled` module linked to private items
+  (`Expect`, `SignatureScheme::tls13_algorithm`). rustdoc does not render those
+  as links, so both read as a cross-reference that silently is not one. They
+  now point at what a reader can actually reach — `TLS13_SUPPORTED` for the
+  second — or name the item as private rather than appearing to link it.
+
+### Added
+- CI builds the documentation with `-D warnings`, in both the default job and
+  the `handrolled-engine` one. `cargo test --doc` runs doctests but never
+  builds the docs, so rustdoc's own lints had no job that could fail on them —
+  which is how the two links above survived thirteen pull requests. The
+  handrolled job documents with `--all-features`, because the crate's prose
+  links to items behind `rusty-tokio` and a partial-feature doc build reports
+  unresolved links that say nothing about the module under test.
+
 ## [0.2.0] - 2026-08-03
 
 Built and tested against `rusty_tokio` rev `6d3bb05a45a393e4cf902013b05189dd168f6106`
