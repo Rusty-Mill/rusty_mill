@@ -22,6 +22,48 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine: interop against real servers
+**2026-08-03**
+
+- **Added:** `tests/handrolled_interop.rs` (rusty_tls#25) — the hand-rolled
+  client completing TLS 1.3 handshakes over a real socket, against servers
+  nobody here configured, using the machine's own trust store, and fetching
+  real HTTP responses. This closes the second item on ADR-0002's shipping bar
+  for the client.
+- **Added:** a blocking transport in about thirty lines, showing what "the
+  caller splits the stream into records" actually looks like. It stays in the
+  test rather than the library: `handrolled` is not the engine this crate
+  ships, so giving it an IO adapter would grow the surface of an experiment
+  for no production benefit.
+- **Changed:** the tests are `#[ignore]`d rather than gated on an environment
+  variable. A gated test that quietly passes when the variable is unset
+  reports `ok` for a run that did nothing — which is exactly how a vacuous
+  session-ticket test survived a mutation in stage 3c-ii. An ignored test
+  reports `ignored`.
+- **Fixed:** coverage that was assumed and absent. This work expected real
+  servers to split a handshake flight across records, finally exercising the
+  client's reassembly buffer — `rustls` sends its flight in one record, so
+  `complete_prefix` and the buffer had never done any work. **The measurement
+  disagreed**: every server tried also sends one record. The interop suite now
+  reports the count rather than asserting a split, and the gap is closed
+  hermetically by a test server that splits its flight on purpose, down to one
+  octet per record.
+- **Known limitation, stated plainly:** where outbound TLS is intercepted, the
+  peer is an egress gateway rather than the host named. That is still an
+  independent TLS 1.3 implementation and so still a third opinion, but a
+  passing run is evidence about *whatever answered* — so the suite prints the
+  certificate issuer on every run rather than leaving it to be inferred.
+- **Known limitation, stated plainly:** one test somebody would expect to find
+  here is absent and cannot be written. An intercepting gateway mints a
+  certificate for whatever SNI it is handed, so a client *correctly* accepts
+  it, and "connect to a real server under the wrong name and watch it be
+  refused" cannot pass in both environments. The direction that is checkable
+  everywhere — every accepted certificate carries the name that was asked for
+  — is asserted instead, and the refusal direction stays covered hermetically
+  where the peer's certificate can be chosen.
+
+---
+
 ## Hand-rolled TLS engine, stage 3c-ii: the TLS 1.3 client
 **2026-08-03**
 

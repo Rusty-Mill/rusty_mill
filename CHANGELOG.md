@@ -196,6 +196,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
   Still behind both gates, and `rustls` remains the engine behind every
   exported type. Nothing in the public API routes through this.
+- **Interop over a real socket** (`tests/handrolled_interop.rs`). The client
+  completes TLS 1.3 handshakes against servers nobody here configured, using
+  the machine's own trust store, and fetches real HTTP responses. `#[ignore]`d
+  rather than gated on an environment variable, because a gated test that
+  passes when the variable is unset reports `ok` for a run that did nothing.
+
+  Two limits stated in the suite itself: where egress is intercepted the peer
+  is a gateway rather than the host named, so the issuer is printed on every
+  run; and because a gateway mints a certificate for whatever SNI it is
+  handed, "connect under the wrong name and watch it be refused" cannot be
+  written to pass in both environments. The checkable direction — every
+  accepted certificate carries the name that was asked for — is asserted
+  instead.
+- **A hermetic test that a handshake flight split across records is
+  reassembled**, down to one octet per record. This closes coverage that was
+  assumed and absent: `rustls` sends its whole flight in one record, and so
+  does every server the interop suite reaches, so `complete_prefix` and the
+  client's reassembly buffer had never done any work.
 - `handshake::complete_prefix`, which reports how many leading bytes of a
   buffer form whole messages. `messages` requires its input to end on a
   boundary, which is right for a finished buffer and wrong for one still
