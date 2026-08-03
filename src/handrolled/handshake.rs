@@ -248,6 +248,36 @@ pub fn messages(input: &[u8]) -> Result<Vec<Message<'_>>> {
     Ok(out)
 }
 
+/// How many leading bytes of `input` form whole handshake messages.
+///
+/// [`messages`] requires its input to end exactly on a message boundary, which
+/// is right for a buffer someone has finished assembling and wrong for one
+/// still filling up: handshake messages may span records, so a client reading
+/// a stream routinely holds a partial one. This reports how much is currently
+/// complete, so a caller can hand that prefix to [`messages`] and keep the
+/// remainder.
+///
+/// Never fails. A partial trailing message is not an error — it is the normal
+/// state of a buffer between records — and a length that has not arrived yet
+/// is simply not complete. Deciding that a peer sent something impossible is
+/// [`messages`]' job, on a prefix this function has already agreed is whole.
+pub fn complete_prefix(input: &[u8]) -> usize {
+    let mut offset = 0usize;
+
+    while let Some(header) = input.get(offset..offset + 4) {
+        let declared = u32::from_be_bytes([0, header[1], header[2], header[3]]) as usize;
+        let Some(total) = declared.checked_add(4) else {
+            break;
+        };
+        if input.len() - offset < total {
+            break;
+        }
+        offset += total;
+    }
+
+    offset
+}
+
 // ---------------------------------------------------------------------------
 // Extensions
 // ---------------------------------------------------------------------------

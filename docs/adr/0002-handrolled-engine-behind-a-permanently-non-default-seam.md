@@ -107,7 +107,7 @@ independently abandonable:
 | 3a | TLS 1.3 key schedule — HKDF-Expand-Label, the secret schedule, traffic keys, Finished | **landed** |
 | 3b | Handshake message encoding/parsing and the transcript hash | **landed** |
 | 3c-i | Ephemeral key exchange, and the TLS `SignatureScheme` namespace — including RSASSA-PSS, which 2b-i refused | **landed** |
-| 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | not started |
+| 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | **landed** |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
 
@@ -312,6 +312,62 @@ suite asserts the refusal — and measures the modulus to prove that is the
 reason — but the positive coverage for PSS has to come from generated keys
 instead of the RFC.
 
+3c-ii is the first stage with a peer, and it changes what a test can be worth.
+Every earlier stage had an oracle independent of this code — RFC 8448's
+published bytes, the machine's own trust store, rustls' record layer. A state
+machine has a better one, a **real server**, because a handshake is a mutual
+computation: a client that derives the wrong secret, orders the transcript
+wrongly, or encodes an extension slightly wrong would still satisfy a suite
+where both sides are this code. `rustls` has not read this implementation, so
+a completed handshake against it is evidence about TLS rather than about
+internal agreement. That test is the one the stage rests on.
+
+Interop proves only the happy path, and a client that completes a handshake
+with a good server *and* with an attacker is worse than useless. The refusals
+needed a peer that could be made to misbehave, and rustls cannot: the server's
+flight arrives inside one AEAD-protected record, so editing it needs keys the
+test does not have. The answer was a minimal test server built from this
+crate's own primitives — which would be circular if it were used to prove the
+client works, and is not used for that. It is used only to make the client
+**refuse**, and a refusal cannot be manufactured by shared wrongness: if both
+sides agreed on a malformed flight, the client would accept it and the test
+would fail. A control test asserts the test server's correct flight completes,
+so the rejection suite cannot pass by producing garbage.
+
+Four things from 3c-ii worth carrying forward:
+
+- **A state machine's expected message should be data, not control flow.**
+  `Expect` is a field, so "the server skipped CertificateVerify" is the default
+  for everything that is not the message required, rather than a case someone
+  has to remember to write. The mutation that advanced from Certificate
+  straight to Finished was caught by fourteen tests; had the ordering been a
+  chain of `if`s, it would have needed one written specifically.
+- **A check that only improves an error message is still worth having, and
+  still must not be oversold.** Deleting the `key_share` group check survived
+  the suite, and chasing it showed the check does not stop a mismatched share
+  from being usable — `agree` uses the client's own group whatever the label
+  says, so a wrong label just fails at the Finished instead. It buys a
+  diagnosable error at the point of the disagreement. That is the same shape as
+  3b's length-overrun check, and it got the same treatment: keep it, test the
+  distinction directly, and say in the doc comment what it is *not* doing.
+- **A test can pass because the thing it tests never happens.** The session
+  ticket test was green and vacuous: this client does not offer
+  `psk_key_exchange_modes`, so by RFC 8446 §4.2.9 a conforming server never
+  sends a ticket, and rustls duly sent none. A mutation that returned tickets
+  to the caller as application data survived. The handling is still worth
+  having — the cost of getting it wrong is a caller handed handshake bytes as
+  data, a protocol surprise turned into silent corruption — so the test server
+  now sends one, because a conforming peer will not.
+- **State the fuzz invariant you can actually defend.** "No corrupted record
+  stream completes a handshake" would look like a security property and be a
+  tautology, since a recorded stream is bound to one ephemeral key. The
+  defensible invariants are that nothing a peer sends makes the client panic —
+  a remotely reachable denial of service — and that a stream which *does*
+  complete authenticated the real server. Corrupting a change_cipher_spec
+  changes nothing, because that record is discarded whatever it holds; the
+  test asserts that harmlessness rather than treating the completions as a
+  mystery.
+
 ### 5. The shipping bar
 
 From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
@@ -319,7 +375,11 @@ From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
 1. **Differential testing against rustls.** Same input, both engines,
    byte-identical output.
 2. **Interop against real servers**, plus the existing hermetic rejection
-   suite passing identically on both engines.
+   suite passing identically on both engines. Met for the client as of 3c-ii:
+   `handrolled_client` completes handshakes against a real
+   `rustls::ServerConnection` across every offered suite and group, including
+   a HelloRetryRequest, and carries application data both ways. Interop against
+   servers on the public internet is still owed.
 3. **Every rejection path tested to actually reject.** The dangerous failure
    is accepting something bad, and no happy-path test catches it.
 4. **Fuzz the parsers.** DER, record, and handshake parsing take hostile input

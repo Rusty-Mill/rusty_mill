@@ -56,8 +56,13 @@
 //!   most sharply on where an ECDSA key's curve comes from — and that module's
 //!   docs set the two side by side.
 //!
-//! The client state machine (3c-ii), TLS 1.2 (4), and the server side (5) are
-//! not built. The ADR carries the order and the bar each must clear.
+//! - [`client`] — the TLS 1.3 client handshake (stage 3c-ii). The first piece
+//!   here with state, and so the first that can be wrong about *sequence*
+//!   rather than content: a flight accepted in the wrong order, or with the
+//!   CertificateVerify quietly missing, still looks like a working connection.
+//!
+//! TLS 1.2 (4) and the server side (5) are not built. The ADR carries the
+//! order and the bar each must clear.
 //!
 //! # What is deliberately *not* here
 //!
@@ -66,6 +71,7 @@
 //! correctness property — constant-time execution — that none of this
 //! module's testing strategy can see.
 
+pub mod client;
 pub mod der;
 pub mod handshake;
 pub mod kx;

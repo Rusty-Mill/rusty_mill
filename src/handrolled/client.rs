@@ -1,0 +1,1104 @@
+//! The TLS 1.3 client handshake — stage 3c-ii.
+//!
+//! Every stage before this one was a function over bytes: same input, same
+//! output, no clock, no peer, no memory. This one has state, and its failures
+//! are of a different kind. A parser can be wrong about *content*; a state
+//! machine can be wrong about *sequence* — accepting a flight in the wrong
+//! order, or with a message quietly missing — and the result still looks like
+//! a working connection.
+//!
+//! The dangerous omission is specific and worth naming. A server's Certificate
+//! proves nothing on its own: anyone can send anyone's certificate. What proves
+//! the peer holds the matching private key is the CertificateVerify, and a
+//! client that accepted a flight without one would complete a handshake with an
+//! attacker who copied a certificate off the wire. That is why the expected
+//! message is a field of the state rather than a `match` on whatever arrived —
+//! see [`Expect`].
+//!
+//! # Sans-IO
+//!
+//! Nothing here opens a socket. [`ClientHandshake::read_record`] takes one
+//! whole TLS record and returns the bytes to send back, which is the same
+//! shape `rustls::ClientConnection` has and for the same reason: the transport
+//! is the caller's business, and a handshake that owns its own IO cannot be
+//! driven by a test.
+//!
+//! Splitting a byte stream into records is the caller's job too, with
+//! [`record_length`] to find the boundaries. That division is the record
+//! layer's own: [`super::record`] protects a record, and says in its docs that
+//! finding one is a layer above.
+//!
+//! # What is deliberately not supported
+//!
+//! Refused, with an error, rather than half-implemented:
+//!
+//! - **Client certificates.** A CertificateRequest ends the handshake with
+//!   [`ClientError::ClientCertificateRequested`]. Sending an empty Certificate
+//!   would let it continue and is legal, but it is a feature this has not
+//!   built and pretending otherwise helps nobody.
+//! - **Session resumption, PSK, and 0-RTT.** No ticket is ever used, and the
+//!   ClientHello does not offer `psk_key_exchange_modes` — so by RFC 8446
+//!   §4.2.9 a conforming server will never send a NewSessionTicket at all.
+//!   [`Connection::read`] handles one anyway. That is not dead code being
+//!   optimistic: the cost of being wrong is that an unexpected handshake
+//!   record gets handed to the caller as application data, which turns a
+//!   protocol surprise into silent data corruption. Discarding it is the
+//!   cheap, safe answer to a message that should not arrive.
+//! - **TLS 1.2 and below.** `supported_versions` offers exactly `0x0304`, and a
+//!   ServerHello that does not select it is refused. Stage 4 is where a
+//!   fallback would go, if one is ever wanted.
+//!
+//! # HelloRetryRequest
+//!
+//! Implemented, including the transcript substitution RFC 8446 §4.4.1
+//! requires: once a retry happens, the running hash starts from a synthetic
+//! `message_hash` message wrapping `Hash(ClientHello1)` rather than from
+//! ClientHello1 itself. Getting that wrong produces a client that works
+//! perfectly until it meets a server that asks for a different group, and then
+//! fails with a decrypt error that looks like anything but a transcript bug.
+
+use ring::rand::{SecureRandom, SystemRandom};
+
+use super::handshake::{
+    certificate_verify_content, complete_prefix, extension, find, messages,
+    parse_encrypted_extensions, parse_finished, CertificateMessage, CertificateVerify, ClientHello,
+    Extension, HandshakeError, HandshakeType, Message, ServerHello, Transcript,
+    SERVER_CERTIFICATE_VERIFY_CONTEXT,
+};
+use super::kx::{KeyExchange, KxError, NamedGroup};
+use super::name::ServerName;
+use super::path::{verify_peer_certificate, PathError, PathOptions, TrustAnchor};
+use super::record::{
+    Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
+};
+use super::schedule::{
+    finished_verify_data, traffic_keys, update_traffic_secret, verify_finished, Hash, KeySchedule,
+};
+use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
+use super::wire::Writer;
+use super::x509::Certificate;
+
+/// Everything the client handshake can refuse.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClientError {
+    /// A handshake message was malformed.
+    Handshake(HandshakeError),
+    /// A record was malformed or did not decrypt.
+    Record(RecordError),
+    /// The key exchange failed.
+    Kx(KxError),
+    /// The peer's certificate did not validate, or was not for this server.
+    Path(PathError),
+    /// The CertificateVerify signature did not check out.
+    Verify(VerifyError),
+    /// A handshake message arrived where a different one was required.
+    ///
+    /// The variant this whole module exists to be able to return. See the
+    /// module docs on why a missing CertificateVerify is the case that matters.
+    UnexpectedMessage {
+        /// What the state machine required.
+        expected: &'static str,
+        /// What arrived.
+        got: HandshakeType,
+    },
+    /// A record arrived carrying content the handshake has no use for.
+    UnexpectedContentType(ContentType),
+    /// The server did not select TLS 1.3.
+    ///
+    /// Covers both a missing `supported_versions` in the ServerHello and one
+    /// naming another version. A TLS 1.2 server reaching this point is a
+    /// downgrade, whether or not it intended one.
+    NotTls13,
+    /// The server selected a cipher suite the client did not offer.
+    UnofferedCipherSuite(u16),
+    /// The server's `key_share` named a group the client did not offer, or
+    /// none at all.
+    BadKeyShare,
+    /// The server sent a second HelloRetryRequest.
+    ///
+    /// RFC 8446 §4.1.4: a client MUST abort rather than retry twice. Two is
+    /// all it takes to make a server able to loop a client indefinitely.
+    RepeatedHelloRetryRequest,
+    /// A HelloRetryRequest asked for a group the client did not offer.
+    UnofferedGroup(u16),
+    /// The server's Finished did not verify.
+    ///
+    /// The handshake was tampered with, or the peer did not derive the same
+    /// keys. Indistinguishable from outside, and both are fatal.
+    BadFinished,
+    /// The server requested a client certificate, which is not supported.
+    ClientCertificateRequested,
+    /// The Certificate message carried no certificates.
+    NoCertificates,
+    /// A certificate in the chain did not parse.
+    ///
+    /// Its own variant rather than a [`PathError`], because path validation
+    /// takes certificates that have already been parsed — reading DER off the
+    /// wire is this module's step, and a peer sending rubbish is a different
+    /// event from a chain that does not validate.
+    MalformedCertificate(super::x509::X509Error),
+    /// A record arrived after the connection was already broken.
+    ///
+    /// Once a handshake fails it stays failed; there is no path back that does
+    /// not risk continuing with half-established state.
+    Failed,
+    /// The system random source failed.
+    Random,
+}
+
+impl core::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Handshake(err) => write!(f, "malformed handshake message: {err}"),
+            Self::Record(err) => write!(f, "record layer: {err}"),
+            Self::Kx(err) => write!(f, "key exchange: {err}"),
+            Self::Path(err) => write!(f, "certificate: {err}"),
+            Self::Verify(err) => write!(f, "handshake signature: {err}"),
+            Self::UnexpectedMessage { expected, got } => {
+                write!(f, "expected {expected}, got {got:?}")
+            }
+            Self::UnexpectedContentType(typ) => {
+                write!(f, "unexpected content type {typ:?} during the handshake")
+            }
+            Self::NotTls13 => f.write_str("the server did not select TLS 1.3"),
+            Self::UnofferedCipherSuite(suite) => {
+                write!(
+                    f,
+                    "the server selected unoffered cipher suite 0x{suite:04x}"
+                )
+            }
+            Self::BadKeyShare => f.write_str("the server's key_share is missing or unusable"),
+            Self::RepeatedHelloRetryRequest => f.write_str("a second HelloRetryRequest"),
+            Self::UnofferedGroup(group) => {
+                write!(f, "a retry asked for unoffered group 0x{group:04x}")
+            }
+            Self::BadFinished => f.write_str("the server's Finished did not verify"),
+            Self::ClientCertificateRequested => {
+                f.write_str("the server requested a client certificate, which is not supported")
+            }
+            Self::NoCertificates => f.write_str("the server sent an empty certificate chain"),
+            Self::MalformedCertificate(err) => write!(f, "a certificate did not parse: {err}"),
+            Self::Failed => f.write_str("the connection already failed"),
+            Self::Random => f.write_str("the system random source failed"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+impl From<HandshakeError> for ClientError {
+    fn from(err: HandshakeError) -> Self {
+        Self::Handshake(err)
+    }
+}
+impl From<RecordError> for ClientError {
+    fn from(err: RecordError) -> Self {
+        Self::Record(err)
+    }
+}
+impl From<KxError> for ClientError {
+    fn from(err: KxError) -> Self {
+        Self::Kx(err)
+    }
+}
+impl From<PathError> for ClientError {
+    fn from(err: PathError) -> Self {
+        Self::Path(err)
+    }
+}
+impl From<VerifyError> for ClientError {
+    fn from(err: VerifyError) -> Self {
+        Self::Verify(err)
+    }
+}
+
+type Result<T> = core::result::Result<T, ClientError>;
+
+// ---------------------------------------------------------------------------
+// Cipher suites
+// ---------------------------------------------------------------------------
+
+/// A TLS 1.3 cipher suite: an AEAD and a hash, chosen together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CipherSuite(pub u16);
+
+impl CipherSuite {
+    /// `TLS_AES_128_GCM_SHA256`, which every TLS 1.3 implementation must have.
+    pub const TLS_AES_128_GCM_SHA256: Self = Self(0x1301);
+    /// `TLS_AES_256_GCM_SHA384`.
+    pub const TLS_AES_256_GCM_SHA384: Self = Self(0x1302);
+    /// `TLS_CHACHA20_POLY1305_SHA256`.
+    pub const TLS_CHACHA20_POLY1305_SHA256: Self = Self(0x1303);
+
+    /// The suites this client offers, strongest-preference first.
+    pub const SUPPORTED: &'static [Self] = &[
+        Self::TLS_AES_256_GCM_SHA384,
+        Self::TLS_AES_128_GCM_SHA256,
+        Self::TLS_CHACHA20_POLY1305_SHA256,
+    ];
+
+    /// The AEAD and hash this suite names, or `None` if it names neither.
+    ///
+    /// The key length comes from the AEAD and the secret length from the hash,
+    /// and `TLS_AES_128_GCM_SHA256` is exactly the case where they differ —
+    /// a 16-byte key from a 32-byte secret. Deriving one from the other would
+    /// work for two of these three.
+    pub const fn parts(self) -> Option<(Aead, Hash)> {
+        match self.0 {
+            0x1301 => Some((Aead::Aes128Gcm, Hash::Sha256)),
+            0x1302 => Some((Aead::Aes256Gcm, Hash::Sha384)),
+            0x1303 => Some((Aead::ChaCha20Poly1305, Hash::Sha256)),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+
+/// What a client needs to know before it can start.
+///
+/// Every field is required. There is no `Default`, because a default trust
+/// anchor set or a default server name is the sort of convenience that ends up
+/// authenticating nothing.
+pub struct ClientConfig<'a> {
+    /// The server being connected to, matched against the certificate.
+    pub server_name: ServerName<'a>,
+    /// The trust anchors the chain must reach.
+    pub anchors: &'a [TrustAnchor<'a>],
+    /// Path validation options, including the current time.
+    pub path: PathOptions,
+    /// The groups to offer, most preferred first. A `key_share` is sent for
+    /// the first; the rest are offered so a server can ask for one by
+    /// HelloRetryRequest.
+    pub groups: &'a [NamedGroup],
+    /// The cipher suites to offer, most preferred first.
+    pub cipher_suites: &'a [CipherSuite],
+}
+
+// ---------------------------------------------------------------------------
+// Record framing
+// ---------------------------------------------------------------------------
+
+/// The total length of the record starting at `input`, header included.
+///
+/// `None` when fewer than [`super::record::HEADER_LEN`] bytes are present, so
+/// a caller reading a stream can use it to decide whether a whole record has
+/// arrived. Deliberately does not validate the type or version — that is
+/// [`ClientHandshake::read_record`]'s job, and a deframer that also judged
+/// would be two things.
+pub fn record_length(input: &[u8]) -> Option<usize> {
+    let header = input.get(..HEADER_LEN)?;
+    Some(HEADER_LEN + usize::from(u16::from_be_bytes([header[3], header[4]])))
+}
+
+/// Frame a fragment as an unprotected record.
+///
+/// Only the first flight is unprotected, so `version` is 0x0301 there and
+/// 0x0303 afterwards. RFC 8446 §5.1 says the field MUST be ignored on receipt,
+/// so this matches convention rather than a requirement.
+fn plaintext_record(typ: ContentType, version: u16, fragment: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN + fragment.len());
+    out.push(typ.as_u8());
+    out.extend_from_slice(&version.to_be_bytes());
+    out.extend_from_slice(&(fragment.len() as u16).to_be_bytes());
+    out.extend_from_slice(fragment);
+    out
+}
+
+/// The one-octet record servers send in middlebox-compatibility mode.
+const CHANGE_CIPHER_SPEC: u8 = 20;
+
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+/// The message the state machine will accept next, and nothing else.
+///
+/// A field rather than a `match` on what arrived: the difference is whether
+/// "the server skipped CertificateVerify" is a case someone has to remember to
+/// write, or the default for every message that is not the one expected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expect {
+    EncryptedExtensions,
+    Certificate,
+    CertificateVerify,
+    Finished,
+}
+
+impl Expect {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::EncryptedExtensions => "EncryptedExtensions",
+            Self::Certificate => "Certificate",
+            Self::CertificateVerify => "CertificateVerify",
+            Self::Finished => "Finished",
+        }
+    }
+}
+
+/// Everything that exists only once a ServerHello has been accepted.
+struct Negotiated {
+    suite: CipherSuite,
+    aead: Aead,
+    hash: Hash,
+    transcript: Transcript,
+    schedule: KeySchedule,
+    client_handshake_secret: Vec<u8>,
+    server_handshake_secret: Vec<u8>,
+    opener: Opener,
+    /// The peer's chain, as DER.
+    ///
+    /// Stored encoded rather than parsed because a [`Certificate`] borrows the
+    /// bytes it was parsed from, and keeping both in one struct would make it
+    /// self-referential. Re-parsing at the point of use costs a microsecond
+    /// and keeps the lifetime honest.
+    certificates: Vec<Vec<u8>>,
+    /// The transcript hash as of the end of the Certificate message, which is
+    /// what the CertificateVerify signature covers. Captured when the
+    /// Certificate is added rather than recomputed later, so a message
+    /// arriving in between cannot silently change what was signed.
+    certificate_transcript: Vec<u8>,
+}
+
+enum State {
+    AwaitServerHello {
+        client_hello: Vec<u8>,
+        kx: KeyExchange,
+        retried: bool,
+    },
+    InFlight {
+        expect: Expect,
+        negotiated: Box<Negotiated>,
+    },
+    Done(Box<Connection>),
+    Failed,
+}
+
+// ---------------------------------------------------------------------------
+// The handshake
+// ---------------------------------------------------------------------------
+
+/// A TLS 1.3 client handshake in progress.
+pub struct ClientHandshake<'a> {
+    config: &'a ClientConfig<'a>,
+    state: State,
+    /// Handshake bytes reassembled across records. Messages may span records
+    /// and several may share one, so neither boundary lines up with the other.
+    buffer: Vec<u8>,
+}
+
+impl<'a> ClientHandshake<'a> {
+    /// Start a handshake, returning it and the ClientHello record to send.
+    pub fn start(config: &'a ClientConfig<'a>) -> Result<(Self, Vec<u8>)> {
+        let group = *config.groups.first().ok_or(ClientError::BadKeyShare)?;
+        let kx = KeyExchange::generate(group)?;
+        let hello = build_client_hello(config, &kx)?;
+
+        let record = plaintext_record(ContentType::Handshake, 0x0301, &hello);
+        Ok((
+            Self {
+                config,
+                state: State::AwaitServerHello {
+                    client_hello: hello,
+                    kx,
+                    retried: false,
+                },
+                buffer: Vec::new(),
+            },
+            record,
+        ))
+    }
+
+    /// True once the handshake has completed and [`Self::into_connection`]
+    /// will succeed.
+    pub fn is_finished(&self) -> bool {
+        matches!(self.state, State::Done(_))
+    }
+
+    /// Take the established connection.
+    pub fn into_connection(self) -> Result<Connection> {
+        match self.state {
+            State::Done(connection) => Ok(*connection),
+            _ => Err(ClientError::Failed),
+        }
+    }
+
+    /// Feed one whole TLS record, and get back the bytes to send in reply.
+    ///
+    /// `record` must be exactly one record, header included — use
+    /// [`record_length`] to find where it ends. The reply is empty for every
+    /// record except the one carrying the server's Finished, which is answered
+    /// with the client's own flight.
+    ///
+    /// A failure is permanent. Every later call returns [`ClientError::Failed`]
+    /// rather than continuing from a state that is half-established.
+    pub fn read_record(&mut self, record: &[u8]) -> Result<Vec<u8>> {
+        if matches!(self.state, State::Failed) {
+            return Err(ClientError::Failed);
+        }
+        match self.read_record_inner(record) {
+            Ok(reply) => Ok(reply),
+            Err(err) => {
+                self.state = State::Failed;
+                Err(err)
+            }
+        }
+    }
+
+    fn read_record_inner(&mut self, record: &[u8]) -> Result<Vec<u8>> {
+        if record.len() < HEADER_LEN {
+            return Err(RecordError::Truncated {
+                len: record.len(),
+                min: HEADER_LEN,
+            }
+            .into());
+        }
+
+        // RFC 8446 §5: a change_cipher_spec received during the handshake must
+        // be dropped without comment. Servers in middlebox-compatibility mode
+        // send one, and a client that treated it as an error would fail
+        // against a large fraction of the internet for no security benefit.
+        if record[0] == CHANGE_CIPHER_SPEC {
+            return Ok(Vec::new());
+        }
+
+        let declared = usize::from(u16::from_be_bytes([record[3], record[4]]));
+        if record.len() != HEADER_LEN + declared {
+            return Err(RecordError::LengthMismatch {
+                declared,
+                available: record.len() - HEADER_LEN,
+            }
+            .into());
+        }
+        if declared > MAX_ENCRYPTED_FRAGMENT_LEN {
+            return Err(RecordError::EncryptedFragmentTooLong { len: declared }.into());
+        }
+
+        let fragment = match &mut self.state {
+            // Before the ServerHello everything is in the clear, and a record
+            // claiming to be protected cannot be: there is no key yet.
+            State::AwaitServerHello { .. } => {
+                if ContentType::from_u8(record[0]) != ContentType::Handshake {
+                    return Err(ClientError::UnexpectedContentType(ContentType::from_u8(
+                        record[0],
+                    )));
+                }
+                record[HEADER_LEN..].to_vec()
+            }
+            State::InFlight { negotiated, .. } => {
+                let opened = negotiated.opener.open(record)?;
+                if opened.typ != ContentType::Handshake {
+                    return Err(ClientError::UnexpectedContentType(opened.typ));
+                }
+                opened.fragment
+            }
+            State::Done(_) | State::Failed => return Err(ClientError::Failed),
+        };
+
+        self.buffer.extend_from_slice(&fragment);
+        self.drain_buffer()
+    }
+
+    /// Process every whole message the buffer now holds.
+    fn drain_buffer(&mut self) -> Result<Vec<u8>> {
+        let mut reply = Vec::new();
+
+        loop {
+            let complete = complete_prefix(&self.buffer);
+            if complete == 0 {
+                return Ok(reply);
+            }
+            let consumed: Vec<u8> = self.buffer.drain(..complete).collect();
+
+            for message in messages(&consumed)? {
+                reply.extend_from_slice(&self.handle_message(&message)?);
+            }
+        }
+    }
+
+    fn handle_message(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
+        match &mut self.state {
+            State::AwaitServerHello { .. } => self.handle_server_hello(message),
+            State::InFlight { .. } => self.handle_flight_message(message),
+            State::Done(_) | State::Failed => Err(ClientError::Failed),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ClientHello
+// ---------------------------------------------------------------------------
+
+fn random_bytes(len: usize) -> Result<Vec<u8>> {
+    let mut out = vec![0u8; len];
+    SystemRandom::new()
+        .fill(&mut out)
+        .map_err(|_| ClientError::Random)?;
+    Ok(out)
+}
+
+/// Build the ClientHello body, header included.
+fn build_client_hello(config: &ClientConfig<'_>, kx: &KeyExchange) -> Result<Vec<u8>> {
+    let random = random_bytes(32)?;
+    // RFC 8446 §D.4: a client in middlebox-compatibility mode sends a
+    // 32-octet session id it will never use, because middleboxes that predate
+    // TLS 1.3 drop handshakes that look too unlike a resumption.
+    let session_id = random_bytes(32)?;
+
+    let mut server_name = Writer::new();
+    if let ServerName::Dns(name) = config.server_name {
+        server_name.vector_u16(|w| {
+            w.u8(0); // host_name
+            w.vector_u16(|w| w.bytes(name.as_bytes()));
+        });
+    }
+
+    let mut versions = Writer::new();
+    versions.vector_u8(|w| w.u16(0x0304));
+
+    let mut groups = Writer::new();
+    groups.vector_u16(|w| {
+        for group in config.groups {
+            w.u16(group.as_u16());
+        }
+    });
+
+    let mut schemes = Writer::new();
+    schemes.vector_u16(|w| {
+        for scheme in SignatureScheme::TLS13_SUPPORTED {
+            w.u16(scheme.0);
+        }
+    });
+
+    let mut key_share = Writer::new();
+    key_share.vector_u16(|w| {
+        w.u16(kx.group().as_u16());
+        w.vector_u16(|w| w.bytes(kx.public_key()));
+    });
+
+    let (server_name, versions, groups, schemes, key_share) = (
+        server_name.into_vec(),
+        versions.into_vec(),
+        groups.into_vec(),
+        schemes.into_vec(),
+        key_share.into_vec(),
+    );
+
+    let mut extensions = Vec::new();
+    // RFC 6066 §3: an IP address is never sent as a server_name, so the
+    // extension is absent entirely rather than present and empty.
+    if !server_name.is_empty() {
+        extensions.push(Extension {
+            typ: extension::SERVER_NAME,
+            data: &server_name,
+        });
+    }
+    extensions.push(Extension {
+        typ: extension::SUPPORTED_VERSIONS,
+        data: &versions,
+    });
+    extensions.push(Extension {
+        typ: extension::SUPPORTED_GROUPS,
+        data: &groups,
+    });
+    extensions.push(Extension {
+        typ: extension::SIGNATURE_ALGORITHMS,
+        data: &schemes,
+    });
+    extensions.push(Extension {
+        typ: extension::KEY_SHARE,
+        data: &key_share,
+    });
+
+    let hello = ClientHello {
+        random: &random,
+        session_id: &session_id,
+        cipher_suites: config.cipher_suites.iter().map(|s| s.0).collect(),
+        extensions,
+    };
+
+    Ok(Message::encode(HandshakeType::ClientHello, &hello.encode()))
+}
+
+// ---------------------------------------------------------------------------
+// ServerHello
+// ---------------------------------------------------------------------------
+
+/// The `key_share` entry in a ServerHello: a group and its key.
+fn server_key_share(data: &[u8]) -> Result<(u16, &[u8])> {
+    let mut reader = super::wire::Reader::new(data);
+    let group = reader.u16().map_err(HandshakeError::Wire)?;
+    let key = reader.vector_u16().map_err(HandshakeError::Wire)?;
+    reader.finish().map_err(HandshakeError::Wire)?;
+    Ok((group, key))
+}
+
+impl ClientHandshake<'_> {
+    fn handle_server_hello(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
+        if message.typ != HandshakeType::ServerHello {
+            return Err(ClientError::UnexpectedMessage {
+                expected: "ServerHello",
+                got: message.typ,
+            });
+        }
+
+        let State::AwaitServerHello {
+            client_hello,
+            kx,
+            retried,
+        } = core::mem::replace(&mut self.state, State::Failed)
+        else {
+            return Err(ClientError::Failed);
+        };
+
+        let hello = ServerHello::parse(message.body)?;
+
+        // The selected suite must be one that was offered, and one this code
+        // can actually use. A server naming something else is either confused
+        // or steering.
+        let suite = CipherSuite(hello.cipher_suite);
+        if !self.config.cipher_suites.contains(&suite) {
+            return Err(ClientError::UnofferedCipherSuite(hello.cipher_suite));
+        }
+        let (aead, hash) = suite
+            .parts()
+            .ok_or(ClientError::UnofferedCipherSuite(hello.cipher_suite))?;
+
+        // TLS 1.3 is negotiated here and nowhere else. `legacy_version` is
+        // pinned at 0x0303 for every version, so a server that omits
+        // `supported_versions` is offering TLS 1.2.
+        match find(&hello.extensions, extension::SUPPORTED_VERSIONS) {
+            Some([0x03, 0x04]) => {}
+            _ => return Err(ClientError::NotTls13),
+        }
+
+        if hello.is_hello_retry_request() {
+            if retried {
+                return Err(ClientError::RepeatedHelloRetryRequest);
+            }
+            return self.retry(client_hello, message, &hello, hash);
+        }
+
+        let share =
+            find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::BadKeyShare)?;
+        let (group, peer_key) = server_key_share(share)?;
+        // The group the server names must be the one whose share was sent.
+        //
+        // This is not what stops a mismatched share from producing a usable
+        // secret — `agree` uses *this* client's group whatever the label says,
+        // so a server that named the wrong one would simply derive a different
+        // secret and fail its own Finished a moment later. What the check buys
+        // is that the failure is `BadKeyShare` at the point of the
+        // disagreement rather than `BadFinished` three messages further on,
+        // which is the difference between a diagnosable bug and a mysterious
+        // one. Claiming more for it would be claiming a defence that is not
+        // there.
+        if group != kx.group().as_u16() {
+            return Err(ClientError::BadKeyShare);
+        }
+
+        let mut transcript = Transcript::new(hash);
+        transcript.add(&client_hello);
+        transcript.add(message.encoded);
+        let hello_hash = transcript.hash();
+
+        let schedule = kx.agree(peer_key, |secret| {
+            KeySchedule::new(hash).into_handshake(secret)
+        })?;
+
+        let client_handshake_secret = schedule.derive("c hs traffic", &hello_hash);
+        let server_handshake_secret = schedule.derive("s hs traffic", &hello_hash);
+
+        let keys = traffic_keys(hash, &server_handshake_secret, aead.key_len());
+        let opener = Opener::new(aead, &keys.key, &keys.iv)?;
+
+        self.state = State::InFlight {
+            expect: Expect::EncryptedExtensions,
+            negotiated: Box::new(Negotiated {
+                suite,
+                aead,
+                hash,
+                transcript,
+                schedule,
+                client_handshake_secret,
+                server_handshake_secret,
+                opener,
+                certificates: Vec::new(),
+                certificate_transcript: Vec::new(),
+            }),
+        };
+        Ok(Vec::new())
+    }
+
+    /// Handle a HelloRetryRequest: rebuild the ClientHello for the group the
+    /// server asked for, and substitute the transcript RFC 8446 §4.4.1
+    /// requires.
+    fn retry(
+        &mut self,
+        client_hello: Vec<u8>,
+        message: &Message<'_>,
+        hello: &ServerHello<'_>,
+        hash: Hash,
+    ) -> Result<Vec<u8>> {
+        let share =
+            find(&hello.extensions, extension::KEY_SHARE).ok_or(ClientError::BadKeyShare)?;
+        if share.len() != 2 {
+            return Err(ClientError::BadKeyShare);
+        }
+        let wanted = u16::from_be_bytes([share[0], share[1]]);
+        let group = NamedGroup::from_u16(wanted).ok_or(ClientError::UnofferedGroup(wanted))?;
+        if !self.config.groups.contains(&group) {
+            return Err(ClientError::UnofferedGroup(wanted));
+        }
+
+        let kx = KeyExchange::generate(group)?;
+        let second = build_client_hello(self.config, &kx)?;
+
+        // §4.4.1: once a retry has happened, the transcript begins with a
+        // synthetic `message_hash` message wrapping Hash(ClientHello1) rather
+        // than with ClientHello1 itself. The substitution exists so that a
+        // server need not retain the first ClientHello, and getting it wrong
+        // produces a client that works until it meets a server that retries.
+        let mut synthetic = Vec::with_capacity(4 + hash.len());
+        synthetic.push(254); // message_hash
+        synthetic.extend_from_slice(&[0x00, 0x00, hash.len() as u8]);
+        synthetic.extend_from_slice(&hash.hash(&client_hello));
+
+        let mut replayed = synthetic;
+        replayed.extend_from_slice(message.encoded);
+        replayed.extend_from_slice(&second);
+
+        self.state = State::AwaitServerHello {
+            client_hello: replayed,
+            kx,
+            retried: true,
+        };
+        Ok(plaintext_record(ContentType::Handshake, 0x0303, &second))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The encrypted flight
+// ---------------------------------------------------------------------------
+
+impl ClientHandshake<'_> {
+    fn handle_flight_message(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
+        let State::InFlight { expect, negotiated } = &mut self.state else {
+            return Err(ClientError::Failed);
+        };
+
+        // RFC 8446 §4.3.2. Refused rather than answered with an empty
+        // Certificate — see the module docs.
+        if message.typ == HandshakeType::CertificateRequest {
+            return Err(ClientError::ClientCertificateRequested);
+        }
+
+        let wanted = match (*expect, message.typ) {
+            (Expect::EncryptedExtensions, HandshakeType::EncryptedExtensions)
+            | (Expect::Certificate, HandshakeType::Certificate)
+            | (Expect::CertificateVerify, HandshakeType::CertificateVerify)
+            | (Expect::Finished, HandshakeType::Finished) => *expect,
+            (expected, got) => {
+                return Err(ClientError::UnexpectedMessage {
+                    expected: expected.name(),
+                    got,
+                })
+            }
+        };
+
+        match wanted {
+            Expect::EncryptedExtensions => {
+                parse_encrypted_extensions(message.body)?;
+                negotiated.transcript.add_message(message);
+                *expect = Expect::Certificate;
+                Ok(Vec::new())
+            }
+            Expect::Certificate => {
+                let certificate = CertificateMessage::parse(message.body)?;
+                if certificate.entries.is_empty() {
+                    return Err(ClientError::NoCertificates);
+                }
+                negotiated.certificates = certificate
+                    .entries
+                    .iter()
+                    .map(|entry| entry.certificate.to_vec())
+                    .collect();
+                negotiated.transcript.add_message(message);
+                // What the CertificateVerify will have signed, captured now.
+                negotiated.certificate_transcript = negotiated.transcript.hash();
+                *expect = Expect::CertificateVerify;
+                Ok(Vec::new())
+            }
+            Expect::CertificateVerify => {
+                let verify = CertificateVerify::parse(message.body)?;
+                self.check_peer(&verify)?;
+                let State::InFlight { expect, negotiated } = &mut self.state else {
+                    return Err(ClientError::Failed);
+                };
+                negotiated.transcript.add_message(message);
+                *expect = Expect::Finished;
+                Ok(Vec::new())
+            }
+            Expect::Finished => self.finish(message),
+        }
+    }
+
+    /// Validate the chain, the name, and the handshake signature.
+    ///
+    /// All three, in one place, because any one of them alone accepts an
+    /// attacker: a valid chain for the wrong name, a right name from an
+    /// untrusted issuer, and a certificate the peer does not hold the key for
+    /// are three different ways to be talking to the wrong server.
+    fn check_peer(&self, verify: &CertificateVerify<'_>) -> Result<()> {
+        let State::InFlight { negotiated, .. } = &self.state else {
+            return Err(ClientError::Failed);
+        };
+
+        let parsed: core::result::Result<Vec<Certificate<'_>>, _> = negotiated
+            .certificates
+            .iter()
+            .map(|der| Certificate::parse(der))
+            .collect();
+        let parsed = parsed.map_err(ClientError::MalformedCertificate)?;
+        let (leaf, intermediates) = parsed.split_first().ok_or(ClientError::NoCertificates)?;
+
+        verify_peer_certificate(
+            leaf,
+            intermediates,
+            self.config.anchors,
+            &self.config.server_name,
+            &self.config.path,
+        )?;
+
+        let content = certificate_verify_content(
+            SERVER_CERTIFICATE_VERIFY_CONTEXT,
+            &negotiated.certificate_transcript,
+        );
+        verify_tls13_signature(
+            SignatureScheme(verify.scheme),
+            &leaf.subject_public_key_info(),
+            &content,
+            verify.signature,
+        )?;
+        Ok(())
+    }
+
+    /// The server's Finished: check it, then send ours and install the
+    /// application keys.
+    fn finish(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
+        let State::InFlight { negotiated, .. } = core::mem::replace(&mut self.state, State::Failed)
+        else {
+            return Err(ClientError::Failed);
+        };
+        let mut negotiated = *negotiated;
+
+        let verify_data = parse_finished(message.body)?;
+        if !verify_finished(
+            negotiated.hash,
+            &negotiated.server_handshake_secret,
+            &negotiated.transcript.hash(),
+            verify_data,
+        ) {
+            return Err(ClientError::BadFinished);
+        }
+
+        // The application secrets are bound to the transcript *through* the
+        // server's Finished, so this has to happen after adding it and before
+        // adding ours.
+        negotiated.transcript.add_message(message);
+        let after_server_finished = negotiated.transcript.hash();
+
+        let master = negotiated.schedule.into_master();
+        let client_application_secret = master.derive("c ap traffic", &after_server_finished);
+        let server_application_secret = master.derive("s ap traffic", &after_server_finished);
+
+        // Ours covers everything the server's did, plus the server's Finished.
+        let client_verify_data = finished_verify_data(
+            negotiated.hash,
+            &negotiated.client_handshake_secret,
+            &after_server_finished,
+        );
+        let client_finished = Message::encode(HandshakeType::Finished, &client_verify_data);
+
+        let handshake_keys = traffic_keys(
+            negotiated.hash,
+            &negotiated.client_handshake_secret,
+            negotiated.aead.key_len(),
+        );
+        let mut sealer = Sealer::new(negotiated.aead, &handshake_keys.key, &handshake_keys.iv)?;
+
+        // Middlebox compatibility again: a bare change_cipher_spec ahead of
+        // the first protected record the client sends.
+        let mut reply = plaintext_record(ContentType::ChangeCipherSpec, 0x0303, &[0x01]);
+        reply.extend_from_slice(&sealer.seal(ContentType::Handshake, &client_finished, 0)?);
+
+        let application =
+            |secret: &[u8]| traffic_keys(negotiated.hash, secret, negotiated.aead.key_len());
+        let client_keys = application(&client_application_secret);
+        let server_keys = application(&server_application_secret);
+
+        self.state = State::Done(Box::new(Connection {
+            aead: negotiated.aead,
+            hash: negotiated.hash,
+            suite: negotiated.suite,
+            sealer: Sealer::new(negotiated.aead, &client_keys.key, &client_keys.iv)?,
+            opener: Opener::new(negotiated.aead, &server_keys.key, &server_keys.iv)?,
+            client_secret: client_application_secret,
+            server_secret: server_application_secret,
+            certificates: negotiated.certificates,
+        }));
+        Ok(reply)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The established connection
+// ---------------------------------------------------------------------------
+
+/// What a completed handshake leaves behind.
+pub struct Connection {
+    aead: Aead,
+    hash: Hash,
+    suite: CipherSuite,
+    sealer: Sealer,
+    opener: Opener,
+    client_secret: Vec<u8>,
+    server_secret: Vec<u8>,
+    certificates: Vec<Vec<u8>>,
+}
+
+/// What came out of a record after the handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Incoming {
+    /// Application data.
+    Application(Vec<u8>),
+    /// A post-handshake message that needed no reply — a NewSessionTicket,
+    /// which this client does not use but must tolerate.
+    Handled,
+    /// A post-handshake message answered with these bytes, which the caller
+    /// must send: a KeyUpdate that requested one in return.
+    Reply(Vec<u8>),
+}
+
+impl Connection {
+    /// The cipher suite in use.
+    pub const fn cipher_suite(&self) -> CipherSuite {
+        self.suite
+    }
+
+    /// The peer's certificate chain, DER-encoded, end-entity first.
+    pub fn peer_certificates(&self) -> &[Vec<u8>] {
+        &self.certificates
+    }
+
+    /// Protect application data as one record.
+    pub fn write(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.sealer.seal(ContentType::ApplicationData, data, 0)?)
+    }
+
+    /// Unprotect one whole record.
+    ///
+    /// Handles the post-handshake messages a server may send at any time. A
+    /// client that treated a NewSessionTicket as application data would hand
+    /// its caller a ticket as if the server had sent it, which is how a
+    /// protocol bug becomes a data-corruption bug.
+    pub fn read(&mut self, record: &[u8]) -> Result<Incoming> {
+        // A change_cipher_spec after the handshake is not permitted, but it
+        // costs nothing to drop and some middleboxes still emit one.
+        if record.first() == Some(&CHANGE_CIPHER_SPEC) {
+            return Ok(Incoming::Handled);
+        }
+
+        let opened = self.opener.open(record)?;
+        match opened.typ {
+            ContentType::ApplicationData => Ok(Incoming::Application(opened.fragment)),
+            ContentType::Handshake => self.post_handshake(&opened.fragment),
+            other => Err(ClientError::UnexpectedContentType(other)),
+        }
+    }
+
+    fn post_handshake(&mut self, fragment: &[u8]) -> Result<Incoming> {
+        let complete = complete_prefix(fragment);
+        let mut reply = Vec::new();
+
+        for message in messages(&fragment[..complete])? {
+            match message.typ {
+                // Read and discarded. This client never resumes, and a server
+                // that offers a ticket is doing nothing wrong.
+                HandshakeType::NewSessionTicket => {}
+                HandshakeType::KeyUpdate => {
+                    // RFC 8446 §4.6.3. The body is one octet:
+                    // update_not_requested(0) or update_requested(1).
+                    let requested = message.body == [0x01];
+                    self.server_secret = update_traffic_secret(self.hash, &self.server_secret);
+                    let keys = traffic_keys(self.hash, &self.server_secret, self.aead.key_len());
+                    self.opener = Opener::new(self.aead, &keys.key, &keys.iv)?;
+
+                    if requested {
+                        // Answer before rekeying our own direction: the reply
+                        // goes out under the key the peer still has.
+                        let body = Message::encode(HandshakeType::KeyUpdate, &[0x00]);
+                        reply.extend_from_slice(&self.sealer.seal(
+                            ContentType::Handshake,
+                            &body,
+                            0,
+                        )?);
+                        self.client_secret = update_traffic_secret(self.hash, &self.client_secret);
+                        let keys =
+                            traffic_keys(self.hash, &self.client_secret, self.aead.key_len());
+                        self.sealer = Sealer::new(self.aead, &keys.key, &keys.iv)?;
+                    }
+                }
+                other => {
+                    return Err(ClientError::UnexpectedMessage {
+                        expected: "a post-handshake message",
+                        got: other,
+                    })
+                }
+            }
+        }
+
+        if reply.is_empty() {
+            Ok(Incoming::Handled)
+        } else {
+            Ok(Incoming::Reply(reply))
+        }
+    }
+}
+
+/// Says nothing about key material, for the reason [`super::kx`] gives.
+impl core::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Connection")
+            .field("cipher_suite", &self.suite)
+            .field("peer_certificates", &self.certificates.len())
+            .field("keys", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Says nothing about key material either.
+impl core::fmt::Debug for ClientHandshake<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let state = match &self.state {
+            State::AwaitServerHello { retried, .. } => {
+                if *retried {
+                    "AwaitServerHello(after retry)"
+                } else {
+                    "AwaitServerHello"
+                }
+            }
+            State::InFlight { expect, .. } => expect.name(),
+            State::Done(_) => "Done",
+            State::Failed => "Failed",
+        };
+        f.debug_struct("ClientHandshake")
+            .field("state", &state)
+            .field("buffered", &self.buffer.len())
+            .finish()
+    }
+}
