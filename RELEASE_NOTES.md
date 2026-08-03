@@ -18,7 +18,42 @@ category — and state known limitations or deliberate scope cuts plainly instea
 leaving them implied.
 -->
 
-Tracked by PR against main, reverse chronological, one entry per merged PR.
+Tracked by PR against main, reverse chronological, one entry per merged PR,
+grouped under the version that shipped them.
+
+---
+
+## v0.2.0
+**2026-08-03**
+
+The first tagged release, so there is no previous tag to compare against —
+later entries carry a compare link. Everything below this heading, down to the
+next version heading, shipped in it.
+
+**Built and tested against:** `rusty_tokio` rev
+`6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`.
+
+That pairing is part of what this version means rather than an implementation
+detail. `AsyncTlsStream` is generic over `rusty_tokio`'s own `AsyncRead`/
+`AsyncWrite`, and Cargo treats two `rev`s of the same git dependency as
+unrelated crates — so a consumer that also depends on `rusty_http` must use the
+same `rusty_tokio` rev across all of them, or get a type-identity error that
+reads like a mistake in their own code. `docs/versioning.md` has the detail.
+
+### Upgrade notes
+
+- **Pin by tag or by rev, never by branch.** Both of the first two carry the
+  same guarantee; a branch name silently resolves to something different on
+  every fresh `Cargo.lock`.
+- **Nothing in the public API changed shape.** The version moves from `0.1.0`
+  to `0.2.0` because the crate gained a large amount of new public surface —
+  the `handrolled` module — not because anything existing moved. Under the
+  ecosystem's `0.y.z` rule additive changes bump `y` too.
+- **The hand-rolled engine is not reachable by accident and never will be.**
+  It needs both the `handrolled-engine` feature and `--cfg
+  rusty_tls_handrolled`. `rustls` remains the engine behind every exported
+  type. See `docs/adr/0002-*`.
 
 ---
 

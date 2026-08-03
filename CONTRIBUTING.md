@@ -13,7 +13,11 @@
 3. Add tests for non-trivial logic — happy path and at least one failure/boundary case.
    Spikes/prototypes are exempt but should say so in the PR.
 4. Add or update docstrings on any public surface you touched.
-5. Open a PR — pick the template that matches (feature / bug fix / docs / chore).
+5. **Bump `Cargo.toml`'s version in the same PR**, not in a later release PR —
+   `y` if any public item's shape changed (including behind a feature gate),
+   `z` if not. CI fails a PR that touches `src/` and leaves the version alone.
+   See `docs/versioning.md`.
+6. Open a PR — pick the template that matches (feature / bug fix / docs / chore).
 
 ## Code style
 - Explicit over implicit; type hints/annotations always.
