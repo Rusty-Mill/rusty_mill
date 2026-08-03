@@ -993,20 +993,17 @@ fn a_random_key_share_is_handled_the_way_its_group_requires() {
             }))
             .unwrap_or_else(|_| panic!("{group:?} panicked at round {round} on {share:02x?}"));
 
-            match result {
-                Ok(secret) => {
-                    assert!(
-                        !wrong_length,
-                        "{group:?} agreed a secret from a {}-octet share",
-                        share.len()
-                    );
-                    assert!(
-                        secret.iter().any(|&b| b != 0),
-                        "{group:?} produced an all-zero secret from {share:02x?}"
-                    );
-                    agreed += 1;
-                }
-                Err(_) => {}
+            if let Ok(secret) = result {
+                assert!(
+                    !wrong_length,
+                    "{group:?} agreed a secret from a {}-octet share",
+                    share.len()
+                );
+                assert!(
+                    secret.iter().any(|&b| b != 0),
+                    "{group:?} produced an all-zero secret from {share:02x?}"
+                );
+                agreed += 1;
             }
         }
 
