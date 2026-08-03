@@ -26,10 +26,15 @@ grouped under the version that shipped them.
 ## v0.2.1
 **2026-08-03**
 
-**Built and tested against:** the same sibling revs as v0.2.0 — `rusty_tokio`
+**The first tagged release**, so there is no previous tag to compare against —
+later entries carry a compare link. `0.1.0` was the decorative default the
+`Cargo.toml` carried from the start, and `0.2.0` was a real version that was
+never tagged (see its entry below), so this is the first ref anything can pin
+to.
+
+**Built and tested against:** the same sibling revs as `0.2.0` — `rusty_tokio`
 rev `6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev
-`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved, so a consumer
-already pinned for v0.2.0 needs to change nothing.
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved.
 
 - **Fixed:** two doc comments in the `handrolled` module linked to private
   items (`Expect`, `SignatureScheme::tls13_algorithm`). rustdoc renders those
@@ -50,9 +55,11 @@ in readability than it buys.
 ## v0.2.0
 **2026-08-03**
 
-The first tagged release, so there is no previous tag to compare against —
-later entries carry a compare link. Everything below this heading, down to the
-next version heading, shipped in it.
+**Never tagged.** This entry describes a version that exists in the history and
+in `Cargo.toml`, but no `v0.2.0` ref was ever published — the tag was cut on
+v0.2.1 instead. Nothing can pin to it; anything that would have is served by
+v0.2.1, which is a superset. Everything below this heading, down to the next
+version heading, shipped in the `0.2.0` version of `Cargo.toml`.
 
 **Built and tested against:** `rusty_tokio` rev
 `6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev

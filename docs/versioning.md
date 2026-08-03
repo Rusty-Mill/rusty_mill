@@ -87,7 +87,7 @@ something different on every fresh `Cargo.lock`.
 
 ```toml
 # Readable, once a tag exists:
-rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", tag = "v0.2.0" }
+rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", tag = "v0.2.1" }
 
 # Equivalent, and what this repo does for its own siblings:
 rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "76efe35…" }
