@@ -105,7 +105,7 @@ independently abandonable:
 | 2b-ii | Path building and RFC 5280 §6.1 validation — chain to an anchor, expiry, `basicConstraints`/`keyUsage`, path length, EKU | **landed** |
 | 2b-iii | Name matching (hostname, IP) and name constraints | **landed** |
 | 3a | TLS 1.3 key schedule — HKDF-Expand-Label, the secret schedule, traffic keys, Finished | **landed** |
-| 3b | Handshake message encoding/parsing and the transcript hash | not started |
+| 3b | Handshake message encoding/parsing and the transcript hash | **landed** |
 | 3c | The client state machine — key exchange, CertificateVerify, driving it all | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
@@ -217,6 +217,46 @@ part of the `info`. The test was written the other way round and failed
 immediately — free domain separation by output length, discovered by asserting
 the opposite.
 
+3b closes a gap 3a landed with rather than hid. 3a could not assert the
+server's Finished `verify_data`, because the transcript it covers runs through
+the server's CertificateVerify and RFC 8448 publishes no labelled value for
+that hash. Documenting the gap was the right call; with 3b's parser the hash is
+computable from the RFC's own messages, and the MAC over it matches. Three
+independently-written pieces — the transcript, the key schedule, and the
+Finished MAC — have to be simultaneously correct for that assertion to pass,
+which is worth more than any of them checked alone.
+
+The property 3b is actually built around is that **parsing and encoding are
+inverses on the wire bytes**. That is not tidiness. The transcript hash covers
+encoded messages, so a client that parses one way and re-encodes another
+computes a transcript the peer does not share, and the handshake fails looking
+like a network fault. Worse, an implementation that *normalises* while
+re-encoding hashes something nobody sent — the same defect as re-encoding a
+`tbsCertificate` before checking its signature, and the reason the X.509
+parser keeps it as a borrow. `Transcript` therefore takes encoded bytes and
+never a parsed message: one path from a message to the hash, and it goes
+through what arrived.
+
+Two things came out of mutation-testing 3b that generalise:
+
+- **A check that changes no accept/reject decision cannot be pinned by
+  behavioural tests, and may still be worth keeping.** Deleting the
+  length-overrun check from `wire::Reader` left every handshake test passing,
+  because `take` is bounds-checked anyway and the deletion only changed what
+  the error was *called*. The check earns its place regardless: a truncated
+  stream is a network event, a length prefix claiming more than its container
+  holds is a peer sending a contradiction, and reporting the second as the
+  first reports a hostile peer as a flaky link. The answer was a wire-level
+  test suite that asserts the distinction directly, plus a doc comment saying
+  plainly what the check is and is not load-bearing for. Overstating what a
+  check defends against is its own bug.
+- **A parser and its encoder make each other testable.** The fuzz suite's
+  handshake invariant — anything accepted must re-encode to the bytes accepted
+  — independently caught six of eleven 3b mutants, including ones no
+  hand-written case targeted. It is the same shape as 2a's DER canonicality
+  invariant, and it works for the same reason: it is a property of *every*
+  input rather than of the inputs someone thought of.
+
 ### 5. The shipping bar
 
 From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
@@ -227,8 +267,10 @@ From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
    suite passing identically on both engines.
 3. **Every rejection path tested to actually reject.** The dangerous failure
    is accepting something bad, and no happy-path test catches it.
-4. **Fuzz the parsers.** DER and record parsing take hostile input by
-   definition.
+4. **Fuzz the parsers.** DER, record, and handshake parsing take hostile input
+   by definition. `tests/handrolled_fuzz.rs` runs on stable in CI, seeded from
+   real trust anchors and RFC 8448's exchange; `fuzz/` holds the
+   coverage-guided targets for a deliberate longer run.
 5. **Known-answer tests from RFC vectors**, which are the only oracle in this
    list that is independent of rustls. Differential testing cannot catch a
    misreading of the spec that both implementations share — most realistically,

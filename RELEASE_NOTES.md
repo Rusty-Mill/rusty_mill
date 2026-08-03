@@ -22,6 +22,57 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 3b: handshake messages and the transcript hash
+**2026-08-03**
+
+- **Added:** `handrolled::wire` (rusty_tls#25) — TLS's presentation language
+  (RFC 8446 §3). Fixed-width integers and length-prefixed vectors, read
+  strictly, with sub-readers so nesting in the input becomes another loop
+  rather than another stack frame. The writer's vectors take a closure and
+  backfill the length, so nothing writes a prefix by hand and no prefix can
+  disagree with what follows it.
+- **Added:** `handrolled::handshake` — the handshake header, ClientHello,
+  ServerHello (with HelloRetryRequest detected by its sentinel `random`, not
+  by message type), EncryptedExtensions, Certificate, CertificateVerify,
+  Finished, the extensions block with duplicates refused per RFC 8446 §4.2,
+  the CertificateVerify signed content, and `Transcript`.
+- **Added:** parse/encode round-tripping as a required property, byte for
+  byte, on RFC 8448's own messages. The transcript hash covers *encoded*
+  messages, so a parser and encoder that are not inverses compute a hash the
+  peer does not share — and one that normalises while re-encoding hashes
+  something nobody sent. `Transcript` therefore takes encoded bytes and never
+  a parsed message: one path from a message to the hash, through what arrived.
+- **Fixed:** the gap stage 3a shipped with and documented. The server's
+  Finished `verify_data` now has a known-answer test. RFC 8448 publishes no
+  labelled value for the transcript hash it covers, but with the messages
+  parseable the hash is computable from the RFC's own bytes — and the MAC over
+  it matches. The transcript (3b), the key schedule (3a), and the Finished MAC
+  (3a) all have to be right at once for that to pass.
+- **Added:** handshake fuzzing, seeded from RFC 8448's exchange, asserting
+  that anything accepted re-encodes to the bytes accepted and that the message
+  spans tile their input exactly with no gap or overlap. It caught six of the
+  eleven mutants in this stage's mutation run on its own.
+- **Added:** a wire-level test suite. Mutation testing found that deleting the
+  length-overrun check left every handshake test passing — fairly, since the
+  input is refused either way and only the error's *name* changes. The check
+  is still worth keeping: a truncated stream is a network event, while a
+  length prefix claiming more than its container holds is a peer sending a
+  contradiction, and reporting the second as the first reports a hostile peer
+  as a flaky link. The new suite pins that distinction, and the doc comment
+  now says plainly that the check is not what keeps a read in bounds.
+- **Known limitation, stated plainly:** no state machine, no key exchange, no
+  X25519, and nothing that decides whether a handshake should proceed. This
+  module reports what a message says, in the same sense the X.509 parser
+  reports what a certificate says. Driving a handshake is stage 3c.
+- **Known limitation, stated plainly:** `NewSessionTicket`, `KeyUpdate`, and
+  `CertificateRequest` are framed and typed but have no body parser yet — a
+  client that needs them will add one in 3c.
+- Reachable only with the `handrolled-engine` feature *and*
+  `--cfg rusty_tls_handrolled`. `rustls` remains the engine behind every
+  exported type; nothing in the public API routes through any of this.
+
+---
+
 ## Hand-rolled TLS engine, stage 3a: the TLS 1.3 key schedule
 **2026-08-02**
 

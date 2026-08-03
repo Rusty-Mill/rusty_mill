@@ -41,8 +41,15 @@
 //!   protocol uses comes from, and where they get bound to the handshake
 //!   transcript that produced them.
 //!
-//! The rest of the handshake (3b, 3c), TLS 1.2 (4), and the server side (5)
-//! are not built. The ADR carries the order and the bar each must clear.
+//! - [`wire`] — TLS's presentation language (stage 3b): fixed-width integers
+//!   and length-prefixed vectors, read strictly and written so a length
+//!   prefix can never disagree with what follows it.
+//! - [`handshake`] — handshake messages and the transcript hash (stage 3b).
+//!   Parses and encodes, and the two are inverses on the wire bytes, because
+//!   the transcript covers what arrived rather than a re-encoding of it.
+//!
+//! The client state machine (3c), TLS 1.2 (4), and the server side (5) are
+//! not built. The ADR carries the order and the bar each must clear.
 //!
 //! # What is deliberately *not* here
 //!
@@ -52,9 +59,11 @@
 //! module's testing strategy can see.
 
 pub mod der;
+pub mod handshake;
 pub mod name;
 pub mod path;
 pub mod record;
 pub mod schedule;
 pub mod verify;
+pub mod wire;
 pub mod x509;
