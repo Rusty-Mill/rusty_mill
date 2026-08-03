@@ -566,6 +566,14 @@ fn a_client_certificate_request_is_refused() {
 struct TestServer<'a> {
     pki: &'a Pki,
     shape: Shape,
+    /// Seal the flight in chunks of this many octets instead of one record.
+    ///
+    /// Handshake messages may span records and several may share one, so the
+    /// two boundaries have nothing to do with each other. Neither `rustls`
+    /// nor any real server tried in `handrolled_interop` actually splits a
+    /// flight — so without this, the client's reassembly buffer was carried
+    /// by tests that never made it do anything.
+    fragment: Option<usize>,
 }
 
 /// How the flight should be malformed, if at all.
@@ -761,11 +769,20 @@ impl TestServer<'_> {
 
         let mut out = Vec::new();
         out.extend_from_slice(&plaintext(22, &server_hello));
-        out.extend_from_slice(
-            &sealer
-                .seal(ContentType::Handshake, &flight, 0)
-                .expect("seal"),
-        );
+        match self.fragment {
+            None => out.extend_from_slice(
+                &sealer
+                    .seal(ContentType::Handshake, &flight, 0)
+                    .expect("seal"),
+            ),
+            Some(size) => {
+                for chunk in flight.chunks(size.max(1)) {
+                    out.extend_from_slice(
+                        &sealer.seal(ContentType::Handshake, chunk, 0).expect("seal"),
+                    );
+                }
+            }
+        }
 
         let master = schedule.into_master();
         let secret = master.derive("s ap traffic", &transcript.hash());
@@ -836,7 +853,11 @@ fn established_with_test_server(
     };
 
     let (mut client, hello) = ClientHandshake::start(&config)?;
-    let server = TestServer { pki, shape };
+    let server = TestServer {
+        pki,
+        shape,
+        fragment: None,
+    };
     let (mut stream, post) = server.respond(&hello);
 
     for record in take_records(&mut stream) {
@@ -1551,5 +1572,107 @@ fn random_records_never_panic() {
             "a random record completed a handshake"
         );
         let _ = result;
+    }
+}
+
+/// A flight split across records is reassembled, whatever the split.
+///
+/// This exists because the coverage it provides was assumed and absent.
+/// `rustls` sends its whole flight in one protected record, and so does every
+/// server `handrolled_interop` reaches — so `complete_prefix` and the client's
+/// reassembly buffer were being carried by tests that never made them work.
+///
+/// Handshake message boundaries and record boundaries are unrelated by
+/// design, so this walks a range of chunk sizes: sizes that split *between*
+/// messages, sizes that split *inside* one, and one octet at a time, which
+/// puts every message across many records and leaves a partial message in the
+/// buffer after almost every read.
+#[test]
+fn a_flight_split_across_records_is_reassembled() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+    };
+
+    for fragment in [1usize, 2, 3, 5, 17, 64, 100, 255, 256, 511, 1024] {
+        let (mut client, hello) = ClientHandshake::start(&config).expect("start");
+        let server = TestServer {
+            pki: &pki,
+            shape: Shape::Correct,
+            fragment: Some(fragment),
+        };
+        let (mut stream, _) = server.respond(&hello);
+
+        let records = take_records(&mut stream);
+        assert!(
+            records.len() > 2 || fragment >= 1024,
+            "a fragment size of {fragment} did not actually split the flight"
+        );
+
+        for record in records {
+            client
+                .read_record(&record)
+                .unwrap_or_else(|e| panic!("fragment {fragment}: {e}"));
+        }
+        assert!(
+            client.is_finished(),
+            "a flight split into {fragment}-octet records did not complete"
+        );
+    }
+}
+
+/// The reassembly buffer must not grow without bound.
+///
+/// A peer that sends a handshake header claiming a huge length and then
+/// dribbles bytes would, in a naive client, be allowed to allocate as much as
+/// it liked. This does not assert a specific bound — there is none in the
+/// implementation — but it does pin that a stream of maximum-size records
+/// carrying no complete message is refused or absorbed rather than accepted
+/// as progress.
+#[test]
+fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+
+    // A ServerHello header claiming three megabytes, then nothing that
+    // completes it. Each record is plaintext, which is all that is legal
+    // before the ServerHello anyway.
+    let mut body = vec![0x02u8, 0x30, 0x00, 0x00]; // ServerHello, 0x300000 long
+    body.extend_from_slice(&[0u8; 60]);
+    let mut record = vec![22u8, 0x03, 0x03];
+    record.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    record.extend_from_slice(&body);
+
+    for _ in 0..64 {
+        // Never completes a message, so never completes a handshake.
+        let _ = client.read_record(&record);
+        assert!(
+            !client.is_finished(),
+            "an incomplete message completed a handshake"
+        );
     }
 }

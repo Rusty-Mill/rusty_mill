@@ -368,6 +368,25 @@ Four things from 3c-ii worth carrying forward:
   test asserts that harmlessness rather than treating the completions as a
   mystery.
 
+Interop over a real socket corrected an assumption this work had been
+carrying, which is the most useful thing it did. The expectation was that real
+servers split a handshake flight across records, and that this would finally
+exercise the client's reassembly buffer — `rustls` sends its flight in one
+record, so `complete_prefix` and the buffer had been carried by tests that
+never made them work. The measurement disagreed: every server tried also sends
+one record. The interop test now *reports* the count rather than asserting a
+split, because asserting one would be asserting a fact about other people's
+servers that can change without notice, and the gap is closed hermetically by
+a test server that splits its flight on purpose, down to one octet per record.
+
+The general lesson is the one 3c-ii already learned twice and this makes three:
+**a test can be green because the thing it tests never happens.** The vacuous
+session ticket, the reassembly buffer nothing reassembled, and the
+wrong-name interop test whose premise an intercepting gateway removes are the
+same failure wearing different clothes. The defence is to measure what the
+test actually exercised — record counts, mutation survival, reach percentages
+— rather than to infer coverage from a passing run.
+
 ### 5. The shipping bar
 
 From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
@@ -375,11 +394,28 @@ From rusty_tls#25, unchanged. Items 1 and 3 are hard gates:
 1. **Differential testing against rustls.** Same input, both engines,
    byte-identical output.
 2. **Interop against real servers**, plus the existing hermetic rejection
-   suite passing identically on both engines. Met for the client as of 3c-ii:
+   suite passing identically on both engines. Met for the client:
    `handrolled_client` completes handshakes against a real
    `rustls::ServerConnection` across every offered suite and group, including
-   a HelloRetryRequest, and carries application data both ways. Interop against
-   servers on the public internet is still owed.
+   a HelloRetryRequest, and `handrolled_interop` does the same over a socket
+   against servers nobody here configured, fetching real HTTP responses.
+
+   Those tests are `#[ignore]`d rather than gated on an environment variable,
+   because a gated test that quietly passes when the variable is unset reports
+   `ok` for a run that did nothing — which is precisely how a vacuous
+   session-ticket test survived a mutation in 3c-ii. An ignored test reports
+   `ignored`, which is the truth.
+
+   Two honest limits on what that interop proves. Where egress is intercepted,
+   the peer is a gateway rather than the host named; the suite prints the
+   issuer so a passing run cannot be misread as having reached a particular
+   server, and a gateway is still an independent TLS 1.3 stack, so the run is
+   still a third opinion. And interception makes one obvious test unwritable:
+   a gateway mints a certificate for whatever SNI it is handed, so "connect
+   under the wrong name and watch it be refused" cannot pass in both
+   environments. The checkable direction — every accepted certificate carries
+   the name that was asked for — is asserted instead, with the refusal
+   direction covered hermetically where the peer's certificate can be chosen.
 3. **Every rejection path tested to actually reject.** The dangerous failure
    is accepting something bad, and no happy-path test catches it.
 4. **Fuzz the parsers.** DER, record, and handshake parsing take hostile input

@@ -78,8 +78,9 @@ one artifact to ship and no team/language boundary to split across:
   messages. It completes real handshakes against `rustls` and carries
   application data, which is the first point at which any of this
   interoperates. Session resumption, client certificates, and TLS 1.2 are
-  refused rather than half-implemented. See [Non-goals](#non-goals) and
-  ADR-0002.
+  refused rather than half-implemented. It is exercised both against `rustls`
+  in memory and, in `handrolled_interop`, over a real socket against servers
+  nobody here configured. See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and
