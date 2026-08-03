@@ -226,6 +226,9 @@ fn serve(listener: TcpListener, pki: Pki) -> Report {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
+        // OpenSSL is not asked to authenticate here; that path has its own
+        // hermetic coverage in `handrolled_server`.
+        client_auth: None,
     };
 
     let Ok((mut socket, _)) = listener.accept() else {

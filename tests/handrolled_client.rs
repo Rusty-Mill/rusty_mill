@@ -40,14 +40,16 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use time::OffsetDateTime;
 
 use rusty_tls::handrolled::client::{
-    record_length, CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming,
+    record_length, CipherSuite, ClientConfig, ClientError, ClientHandshake, ClientIdentity,
+    Incoming,
 };
 use rusty_tls::handrolled::handshake::{
-    messages, ClientHello, HandshakeType, Message, ServerHello,
+    messages, ClientHello, HandshakeError, HandshakeType, Message, ServerHello,
 };
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
+use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
 
 /// The rejection cases, shared with `handshake.rs`. This file holds the
@@ -78,6 +80,9 @@ struct Pki {
     /// The leaf's private key, for the test server below to sign with.
     leaf_pkcs8: Vec<u8>,
     chain: Vec<CertificateDer<'static>>,
+    /// The same chain as plain DER, which is the shape this crate's own
+    /// `ClientIdentity` takes.
+    chain_der: Vec<Vec<u8>>,
     key: PrivateKeyDer<'static>,
 }
 
@@ -118,6 +123,7 @@ fn pki(algorithm: &'static rcgen::SignatureAlgorithm, name: &str) -> Pki {
             CertificateDer::from(leaf.der().to_vec()),
             CertificateDer::from(root.der().to_vec()),
         ],
+        chain_der: vec![leaf.der().to_vec(), root.der().to_vec()],
         key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
     }
 }
@@ -236,6 +242,7 @@ fn handshake_with(
         path: options(),
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = rustls_server(pki);
@@ -358,6 +365,7 @@ fn every_offered_suite_and_group_completes_against_rustls() {
                 path: options(),
                 groups: &[group],
                 cipher_suites: core::slice::from_ref(suite),
+                identity: None,
             };
 
             let mut server = rustls_server(&pki);
@@ -408,6 +416,7 @@ fn the_client_hello_offers_what_it_should_and_nothing_it_should_not() {
         path: options(),
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -458,6 +467,7 @@ fn an_ip_address_is_not_sent_as_a_server_name() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -586,14 +596,21 @@ fn a_finished_that_does_not_verify_is_refused() {
     assert_eq!(error, ClientError::BadFinished);
 }
 
-/// A CertificateRequest is refused rather than answered with an empty
-/// certificate. Not supported, and said so.
+/// A CertificateRequest with no `signature_algorithms` is refused.
+///
+/// RFC 8446 §4.3.2 makes the extension mandatory, and for a reason worth
+/// keeping: without it the request names no scheme, so any answer would be a
+/// guess. A guess produces a signature the server is obliged to reject, and a
+/// failure two messages later that looks like a signing bug.
 #[test]
-fn a_client_certificate_request_is_refused() {
+fn a_certificate_request_without_signature_algorithms_is_refused() {
     let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
     let error = against_test_server(&pki, Shape::RequestClientCertificate)
-        .expect_err("a CertificateRequest was ignored");
-    assert_eq!(error, ClientError::ClientCertificateRequested);
+        .expect_err("a CertificateRequest naming no schemes was answered anyway");
+    assert_eq!(
+        error,
+        ClientError::Handshake(HandshakeError::MissingSignatureAlgorithms)
+    );
 }
 
 /// A minimal TLS 1.3 server, built from this crate's own primitives.
@@ -921,6 +938,7 @@ fn established_with_test_server(
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        identity: None,
     };
 
     let (mut client, hello) = ClientHandshake::start(&config)?;
@@ -975,6 +993,7 @@ fn the_shared_rejection_table_holds_for_the_handrolled_engine() {
             path,
             groups: &[NamedGroup::X25519],
             cipher_suites: CipherSuite::SUPPORTED,
+            identity: None,
         };
 
         match (run_table_case(&fixture, &config), case.handrolled) {
@@ -1055,6 +1074,7 @@ fn a_tampered_record_fails_the_connection_permanently() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1105,6 +1125,7 @@ fn a_cipher_suite_that_was_not_offered_is_refused() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        identity: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1148,6 +1169,7 @@ fn a_server_that_does_not_select_tls13_is_refused() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1187,6 +1209,7 @@ fn protected_data_before_the_server_hello_is_refused() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1267,6 +1290,7 @@ fn a_hello_retry_request_completes_against_rustls() {
         path: options(),
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1319,6 +1343,7 @@ fn a_second_hello_retry_request_is_refused() {
         path: options(),
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1600,6 +1625,7 @@ fn random_records_never_panic() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut rng = Rng::new(0x5eed_0101);
@@ -1665,6 +1691,7 @@ fn a_flight_split_across_records_is_reassembled() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        identity: None,
     };
 
     for fragment in [1usize, 2, 3, 5, 17, 64, 100, 255, 256, 511, 1024] {
@@ -1717,6 +1744,7 @@ fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1785,6 +1813,7 @@ fn a_server_that_cannot_speak_tls13_is_refused_in_its_own_words() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = tls12_only_server(&pki);
@@ -1844,6 +1873,7 @@ fn the_downgrade_sentinel_is_told_apart_from_an_old_server() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     // Take a genuine ServerHello and strip `supported_versions`, with and
@@ -2015,6 +2045,7 @@ fn a_malformed_alert_is_refused_rather_than_interpreted() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     for body in [vec![], vec![0x02], vec![0x02, 0x46, 0x00]] {
@@ -2054,6 +2085,7 @@ fn a_server_hello_that_does_not_echo_the_session_id_is_refused() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -2108,6 +2140,7 @@ fn a_retried_client_hello_keeps_its_identity() {
         path: options(),
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -2141,5 +2174,147 @@ fn a_retried_client_hello_keeps_its_identity() {
         find(&before.extensions, extension::KEY_SHARE),
         find(&after.extensions, extension::KEY_SHARE),
         "the retry reused the key share the server rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Client certificates — rusty_tls#42
+// ---------------------------------------------------------------------------
+
+/// A `rustls` server that requires the client to authenticate.
+///
+/// This is the oracle that matters for client certificates. `rustls` verifies
+/// the chain *and* the CertificateVerify signature — including that it was
+/// made with the client context string over the right transcript — so a
+/// completed handshake here is evidence about all three. A test server of this
+/// crate's own making would agree with whatever this crate did.
+fn rustls_server_requiring_client_auth(pki: &Pki, client_root: &[u8]) -> rustls::ServerConnection {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(client_root.to_vec()))
+        .expect("the client root is acceptable to rustls");
+
+    let verifier = rustls::server::WebPkiClientVerifier::builder(std::sync::Arc::new(roots))
+        .build()
+        .expect("client verifier");
+
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .expect("server config");
+    rustls::ServerConnection::new(Arc::new(config)).expect("server connection")
+}
+
+/// Drive this client against a `rustls` server that demands a certificate.
+///
+/// `identity` is what the client will present; `None` means it has nothing,
+/// which is a case with its own correct answer rather than an error.
+fn against_client_auth(
+    pki: &Pki,
+    client_pki: &Pki,
+    identity: Option<&ClientIdentity<'_>>,
+) -> Result<(), ClientError> {
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+        identity,
+    };
+
+    let mut server = rustls_server_requiring_client_auth(pki, &client_pki.root_der);
+    let (mut client, mut to_server) = ClientHandshake::start(&config)?;
+
+    for _ in 0..8 {
+        let mut from_server = Vec::new();
+        {
+            let mut cursor = std::io::Cursor::new(&to_server);
+            while server.read_tls(&mut cursor).expect("read_tls") > 0 {
+                // `process_new_packets` is where rustls checks the client's
+                // certificate and signature, so its error is the verdict this
+                // test is after.
+                server
+                    .process_new_packets()
+                    .map_err(|_| ClientError::Failed)?;
+            }
+            server
+                .process_new_packets()
+                .map_err(|_| ClientError::Failed)?;
+            while server.wants_write() {
+                server.write_tls(&mut from_server).expect("write_tls");
+            }
+        }
+        to_server.clear();
+
+        let mut stream = from_server;
+        for record in take_records(&mut stream) {
+            to_server.extend_from_slice(&client.read_record(&record)?);
+        }
+
+        if client.is_finished() {
+            // Deliver the client's last flight so rustls actually checks it —
+            // without this the test would pass on a signature nobody read.
+            let mut cursor = std::io::Cursor::new(&to_server);
+            while server.read_tls(&mut cursor).expect("read_tls") > 0 {
+                server
+                    .process_new_packets()
+                    .map_err(|_| ClientError::Failed)?;
+            }
+            server
+                .process_new_packets()
+                .map_err(|_| ClientError::Failed)?;
+            assert!(!server.is_handshaking(), "rustls never finished");
+            return Ok(());
+        }
+        if to_server.is_empty() {
+            break;
+        }
+    }
+    Err(ClientError::Failed)
+}
+
+/// The headline: this client authenticates itself to a `rustls` server.
+///
+/// `rustls` checks the chain against a root it was given, and checks the
+/// CertificateVerify — context string, transcript, and all. Nothing in this
+/// crate is asked whether its own signature is correct.
+#[test]
+fn this_client_authenticates_itself_to_a_rustls_server() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, "client.example");
+    let key = SigningKey::ecdsa_p256(&client_pki.leaf_pkcs8).expect("client key");
+    let identity = ClientIdentity {
+        certificates: &client_pki.chain_der,
+        key: &key,
+    };
+
+    against_client_auth(&server_pki, &client_pki, Some(&identity))
+        .expect("rustls rejected this client's certificate");
+}
+
+/// A client with no identity answers with an empty Certificate, and the server
+/// gets to decide.
+///
+/// The server here requires a certificate, so it refuses — which is the point.
+/// The client's job is to say "I have nothing" in the conforming way rather
+/// than to abort the handshake on the server's behalf, and this shows both
+/// halves of that: the empty message is well-formed enough for `rustls` to
+/// read, and `rustls` is the one that says no.
+#[test]
+fn a_client_with_no_identity_sends_an_empty_certificate_and_is_refused_by_the_server() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, "client.example");
+
+    let result = against_client_auth(&server_pki, &client_pki, None);
+    assert!(
+        result.is_err(),
+        "a server requiring a certificate accepted a client with none"
     );
 }

@@ -56,6 +56,11 @@ pub enum HandshakeError {
     },
     /// A message had a type this parser does not handle in this position.
     UnexpectedMessage(u8),
+    /// A CertificateRequest carried no `signature_algorithms` extension.
+    ///
+    /// §4.3.2 requires it. Without it the request names no way to answer it,
+    /// and any answer would be a guess.
+    MissingSignatureAlgorithms,
     /// `legacy_version` was not `0x0303`.
     ///
     /// TLS 1.3 pins it and negotiates the real version through the
@@ -93,6 +98,9 @@ impl core::fmt::Display for HandshakeError {
                 "a handshake message declares {declared} bytes, {available} available"
             ),
             Self::UnexpectedMessage(typ) => write!(f, "unexpected handshake message type {typ}"),
+            Self::MissingSignatureAlgorithms => {
+                f.write_str("a CertificateRequest carried no signature_algorithms")
+            }
             Self::UnexpectedLegacyVersion(version) => {
                 write!(f, "legacy_version is 0x{version:04x}, expected 0x0303")
             }
@@ -512,6 +520,48 @@ pub fn parse_encrypted_extensions(body: &[u8]) -> Result<Vec<Extension<'_>>> {
     let extensions = parse_extensions(&mut reader)?;
     reader.finish()?;
     Ok(extensions)
+}
+
+/// A CertificateRequest, RFC 8446 §4.3.2.
+///
+/// Only the two fields answering it needs. The rest of the extension set —
+/// `certificate_authorities`, `oid_filters` — is advisory: it narrows what the
+/// server would *prefer*, and a client that ignores it sends a chain the
+/// server may then reject. Honouring it would be a real improvement; parsing
+/// it and doing nothing with it would only look like one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CertificateRequestMessage<'a> {
+    /// `certificate_request_context`, echoed verbatim in the answer.
+    pub context: &'a [u8],
+    /// The signature schemes the server will accept from the client.
+    pub schemes: Vec<u16>,
+}
+
+impl<'a> CertificateRequestMessage<'a> {
+    /// Parse a CertificateRequest body.
+    ///
+    /// `signature_algorithms` is mandatory — §4.3.2 says so, and a request
+    /// without one names no way to answer it. Refused rather than answered
+    /// with a guess: a guess produces a signature the peer is obliged to
+    /// reject, and a failure two messages later.
+    pub fn parse(body: &'a [u8]) -> Result<Self> {
+        let mut reader = Reader::new(body);
+        let context = reader.vector_u8()?;
+        let extensions = parse_extensions(&mut reader)?;
+        reader.finish()?;
+
+        let offered = find(&extensions, extension::SIGNATURE_ALGORITHMS)
+            .ok_or(HandshakeError::MissingSignatureAlgorithms)?;
+        let mut reader = Reader::new(offered);
+        let mut list = reader.sub_u16()?;
+        reader.finish()?;
+
+        let mut schemes = Vec::new();
+        while !list.is_empty() {
+            schemes.push(list.u16()?);
+        }
+        Ok(Self { context, schemes })
+    }
 }
 
 /// One entry in a Certificate message.

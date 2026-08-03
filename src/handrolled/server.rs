@@ -31,14 +31,31 @@
 //! Refused rather than half-implemented, on the same principle the client
 //! applies:
 //!
-//! - **Client certificates.** No CertificateRequest is ever sent, so no client
-//!   is ever authenticated. A caller wanting mutual TLS does not have it.
 //! - **Session resumption, tickets, and 0-RTT.** No NewSessionTicket is
 //!   issued. Resumption is where a server's most interesting state lives, and
 //!   a server that stores nothing cannot be confused about what it stored.
 //! - **TLS 1.2 and below.** A ClientHello that does not offer `0x0304` in
 //!   `supported_versions` gets a `protocol_version` alert, which is what stage
 //!   4a taught this code to send and to read.
+//!
+//! # Client certificates
+//!
+//! Implemented, as of `rusty_tls#42`, and off unless [`ServerConfig`] carries a
+//! [`ClientAuth`]. When it does, this server sends a CertificateRequest naming
+//! the schemes it accepts, then checks two separate things about the answer:
+//! that the chain validates to the configured anchors, and that the
+//! CertificateVerify was made by the key in the leaf. **Both are required.** A
+//! certificate proves nothing on its own — anyone can present anyone's — and
+//! the signature is the only thing tying it to the peer that sent it.
+//!
+//! No name is matched. A client certificate identifies a client and there is
+//! no hostname for it to be checked against; deciding whether *this* client is
+//! allowed is the application's job, and
+//! [`Connection::peer_certificates`] is where it reads what arrived.
+//!
+//! [`ClientAuth::required`] is spelled out rather than inferred from whether
+//! anchors were configured, because "ask, and accept whoever turns up
+//! empty-handed" and "ask, and refuse them" are different security postures.
 //!
 //! # HelloRetryRequest
 //!
@@ -62,17 +79,20 @@
 
 use super::handshake::{
     certificate_verify_content, complete_prefix, extension, find, messages, parse_finished,
-    ClientHello, Extension, HandshakeError, HandshakeType, Message, ServerHello, Transcript,
+    CertificateMessage, CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType,
+    Message, ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT,
     HELLO_RETRY_REQUEST_RANDOM, SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
+use super::path::{validate_path, PathError, PathOptions, TrustAnchor};
 use super::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
 };
 use super::schedule::{finished_verify_data, traffic_keys, verify_finished, Hash, KeySchedule};
 use super::sign::{SignError, SigningKey};
-use super::verify::SignatureScheme;
+use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
 use super::wire::{Reader, Writer};
+use super::x509::{Certificate, X509Error};
 
 use super::client::{Alert, AlertDescription, AlertLevel, CipherSuite, Connection};
 
@@ -128,6 +148,25 @@ pub enum ServerError {
     NoSharedSignatureScheme,
     /// The client's Finished did not verify.
     BadFinished,
+    /// A client certificate was required and none was presented.
+    ///
+    /// An empty Certificate is a conforming answer, not a malformed one — this
+    /// is the server declining it, which is the server's decision to make.
+    ClientCertificateRequired,
+    /// A certificate the client presented could not be parsed.
+    MalformedClientCertificate(X509Error),
+    /// The client's certificate chain did not validate.
+    ///
+    /// No name is checked: a client certificate identifies a client, and there
+    /// is no hostname for it to match. What the application does with the
+    /// identity is above this layer, and
+    /// [`Connection::peer_certificates`] is where it reads it.
+    ClientCertificate(PathError),
+    /// The client's CertificateVerify did not verify.
+    ///
+    /// The certificate proves nothing on its own; anyone can present anyone's.
+    /// This is the check that the peer holds the matching private key.
+    ClientCertificateVerify(VerifyError),
     /// The peer sent an alert.
     PeerAlert(Alert),
     /// A record arrived after the connection was already broken.
@@ -159,6 +198,16 @@ impl core::fmt::Display for ServerError {
             }
             Self::NoSharedSignatureScheme => f.write_str("no signature scheme in common"),
             Self::BadFinished => f.write_str("the client's Finished did not verify"),
+            Self::ClientCertificateRequired => {
+                f.write_str("a client certificate was required and none was sent")
+            }
+            Self::MalformedClientCertificate(err) => {
+                write!(f, "a client certificate did not parse: {err}")
+            }
+            Self::ClientCertificate(err) => write!(f, "the client's certificate: {err}"),
+            Self::ClientCertificateVerify(err) => {
+                write!(f, "the client's CertificateVerify: {err}")
+            }
             Self::PeerAlert(alert) => {
                 write!(
                     f,
@@ -206,7 +255,11 @@ impl ServerError {
             Self::NotTls13 => AlertDescription::PROTOCOL_VERSION,
             Self::Handshake(_) | Self::UnexpectedMessage { .. } => AlertDescription::DECODE_ERROR,
             Self::UnexpectedContentType(_) => AlertDescription::ILLEGAL_PARAMETER,
-            Self::BadFinished => AlertDescription::DECRYPT_ERROR,
+            Self::BadFinished | Self::ClientCertificateVerify(_) => AlertDescription::DECRYPT_ERROR,
+            Self::ClientCertificateRequired => AlertDescription::CERTIFICATE_REQUIRED,
+            Self::ClientCertificate(_) | Self::MalformedClientCertificate(_) => {
+                AlertDescription::BAD_CERTIFICATE
+            }
             Self::Record(_) => AlertDescription::BAD_RECORD_MAC,
             Self::NoSharedCipherSuite
             | Self::NoSharedGroup
@@ -242,6 +295,30 @@ pub struct ServerConfig<'a> {
     pub cipher_suites: &'a [CipherSuite],
     /// The key exchange groups this server will use, most preferred first.
     pub groups: &'a [NamedGroup],
+    /// Whether, and how, to ask the client to authenticate.
+    ///
+    /// `None` — the default posture — sends no CertificateRequest, so no
+    /// client is ever authenticated and none is ever asked to be.
+    pub client_auth: Option<&'a ClientAuth<'a>>,
+}
+
+/// How a server treats client certificates.
+///
+/// `required` is not a default anywhere, and is spelled out rather than
+/// inferred from whether anchors were supplied. "Ask, and accept whoever turns
+/// up empty-handed" and "ask, and refuse them" are different security
+/// postures, and a server should have to say which one it is running.
+pub struct ClientAuth<'a> {
+    /// The anchors a client's chain must reach.
+    pub anchors: &'a [TrustAnchor<'a>],
+    /// Path validation options, including the current time.
+    pub path: PathOptions,
+    /// Whether a client that presents no certificate is refused.
+    ///
+    /// `false` means the handshake continues with an unauthenticated client —
+    /// which is only useful if the application above can tell the difference,
+    /// so [`Connection::peer_certificates`] reports what arrived.
+    pub required: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +349,45 @@ struct Negotiated {
     opener: Opener,
     client_application_secret: Vec<u8>,
     server_application_secret: Vec<u8>,
+    /// What this server is still waiting for from the client.
+    ///
+    /// A field rather than a `match` on whatever arrived, for the same reason
+    /// the client's `Expect` is one: with client authentication in play, "the
+    /// CertificateVerify was quietly missing" has to be the *default*
+    /// rejection rather than a case someone remembered to write. A server that
+    /// accepted a Certificate and then a Finished, skipping the proof of key
+    /// possession in between, would authenticate anyone who could copy a
+    /// certificate off the wire.
+    expect: ExpectFromClient,
+    /// The chain the client presented, empty if it presented none.
+    client_certificates: Vec<Vec<u8>>,
+    /// The transcript hash as of the end of the client's Certificate, which is
+    /// what its CertificateVerify signs. Captured when that message is added
+    /// rather than recomputed later.
+    client_certificate_transcript: Vec<u8>,
+}
+
+/// The message a server will accept next from the client.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpectFromClient {
+    /// No CertificateRequest was sent, so the Finished comes straight away.
+    Finished,
+    /// A CertificateRequest was sent; §4.4.2's answer comes first.
+    Certificate,
+    /// A non-empty Certificate arrived, so its proof of possession is due.
+    CertificateVerify,
+    /// A Certificate arrived and was empty, so there is nothing to prove.
+    FinishedAfterEmptyCertificate,
+}
+
+impl ExpectFromClient {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Finished | Self::FinishedAfterEmptyCertificate => "Finished",
+            Self::Certificate => "Certificate",
+            Self::CertificateVerify => "CertificateVerify",
+        }
+    }
 }
 
 /// What a HelloRetryRequest has to remember until the second hello arrives.
@@ -439,7 +555,7 @@ impl<'a> ServerHandshake<'a> {
         match &self.state {
             State::AwaitClientHello => self.hello(message),
             State::AwaitRetriedClientHello(_) => self.retried_hello(message),
-            State::AwaitFinished(_) => self.finished(message),
+            State::AwaitFinished(_) => self.client_flight(message),
             State::Done(_) | State::Failed => Err(ServerError::Failed),
         }
     }
@@ -857,6 +973,35 @@ impl ServerHandshake<'_> {
         transcript.add(&encrypted_extensions);
         flight.extend_from_slice(&encrypted_extensions);
 
+        // §4.3.2 puts the request after EncryptedExtensions and before the
+        // server's own Certificate. It names the schemes this server will
+        // accept; a client that can produce none of them answers empty, which
+        // `client_auth.required` then decides about.
+        let expect = if self.config.client_auth.is_some() {
+            let mut schemes = Writer::new();
+            schemes.vector_u16(|w| {
+                for scheme in SignatureScheme::TLS13_SUPPORTED {
+                    w.u16(scheme.0);
+                }
+            });
+            let schemes = schemes.into_vec();
+            let mut body = Writer::new();
+            // An empty certificate_request_context. §4.3.2 allows any value in
+            // a handshake request and this server asks exactly once, so there
+            // is nothing to disambiguate.
+            body.vector_u8(|_| {});
+            body.vector_u16(|w| {
+                w.u16(extension::SIGNATURE_ALGORITHMS);
+                w.vector_u16(|w| w.bytes(&schemes));
+            });
+            let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
+            transcript.add(&request);
+            flight.extend_from_slice(&request);
+            ExpectFromClient::Certificate
+        } else {
+            ExpectFromClient::Finished
+        };
+
         let certificate = certificate_message(self.config.certificates);
         transcript.add(&certificate);
         flight.extend_from_slice(&certificate);
@@ -904,17 +1049,128 @@ impl ServerHandshake<'_> {
             opener,
             client_application_secret,
             server_application_secret,
+            expect,
+            client_certificates: Vec::new(),
+            client_certificate_transcript: Vec::new(),
         }));
         Ok(out)
     }
 
-    fn finished(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
-        if message.typ != HandshakeType::Finished {
-            return Err(ServerError::UnexpectedMessage {
-                expected: "Finished",
-                got: message.typ,
-            });
+    /// The client's closing flight: its Certificate and CertificateVerify when
+    /// one was asked for, then its Finished.
+    ///
+    /// The expectation is a field of the state, not a `match` on what arrived.
+    /// With client authentication in play that distinction is the whole
+    /// safety property: a server that took a Certificate and then a Finished,
+    /// skipping the proof of possession in between, would authenticate anyone
+    /// who could copy a certificate off the wire.
+    fn client_flight(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
+        let State::AwaitFinished(negotiated) = &mut self.state else {
+            return Err(ServerError::Failed);
+        };
+
+        match (negotiated.expect, message.typ) {
+            (ExpectFromClient::Certificate, HandshakeType::Certificate) => {
+                let certificate = CertificateMessage::parse(message.body)?;
+                let auth = self
+                    .config
+                    .client_auth
+                    .expect("only requested when configured");
+
+                if certificate.entries.is_empty() {
+                    if auth.required {
+                        self.state = State::Failed;
+                        return Err(ServerError::ClientCertificateRequired);
+                    }
+                    // Accepted, and recorded as unauthenticated. The
+                    // application above can tell the difference by asking the
+                    // connection what the peer presented.
+                    negotiated.transcript.add_message(message);
+                    negotiated.expect = ExpectFromClient::FinishedAfterEmptyCertificate;
+                    return Ok(Vec::new());
+                }
+
+                let chain: Vec<Vec<u8>> = certificate
+                    .entries
+                    .iter()
+                    .map(|entry| entry.certificate.to_vec())
+                    .collect();
+                let parsed: core::result::Result<Vec<Certificate<'_>>, _> =
+                    chain.iter().map(|der| Certificate::parse(der)).collect();
+                let parsed = match parsed {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        self.state = State::Failed;
+                        return Err(ServerError::MalformedClientCertificate(err));
+                    }
+                };
+                let (end_entity, intermediates) =
+                    parsed.split_first().expect("checked non-empty above");
+
+                // No name check. A client certificate identifies a client and
+                // there is no hostname for it to match — using the server's
+                // own name here would be nonsense that happened to compile.
+                if let Err(err) = validate_path(end_entity, intermediates, auth.anchors, &auth.path)
+                {
+                    self.state = State::Failed;
+                    return Err(ServerError::ClientCertificate(err));
+                }
+
+                negotiated.transcript.add_message(message);
+                negotiated.client_certificate_transcript = negotiated.transcript.hash();
+                negotiated.client_certificates = chain;
+                negotiated.expect = ExpectFromClient::CertificateVerify;
+                Ok(Vec::new())
+            }
+            (ExpectFromClient::CertificateVerify, HandshakeType::CertificateVerify) => {
+                let verify = CertificateVerify::parse(message.body)?;
+                let leaf = negotiated
+                    .client_certificates
+                    .first()
+                    .expect("a CertificateVerify is only expected after a non-empty chain");
+                let leaf = match Certificate::parse(leaf) {
+                    Ok(leaf) => leaf,
+                    Err(err) => {
+                        self.state = State::Failed;
+                        return Err(ServerError::MalformedClientCertificate(err));
+                    }
+                };
+                // The *client* context string, over the transcript as of the
+                // client's Certificate. §4.4.3 gives the two directions
+                // different strings precisely so this signature cannot be a
+                // replayed server one.
+                let content = certificate_verify_content(
+                    CLIENT_CERTIFICATE_VERIFY_CONTEXT,
+                    &negotiated.client_certificate_transcript,
+                );
+                if let Err(err) = verify_tls13_signature(
+                    SignatureScheme(verify.scheme),
+                    &leaf.subject_public_key_info(),
+                    &content,
+                    verify.signature,
+                ) {
+                    self.state = State::Failed;
+                    return Err(ServerError::ClientCertificateVerify(err));
+                }
+                negotiated.transcript.add_message(message);
+                negotiated.expect = ExpectFromClient::Finished;
+                Ok(Vec::new())
+            }
+            (
+                ExpectFromClient::Finished | ExpectFromClient::FinishedAfterEmptyCertificate,
+                HandshakeType::Finished,
+            ) => self.finished(message),
+            (expected, got) => {
+                self.state = State::Failed;
+                Err(ServerError::UnexpectedMessage {
+                    expected: expected.name(),
+                    got,
+                })
+            }
         }
+    }
+
+    fn finished(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
         let State::AwaitFinished(negotiated) = core::mem::replace(&mut self.state, State::Failed)
         else {
             return Err(ServerError::Failed);
@@ -950,7 +1206,7 @@ impl ServerHandshake<'_> {
             Opener::new(negotiated.aead, &client_keys.key, &client_keys.iv)?,
             negotiated.server_application_secret,
             negotiated.client_application_secret,
-            Vec::new(),
+            negotiated.client_certificates,
         )));
         Ok(Vec::new())
     }

@@ -5,6 +5,49 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-03
+
+Built and tested against the same sibling revs as 0.2.x and 0.3.0:
+`rusty_tokio` rev `6d3bb05a45a393e4cf902013b05189dd168f6106` and `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`. Neither moved.
+
+`y` under `docs/versioning.md` §2, and this one is genuinely breaking rather
+than merely additive: `ClientConfig` and `ServerConfig` each gained a field, so
+every construction of them needs updating, and `ClientError` lost a variant.
+
+### Added
+- **Client certificates, both halves** (rusty_tls#42). The hand-rolled client
+  can authenticate itself, and the hand-rolled server can require it.
+  - `ClientConfig::identity` takes a `ClientIdentity` — a chain and the key for
+    it. With one configured, a CertificateRequest is answered with a
+    Certificate and a CertificateVerify signed using RFC 8446 §4.4.3's
+    **client** context string, which differs from the server's so a signature
+    made in one direction can never be replayed as the other.
+  - With no identity, or none matching the schemes the server named, the answer
+    is an empty Certificate. §4.4.2 makes that the conforming way to say "I
+    have nothing", and it leaves the accept-or-refuse decision with the server.
+    The client no longer aborts on a CertificateRequest.
+  - `ServerConfig::client_auth` takes a `ClientAuth` — anchors, path options,
+    and an explicit `required` flag. The server checks **two** things about the
+    answer: that the chain validates, and that the CertificateVerify was made
+    by the key in the leaf. A certificate proves nothing on its own.
+  - No name is matched against a client certificate: a client is not a
+    hostname. `Connection::peer_certificates` reports what arrived, so the
+    application can decide who it is.
+  - New: `AlertDescription::CERTIFICATE_REQUIRED`,
+    `handshake::CertificateRequestMessage`,
+    `HandshakeError::MissingSignatureAlgorithms`, and four `ServerError`
+    variants for the ways a client's certificate can be refused.
+
+### Removed
+- `ClientError::ClientCertificateRequested`. It existed to report that client
+  certificates were unimplemented, and is unreachable now that they are.
+
+### Changed
+- A CertificateRequest with no `signature_algorithms` is now refused as
+  malformed (§4.3.2 requires it). Previously every CertificateRequest was
+  refused, so this is narrower rather than newly strict.
+
 ## [0.3.0] - 2026-08-03
 
 Built and tested against the same sibling revs as 0.2.x: `rusty_tokio` rev
