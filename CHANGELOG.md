@@ -5,6 +5,28 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Added
+- **The hand-rolled server is now driven over a real socket by OpenSSL**
+  (rusty_tls#45). `tests/handrolled_socket_interop.rs` binds a loopback
+  listener, runs `ServerHandshake` over it, and points `openssl s_client` at
+  it. Until now every server test was `rustls`-the-client, in memory, with
+  whole records handed across as byte slices — one implementation rather than
+  an independent one, and no socket.
+  - OpenSSL **verifies the chain**: `-CAfile` with the generated root,
+    `-verify_return_error` so a bad chain is a non-zero exit rather than a
+    printed warning, and `-verify_hostname` so the certificate must be for the
+    name asked for rather than the address dialled. Without those three,
+    "it connected" would stand in for "it was trusted".
+  - Covers what an in-memory harness cannot: a record's header and body
+    arriving in separate reads, application data both ways over a socket, and
+    `close_notify` from an independent peer seen as an orderly close.
+  - `#[ignore]`d because the `openssl` binary cannot be assumed present — but
+    **CI runs them explicitly**, since the runner has it and the tests are
+    otherwise hermetic. `#[ignore]` here means "not everywhere", not "never".
+    The step asserts a non-zero pass count rather than trusting the exit code:
+    `-- --ignored` runs *only* ignored tests, so removing the attribute would
+    otherwise leave a green step that ran nothing.
+
 ### Changed
 - The hermetic rejection cases are now **one table run by two drivers** rather
   than two hand-written suites that happened to agree (rusty_tls#46). The cases
