@@ -23,6 +23,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   - `#[ignore]`d because the `openssl` binary cannot be assumed present — but
     **CI runs them explicitly**, since the runner has it and the tests are
     otherwise hermetic. `#[ignore]` here means "not everywhere", not "never".
+    The step asserts a non-zero pass count rather than trusting the exit code:
+    `-- --ignored` runs *only* ignored tests, so removing the attribute would
+    otherwise leave a green step that ran nothing.
 
 ### Changed
 - The hermetic rejection cases are now **one table run by two drivers** rather

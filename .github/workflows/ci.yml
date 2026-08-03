@@ -140,8 +140,19 @@ jobs:
       - name: Socket interop against OpenSSL
         run: |
           openssl version
-          cargo test --features handrolled-engine \
-            --test handrolled_socket_interop -- --ignored --nocapture
+          out=$(cargo test --features handrolled-engine \
+            --test handrolled_socket_interop -- --ignored --nocapture --color never)
+          echo "$out"
+          # `-- --ignored` runs *only* the ignored tests. If someone removes
+          # the attribute, this command runs zero tests and exits 0 — a green
+          # step for a run that did nothing, which is the failure mode the
+          # guard below exists to catch and which this step would otherwise
+          # reintroduce. So assert the count rather than trusting the exit
+          # code.
+          echo "$out" | grep -qE 'test result: ok\. [1-9][0-9]* passed' || {
+            echo "::error::the socket-interop suite ran no tests — is #[ignore] still on them?"
+            exit 1
+          }
 
       - name: Prove the gated tests actually ran
         # Every handrolled test file is `#![cfg(all(feature = "...", cfg))]`,
