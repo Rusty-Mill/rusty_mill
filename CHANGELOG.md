@@ -112,6 +112,40 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   This is arithmetic over byte strings only. The handshake messages, the
   transcript's accumulation, the key exchange, and anything that talks to a
   peer are stages 3b and 3c.
+- **Hand-rolled engine, stage 3b: handshake messages and the transcript hash**
+  (rusty_tls#25). `handrolled::wire` implements TLS's presentation language
+  (RFC 8446 §3) — fixed-width integers and length-prefixed vectors, read
+  strictly and written through closures that backfill lengths, so a prefix
+  cannot disagree with what follows it. `handrolled::handshake` implements the
+  messages a TLS 1.3 client sends and receives: the handshake header,
+  ClientHello, ServerHello (including HelloRetryRequest detection),
+  EncryptedExtensions, Certificate, CertificateVerify, Finished, the
+  extensions block with duplicates refused, the CertificateVerify signed
+  content, and `Transcript`.
+
+  Parsing and encoding are required to be inverses on the RFC's own bytes.
+  That is a correctness property, not a tidiness one: the transcript hash
+  covers encoded messages, so a parser and encoder that disagree compute a
+  transcript the peer does not share. `Transcript` accordingly accepts encoded
+  bytes and never a parsed message.
+
+  This closes a gap stage 3a landed with and documented: the server's Finished
+  `verify_data` could not be asserted, because RFC 8448 publishes no labelled
+  value for the transcript hash it covers. With the messages parseable that
+  hash is computable, and the MAC over it matches the RFC — which requires the
+  transcript, the key schedule, and the Finished MAC to be simultaneously
+  correct.
+
+  Still no state machine, no key exchange, and nothing that decides whether a
+  handshake should proceed. Those are stage 3c.
+- **Handshake fuzzing** in `tests/handrolled_fuzz.rs`, seeded from RFC 8448's
+  exchange, asserting that anything accepted re-encodes to the bytes accepted
+  and that the message spans tile their input exactly. It independently caught
+  six of the eleven mutants in stage 3b's mutation run.
+- **`tests/handrolled_wire.rs`**, which pins the distinction between a
+  truncated stream and a length prefix claiming more than its container holds.
+  Message-level tests cannot: the two are refused either way, and only the
+  error differs.
 
 ### Changed
 ### Fixed

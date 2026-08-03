@@ -1,4 +1,4 @@
-//! Fuzzing the DER reader and certificate parser, on stable, in CI.
+//! Fuzzing the parsers — DER, X.509, and the TLS handshake — on stable, in CI.
 //!
 //! ADR-0002 lists "fuzz the parsers" as a shipping-bar item and stage 2a
 //! landed owing it. This is that debt, in the form that can actually run on
@@ -38,13 +38,39 @@
 //! high-tag-number form would produce a `Value` whose `encoded` is longer
 //! than its canonical form, and this fails — for every input, not just the
 //! ones someone thought to write a case for.
+//!
+//! # The handshake half
+//!
+//! Stage 3b added a second parser that reads attacker-supplied bytes, so it
+//! gets the same treatment, seeded from RFC 8448's real exchange. Its
+//! invariant is the same shape as the DER one and matters for the same
+//! reason:
+//!
+//! > **If a message parses, re-encoding it must reproduce the accepted body
+//! > exactly.**
+//!
+//! The transcript hash covers encoded messages. A parser and encoder that
+//! disagree on any input compute a transcript the peer does not share, and a
+//! parser that *normalises* while re-encoding hashes something nobody sent —
+//! the same class of bug as re-encoding a certificate before checking its
+//! signature.
+//!
+//! Plus one framing invariant that is purely about not being lied to: the
+//! spans `messages()` returns must tile their input exactly, with no gap, no
+//! overlap, and nothing pointing outside.
 
 #![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
 
 use platform::security::TrustAnchors;
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use rusty_tls::handrolled::der::{Reader, Tag};
+use rusty_tls::handrolled::handshake::{
+    messages, parse_encrypted_extensions, parse_finished, CertificateMessage, CertificateVerify,
+    ClientHello, HandshakeType, Message, ServerHello,
+};
 use rusty_tls::handrolled::x509::Certificate;
+
+mod rfc8448;
 
 // ---------------------------------------------------------------------------
 // Deterministic randomness
@@ -286,6 +312,141 @@ fn check_everything(input: &[u8]) -> (usize, bool) {
     check_typed_readers(input);
     let parsed = check_certificate_invariants(input);
     (values, parsed)
+}
+
+// ---------------------------------------------------------------------------
+// The handshake invariants
+// ---------------------------------------------------------------------------
+
+/// Drive the handshake parsers over `input`, checking every promise they
+/// make. Returns how many messages were framed and how many bodies parsed, so
+/// callers can measure reach the same way the certificate tests do.
+fn check_handshake_invariants(input: &[u8]) -> (usize, usize) {
+    // The type mapping must be total and lossless, whatever byte arrives.
+    for byte in input.iter().copied() {
+        assert_eq!(
+            HandshakeType::from_u8(byte).as_u8(),
+            byte,
+            "the handshake type mapping lost a value"
+        );
+    }
+
+    let Ok(parsed) = messages(input) else {
+        return (0, 0);
+    };
+
+    // The spans must tile the input: no gap, no overlap, nothing outside.
+    let mut offset = 0usize;
+    for message in &parsed {
+        assert!(
+            is_subslice(message.encoded, input),
+            "an encoded span escaped its input"
+        );
+        assert!(
+            is_subslice(message.body, message.encoded),
+            "a body escaped its own message"
+        );
+        assert_eq!(
+            message.encoded.len(),
+            message.body.len() + 4,
+            "a message without a four-octet header"
+        );
+        assert_eq!(&message.encoded[4..], message.body);
+
+        let start = message.encoded.as_ptr() as usize - input.as_ptr() as usize;
+        assert_eq!(start, offset, "the message spans do not tile the input");
+        offset += message.encoded.len();
+
+        // Framing round-trips for every message, parseable body or not.
+        assert_eq!(
+            Message::encode(message.typ, message.body),
+            message.encoded,
+            "re-framing a message did not reproduce it"
+        );
+    }
+    assert_eq!(offset, input.len(), "the spans left a tail unaccounted for");
+
+    let mut bodies = 0usize;
+    for message in &parsed {
+        // The property this whole section exists for: parse and encode are
+        // inverses on anything accepted, because the transcript hashes the
+        // bytes and a disagreement is a handshake nobody can complete.
+        match message.typ {
+            HandshakeType::ClientHello => {
+                if let Ok(hello) = ClientHello::parse(message.body) {
+                    assert_eq!(
+                        hello.encode(),
+                        message.body,
+                        "ClientHello did not round-trip"
+                    );
+                    bodies += 1;
+                }
+            }
+            HandshakeType::ServerHello => {
+                if let Ok(hello) = ServerHello::parse(message.body) {
+                    assert_eq!(
+                        hello.encode(),
+                        message.body,
+                        "ServerHello did not round-trip"
+                    );
+                    // A HelloRetryRequest is decided by `random` alone, and
+                    // asking must never panic on a short or odd one.
+                    let _ = hello.is_hello_retry_request();
+                    bodies += 1;
+                }
+            }
+            HandshakeType::Certificate => {
+                if let Ok(certificate) = CertificateMessage::parse(message.body) {
+                    assert_eq!(
+                        certificate.encode(),
+                        message.body,
+                        "Certificate did not round-trip"
+                    );
+                    // Entries feed the stage 2a parser; it must not panic on
+                    // whatever this one accepted.
+                    for entry in &certificate.entries {
+                        assert!(is_subslice(entry.certificate, input));
+                        let _ = Certificate::parse(entry.certificate);
+                    }
+                    bodies += 1;
+                }
+            }
+            HandshakeType::CertificateVerify => {
+                if let Ok(verify) = CertificateVerify::parse(message.body) {
+                    assert_eq!(
+                        verify.encode(),
+                        message.body,
+                        "CertificateVerify did not round-trip"
+                    );
+                    assert!(!verify.signature.is_empty(), "an empty signature");
+                    bodies += 1;
+                }
+            }
+            HandshakeType::EncryptedExtensions => {
+                if let Ok(extensions) = parse_encrypted_extensions(message.body) {
+                    for extension in &extensions {
+                        assert!(is_subslice(extension.data, input));
+                    }
+                    // Duplicates are refused, so the types must be distinct.
+                    let mut types: Vec<u16> = extensions.iter().map(|e| e.typ).collect();
+                    let before = types.len();
+                    types.sort_unstable();
+                    types.dedup();
+                    assert_eq!(before, types.len(), "a duplicate extension was accepted");
+                    bodies += 1;
+                }
+            }
+            HandshakeType::Finished => {
+                if let Ok(verify_data) = parse_finished(message.body) {
+                    assert!(!verify_data.is_empty(), "an empty verify_data");
+                    bodies += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (parsed.len(), bodies)
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +693,137 @@ fn parsing_the_same_bytes_twice_gives_the_same_answer() {
             _ => panic!("parsing the same {} bytes twice disagreed", input.len()),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The handshake tests
+// ---------------------------------------------------------------------------
+
+/// Every prefix and concatenation of RFC 8448's exchange, plus the exchange
+/// itself — the shapes a real reassembly buffer holds part-way through a
+/// handshake.
+fn handshake_corpus() -> Vec<Vec<u8>> {
+    let mut corpus = rfc8448::all_messages();
+
+    // The whole exchange in order, which is what a client that buffered
+    // everything would hand to `messages()`.
+    let whole: Vec<u8> = corpus.iter().flatten().copied().collect();
+    corpus.push(whole);
+
+    corpus
+}
+
+/// Uniformly random bytes through the handshake parsers. Cheap and shallow —
+/// a random first octet is a valid `HandshakeType` every time, but the
+/// `uint24` that follows almost never matches the buffer.
+#[test]
+fn random_bytes_never_break_a_handshake_invariant() {
+    let mut rng = Rng::new(0x5eed_0006);
+
+    for round in 0..iterations(30_000) {
+        let len = rng.below(256);
+        let input: Vec<u8> = (0..len).map(|_| rng.byte()).collect();
+        let _ = std::panic::catch_unwind(|| check_handshake_invariants(&input))
+            .unwrap_or_else(|_| panic!("invariant broken at round {round} on {input:02x?}"));
+    }
+}
+
+/// The one that matters: mutations of RFC 8448's real messages.
+///
+/// A single flipped byte in a real ClientHello is still a ClientHello, so it
+/// reaches past the framing and into the extension loop, the cipher-suite
+/// vector, and the compression check — where a round-trip bug would live.
+#[test]
+fn mutated_handshake_messages_never_break_an_invariant() {
+    let corpus = handshake_corpus();
+    let mut rng = Rng::new(0x5eed_0007);
+
+    for round in 0..iterations(30_000) {
+        let seed = &corpus[rng.below(corpus.len())];
+        let input = mutate(&mut rng, seed);
+        let _ =
+            std::panic::catch_unwind(|| check_handshake_invariants(&input)).unwrap_or_else(|_| {
+                panic!(
+                    "invariant broken at round {round} on a {}-byte mutant: {input:02x?}",
+                    input.len()
+                )
+            });
+    }
+}
+
+/// The reach check, for the same reason the certificate one exists: a change
+/// that made every handshake input fail at the first octet would leave both
+/// tests above passing while testing nothing at all.
+#[test]
+fn mutated_handshake_messages_reach_past_the_framing() {
+    let corpus = handshake_corpus();
+    let mut rng = Rng::new(0x5eed_0008);
+    let rounds = iterations(30_000);
+
+    let (mut framed, mut deep) = (0usize, 0usize);
+    for _ in 0..rounds {
+        let seed = &corpus[rng.below(corpus.len())];
+        let input = mutate(&mut rng, seed);
+        let (frames, bodies) = check_handshake_invariants(&input);
+        if frames > 0 {
+            framed += 1;
+        }
+        if bodies > 0 {
+            deep += 1;
+        }
+    }
+
+    let framed_pct = framed * 100 / rounds;
+    let deep_pct = deep * 100 / rounds;
+    println!(
+        "of {rounds} mutants: {framed_pct}% framed into messages, {deep_pct}% had a body parse"
+    );
+
+    assert!(
+        framed_pct >= 20,
+        "only {framed_pct}% of mutants framed — the fuzzer is testing the \
+         length check and almost nothing else"
+    );
+    assert!(
+        deep_pct >= 10,
+        "only {deep_pct}% of mutants reached a message body — mutations are \
+         being rejected before any parser runs"
+    );
+}
+
+/// Handshake parsing must be a function of its input, like certificate
+/// parsing, and for the same reason.
+#[test]
+fn parsing_the_same_handshake_bytes_twice_gives_the_same_answer() {
+    let corpus = handshake_corpus();
+    let mut rng = Rng::new(0x5eed_0009);
+
+    for _ in 0..iterations(5_000) {
+        let seed = &corpus[rng.below(corpus.len())];
+        let input = mutate(&mut rng, seed);
+
+        match (messages(&input), messages(&input)) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b),
+            (Err(a), Err(b)) => assert_eq!(a, b),
+            _ => panic!("framing the same {} bytes twice disagreed", input.len()),
+        }
+    }
+}
+
+/// Every unmutated handshake seed must frame and its bodies must parse, or
+/// the reach numbers above mean nothing.
+#[test]
+fn the_unmutated_handshake_corpus_parses() {
+    for (index, seed) in handshake_corpus().iter().enumerate() {
+        let (frames, bodies) = check_handshake_invariants(seed);
+        assert!(frames > 0, "seed {index} did not frame into any message");
+        assert!(bodies > 0, "seed {index} framed but no body parsed");
+    }
+
+    // The whole exchange is seven messages: CH, SH, then the server's four,
+    // then the client's Finished.
+    let whole: Vec<u8> = rfc8448::all_messages().into_iter().flatten().collect();
+    assert_eq!(messages(&whole).expect("the exchange frames").len(), 7);
 }
 
 /// Every unmutated seed must parse, or the corpus is not what the tests above

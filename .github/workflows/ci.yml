@@ -70,9 +70,9 @@ jobs:
       - name: Prove the gated tests actually ran
         # Every handrolled test file is `#![cfg(all(feature = "...", cfg))]`,
         # so a typo in the cfg name — here, in Cargo.toml's check-cfg, or in
-        # the source — compiles all three down to zero tests and still reports
-        # success. A green job that ran nothing is the failure mode this
-        # guards against.
+        # the source — compiles every one of them down to zero tests and still
+        # reports success. A green job that ran nothing is the failure mode
+        # this guards against, so every new suite belongs in this list.
         run: |
           for t in handrolled_record_kat \
                    handrolled_record_differential \
@@ -84,7 +84,9 @@ jobs:
                    handrolled_verify \
                    handrolled_path \
                    handrolled_name \
-                   handrolled_schedule; do
+                   handrolled_schedule \
+                   handrolled_wire \
+                   handrolled_handshake; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
             echo "$t: $n tests"

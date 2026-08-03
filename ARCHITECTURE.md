@@ -62,9 +62,13 @@ one artifact to ship and no team/language boundary to split across:
   combined entry point that does both and so cannot be half-performed. With
   that, path validation is complete. Stage 3a adds `handrolled::schedule`,
   the TLS 1.3 key schedule — where every key the protocol uses comes from, and
-  where they are bound to the handshake transcript that produced them. The
-  handshake messages and the state machine that drives them (3b, 3c) are not
-  built. See [Non-goals](#non-goals) and ADR-0002.
+  where they are bound to the handshake transcript that produced them. Stage 3b
+  adds `handrolled::wire` (TLS's presentation language) and
+  `handrolled::handshake` (the messages themselves plus the running transcript
+  hash), where parsing and encoding are required to be inverses on the wire
+  bytes — the transcript covers what arrived, so a re-encoding that differs
+  computes a hash the peer does not share. The state machine that drives them
+  (3c) is not built. See [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and
