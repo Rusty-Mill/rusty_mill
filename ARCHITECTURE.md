@@ -67,8 +67,14 @@ one artifact to ship and no team/language boundary to split across:
   `handrolled::handshake` (the messages themselves plus the running transcript
   hash), where parsing and encoding are required to be inverses on the wire
   bytes — the transcript covers what arrived, so a re-encoding that differs
-  computes a hash the peer does not share. The state machine that drives them
-  (3c) is not built. See [Non-goals](#non-goals) and ADR-0002.
+  computes a hash the peer does not share. Stage 3c-i adds `handrolled::kx`
+  (ephemeral X25519 and NIST-curve key exchange) and the TLS `SignatureScheme`
+  namespace in `handrolled::verify` — including RSASSA-PSS, which the X.509
+  side refuses and which RFC 8446 §4.4.3 *requires* for an RSA handshake
+  signature. The two namespaces disagree about more than that, most sharply on
+  where an ECDSA key's curve comes from, which is why they are separate types.
+  The state machine that drives all of it (3c-ii) is not built. See
+  [Non-goals](#non-goals) and ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

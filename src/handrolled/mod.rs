@@ -48,7 +48,15 @@
 //!   Parses and encodes, and the two are inverses on the wire bytes, because
 //!   the transcript covers what arrived rather than a re-encoding of it.
 //!
-//! The client state machine (3c), TLS 1.2 (4), and the server side (5) are
+//! - [`kx`] — ephemeral key exchange (stage 3c-i): X25519 and the two NIST
+//!   curves, wrapped so a key can be used exactly once and the agreed secret
+//!   never outlives the closure it is handed to.
+//! - [`verify`] gains the TLS `SignatureScheme` namespace in 3c-i, alongside
+//!   the X.509 one it has carried since 2b-i. They follow different rules —
+//!   most sharply on where an ECDSA key's curve comes from — and that module's
+//!   docs set the two side by side.
+//!
+//! The client state machine (3c-ii), TLS 1.2 (4), and the server side (5) are
 //! not built. The ADR carries the order and the bar each must clear.
 //!
 //! # What is deliberately *not* here
@@ -60,6 +68,7 @@
 
 pub mod der;
 pub mod handshake;
+pub mod kx;
 pub mod name;
 pub mod path;
 pub mod record;
