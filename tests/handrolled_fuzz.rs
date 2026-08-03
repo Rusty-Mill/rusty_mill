@@ -1,4 +1,5 @@
-//! Fuzzing the parsers — DER, X.509, and the TLS handshake — on stable, in CI.
+//! Fuzzing the parsers and verifiers — DER, X.509, the TLS handshake, key
+//! exchange, and handshake signatures — on stable, in CI.
 //!
 //! ADR-0002 lists "fuzz the parsers" as a shipping-bar item and stage 2a
 //! landed owing it. This is that debt, in the form that can actually run on
@@ -58,6 +59,20 @@
 //! Plus one framing invariant that is purely about not being lied to: the
 //! spans `messages()` returns must tile their input exactly, with no gap, no
 //! overlap, and nothing pointing outside.
+//!
+//! # The verifiers
+//!
+//! Stage 3c-i added two more places attacker-controlled bytes arrive: a
+//! `SignatureScheme` is a `uint16` a peer picks, and a `key_share` is a byte
+//! string a peer picks. Their invariant is blunt and is the only one that
+//! matters:
+//!
+//! > **Nothing an attacker can choose alone makes a verifier return `Ok`.**
+//!
+//! A random signature under a random scheme against a real key must be
+//! refused every time. So must a random key share. Neither may panic — a
+//! panic in a verifier is a denial of service reachable from the first
+//! handshake flight, which is the same bug class the SAN iterator had.
 
 #![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
 
@@ -68,6 +83,8 @@ use rusty_tls::handrolled::handshake::{
     messages, parse_encrypted_extensions, parse_finished, CertificateMessage, CertificateVerify,
     ClientHello, HandshakeType, Message, ServerHello,
 };
+use rusty_tls::handrolled::kx::{KeyExchange, NamedGroup};
+use rusty_tls::handrolled::verify::{verify_tls13_signature, SignatureScheme};
 use rusty_tls::handrolled::x509::Certificate;
 
 mod rfc8448;
@@ -843,4 +860,169 @@ fn the_unmutated_corpus_parses() {
         corpus.len(),
         failures.join("\n")
     );
+}
+
+// ---------------------------------------------------------------------------
+// The verifiers — stage 3c-i
+// ---------------------------------------------------------------------------
+
+/// A real certificate to verify against, so the refusals below are refusals of
+/// the *signature* rather than of a nonsense key.
+fn verification_key() -> Vec<u8> {
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+    let params = rcgen::CertificateParams::new(vec!["fuzz.example".to_string()]).expect("params");
+    params.self_signed(&key).expect("self-sign").der().to_vec()
+}
+
+/// No `SignatureScheme` a peer can name, with a signature a peer can choose,
+/// verifies against a key the peer does not hold.
+///
+/// Every scheme number is walked, not sampled: there are only 65 536 of them,
+/// and an accidental catch-all arm — a `_ => Ok(...)` in the wrong place —
+/// would be invisible to a sampling test and fatal in production.
+#[test]
+fn no_scheme_and_no_random_signature_ever_verifies() {
+    let certificate_der = verification_key();
+    let certificate = Certificate::parse(&certificate_der).expect("parses");
+    let key = certificate.subject_public_key_info();
+
+    let mut rng = Rng::new(0x5eed_000a);
+    let message = b"a message nobody signed";
+
+    // Every scheme in the registry's range, with one random signature each.
+    for value in 0u32..=u32::from(u16::MAX) {
+        let length = 1 + rng.below(80);
+        let signature: Vec<u8> = (0..length).map(|_| rng.byte()).collect();
+        let result =
+            verify_tls13_signature(SignatureScheme(value as u16), &key, message, &signature);
+        assert!(
+            result.is_err(),
+            "scheme 0x{value:04x} accepted a random {length}-byte signature"
+        );
+    }
+}
+
+/// Mutated certificates, real schemes, random signatures. The key itself is
+/// hostile here, which the test above deliberately kept clean.
+#[test]
+fn a_mutated_key_never_makes_a_signature_verify() {
+    let certificate_der = verification_key();
+    let mut rng = Rng::new(0x5eed_000b);
+    let rounds = iterations(20_000);
+    let mut reached = 0usize;
+
+    for round in 0..rounds {
+        let mutant = mutate(&mut rng, &certificate_der);
+        let Ok(certificate) = Certificate::parse(&mutant) else {
+            continue;
+        };
+        reached += 1;
+        let key = certificate.subject_public_key_info();
+
+        let scheme =
+            SignatureScheme::TLS13_SUPPORTED[rng.below(SignatureScheme::TLS13_SUPPORTED.len())];
+        let signature: Vec<u8> = (0..1 + rng.below(80)).map(|_| rng.byte()).collect();
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            verify_tls13_signature(scheme, &key, b"unsigned", &signature)
+        }))
+        .unwrap_or_else(|_| panic!("panicked at round {round} on {mutant:02x?}"));
+
+        assert!(result.is_err(), "a mutated key verified a random signature");
+    }
+
+    assert!(
+        reached * 100 / rounds >= 5,
+        "only {reached} of {rounds} mutants parsed — the verifier is barely being reached"
+    );
+}
+
+/// A key share a peer chooses never panics, and what it *does* do differs by
+/// group in a way worth pinning down.
+///
+/// The first draft of this test asserted that a random key share never agrees
+/// a secret. That is false, and the fuzzer said so immediately: X25519 has no
+/// invalid public keys. RFC 7748 §5 decodes *every* 32-octet string to a
+/// u-coordinate, deliberately, so there is nothing to reject and a random
+/// share agrees a perfectly good secret with a peer who does not know it.
+///
+/// That is not a weakness, but it does mean the small-order check is the only
+/// validation X25519 has — which is why
+/// `handrolled_kx::a_small_order_x25519_key_share_is_refused` carries more
+/// weight than it looks like it should. The NIST curves are the opposite: a
+/// random point is essentially never on the curve, so almost everything is
+/// refused.
+///
+/// So the invariants are per-group, and the one that holds everywhere is that
+/// a secret, if there is one, is never all zeroes.
+#[test]
+fn a_random_key_share_is_handled_the_way_its_group_requires() {
+    let mut rng = Rng::new(0x5eed_000c);
+    let rounds = iterations(2_000);
+
+    for group in [
+        NamedGroup::X25519,
+        NamedGroup::SecP256R1,
+        NamedGroup::SecP384R1,
+    ] {
+        let correct_length = match group {
+            NamedGroup::SecP256R1 => 65,
+            NamedGroup::SecP384R1 => 97,
+            _ => 32,
+        };
+        let mut agreed = 0usize;
+
+        for round in 0..rounds {
+            // Three quarters correctly sized, so the NIST shares actually
+            // reach the on-curve check rather than being turned away on
+            // length.
+            let length = if rng.below(4) == 0 {
+                rng.below(128)
+            } else {
+                correct_length
+            };
+            let mut share: Vec<u8> = (0..length).map(|_| rng.byte()).collect();
+            if !share.is_empty() && rng.below(2) == 0 {
+                share[0] = 0x04; // the uncompressed-point marker
+            }
+            let wrong_length = share.len() != correct_length;
+
+            let kx = KeyExchange::generate(group).expect("generate");
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                kx.agree(&share, <[u8]>::to_vec)
+            }))
+            .unwrap_or_else(|_| panic!("{group:?} panicked at round {round} on {share:02x?}"));
+
+            if let Ok(secret) = result {
+                assert!(
+                    !wrong_length,
+                    "{group:?} agreed a secret from a {}-octet share",
+                    share.len()
+                );
+                assert!(
+                    secret.iter().any(|&b| b != 0),
+                    "{group:?} produced an all-zero secret from {share:02x?}"
+                );
+                agreed += 1;
+            }
+        }
+
+        let rate = agreed * 100 / rounds;
+        println!("{group:?}: {rate}% of random key shares agreed a secret");
+        match group {
+            // Every 32-octet string is a valid X25519 public key, so this
+            // should be close to the three quarters that were correctly sized.
+            NamedGroup::X25519 => assert!(
+                rate >= 50,
+                "X25519 refused {}% of random shares — it has no invalid \
+                 public keys, so something is rejecting them for another reason",
+                100 - rate
+            ),
+            // A random string is not a point on a NIST curve.
+            _ => assert_eq!(
+                rate, 0,
+                "{group:?} accepted a random string as a point on the curve"
+            ),
+        }
+    }
 }

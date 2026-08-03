@@ -106,7 +106,8 @@ independently abandonable:
 | 2b-iii | Name matching (hostname, IP) and name constraints | **landed** |
 | 3a | TLS 1.3 key schedule — HKDF-Expand-Label, the secret schedule, traffic keys, Finished | **landed** |
 | 3b | Handshake message encoding/parsing and the transcript hash | **landed** |
-| 3c | The client state machine — key exchange, CertificateVerify, driving it all | not started |
+| 3c-i | Ephemeral key exchange, and the TLS `SignatureScheme` namespace — including RSASSA-PSS, which 2b-i refused | **landed** |
+| 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | not started |
 | 4 | TLS 1.2 — only if a real peer forces it | not started |
 | 5 | Server side — last, or never | not started |
 
@@ -256,6 +257,60 @@ Two things came out of mutation-testing 3b that generalise:
   hand-written case targeted. It is the same shape as 2a's DER canonicality
   invariant, and it works for the same reason: it is a property of *every*
   input rather than of the inputs someone thought of.
+
+3c split for the usual reason, and the boundary is the usual kind: 3c-i is
+facts about bytes with no state and no peer, 3c-ii is a state machine. What
+made the split obvious was discovering, while scoping 3c, that the engine could
+not verify a single real RSA handshake — RFC 8446 §4.4.3 requires RSASSA-PSS
+for a CertificateVerify, and 2b-i had refused PSS outright. That is a
+self-contained piece of work with its own failure modes, and bundling it into a
+state machine would have meant reviewing both at once.
+
+Three things came out of 3c-i worth carrying forward:
+
+- **The same question can have opposite right answers in two namespaces.**
+  2b-i was corrected by real certificates into reading an ECDSA key's curve off
+  the *key*, because `ecdsa-with-SHA256` names only a hash. TLS 1.3 then
+  inverts it: `ecdsa_secp256r1_sha256` names hash *and* curve, so a P-384 key
+  under that scheme must be refused. A single shared "signature algorithm"
+  type would have made one of those two rules unstatable. They are separate
+  types, and the module doc sets them side by side rather than leaving a
+  reader to notice.
+- **A refusal that is really a downgrade must not read as a gap.** The
+  `rsa_pkcs1_*` schemes are implemented and are refused for a handshake
+  signature on the RFC's instruction. Reporting that as "unsupported" would
+  invite a future reader to helpfully add support for it, which is exactly the
+  change the RFC forbids. It gets its own error variant, and a test asserts the
+  two do not render alike.
+- **Refusing PSS in one namespace and requiring it in the other is not
+  inconsistency, and the reason should be written down.** In X.509 the PSS
+  parameters are a DER structure carrying hash, MGF, salt length, and trailer,
+  any of which can be misread into verifying the wrong thing — so 2b-i failed
+  closed. A TLS `SignatureScheme` is one number that fixes all four. Nothing is
+  left to misparse. The safe answer differs because the encodings differ.
+
+Two testing notes from 3c-i, both about being wrong in a useful way:
+
+- A mutation survived — dropping the Ed25519 parameters check — because every
+  key in the suite came from `rcgen` and was therefore conforming. The
+  certificate namespace *did* cover the same rule, which is what made the gap
+  invisible: both paths looked equally tested. Chasing it turned up a real
+  asymmetry as well, in that the TLS path was not checking an RSA key's
+  parameters at all, so a leaf's own key was held to a lower standard than its
+  issuer's.
+- A fuzz invariant was written too strongly and failed immediately: "a random
+  key share never agrees a secret" is false for X25519, which by RFC 7748 §5
+  has *no* invalid public keys — every 32-octet string decodes. The test now
+  asserts what is actually true per group, and the finding sharpened something
+  worth knowing: the small-order check is the only validation X25519 has.
+
+One limitation of 3c-i is worth recording because it will look like an
+omission later. RFC 8448 has been the independent oracle for stages 1, 3a, and
+3b, and it cannot be one here: its example server key is 1024-bit RSA, and
+`ring`'s PSS verifiers enforce 2048–8192 bits. Refusing it is correct, so the
+suite asserts the refusal — and measures the modulus to prove that is the
+reason — but the positive coverage for PSS has to come from generated keys
+instead of the RFC.
 
 ### 5. The shipping bar
 

@@ -20,7 +20,37 @@
 //! tests do exactly that, on real roots, as a *correctness* check on this
 //! code — not as a statement about those roots.
 //!
+//! # Two namespaces, and why they are not one type
+//!
+//! This module verifies signatures in two different worlds, and stage 3c-i
+//! added the second:
+//!
+//! - [`SignatureAlgorithm`] — an X.509 `AlgorithmIdentifier`, an OID plus
+//!   parameters, naming how a *certificate* was signed.
+//! - [`SignatureScheme`] — a TLS `SignatureScheme`, a `uint16`, naming how a
+//!   *handshake* was signed (RFC 8446 §4.2.3).
+//!
+//! They overlap in what they can express and disagree on almost every rule,
+//! so they are separate types with separate tables. Three disagreements are
+//! worth stating outright, because each is a way to be wrong:
+//!
+//! | Question | X.509 | TLS 1.3 |
+//! | --- | --- | --- |
+//! | Where does an ECDSA key's curve come from? | the **key** | the **scheme** |
+//! | Is RSA PKCS#1 v1.5 acceptable? | yes | **no**, PSS only |
+//! | Is RSASSA-PSS acceptable? | not implemented | **required** for RSA |
+//!
+//! The first row is the one that bites. Stage 2b-i learned the hard way that
+//! `ecdsa-with-SHA256` names a hash and says nothing about the curve — a
+//! P-384 key signed with SHA-256 is conforming, and three roots in this
+//! machine's trust store are exactly that. TLS 1.3 then inverts it:
+//! `ecdsa_secp256r1_sha256` names *both*, so a P-384 key under that scheme is
+//! invalid and must be refused. Same-looking question, opposite answers —
+//! which is precisely why a shared "signature algorithm" type would be a trap.
+//!
 //! # Algorithms, and the ones deliberately refused
+//!
+//! For certificates ([`SignatureAlgorithm`]):
 //!
 //! | Algorithm | Status |
 //! | --- | --- |
@@ -30,6 +60,25 @@
 //! | RSA PKCS#1 v1.5 + SHA-1, + MD5 | **refused** as weak |
 //! | ECDSA + SHA-1 | **refused** as weak |
 //! | RSASSA-PSS | **refused** as unsupported |
+//!
+//! For handshakes ([`SignatureScheme`]):
+//!
+//! | Scheme | Status |
+//! | --- | --- |
+//! | `rsa_pss_rsae_sha256/384/512` | supported |
+//! | `ecdsa_secp256r1_sha256`, `ecdsa_secp384r1_sha384` | supported |
+//! | `ed25519` | supported |
+//! | `rsa_pkcs1_*` | **refused** — certificates only, RFC 8446 §4.4.3 |
+//! | `rsa_pkcs1_sha1`, `ecdsa_sha1` | **refused** as weak |
+//! | `ecdsa_secp521r1_sha512`, `ed448`, `rsa_pss_pss_*` | **refused** as unsupported |
+//!
+//! PSS being refused in one column and required in the other is not an
+//! inconsistency. In X.509 the PSS *parameters* are a DER structure carrying
+//! the hash, the mask generation function, the salt length, and a trailer
+//! field, any of which can be got wrong in a way that verifies something other
+//! than what was signed — so 2b-i failed closed. A TLS `SignatureScheme` is a
+//! single number that fixes all four. There is nothing left to misparse, which
+//! is why the safe answer differs.
 //!
 //! SHA-1 is refused rather than merely discouraged, and that is a real
 //! decision rather than a default: 28 of the 152 roots in this machine's own
@@ -101,6 +150,23 @@ pub enum VerifyError {
     /// P-256 and P-384 are implemented; P-521 and everything else is refused
     /// rather than approximated.
     UnsupportedCurve,
+    /// A TLS [`SignatureScheme`] named a curve, and the key is on a different
+    /// one.
+    ///
+    /// Distinct from [`VerifyError::UnsupportedCurve`]: both curves may be
+    /// perfectly supported, and the scheme still does not describe this key.
+    /// Only reachable through the TLS namespace — X.509 reads the curve off
+    /// the key, so there is nothing there for it to disagree with. See the
+    /// module docs.
+    CurveMismatch,
+    /// A TLS [`SignatureScheme`] that RFC 8446 §4.4.3 permits in certificates
+    /// but forbids in a handshake signature — the `rsa_pkcs1_*` family.
+    ///
+    /// Its own variant rather than
+    /// [`VerifyError::UnsupportedSignatureAlgorithm`], because this is not a
+    /// gap: the algorithm is implemented, and is being refused *in this
+    /// position* on the RFC's instruction.
+    CertificateOnlyScheme,
     /// An `AlgorithmIdentifier`'s parameters were absent where they are
     /// required, present where they are forbidden, or malformed.
     MalformedParameters,
@@ -123,6 +189,12 @@ impl core::fmt::Display for VerifyError {
                 f.write_str("the signature algorithm does not match the key's algorithm")
             }
             Self::UnsupportedCurve => f.write_str("unsupported elliptic curve"),
+            Self::CurveMismatch => {
+                f.write_str("the signature scheme names a curve the key is not on")
+            }
+            Self::CertificateOnlyScheme => {
+                f.write_str("this signature scheme is permitted in certificates but not in a TLS 1.3 handshake signature")
+            }
             Self::MalformedParameters => f.write_str("malformed algorithm parameters"),
             Self::BadSignature => f.write_str("signature verification failed"),
         }
@@ -233,30 +305,11 @@ impl SignatureAlgorithm {
         };
 
         match algorithm {
-            // RFC 4055 §5: parameters MUST be present and NULL. Absent is
-            // accepted too — some issuers omit it, the meaning is not in
-            // dispute, and rejecting would refuse certificates that verify
-            // correctly everywhere else. Anything *else* is refused, because
-            // then the meaning genuinely is in dispute.
             Self::RsaPkcs1Sha256 | Self::RsaPkcs1Sha384 | Self::RsaPkcs1Sha512 => {
-                match identifier.parameters {
-                    None => {}
-                    Some(bytes) => {
-                        let mut reader = Reader::new(bytes);
-                        reader
-                            .read_null()
-                            .map_err(|_| VerifyError::MalformedParameters)?;
-                        reader
-                            .finish()
-                            .map_err(|_| VerifyError::MalformedParameters)?;
-                    }
-                }
+                require_null_or_absent_parameters(identifier)?;
             }
-            // RFC 5758 §3.2 and RFC 8410 §3: absent, full stop.
             Self::EcdsaSha256 | Self::EcdsaSha384 | Self::Ed25519 => {
-                if identifier.parameters.is_some() {
-                    return Err(VerifyError::MalformedParameters);
-                }
+                require_absent_parameters(identifier)?;
             }
         }
 
@@ -333,45 +386,78 @@ fn check_key_compatibility(
     }
 
     if algorithm.is_ecdsa() {
-        // RFC 5480 §2.1.1: the key's parameters name the curve.
-        let bytes = key
-            .algorithm
-            .parameters
-            .ok_or(VerifyError::MalformedParameters)?;
-        let mut reader = Reader::new(bytes);
-        let named = reader
-            .read_oid()
-            .map_err(|_| VerifyError::MalformedParameters)?;
-        reader
-            .finish()
-            .map_err(|_| VerifyError::MalformedParameters)?;
-
-        return match named {
-            oid::P256 => Ok(Some(Curve::P256)),
-            oid::P384 => Ok(Some(Curve::P384)),
-            // P-521, secp256k1, an explicit curve specification — all
-            // refused. Verifying over a curve this module does not know is
-            // not something to attempt.
-            _ => Err(VerifyError::UnsupportedCurve),
-        };
+        return named_curve(key).map(Some);
     }
 
-    // RSA: parameters MUST be NULL (RFC 4055 §1.2), with absent accepted for
-    // the same reason as on the signature side. Ed25519: absent (RFC 8410
-    // §3), with nothing accepted in its place.
-    match (algorithm, key.algorithm.parameters) {
-        (SignatureAlgorithm::Ed25519, Some(_)) => Err(VerifyError::MalformedParameters),
-        (_, None) => Ok(None),
-        (_, Some(bytes)) => {
-            let mut reader = Reader::new(bytes);
-            reader
-                .read_null()
-                .map_err(|_| VerifyError::MalformedParameters)?;
-            reader
-                .finish()
-                .map_err(|_| VerifyError::MalformedParameters)?;
-            Ok(None)
-        }
+    // RSA: NULL or absent. Ed25519: absent, with nothing accepted in its
+    // place.
+    match algorithm {
+        SignatureAlgorithm::Ed25519 => require_absent_parameters(&key.algorithm)?,
+        _ => require_null_or_absent_parameters(&key.algorithm)?,
+    }
+    Ok(None)
+}
+
+/// Require an `AlgorithmIdentifier`'s parameters to be `NULL` or absent.
+///
+/// RFC 4055 §1.2 says `NULL` for RSA. Absent is accepted too: some issuers
+/// omit it, the meaning is not in dispute, and refusing would turn away
+/// certificates that verify correctly everywhere else. Anything else is
+/// refused, because then the meaning genuinely is in dispute.
+fn require_null_or_absent_parameters(
+    identifier: &AlgorithmIdentifier<'_>,
+) -> Result<(), VerifyError> {
+    let Some(bytes) = identifier.parameters else {
+        return Ok(());
+    };
+    let mut reader = Reader::new(bytes);
+    reader
+        .read_null()
+        .map_err(|_| VerifyError::MalformedParameters)?;
+    reader
+        .finish()
+        .map_err(|_| VerifyError::MalformedParameters)
+}
+
+/// Require an `AlgorithmIdentifier` to carry no parameters at all.
+///
+/// RFC 8410 §3 for Ed25519 and RFC 5758 §3.2 for ECDSA signature algorithms:
+/// absent, full stop. A `NULL` here is the classic mistake — it looks like
+/// "no parameters" and is a different encoding, so tolerating it would mean
+/// accepting a key nobody conforming produces.
+fn require_absent_parameters(identifier: &AlgorithmIdentifier<'_>) -> Result<(), VerifyError> {
+    if identifier.parameters.is_some() {
+        return Err(VerifyError::MalformedParameters);
+    }
+    Ok(())
+}
+
+/// Read the curve an EC key is on, from the key's own parameters.
+///
+/// RFC 5480 §2.1.1: an `id-ecPublicKey` key's `AlgorithmIdentifier`
+/// parameters name the curve. Both namespaces need this and want opposite
+/// things from it — X.509 *takes* the curve from here, TLS *checks* it
+/// against the scheme — so it is one function with one reading of the DER.
+fn named_curve(key: &SubjectPublicKeyInfo<'_>) -> Result<Curve, VerifyError> {
+    let bytes = key
+        .algorithm
+        .parameters
+        .ok_or(VerifyError::MalformedParameters)?;
+    let mut reader = Reader::new(bytes);
+    let named = reader
+        .read_oid()
+        .map_err(|_| VerifyError::MalformedParameters)?;
+    reader
+        .finish()
+        .map_err(|_| VerifyError::MalformedParameters)?;
+
+    match named {
+        oid::P256 => Ok(Curve::P256),
+        oid::P384 => Ok(Curve::P384),
+        // P-521, secp256k1, an explicit curve specification — all refused.
+        // Verifying over a curve this module does not know is not something
+        // to attempt.
+        _ => Err(VerifyError::UnsupportedCurve),
     }
 }
 
@@ -390,6 +476,208 @@ pub fn verify_signed_data(
     let curve = check_key_compatibility(algorithm, key)?;
 
     signature::UnparsedPublicKey::new(algorithm.ring_algorithm(curve), key.key)
+        .verify(message, signature)
+        .map_err(|_| VerifyError::BadSignature)
+}
+
+// ---------------------------------------------------------------------------
+// The TLS namespace — stage 3c-i
+// ---------------------------------------------------------------------------
+
+/// A TLS `SignatureScheme` (RFC 8446 §4.2.3).
+///
+/// A newtype over the wire value rather than an enum, because the registry is
+/// open: a peer may offer anything, and a client has to be able to hold a
+/// number it does not recognise long enough to refuse it. What it *means* is
+/// decided by [`SignatureScheme::tls13_algorithm`], which recognises a fixed
+/// set and refuses the rest.
+///
+/// See the module docs for how this differs from [`SignatureAlgorithm`], which
+/// is the same idea for certificates and follows different rules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SignatureScheme(pub u16);
+
+impl SignatureScheme {
+    /// `rsa_pkcs1_sha256(0x0401)` — certificates only.
+    pub const RSA_PKCS1_SHA256: Self = Self(0x0401);
+    /// `rsa_pkcs1_sha384(0x0501)` — certificates only.
+    pub const RSA_PKCS1_SHA384: Self = Self(0x0501);
+    /// `rsa_pkcs1_sha512(0x0601)` — certificates only.
+    pub const RSA_PKCS1_SHA512: Self = Self(0x0601);
+
+    /// `ecdsa_secp256r1_sha256(0x0403)`.
+    pub const ECDSA_SECP256R1_SHA256: Self = Self(0x0403);
+    /// `ecdsa_secp384r1_sha384(0x0503)`.
+    pub const ECDSA_SECP384R1_SHA384: Self = Self(0x0503);
+    /// `ecdsa_secp521r1_sha512(0x0603)` — P-521 is not implemented here.
+    pub const ECDSA_SECP521R1_SHA512: Self = Self(0x0603);
+
+    /// `rsa_pss_rsae_sha256(0x0804)` — what an RSA server actually signs a
+    /// TLS 1.3 handshake with.
+    pub const RSA_PSS_RSAE_SHA256: Self = Self(0x0804);
+    /// `rsa_pss_rsae_sha384(0x0805)`.
+    pub const RSA_PSS_RSAE_SHA384: Self = Self(0x0805);
+    /// `rsa_pss_rsae_sha512(0x0806)`.
+    pub const RSA_PSS_RSAE_SHA512: Self = Self(0x0806);
+
+    /// `ed25519(0x0807)`.
+    pub const ED25519: Self = Self(0x0807);
+    /// `ed448(0x0808)` — not implemented.
+    pub const ED448: Self = Self(0x0808);
+
+    /// `rsa_pss_pss_sha256(0x0809)` — needs an `id-RSASSA-PSS` key, which the
+    /// X.509 parser does not produce.
+    pub const RSA_PSS_PSS_SHA256: Self = Self(0x0809);
+    /// `rsa_pss_pss_sha384(0x080a)`.
+    pub const RSA_PSS_PSS_SHA384: Self = Self(0x080a);
+    /// `rsa_pss_pss_sha512(0x080b)`.
+    pub const RSA_PSS_PSS_SHA512: Self = Self(0x080b);
+
+    /// `rsa_pkcs1_sha1(0x0201)` — legacy, refused.
+    pub const RSA_PKCS1_SHA1: Self = Self(0x0201);
+    /// `ecdsa_sha1(0x0203)` — legacy, refused.
+    pub const ECDSA_SHA1: Self = Self(0x0203);
+
+    /// The schemes this module will verify a TLS 1.3 handshake signature
+    /// with, in the order a client should offer them.
+    ///
+    /// Exposed so that the `signature_algorithms` extension a client sends and
+    /// the set it will actually accept cannot drift apart — offering a scheme
+    /// that would then be refused invites a server to pick it and fail the
+    /// handshake for no reason.
+    pub const TLS13_SUPPORTED: &'static [Self] = &[
+        Self::ECDSA_SECP256R1_SHA256,
+        Self::ECDSA_SECP384R1_SHA384,
+        Self::ED25519,
+        Self::RSA_PSS_RSAE_SHA256,
+        Self::RSA_PSS_RSAE_SHA384,
+        Self::RSA_PSS_RSAE_SHA512,
+    ];
+
+    /// Resolve this scheme for use in a TLS 1.3 handshake signature, given
+    /// the key it will be checked against.
+    ///
+    /// `key` is needed because two of the rules involve it: an ECDSA scheme
+    /// names a curve the key must actually be on, and every scheme names a key
+    /// type. Refusals are as specific as the reason — a `rsa_pkcs1_*` scheme
+    /// is [`VerifyError::CertificateOnlyScheme`] rather than "unsupported",
+    /// because it is implemented and being turned away on the RFC's
+    /// instruction.
+    fn tls13_algorithm(
+        self,
+        key: &SubjectPublicKeyInfo<'_>,
+    ) -> Result<&'static dyn signature::VerificationAlgorithm, VerifyError> {
+        // Weak first, so a SHA-1 scheme is never reported as merely
+        // unsupported — it is refused on strength, and that distinction is
+        // the same one certificates make.
+        match self {
+            Self::RSA_PKCS1_SHA1 => {
+                return Err(VerifyError::WeakSignatureAlgorithm("rsa_pkcs1_sha1"))
+            }
+            Self::ECDSA_SHA1 => return Err(VerifyError::WeakSignatureAlgorithm("ecdsa_sha1")),
+
+            // RFC 8446 §4.4.3: "RSA signatures MUST use an RSASSA-PSS
+            // algorithm, regardless of whether RSASSA-PKCS1-v1_5 algorithms
+            // appear in 'signature_algorithms'." §4.2.3 lists these as
+            // defined for use in certificates only. Accepting one here would
+            // accept a signature the RFC says a conforming peer never sends,
+            // which is a downgrade in everything but name.
+            Self::RSA_PKCS1_SHA256 | Self::RSA_PKCS1_SHA384 | Self::RSA_PKCS1_SHA512 => {
+                return Err(VerifyError::CertificateOnlyScheme)
+            }
+
+            _ => {}
+        }
+
+        let required_key = match self {
+            Self::RSA_PSS_RSAE_SHA256 | Self::RSA_PSS_RSAE_SHA384 | Self::RSA_PSS_RSAE_SHA512 => {
+                oid::RSA_ENCRYPTION
+            }
+            Self::ECDSA_SECP256R1_SHA256 | Self::ECDSA_SECP384R1_SHA384 => oid::EC_PUBLIC_KEY,
+            Self::ED25519 => oid::ED25519,
+            _ => return Err(VerifyError::UnsupportedSignatureAlgorithm),
+        };
+
+        if key.algorithm.oid != required_key {
+            return Err(match key.algorithm.oid {
+                oid::RSA_ENCRYPTION | oid::EC_PUBLIC_KEY | oid::ED25519 => {
+                    VerifyError::KeyAlgorithmMismatch
+                }
+                _ => VerifyError::UnsupportedKeyAlgorithm,
+            });
+        }
+
+        // The key's own parameters, by the same rules the X.509 side applies —
+        // the namespaces disagree about signature algorithms, not about how a
+        // `SubjectPublicKeyInfo` is encoded. Checking here and not there would
+        // leave a leaf's key held to a lower standard than its issuer's, for
+        // no reason anyone could state.
+        match self {
+            Self::RSA_PSS_RSAE_SHA256 | Self::RSA_PSS_RSAE_SHA384 | Self::RSA_PSS_RSAE_SHA512 => {
+                require_null_or_absent_parameters(&key.algorithm)?;
+            }
+            Self::ED25519 => require_absent_parameters(&key.algorithm)?,
+            // EC keys are the exception: their parameters are *required*,
+            // because that is where the curve is. `named_curve` enforces it.
+            _ => {}
+        }
+
+        match self {
+            // `ring`'s PSS verifiers fix MGF1 with the same hash and a salt
+            // length equal to the digest length, which is what RFC 8446
+            // §4.2.3 requires of these schemes. They also enforce a 2048–8192
+            // bit modulus, so an undersized RSA key is refused without a
+            // check here — including RFC 8448's own 1024-bit example key.
+            Self::RSA_PSS_RSAE_SHA256 => Ok(&signature::RSA_PSS_2048_8192_SHA256),
+            Self::RSA_PSS_RSAE_SHA384 => Ok(&signature::RSA_PSS_2048_8192_SHA384),
+            Self::RSA_PSS_RSAE_SHA512 => Ok(&signature::RSA_PSS_2048_8192_SHA512),
+
+            // The scheme names the curve, so the key has to be on it. This is
+            // the inverse of the X.509 rule and the reason these are two
+            // types — see the module docs.
+            Self::ECDSA_SECP256R1_SHA256 => match named_curve(key)? {
+                Curve::P256 => Ok(&signature::ECDSA_P256_SHA256_ASN1),
+                Curve::P384 => Err(VerifyError::CurveMismatch),
+            },
+            Self::ECDSA_SECP384R1_SHA384 => match named_curve(key)? {
+                Curve::P384 => Ok(&signature::ECDSA_P384_SHA384_ASN1),
+                Curve::P256 => Err(VerifyError::CurveMismatch),
+            },
+
+            Self::ED25519 => Ok(&signature::ED25519),
+
+            // Unreachable: `required_key` above returns for everything else.
+            _ => Err(VerifyError::UnsupportedSignatureAlgorithm),
+        }
+    }
+}
+
+/// Verify a TLS 1.3 handshake signature — a CertificateVerify.
+///
+/// `message` is the blob RFC 8446 §4.4.3 defines, which
+/// [`super::handshake::certificate_verify_content`] builds: 64 octets of
+/// `0x20`, a context string, `0x00`, then the transcript hash. Composing the
+/// two is the caller's job, deliberately — this module knows how to check a
+/// signature and nothing about what a handshake looks like, and
+/// [`super::handshake`] parses messages and verifies nothing. Stage 3c-ii is
+/// where they meet.
+///
+/// # This proves authorship, not authority — again
+///
+/// The same caveat as [`verify_signature`], and it is easier to lose here. A
+/// CertificateVerify that checks out proves the peer holds the private key for
+/// the certificate it sent. It says nothing about whether that certificate
+/// chains to a trust anchor ([`super::path`]) or is valid for the name that
+/// was asked for ([`super::name`]). All three are required, and any one of
+/// them alone accepts an attacker who generated their own certificate.
+pub fn verify_tls13_signature(
+    scheme: SignatureScheme,
+    key: &SubjectPublicKeyInfo<'_>,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), VerifyError> {
+    let algorithm = scheme.tls13_algorithm(key)?;
+    signature::UnparsedPublicKey::new(algorithm, key.key)
         .verify(message, signature)
         .map_err(|_| VerifyError::BadSignature)
 }

@@ -146,8 +146,44 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   truncated stream and a length prefix claiming more than its container holds.
   Message-level tests cannot: the two are refused either way, and only the
   error differs.
+- **Hand-rolled engine, stage 3c-i: key exchange and handshake signatures**
+  (rusty_tls#25). `handrolled::kx` does ephemeral key exchange over X25519,
+  P-256, and P-384. A key is used exactly once — `agree` takes `self` by value
+  — and the agreed secret is handed to a closure rather than returned, so no
+  long-lived copy exists for this crate to promise (and fail) to erase.
+- **The TLS `SignatureScheme` namespace** in `handrolled::verify`, alongside
+  the X.509 `AlgorithmIdentifier` namespace it has carried since 2b-i, plus
+  `verify_tls13_signature` for checking a CertificateVerify.
+
+  **RSASSA-PSS is now supported here**, which matters because RFC 8446 §4.4.3
+  *requires* it for an RSA handshake signature — until this stage the engine
+  could not have verified a single real RSA handshake. It remains refused in
+  the certificate namespace, and that is not an inconsistency: X.509 carries
+  the PSS hash, MGF, salt length, and trailer as parameters that can be
+  misread, while a TLS scheme number fixes all four.
+
+  The two namespaces are separate types because they disagree. Most sharply:
+  an X.509 ECDSA identifier names only a hash, so the curve comes from the key
+  (the correction real certificates forced on 2b-i), while a TLS scheme names
+  both, so a P-384 key under `ecdsa_secp256r1_sha256` is refused.
+
+  Also refused: `rsa_pkcs1_*` for handshake signatures, with its own error
+  variant rather than "unsupported" — the algorithm works and is being turned
+  away on the RFC's instruction, and a reader who mistook that for a gap might
+  helpfully close it.
+- **Verifier fuzzing.** Every one of the 65 536 `SignatureScheme` values is
+  walked against a real key with a random signature, and none verifies; mutated
+  certificates never make a signature verify; random key shares never panic.
 
 ### Changed
+- **`handrolled::verify` now checks a key's `AlgorithmIdentifier` parameters
+  on the TLS path too.** Previously only the certificate path did, which meant
+  a leaf's own key — the one a CertificateVerify is checked against, and which
+  path validation never inspects — was held to a lower standard than the CA
+  above it.
+- The parameter rules ("`NULL` or absent" for RSA, "absent" for Ed25519 and
+  ECDSA identifiers) are now one implementation used by both namespaces rather
+  than two inline copies.
 ### Fixed
 - **An infinite loop in `handrolled::x509::ExtendedKeyUsage`'s iterator**,
   found by the new fuzzer. `Reader::read` does not consume a value whose tag

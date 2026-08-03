@@ -22,6 +22,62 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 3c-i: key exchange and handshake signatures
+**2026-08-03**
+
+- **Added:** `handrolled::kx` (rusty_tls#25) — ephemeral key exchange over
+  X25519, P-256, and P-384. A key is used exactly once, enforced by `agree`
+  taking `self` by value; the agreed secret is passed to a closure rather than
+  returned, so there is no long-lived copy this crate would have to promise to
+  erase and could not (zeroing on `Drop` needs a dependency or `unsafe`, and
+  this crate forbids `unsafe`).
+- **Added:** the TLS `SignatureScheme` namespace in `handrolled::verify`, and
+  `verify_tls13_signature` for checking a CertificateVerify.
+- **Fixed:** **RSASSA-PSS is now verifiable.** RFC 8446 §4.4.3 requires it for
+  an RSA handshake signature and stage 2b-i refused it outright, so until now
+  the engine could not have verified a single real RSA handshake. PSS stays
+  refused for *certificates*, which is deliberate rather than inconsistent:
+  X.509 carries the hash, mask generation function, salt length, and trailer as
+  parameters that can each be misread into verifying the wrong thing, while a
+  TLS scheme number fixes all four and leaves nothing to misparse.
+- **Changed:** the certificate and handshake namespaces are separate types
+  because they disagree, and the module docs now put the disagreements in one
+  table. The sharpest: an X.509 `ecdsa-with-SHA256` names only a hash, so the
+  curve is read off the key — the correction real trust-store certificates
+  forced on 2b-i — while TLS's `ecdsa_secp256r1_sha256` names hash *and* curve,
+  so a P-384 key under it is refused. One key, two opposite right answers.
+- **Changed:** `rsa_pkcs1_*` is refused for handshake signatures with its own
+  error rather than "unsupported". The algorithm works; it is being turned away
+  on the RFC's instruction, and a reader who mistook that for a gap might
+  helpfully close it.
+- **Fixed:** the TLS path now checks a key's `AlgorithmIdentifier` parameters,
+  which only the certificate path did before. A leaf's own key is what a
+  CertificateVerify is checked against and path validation never inspects it,
+  so it had been held to a lower standard than the CA above it. Found by a
+  surviving mutation.
+- **Added:** verifier fuzzing — all 65 536 `SignatureScheme` values walked
+  against a real key with random signatures, none verifying; mutated
+  certificates never verifying a signature; random key shares never panicking.
+- **Known limitation, stated plainly:** RFC 8448 cannot be the independent
+  oracle here, the way it was for stages 1, 3a, and 3b. Its example server key
+  is 1024-bit RSA and `ring`'s PSS verifiers enforce 2048–8192 bits, so the
+  RFC's own CertificateVerify is refused. That refusal is correct in 2026, and
+  the suite asserts it and measures the modulus to prove that is the reason —
+  but the positive PSS coverage comes from a generated key rather than from the
+  RFC.
+- **Known limitation, stated plainly:** no state machine yet. Nothing here
+  decides what order messages may arrive in, handles a HelloRetryRequest, or
+  drives a handshake. That is 3c-ii.
+- **Known limitation, stated plainly:** X25519 has no invalid public keys —
+  RFC 7748 §5 decodes every 32-octet string — so the small-order check is the
+  only validation there is on that curve. `ring` performs it; this crate's
+  contribution is passing the key share to it correctly.
+- Reachable only with the `handrolled-engine` feature *and*
+  `--cfg rusty_tls_handrolled`. `rustls` remains the engine behind every
+  exported type.
+
+---
+
 ## Hand-rolled TLS engine, stage 3b: handshake messages and the transcript hash
 **2026-08-03**
 
