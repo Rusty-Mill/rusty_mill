@@ -22,6 +22,55 @@ Tracked by PR against main, reverse chronological, one entry per merged PR.
 
 ---
 
+## Hand-rolled TLS engine, stage 3c-ii: the TLS 1.3 client
+**2026-08-03**
+
+- **Added:** `handrolled::client` (rusty_tls#25) — a sans-IO TLS 1.3 client
+  handshake. `ClientHandshake::read_record` takes one whole record and returns
+  the bytes to send back; `Connection` carries application data afterwards.
+  Nothing here opens a socket, for the same reason `rustls::ClientConnection`
+  does not: a handshake that owns its IO cannot be driven by a test.
+- **Added:** **the engine interoperates.** The client completes handshakes
+  against a real `rustls` server across every offered cipher suite and
+  key-exchange group, including a HelloRetryRequest, and carries application
+  data both ways. Nine stages of parsers and primitives now do something
+  end to end.
+- **Added:** HelloRetryRequest, including the transcript substitution RFC 8446
+  §4.4.1 requires — once a retry happens the running hash starts from a
+  synthetic `message_hash` message wrapping `Hash(ClientHello1)` rather than
+  from ClientHello1 itself. Invisible until it is wrong, and then it fails
+  with an error that looks like corruption rather than a transcript bug.
+- **Added:** post-handshake handling. A NewSessionTicket is discarded and a
+  KeyUpdate rekeys the receiving direction, answering when one is requested.
+- **Added:** a rejection suite driven by a minimal test server, because the
+  server's flight arrives inside one AEAD record and cannot be edited without
+  its keys. Refused: a flight missing any message, a reordered flight, a
+  CertificateVerify over the wrong transcript, a Finished that does not
+  verify, an untrusted root, a wrong name, an expired certificate, an
+  unoffered cipher suite, a server that does not select TLS 1.3, a second
+  HelloRetryRequest, and a mislabelled `key_share`.
+- **Added:** `handshake::complete_prefix`, for pulling whole messages out of a
+  buffer that is still filling.
+- **Known limitation, stated plainly:** client certificates are refused, not
+  supported. A CertificateRequest ends the handshake with a specific error.
+  Answering with an empty Certificate would be legal and would let it
+  continue, but it is a feature this has not built.
+- **Known limitation, stated plainly:** no session resumption, PSK, or 0-RTT.
+  The ClientHello does not offer `psk_key_exchange_modes`, so by RFC 8446
+  §4.2.9 a conforming server will never send a session ticket at all — which
+  is why an earlier version of the ticket test passed while exercising
+  nothing.
+- **Known limitation, stated plainly:** TLS 1.2 and below are refused.
+  `supported_versions` offers exactly `0x0304`.
+- **Known limitation, stated plainly:** interop is against `rustls` in memory.
+  Nothing has yet been tested against a server on the public internet, which
+  is where the shipping bar's second item still points.
+- Reachable only with the `handrolled-engine` feature *and*
+  `--cfg rusty_tls_handrolled`. `rustls` remains the engine behind every
+  exported type.
+
+---
+
 ## Hand-rolled TLS engine, stage 3c-i: key exchange and handshake signatures
 **2026-08-03**
 

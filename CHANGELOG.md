@@ -175,6 +175,32 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   walked against a real key with a random signature, and none verifies; mutated
   certificates never make a signature verify; random key shares never panic.
 
+- **Hand-rolled engine, stage 3c-ii: the TLS 1.3 client** (rusty_tls#25).
+  `handrolled::client` is a sans-IO client handshake: `ClientHandshake` takes
+  one record at a time and returns the bytes to send back, and `Connection`
+  carries application data afterwards. It builds the ClientHello, processes
+  the ServerHello, derives every key, validates the peer's chain, name, and
+  handshake signature, checks the server's Finished, sends its own, and
+  handles HelloRetryRequest including the transcript substitution RFC 8446
+  §4.4.1 requires.
+
+  **This is the first part of the hand-rolled engine that interoperates.** It
+  completes handshakes against a real `rustls` server across every offered
+  cipher suite and key-exchange group, including a HelloRetryRequest, and
+  carries application data both ways.
+
+  Deliberately refused rather than half-implemented: client certificates
+  (a CertificateRequest ends the handshake), session resumption, PSK, 0-RTT,
+  and anything below TLS 1.3. Post-handshake NewSessionTicket and KeyUpdate
+  are handled — the first discarded, the second answered and rekeyed.
+
+  Still behind both gates, and `rustls` remains the engine behind every
+  exported type. Nothing in the public API routes through this.
+- `handshake::complete_prefix`, which reports how many leading bytes of a
+  buffer form whole messages. `messages` requires its input to end on a
+  boundary, which is right for a finished buffer and wrong for one still
+  filling up.
+
 ### Changed
 - **`handrolled::verify` now checks a key's `AlgorithmIdentifier` parameters
   on the TLS path too.** Previously only the certificate path did, which meant

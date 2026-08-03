@@ -88,7 +88,8 @@ jobs:
                    handrolled_wire \
                    handrolled_handshake \
                    handrolled_kx \
-                   handrolled_tls_signature; do
+                   handrolled_tls_signature \
+                   handrolled_client; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')
             echo "$t: $n tests"

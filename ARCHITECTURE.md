@@ -73,8 +73,13 @@ one artifact to ship and no team/language boundary to split across:
   side refuses and which RFC 8446 §4.4.3 *requires* for an RSA handshake
   signature. The two namespaces disagree about more than that, most sharply on
   where an ECDSA key's curve comes from, which is why they are separate types.
-  The state machine that drives all of it (3c-ii) is not built. See
-  [Non-goals](#non-goals) and ADR-0002.
+  Stage 3c-ii adds `handrolled::client` — the sans-IO client handshake that
+  drives all of the above, including HelloRetryRequest and the post-handshake
+  messages. It completes real handshakes against `rustls` and carries
+  application data, which is the first point at which any of this
+  interoperates. Session resumption, client certificates, and TLS 1.2 are
+  refused rather than half-implemented. See [Non-goals](#non-goals) and
+  ADR-0002.
 
 There is no separate public sans-IO "core" type distinct from the two
 adapters — `rustls::ClientConnection` already *is* the sans-IO engine, and

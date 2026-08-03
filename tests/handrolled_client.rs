@@ -1,0 +1,1555 @@
+//! The TLS 1.3 client handshake — stage 3c-ii.
+//!
+//! # Why interop is the test that matters here
+//!
+//! Every earlier stage had an oracle that was independent of this code: RFC
+//! 8448's published bytes, the machine's own trust store, rustls' record
+//! layer. A state machine has a better one — **a real server** — and it is
+//! better because it checks the thing unit tests structurally cannot.
+//!
+//! A handshake is a mutual computation. If this client derives the wrong
+//! traffic secret, builds the transcript in the wrong order, or encodes an
+//! extension slightly wrong, a self-consistent test suite would still pass:
+//! both sides of it are this code. `rustls` did not read this implementation,
+//! so a completed handshake against it is evidence about the protocol rather
+//! than about internal agreement.
+//!
+//! [`a_full_handshake_against_rustls_completes_and_carries_data`] is therefore
+//! the load-bearing test in this file, and the rest exists because interop
+//! proves the happy path and says nothing about refusals.
+//!
+//! # The refusals are the other half
+//!
+//! A client that completes a handshake with a good server and *also* completes
+//! one with an attacker is worse than useless. The tampering tests drive real
+//! handshakes and corrupt one thing each — the certificate, the signature, the
+//! Finished, the order of the flight — and require every one to be refused.
+//!
+//! The sharpest is [`a_flight_without_a_certificate_verify_is_refused`]. A
+//! Certificate proves nothing on its own; anybody can replay somebody else's.
+//! Only the CertificateVerify proves the peer holds the key, so a client that
+//! tolerated its absence would authenticate an attacker who copied a
+//! certificate off the wire.
+
+#![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
+
+use std::sync::Arc;
+
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use time::OffsetDateTime;
+
+use rusty_tls::handrolled::client::{
+    record_length, CipherSuite, ClientConfig, ClientError, ClientHandshake, Incoming,
+};
+use rusty_tls::handrolled::handshake::{
+    messages, ClientHello, HandshakeType, Message, ServerHello,
+};
+use rusty_tls::handrolled::kx::NamedGroup;
+use rusty_tls::handrolled::name::ServerName;
+use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
+use rusty_tls::handrolled::x509::Certificate;
+
+const SERVER: &str = "handrolled.example";
+
+/// Well inside the generated certificates' validity, and fixed so a test never
+/// depends on how long the suite takes to run.
+fn options() -> PathOptions {
+    PathOptions {
+        time: 1_800_000_000, // 2027-01-15
+        max_path_length: 8,
+        max_signature_checks: 64,
+        required_eku: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A server to talk to
+// ---------------------------------------------------------------------------
+
+/// A CA, and a leaf it issued for [`SERVER`].
+struct Pki {
+    root_der: Vec<u8>,
+    leaf_der: Vec<u8>,
+    /// The leaf's private key, for the test server below to sign with.
+    leaf_pkcs8: Vec<u8>,
+    chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+}
+
+/// An explicit validity window, because `rcgen` defaults `not_after` to the
+/// year 4096 and a test that relies on that default cannot express "expired".
+const NOT_BEFORE: i64 = 1_577_836_800; // 2020-01-01
+const NOT_AFTER: i64 = 1_893_456_000; // 2030-01-01
+
+fn dated(params: &mut CertificateParams) {
+    params.not_before = OffsetDateTime::from_unix_timestamp(NOT_BEFORE).expect("not_before");
+    params.not_after = OffsetDateTime::from_unix_timestamp(NOT_AFTER).expect("not_after");
+}
+
+fn pki(algorithm: &'static rcgen::SignatureAlgorithm, name: &str) -> Pki {
+    let root_key = KeyPair::generate_for(algorithm).expect("root key");
+    let mut root_params = CertificateParams::new(Vec::<String>::new()).expect("root params");
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    root_params.distinguished_name.push(
+        rcgen::DnType::CommonName,
+        rcgen::DnValue::Utf8String("handrolled test root".to_string()),
+    );
+    dated(&mut root_params);
+    let root = root_params.self_signed(&root_key).expect("root");
+
+    let leaf_key = KeyPair::generate_for(algorithm).expect("leaf key");
+    let mut leaf_params = CertificateParams::new(vec![name.to_string()]).expect("leaf params");
+    dated(&mut leaf_params);
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &root, &root_key)
+        .expect("leaf");
+
+    Pki {
+        root_der: root.der().to_vec(),
+        leaf_der: leaf.der().to_vec(),
+        leaf_pkcs8: leaf_key.serialize_der(),
+        chain: vec![
+            CertificateDer::from(leaf.der().to_vec()),
+            CertificateDer::from(root.der().to_vec()),
+        ],
+        key: PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(leaf_key.serialize_der())),
+    }
+}
+
+fn anchor(root_der: &[u8]) -> Certificate<'_> {
+    Certificate::parse(root_der).expect("the root parses")
+}
+
+fn rustls_server(pki: &Pki) -> rustls::ServerConnection {
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .expect("server config");
+    rustls::ServerConnection::new(Arc::new(config)).expect("server connection")
+}
+
+// ---------------------------------------------------------------------------
+// Driving the two against each other
+// ---------------------------------------------------------------------------
+
+/// Split a byte stream into whole records, leaving any partial tail behind.
+fn take_records(stream: &mut Vec<u8>) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    while let Some(length) = record_length(stream) {
+        if stream.len() < length {
+            break;
+        }
+        out.push(stream.drain(..length).collect());
+    }
+    out
+}
+
+/// Feed bytes to a rustls server and collect whatever it wants to send back.
+fn pump_server(server: &mut rustls::ServerConnection, input: &[u8]) -> Vec<u8> {
+    if !input.is_empty() {
+        let mut cursor = std::io::Cursor::new(input);
+        while server.read_tls(&mut cursor).expect("read_tls") > 0 {
+            server.process_new_packets().expect("process_new_packets");
+        }
+    }
+    server.process_new_packets().expect("process_new_packets");
+    let mut out = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut out).expect("write_tls");
+    }
+    out
+}
+
+/// What a completed handshake produced, so tests can keep talking.
+struct Established {
+    connection: rusty_tls::handrolled::client::Connection,
+    server: rustls::ServerConnection,
+}
+
+/// Run a handshake to completion, optionally corrupting the server's records
+/// on the way through.
+///
+/// `tamper` sees every record the server sends, in order, and returns what the
+/// client should actually receive. Returning `None` drops the record.
+fn handshake_with(
+    pki: &Pki,
+    name: &str,
+    mut tamper: impl FnMut(usize, Vec<u8>) -> Option<Vec<u8>>,
+) -> Result<Established, ClientError> {
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(name),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = rustls_server(pki);
+    let (mut client, mut to_server) = ClientHandshake::start(&config)?;
+
+    let mut seen = 0usize;
+    for _ in 0..16 {
+        let from_server = pump_server(&mut server, &to_server);
+        to_server.clear();
+
+        let mut stream = from_server;
+        for record in take_records(&mut stream) {
+            seen += 1;
+            let Some(record) = tamper(seen - 1, record) else {
+                continue;
+            };
+            to_server.extend_from_slice(&client.read_record(&record)?);
+        }
+
+        if client.is_finished() {
+            // Deliver the client's final flight, plus anything the server
+            // says afterwards (rustls sends session tickets immediately).
+            let mut connection = client.into_connection()?;
+            let tickets = pump_server(&mut server, &to_server);
+            let mut stream = tickets;
+            for record in take_records(&mut stream) {
+                // Asserted here rather than in one dedicated test, because
+                // this is where every completed handshake passes and a
+                // mutation that surfaced a ticket as data survived a suite
+                // that only checked it in one place.
+                if let Incoming::Application(data) = connection.read(&record)? {
+                    panic!("a post-handshake message surfaced as data: {data:02x?}");
+                }
+            }
+            return Ok(Established { connection, server });
+        }
+        if to_server.is_empty() {
+            break;
+        }
+    }
+
+    Err(ClientError::Failed)
+}
+
+fn handshake(pki: &Pki) -> Result<Established, ClientError> {
+    handshake_with(pki, SERVER, |_, record| Some(record))
+}
+
+// ---------------------------------------------------------------------------
+// Interop — the test that carries this file
+// ---------------------------------------------------------------------------
+
+/// A complete handshake against a real `rustls` server, then data both ways.
+///
+/// See the module docs on why this is worth more than any number of
+/// self-consistent unit tests: rustls has not read this implementation, so
+/// agreement is evidence about TLS rather than about internal consistency.
+#[test]
+fn a_full_handshake_against_rustls_completes_and_carries_data() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let Established {
+        mut connection,
+        mut server,
+    } = handshake(&pki).expect("the handshake completes");
+
+    // The client saw the chain the server actually sent.
+    assert_eq!(connection.peer_certificates().len(), 2);
+    let leaf = Certificate::parse(&connection.peer_certificates()[0]).expect("parses");
+    assert_eq!(leaf.subject_public_key_info().key.len(), 65, "a P-256 key");
+
+    // Client to server.
+    let record = connection
+        .write(b"ping from the hand-rolled client")
+        .expect("write");
+    let mut cursor = std::io::Cursor::new(&record);
+    server.read_tls(&mut cursor).expect("read_tls");
+    server.process_new_packets().expect("process");
+    let mut got = Vec::new();
+    std::io::Read::read_to_end(&mut server.reader(), &mut got).ok();
+    assert_eq!(got, b"ping from the hand-rolled client");
+
+    // Server to client.
+    std::io::Write::write_all(&mut server.writer(), b"pong from rustls").expect("write");
+    let mut out = Vec::new();
+    while server.wants_write() {
+        server.write_tls(&mut out).expect("write_tls");
+    }
+    let mut received = Vec::new();
+    for record in take_records(&mut out) {
+        if let Incoming::Application(data) = connection.read(&record).expect("read") {
+            received.extend_from_slice(&data);
+        }
+    }
+    assert_eq!(received, b"pong from rustls");
+}
+
+/// Every cipher suite and both key-exchange groups, against a real server.
+///
+/// A suite that is offered but broken is worse than one that is absent: the
+/// server picks it and the handshake fails for a reason nobody can see.
+#[test]
+fn every_offered_suite_and_group_completes_against_rustls() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+
+    for suite in CipherSuite::SUPPORTED {
+        for group in [
+            NamedGroup::X25519,
+            NamedGroup::SecP256R1,
+            NamedGroup::SecP384R1,
+        ] {
+            let config = ClientConfig {
+                server_name: ServerName::Dns(SERVER),
+                anchors: &anchors,
+                path: options(),
+                groups: &[group],
+                cipher_suites: core::slice::from_ref(suite),
+            };
+
+            let mut server = rustls_server(&pki);
+            let (mut client, mut to_server) = ClientHandshake::start(&config).expect("start");
+
+            for _ in 0..8 {
+                let mut stream = pump_server(&mut server, &to_server);
+                to_server.clear();
+                for record in take_records(&mut stream) {
+                    to_server.extend_from_slice(
+                        &client
+                            .read_record(&record)
+                            .unwrap_or_else(|e| panic!("{suite:?} {group:?}: {e}")),
+                    );
+                }
+                if client.is_finished() {
+                    break;
+                }
+            }
+
+            let connection = client
+                .into_connection()
+                .unwrap_or_else(|e| panic!("{suite:?} {group:?} did not complete: {e}"));
+            assert_eq!(connection.cipher_suite(), *suite);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the client sends
+// ---------------------------------------------------------------------------
+
+/// The ClientHello has to be the message TLS 1.3 requires, and a server that
+/// rejects it says so only by failing the handshake — which is a poor error
+/// message. This checks the shape directly.
+#[test]
+fn the_client_hello_offers_what_it_should_and_nothing_it_should_not() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let (_, record) = ClientHandshake::start(&config).expect("start");
+    assert_eq!(record[0], 22, "a handshake record");
+    let parsed = messages(&record[5..]).expect("the body is one message");
+    assert_eq!(parsed[0].typ, HandshakeType::ClientHello);
+
+    let hello = ClientHello::parse(parsed[0].body).expect("parses");
+    assert_eq!(hello.random.len(), 32);
+    // RFC 8446 §D.4: a non-empty session id, for middleboxes.
+    assert_eq!(hello.session_id.len(), 32);
+    assert_eq!(
+        hello.cipher_suites,
+        CipherSuite::SUPPORTED
+            .iter()
+            .map(|s| s.0)
+            .collect::<Vec<_>>()
+    );
+
+    use rusty_tls::handrolled::handshake::{extension, find};
+    assert_eq!(
+        find(&hello.extensions, extension::SUPPORTED_VERSIONS),
+        Some(&[0x02, 0x03, 0x04][..]),
+        "exactly TLS 1.3, and nothing older"
+    );
+    let sni = find(&hello.extensions, extension::SERVER_NAME).expect("SNI is present");
+    assert!(sni.ends_with(SERVER.as_bytes()));
+    assert!(find(&hello.extensions, extension::KEY_SHARE).is_some());
+    assert!(find(&hello.extensions, extension::SIGNATURE_ALGORITHMS).is_some());
+    assert!(find(&hello.extensions, extension::SUPPORTED_GROUPS).is_some());
+}
+
+/// RFC 6066 §3: an IP address is never sent as a `server_name`. Sending one
+/// leaks the address to anything reading the plaintext ClientHello and is not
+/// what the extension means.
+#[test]
+fn an_ip_address_is_not_sent_as_a_server_name() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Ip("192.0.2.1".parse().expect("address")),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let (_, record) = ClientHandshake::start(&config).expect("start");
+    let parsed = messages(&record[5..]).expect("parses");
+    let hello = ClientHello::parse(parsed[0].body).expect("parses");
+
+    use rusty_tls::handrolled::handshake::{extension, find};
+    assert_eq!(
+        find(&hello.extensions, extension::SERVER_NAME),
+        None,
+        "an IP address was sent as SNI"
+    );
+    assert!(
+        !record.windows(9).any(|w| w == b"192.0.2.1"),
+        "the address appears in the ClientHello anyway"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Refusals
+// ---------------------------------------------------------------------------
+
+/// The control: the test server's correct flight must complete, or every
+/// refusal below would pass for the wrong reason.
+///
+/// Without this, a test server that produced garbage would make the whole
+/// rejection suite green while proving nothing at all.
+#[test]
+fn the_test_servers_correct_flight_completes() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    against_test_server(&pki, Shape::Correct).expect("the control handshake must complete");
+}
+
+/// The sharpest refusal in the file. See the module docs.
+///
+/// The certificate is genuine and chains to a trusted root. What is missing is
+/// the only thing that proves the peer holds its private key, and a client that
+/// shrugged would authenticate anyone who copied a certificate off the wire.
+#[test]
+fn a_flight_without_a_certificate_verify_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::Missing(HandshakeType::CertificateVerify))
+        .expect_err("a flight with no CertificateVerify completed");
+    assert!(
+        matches!(
+            error,
+            ClientError::UnexpectedMessage {
+                expected: "CertificateVerify",
+                got: HandshakeType::Finished,
+            }
+        ),
+        "refused for the wrong reason: {error:?}"
+    );
+}
+
+/// Every message in the server's flight is required, and in order.
+#[test]
+fn a_flight_missing_any_message_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+
+    for (dropped, expected) in [
+        (HandshakeType::EncryptedExtensions, "EncryptedExtensions"),
+        (HandshakeType::Certificate, "Certificate"),
+        (HandshakeType::CertificateVerify, "CertificateVerify"),
+        (HandshakeType::Finished, "Finished"),
+    ] {
+        let outcome = against_test_server(&pki, Shape::Missing(dropped));
+        match outcome {
+            Err(ClientError::UnexpectedMessage { expected: e, .. }) => assert_eq!(
+                e, expected,
+                "dropping {dropped:?} was refused as a missing {e}, not {expected}"
+            ),
+            // Dropping the Finished leaves the handshake unfinished rather
+            // than producing a message to object to, which is equally a
+            // refusal: nothing completes.
+            Err(ClientError::Failed) if dropped == HandshakeType::Finished => {}
+            other => panic!("dropping {dropped:?} was not refused: {other:?}"),
+        }
+    }
+}
+
+/// Order is part of the requirement, not a convention. A CertificateVerify
+/// that arrives before the certificate it is about cannot have signed a
+/// transcript containing it.
+#[test]
+fn a_reordered_flight_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::CertificateVerifyBeforeCertificate)
+        .expect_err("a reordered flight completed");
+    assert!(
+        matches!(
+            error,
+            ClientError::UnexpectedMessage {
+                expected: "Certificate",
+                got: HandshakeType::CertificateVerify,
+            }
+        ),
+        "refused for the wrong reason: {error:?}"
+    );
+}
+
+/// A CertificateVerify signature over anything other than the transcript
+/// through the Certificate is refused.
+///
+/// This is the check that ties the peer's key to *this* handshake rather than
+/// to some other one. A signature that verifies over the wrong bytes would let
+/// a recorded handshake be replayed.
+#[test]
+fn a_signature_over_the_wrong_transcript_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::SignatureOverTheWrongTranscript)
+        .expect_err("a signature over the wrong bytes was accepted");
+    assert!(
+        matches!(error, ClientError::Verify(_)),
+        "refused for the wrong reason: {error:?}"
+    );
+}
+
+/// A Finished that does not verify ends the handshake. It is the only thing
+/// that proves the two sides derived the same keys over the same transcript.
+#[test]
+fn a_finished_that_does_not_verify_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::CorruptFinished)
+        .expect_err("a corrupt Finished was accepted");
+    assert_eq!(error, ClientError::BadFinished);
+}
+
+/// A CertificateRequest is refused rather than answered with an empty
+/// certificate. Not supported, and said so.
+#[test]
+fn a_client_certificate_request_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::RequestClientCertificate)
+        .expect_err("a CertificateRequest was ignored");
+    assert_eq!(error, ClientError::ClientCertificateRequested);
+}
+
+/// A minimal TLS 1.3 server, built from this crate's own primitives.
+///
+/// It exists because the server's flight arrives inside one AEAD-protected
+/// record: editing it on the wire needs keys the test does not have, so the
+/// only way to show the client a malformed flight is to be the peer that
+/// produces one.
+///
+/// Using this crate's own primitives to test this crate would be circular if
+/// it were proving the client *works* — which is why it is not used for that.
+/// The happy path is proved against `rustls` above. This is used only to make
+/// the client **refuse**, and a refusal cannot be manufactured by shared
+/// wrongness: if both sides agreed on a wrong flight, the client would accept
+/// it and the test would fail.
+struct TestServer<'a> {
+    pki: &'a Pki,
+    shape: Shape,
+}
+
+/// How the flight should be malformed, if at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shape {
+    /// Everything, in order — the control, which must complete.
+    Correct,
+    /// Omit one message.
+    Missing(HandshakeType),
+    /// Send Certificate and CertificateVerify the wrong way round.
+    CertificateVerifyBeforeCertificate,
+    /// A CertificateVerify whose signature is over the wrong transcript.
+    SignatureOverTheWrongTranscript,
+    /// A Finished whose `verify_data` is one bit out.
+    CorruptFinished,
+    /// A CertificateRequest, which this client refuses.
+    RequestClientCertificate,
+    /// A `key_share` naming a group other than the one the client sent.
+    WrongKeyShareGroup,
+}
+
+impl TestServer<'_> {
+    /// Answer a ClientHello record with a flight of the configured shape,
+    /// returning the records to send back and the server's own
+    /// application-direction state.
+    ///
+    /// The application secrets come from the transcript through the *server's*
+    /// Finished, so the server can compute them without ever seeing the
+    /// client's — which is what makes post-handshake testing possible here.
+    fn respond(&self, client_hello_record: &[u8]) -> (Vec<u8>, ServerPost) {
+        use rusty_tls::handrolled::handshake::{
+            certificate_verify_content, extension, find, CertificateEntry, CertificateMessage,
+            CertificateVerify, Extension, Transcript, SERVER_CERTIFICATE_VERIFY_CONTEXT,
+        };
+        use rusty_tls::handrolled::kx::{KeyExchange, NamedGroup};
+        use rusty_tls::handrolled::record::{Aead, ContentType, Sealer};
+        use rusty_tls::handrolled::schedule::{
+            finished_verify_data, traffic_keys, Hash, KeySchedule,
+        };
+        use rusty_tls::handrolled::wire::{Reader, Writer};
+
+        let (aead, hash) = (Aead::Aes128Gcm, Hash::Sha256);
+
+        let parsed = messages(&client_hello_record[5..]).expect("the ClientHello parses");
+        let hello = ClientHello::parse(parsed[0].body).expect("parses");
+
+        // The client's single key_share entry.
+        let shares = find(&hello.extensions, extension::KEY_SHARE).expect("a key_share");
+        let mut reader = Reader::new(shares);
+        let mut list = reader.sub_u16().expect("client_shares");
+        let group = NamedGroup::from_u16(list.u16().expect("group")).expect("a known group");
+        let peer_key = list.vector_u16().expect("key").to_vec();
+
+        let kx = KeyExchange::generate(group).expect("generate");
+        let public = kx.public_key().to_vec();
+
+        let mut share = Writer::new();
+        share.u16(if self.shape == Shape::WrongKeyShareGroup {
+            // A well-formed X25519 key, labelled P-256. The bytes are usable;
+            // only the label is a lie.
+            NamedGroup::SecP256R1.as_u16()
+        } else {
+            group.as_u16()
+        });
+        share.vector_u16(|w| w.bytes(&public));
+        let share = share.into_vec();
+        let versions = vec![0x03, 0x04];
+
+        let server_hello = ServerHello {
+            random: &[0x5au8; 32],
+            session_id: hello.session_id,
+            cipher_suite: CipherSuite::TLS_AES_128_GCM_SHA256.0,
+            extensions: vec![
+                Extension {
+                    typ: extension::KEY_SHARE,
+                    data: &share,
+                },
+                Extension {
+                    typ: extension::SUPPORTED_VERSIONS,
+                    data: &versions,
+                },
+            ],
+        };
+        let server_hello = Message::encode(HandshakeType::ServerHello, &server_hello.encode());
+
+        let mut transcript = Transcript::new(hash);
+        transcript.add(parsed[0].encoded);
+        transcript.add(&server_hello);
+
+        let schedule = kx
+            .agree(&peer_key, |secret| {
+                KeySchedule::new(hash).into_handshake(secret)
+            })
+            .expect("agree");
+        let server_secret = schedule.derive("s hs traffic", &transcript.hash());
+        let keys = traffic_keys(hash, &server_secret, aead.key_len());
+        let mut sealer = Sealer::new(aead, &keys.key, &keys.iv).expect("sealer");
+
+        // Build the flight, adding each message to the transcript as it is
+        // actually sent — so a dropped message is genuinely absent from both.
+        let mut flight = Vec::new();
+        let add = |transcript: &mut Transcript, flight: &mut Vec<u8>, bytes: &[u8]| {
+            transcript.add(bytes);
+            flight.extend_from_slice(bytes);
+        };
+
+        let mut empty_extensions = Writer::new();
+        empty_extensions.vector_u16(|_| {});
+        let encrypted_extensions = Message::encode(
+            HandshakeType::EncryptedExtensions,
+            &empty_extensions.into_vec(),
+        );
+
+        let certificate = CertificateMessage {
+            context: &[],
+            entries: vec![
+                CertificateEntry {
+                    certificate: &self.pki.leaf_der,
+                    extensions: &[],
+                },
+                CertificateEntry {
+                    certificate: &self.pki.root_der,
+                    extensions: &[],
+                },
+            ],
+        };
+        let certificate = Message::encode(HandshakeType::Certificate, &certificate.encode());
+
+        if self.shape != Shape::Missing(HandshakeType::EncryptedExtensions) {
+            add(&mut transcript, &mut flight, &encrypted_extensions);
+        }
+        if self.shape == Shape::RequestClientCertificate {
+            let mut body = Writer::new();
+            body.vector_u8(|_| {}); // certificate_request_context
+            body.vector_u16(|_| {}); // extensions
+            let request = Message::encode(HandshakeType::CertificateRequest, &body.into_vec());
+            add(&mut transcript, &mut flight, &request);
+        }
+
+        let sign = |transcript_hash: &[u8]| -> Vec<u8> {
+            let content =
+                certificate_verify_content(SERVER_CERTIFICATE_VERIFY_CONTEXT, transcript_hash);
+            let rng = ring::rand::SystemRandom::new();
+            let pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+                &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+                &self.pki.leaf_pkcs8,
+                &rng,
+            )
+            .expect("the leaf key loads");
+            let signature = pair.sign(&rng, &content).expect("sign").as_ref().to_vec();
+            let verify = CertificateVerify {
+                scheme: 0x0403, // ecdsa_secp256r1_sha256
+                signature: &signature,
+            };
+            Message::encode(HandshakeType::CertificateVerify, &verify.encode())
+        };
+
+        match self.shape {
+            Shape::CertificateVerifyBeforeCertificate => {
+                let verify = sign(&transcript.hash());
+                add(&mut transcript, &mut flight, &verify);
+                add(&mut transcript, &mut flight, &certificate);
+            }
+            Shape::Missing(HandshakeType::Certificate) => {
+                let verify = sign(&transcript.hash());
+                add(&mut transcript, &mut flight, &verify);
+            }
+            Shape::Missing(HandshakeType::CertificateVerify) => {
+                add(&mut transcript, &mut flight, &certificate);
+            }
+            Shape::SignatureOverTheWrongTranscript => {
+                add(&mut transcript, &mut flight, &certificate);
+                // Sign the transcript as it will be *after* this message
+                // rather than before it — a plausible off-by-one, and fatal.
+                let verify = sign(&hash.hash(b"not the transcript"));
+                add(&mut transcript, &mut flight, &verify);
+            }
+            _ => {
+                add(&mut transcript, &mut flight, &certificate);
+                let verify = sign(&transcript.hash());
+                add(&mut transcript, &mut flight, &verify);
+            }
+        }
+
+        if self.shape != Shape::Missing(HandshakeType::Finished) {
+            let mut verify_data = finished_verify_data(hash, &server_secret, &transcript.hash());
+            if self.shape == Shape::CorruptFinished {
+                verify_data[0] ^= 0x01;
+            }
+            let finished = Message::encode(HandshakeType::Finished, &verify_data);
+            add(&mut transcript, &mut flight, &finished);
+        }
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&plaintext(22, &server_hello));
+        out.extend_from_slice(
+            &sealer
+                .seal(ContentType::Handshake, &flight, 0)
+                .expect("seal"),
+        );
+
+        let master = schedule.into_master();
+        let secret = master.derive("s ap traffic", &transcript.hash());
+        let keys = traffic_keys(hash, &secret, aead.key_len());
+        let post = ServerPost {
+            aead,
+            hash,
+            secret,
+            sealer: Sealer::new(aead, &keys.key, &keys.iv).expect("app sealer"),
+        };
+        (out, post)
+    }
+}
+
+/// The server's application-direction state, for talking after the handshake.
+struct ServerPost {
+    aead: rusty_tls::handrolled::record::Aead,
+    hash: rusty_tls::handrolled::schedule::Hash,
+    secret: Vec<u8>,
+    sealer: rusty_tls::handrolled::record::Sealer,
+}
+
+impl ServerPost {
+    fn seal(&mut self, typ: rusty_tls::handrolled::record::ContentType, body: &[u8]) -> Vec<u8> {
+        self.sealer.seal(typ, body, 0).expect("seal")
+    }
+
+    /// Advance this direction's key, as a peer does after sending a KeyUpdate.
+    fn rekey(&mut self) {
+        use rusty_tls::handrolled::record::Sealer;
+        use rusty_tls::handrolled::schedule::{traffic_keys, update_traffic_secret};
+        self.secret = update_traffic_secret(self.hash, &self.secret);
+        let keys = traffic_keys(self.hash, &self.secret, self.aead.key_len());
+        self.sealer = Sealer::new(self.aead, &keys.key, &keys.iv).expect("rekeyed sealer");
+    }
+}
+
+fn plaintext(typ: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![typ, 0x03, 0x03];
+    out.extend_from_slice(&(body.len() as u16).to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
+/// Drive the client against a [`TestServer`] of the given shape.
+fn against_test_server(pki: &Pki, shape: Shape) -> Result<(), ClientError> {
+    established_with_test_server(pki, shape).map(|_| ())
+}
+
+/// As [`against_test_server`], keeping both ends so a test can carry on
+/// talking after the handshake.
+fn established_with_test_server(
+    pki: &Pki,
+    shape: Shape,
+) -> Result<(rusty_tls::handrolled::client::Connection, ServerPost), ClientError> {
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+    };
+
+    let (mut client, hello) = ClientHandshake::start(&config)?;
+    let server = TestServer { pki, shape };
+    let (mut stream, post) = server.respond(&hello);
+
+    for record in take_records(&mut stream) {
+        client.read_record(&record)?;
+    }
+    if client.is_finished() {
+        Ok((client.into_connection()?, post))
+    } else {
+        Err(ClientError::Failed)
+    }
+}
+
+/// A certificate the client has no anchor for is refused, however well-formed
+/// the rest of the handshake is.
+#[test]
+fn a_server_with_an_untrusted_root_is_refused() {
+    let real = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let other = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+
+    // Trust `other`'s root, talk to `real`'s server.
+    let root = anchor(&other.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let error = run_to_failure(&real, &config);
+    assert!(
+        matches!(error, ClientError::Path(_)),
+        "an untrusted root was accepted: {error:?}"
+    );
+}
+
+/// A certificate for a different name is refused even though it chains to a
+/// trusted root — the two checks are independent and both are required.
+#[test]
+fn a_certificate_for_another_name_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, "somewhere.else.example");
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let error = run_to_failure(&pki, &config);
+    assert!(
+        matches!(error, ClientError::Path(_)),
+        "a certificate for the wrong name was accepted: {error:?}"
+    );
+}
+
+/// An expired certificate is refused. Same chain, same name, a clock that has
+/// moved past its validity.
+#[test]
+fn an_expired_certificate_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let mut path = options();
+    path.time = NOT_AFTER + 86_400; // the day after the leaf expires
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path,
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let error = run_to_failure(&pki, &config);
+    assert!(
+        matches!(error, ClientError::Path(_)),
+        "an expired certificate was accepted: {error:?}"
+    );
+}
+
+/// Drive a handshake that is expected to fail, and return why.
+fn run_to_failure(pki: &Pki, config: &ClientConfig<'_>) -> ClientError {
+    let mut server = rustls_server(pki);
+    let (mut client, mut to_server) = ClientHandshake::start(config).expect("start");
+
+    for _ in 0..8 {
+        let mut stream = pump_server(&mut server, &to_server);
+        to_server.clear();
+        for record in take_records(&mut stream) {
+            match client.read_record(&record) {
+                Ok(reply) => to_server.extend_from_slice(&reply),
+                Err(err) => return err,
+            }
+        }
+        if client.is_finished() {
+            break;
+        }
+    }
+    panic!("a handshake that should have failed completed");
+}
+
+/// A tampered record does not decrypt, and the failure is permanent. A client
+/// that carried on after a decryption failure would be continuing with state
+/// the peer does not share.
+#[test]
+fn a_tampered_record_fails_the_connection_permanently() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = rustls_server(&pki);
+    let (mut client, to_server) = ClientHandshake::start(&config).expect("start");
+    let mut stream = pump_server(&mut server, &to_server);
+    let records = take_records(&mut stream);
+
+    // The ServerHello is plaintext; rustls then sends a change_cipher_spec,
+    // which is dropped by design, and then the protected flight. Find the
+    // first record that is actually encrypted rather than assuming an index.
+    client.read_record(&records[0]).expect("ServerHello");
+    let flight = records
+        .iter()
+        .find(|r| r[0] == 23)
+        .expect("an encrypted record")
+        .clone();
+
+    let mut tampered = flight.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+
+    assert!(
+        client.read_record(&tampered).is_err(),
+        "a tampered record opened"
+    );
+    assert_eq!(
+        client.read_record(&flight),
+        Err(ClientError::Failed),
+        "the connection continued after a decryption failure"
+    );
+}
+
+/// A ServerHello selecting a suite the client never offered is refused. A
+/// client that accepted one would be negotiating with itself.
+#[test]
+fn a_cipher_suite_that_was_not_offered_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    // Offer only AES-128; rewrite the ServerHello to name ChaCha20.
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+    };
+
+    let mut server = rustls_server(&pki);
+    let (mut client, to_server) = ClientHandshake::start(&config).expect("start");
+    let mut stream = pump_server(&mut server, &to_server);
+    let records = take_records(&mut stream);
+
+    let mut hello = records[0].clone();
+    let parsed = messages(&hello[5..]).expect("parses");
+    let body = ServerHello::parse(parsed[0].body).expect("parses");
+    let mut rewritten = body.clone();
+    rewritten.cipher_suite = CipherSuite::TLS_CHACHA20_POLY1305_SHA256.0;
+    let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+    hello.truncate(5);
+    hello[3..5].copy_from_slice(&(encoded.len() as u16).to_be_bytes());
+    hello.extend_from_slice(&encoded);
+
+    assert_eq!(
+        client.read_record(&hello),
+        Err(ClientError::UnofferedCipherSuite(
+            CipherSuite::TLS_CHACHA20_POLY1305_SHA256.0
+        ))
+    );
+}
+
+/// A server that does not select TLS 1.3 is refused, whatever it puts in
+/// `legacy_version`. That field is pinned for every version, so the absence of
+/// `supported_versions` *is* the downgrade.
+#[test]
+fn a_server_that_does_not_select_tls13_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = rustls_server(&pki);
+    let (mut client, to_server) = ClientHandshake::start(&config).expect("start");
+    let mut stream = pump_server(&mut server, &to_server);
+    let records = take_records(&mut stream);
+
+    let parsed = messages(&records[0][5..]).expect("parses");
+    let body = ServerHello::parse(parsed[0].body).expect("parses");
+    let mut rewritten = body.clone();
+    rewritten
+        .extensions
+        .retain(|e| e.typ != rusty_tls::handrolled::handshake::extension::SUPPORTED_VERSIONS);
+    let encoded = Message::encode(HandshakeType::ServerHello, &rewritten.encode());
+
+    let mut record = vec![22u8, 0x03, 0x03];
+    record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+    record.extend_from_slice(&encoded);
+
+    assert_eq!(client.read_record(&record), Err(ClientError::NotTls13));
+}
+
+/// A record arriving before the ServerHello that claims to be application data
+/// cannot be: there is no key yet.
+#[test]
+fn protected_data_before_the_server_hello_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let (mut client, _) = ClientHandshake::start(&config).expect("start");
+    let record = vec![23u8, 0x03, 0x03, 0x00, 0x02, 0xaa, 0xbb];
+    assert!(matches!(
+        client.read_record(&record),
+        Err(ClientError::UnexpectedContentType(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Post-handshake
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Deframing
+// ---------------------------------------------------------------------------
+
+/// `record_length` reports what it can and admits what it cannot.
+#[test]
+fn record_length_needs_a_whole_header() {
+    assert_eq!(record_length(&[]), None);
+    assert_eq!(record_length(&[22, 3, 3, 0]), None);
+    assert_eq!(record_length(&[22, 3, 3, 0, 5]), Some(10));
+    assert_eq!(record_length(&[22, 3, 3, 0x40, 0x00]), Some(16389));
+    // It reports the length the header claims, without judging it — checking
+    // is the handshake's job, and a deframer that also judged would be two
+    // things.
+    assert_eq!(record_length(&[99, 9, 9, 0xff, 0xff]), Some(65540));
+}
+
+// ---------------------------------------------------------------------------
+// HelloRetryRequest
+// ---------------------------------------------------------------------------
+
+/// A `rustls` server that will only do X25519, so a client offering a
+/// key share for anything else is sent a HelloRetryRequest.
+fn x25519_only_server(pki: &Pki) -> rustls::ServerConnection {
+    let mut provider = rustls::crypto::ring::default_provider();
+    provider.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
+
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .expect("server config");
+    rustls::ServerConnection::new(Arc::new(config)).expect("server connection")
+}
+
+/// A real HelloRetryRequest, from a real server, completing.
+///
+/// The client sends a P-384 key share to a server that only speaks X25519, so
+/// the server asks it to try again. That exercises the one piece of this
+/// module with no analogue anywhere else: RFC 8446 §4.4.1 replaces the first
+/// ClientHello in the transcript with a synthetic `message_hash` message
+/// wrapping its hash.
+///
+/// The substitution is invisible until it is wrong. A client that skipped it
+/// would negotiate everything correctly, derive keys from a transcript the
+/// server does not share, and fail at the server's Finished with an error that
+/// looks like corruption. Only a server that actually retries can tell the
+/// difference, which is why this test needs one.
+#[test]
+fn a_hello_retry_request_completes_against_rustls() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    // The key share goes to the first group; X25519 is offered so the server
+    // has something to ask for.
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = x25519_only_server(&pki);
+    let (mut client, mut to_server) = ClientHandshake::start(&config).expect("start");
+
+    let mut retried = false;
+    for _ in 0..8 {
+        let mut stream = pump_server(&mut server, &to_server);
+        to_server.clear();
+        for record in take_records(&mut stream) {
+            // A HelloRetryRequest is a ServerHello with the sentinel random,
+            // so catch it on the way past to prove the path was taken rather
+            // than inferring it from the handshake completing.
+            if record[0] == 22 {
+                if let Ok(parsed) = messages(&record[5..]) {
+                    if parsed[0].typ == HandshakeType::ServerHello {
+                        let hello = ServerHello::parse(parsed[0].body).expect("parses");
+                        retried |= hello.is_hello_retry_request();
+                    }
+                }
+            }
+            to_server.extend_from_slice(&client.read_record(&record).expect("read_record"));
+        }
+        if client.is_finished() {
+            break;
+        }
+    }
+
+    assert!(retried, "the server never sent a HelloRetryRequest");
+    let connection = client
+        .into_connection()
+        .expect("the handshake completes after a retry");
+    assert_eq!(connection.peer_certificates().len(), 2);
+}
+
+/// A second HelloRetryRequest is refused. RFC 8446 §4.1.4: one retry, and a
+/// client that allowed two could be made to loop forever.
+#[test]
+fn a_second_hello_retry_request_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut server = x25519_only_server(&pki);
+    let (mut client, to_server) = ClientHandshake::start(&config).expect("start");
+
+    // Take the server's genuine HelloRetryRequest...
+    let mut stream = pump_server(&mut server, &to_server);
+    let records = take_records(&mut stream);
+    let retry = records
+        .iter()
+        .find(|r| r[0] == 22)
+        .expect("a HelloRetryRequest")
+        .clone();
+
+    // ...and send it twice.
+    client
+        .read_record(&retry)
+        .expect("the first retry is accepted");
+    assert_eq!(
+        client.read_record(&retry),
+        Err(ClientError::RepeatedHelloRetryRequest),
+        "a second HelloRetryRequest was accepted"
+    );
+}
+
+/// A `key_share` labelled with the wrong group is refused where the
+/// disagreement happens, not three messages later.
+///
+/// This exists because a mutation deleting the check survived, and chasing it
+/// showed the check is not doing what it looks like it does: `agree` uses this
+/// client's own group whatever the label claims, so a mislabelled share yields
+/// a different secret and fails at the server's Finished regardless. The check
+/// buys a diagnosable error rather than a mysterious one — which is worth
+/// having and worth not overstating, so this test pins the distinction by
+/// asserting the *specific* error rather than merely that something failed.
+#[test]
+fn a_key_share_labelled_with_the_wrong_group_is_refused_as_such() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let error = against_test_server(&pki, Shape::WrongKeyShareGroup)
+        .expect_err("a mislabelled key_share was accepted");
+    assert_eq!(
+        error,
+        ClientError::BadKeyShare,
+        "refused, but not at the point of the disagreement"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Post-handshake
+// ---------------------------------------------------------------------------
+
+/// A NewSessionTicket must never reach the caller as application data.
+///
+/// This client does not offer `psk_key_exchange_modes`, so RFC 8446 §4.2.9
+/// says a conforming server will never send it a ticket — and `rustls`
+/// duly does not, which is why an earlier version of this test passed while
+/// exercising nothing. A mutation that returned tickets as application data
+/// survived the whole suite.
+///
+/// The handling is still worth having and worth testing. The cost of getting
+/// it wrong is not a failed handshake, it is a caller handed handshake bytes
+/// as if the server had sent them — a protocol surprise turned into silent
+/// data corruption. So the test server sends one, because a conforming peer
+/// will not.
+#[test]
+fn a_session_ticket_is_never_handed_to_the_caller_as_data() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    // A NewSessionTicket with a plausible body.
+    let mut body = rusty_tls::handrolled::wire::Writer::new();
+    body.u32(7200); // ticket_lifetime
+    body.u32(0); // ticket_age_add
+    body.vector_u8(|w| w.bytes(b"nonce"));
+    body.vector_u16(|w| w.bytes(b"an opaque ticket"));
+    body.vector_u16(|_| {}); // extensions
+    let ticket = Message::encode(HandshakeType::NewSessionTicket, &body.into_vec());
+    let record = server.seal(ContentType::Handshake, &ticket);
+
+    assert_eq!(
+        connection.read(&record).expect("the ticket is tolerated"),
+        Incoming::Handled,
+        "a session ticket surfaced as something other than 'handled'"
+    );
+
+    // And the connection still works.
+    let data = server.seal(ContentType::ApplicationData, b"after the ticket");
+    assert_eq!(
+        connection.read(&data).expect("read"),
+        Incoming::Application(b"after the ticket".to_vec())
+    );
+}
+
+/// A KeyUpdate rekeys the receiving direction, and one that asks for a reply
+/// gets one.
+///
+/// RFC 8446 §4.6.3. A client that ignored a KeyUpdate would fail to decrypt
+/// everything the server sent afterwards, which looks like a broken
+/// connection rather than a missing feature.
+#[test]
+fn a_key_update_rekeys_the_connection() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    // Ordinary data first, so the sequence numbers are not both zero.
+    let data = server.seal(ContentType::ApplicationData, b"before");
+    assert_eq!(
+        connection.read(&data).expect("read"),
+        Incoming::Application(b"before".to_vec())
+    );
+
+    // update_requested(1): the client must rekey and answer.
+    let update = Message::encode(HandshakeType::KeyUpdate, &[0x01]);
+    let record = server.seal(ContentType::Handshake, &update);
+    let reply = connection.read(&record).expect("the update is handled");
+    match reply {
+        Incoming::Reply(bytes) => assert!(!bytes.is_empty(), "an empty reply"),
+        other => panic!("update_requested was not answered: {other:?}"),
+    }
+
+    // The server now advances its own send key, as a peer does after sending
+    // a KeyUpdate. The client must follow.
+    server.rekey();
+    let data = server.seal(ContentType::ApplicationData, b"after the rekey");
+    assert_eq!(
+        connection.read(&data).expect("read after rekey"),
+        Incoming::Application(b"after the rekey".to_vec()),
+        "the client did not rekey its receiving direction"
+    );
+}
+
+/// `update_not_requested(0)` rekeys without a reply — answering anyway would
+/// be an infinite exchange of KeyUpdates.
+#[test]
+fn a_key_update_that_asks_for_no_reply_gets_none() {
+    use rusty_tls::handrolled::record::ContentType;
+
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let (mut connection, mut server) =
+        established_with_test_server(&pki, Shape::Correct).expect("completes");
+
+    let update = Message::encode(HandshakeType::KeyUpdate, &[0x00]);
+    let record = server.seal(ContentType::Handshake, &update);
+    assert_eq!(
+        connection.read(&record).expect("handled"),
+        Incoming::Handled,
+        "update_not_requested was answered"
+    );
+
+    server.rekey();
+    let data = server.seal(ContentType::ApplicationData, b"still working");
+    assert_eq!(
+        connection.read(&data).expect("read"),
+        Incoming::Application(b"still working".to_vec())
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hostile input
+// ---------------------------------------------------------------------------
+
+/// xorshift64*, so a failure replays from the seed printed with it.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+    fn next_u64(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+    fn below(&mut self, bound: usize) -> usize {
+        if bound == 0 {
+            0
+        } else {
+            (self.next_u64() % bound as u64) as usize
+        }
+    }
+    fn byte(&mut self) -> u8 {
+        self.next_u64() as u8
+    }
+}
+
+/// Nothing a peer can put on the wire makes the client panic.
+///
+/// The invariant is deliberately just that, rather than "never completes a
+/// handshake". A corrupted record stream cannot complete one for a reason that
+/// has nothing to do with this code — the records are bound to one client's
+/// ephemeral key — so asserting it would look like a security property and be
+/// a tautology.
+///
+/// What is not a tautology is the panic. A client is fed bytes by whoever it
+/// dialled, and an index out of range in a handshake parser is a denial of
+/// service reachable from the first flight. That is the same bug class as the
+/// SAN iterator that stage 2a's fuzzer found.
+#[test]
+fn no_corrupted_record_stream_makes_the_client_panic() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let mut rng = Rng::new(0x5eed_0100);
+
+    let rounds = std::env::var("RUSTY_TLS_FUZZ_ITERATIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(400usize);
+
+    let mut completed = 0usize;
+    let mut reached_flight = 0usize;
+
+    for round in 0..rounds {
+        let seen = std::cell::Cell::new(0usize);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handshake_with(&pki, SERVER, |index, mut record| {
+                seen.set(index + 1);
+                // Three quarters of rounds corrupt exactly one record, so the
+                // rest of the stream stays well-formed and the client gets
+                // deep into the flight before anything is wrong.
+                if rng.below(4) != 0 && !record.is_empty() {
+                    let at = rng.below(record.len());
+                    record[at] ^= 1 << rng.below(8);
+                }
+                Some(record)
+            })
+        }));
+
+        match outcome {
+            // A completion is not alarming and not luck: a corrupted
+            // change_cipher_spec changes nothing, because that record is
+            // discarded by design whatever it contains. What must still hold
+            // is that a handshake which completed authenticated the real
+            // server — corruption may be harmless, but it must never be
+            // *useful* to an attacker.
+            Ok(Ok(established)) => {
+                completed += 1;
+                assert_eq!(
+                    established.connection.peer_certificates()[0],
+                    pki.leaf_der,
+                    "a corrupted stream completed against a different certificate"
+                );
+            }
+            Ok(Err(_)) => {}
+            Err(_) => panic!("the client panicked at round {round} (seed 0x5eed0100)"),
+        }
+        if seen.get() >= 2 {
+            reached_flight += 1;
+        }
+    }
+
+    // A fuzzer that never gets past the first record is testing the header
+    // check and nothing else.
+    assert!(
+        reached_flight * 100 / rounds >= 50,
+        "only {reached_flight} of {rounds} rounds reached a second record"
+    );
+    println!("of {rounds} corrupted streams, {completed} still completed");
+}
+
+/// Random bytes framed as records, straight at a fresh client.
+#[test]
+fn random_records_never_panic() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+    };
+
+    let mut rng = Rng::new(0x5eed_0101);
+    for round in 0..2_000 {
+        let (mut client, _) = ClientHandshake::start(&config).expect("start");
+
+        let body: Vec<u8> = (0..rng.below(300)).map(|_| rng.byte()).collect();
+        let mut record = vec![
+            // Mostly a plausible content type, sometimes anything at all.
+            if rng.below(4) == 0 {
+                rng.byte()
+            } else {
+                [20u8, 21, 22, 23][rng.below(4)]
+            },
+            0x03,
+            0x03,
+        ];
+        record.extend_from_slice(&(body.len() as u16).to_be_bytes());
+        record.extend_from_slice(&body);
+        // Sometimes lie about the length, which is the malformation a
+        // deframer is most likely to mishandle.
+        if rng.below(3) == 0 {
+            record[3] = rng.byte();
+            record[4] = rng.byte();
+        }
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| client.read_record(&record)))
+                .unwrap_or_else(|_| panic!("panicked at round {round} on {record:02x?}"));
+
+        assert!(
+            !client.is_finished(),
+            "a random record completed a handshake"
+        );
+        let _ = result;
+    }
+}
