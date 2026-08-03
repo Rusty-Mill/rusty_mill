@@ -41,7 +41,7 @@ use rusty_tls::handrolled::handshake::{
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::{ServerConfig, ServerError, ServerHandshake};
+use rusty_tls::handrolled::server::{ClientAuth, ServerConfig, ServerError, ServerHandshake};
 use rusty_tls::handrolled::sign::SigningKey;
 use rusty_tls::handrolled::x509::Certificate;
 
@@ -169,6 +169,7 @@ fn interop_with_groups(
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups,
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -265,6 +266,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&server_config);
 
@@ -280,6 +282,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
 
     let (mut client, hello) = ClientHandshake::start(&client_config).expect("start");
@@ -364,6 +367,7 @@ fn client_hello(edit: Edit) -> Vec<u8> {
         path: options(),
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
     let (_, record) = ClientHandshake::start(&config).expect("start");
     let parsed = messages(&record[5..]).expect("parses");
@@ -397,6 +401,7 @@ fn refuse(record: &[u8]) -> ServerError {
         key: &key,
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -562,6 +567,7 @@ fn a_truncated_client_hello_is_waited_for_rather_than_refused() {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
 
     let whole = client_hello(Edit::default());
@@ -610,6 +616,7 @@ fn a_peer_cannot_drive_the_server_with_incomplete_messages() {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -778,6 +785,7 @@ fn against_test_client(corrupt_finished: bool) -> Result<(), ServerError> {
         key: &key,
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -831,6 +839,7 @@ fn a_corrupted_protected_record_fails_at_the_record_layer() {
         key: &key,
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -969,6 +978,7 @@ fn first_reply(record: &[u8]) -> Vec<u8> {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -1015,6 +1025,7 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
+        client_auth: None,
     };
     let mut server = ServerHandshake::new(&config);
     let retry = server
@@ -1117,12 +1128,14 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         path: options(),
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
     };
     let server_config = ServerConfig {
         certificates: &pki.chain,
         key: &key,
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::SecP256R1],
+        client_auth: None,
     };
 
     let mut server = ServerHandshake::new(&server_config);
@@ -1255,4 +1268,408 @@ fn a_retried_hello_that_stopped_offering_tls13_is_refused() {
     let error = after_a_retry(&first, &second).expect_err("the server accepted a downgrade");
     assert_eq!(error, ServerError::NotTls13);
     assert_eq!(error.alert(), Some(AlertDescription::PROTOCOL_VERSION));
+}
+
+// ---------------------------------------------------------------------------
+// Client certificates — rusty_tls#42
+// ---------------------------------------------------------------------------
+
+/// A `rustls` client holding a certificate to present.
+fn rustls_client_with_certificate(pki: &Pki, client: &Pki) -> rustls::ClientConnection {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(pki.root_der.clone()))
+        .expect("the root is acceptable to rustls");
+
+    let chain: Vec<CertificateDer<'static>> = client
+        .chain
+        .iter()
+        .map(|der| CertificateDer::from(der.clone()))
+        .collect();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        client.leaf_pkcs8.clone(),
+    ));
+
+    let config = rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(roots)
+        .with_client_auth_cert(chain, key)
+        .expect("client auth config");
+
+    rustls::ClientConnection::new(
+        Arc::new(config),
+        RustlsName::try_from(SERVER).expect("name"),
+    )
+    .expect("client connection")
+}
+
+/// Drive a `rustls` client against this server with client authentication on.
+///
+/// `client` is `None` when the client should present nothing.
+fn client_auth_interop(client: Option<&Pki>, required: bool) -> Result<Vec<Vec<u8>>, ServerError> {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    // With no client, the anchor set is irrelevant to the outcome but must
+    // still be well-formed, so an unrelated CA stands in.
+    let fallback = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let anchor_der = client.map_or_else(|| fallback.root_der.clone(), |c| c.root_der.clone());
+    let root = Certificate::parse(&anchor_der).expect("the client root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required,
+    };
+    let config = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+    };
+
+    let mut server = ServerHandshake::new(&config);
+    let mut peer = match client {
+        Some(client) => rustls_client_with_certificate(&server_pki, client),
+        None => rustls_client(&server_pki),
+    };
+
+    for _ in 0..8 {
+        let mut to_server = Vec::new();
+        while peer.wants_write() {
+            peer.write_tls(&mut to_server).expect("write_tls");
+        }
+
+        let mut from_server = Vec::new();
+        for record in take_records(&mut to_server) {
+            from_server.extend_from_slice(&server.read_record(&record)?);
+        }
+
+        if !from_server.is_empty() {
+            let mut cursor = std::io::Cursor::new(&from_server);
+            while peer.read_tls(&mut cursor).expect("read_tls") > 0 {
+                peer.process_new_packets().expect("process_new_packets");
+            }
+            peer.process_new_packets().expect("process_new_packets");
+        }
+
+        if server.is_finished() {
+            let connection = server.into_connection()?;
+            return Ok(connection.peer_certificates().to_vec());
+        }
+        if from_server.is_empty() && !peer.wants_write() {
+            break;
+        }
+    }
+    Err(ServerError::Failed)
+}
+
+/// The headline for the server half: a real `rustls` client authenticates
+/// itself, and this server checks both the chain and the signature.
+///
+/// `rustls` produced the CertificateVerify without having read this code, so a
+/// pass says the *verification* side is right — the client context string, the
+/// transcript it covers, and the chain validation. A test where both halves
+/// were this crate could agree on a shared mistake.
+#[test]
+fn a_rustls_client_authenticates_itself_to_this_server() {
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let presented = client_auth_interop(Some(&client_pki), true)
+        .expect("this server rejected a rustls client's certificate");
+
+    assert!(
+        !presented.is_empty(),
+        "the handshake completed but no client chain was recorded"
+    );
+    assert_eq!(
+        presented[0], client_pki.chain[0],
+        "the recorded chain is not the one the client sent"
+    );
+}
+
+/// A client that presents nothing is refused when a certificate is required.
+///
+/// The empty Certificate is conforming, so this is the *server* declining it
+/// rather than a parse failure — which is why the alert is
+/// `certificate_required` and not `bad_certificate`.
+#[test]
+fn a_client_with_no_certificate_is_refused_when_one_is_required() {
+    let error = client_auth_interop(None, true).expect_err("an empty chain was accepted");
+    assert_eq!(error, ServerError::ClientCertificateRequired);
+    assert_eq!(error.alert(), Some(AlertDescription::CERTIFICATE_REQUIRED));
+}
+
+/// The same client is accepted when a certificate is optional, and the
+/// connection records that it presented none.
+///
+/// Worth its own test because "accepted" must not quietly mean
+/// "authenticated": an application that cannot tell the two apart would treat
+/// an anonymous peer as a named one.
+#[test]
+fn a_client_with_no_certificate_is_accepted_when_optional() {
+    let presented =
+        client_auth_interop(None, false).expect("an optional certificate was treated as required");
+    assert!(
+        presented.is_empty(),
+        "a client that sent no certificate was recorded as having sent one"
+    );
+}
+
+/// A client whose chain does not reach the server's anchors is refused.
+#[test]
+fn a_client_certificate_from_an_unrelated_ca_is_refused() {
+    // `client_auth_interop` anchors on the chain it is handed, so handing it a
+    // *different* PKI than the client uses is what makes the chain untrusted.
+    let presenting = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let unrelated = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let root = Certificate::parse(&unrelated.root_der).expect("parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let config = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+    };
+
+    let mut server = ServerHandshake::new(&config);
+    let mut client = rustls_client_with_certificate(&server_pki, &presenting);
+
+    let mut error = None;
+    for _ in 0..8 {
+        let mut to_server = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut to_server).expect("write_tls");
+        }
+        let mut from_server = Vec::new();
+        for record in take_records(&mut to_server) {
+            match server.read_record(&record) {
+                Ok(reply) => from_server.extend_from_slice(&reply),
+                Err(err) => {
+                    error = Some(err);
+                    break;
+                }
+            }
+        }
+        if error.is_some() {
+            break;
+        }
+        if !from_server.is_empty() {
+            let mut cursor = std::io::Cursor::new(&from_server);
+            while client.read_tls(&mut cursor).expect("read_tls") > 0 {
+                let _ = client.process_new_packets();
+            }
+            let _ = client.process_new_packets();
+        }
+        if server.is_finished() {
+            break;
+        }
+    }
+
+    assert!(
+        matches!(error, Some(ServerError::ClientCertificate(_))),
+        "an untrusted client chain was accepted: {error:?}"
+    );
+}
+
+impl TestClient {
+    /// Answer a server that asked for a certificate: a real chain, a real
+    /// Finished, and a CertificateVerify that is correct or deliberately not.
+    ///
+    /// `rustls` cannot be made to produce a bad signature, so proving the
+    /// server checks the client's CertificateVerify needs a client that
+    /// controls its own keys. This is that client — the same reason the
+    /// corrupt-Finished test needed one.
+    fn certificate_flight(
+        self,
+        server_records: &[Vec<u8>],
+        chain: &[Vec<u8>],
+        leaf_pkcs8: &[u8],
+        corrupt_signature: bool,
+    ) -> Vec<u8> {
+        use rusty_tls::handrolled::handshake::{
+            certificate_verify_content, extension, find, Transcript,
+            CLIENT_CERTIFICATE_VERIFY_CONTEXT,
+        };
+        use rusty_tls::handrolled::record::{Aead, ContentType, Opener, Sealer};
+        use rusty_tls::handrolled::schedule::{
+            finished_verify_data, traffic_keys, Hash, KeySchedule,
+        };
+        use rusty_tls::handrolled::wire::{Reader, Writer};
+
+        let (aead, hash) = (Aead::Aes128Gcm, Hash::Sha256);
+
+        let parsed = messages(&server_records[0][5..]).expect("ServerHello parses");
+        let server_hello =
+            rusty_tls::handrolled::handshake::ServerHello::parse(parsed[0].body).expect("parses");
+        let share = find(&server_hello.extensions, extension::KEY_SHARE).expect("key_share");
+        let mut reader = Reader::new(share);
+        let _group = reader.u16().expect("group");
+        let peer_key = reader.vector_u16().expect("key").to_vec();
+
+        let mut transcript = Transcript::new(hash);
+        transcript.add(&self.hello);
+        transcript.add(parsed[0].encoded);
+        let hello_hash = transcript.hash();
+
+        let schedule = self
+            .kx
+            .agree(&peer_key, |secret| {
+                KeySchedule::new(hash).into_handshake(secret)
+            })
+            .expect("agree");
+        let client_secret = schedule.derive("c hs traffic", &hello_hash);
+        let server_secret = schedule.derive("s hs traffic", &hello_hash);
+
+        let keys = traffic_keys(hash, &server_secret, aead.key_len());
+        let mut opener = Opener::new(aead, &keys.key, &keys.iv).expect("opener");
+        for record in &server_records[1..] {
+            if record[0] == 20 {
+                continue;
+            }
+            let opened = opener.open(record).expect("the server's flight opens");
+            transcript.add(&opened.fragment);
+        }
+
+        // The client's Certificate, echoing the empty context the server sent.
+        let mut body = Writer::new();
+        body.vector_u8(|_| {});
+        body.vector_u24(|w| {
+            for certificate in chain {
+                w.vector_u24(|w| w.bytes(certificate));
+                w.vector_u16(|_| {});
+            }
+        });
+        let certificate = Message::encode(HandshakeType::Certificate, &body.into_vec());
+        transcript.add(&certificate);
+
+        // Signed with the *client* context string over the transcript through
+        // the Certificate — which is precisely what the server re-derives.
+        let content =
+            certificate_verify_content(CLIENT_CERTIFICATE_VERIFY_CONTEXT, &transcript.hash());
+        let rng = ring::rand::SystemRandom::new();
+        let pair = ring::signature::EcdsaKeyPair::from_pkcs8(
+            &ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING,
+            leaf_pkcs8,
+            &rng,
+        )
+        .expect("the client leaf key loads");
+        let mut signature = pair.sign(&rng, &content).expect("sign").as_ref().to_vec();
+        if corrupt_signature {
+            // One bit, in the signature only. The chain is untouched and still
+            // validates, so the *only* thing that can refuse this handshake is
+            // the CertificateVerify check.
+            let last = signature.len() - 1;
+            signature[last] ^= 0x01;
+        }
+        let mut verify = Writer::new();
+        verify.u16(rusty_tls::handrolled::verify::SignatureScheme::ECDSA_SECP256R1_SHA256.0);
+        verify.vector_u16(|w| w.bytes(&signature));
+        let verify = Message::encode(HandshakeType::CertificateVerify, &verify.into_vec());
+        transcript.add(&verify);
+
+        let verify_data = finished_verify_data(hash, &client_secret, &transcript.hash());
+        let finished = Message::encode(HandshakeType::Finished, &verify_data);
+
+        let mut flight = certificate;
+        flight.extend_from_slice(&verify);
+        flight.extend_from_slice(&finished);
+
+        let keys = traffic_keys(hash, &client_secret, aead.key_len());
+        let mut sealer = Sealer::new(aead, &keys.key, &keys.iv).expect("sealer");
+        sealer
+            .seal(ContentType::Handshake, &flight, 0)
+            .expect("seal")
+    }
+}
+
+/// Drive a [`TestClient`] that presents a certificate at a server requiring
+/// one.
+fn against_certificate_client(corrupt_signature: bool) -> Result<(), ServerError> {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+
+    let root = Certificate::parse(&client_pki.root_der).expect("parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let config = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+    };
+
+    let mut server = ServerHandshake::new(&config);
+    let client = TestClient::new();
+    let mut flight = server.read_record(&client.hello_record())?;
+    let records = take_records(&mut flight);
+    let answer = client.certificate_flight(
+        &records,
+        &client_pki.chain,
+        &client_pki.leaf_pkcs8,
+        corrupt_signature,
+    );
+    server.read_record(&answer)?;
+
+    if server.is_finished() {
+        Ok(())
+    } else {
+        Err(ServerError::Failed)
+    }
+}
+
+/// The control: the same client, signing correctly, completes.
+///
+/// Without this the refusal test below could pass because the harness is
+/// broken rather than because the server is strict — the failure mode this
+/// repo has hit repeatedly.
+#[test]
+fn a_correctly_signed_client_certificate_completes() {
+    against_certificate_client(false).expect("a correctly signed client was refused");
+}
+
+/// **The check that matters.** A client presenting a valid chain but a
+/// CertificateVerify that does not verify is refused.
+///
+/// A server that skipped this would authenticate anyone who could copy a
+/// certificate off the wire — the certificate proves nothing on its own, and
+/// this signature is the only thing tying it to the peer holding the key.
+///
+/// Added because a mutation run found the check unreachable: deleting it
+/// entirely left all 30 tests in this file green. `rustls` will not produce a
+/// bad signature, so nothing that drove the server with `rustls` could ever
+/// have caught it.
+#[test]
+fn a_client_certificate_verify_that_does_not_verify_is_refused() {
+    let error = against_certificate_client(true).expect_err("a bad client signature was accepted");
+    assert!(
+        matches!(error, ServerError::ClientCertificateVerify(_)),
+        "refused, but not for the right reason: {error:?}"
+    );
+    assert_eq!(error.alert(), Some(AlertDescription::DECRYPT_ERROR));
 }

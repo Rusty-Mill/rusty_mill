@@ -23,6 +23,34 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.4.0
+**2026-08-03**
+
+**Built and tested against:** unchanged from v0.2.x — `rusty_tokio` rev
+`6d3bb05a45a393e4cf902013b05189dd168f6106`, `rustils` rev
+`93b00ce964284d93ea6cec2581b3543f08df8f2d`.
+
+- **Added:** client certificates, both halves (#42). This crate's client
+  authenticates itself to a `rustls` server, and this crate's server verifies a
+  `rustls` client — each direction checked by the implementation that did not
+  produce the bytes.
+
+### Upgrade notes
+
+- **Breaking:** `ClientConfig` gained `identity` and `ServerConfig` gained
+  `client_auth`. Both take `None` for the previous behaviour, but every
+  construction needs the field. `ClientError::ClientCertificateRequested` is
+  removed — it reported an unimplemented feature that now exists.
+- Both types are behind `handrolled-engine` *and* `--cfg
+  rusty_tls_handrolled`, so nothing a consumer of the shipped API touches has
+  changed.
+
+**Known limitations, stated rather than implied:** the client ignores a
+CertificateRequest's `certificate_authorities` and `oid_filters` — it sends the
+chain it was configured with, so a server wanting a different one refuses with
+a worse error message than it could. Post-handshake authentication is not
+supported. Still absent entirely: session resumption (#43) and TLS 1.2 (#41).
+
 ## v0.3.0
 **2026-08-03**
 
