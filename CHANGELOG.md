@@ -5,6 +5,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-03
+
+`y` under §2: `Incoming` gained a variant and `Session` is new public surface.
+
+### Added
+- **Session tickets are kept, not discarded** (rusty_tls#43, stage two). A
+  NewSessionTicket now arrives as `Incoming::Ticket(Box<Session>)` rather than
+  `Incoming::Handled`. The `Session` carries the ticket, its lifetime, the
+  cipher suite it belongs to, and the PSK derived from it —
+  `HKDF-Expand-Label(res master, "resumption", nonce, Hash.length)` per §4.6.1.
+  - `res master` is derived over the transcript through the **client's**
+    Finished, which is why it can only be computed once that message exists.
+  - `Session`'s `Debug` redacts the key, and the key is behind `psk()` rather
+    than a public field: a struct with one public secret and one private one
+    reads as an oversight rather than a decision.
+  - A ticket arriving in the same fragment as a KeyUpdate that needs a reply is
+    refused rather than silently dropped. Losing a session key quietly surfaces
+    much later as "resumption never works".
+
+**Known limitation, stated rather than implied:** nothing offers the PSK back
+yet, so **no handshake is resumed, and the derived key's value is verified by
+nothing.** The tests show a key of the correct length from the correct inputs;
+only a completed resumption proves the transcript point and the expansion are
+right. #43 stays open for that.
+
 ## [0.5.0] - 2026-08-03
 
 Built and tested against the same sibling revs as 0.2.x–0.4.0. Neither moved.

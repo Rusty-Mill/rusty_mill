@@ -33,11 +33,19 @@
 //!
 //! Refused, with an error, rather than half-implemented:
 //!
-//! - **Session resumption.** The ClientHello now offers
-//!   `psk_key_exchange_modes` (`psk_dhe_ke` only), so a server *does* send
-//!   NewSessionTickets and [`Connection::read`] handles them — but nothing yet
-//!   keeps one or offers a `pre_shared_key` on a later connection, so no
-//!   handshake is ever actually resumed. `rusty_tls#43` tracks the rest.
+//! - **Session resumption.** The ClientHello offers `psk_key_exchange_modes`
+//!   (`psk_dhe_ke` only), a NewSessionTicket is surfaced as an
+//!   [`Incoming::Ticket`] carrying a [`Session`], and that session holds the
+//!   PSK derived from it. What is still missing is offering that PSK back:
+//!   nothing sends a `pre_shared_key` extension, so **no handshake is ever
+//!   actually resumed**, and `rusty_tls#43` stays open.
+//!
+//!   One consequence is worth stating rather than leaving for someone to
+//!   assume. Because nothing resumes yet, **the derived PSK's value is not
+//!   verified by anything.** The tests show a key of the right length is
+//!   produced from the right inputs; only a completed resumption proves the
+//!   `res master` transcript point and the `"resumption"` expansion are right,
+//!   and that arrives with the next stage.
 //! - **0-RTT.** Not offered, not accepted, and not planned without a named
 //!   consumer and an anti-replay design. Early data is replay-safe only if the
 //!   application above it is, and TLS cannot tell a request that reads from one
@@ -92,7 +100,8 @@ use super::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
 };
 use super::schedule::{
-    finished_verify_data, traffic_keys, update_traffic_secret, verify_finished, Hash, KeySchedule,
+    expand_label, finished_verify_data, traffic_keys, update_traffic_secret, verify_finished, Hash,
+    KeySchedule,
 };
 use super::sign::{SignError, SigningKey};
 use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
@@ -1115,6 +1124,49 @@ impl ClientHandshake<'_> {
     }
 }
 
+impl Connection {
+    /// Turn a NewSessionTicket body into a resumable [`Session`].
+    ///
+    /// RFC 8446 §4.6.1. The PSK is
+    /// `HKDF-Expand-Label(resumption_master_secret, "resumption", nonce,
+    /// Hash.length)` — the nonce is what makes two tickets from one connection
+    /// different keys rather than one key issued twice.
+    fn session_from(&self, body: &[u8]) -> Result<Session> {
+        let mut reader = super::wire::Reader::new(body);
+        let lifetime = reader.u32().map_err(HandshakeError::Wire)?;
+        let age_add = reader.u32().map_err(HandshakeError::Wire)?;
+        let nonce = reader.vector_u8().map_err(HandshakeError::Wire)?.to_vec();
+        let ticket = reader.vector_u16().map_err(HandshakeError::Wire)?.to_vec();
+        // Extensions are read to prove the message is well-formed, then
+        // dropped: the only one defined here is `early_data`, and ADR-0003
+        // says this client does not do early data.
+        let _extensions = reader.vector_u16().map_err(HandshakeError::Wire)?;
+        reader.finish().map_err(HandshakeError::Wire)?;
+
+        if ticket.is_empty() {
+            return Err(ClientError::Handshake(HandshakeError::Empty(
+                "a NewSessionTicket's ticket",
+            )));
+        }
+
+        let psk = expand_label(
+            self.hash,
+            &self.resumption_master,
+            "resumption",
+            &nonce,
+            self.hash.len(),
+        );
+
+        Ok(Session {
+            ticket,
+            lifetime,
+            age_add,
+            suite: self.suite,
+            psk,
+        })
+    }
+}
+
 /// A client's Certificate message, RFC 8446 §4.4.2.
 ///
 /// Unlike the server's, the `certificate_request_context` is not empty: it is
@@ -1367,6 +1419,14 @@ impl ClientHandshake<'_> {
         let client_keys = application(&client_application_secret);
         let server_keys = application(&server_application_secret);
 
+        // `res master` covers the transcript through the *client's* Finished,
+        // so it can only be derived once that message exists. Every other
+        // secret in this handshake is bound to an earlier point; getting this
+        // one's transcript wrong would produce a PSK that is wrong in a way
+        // only the next connection discovers.
+        negotiated.transcript.add(&client_finished);
+        let resumption_master = master.derive("res master", &negotiated.transcript.hash());
+
         self.state = State::Done(Box::new(Connection {
             aead: negotiated.aead,
             hash: negotiated.hash,
@@ -1376,6 +1436,7 @@ impl ClientHandshake<'_> {
             client_secret: client_application_secret,
             server_secret: server_application_secret,
             certificates: negotiated.certificates,
+            resumption_master,
         }));
         Ok(reply)
     }
@@ -1395,6 +1456,61 @@ pub struct Connection {
     client_secret: Vec<u8>,
     server_secret: Vec<u8>,
     certificates: Vec<Vec<u8>>,
+    /// `res master`, from which a ticket's PSK is derived.
+    ///
+    /// Empty for a connection built by the server half, which does not issue
+    /// tickets — see `rusty_tls#43`. An empty secret means a NewSessionTicket
+    /// is reported as [`Incoming::Handled`] rather than surfaced, which is the
+    /// old behaviour and the safe one: a PSK derived from nothing would be a
+    /// key that looks usable and is not.
+    resumption_master: Vec<u8>,
+}
+
+/// A ticket and the pre-shared key it stands for.
+///
+/// What a caller keeps in order to resume later. The PSK is derived here
+/// rather than stored raw on the wire: the `ticket` is opaque bytes chosen by
+/// the server, and the key is computed from *this* connection's resumption
+/// master secret, so a ticket is worthless to anyone who did not also complete
+/// the handshake it came from.
+///
+/// Holding one is holding key material. It authenticates a future handshake as
+/// this session's continuation, so it deserves the same care as a private key
+/// — which is why `Debug` says nothing about the secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Session {
+    /// The opaque ticket, echoed back to the server to resume.
+    pub ticket: Vec<u8>,
+    /// Seconds the server said the ticket is good for.
+    pub lifetime: u32,
+    /// The obfuscation offset for the age this client reports on resumption.
+    pub age_add: u32,
+    /// The cipher suite this session used. A PSK is bound to its hash, so a
+    /// resumption offering it under a different one is not resumption.
+    pub suite: CipherSuite,
+    psk: Vec<u8>,
+}
+
+impl Session {
+    /// The pre-shared key this ticket stands for.
+    ///
+    /// Not a public field: it is the secret half, and a struct with one public
+    /// key and one private one reads as an oversight rather than a decision.
+    pub fn psk(&self) -> &[u8] {
+        &self.psk
+    }
+}
+
+/// Says nothing about key material.
+impl core::fmt::Debug for Session {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Session")
+            .field("ticket", &format_args!("<{} bytes>", self.ticket.len()))
+            .field("lifetime", &self.lifetime)
+            .field("suite", &self.suite)
+            .field("psk", &"<redacted>")
+            .finish()
+    }
 }
 
 /// What came out of a record after the handshake.
@@ -1403,6 +1519,11 @@ pub struct Connection {
 pub enum Incoming {
     /// Application data.
     Application(Vec<u8>),
+    /// A NewSessionTicket, turned into something a caller can resume with.
+    ///
+    /// Boxed because it carries key material and is much larger than the other
+    /// variants; an enum sized by its rarest case would cost every read.
+    Ticket(Box<Session>),
     /// A post-handshake message that needed no reply — a NewSessionTicket,
     /// which this client does not use but must tolerate.
     Handled,
@@ -1445,6 +1566,9 @@ impl Connection {
             client_secret: send_secret,
             server_secret: receive_secret,
             certificates,
+            // The server half does not issue tickets, so it has no resumption
+            // secret to hand out. See the field's own docs.
+            resumption_master: Vec::new(),
         }
     }
 
@@ -1499,12 +1623,18 @@ impl Connection {
     fn post_handshake(&mut self, fragment: &[u8]) -> Result<Incoming> {
         let complete = complete_prefix(fragment);
         let mut reply = Vec::new();
+        let mut session = None;
 
         for message in messages(&fragment[..complete])? {
             match message.typ {
-                // Read and discarded. This client never resumes, and a server
-                // that offers a ticket is doing nothing wrong.
-                HandshakeType::NewSessionTicket => {}
+                HandshakeType::NewSessionTicket => {
+                    // Surfaced rather than discarded, but only when there is a
+                    // resumption secret to derive a key from — see the field's
+                    // docs on why an empty one must not produce a Session.
+                    if !self.resumption_master.is_empty() {
+                        session = Some(self.session_from(message.body)?);
+                    }
+                }
                 HandshakeType::KeyUpdate => {
                     // RFC 8446 §4.6.3. The body is one octet:
                     // update_not_requested(0) or update_requested(1).
@@ -1535,6 +1665,22 @@ impl Connection {
                     })
                 }
             }
+        }
+
+        if let Some(session) = session {
+            // A ticket and a KeyUpdate cannot arrive needing different answers
+            // in the same fragment — a KeyUpdate that wants a reply produces
+            // `Reply`, and the ticket would be lost. Refused rather than
+            // silently dropped, because losing a session key quietly is the
+            // kind of thing that shows up as "resumption never works" much
+            // later.
+            if !reply.is_empty() {
+                return Err(ClientError::UnexpectedMessage {
+                    expected: "a NewSessionTicket alone",
+                    got: HandshakeType::KeyUpdate,
+                });
+            }
+            return Ok(Incoming::Ticket(Box::new(session)));
         }
 
         if reply.is_empty() {
