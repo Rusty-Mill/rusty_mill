@@ -1,8 +1,8 @@
 # cargo-deny configuration — supply-chain hygiene for a dependency graph
-# that includes four git-pinned sibling crates (rusty_regx, rusty_lines,
-# rusty_libc, rusty_win32), all from the same author as rush itself. Run
-# locally with `cargo deny check`, or see .github/workflows/ci.yml for the
-# CI job.
+# that includes five git-pinned sibling crates (rusty_regx, rusty_lines,
+# rusty_libc, rusty_win32, rpath), all from the same author as rush itself.
+# Run locally with `cargo deny check`, or see .github/workflows/ci.yml for
+# the CI job.
 #
 # https://embarkstudios.github.io/cargo-deny/
 
@@ -49,8 +49,8 @@ confidence-threshold = 0.8
 # version per crate.
 multiple-versions = "warn"
 # rush's own sibling crates (rusty_regx, rusty_lines, rusty_libc,
-# rusty_win32, all first-party, same author, see Cargo.toml's own comments
-# on each) are
+# rusty_win32, rpath, all first-party, same author, see Cargo.toml's own
+# comments on each) are
 # deliberate git dependencies with no crates.io `version =` requirement —
 # exactly what this lint flags as a "wildcard" dependency, but here it's
 # the intended architecture (actively co-developed alongside rush itself,
@@ -77,4 +77,5 @@ allow-git = [
     "https://github.com/baileyrd/rusty_lines",
     "https://github.com/baileyrd/rusty_libc",
     "https://github.com/baileyrd/rusty_win32",
+    "https://github.com/baileyrd/rpath",
 ]
