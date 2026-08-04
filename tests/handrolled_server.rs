@@ -283,6 +283,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (mut client, hello) = ClientHandshake::start(&client_config).expect("start");
@@ -368,6 +369,7 @@ fn client_hello(edit: Edit) -> Vec<u8> {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
     let (_, record) = ClientHandshake::start(&config).expect("start");
     let parsed = messages(&record[5..]).expect("parses");
@@ -1129,6 +1131,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
     let server_config = ServerConfig {
         certificates: &pki.chain,

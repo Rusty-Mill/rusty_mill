@@ -41,10 +41,10 @@ use time::OffsetDateTime;
 
 use rusty_tls::handrolled::client::{
     record_length, CipherSuite, ClientConfig, ClientError, ClientHandshake, ClientIdentity,
-    Incoming,
+    Incoming, Resumption, Session,
 };
 use rusty_tls::handrolled::handshake::{
-    messages, ClientHello, HandshakeError, HandshakeType, Message, ServerHello,
+    messages, ClientHello, HandshakeError, HandshakeType, Message, PresharedKeyOffer, ServerHello,
 };
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
@@ -243,6 +243,7 @@ fn handshake_with(
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(pki);
@@ -366,6 +367,7 @@ fn every_offered_suite_and_group_completes_against_rustls() {
                 groups: &[group],
                 cipher_suites: core::slice::from_ref(suite),
                 identity: None,
+                resumption: None,
             };
 
             let mut server = rustls_server(&pki);
@@ -417,6 +419,7 @@ fn the_client_hello_offers_what_it_should_and_nothing_it_should_not() {
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -468,6 +471,7 @@ fn an_ip_address_is_not_sent_as_a_server_name() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (_, record) = ClientHandshake::start(&config).expect("start");
@@ -939,6 +943,7 @@ fn established_with_test_server(
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
+        resumption: None,
     };
 
     let (mut client, hello) = ClientHandshake::start(&config)?;
@@ -994,6 +999,7 @@ fn the_shared_rejection_table_holds_for_the_handrolled_engine() {
             groups: &[NamedGroup::X25519],
             cipher_suites: CipherSuite::SUPPORTED,
             identity: None,
+            resumption: None,
         };
 
         match (run_table_case(&fixture, &config), case.handrolled) {
@@ -1075,6 +1081,7 @@ fn a_tampered_record_fails_the_connection_permanently() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1126,6 +1133,7 @@ fn a_cipher_suite_that_was_not_offered_is_refused() {
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1170,6 +1178,7 @@ fn a_server_that_does_not_select_tls13_is_refused() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -1210,6 +1219,7 @@ fn protected_data_before_the_server_hello_is_refused() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1291,6 +1301,7 @@ fn a_hello_retry_request_completes_against_rustls() {
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1344,6 +1355,7 @@ fn a_second_hello_retry_request_is_refused() {
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -1635,6 +1647,7 @@ fn random_records_never_panic() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut rng = Rng::new(0x5eed_0101);
@@ -1701,6 +1714,7 @@ fn a_flight_split_across_records_is_reassembled() {
         groups: &[NamedGroup::X25519],
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         identity: None,
+        resumption: None,
     };
 
     for fragment in [1usize, 2, 3, 5, 17, 64, 100, 255, 256, 511, 1024] {
@@ -1754,6 +1768,7 @@ fn a_peer_cannot_drive_the_handshake_with_incomplete_messages() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (mut client, _) = ClientHandshake::start(&config).expect("start");
@@ -1823,6 +1838,7 @@ fn a_server_that_cannot_speak_tls13_is_refused_in_its_own_words() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = tls12_only_server(&pki);
@@ -1883,6 +1899,7 @@ fn the_downgrade_sentinel_is_told_apart_from_an_old_server() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     // Take a genuine ServerHello and strip `supported_versions`, with and
@@ -2055,6 +2072,7 @@ fn a_malformed_alert_is_refused_rather_than_interpreted() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     for body in [vec![], vec![0x02], vec![0x02, 0x46, 0x00]] {
@@ -2095,6 +2113,7 @@ fn a_server_hello_that_does_not_echo_the_session_id_is_refused() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -2150,6 +2169,7 @@ fn a_retried_client_hello_keeps_its_identity() {
         groups: &[NamedGroup::SecP384R1, NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = x25519_only_server(&pki);
@@ -2236,6 +2256,7 @@ fn against_client_auth(
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity,
+        resumption: None,
     };
 
     let mut server = rustls_server_requiring_client_auth(pki, &client_pki.root_der);
@@ -2361,6 +2382,7 @@ fn a_rustls_server_now_sends_session_tickets() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let mut server = rustls_server(&pki);
@@ -2404,4 +2426,339 @@ fn a_rustls_server_now_sends_session_tickets() {
         "rustls still sent no NewSessionTicket — is psk_key_exchange_modes being offered?"
     );
     println!("rustls sent {tickets} session ticket(s)");
+}
+
+// ---------------------------------------------------------------------------
+// Resumption — rusty_tls#43, the acceptance criterion
+// ---------------------------------------------------------------------------
+
+/// A `rustls` server config that can resume, shared across two connections.
+///
+/// The sharing is the point. `rustls` keeps its stateful ticket store on the
+/// `ServerConfig`, so two `ServerConnection`s built from the same `Arc` are the
+/// same server as far as resumption is concerned, and two built from different
+/// ones are not — which is exactly the distinction a resumption test needs to
+/// make.
+fn resumable_server_config(pki: &Pki) -> Arc<rustls::ServerConfig> {
+    let config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(pki.chain.clone(), pki.key.clone_key())
+        .expect("server config");
+    Arc::new(config)
+}
+
+/// What one handshake against a shared server produced.
+#[derive(Debug)]
+struct Ran {
+    connection: rusty_tls::handrolled::client::Connection,
+    sessions: Vec<Session>,
+}
+
+/// Drive one handshake to completion against a `rustls` server built from
+/// `server_config`, collecting every ticket that follows.
+///
+/// `tamper` sees the ClientHello record on its way out. It is the only hook of
+/// its kind here because the binder is in that record and nowhere else, so it
+/// is the only place a corruption tests what these tests are about.
+///
+/// A `rustls` refusal comes back as `Err` rather than a panic: for the binder
+/// test, the refusal *is* the expected result, and asserting it away would
+/// leave nothing checking that `rustls` verifies binders at all.
+fn run_against(
+    config: &ClientConfig<'_>,
+    server_config: &Arc<rustls::ServerConfig>,
+    tamper: impl FnOnce(Vec<u8>) -> Vec<u8>,
+) -> Result<Ran, String> {
+    let mut server =
+        rustls::ServerConnection::new(server_config.clone()).expect("server connection");
+    let (client, hello) = ClientHandshake::start(config).map_err(|err| format!("start: {err}"))?;
+
+    let mut handshake = Some(client);
+    let mut connection: Option<rusty_tls::handrolled::client::Connection> = None;
+    let mut sessions = Vec::new();
+    let mut to_server = tamper(hello);
+
+    for _ in 0..8 {
+        let had_input = !to_server.is_empty();
+        let (mut stream, refusal) = pump_server_allowing_refusal(&mut server, &to_server);
+        to_server.clear();
+        if let Some(err) = refusal {
+            return Err(err);
+        }
+
+        let records = take_records(&mut stream);
+        if records.is_empty() && !had_input {
+            break;
+        }
+        for record in records {
+            if let Some(client) = handshake.as_mut() {
+                let reply = client
+                    .read_record(&record)
+                    .map_err(|err| format!("client: {err}"))?;
+                to_server.extend_from_slice(&reply);
+                if client.is_finished() {
+                    connection = Some(
+                        handshake
+                            .take()
+                            .expect("just borrowed")
+                            .into_connection()
+                            .map_err(|err| format!("into_connection: {err}"))?,
+                    );
+                }
+            } else if let Some(connection) = connection.as_mut() {
+                match connection
+                    .read(&record)
+                    .map_err(|err| format!("post-handshake: {err}"))?
+                {
+                    Incoming::Ticket(session) => sessions.push(*session),
+                    Incoming::Application(data) => {
+                        return Err(format!(
+                            "a post-handshake message surfaced as data: {data:02x?}"
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if connection.is_some() && to_server.is_empty() {
+            break;
+        }
+    }
+
+    match connection {
+        Some(connection) => Ok(Ran {
+            connection,
+            sessions,
+        }),
+        None => Err("the handshake did not complete".to_string()),
+    }
+}
+
+fn resumption_config<'a>(
+    anchors: &'a [TrustAnchor<'a>],
+    resumption: Option<Resumption<'a>>,
+) -> ClientConfig<'a> {
+    ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
+        resumption,
+    }
+}
+
+/// **The test this issue exists for.** A second connection resumes the first.
+///
+/// Everything `rusty_tls#43` merged before this — the PSK derived from a
+/// ticket in `0.6.0`, `binder_key` and `psk_binder` in `0.7.0` — was tested for
+/// *shape* and not for *value*. The issue's own status comment measured it:
+/// swapping `"res binder"` for `"ext binder"` passed all five binder tests. So
+/// did the `res master` transcript point and the `"resumption"` expansion, with
+/// nothing checking either.
+///
+/// This is what checks them, and it checks all of them at once, because a
+/// `rustls` server that accepts the binder has independently computed:
+///
+/// - the same PSK from its own resumption master secret and the ticket's nonce
+///   — so `"resumption"` and the `res master` transcript point are right;
+/// - the same binder key from that PSK under `"res binder"` — so that label is
+///   right;
+/// - the same binder over the same truncated ClientHello — so the two-phase
+///   encoding truncates in the right place.
+///
+/// None of those are separately assertable from inside this crate. They are
+/// separately *wrong*-able, and this is the one measurement that sees any of
+/// them. If it fails, the fault is in one of the four and the error will say
+/// `IncorrectBinder`, which does not narrow it — that is the cost of an oracle
+/// that only answers yes or no.
+#[test]
+fn a_second_connection_resumes_the_first_against_rustls() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let server_config = resumable_server_config(&pki);
+
+    let first = run_against(
+        &resumption_config(&anchors, None),
+        &server_config,
+        |hello| hello,
+    )
+    .expect("the first handshake");
+    assert!(
+        !first.connection.resumed(),
+        "the first connection cannot have resumed anything"
+    );
+    let first_certificates = first.connection.peer_certificates().to_vec();
+    let session = first
+        .sessions
+        .into_iter()
+        .next()
+        .expect("rustls issued no ticket to resume with");
+
+    let second = run_against(
+        &resumption_config(
+            &anchors,
+            Some(Resumption {
+                session: &session,
+                age_ms: 1_000,
+            }),
+        ),
+        &server_config,
+        |hello| hello,
+    )
+    .expect("the second handshake");
+
+    assert!(
+        second.connection.resumed(),
+        "rustls accepted the handshake but did not accept the pre-shared key"
+    );
+    // The chain from the connection the ticket came from, carried forward — a
+    // resumed handshake carries no Certificate message, and an application that
+    // gates on the peer's certificates must not silently see none.
+    assert_eq!(
+        second.connection.peer_certificates(),
+        pki.chain_der.as_slice(),
+        "a resumed connection reported the wrong peer"
+    );
+    assert_eq!(
+        first_certificates,
+        second.connection.peer_certificates(),
+        "the resumed connection's peer differs from the one the ticket came from"
+    );
+}
+
+/// The binder is actually checked by the server, so the test above means
+/// something.
+///
+/// A positive interop result proves nothing on its own unless the peer would
+/// have refused a wrong answer. This corrupts the last octet of the
+/// ClientHello — which, because `pre_shared_key` is the last extension and the
+/// binders are its last field, is the last octet of the binder — and requires
+/// `rustls` to refuse.
+///
+/// Without this, `a_second_connection_resumes_the_first_against_rustls` would
+/// still pass if `rustls` ignored binders entirely, and the whole chain of
+/// derivations it claims to verify would be unverified.
+#[test]
+fn rustls_refuses_a_corrupted_binder() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let server_config = resumable_server_config(&pki);
+
+    let first = run_against(
+        &resumption_config(&anchors, None),
+        &server_config,
+        |hello| hello,
+    )
+    .expect("the first handshake");
+    let session = first
+        .sessions
+        .into_iter()
+        .next()
+        .expect("rustls issued no ticket to resume with");
+
+    let refusal = run_against(
+        &resumption_config(
+            &anchors,
+            Some(Resumption {
+                session: &session,
+                age_ms: 1_000,
+            }),
+        ),
+        &server_config,
+        |mut hello| {
+            let last = hello.len() - 1;
+            hello[last] ^= 0x01;
+            hello
+        },
+    )
+    .expect_err("rustls accepted a corrupted binder");
+
+    assert!(
+        refusal.to_lowercase().contains("binder"),
+        "rustls refused, but not for the binder: {refusal}"
+    );
+}
+
+/// The `obfuscated_ticket_age` the offer carries is `age_ms + age_add`,
+/// modulo 2³².
+///
+/// **This test pins arithmetic; it does not verify it against a peer.** The
+/// distinction matters and is the same one the issue's status comment drew
+/// about the binder derivations. A server uses the obfuscated age for
+/// anti-replay in 0-RTT and for nothing else — `rustls` accepts a 1-RTT
+/// resumption whatever the age says, which is why the mutation replacing
+/// `age_add` with zero survived the resumption tests above. No oracle in this
+/// repo can catch that, so this checks the formula directly and says out loud
+/// that a green tick here is a regression guard rather than an interop result.
+#[test]
+fn the_offer_carries_the_obfuscated_ticket_age() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let server_config = resumable_server_config(&pki);
+
+    let first = run_against(
+        &resumption_config(&anchors, None),
+        &server_config,
+        |hello| hello,
+    )
+    .expect("the first handshake");
+    let session = first
+        .sessions
+        .into_iter()
+        .next()
+        .expect("rustls issued no ticket to resume with");
+
+    // A value chosen so the sum wraps for most `age_add`s a server picks, since
+    // wrapping is the part of the formula an implementation gets wrong.
+    let age_ms = 4_000_000_000u32;
+    let config = resumption_config(
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms,
+        }),
+    );
+    let (_client, hello) = ClientHandshake::start(&config).expect("start");
+
+    let messages = messages(&hello[5..]).expect("the hello parses");
+    let hello = ClientHello::parse(messages[0].body).expect("a ClientHello");
+    let offer = hello.extensions.last().expect("the hello has extensions");
+    assert_eq!(
+        offer.typ, 41,
+        "pre_shared_key is not the last extension, so the binder covers the wrong bytes"
+    );
+    let offer = PresharedKeyOffer::parse(offer.data).expect("the offer parses");
+
+    assert_eq!(offer.identities.len(), 1);
+    assert_eq!(offer.identities[0].identity, session.ticket.as_slice());
+    assert_eq!(
+        offer.identities[0].obfuscated_ticket_age,
+        age_ms.wrapping_add(session.age_add),
+        "the ticket age is not obfuscated with the server's age_add"
+    );
+    assert_eq!(offer.binders.len(), 1);
+    let (_, hash) = session.suite.parts().expect("a known suite");
+    assert_eq!(
+        offer.binders[0].len(),
+        hash.len(),
+        "a binder is one hash length, under the PSK's own hash"
+    );
 }

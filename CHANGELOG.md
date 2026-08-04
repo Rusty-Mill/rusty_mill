@@ -5,6 +5,73 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-08-04
+
+Built and tested against the same sibling revs as 0.2.x–0.7.0. Neither moved.
+
+`y` under §2: `handshake` and `client` both gained public surface.
+
+### Added
+- **A handshake actually resumes** (rusty_tls#43, client side). This is the
+  measurement the last three versions were missing.
+  - `handshake::BinderHello` encodes a ClientHello in two phases: build it with
+    zeroed binder placeholders, hash the truncated prefix, splice the real
+    binders in. `ClientHello::encode` is unchanged, and the bytes a binder
+    covers are a *literal prefix* of the message that is sent rather than a
+    second serialisation that has to be kept in agreement with the first.
+  - `handshake::PresharedKeyOffer` parses the offer from the other direction,
+    and `truncated` enforces "`pre_shared_key` is the last extension" by
+    re-encoding the binder block and requiring it to be the tail of the message
+    — so anything at all after the offer is refused rather than left uncovered.
+  - `ClientConfig::resumption` takes a `Resumption { session, age_ms }` and
+    offers it as a `pre_shared_key`. `Connection::resumed()` reports whether
+    the server accepted it.
+  - `Session` now carries `peer_certificates` from the handshake it came out
+    of, so `Connection::peer_certificates()` on a resumed connection answers
+    with the chain the peer was actually validated on instead of nothing.
+
+### Changed
+- **`ClientConfig` gained a required `resumption` field.** There is no
+  `Default`, so this is a breaking change for every caller — `resumption: None`
+  restores the previous behaviour exactly.
+
+### Security
+- **`early_data` is refused, not ignored** (ADR-0003). A server that sends the
+  extension in EncryptedExtensions gets `ClientError::UnexpectedEarlyData`.
+  This client never offers early data, so accepting the extension would be
+  agreeing to a replay property nothing here implements.
+- **A `pre_shared_key` in a ServerHello that was never offered is refused**, as
+  is a `selected_identity` past the end of the offer, and a selected cipher
+  suite whose hash is not the PSK's.
+- **A CertificateRequest in a resumed handshake is refused** (§4.4.2). Signing
+  over a transcript in a handshake where the server proved nothing about its own
+  identity is not something to do on request.
+
+**What this finally verifies.** The key material from 0.6.0 and 0.7.0 was tested
+for shape and not for value — the issue measured that a `"res binder"` →
+`"ext binder"` swap passed all five binder tests. A `rustls` server accepting a
+resumption checks four separate things at once, because it computes them
+independently: the `"resumption"` expansion, the `res master` transcript point,
+the `"res binder"` label, and the truncation point. All four were mutated and
+all four now fail the resumption test.
+`rustls_refuses_a_corrupted_binder` is what makes that evidence rather than
+coincidence — without it, the positive test would pass even if `rustls` ignored
+binders entirely.
+
+**Known limitations, stated rather than implied:**
+- **The server half still does not resume.** It parses no `pre_shared_key`,
+  verifies no binder, and issues no NewSessionTicket. **#43 stays open** for
+  that and for the ticket-sealing key ADR-0003 flags as being as sensitive as
+  the certificate's private key.
+- **`obfuscated_ticket_age` is pinned by arithmetic, not by a peer.** A server
+  uses it for 0-RTT anti-replay and for nothing else, so `rustls` accepts a
+  1-RTT resumption whatever it says — measured: the mutation zeroing `age_add`
+  survives every interop test here.
+  `the_offer_carries_the_obfuscated_ticket_age` checks the formula directly and
+  is a regression guard rather than an interop result.
+- **Only one identity is ever offered**, so `selected_identity` is only ever
+  accepted as `0`.
+
 ## [0.7.0] - 2026-08-03
 
 `y` under §2: `schedule` gained two public functions.

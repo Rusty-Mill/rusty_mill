@@ -265,6 +265,7 @@ fn fetch(host: &str) -> Result<Report, InteropError> {
         // No client certificate: these servers do not ask for one, and if one
         // ever did, an empty Certificate is the conforming answer.
         identity: None,
+        resumption: None,
     };
 
     let mut transport = Transport::connect(host).map_err(InteropError::Network)?;

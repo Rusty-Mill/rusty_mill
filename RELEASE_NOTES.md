@@ -23,6 +23,40 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.8.0
+**2026-08-04**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Added:** a handshake actually resumes (#43, client side) — two-phase
+  ClientHello encoding (`handshake::BinderHello`), a `pre_shared_key` offer via
+  `ClientConfig::resumption`, and the resumed route through the key schedule.
+- **Added:** `Connection::resumed()`, and `Session::peer_certificates` so a
+  resumed connection still reports the chain its peer was validated on.
+- **Security:** `early_data` is refused rather than ignored; an unoffered
+  `pre_shared_key`, a bad `selected_identity`, a suite/PSK hash mismatch, and a
+  CertificateRequest in a resumed handshake are all refused.
+
+**What this verifies that nothing before it did.** The PSK derivation from
+v0.6.0 and the binder derivation from v0.7.0 were tested for shape, not value —
+swapping `"res binder"` for `"ext binder"` passed every one of those tests. A
+`rustls` server accepting a resumption checks the `"resumption"` expansion, the
+`res master` transcript point, the `"res binder"` label, and the truncation
+point, all independently. Each was mutated; each now fails.
+
+### Upgrade notes
+
+- **`ClientConfig` gained a required `resumption` field.** There is no
+  `Default` for it, so every construction needs updating; `resumption: None`
+  is exactly the old behaviour.
+
+**Known limitations:** the **server half still does not resume** — no
+`pre_shared_key` parsing, no binder verification, no NewSessionTicket issuance —
+so **#43 remains open**. And `obfuscated_ticket_age` is pinned by arithmetic
+rather than by a peer: `rustls` accepts a 1-RTT resumption whatever the age
+says, measured by a mutation that zeroes `age_add` and survives every interop
+test here.
+
 ## v0.7.0
 **2026-08-03**
 
