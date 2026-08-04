@@ -2318,3 +2318,75 @@ fn a_client_with_no_identity_sends_an_empty_certificate_and_is_refused_by_the_se
         "a server requiring a certificate accepted a client with none"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Session tickets — rusty_tls#43, stage one
+// ---------------------------------------------------------------------------
+
+/// A real `rustls` server now sends this client a NewSessionTicket.
+///
+/// This is the measurement ADR-0003 was written about. Until the client
+/// offered `psk_key_exchange_modes`, RFC 8446 §4.2.9 meant a conforming server
+/// sent no ticket **ever** — so the client's ticket-handling branch could not
+/// be reached, and the test that claimed to cover it was green and vacuous. A
+/// mutation returning a ticket as application data survived it.
+///
+/// The assertion is deliberately "at least one arrived", not an exact count:
+/// how many tickets a server chooses to issue is that server's business, and
+/// pinning `rustls`' current answer would make this fail when `rustls` changes
+/// something it is entitled to change. What matters is that the number is no
+/// longer zero.
+#[test]
+fn a_rustls_server_now_sends_session_tickets() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors: &anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
+    };
+
+    let mut server = rustls_server(&pki);
+    let (mut client, mut to_server) = ClientHandshake::start(&config).expect("start");
+
+    let mut connection = None;
+    for _ in 0..8 {
+        let mut stream = pump_server(&mut server, &to_server);
+        to_server.clear();
+        for record in take_records(&mut stream) {
+            to_server.extend_from_slice(&client.read_record(&record).expect("client"));
+        }
+        if client.is_finished() {
+            connection = Some(client.into_connection().expect("connection"));
+            break;
+        }
+    }
+    let mut connection = connection.expect("the handshake did not complete");
+
+    // Deliver the client's Finished; rustls issues its tickets in response.
+    let mut stream = pump_server(&mut server, &to_server);
+    let mut tickets = 0usize;
+    for record in take_records(&mut stream) {
+        match connection.read(&record).expect("a post-handshake record") {
+            Incoming::Handled => tickets += 1,
+            Incoming::Application(data) => {
+                panic!("a post-handshake message surfaced as data: {data:02x?}")
+            }
+            _ => {}
+        }
+    }
+
+    assert!(
+        tickets > 0,
+        "rustls still sent no NewSessionTicket — is psk_key_exchange_modes being offered?"
+    );
+    println!("rustls sent {tickets} session ticket(s)");
+}

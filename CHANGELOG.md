@@ -5,6 +5,35 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-03
+
+Built and tested against the same sibling revs as 0.2.x–0.4.0. Neither moved.
+
+`y` under `docs/versioning.md` §2: `handshake::extension` gained three public
+constants. Additive, but additive is still `y` at `0.y.z`.
+
+### Added
+- **ADR-0003: session resumption without 0-RTT.** Records the decision that
+  resumption is in scope and **early data is not**, until a named consumer asks
+  and an anti-replay design lands in a follow-up ADR. Early data is replay-safe
+  only if the application above it is, and TLS cannot tell a request that reads
+  from one that charges a card.
+- **The client offers `psk_key_exchange_modes`** (rusty_tls#43, stage one).
+  RFC 8446 §4.2.9 means a conforming server sends no NewSessionTicket unless
+  the client asks — so until now the client's ticket-handling branch **could
+  not be reached at all**, and the test that claimed to cover it was green and
+  vacuous. Measured, not assumed: a `rustls` server now sends one ticket where
+  it previously sent none, and removing the extension makes that test fail.
+- `extension::PRE_SHARED_KEY`, `extension::EARLY_DATA`, and
+  `extension::PSK_KEY_EXCHANGE_MODES`.
+
+Only `psk_dhe_ke` is offered, never `psk_ke`: resuming without fresh key
+material trades forward secrecy for one saved key exchange, which is a bad
+trade in an engine that is not the default and never will be.
+
+**#43 is not closed by this.** Offering a PSK on a later connection, binders
+over the truncated ClientHello, and the server side of both remain.
+
 ## [0.4.0] - 2026-08-03
 
 Built and tested against the same sibling revs as 0.2.x and 0.3.0:

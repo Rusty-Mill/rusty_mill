@@ -314,8 +314,21 @@ pub mod extension {
     pub const SIGNATURE_ALGORITHMS: u16 = 13;
     /// `application_layer_protocol_negotiation(16)` — ALPN.
     pub const ALPN: u16 = 16;
+    /// `pre_shared_key(41)`.
+    ///
+    /// Must be the **last** extension in a ClientHello: its binders are
+    /// computed over the hello truncated to just before them, so anything
+    /// after it would not be covered.
+    pub const PRE_SHARED_KEY: u16 = 41;
+    /// `early_data(42)`. Recognised only so it can be refused — see ADR-0003.
+    pub const EARLY_DATA: u16 = 42;
     /// `supported_versions(43)`.
     pub const SUPPORTED_VERSIONS: u16 = 43;
+    /// `psk_key_exchange_modes(45)`.
+    ///
+    /// RFC 8446 §4.2.9: a server sends no NewSessionTicket unless the client
+    /// offered this, so without it the whole ticket path is unreachable.
+    pub const PSK_KEY_EXCHANGE_MODES: u16 = 45;
     /// `key_share(51)`.
     pub const KEY_SHARE: u16 = 51;
 }
