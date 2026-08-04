@@ -46,7 +46,7 @@ libc = "0.2"
 # std::process::Child's thread handle for the suspend-then-assign-to-job
 # sequencing that needs).
 [target.'cfg(windows)'.dependencies]
-rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "a223c5cda0d762619d04a50262847fbe651e751c", features = ["std"] }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "ee8f842e4e0b961b6a5605ea72d34237d4383f4c", features = ["std"] }
 
 # The integration tests drive the built binary and also make a few syscalls of
 # their own, so they always need libc.
