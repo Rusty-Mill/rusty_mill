@@ -23,6 +23,23 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.5.0
+**2026-08-03**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Added:** ADR-0003 — session resumption is in scope, 0-RTT is not, and the
+  reasoning is written down rather than left implied.
+- **Added:** the client offers `psk_key_exchange_modes` (#43, stage one), which
+  makes the ticket path reachable for the first time. A `rustls` server now
+  sends a ticket where it previously sent none.
+
+**This does not close #43.** What lands here is the half that makes tickets
+*arrive*; offering a PSK on a later connection — binders over the truncated
+ClientHello — and the server side of both are still to come. Said plainly
+because a version that claimed resumption and delivered half of it would be
+worse than one that claims less.
+
 ## v0.4.0
 **2026-08-03**
 

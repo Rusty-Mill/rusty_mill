@@ -33,14 +33,16 @@
 //!
 //! Refused, with an error, rather than half-implemented:
 //!
-//! - **Session resumption, PSK, and 0-RTT.** No ticket is ever used, and the
-//!   ClientHello does not offer `psk_key_exchange_modes` — so by RFC 8446
-//!   §4.2.9 a conforming server will never send a NewSessionTicket at all.
-//!   [`Connection::read`] handles one anyway. That is not dead code being
-//!   optimistic: the cost of being wrong is that an unexpected handshake
-//!   record gets handed to the caller as application data, which turns a
-//!   protocol surprise into silent data corruption. Discarding it is the
-//!   cheap, safe answer to a message that should not arrive.
+//! - **Session resumption.** The ClientHello now offers
+//!   `psk_key_exchange_modes` (`psk_dhe_ke` only), so a server *does* send
+//!   NewSessionTickets and [`Connection::read`] handles them — but nothing yet
+//!   keeps one or offers a `pre_shared_key` on a later connection, so no
+//!   handshake is ever actually resumed. `rusty_tls#43` tracks the rest.
+//! - **0-RTT.** Not offered, not accepted, and not planned without a named
+//!   consumer and an anti-replay design. Early data is replay-safe only if the
+//!   application above it is, and TLS cannot tell a request that reads from one
+//!   that charges a card. ADR-0003 records that as a decision rather than an
+//!   omission.
 //! - **TLS 1.2 and below.** `supported_versions` offers exactly `0x0304`, and a
 //!   ServerHello that does not select it is refused. Stage 4 is where a
 //!   fallback would go, if one is ever wanted.
@@ -870,12 +872,20 @@ fn build_client_hello(
         w.vector_u16(|w| w.bytes(kx.public_key()));
     });
 
-    let (server_name, versions, groups, schemes, key_share) = (
+    // RFC 8446 §4.2.9. Without this a conforming server sends no
+    // NewSessionTicket at all, which made the client's ticket-handling code
+    // unreachable — see ADR-0003. Only `psk_dhe_ke(1)`: `psk_ke` resumes
+    // without fresh key material, and the saving is one key exchange.
+    let mut psk_modes = Writer::new();
+    psk_modes.vector_u8(|w| w.u8(1));
+
+    let (server_name, versions, groups, schemes, key_share, psk_modes) = (
         server_name.into_vec(),
         versions.into_vec(),
         groups.into_vec(),
         schemes.into_vec(),
         key_share.into_vec(),
+        psk_modes.into_vec(),
     );
 
     let mut extensions = Vec::new();
@@ -902,6 +912,10 @@ fn build_client_hello(
     extensions.push(Extension {
         typ: extension::KEY_SHARE,
         data: &key_share,
+    });
+    extensions.push(Extension {
+        typ: extension::PSK_KEY_EXCHANGE_MODES,
+        data: &psk_modes,
     });
 
     let hello = ClientHello {
