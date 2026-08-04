@@ -1178,7 +1178,7 @@ mod tests {
         let link_str = link.to_str().unwrap();
 
         match create_symlink(link_str, target_str, false) {
-            Ok(()) => {},
+            Ok(()) => {}
             Err(Win32Error::ERROR_PRIVILEGE_NOT_HELD) => {
                 let _ = std::fs::remove_file(&target);
                 return;
