@@ -33,16 +33,20 @@ use time::OffsetDateTime;
 
 use rusty_tls::handrolled::client::{
     record_length, AlertDescription, CipherSuite, ClientConfig, ClientHandshake, Incoming,
+    Resumption,
 };
 use rusty_tls::handrolled::handshake::{
-    extension, find, messages, ClientHello, HandshakeType, Message, ServerHello,
-    HELLO_RETRY_REQUEST_RANDOM,
+    extension, find, messages, pre_shared_key_placeholder, ClientHello, Extension, HandshakeType,
+    Message, PskIdentity, ServerHello, HELLO_RETRY_REQUEST_RANDOM,
 };
 use rusty_tls::handrolled::kx::NamedGroup;
 use rusty_tls::handrolled::name::ServerName;
 use rusty_tls::handrolled::path::{PathOptions, TrustAnchor};
-use rusty_tls::handrolled::server::{ClientAuth, ServerConfig, ServerError, ServerHandshake};
+use rusty_tls::handrolled::server::{
+    ClientAuth, ServerConfig, ServerError, ServerHandshake, Tickets,
+};
 use rusty_tls::handrolled::sign::SigningKey;
+use rusty_tls::handrolled::ticket::{TicketKey, TicketKeys};
 use rusty_tls::handrolled::x509::Certificate;
 
 const SERVER: &str = "handrolled.example";
@@ -170,6 +174,7 @@ fn interop_with_groups(
         cipher_suites: CipherSuite::SUPPORTED,
         groups,
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     let mut client = rustls_client(&pki);
@@ -267,6 +272,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&server_config);
 
@@ -283,6 +289,7 @@ fn this_clients_handshake_with_this_server_carries_data_both_ways() {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
 
     let (mut client, hello) = ClientHandshake::start(&client_config).expect("start");
@@ -346,6 +353,12 @@ struct Edit {
     replace: Vec<(u16, Vec<u8>)>,
     /// Cipher suites to offer instead.
     cipher_suites: Option<Vec<u16>>,
+    /// Extensions to add after the ones the hello already carries, in order.
+    ///
+    /// Appending rather than replacing is the only way to test a rule about
+    /// extension *order* — `pre_shared_key` has to be last, so putting
+    /// something after it is the case that matters.
+    append: Vec<(u16, Vec<u8>)>,
 }
 
 /// Build a genuine ClientHello with this crate's client, then apply `edit`.
@@ -368,6 +381,7 @@ fn client_hello(edit: Edit) -> Vec<u8> {
         groups: &[NamedGroup::X25519],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
     let (_, record) = ClientHandshake::start(&config).expect("start");
     let parsed = messages(&record[5..]).expect("parses");
@@ -383,6 +397,12 @@ fn client_hello(edit: Edit) -> Vec<u8> {
     }
     if let Some(suites) = edit.cipher_suites {
         hello.cipher_suites = suites;
+    }
+    for (typ, data) in &edit.append {
+        hello.extensions.push(Extension {
+            typ: *typ,
+            data: data.as_slice(),
+        });
     }
 
     let encoded = Message::encode(HandshakeType::ClientHello, &hello.encode());
@@ -402,6 +422,7 @@ fn refuse(record: &[u8]) -> ServerError {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -568,6 +589,7 @@ fn a_truncated_client_hello_is_waited_for_rather_than_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
 
     let whole = client_hello(Edit::default());
@@ -617,6 +639,7 @@ fn a_peer_cannot_drive_the_server_with_incomplete_messages() {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
 
@@ -786,6 +809,7 @@ fn against_test_client(corrupt_finished: bool) -> Result<(), ServerError> {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -840,6 +864,7 @@ fn a_corrupted_protected_record_fails_at_the_record_layer() {
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     let client = TestClient::new();
@@ -979,6 +1004,7 @@ fn first_reply(record: &[u8]) -> Vec<u8> {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     server
@@ -1008,6 +1034,12 @@ fn re_edit(record: &[u8], edit: Edit) -> Vec<u8> {
     if let Some(suites) = edit.cipher_suites {
         hello.cipher_suites = suites;
     }
+    for (typ, data) in &edit.append {
+        hello.extensions.push(Extension {
+            typ: *typ,
+            data: data.as_slice(),
+        });
+    }
 
     let encoded = Message::encode(HandshakeType::ClientHello, &hello.encode());
     let mut out = vec![22u8, 0x03, 0x01];
@@ -1026,6 +1058,7 @@ fn after_a_retry(first: &[u8], second: &[u8]) -> Result<Vec<u8>, ServerError> {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: None,
+        tickets: None,
     };
     let mut server = ServerHandshake::new(&config);
     let retry = server
@@ -1129,6 +1162,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         groups: &[NamedGroup::X25519, NamedGroup::SecP256R1],
         cipher_suites: CipherSuite::SUPPORTED,
         identity: None,
+        resumption: None,
     };
     let server_config = ServerConfig {
         certificates: &pki.chain,
@@ -1136,6 +1170,7 @@ fn this_clients_handshake_completes_through_a_hello_retry_request() {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::SecP256R1],
         client_auth: None,
+        tickets: None,
     };
 
     let mut server = ServerHandshake::new(&server_config);
@@ -1329,6 +1364,7 @@ fn client_auth_interop(client: Option<&Pki>, required: bool) -> Result<Vec<Vec<u
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
+        tickets: None,
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1445,6 +1481,7 @@ fn a_client_certificate_from_an_unrelated_ca_is_refused() {
         cipher_suites: CipherSuite::SUPPORTED,
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
+        tickets: None,
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1622,6 +1659,7 @@ fn against_certificate_client(corrupt_signature: bool) -> Result<(), ServerError
         cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
         groups: &[NamedGroup::X25519],
         client_auth: Some(&auth),
+        tickets: None,
     };
 
     let mut server = ServerHandshake::new(&config);
@@ -1672,4 +1710,670 @@ fn a_client_certificate_verify_that_does_not_verify_is_refused() {
         "refused, but not for the right reason: {error:?}"
     );
     assert_eq!(error.alert(), Some(AlertDescription::DECRYPT_ERROR));
+}
+
+// ---------------------------------------------------------------------------
+// Resumption — rusty_tls#43, server side
+// ---------------------------------------------------------------------------
+
+/// A `rustls` client config that will resume, shared across two connections.
+///
+/// The sharing is what makes resumption possible: `rustls` keeps its session
+/// cache on the `ClientConfig`, so a second `ClientConnection` from the same
+/// `Arc` offers the ticket the first one was given, and one from a fresh
+/// config has nothing to offer.
+fn resumable_rustls_client_config(pki: &Pki) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(pki.root_der.clone()))
+        .expect("the root is acceptable to rustls");
+    Arc::new(
+        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    )
+}
+
+fn ticket_config<'a>(keys: TicketKeys<'a>, now: i64, lifetime: u32) -> Tickets<'a> {
+    Tickets {
+        keys,
+        now,
+        lifetime,
+        count: 2,
+    }
+}
+
+/// Drive one `rustls` client through a handshake with this server.
+///
+/// `tamper` sees each record on its way from the client to the server, which is
+/// where a ClientHello's binder lives. The server's refusal is returned rather
+/// than panicked on, because for half these tests the refusal is the result.
+fn serve_rustls(
+    config: &ServerConfig<'_>,
+    client_config: &Arc<rustls::ClientConfig>,
+    mut tamper: impl FnMut(usize, Vec<u8>) -> Vec<u8>,
+) -> Result<rustls::ClientConnection, ServerError> {
+    let mut server = ServerHandshake::new(config);
+    let mut client = rustls::ClientConnection::new(
+        client_config.clone(),
+        RustlsName::try_from(SERVER).expect("name"),
+    )
+    .expect("client connection");
+
+    let mut seen = 0usize;
+    for _ in 0..8 {
+        let mut to_server = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut to_server).expect("write_tls");
+        }
+
+        let mut from_server = Vec::new();
+        for record in take_records(&mut to_server) {
+            seen += 1;
+            let record = tamper(seen - 1, record);
+            from_server.extend_from_slice(&server.read_record(&record)?);
+        }
+
+        if !from_server.is_empty() {
+            let mut cursor = std::io::Cursor::new(&from_server);
+            while client.read_tls(&mut cursor).expect("read_tls") > 0 {
+                client.process_new_packets().expect("process_new_packets");
+            }
+            client.process_new_packets().expect("process_new_packets");
+        }
+
+        if server.is_finished() && !client.is_handshaking() && !client.wants_write() {
+            return Ok(client);
+        }
+        if from_server.is_empty() && !client.wants_write() {
+            break;
+        }
+    }
+    panic!("the handshake did not complete");
+}
+
+/// **The server half's acceptance criterion.** A `rustls` client resumes
+/// against this server.
+///
+/// The mirror of the client-side test, and it verifies a different set of
+/// things — the ones only a *server* can get wrong. `rustls` accepting a
+/// resumption here means it independently computed, from a NewSessionTicket
+/// this server minted:
+///
+/// - the same PSK, so this server's `res master` transcript point and its
+///   `"resumption"` expansion agree with an implementation that did not read
+///   this one;
+/// - the same binder, which this server then *verified* rather than produced —
+///   a different code path from the client's, and the one that decides whether
+///   a stranger gets to resume somebody else's session;
+/// - a flight with no Certificate and no CertificateVerify, which §4.4.2
+///   requires of a resumed handshake and which `rustls` would refuse to see.
+///
+/// Self-consistency could not show any of it: the ticket is sealed and opened
+/// by the same key, so a server that got the PSK derivation wrong in a
+/// self-consistent way would resume with itself perfectly.
+#[test]
+fn a_rustls_client_resumes_against_this_server() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_rustls_client_config(&pki);
+
+    let first = serve_rustls(&config, &client_config, |_, record| record).expect("first");
+    assert!(
+        !first
+            .handshake_kind()
+            .is_some_and(|kind| kind == rustls::HandshakeKind::Resumed),
+        "the first handshake cannot have resumed anything"
+    );
+
+    let second = serve_rustls(&config, &client_config, |_, record| record).expect("second");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed),
+        "rustls completed the handshake but did not resume — this server ignored the ticket \
+         it had issued, or offered a full handshake instead"
+    );
+    // §4.4.2: a resumed handshake carries no Certificate. rustls reports the
+    // chain from the session it resumed, so this says the peer is still the one
+    // it validated, not that a chain was sent again.
+    assert!(
+        second.peer_certificates().is_some_and(|c| c.len() == 2),
+        "rustls lost track of the peer across a resumption"
+    );
+}
+
+/// A corrupted binder is fatal, not a fallback.
+///
+/// RFC 8446 §4.2.11: once a server recognises an identity it MUST verify that
+/// identity's binder and abort if it does not check out. Quietly falling back
+/// to a full handshake instead would make the binder an optional extra — the
+/// handshake would still complete, `rustls` would still be happy, and the one
+/// proof that the client holds the PSK would have been skipped.
+///
+/// This is also what makes `a_rustls_client_resumes_against_this_server`
+/// evidence rather than coincidence: without it, that test would pass on a
+/// server that never looked at a binder at all.
+#[test]
+fn a_corrupted_binder_is_refused_rather_than_ignored() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_rustls_client_config(&pki);
+
+    serve_rustls(&config, &client_config, |_, record| record).expect("first");
+
+    // The last octet of the ClientHello is the last octet of the last binder,
+    // because `pre_shared_key` is the last extension and `binders` is its last
+    // field. That is the whole reason the extension has to go last.
+    let refusal = serve_rustls(&config, &client_config, |index, mut record| {
+        if index == 0 {
+            let last = record.len() - 1;
+            record[last] ^= 0x01;
+        }
+        record
+    })
+    .expect_err("a corrupted binder was accepted");
+
+    assert_eq!(refusal, ServerError::BadBinder);
+    assert_eq!(refusal.alert(), Some(AlertDescription::DECRYPT_ERROR));
+}
+
+/// A ticket this server cannot open is a full handshake, not a refusal.
+///
+/// The distinction is the difference between a server that survives a key
+/// rotation and one that breaks every client holding an older ticket. §4.2.11
+/// lets a server ignore an identity it does not recognise, and every ticket
+/// becomes unrecognisable eventually.
+#[test]
+fn an_unopenable_ticket_falls_back_to_a_full_handshake() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let issuing = TicketKey::generate().expect("a ticket key");
+    let issuing_tickets = ticket_config(
+        TicketKeys {
+            current: &issuing,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&issuing_tickets),
+    };
+    let client_config = resumable_rustls_client_config(&pki);
+    serve_rustls(&config, &client_config, |_, record| record).expect("first");
+
+    // A server that has rotated its key and kept no previous one.
+    let rotated = TicketKey::generate().expect("another ticket key");
+    let rotated_tickets = ticket_config(
+        TicketKeys {
+            current: &rotated,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let rotated_config = ServerConfig {
+        tickets: Some(&rotated_tickets),
+        ..config
+    };
+    let second = serve_rustls(&rotated_config, &client_config, |_, record| record)
+        .expect("a client with a stale ticket was refused instead of served");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "a ticket sealed under a retired key resumed anyway"
+    );
+
+    // And with the old key retained, the same ticket still works — which is
+    // what makes rotation possible rather than merely expressible.
+    let retired = [&issuing];
+    let retaining = ticket_config(
+        TicketKeys {
+            current: &rotated,
+            previous: &retired,
+        },
+        options().time,
+        7200,
+    );
+    let retaining_config = ServerConfig {
+        tickets: Some(&retaining),
+        ..config
+    };
+    let third = serve_rustls(&retaining_config, &client_config, |_, record| record).expect("third");
+    assert_eq!(
+        third.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed),
+        "a retired key that is still retained did not open its own ticket"
+    );
+}
+
+/// An expired ticket is a full handshake.
+#[test]
+fn an_expired_ticket_falls_back_to_a_full_handshake() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let issuing = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        60,
+    );
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&issuing),
+    };
+    let client_config = resumable_rustls_client_config(&pki);
+    serve_rustls(&config, &client_config, |_, record| record).expect("first");
+
+    let later = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time + 61,
+        60,
+    );
+    let second = serve_rustls(
+        &ServerConfig {
+            tickets: Some(&later),
+            ..config
+        },
+        &client_config,
+        |_, record| record,
+    )
+    .expect("a client with an expired ticket was refused instead of served");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "an expired ticket resumed anyway"
+    );
+}
+
+/// A ticket is bound to the certificate chain that issued it.
+///
+/// Two configurations sharing a sealing key are a real deployment — that is how
+/// a load balanced fleet resumes across its members — and two configurations
+/// presenting *different* certificates sharing one is a mistake. Without this
+/// binding, a session authenticated by one identity could be continued under
+/// another, and the sealing key alone does not say which identity sealed it.
+#[test]
+fn a_ticket_does_not_resume_under_a_different_certificate() {
+    let first_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let first_key = signing_key(&first_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &first_pki.chain,
+        key: &first_key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_rustls_client_config(&first_pki);
+    serve_rustls(&config, &client_config, |_, record| record).expect("first");
+
+    // A second server, same ticket key, different certificate. `rustls` must be
+    // willing to talk to it, so its client config trusts both roots.
+    let second_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let second_key = signing_key(&second_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(first_pki.root_der.clone()))
+        .expect("the first root");
+    roots
+        .add(CertificateDer::from(second_pki.root_der.clone()))
+        .expect("the second root");
+    let both = Arc::new(
+        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+    );
+    // Re-establish against the first server under the config that trusts both,
+    // so the ticket in the cache belongs to that config.
+    serve_rustls(&config, &both, |_, record| record).expect("re-establish");
+
+    let other = ServerConfig {
+        certificates: &second_pki.chain,
+        key: &second_key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let resumed = serve_rustls(&other, &both, |_, record| record)
+        .expect("a server presenting a different chain refused instead of falling back");
+    assert_eq!(
+        resumed.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "a ticket issued under one certificate chain resumed under another"
+    );
+}
+
+/// `early_data` is refused rather than ignored, whether or not this server
+/// would have resumed.
+///
+/// ADR-0003 puts 0-RTT out of scope and says the extension is *refused*. The
+/// distinction matters to the client: a server that dropped it silently looks
+/// identical to one that considered the early data and declined it, and those
+/// two answers mean different things to a client deciding what it may replay.
+#[test]
+fn an_early_data_extension_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: None,
+    };
+    let mut server = ServerHandshake::new(&config);
+
+    let hello = client_hello(Edit {
+        append: vec![(extension::EARLY_DATA, Vec::new())],
+        ..Default::default()
+    });
+    let error = server
+        .read_record(&hello)
+        .expect_err("early_data was accepted");
+    assert_eq!(error, ServerError::EarlyDataOffered);
+    assert_eq!(error.alert(), Some(AlertDescription::ILLEGAL_PARAMETER));
+}
+
+/// `pre_shared_key` anywhere but last is refused.
+///
+/// §4.2.11 makes it a MUST, and it is the one structural rule a binder depends
+/// on: everything after the offer falls outside what the binder proves. A
+/// server that tolerated it would be verifying a binder over a prefix of a
+/// message whose remainder the binder says nothing about.
+#[test]
+fn a_pre_shared_key_that_is_not_last_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: None,
+    };
+    let mut server = ServerHandshake::new(&config);
+
+    // A syntactically valid offer, followed by another extension.
+    let identities = [PskIdentity {
+        identity: b"an opaque ticket",
+        obfuscated_ticket_age: 0,
+    }];
+    let offer = pre_shared_key_placeholder(&identities, &[32]);
+    let hello = client_hello(Edit {
+        append: vec![
+            (extension::PRE_SHARED_KEY, offer),
+            (0xff02, vec![0x00, 0x00]),
+        ],
+        ..Default::default()
+    });
+
+    let error = server
+        .read_record(&hello)
+        .expect_err("an offer that was not last was accepted");
+    assert_eq!(error, ServerError::PskOfferNotLast);
+    assert_eq!(error.alert(), Some(AlertDescription::ILLEGAL_PARAMETER));
+}
+
+/// This crate's own client resuming against this crate's own server.
+///
+/// Circular, and included for the one thing the two interop tests cannot show
+/// between them: that the two halves meet. `rustls` proves each side is right
+/// about the protocol, one side at a time — this proves the ticket this server
+/// mints is the ticket this client can redeem, end to end, including the
+/// NewSessionTicket arriving on the connection rather than in the handshake.
+///
+/// It is a supplement, never a substitute. If this passed and either interop
+/// test failed, this would be the one that was wrong.
+#[test]
+fn this_client_resumes_against_this_server() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = Tickets {
+        keys: TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        now: options().time,
+        lifetime: 7200,
+        count: 2,
+    };
+    let server_config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+
+    let root = Certificate::parse(&pki.root_der).expect("root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+
+    let first = run_both(&server_config, &anchors, None).expect("the first handshake");
+    assert!(!first.0.resumed(), "the first handshake resumed something");
+    assert_eq!(
+        first.1.len(),
+        2,
+        "a server asked for two tickets sent a different number, or the client kept only one"
+    );
+    // Two tickets from one connection must be two *different* keys. The nonce
+    // in each NewSessionTicket is the only thing that makes them differ, and a
+    // server that reused it would hand out one key twice while looking exactly
+    // like one that did not.
+    assert_ne!(
+        first.1[0].psk(),
+        first.1[1].psk(),
+        "two tickets from one connection carry the same key"
+    );
+    let session = first.1[0].clone();
+
+    let second = run_both(
+        &server_config,
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 5_000,
+        }),
+    )
+    .expect("the second handshake");
+    assert!(
+        second.0.resumed(),
+        "this server did not accept a ticket it had just issued"
+    );
+    assert_eq!(
+        second.0.peer_certificates(),
+        &pki.chain[..],
+        "the resumed connection lost the peer it was resuming"
+    );
+}
+
+/// Drive this client against this server, returning the client's connection and
+/// the first session ticket that arrived on it.
+#[allow(clippy::type_complexity)]
+fn run_both(
+    server_config: &ServerConfig<'_>,
+    anchors: &[TrustAnchor<'_>],
+    resumption: Option<Resumption<'_>>,
+) -> Result<
+    (
+        rusty_tls::handrolled::client::Connection,
+        Vec<rusty_tls::handrolled::client::Session>,
+    ),
+    String,
+> {
+    let client_config = ClientConfig {
+        server_name: ServerName::Dns(SERVER),
+        anchors,
+        path: options(),
+        groups: &[NamedGroup::X25519],
+        cipher_suites: CipherSuite::SUPPORTED,
+        identity: None,
+        resumption,
+    };
+    let mut server = ServerHandshake::new(server_config);
+    let (client, hello) = ClientHandshake::start(&client_config).map_err(|e| e.to_string())?;
+
+    let mut handshake = Some(client);
+    let mut connection = None;
+    let mut sessions: Vec<rusty_tls::handrolled::client::Session> = Vec::new();
+    let mut to_server = hello;
+
+    for _ in 0..8 {
+        let mut to_client = Vec::new();
+        for record in take_records(&mut to_server) {
+            to_client.extend_from_slice(&server.read_record(&record).map_err(|e| e.to_string())?);
+        }
+        to_server.clear();
+
+        let records = take_records(&mut to_client);
+        if records.is_empty() {
+            break;
+        }
+        for record in records {
+            if let Some(client) = handshake.as_mut() {
+                let reply = client.read_record(&record).map_err(|e| e.to_string())?;
+                to_server.extend_from_slice(&reply);
+                if client.is_finished() {
+                    connection = Some(
+                        handshake
+                            .take()
+                            .expect("just borrowed")
+                            .into_connection()
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+            } else if let Some(connection) = connection.as_mut() {
+                match connection.read(&record).map_err(|e| e.to_string())? {
+                    Incoming::Tickets(arrived) => sessions.extend(arrived),
+                    Incoming::Application(data) => {
+                        return Err(format!(
+                            "a post-handshake message surfaced as data: {data:02x?}"
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match connection {
+        Some(connection) => Ok((connection, sessions)),
+        None => Err("the handshake did not complete".to_string()),
+    }
+}
+
+/// A ticket does not resume under a cipher suite whose hash is not its own.
+///
+/// A PSK is established under one suite's hash and every secret derived from
+/// it — the binder included — runs under that hash. §4.2.11 leaves a server to
+/// "select a compatible PSK", and selecting none is a legitimate selection: the
+/// handshake falls back and completes.
+///
+/// The mutation this exists to catch does *not* produce a silent
+/// vulnerability; it produces a fatal `BadBinder` on a client that did nothing
+/// wrong, because the server would then check a SHA-256 binder under SHA-384.
+/// That is the failure this check converts into a clean full handshake.
+#[test]
+fn a_ticket_does_not_resume_under_a_suite_with_a_different_hash() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let sha256 = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: &[CipherSuite::TLS_AES_128_GCM_SHA256],
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_rustls_client_config(&pki);
+    serve_rustls(&sha256, &client_config, |_, record| record).expect("first");
+
+    // The same ticket key, the same certificate, a different hash.
+    let sha384 = ServerConfig {
+        cipher_suites: &[CipherSuite::TLS_AES_256_GCM_SHA384],
+        ..sha256
+    };
+    let second = serve_rustls(&sha384, &client_config, |_, record| record)
+        .expect("a ticket from another suite was refused instead of ignored");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "a PSK established under SHA-256 was used under SHA-384"
+    );
 }

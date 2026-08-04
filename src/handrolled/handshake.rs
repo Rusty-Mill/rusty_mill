@@ -78,6 +78,14 @@ pub enum HandshakeError {
     DuplicateExtension(u16),
     /// A field was empty where the grammar requires content.
     Empty(&'static str),
+    /// A `pre_shared_key` offer was not in the shape RFC 8446 §4.2.11 requires.
+    ///
+    /// Separate from a bare wire error because the binders' position is a
+    /// structural property rather than an encoding one: the block has to sit
+    /// at the very end of the ClientHello, and an offer that parses perfectly
+    /// while sitting somewhere else is exactly the case a binder would fail to
+    /// cover.
+    PskOffer(&'static str),
 }
 
 impl From<WireError> for HandshakeError {
@@ -109,6 +117,7 @@ impl core::fmt::Display for HandshakeError {
             }
             Self::DuplicateExtension(id) => write!(f, "extension {id} appears more than once"),
             Self::Empty(what) => write!(f, "{what} is empty"),
+            Self::PskOffer(why) => write!(f, "malformed pre_shared_key offer: {why}"),
         }
     }
 }
@@ -443,6 +452,265 @@ impl<'a> ClientHello<'a> {
         writer.vector_u8(|w| w.u8(0));
         write_extensions(&mut writer, &self.extensions);
         writer.into_vec()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pre_shared_key
+// ---------------------------------------------------------------------------
+
+/// One `PskIdentity` in a `pre_shared_key` offer, RFC 8446 §4.2.11.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PskIdentity<'a> {
+    /// The opaque identity — for a resumption PSK, the ticket the server
+    /// issued.
+    pub identity: &'a [u8],
+    /// `obfuscated_ticket_age`: the ticket's age in milliseconds plus the
+    /// `ticket_age_add` the server chose, modulo 2³².
+    ///
+    /// The addition is the obfuscation. Without it, a passive observer could
+    /// correlate two connections by noticing that one's age is the other's
+    /// plus the gap between them.
+    pub obfuscated_ticket_age: u32,
+}
+
+/// A `pre_shared_key` offer, as it appears in a ClientHello.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresharedKeyOffer<'a> {
+    /// The identities, in the client's order of preference.
+    pub identities: Vec<PskIdentity<'a>>,
+    /// The binders, one per identity and in the same order.
+    pub binders: Vec<&'a [u8]>,
+}
+
+impl<'a> PresharedKeyOffer<'a> {
+    /// Parse a `pre_shared_key` extension's `extension_data` from a
+    /// ClientHello.
+    ///
+    /// The count check is §4.2.11's: "Each entry in the `binders` list is
+    /// computed as an HMAC over a transcript hash… The `binders` list MUST be
+    /// the same length as the `identities` list." A mismatch means the
+    /// binder that would be checked belongs to a different identity than the
+    /// one that would be used, which is worth refusing rather than
+    /// index-matching through.
+    pub fn parse(data: &'a [u8]) -> Result<Self> {
+        let mut reader = Reader::new(data);
+
+        let mut list = reader.sub_u16()?;
+        let mut identities = Vec::new();
+        while !list.is_empty() {
+            let identity = list.vector_u16()?;
+            let obfuscated_ticket_age = list.u32()?;
+            if identity.is_empty() {
+                return Err(HandshakeError::PskOffer("an identity is empty"));
+            }
+            identities.push(PskIdentity {
+                identity,
+                obfuscated_ticket_age,
+            });
+        }
+
+        let mut list = reader.sub_u16()?;
+        let mut binders = Vec::new();
+        while !list.is_empty() {
+            let binder = list.vector_u8()?;
+            // §4.2.11.2 sizes a `PskBinderEntry` at 32..255: it is a hash-length
+            // HMAC, and the shortest hash TLS 1.3 defines is 32 octets.
+            if binder.len() < 32 {
+                return Err(HandshakeError::PskOffer(
+                    "a binder is shorter than 32 octets",
+                ));
+            }
+            binders.push(binder);
+        }
+        reader.finish()?;
+
+        if identities.is_empty() {
+            return Err(HandshakeError::PskOffer("no identities"));
+        }
+        if identities.len() != binders.len() {
+            return Err(HandshakeError::PskOffer(
+                "the binder count does not match the identity count",
+            ));
+        }
+
+        Ok(Self {
+            identities,
+            binders,
+        })
+    }
+
+    /// How many octets the trailing `PskBinderEntry` block occupies.
+    fn binder_block_len(&self) -> usize {
+        binder_block_len(self.binders.iter().map(|binder| binder.len()))
+    }
+
+    /// The ClientHello bytes this offer's binders are computed over: the
+    /// encoded message truncated to just before the binder block.
+    ///
+    /// This is where "`pre_shared_key` must be the last extension" is actually
+    /// enforced. The check is not that the extension *appears* last in a parsed
+    /// list — it is that the binder block, re-encoded from what was parsed, is
+    /// byte-for-byte the tail of the message. Anything at all after it, in any
+    /// extension or in a trailing field, makes that comparison fail, which is
+    /// the property a binder needs: everything outside the truncation is
+    /// uncovered, so nothing may be outside it.
+    pub fn truncated<'m>(&self, encoded_message: &'m [u8]) -> Result<&'m [u8]> {
+        let block = self.binder_block_len();
+        let at = encoded_message
+            .len()
+            .checked_sub(block)
+            .ok_or(HandshakeError::PskOffer(
+                "the message is shorter than its binders",
+            ))?;
+        let mut expected = Writer::new();
+        write_binders(&mut expected, self.binders.iter().copied());
+        if &encoded_message[at..] != expected.as_slice() {
+            return Err(HandshakeError::PskOffer(
+                "pre_shared_key is not the last extension",
+            ));
+        }
+        Ok(&encoded_message[..at])
+    }
+}
+
+/// How many octets a `PskBinderEntry` block of these binder lengths occupies:
+/// a `uint16` for the list, then a `uint8` length and the bytes for each.
+fn binder_block_len(lens: impl IntoIterator<Item = usize>) -> usize {
+    2 + lens.into_iter().map(|len| 1 + len).sum::<usize>()
+}
+
+fn write_binders<'b>(writer: &mut Writer, binders: impl IntoIterator<Item = &'b [u8]>) {
+    let binders: Vec<&[u8]> = binders.into_iter().collect();
+    writer.vector_u16(|w| {
+        for binder in binders {
+            w.vector_u8(|w| w.bytes(binder));
+        }
+    });
+}
+
+/// Encode a `pre_shared_key` extension's `extension_data` with the binders
+/// present but zeroed.
+///
+/// The placeholders are the same length the real binders will be, which is
+/// what makes the two-phase encoding work: every length field in the message
+/// already holds its final value, so the truncated bytes a binder is computed
+/// over are a true prefix of the message that is finally sent.
+pub fn pre_shared_key_placeholder(
+    identities: &[PskIdentity<'_>],
+    binder_lens: &[usize],
+) -> Vec<u8> {
+    let mut writer = Writer::new();
+    writer.vector_u16(|w| {
+        for identity in identities {
+            w.vector_u16(|w| w.bytes(identity.identity));
+            w.u32(identity.obfuscated_ticket_age);
+        }
+    });
+    let zeroed: Vec<Vec<u8>> = binder_lens.iter().map(|len| vec![0u8; *len]).collect();
+    write_binders(&mut writer, zeroed.iter().map(|binder| binder.as_slice()));
+    writer.into_vec()
+}
+
+/// A ClientHello encoded with placeholder binders, waiting for the real ones.
+///
+/// The awkward shape RFC 8446 forces and ADR-0003 records: a binder is an HMAC
+/// over the hello *truncated to just before the binders*, so the hello cannot
+/// be finished until the binder is known and the binder cannot be computed
+/// until the hello is nearly finished.
+///
+/// Building with zeroed placeholders and splicing keeps
+/// [`ClientHello::encode`] a single, ordinary encoder — there is no
+/// "encode part of a message" path to get out of step with the whole-message
+/// one — and it makes [`Self::truncated`] a literal prefix of
+/// [`Self::finish`]'s output rather than a separate serialisation that has to
+/// be kept in agreement with it.
+#[derive(Clone, Debug)]
+pub struct BinderHello {
+    encoded: Vec<u8>,
+    truncated_len: usize,
+    binder_lens: Vec<usize>,
+}
+
+impl BinderHello {
+    /// Encode `hello`, whose last extension must be a `pre_shared_key` offer
+    /// built by [`pre_shared_key_placeholder`] with these `binder_lens`.
+    ///
+    /// Checked rather than assumed. A caller that appended another extension
+    /// after the offer, or sized the placeholders differently from the binders
+    /// it will produce, would get a hello whose binders cover the wrong bytes
+    /// — and that failure surfaces at the peer as a decrypt error with no
+    /// indication of the cause.
+    pub fn new(hello: &ClientHello<'_>, binder_lens: &[usize]) -> Result<Self> {
+        if binder_lens.is_empty() {
+            return Err(HandshakeError::PskOffer("no binders"));
+        }
+        match hello.extensions.last() {
+            Some(last) if last.typ == extension::PRE_SHARED_KEY => {}
+            _ => {
+                return Err(HandshakeError::PskOffer(
+                    "pre_shared_key is not the last extension",
+                ))
+            }
+        }
+
+        let encoded = Message::encode(HandshakeType::ClientHello, &hello.encode());
+        let block = binder_block_len(binder_lens.iter().copied());
+        let truncated_len = encoded
+            .len()
+            .checked_sub(block)
+            .ok_or(HandshakeError::PskOffer(
+                "the message is shorter than its binders",
+            ))?;
+
+        // The placeholders have to be exactly where the arithmetic says they
+        // are, or the splice below writes over something else. Re-encoding
+        // them and comparing is the check that says so.
+        let zeroed: Vec<Vec<u8>> = binder_lens.iter().map(|len| vec![0u8; *len]).collect();
+        let mut expected = Writer::new();
+        write_binders(&mut expected, zeroed.iter().map(|binder| binder.as_slice()));
+        if &encoded[truncated_len..] != expected.as_slice() {
+            return Err(HandshakeError::PskOffer(
+                "the binder placeholders are not at the end of the hello",
+            ));
+        }
+
+        Ok(Self {
+            encoded,
+            truncated_len,
+            binder_lens: binder_lens.to_vec(),
+        })
+    }
+
+    /// The bytes a binder is computed over: everything up to, but not
+    /// including, the binder block.
+    pub fn truncated(&self) -> &[u8] {
+        &self.encoded[..self.truncated_len]
+    }
+
+    /// Splice the real binders in and take the finished message.
+    ///
+    /// `binders` must match the lengths [`Self::new`] was given, in order.
+    pub fn finish(mut self, binders: &[Vec<u8>]) -> Result<Vec<u8>> {
+        if binders.len() != self.binder_lens.len()
+            || binders
+                .iter()
+                .zip(&self.binder_lens)
+                .any(|(binder, len)| binder.len() != *len)
+        {
+            return Err(HandshakeError::PskOffer(
+                "the binders do not match the placeholders they replace",
+            ));
+        }
+
+        let mut at = self.truncated_len + 2;
+        for binder in binders {
+            at += 1; // the PskBinderEntry length octet, already correct
+            self.encoded[at..at + binder.len()].copy_from_slice(binder);
+            at += binder.len();
+        }
+        debug_assert_eq!(at, self.encoded.len(), "every placeholder was replaced");
+        Ok(self.encoded)
     }
 }
 

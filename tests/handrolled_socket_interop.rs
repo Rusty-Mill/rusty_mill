@@ -229,6 +229,7 @@ fn serve(listener: TcpListener, pki: Pki) -> Report {
         // OpenSSL is not asked to authenticate here; that path has its own
         // hermetic coverage in `handrolled_server`.
         client_auth: None,
+        tickets: None,
     };
 
     let Ok((mut socket, _)) = listener.accept() else {

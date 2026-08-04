@@ -26,8 +26,9 @@
 
 use rusty_tls::handrolled::handshake::{
     certificate_verify_content, extension, find, messages, parse_encrypted_extensions,
-    parse_finished, CertificateMessage, CertificateVerify, ClientHello, HandshakeError,
-    HandshakeType, Message, ServerHello, Transcript, SERVER_CERTIFICATE_VERIFY_CONTEXT,
+    parse_finished, pre_shared_key_placeholder, BinderHello, CertificateMessage, CertificateVerify,
+    ClientHello, Extension, HandshakeError, HandshakeType, Message, PresharedKeyOffer, PskIdentity,
+    ServerHello, Transcript, SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use rusty_tls::handrolled::schedule::{finished_verify_data, Hash, KeySchedule};
 use rusty_tls::handrolled::wire::WireError;
@@ -554,5 +555,222 @@ fn a_certificate_entry_cannot_reach_past_the_certificate_list() {
             available: entry_length + 2,
         })),
         "an entry overrunning the certificate list was not refused as an overrun"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two-phase ClientHello — rusty_tls#43
+// ---------------------------------------------------------------------------
+
+/// A ClientHello carrying a `pre_shared_key` offer with `binder_lens`-sized
+/// placeholders, built on the RFC's own hello so the surrounding message is
+/// real rather than a fixture shaped to suit the test.
+fn hello_with_offer(binder_lens: &[usize], trailing_extension: bool) -> Vec<u8> {
+    let encoded = hex(CLIENT_HELLO);
+    let message = messages(&encoded).expect("the RFC's hello parses")[0];
+    let mut hello = ClientHello::parse(message.body).expect("a ClientHello");
+
+    let identities = [PskIdentity {
+        identity: b"an opaque ticket",
+        obfuscated_ticket_age: 0x0102_0304,
+    }];
+    let offer = pre_shared_key_placeholder(&identities, binder_lens);
+    hello.extensions.push(Extension {
+        typ: extension::PRE_SHARED_KEY,
+        data: &offer,
+    });
+    // An unregistered type, so this is a trailing extension and not a
+    // duplicate of one the RFC's hello already carries — 0xff01 is
+    // `renegotiation_info`, which that hello does carry.
+    let trailing = [0x03u8, 0x04];
+    if trailing_extension {
+        hello.extensions.push(Extension {
+            typ: 0xff02,
+            data: &trailing,
+        });
+    }
+    // Encoded here rather than returned as a `ClientHello`, because the struct
+    // borrows `offer` and `trailing`, which do not outlive this function.
+    Message::encode(HandshakeType::ClientHello, &hello.encode())
+}
+
+/// The bytes a binder covers are a **literal prefix** of the message that is
+/// sent.
+///
+/// This is the property the two-phase encoding exists for, and the one that
+/// cannot be checked by looking at either half alone. If the truncated bytes
+/// were a separate serialisation — "encode everything up to the binders" —
+/// then every length field in it would have to be independently correct, and a
+/// disagreement between the two encoders would produce a binder over bytes
+/// nobody ever sent. Building with placeholders and splicing makes the two
+/// the same bytes by construction; this asserts that construction held.
+#[test]
+fn the_truncated_hello_is_a_prefix_of_the_finished_one() {
+    let encoded = hex(CLIENT_HELLO);
+    let message = messages(&encoded).expect("the RFC's hello parses")[0];
+    let mut hello = ClientHello::parse(message.body).expect("a ClientHello");
+    let identities = [PskIdentity {
+        identity: b"an opaque ticket",
+        obfuscated_ticket_age: 0x0102_0304,
+    }];
+    let offer = pre_shared_key_placeholder(&identities, &[32]);
+    hello.extensions.push(Extension {
+        typ: extension::PRE_SHARED_KEY,
+        data: &offer,
+    });
+
+    let placeheld = BinderHello::new(&hello, &[32]).expect("a hello with placeholders");
+    let truncated = placeheld.truncated().to_vec();
+    let binder = vec![0xabu8; 32];
+    let finished = placeheld
+        .finish(std::slice::from_ref(&binder))
+        .expect("the splice");
+
+    assert_eq!(
+        &finished[..truncated.len()],
+        truncated.as_slice(),
+        "the binder covers bytes that are not a prefix of the message sent"
+    );
+    assert_eq!(
+        finished.len(),
+        // uint16 for the binder list, then a uint8 length and the binder.
+        truncated.len() + 2 + 1 + 32,
+        "the binder block is not the whole of what truncation removed"
+    );
+    assert_eq!(
+        &finished[finished.len() - 32..],
+        binder.as_slice(),
+        "the real binder did not land where the placeholder was"
+    );
+
+    // And the finished message is still a well-formed ClientHello whose offer
+    // reads back as what went in — a splice that corrupted a length field
+    // would leave the arithmetic above intact and this parse broken.
+    let message = messages(&finished).expect("the spliced hello parses")[0];
+    let hello = ClientHello::parse(message.body).expect("a ClientHello");
+    let data = find(&hello.extensions, extension::PRE_SHARED_KEY).expect("the offer");
+    let offer = PresharedKeyOffer::parse(data).expect("the offer parses");
+    assert_eq!(offer.identities[0].identity, b"an opaque ticket");
+    assert_eq!(offer.identities[0].obfuscated_ticket_age, 0x0102_0304);
+    assert_eq!(offer.binders, vec![binder.as_slice()]);
+    assert_eq!(
+        offer.truncated(&finished).expect("the truncation point"),
+        truncated.as_slice(),
+        "the receiving side truncates somewhere else than the sending side"
+    );
+}
+
+/// An extension after the offer is refused, on both sides.
+///
+/// The whole reason `pre_shared_key` must be last is that a binder covers only
+/// what precedes it. A hello with anything after the offer has bytes the
+/// binder does not prove, and both the encoder and the parser have to say so —
+/// the encoder because it would otherwise splice into the middle of a message,
+/// and the parser because a peer is not obliged to be well-behaved.
+#[test]
+fn an_extension_after_the_offer_is_refused() {
+    let encoded = hex(CLIENT_HELLO);
+    let message = messages(&encoded).expect("the RFC's hello parses")[0];
+    let mut hello = ClientHello::parse(message.body).expect("a ClientHello");
+    let identities = [PskIdentity {
+        identity: b"an opaque ticket",
+        obfuscated_ticket_age: 0,
+    }];
+    let offer = pre_shared_key_placeholder(&identities, &[32]);
+    hello.extensions.push(Extension {
+        typ: extension::PRE_SHARED_KEY,
+        data: &offer,
+    });
+    let trailing = [0x03u8, 0x04];
+    hello.extensions.push(Extension {
+        typ: 0xff02,
+        data: &trailing,
+    });
+
+    assert!(
+        matches!(
+            BinderHello::new(&hello, &[32]),
+            Err(HandshakeError::PskOffer(_))
+        ),
+        "a hello with an extension after the offer was encoded anyway"
+    );
+
+    // The parsing side, on a message that really was built that way.
+    let sent = hello_with_offer(&[32], true);
+    let message = messages(&sent).expect("it parses as a message")[0];
+    let parsed = ClientHello::parse(message.body).expect("a ClientHello");
+    let data = find(&parsed.extensions, extension::PRE_SHARED_KEY).expect("the offer");
+    let offer = PresharedKeyOffer::parse(data).expect("the offer parses");
+    assert!(
+        matches!(
+            offer.truncated(message.encoded),
+            Err(HandshakeError::PskOffer(_))
+        ),
+        "a received hello with an extension after the offer was truncated anyway"
+    );
+}
+
+/// Binders that do not match the placeholders they replace are refused.
+///
+/// A binder of the wrong length cannot be spliced in without moving every byte
+/// after it, and there are no bytes after it — so the failure would be a
+/// silent truncation of the binder rather than a wrong hello. Refusing is the
+/// only outcome that says what happened.
+#[test]
+fn a_binder_that_does_not_fit_its_placeholder_is_refused() {
+    let encoded = hex(CLIENT_HELLO);
+    let message = messages(&encoded).expect("the RFC's hello parses")[0];
+    let mut hello = ClientHello::parse(message.body).expect("a ClientHello");
+    let identities = [PskIdentity {
+        identity: b"an opaque ticket",
+        obfuscated_ticket_age: 0,
+    }];
+    let offer = pre_shared_key_placeholder(&identities, &[48]);
+    hello.extensions.push(Extension {
+        typ: extension::PRE_SHARED_KEY,
+        data: &offer,
+    });
+
+    let placeheld = BinderHello::new(&hello, &[48]).expect("a hello with placeholders");
+    assert!(
+        matches!(
+            placeheld.clone().finish(&[vec![0u8; 32]]),
+            Err(HandshakeError::PskOffer(_))
+        ),
+        "a 32-octet binder was spliced into a 48-octet placeholder"
+    );
+    assert!(
+        matches!(
+            placeheld.clone().finish(&[vec![0u8; 48], vec![0u8; 48]]),
+            Err(HandshakeError::PskOffer(_))
+        ),
+        "two binders were spliced into one placeholder"
+    );
+    assert!(placeheld.finish(&[vec![0u8; 48]]).is_ok());
+}
+
+/// A `pre_shared_key` offer with more binders than identities is refused.
+///
+/// RFC 8446 §4.2.11 requires the lists to be the same length. Index-matching
+/// through a mismatch would check one identity's binder and use another's key,
+/// which is a check that looks like it happened.
+#[test]
+fn an_offer_with_mismatched_lists_is_refused() {
+    let mut writer = rusty_tls::handrolled::wire::Writer::new();
+    writer.vector_u16(|w| {
+        w.vector_u16(|w| w.bytes(b"one ticket"));
+        w.u32(0);
+    });
+    writer.vector_u16(|w| {
+        w.vector_u8(|w| w.bytes(&[0u8; 32]));
+        w.vector_u8(|w| w.bytes(&[0u8; 32]));
+    });
+
+    assert!(
+        matches!(
+            PresharedKeyOffer::parse(&writer.into_vec()),
+            Err(HandshakeError::PskOffer(_))
+        ),
+        "an offer with two binders for one identity was accepted"
     );
 }

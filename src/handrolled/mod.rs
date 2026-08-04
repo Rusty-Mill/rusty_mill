@@ -65,6 +65,10 @@
 //!   here that holds a private key rather than only checking one.
 //! - [`server`] — the TLS 1.3 server handshake (stage 5). The mirror of
 //!   [`client`], and exposed differently: every byte it parses is unsolicited.
+//! - [`ticket`] — sealing and opening resumption tickets (stage 5,
+//!   `rusty_tls#43`), and the key that does it. That key is as sensitive as
+//!   the certificate's private key and needs rotating; the module says why and
+//!   [`ticket::TicketKeys`] is the shape that makes rotating possible.
 //!
 //! TLS 1.2 (4b) is not built, and the ADR records why as a decision rather
 //! than an omission.
@@ -86,6 +90,7 @@ pub mod record;
 pub mod schedule;
 pub mod server;
 pub mod sign;
+pub mod ticket;
 pub mod verify;
 pub mod wire;
 pub mod x509;
