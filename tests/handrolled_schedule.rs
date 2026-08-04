@@ -26,8 +26,8 @@
 #![cfg(all(feature = "handrolled-engine", rusty_tls_handrolled))]
 
 use rusty_tls::handrolled::schedule::{
-    derive_secret, expand_label, finished_key, finished_verify_data, traffic_keys,
-    update_traffic_secret, verify_finished, Hash, KeySchedule,
+    binder_key, derive_secret, expand_label, finished_key, finished_verify_data, psk_binder,
+    traffic_keys, update_traffic_secret, verify_finished, Hash, KeySchedule,
 };
 
 fn hex(text: &str) -> Vec<u8> {
@@ -547,4 +547,78 @@ fn the_tls13_prefix_is_part_of_the_label() {
     // And the published "key" expansion is the one that matches the RFC —
     // covered by `traffic_keys_match_the_record_layer_kat`, which would fail
     // if the prefix were missing or doubled.
+}
+
+// ---------------------------------------------------------------------------
+// PSK binders — rusty_tls#43, stage three
+// ---------------------------------------------------------------------------
+
+/// A binder is a function of the PSK and the truncated transcript, and of
+/// nothing else.
+///
+/// Deterministic is not a weak property here: the server recomputes the same
+/// value from its own copy of both, and a binder that varied would fail every
+/// resumption for reasons no log would explain.
+#[test]
+fn a_binder_is_determined_by_the_psk_and_the_transcript() {
+    let psk = [7u8; 32];
+    let transcript = [9u8; 32];
+
+    let once = psk_binder(Hash::Sha256, &psk, &transcript);
+    let twice = psk_binder(Hash::Sha256, &psk, &transcript);
+    assert_eq!(once, twice);
+    assert_eq!(once.len(), 32, "a SHA-256 binder is the hash length");
+}
+
+/// A different PSK gives a different binder.
+///
+/// This is what the binder is *for*: it proves the client holds the key the
+/// ticket stands for. A binder that ignored the PSK would be a proof of
+/// nothing, and would still look correct in a round-trip test.
+#[test]
+fn a_binder_depends_on_the_psk() {
+    let transcript = [9u8; 32];
+    let mine = psk_binder(Hash::Sha256, &[7u8; 32], &transcript);
+    let theirs = psk_binder(Hash::Sha256, &[8u8; 32], &transcript);
+    assert_ne!(mine, theirs, "the binder ignored the pre-shared key");
+}
+
+/// A different truncated transcript gives a different binder.
+///
+/// The other half of what it proves: that *this* ClientHello is the one the
+/// key was offered with. Without it a captured binder could be replayed onto a
+/// different hello.
+#[test]
+fn a_binder_depends_on_the_transcript() {
+    let psk = [7u8; 32];
+    let here = psk_binder(Hash::Sha256, &psk, &[9u8; 32]);
+    let there = psk_binder(Hash::Sha256, &psk, &[10u8; 32]);
+    assert_ne!(here, there, "the binder ignored the transcript");
+}
+
+/// The binder key is not the PSK, and not the PSK's early secret either.
+///
+/// `Derive-Secret` stands between them on purpose: a binder computed directly
+/// from the PSK would leak a distinguisher on the key itself, and the whole
+/// point of the schedule is that each secret is used for exactly one thing.
+#[test]
+fn the_binder_key_is_derived_rather_than_the_psk_itself() {
+    let psk = [7u8; 32];
+    let key = binder_key(Hash::Sha256, &psk);
+
+    assert_ne!(key.as_slice(), psk.as_slice());
+    assert_eq!(key.len(), 32);
+    // And it is bound to the PSK, so two sessions never share one.
+    assert_ne!(key, binder_key(Hash::Sha256, &[8u8; 32]));
+}
+
+/// A SHA-384 session's binder is 48 octets, not 32.
+///
+/// The binder's length follows the suite's hash, so a resumption offered under
+/// a different suite than the ticket was issued for is a different computation
+/// — which is why [`Session`] records the suite it belongs to.
+#[test]
+fn a_binders_length_follows_the_hash() {
+    let psk = [7u8; 48];
+    assert_eq!(psk_binder(Hash::Sha384, &psk, &[9u8; 48]).len(), 48);
 }

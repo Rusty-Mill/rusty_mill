@@ -23,6 +23,18 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.7.0
+**2026-08-03**
+
+- **Added:** PSK binder derivation (#43, stage three, partial) —
+  `schedule::binder_key` and `schedule::psk_binder`.
+
+**Known limitation:** the tests check the shape of these functions, not their
+values — a mutation swapping the `"res binder"` label for `"ext binder"` passes
+all of them. Only RFC 8448's resumption vectors or a real resumption can check
+the value, and neither exists here yet. Nothing calls these in the handshake
+path, so **still nothing resumes.** #43 remains open.
+
 ## v0.6.0
 **2026-08-03**
 
