@@ -98,7 +98,13 @@ unsafe extern "system" {
     pub fn UpdateWindow(h_wnd: HWND) -> i32;
     pub fn GetDC(h_wnd: HWND) -> HDC;
     pub fn ReleaseDC(h_wnd: HWND, h_dc: HDC) -> i32;
-    pub fn PeekMessageW(lp_msg: *mut MSG, h_wnd: HWND, w_msg_filter_min: u32, w_msg_filter_max: u32, w_remove_msg: u32) -> i32;
+    pub fn PeekMessageW(
+        lp_msg: *mut MSG,
+        h_wnd: HWND,
+        w_msg_filter_min: u32,
+        w_msg_filter_max: u32,
+        w_remove_msg: u32,
+    ) -> i32;
     pub fn TranslateMessage(lp_msg: *const MSG) -> i32;
     pub fn DispatchMessageW(lp_msg: *const MSG) -> isize;
     pub fn DefWindowProcW(h_wnd: HWND, msg: u32, w_param: usize, l_param: isize) -> isize;
@@ -120,6 +126,14 @@ unsafe extern "system" {
 }
 
 /// Helper function to create a native Windows OS Window.
+///
+/// # Safety
+///
+/// Must be called from the thread that will subsequently pump this
+/// window's messages (`PeekMessageW`/`TranslateMessage`/`DispatchMessageW`)
+/// — `RegisterClassExW`/`CreateWindowExW` tie the window class and the
+/// returned `HWND` to the calling thread's message queue, the same
+/// thread-affinity Win32 itself documents for all windowing calls.
 pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND {
     let class_name: Vec<u16> = "RustyMillWindowClass\0".encode_utf16().collect();
     let title_utf16: Vec<u16> = title.encode_utf16().chain(core::iter::once(0)).collect();
@@ -167,6 +181,14 @@ pub unsafe fn create_native_window(title: &str, width: u32, height: u32) -> HWND
 }
 
 /// Helper function to blit a raw 32-bit pixel buffer to a Window HDC via StretchDIBits.
+///
+/// # Safety
+///
+/// `hwnd` must be a currently-open, valid window handle from
+/// [`create_native_window`] (or null, silently skipped). `pixels` must
+/// contain at least `width * height` elements — `StretchDIBits` reads
+/// exactly that many pixels starting at `pixels.as_ptr()`, with no bounds
+/// check against the slice's own length.
 pub unsafe fn blit_pixel_buffer(hwnd: HWND, width: usize, height: usize, pixels: &[u32]) {
     if hwnd.is_null() {
         return;

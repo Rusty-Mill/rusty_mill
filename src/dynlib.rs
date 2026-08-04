@@ -52,11 +52,7 @@ pub unsafe fn get_proc_address(module: RawHandle, name: &str) -> Option<*mut cor
     // contract; `c_name` is a valid null-terminated byte string for the
     // duration of this call.
     let proc = unsafe { GetProcAddress(module, c_name.as_ptr()) };
-    if proc.is_null() {
-        None
-    } else {
-        Some(proc)
-    }
+    if proc.is_null() { None } else { Some(proc) }
 }
 
 /// Unloads a module obtained from [`load_library`], decrementing its

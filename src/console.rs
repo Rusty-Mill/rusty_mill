@@ -1217,7 +1217,7 @@ mod tests {
         let stdin = ensure_console_stdin();
 
         match unsafe { write_char_events(stdin, "a") } {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(Win32Error::ERROR_INVALID_HANDLE) => return,
             Err(e) => panic!("WriteConsoleInputW should succeed: {e:?}"),
         }
@@ -1227,7 +1227,7 @@ mod tests {
         assert!(ready_before, "queued input should make the handle ready");
 
         match unsafe { flush_input(stdin) } {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(Win32Error::ERROR_INVALID_HANDLE) => return,
             Err(e) => panic!("FlushConsoleInputBuffer failed: {e:?}"),
         }
@@ -1300,8 +1300,8 @@ mod tests {
     fn alloc_fails_when_a_console_is_already_attached() {
         let _ = ensure_console_stdin(); // guarantee a console exists first
         match alloc() {
-            Err(Win32Error::ERROR_ACCESS_DENIED) => {},
-            Ok(_) => {},
+            Err(Win32Error::ERROR_ACCESS_DENIED) => {}
+            Ok(_) => {}
             Err(e) => panic!("AllocConsole failed: {e:?}"),
         }
     }
@@ -1471,7 +1471,7 @@ mod tests {
         // SAFETY: `stdout` is a valid console output handle per the above.
         match unsafe { fill_char(stdout, u16::from(b'x'), 0, 0, 5) } {
             Ok(written) => assert_eq!(written, 5),
-            Err(Win32Error::ERROR_INVALID_HANDLE) | Err(Win32Error::ERROR_GEN_FAILURE) => return,
+            Err(Win32Error::ERROR_INVALID_HANDLE) | Err(Win32Error::ERROR_GEN_FAILURE) => (),
             Err(e) => panic!("FillConsoleOutputCharacterW failed: {e:?}"),
         }
     }
@@ -1485,7 +1485,7 @@ mod tests {
         // SAFETY: `stdout` is a valid console output handle per the above.
         match unsafe { fill_attribute(stdout, 0x0007, 0, 0, 5) } {
             Ok(written) => assert_eq!(written, 5),
-            Err(Win32Error::ERROR_INVALID_HANDLE) | Err(Win32Error::ERROR_GEN_FAILURE) => return,
+            Err(Win32Error::ERROR_INVALID_HANDLE) | Err(Win32Error::ERROR_GEN_FAILURE) => (),
             Err(e) => panic!("FillConsoleOutputAttribute failed: {e:?}"),
         }
     }

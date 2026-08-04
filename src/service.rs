@@ -1062,7 +1062,9 @@ mod tests {
         let scm = open_manager(SC_MANAGER_CONNECT)
             .expect("OpenSCManagerW should succeed with SC_MANAGER_CONNECT");
         // SAFETY: `scm` is valid and open from the call just above.
-        let service = match unsafe { open_service(scm, "EventLog", SERVICE_START | SERVICE_QUERY_STATUS) } {
+        let service = match unsafe {
+            open_service(scm, "EventLog", SERVICE_START | SERVICE_QUERY_STATUS)
+        } {
             Ok(s) => s,
             Err(Win32Error::ERROR_ACCESS_DENIED) => {
                 unsafe { close(scm) }.expect("CloseServiceHandle should succeed on the SCM handle");
