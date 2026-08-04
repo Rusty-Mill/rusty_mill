@@ -4632,6 +4632,7 @@ fn trap_cmd(argv: &[String]) -> i32 {
             Some(name) => crate::trap::set(name, command),
             None => {
                 eprintln!("trap: {spec}: invalid signal specification");
+                status = 1;
             }
         }
     }
@@ -4639,6 +4640,17 @@ fn trap_cmd(argv: &[String]) -> i32 {
 }
 
 // --- PowerShell-like Object Cmdlets ---
+
+/// Whether `name` is one of the object cmdlets above — the narrower check
+/// `exec::run_foreground_dispatch` needs to decide whether an all-builtins
+/// pipeline is actually an object pipeline (safe to run in-process, piping
+/// `Value`s stage to stage) versus an ordinary pipeline that happens to be
+/// made entirely of *regular* builtins (e.g. `echo hi | read x`), which
+/// still needs real OS-level pipes: `is_builtin` alone can't tell these
+/// apart, since `echo`/`read`/etc. are builtins too.
+pub fn is_object_cmdlet(name: &str) -> bool {
+    matches!(name, "ls-obj" | "ps-obj" | "from-json" | "to-json" | "where" | "select" | "sort-obj")
+}
 
 pub fn ls_obj_cmd(argv: &[String]) -> i32 {
     use crate::value::{push_pipeline_output, Value};
