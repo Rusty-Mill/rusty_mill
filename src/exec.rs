@@ -1499,15 +1499,18 @@ fn run_foreground_dispatch(raw: &RawPipeline) -> Result<i32, String> {
         return with_prefix_assignments(&cmd, || run_builtin_foreground(&cmd));
     }
 
-    // Multi-stage builtins pipeline (e.g. `ls-obj | where size -gt 10 | select name`):
-    // run in-process passing object streams between stages.
-    let all_builtins = pipeline.commands.len() > 1
+    // Multi-stage *object-cmdlet* pipeline (e.g. `ls-obj | where size -gt 10 |
+    // select name`): run in-process passing object streams between stages.
+    // Narrower than "every stage is *a* builtin" (`echo hi | read x` is an
+    // all-builtins pipeline too, but an ordinary text one that still needs
+    // real OS-level pipes between `echo` and `read`, not the object stream).
+    let all_object_cmdlets = pipeline.commands.len() > 1
         && pipeline.commands.iter().all(|stage| match stage {
-            Stage::Simple(c) => c.argv.first().is_some_and(|name| builtins::is_builtin(name)),
+            Stage::Simple(c) => c.argv.first().is_some_and(|name| builtins::is_object_cmdlet(name)),
             _ => false,
         });
 
-    if all_builtins {
+    if all_object_cmdlets {
         crate::value::reset_pipeline_stream();
         let n = pipeline.commands.len();
         let mut statuses = Vec::with_capacity(n);
