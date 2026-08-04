@@ -49,7 +49,7 @@
 //! # Session resumption
 //!
 //! Implemented, as of `rusty_tls#43`. A NewSessionTicket arrives as an
-//! [`Incoming::Ticket`] carrying a [`Session`]; putting that session in
+//! [`Incoming::Tickets`] carrying a [`Session`]; putting that session in
 //! [`ClientConfig::resumption`] offers it back as a `pre_shared_key` on the
 //! next connection, and [`Connection::resumed`] says whether the server took
 //! it.
@@ -576,7 +576,7 @@ pub struct ClientConfig<'a> {
 /// would invite storing a stale one.
 #[derive(Clone, Copy, Debug)]
 pub struct Resumption<'a> {
-    /// The session, as [`Incoming::Ticket`] delivered it.
+    /// The session, as [`Incoming::Tickets`] delivered it.
     pub session: &'a Session,
     /// Milliseconds since the NewSessionTicket arrived.
     ///
