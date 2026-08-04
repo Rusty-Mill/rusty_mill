@@ -312,6 +312,48 @@ impl KeySchedule {
     }
 }
 
+/// The binder key for a resumption PSK.
+///
+/// `Derive-Secret(Early-Secret(psk), "res binder", "")`. The early secret here
+/// is extracted from the PSK rather than from zeroes, which is the one place
+/// the key schedule's first step differs between a fresh handshake and a
+/// resumed one.
+///
+/// `"res binder"` and not `"ext binder"`: the two labels separate a *resumption*
+/// PSK from an externally provisioned one, so a key established one way cannot
+/// be presented as if it had been established the other.
+///
+/// # What the tests here do and do not prove
+///
+/// The suite covers the *shape* of this function — deterministic, dependent on
+/// both the PSK and the transcript, the right length for the hash, and not
+/// simply the PSK passed through. It does **not** pin the value: swapping this
+/// label for `"ext binder"` passes every one of them.
+///
+/// Nothing in this repo can check the value yet. That needs either RFC 8448's
+/// resumption vectors or a handshake that actually resumes, and neither exists
+/// here — see `rusty_tls#43`. Said plainly because five green tests beside a
+/// derivation invite the reader to conclude the derivation is right.
+pub fn binder_key(hash: Hash, psk: &[u8]) -> Vec<u8> {
+    let early = KeySchedule::new_with_psk(hash, psk);
+    derive_secret(hash, early.secret(), "res binder", &hash.empty_hash())
+}
+
+/// The binder for a `pre_shared_key` offer.
+///
+/// The same HMAC construction as a Finished, over the ClientHello **truncated
+/// to just before the binders themselves** — a binder cannot cover itself. That
+/// is why `pre_shared_key` must be the last extension in the hello: anything
+/// after it would fall outside what the binder proves.
+///
+/// `truncated_transcript_hash` is the hash of everything up to that point,
+/// which for a first-connection resumption is just the truncated hello and for
+/// one after a HelloRetryRequest includes the earlier messages too.
+pub fn psk_binder(hash: Hash, psk: &[u8], truncated_transcript_hash: &[u8]) -> Vec<u8> {
+    let key = binder_key(hash, psk);
+    finished_verify_data(hash, &key, truncated_transcript_hash)
+}
+
 /// The record-protection key and IV derived from one traffic secret.
 ///
 /// RFC 8446 §7.3. Both are `HKDF-Expand-Label` from the same secret with

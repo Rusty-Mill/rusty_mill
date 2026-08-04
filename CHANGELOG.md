@@ -5,6 +5,31 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-03
+
+`y` under §2: `schedule` gained two public functions.
+
+### Added
+- **PSK binder derivation** (rusty_tls#43, stage three, partial).
+  `schedule::binder_key` computes `Derive-Secret(Early-Secret(psk),
+  "res binder", "")` — the one place the key schedule's first step differs
+  between a fresh handshake and a resumed one, because the early secret is
+  extracted from the PSK rather than from zeroes. `schedule::psk_binder`
+  applies the Finished construction over the truncated ClientHello.
+
+**Known limitation, and it is a real one.** The tests cover the *shape* of
+these functions — deterministic, dependent on both the PSK and the transcript,
+the right length, not the PSK passed through. **They do not pin the values:**
+a mutation swapping `"res binder"` for `"ext binder"` passes all five. Checking
+the value needs RFC 8448's resumption vectors or a handshake that actually
+resumes, and neither exists here yet.
+
+Nothing calls these functions in the handshake path. They are covered by tests
+rather than left unreachable, but no ClientHello offers a `pre_shared_key` and
+no server accepts one, so **still nothing resumes.** #43 stays open for the
+offer path, the two-phase ClientHello encoding the binder requires, and the
+server side.
+
 ## [0.6.0] - 2026-08-03
 
 `y` under §2: `Incoming` gained a variant and `Session` is new public surface.
