@@ -1426,10 +1426,19 @@ fn a_session_ticket_is_never_handed_to_the_caller_as_data() {
     let ticket = Message::encode(HandshakeType::NewSessionTicket, &body.into_vec());
     let record = server.seal(ContentType::Handshake, &ticket);
 
+    let incoming = connection.read(&record).expect("the ticket is tolerated");
+    let Incoming::Ticket(session) = incoming else {
+        panic!("a session ticket surfaced as {incoming:?} rather than a Ticket");
+    };
+    assert_eq!(session.ticket, b"an opaque ticket");
+    assert_eq!(session.lifetime, 7200);
+    // The derived key is the whole point of surfacing it: a Session whose PSK
+    // was empty would look resumable and be useless.
+    assert!(!session.psk().is_empty(), "the session carries no key");
     assert_eq!(
-        connection.read(&record).expect("the ticket is tolerated"),
-        Incoming::Handled,
-        "a session ticket surfaced as something other than 'handled'"
+        session.psk().len(),
+        32,
+        "a SHA-256 session's PSK should be 32 octets"
     );
 
     // And the connection still works.
@@ -2376,7 +2385,13 @@ fn a_rustls_server_now_sends_session_tickets() {
     let mut tickets = 0usize;
     for record in take_records(&mut stream) {
         match connection.read(&record).expect("a post-handshake record") {
-            Incoming::Handled => tickets += 1,
+            Incoming::Ticket(session) => {
+                assert!(
+                    !session.psk().is_empty(),
+                    "a ticket arrived with no derived key"
+                );
+                tickets += 1;
+            }
             Incoming::Application(data) => {
                 panic!("a post-handshake message surfaced as data: {data:02x?}")
             }

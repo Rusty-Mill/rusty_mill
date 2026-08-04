@@ -23,6 +23,27 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.6.0
+**2026-08-03**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Added:** session tickets are kept rather than discarded (#43, stage two). A
+  NewSessionTicket arrives as `Incoming::Ticket(Box<Session>)`, and the
+  `Session` carries the PSK derived from it.
+
+### Upgrade notes
+
+- **`Incoming::Handled` no longer covers NewSessionTicket.** A caller matching
+  on `Handled` to mean "a ticket arrived" now needs `Ticket(_)`. `Incoming` is
+  `#[non_exhaustive]`, so a wildcard arm already handles it.
+
+**Known limitation, stated rather than implied:** nothing offers the PSK back
+yet, so **no handshake is resumed, and the derived key's value is verified by
+nothing.** The tests show a key of the right length from the right inputs; only
+a completed resumption proves the `res master` transcript point and the
+`"resumption"` expansion are correct. #43 stays open for that.
+
 ## v0.5.0
 **2026-08-03**
 
