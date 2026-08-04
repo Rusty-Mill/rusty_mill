@@ -23,6 +23,45 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.9.0
+**2026-08-04**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Added:** the server half resumes (#43) — `ServerConfig::tickets` makes this
+  server issue NewSessionTickets and accept them back as a `pre_shared_key`.
+- **Added:** `handrolled::ticket` — `TicketKey`, `TicketKeys`, `TicketContents`.
+  Resumption is stateless, so the server holds a sealing key instead of a
+  session table. **That key is as sensitive as the certificate's private key**
+  and needs rotating; `TicketKeys` carries retired keys so rotation is not an
+  outage.
+- **Changed:** `Incoming::Ticket(Box<Session>)` is now
+  `Incoming::Tickets(Vec<Session>)`. A server routinely sends several tickets in
+  one record and the old variant kept only the last.
+- **Security:** a recognised identity with a bad binder aborts rather than
+  falling back; `early_data` and a misplaced `pre_shared_key` are refused;
+  tickets are ignored when they do not open, have expired, belong to another
+  suite, or were issued under a different certificate chain.
+
+**Measured, not assumed.** Twenty-five mutations across both halves, each
+asserted to have applied before its result was believed, and each killed by a
+named test. Four survived their first run — a reusable ticket nonce, a droppable
+cipher-suite binding, removable sealing associated data, and a deletable
+PSK-hash check — and are why three tests and one behaviour change exist.
+
+### Upgrade notes
+
+- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is the
+  previous behaviour exactly.
+- **`Incoming::Ticket` is gone; match `Incoming::Tickets(sessions)`** and take
+  what you want from the `Vec`, which is never empty.
+
+**Known limitations:** resumption and client authentication do not combine — with
+`client_auth` configured, a `pre_shared_key` offer gets a full handshake,
+because these tickets carry no client identity. And `obfuscated_ticket_age` is
+still unchecked by this server; it exists for 0-RTT anti-replay, which ADR-0003
+puts out of scope.
+
 ## v0.8.0
 **2026-08-04**
 

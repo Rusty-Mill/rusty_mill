@@ -5,6 +5,81 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-08-04
+
+Built and tested against the same sibling revs as 0.2.x–0.8.0. Neither moved.
+
+`y` under §2: a new public module, and `Incoming` changed shape.
+
+### Added
+- **The server half resumes** (rusty_tls#43). With `ServerConfig::tickets` set,
+  this server issues NewSessionTickets and accepts them back as a
+  `pre_shared_key`.
+  - A new `handrolled::ticket` module: `TicketKey`, `TicketKeys`, and
+    `TicketContents`. Resumption here is **stateless** — a ticket is a sealed
+    copy of the PSK, so the server keeps no per-session storage and instead
+    keeps a key. **That key is as sensitive as the certificate's private key**,
+    and ADR-0003 says so: anyone who can open a ticket learns a PSK that
+    authenticates a handshake as the continuation of a certificate-authenticated
+    session, and anyone who can forge one can mint that authentication from
+    nothing. `TicketKeys` carries a current key plus retired keys still accepted,
+    because rotation that refuses every outstanding ticket is an outage.
+  - A ticket is bound to the **certificate chain** that issued it as well as to
+    the sealing key. Two configurations sharing a key is a real deployment; two
+    presenting different certificates and sharing one is a mistake, and the key
+    alone does not say which identity sealed a ticket.
+  - `Tickets` carries `now` explicitly, for the reason `PathOptions::time` does:
+    nothing in this module reads a clock.
+
+### Changed
+- **`Incoming::Ticket(Box<Session>)` is now `Incoming::Tickets(Vec<Session>)`.**
+  A server routinely sends several tickets in one record — `rustls` sends two by
+  default — and the old variant silently kept whichever arrived last. Measured
+  by mutation: a change that discarded all but the last survived every test in
+  the repo until the two-ticket assertion existed.
+- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is
+  exactly the previous behaviour.
+
+### Security
+- **A recognised identity with a bad binder aborts the handshake** (§4.2.11),
+  with `decrypt_error`. It is not a fallback: once the server has chosen which
+  key the client claims to hold, the binder is the only proof it holds it, and
+  falling back would let the handshake complete having checked nothing.
+- **`early_data` in a ClientHello is refused**, with `illegal_parameter`, whether
+  or not this server would have resumed at all.
+- **`pre_shared_key` anywhere but last is refused**, with `illegal_parameter`.
+  Everything after the offer falls outside what the binders prove.
+- **Tickets are ignored, not honoured, when they do not open, have expired,
+  belong to another cipher suite, or were issued under a different certificate
+  chain.** Each of those has a test, and each is a mutation that survived
+  without one.
+- **Client-side `pre_shared_key` refusals now have tests.** An unoffered PSK, a
+  `selected_identity` past the end of the offer, and a suite whose hash is not
+  the PSK's are each refused — reached with a synthetic hostile ServerHello,
+  because no correct server produces any of them and no interop test can.
+
+**Measured, not assumed.** Twenty-five mutations across both halves, each
+asserted to have applied before its result was believed, and each killed by a
+named test. Four survived their first run and are the reason three tests and one
+behaviour change exist: the ticket nonce could be reused, the cipher-suite
+binding could be dropped, the sealing associated data could be removed, and the
+client's PSK-hash check could be deleted — none of which any test in the repo
+noticed at the time.
+
+**Known limitations, stated rather than implied:**
+- **Resumption and client authentication do not combine.** With
+  `ServerConfig::client_auth` set, a `pre_shared_key` offer is answered with a
+  full handshake, because these tickets carry no client identity and a resumed
+  connection would otherwise report no client certificate while `required` went
+  unenforced. A gap, not a preference.
+- **A resumed connection's peer was verified on the earlier connection**, not on
+  this one. `Session::peer_certificates` carries the chain forward so the answer
+  does not silently become "none", and `Connection::resumed()` is how an
+  application tells the two apart.
+- **`obfuscated_ticket_age` is still pinned by arithmetic rather than by a
+  peer**, and this server does not check it. It exists for 0-RTT anti-replay,
+  which ADR-0003 puts out of scope.
+
 ## [0.8.0] - 2026-08-04
 
 Built and tested against the same sibling revs as 0.2.x–0.7.0. Neither moved.

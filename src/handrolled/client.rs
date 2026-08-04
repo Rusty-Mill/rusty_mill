@@ -1789,11 +1789,19 @@ impl core::fmt::Debug for Session {
 pub enum Incoming {
     /// Application data.
     Application(Vec<u8>),
-    /// A NewSessionTicket, turned into something a caller can resume with.
+    /// One or more NewSessionTickets, turned into something a caller can
+    /// resume with.
     ///
-    /// Boxed because it carries key material and is much larger than the other
-    /// variants; an enum sized by its rarest case would cost every read.
-    Ticket(Box<Session>),
+    /// A `Vec` and not a single session, because a server routinely sends
+    /// several in one record — `rustls` sends two by default — and a variant
+    /// carrying one would silently keep whichever arrived last. Losing a
+    /// session key quietly is the kind of thing that surfaces much later as
+    /// "resumption sometimes does not work", which is the worst shape a bug
+    /// can take.
+    ///
+    /// Never empty: a fragment with no tickets in it produces
+    /// [`Incoming::Handled`] instead.
+    Tickets(Vec<Session>),
     /// A post-handshake message that needed no reply — a NewSessionTicket,
     /// which this client does not use but must tolerate.
     Handled,
@@ -1907,7 +1915,7 @@ impl Connection {
     fn post_handshake(&mut self, fragment: &[u8]) -> Result<Incoming> {
         let complete = complete_prefix(fragment);
         let mut reply = Vec::new();
-        let mut session = None;
+        let mut sessions = Vec::new();
 
         for message in messages(&fragment[..complete])? {
             match message.typ {
@@ -1916,7 +1924,7 @@ impl Connection {
                     // resumption secret to derive a key from — see the field's
                     // docs on why an empty one must not produce a Session.
                     if !self.resumption_master.is_empty() {
-                        session = Some(self.session_from(message.body)?);
+                        sessions.push(self.session_from(message.body)?);
                     }
                 }
                 HandshakeType::KeyUpdate => {
@@ -1951,20 +1959,20 @@ impl Connection {
             }
         }
 
-        if let Some(session) = session {
-            // A ticket and a KeyUpdate cannot arrive needing different answers
+        if !sessions.is_empty() {
+            // Tickets and a KeyUpdate cannot arrive needing different answers
             // in the same fragment — a KeyUpdate that wants a reply produces
-            // `Reply`, and the ticket would be lost. Refused rather than
+            // `Reply`, and the tickets would be lost. Refused rather than
             // silently dropped, because losing a session key quietly is the
             // kind of thing that shows up as "resumption never works" much
             // later.
             if !reply.is_empty() {
                 return Err(ClientError::UnexpectedMessage {
-                    expected: "a NewSessionTicket alone",
+                    expected: "NewSessionTickets alone",
                     got: HandshakeType::KeyUpdate,
                 });
             }
-            return Ok(Incoming::Ticket(Box::new(session)));
+            return Ok(Incoming::Tickets(sessions));
         }
 
         if reply.is_empty() {

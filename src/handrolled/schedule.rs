@@ -354,6 +354,23 @@ pub fn psk_binder(hash: Hash, psk: &[u8], truncated_transcript_hash: &[u8]) -> V
     finished_verify_data(hash, &key, truncated_transcript_hash)
 }
 
+/// Check a binder a client offered.
+///
+/// The verifying half of [`psk_binder`], and constant-time for the reason
+/// [`verify_finished`] is: a server that compared binders byte by byte and
+/// returned early would tell whoever asked how much of one they had guessed
+/// right, and a binder is the only thing standing between an attacker and a
+/// handshake that resumes somebody else's session.
+pub fn verify_psk_binder(
+    hash: Hash,
+    psk: &[u8],
+    truncated_transcript_hash: &[u8],
+    binder: &[u8],
+) -> bool {
+    let key = binder_key(hash, psk);
+    verify_finished(hash, &key, truncated_transcript_hash, binder)
+}
+
 /// The record-protection key and IV derived from one traffic secret.
 ///
 /// RFC 8446 §7.3. Both are `HKDF-Expand-Label` from the same secret with

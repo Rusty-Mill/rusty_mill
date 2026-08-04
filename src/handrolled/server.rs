@@ -31,12 +31,52 @@
 //! Refused rather than half-implemented, on the same principle the client
 //! applies:
 //!
-//! - **Session resumption, tickets, and 0-RTT.** No NewSessionTicket is
-//!   issued. Resumption is where a server's most interesting state lives, and
-//!   a server that stores nothing cannot be confused about what it stored.
+//! - **0-RTT.** Not accepted, and an `early_data` extension in a ClientHello
+//!   is *refused* rather than dropped — ADR-0003 records that as a decision.
+//!   A server that ignored it would look, to the client, exactly like one that
+//!   had considered the early data and declined it, and those two answers mean
+//!   different things to a client deciding what it may replay.
+//! - **`psk_ke`.** A client that offers no `psk_dhe_ke` is answered with a full
+//!   handshake. Resuming without fresh key material trades the session's
+//!   forward secrecy for one saved key exchange.
+//! - **Resumption together with client authentication.** When
+//!   [`ServerConfig::client_auth`] is configured, a `pre_shared_key` offer is
+//!   answered with a full handshake. That is a gap and not a preference: these
+//!   tickets carry no client identity, so a resumed connection would report no
+//!   client certificate and [`ClientAuth::required`] would go quietly
+//!   unenforced. Falling back keeps the posture the configuration asked for.
+//!   See `rusty_tls#43`.
 //! - **TLS 1.2 and below.** A ClientHello that does not offer `0x0304` in
 //!   `supported_versions` gets a `protocol_version` alert, which is what stage
 //!   4a taught this code to send and to read.
+//!
+//! # Session resumption
+//!
+//! Implemented, as of `rusty_tls#43`, and off unless [`ServerConfig`] carries a
+//! [`Tickets`]. When it does, this server issues NewSessionTickets after each
+//! handshake and accepts them back as a `pre_shared_key` on a later one.
+//!
+//! **Stateless.** A ticket is a sealed copy of the resumption PSK rather than a
+//! handle into a table, so this server keeps no per-session storage — and in
+//! exchange it keeps a key that is as sensitive as [`ServerConfig::key`].
+//! [`super::ticket`]'s module docs say why, and why rotating it is a deployment
+//! concern this crate documents rather than hides.
+//!
+//! Three rules decide whether an offer is taken, and the third is the one that
+//! is not optional:
+//!
+//! - **A ticket that does not open, has expired, belongs to another cipher
+//!   suite, or was issued under a different certificate chain is ignored**, and
+//!   the handshake proceeds in full. §4.2.11 permits that, and it has to:
+//!   every ticket becomes unopenable eventually, and a server that refused
+//!   would turn its own key rotation into an outage.
+//! - **An identity that *is* recognised has its binder verified**, over the
+//!   ClientHello truncated to just before the binders.
+//! - **A recognised identity whose binder does not verify aborts the
+//!   handshake.** Not a fallback. Once the server has decided which key the
+//!   client claims to hold, the binder is the only proof it holds it, and
+//!   falling back would make that proof optional — the handshake would still
+//!   complete, and nothing would have been checked.
 //!
 //! # Client certificates
 //!
@@ -80,7 +120,7 @@
 use super::handshake::{
     certificate_verify_content, complete_prefix, extension, find, messages, parse_finished,
     CertificateMessage, CertificateVerify, ClientHello, Extension, HandshakeError, HandshakeType,
-    Message, ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT,
+    Message, PresharedKeyOffer, ServerHello, Transcript, CLIENT_CERTIFICATE_VERIFY_CONTEXT,
     HELLO_RETRY_REQUEST_RANDOM, SERVER_CERTIFICATE_VERIFY_CONTEXT,
 };
 use super::kx::{KeyExchange, KxError, NamedGroup};
@@ -88,8 +128,12 @@ use super::path::{validate_path, PathError, PathOptions, TrustAnchor};
 use super::record::{
     Aead, ContentType, Opener, RecordError, Sealer, HEADER_LEN, MAX_ENCRYPTED_FRAGMENT_LEN,
 };
-use super::schedule::{finished_verify_data, traffic_keys, verify_finished, Hash, KeySchedule};
+use super::schedule::{
+    expand_label, finished_verify_data, traffic_keys, verify_finished, verify_psk_binder, Hash,
+    KeySchedule,
+};
 use super::sign::{SignError, SigningKey};
+use super::ticket::{TicketContents, TicketError, TicketKeys};
 use super::verify::{verify_tls13_signature, SignatureScheme, VerifyError};
 use super::wire::{Reader, Writer};
 use super::x509::{Certificate, X509Error};
@@ -173,6 +217,28 @@ pub enum ServerError {
     Failed,
     /// The system random source failed.
     Random,
+    /// A `pre_shared_key` offer was accepted and its binder did not verify.
+    ///
+    /// Fatal, and RFC 8446 §4.2.11 says so: once the server has recognised an
+    /// identity it MUST validate that identity's binder and abort if it does
+    /// not check out. Falling back to a full handshake instead would turn the
+    /// one proof that the client holds the PSK into an optional extra.
+    BadBinder,
+    /// A ClientHello carried `pre_shared_key` somewhere other than last.
+    ///
+    /// §4.2.11 requires it to be the final extension, because its binders cover
+    /// the hello truncated to just before them. Anything after it is outside
+    /// what the binders prove.
+    PskOfferNotLast,
+    /// A ClientHello carried an `early_data` extension.
+    ///
+    /// ADR-0003 puts 0-RTT out of scope. Refused rather than ignored: a server
+    /// that dropped the extension silently would look to a client exactly like
+    /// one that considered and rejected the early data, and the difference
+    /// matters to a client deciding what it may replay.
+    EarlyDataOffered,
+    /// A ticket opened and its contents were not a ticket.
+    Ticket(TicketError),
 }
 
 impl core::fmt::Display for ServerError {
@@ -217,6 +283,14 @@ impl core::fmt::Display for ServerError {
             }
             Self::Failed => f.write_str("the connection already failed"),
             Self::Random => f.write_str("the system random source failed"),
+            Self::BadBinder => f.write_str("a recognised PSK identity's binder did not verify"),
+            Self::PskOfferNotLast => {
+                f.write_str("pre_shared_key was not the last extension in the ClientHello")
+            }
+            Self::EarlyDataOffered => {
+                f.write_str("the client offered early_data, which this server does not accept")
+            }
+            Self::Ticket(err) => write!(f, "a session ticket: {err}"),
         }
     }
 }
@@ -272,6 +346,9 @@ impl ServerError {
             // parameter, which is more specific than "handshake failure" and
             // tells the client which of the two hellos to look at.
             Self::RetriedHelloChangedIdentity => AlertDescription::ILLEGAL_PARAMETER,
+            Self::BadBinder => AlertDescription::DECRYPT_ERROR,
+            Self::PskOfferNotLast | Self::EarlyDataOffered => AlertDescription::ILLEGAL_PARAMETER,
+            Self::Ticket(_) => AlertDescription::HANDSHAKE_FAILURE,
             // The peer already knows; telling it again is noise.
             Self::PeerAlert(_) | Self::Failed => return None,
         })
@@ -300,6 +377,48 @@ pub struct ServerConfig<'a> {
     /// `None` — the default posture — sends no CertificateRequest, so no
     /// client is ever authenticated and none is ever asked to be.
     pub client_auth: Option<&'a ClientAuth<'a>>,
+    /// Whether, and how, to issue and accept resumption tickets.
+    ///
+    /// `None` is the posture this server had before `rusty_tls#43`: no
+    /// NewSessionTicket is issued, and a `pre_shared_key` offer is ignored and
+    /// answered with a full handshake. A server that stores nothing cannot be
+    /// confused about what it stored, and that remains a legitimate thing to
+    /// choose.
+    pub tickets: Option<&'a Tickets<'a>>,
+}
+
+/// How a server handles resumption.
+///
+/// Read [`super::ticket`]'s module docs before configuring one. The sealing
+/// key in here is as sensitive as [`ServerConfig::key`], and ADR-0003 records
+/// that rotating it is a deployment concern this crate must document rather
+/// than hide — which is what [`super::ticket::TicketKeys`] is shaped for.
+pub struct Tickets<'a> {
+    /// The key new tickets are sealed with, plus any retired keys whose
+    /// tickets are still accepted.
+    pub keys: TicketKeys<'a>,
+    /// The moment to issue and expire tickets against, in seconds since the
+    /// Unix epoch.
+    ///
+    /// Supplied rather than read from a clock, for the reason
+    /// [`PathOptions::time`] is — and, like it, it is read per handshake, so a
+    /// long-lived configuration wants a fresh value per connection rather than
+    /// one captured at start-up.
+    pub now: i64,
+    /// How long a ticket may be redeemed for, in seconds.
+    ///
+    /// This bounds how long a compromise of the sealing key reaches forward,
+    /// so it is a security parameter and not only a convenience one. RFC 8446
+    /// §4.6.1 caps it at seven days and says nothing about what is sensible
+    /// below that.
+    pub lifetime: u32,
+    /// How many tickets to issue after a handshake.
+    ///
+    /// More than one lets a client open several connections later without
+    /// linking them to each other, since a ticket is only meant to be used
+    /// once. Zero issues none, which is how to accept resumption without
+    /// offering any more of it.
+    pub count: usize,
 }
 
 /// How a server treats client certificates.
@@ -349,6 +468,13 @@ struct Negotiated {
     opener: Opener,
     client_application_secret: Vec<u8>,
     server_application_secret: Vec<u8>,
+    /// The Master Secret, kept so `res master` can be derived once the
+    /// client's Finished arrives.
+    ///
+    /// It cannot be derived earlier: `res master` covers the transcript
+    /// *through* that message, and every other secret in the handshake is
+    /// bound to a point before it.
+    master: KeySchedule,
     /// What this server is still waiting for from the client.
     ///
     /// A field rather than a `match` on whatever arrived, for the same reason
@@ -585,6 +711,21 @@ struct Selected<'a> {
     scheme: SignatureScheme,
     group: NamedGroup,
     peer_key: &'a [u8],
+    /// The pre-shared key this handshake resumes, if it resumes one.
+    ///
+    /// `Some` changes the flight — no CertificateRequest, no Certificate, no
+    /// CertificateVerify — and changes where the key schedule starts. It is
+    /// carried here rather than recomputed in `complete`, because the binder
+    /// was verified against the ClientHello and `complete` no longer has it.
+    psk: Option<AcceptedPsk>,
+}
+
+/// A `pre_shared_key` offer this server has decided to accept.
+struct AcceptedPsk {
+    /// Which of the client's identities was chosen, for `selected_identity`.
+    index: u16,
+    /// The key itself, out of the ticket.
+    psk: Vec<u8>,
 }
 
 /// The groups a client says it supports, whether or not it sent a share for
@@ -649,7 +790,130 @@ fn offers_tls13(data: &[u8]) -> bool {
     false
 }
 
+/// The `psk_key_exchange_modes` a client offered.
+///
+/// RFC 8446 §4.2.9: a server MUST NOT resume unless the client offered a mode
+/// it can use, and `psk_dhe_ke(1)` is the only one ADR-0003 permits. A client
+/// offering `psk_ke` alone is asking to resume without fresh key material,
+/// which is a trade this engine does not make.
+fn offers_psk_dhe_ke(data: &[u8]) -> bool {
+    let Ok(mut list) = Reader::new(data).sub_u8() else {
+        return false;
+    };
+    while !list.is_empty() {
+        match list.u8() {
+            Ok(1) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 impl ServerHandshake<'_> {
+    /// Decide whether to resume, and prove the client holds the key if so.
+    ///
+    /// `transcript_prefix` is everything in the transcript before this hello —
+    /// empty on a first attempt, and `message_hash || HelloRetryRequest` after
+    /// a retry. The binder covers that prefix followed by the hello truncated
+    /// to just before the binders, which is why this needs the hello's encoded
+    /// bytes and not only its parsed form.
+    ///
+    /// Three outcomes, and the difference between them is the whole of §4.2.11:
+    ///
+    /// - **No offer, or none this server recognises** — `Ok(None)`, and the
+    ///   handshake proceeds in full. An unrecognised ticket is not an error;
+    ///   it is what every ticket becomes after a key rotation or an expiry, and
+    ///   a server that aborted would break clients for being patient.
+    /// - **An identity recognised and its binder verified** — `Ok(Some(_))`.
+    /// - **An identity recognised and its binder wrong** —
+    ///   [`ServerError::BadBinder`], fatal. Once the server has decided which
+    ///   key the client claims to hold, the binder is the only proof it holds
+    ///   it, and falling back to a full handshake instead would make that proof
+    ///   optional.
+    fn accept_psk(
+        &self,
+        hello: &ClientHello<'_>,
+        encoded_hello: &[u8],
+        transcript_prefix: &[u8],
+        suite: CipherSuite,
+        hash: Hash,
+    ) -> Result<Option<AcceptedPsk>> {
+        // ADR-0003, and checked before anything else so it is refused whether
+        // or not this server would have resumed at all.
+        if find(&hello.extensions, extension::EARLY_DATA).is_some() {
+            return Err(ServerError::EarlyDataOffered);
+        }
+
+        let Some(data) = find(&hello.extensions, extension::PRE_SHARED_KEY) else {
+            return Ok(None);
+        };
+        // §4.2.11 makes this a MUST, and it is the one structural rule the
+        // binder depends on. Checked even when this server would not have
+        // resumed, because a hello built that way is malformed rather than
+        // merely unusable.
+        match hello.extensions.last() {
+            Some(last) if last.typ == extension::PRE_SHARED_KEY => {}
+            _ => return Err(ServerError::PskOfferNotLast),
+        }
+
+        let Some(tickets) = self.config.tickets else {
+            return Ok(None);
+        };
+        // Client authentication and resumption are not combined here, and the
+        // reason is a hole rather than a preference: these tickets carry no
+        // client identity, so a resumed connection would report no client
+        // certificate and `ClientAuth::required` would go quietly
+        // unenforced. Falling back to a full handshake keeps the posture the
+        // configuration asked for. See `rusty_tls#43`.
+        if self.config.client_auth.is_some() {
+            return Ok(None);
+        }
+        match find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES) {
+            Some(modes) if offers_psk_dhe_ke(modes) => {}
+            _ => return Ok(None),
+        }
+
+        let offer = PresharedKeyOffer::parse(data)?;
+        let truncated = offer.truncated(encoded_hello)?;
+        let mut covered = Vec::with_capacity(transcript_prefix.len() + truncated.len());
+        covered.extend_from_slice(transcript_prefix);
+        covered.extend_from_slice(truncated);
+        let covered = hash.hash(&covered);
+
+        let identity = TicketContents::identity_of(self.config.certificates);
+        for (index, offered) in offer.identities.iter().enumerate() {
+            let Some(contents) = TicketContents::open(offered.identity, &tickets.keys) else {
+                continue;
+            };
+            let contents = contents.map_err(ServerError::Ticket)?;
+
+            // A PSK is bound to its suite's hash, so one established under a
+            // different suite is not a key this handshake can use. Not an
+            // error: §4.2.11 leaves the server to select a compatible PSK, and
+            // selecting none is a legitimate selection.
+            if contents.suite != suite || !contents.is_current(tickets.now) {
+                continue;
+            }
+            // And bound to the identity that issued it. Two configurations
+            // sharing a sealing key would otherwise let a session
+            // authenticated by one certificate chain continue under the other.
+            if contents.identity != identity {
+                continue;
+            }
+
+            if !verify_psk_binder(hash, &contents.psk, &covered, offer.binders[index]) {
+                return Err(ServerError::BadBinder);
+            }
+            return Ok(Some(AcceptedPsk {
+                index: index as u16,
+                psk: contents.psk,
+            }));
+        }
+
+        Ok(None)
+    }
+
     fn hello(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
         if message.typ != HandshakeType::ClientHello {
             return Err(ServerError::UnexpectedMessage {
@@ -712,6 +976,11 @@ impl ServerHandshake<'_> {
             return self.retry(message, &hello, suite, aead, hash);
         };
 
+        // Before `complete`, because the binder covers this hello and
+        // `complete` is shared with the post-retry path that has a different
+        // transcript in front of it.
+        let psk = self.accept_psk(&hello, message.encoded, &[], suite, hash)?;
+
         self.complete(
             message.encoded,
             &hello,
@@ -722,6 +991,7 @@ impl ServerHandshake<'_> {
                 scheme,
                 group,
                 peer_key,
+                psk,
             },
             true,
         )
@@ -879,6 +1149,18 @@ impl ServerHandshake<'_> {
             .map(|(_, key)| *key)
             .ok_or(ServerError::RetriedHelloStillHasNoShare(retrying.group))?;
 
+        // §4.1.2 requires the binder to be recomputed for the second hello, over
+        // a transcript that now begins with the synthetic `message_hash` and
+        // the retry — so the prefix is what the retry left behind, and the
+        // hello being truncated is this one.
+        let psk = self.accept_psk(
+            &hello,
+            message.encoded,
+            &retrying.transcript_head,
+            retrying.suite,
+            retrying.hash,
+        )?;
+
         let mut transcript_head = retrying.transcript_head;
         transcript_head.extend_from_slice(message.encoded);
 
@@ -892,6 +1174,7 @@ impl ServerHandshake<'_> {
                 scheme,
                 group: retrying.group,
                 peer_key,
+                psk,
             },
             // Already sent with the HelloRetryRequest: Appendix D.4 puts it
             // after the server's first message, and it has had one.
@@ -921,6 +1204,7 @@ impl ServerHandshake<'_> {
             scheme,
             group,
             peer_key,
+            psk,
         } = selected;
 
         let kx = KeyExchange::generate(group)?;
@@ -930,6 +1214,28 @@ impl ServerHandshake<'_> {
         let share = share.into_vec();
         let versions = vec![0x03, 0x04];
 
+        let mut extensions = vec![
+            Extension {
+                typ: extension::KEY_SHARE,
+                data: &share,
+            },
+            Extension {
+                typ: extension::SUPPORTED_VERSIONS,
+                data: &versions,
+            },
+        ];
+        // §4.2.11: a ServerHello's `pre_shared_key` is the index of the
+        // identity that was chosen, and nothing else. Its presence is the only
+        // signal the client gets that this handshake resumed — which is why
+        // the client refuses one it did not offer.
+        let selected_identity = psk.as_ref().map(|psk| psk.index.to_be_bytes());
+        if let Some(index) = &selected_identity {
+            extensions.push(Extension {
+                typ: extension::PRE_SHARED_KEY,
+                data: index,
+            });
+        }
+
         let random = random_bytes(32)?;
         let server_hello = ServerHello {
             random: &random,
@@ -937,16 +1243,7 @@ impl ServerHandshake<'_> {
             // in compatibility mode are watching for it.
             session_id: hello.session_id,
             cipher_suite: suite.0,
-            extensions: vec![
-                Extension {
-                    typ: extension::KEY_SHARE,
-                    data: &share,
-                },
-                Extension {
-                    typ: extension::SUPPORTED_VERSIONS,
-                    data: &versions,
-                },
-            ],
+            extensions,
         };
         let server_hello = Message::encode(HandshakeType::ServerHello, &server_hello.encode());
 
@@ -955,8 +1252,17 @@ impl ServerHandshake<'_> {
         transcript.add(&server_hello);
         let hello_hash = transcript.hash();
 
+        // The second route through the key schedule ADR-0003 names: on a
+        // resumed handshake the early secret is extracted from the PSK rather
+        // than from zeroes. It is one line, it is the entire difference, and a
+        // server that took the wrong branch would fail the client's Finished
+        // with nothing to say which of the two sides disagreed.
         let schedule = kx.agree(peer_key, |secret| {
-            KeySchedule::new(hash).into_handshake(secret)
+            match &psk {
+                Some(psk) => KeySchedule::new_with_psk(hash, &psk.psk),
+                None => KeySchedule::new(hash),
+            }
+            .into_handshake(secret)
         })?;
         let client_handshake_secret = schedule.derive("c hs traffic", &hello_hash);
         let server_handshake_secret = schedule.derive("s hs traffic", &hello_hash);
@@ -977,7 +1283,12 @@ impl ServerHandshake<'_> {
         // server's own Certificate. It names the schemes this server will
         // accept; a client that can produce none of them answers empty, which
         // `client_auth.required` then decides about.
-        let expect = if self.config.client_auth.is_some() {
+        //
+        // Never on a resumed handshake: §4.4.2 forbids requesting client
+        // authentication in one, and `accept_psk` refuses to resume at all
+        // when client authentication is configured, so the two are mutually
+        // exclusive twice over.
+        let expect = if self.config.client_auth.is_some() && psk.is_none() {
             let mut schemes = Writer::new();
             schemes.vector_u16(|w| {
                 for scheme in SignatureScheme::TLS13_SUPPORTED {
@@ -1002,21 +1313,30 @@ impl ServerHandshake<'_> {
             ExpectFromClient::Finished
         };
 
-        let certificate = certificate_message(self.config.certificates);
-        transcript.add(&certificate);
-        flight.extend_from_slice(&certificate);
+        // A resumed handshake sends neither, and that is not an optimisation:
+        // §4.4.2 says a server MUST NOT send a Certificate when it
+        // authenticated with a PSK. The client already validated this chain on
+        // the connection the ticket came from, and the binder is what proves
+        // this is the same session — signing again would prove nothing the PSK
+        // has not already proved, over a transcript the client would then have
+        // to reconcile with a certificate it did not ask for.
+        if psk.is_none() {
+            let certificate = certificate_message(self.config.certificates);
+            transcript.add(&certificate);
+            flight.extend_from_slice(&certificate);
 
-        // Signed over the transcript through the Certificate, with the §4.4.3
-        // padding and context string. Never over a bare hash.
-        let content =
-            certificate_verify_content(SERVER_CERTIFICATE_VERIFY_CONTEXT, &transcript.hash());
-        let signature = self.config.key.sign(scheme, &content)?;
-        let mut verify = Writer::new();
-        verify.u16(scheme.0);
-        verify.vector_u16(|w| w.bytes(&signature));
-        let verify = Message::encode(HandshakeType::CertificateVerify, &verify.into_vec());
-        transcript.add(&verify);
-        flight.extend_from_slice(&verify);
+            // Signed over the transcript through the Certificate, with the
+            // §4.4.3 padding and context string. Never over a bare hash.
+            let content =
+                certificate_verify_content(SERVER_CERTIFICATE_VERIFY_CONTEXT, &transcript.hash());
+            let signature = self.config.key.sign(scheme, &content)?;
+            let mut verify = Writer::new();
+            verify.u16(scheme.0);
+            verify.vector_u16(|w| w.bytes(&signature));
+            let verify = Message::encode(HandshakeType::CertificateVerify, &verify.into_vec());
+            transcript.add(&verify);
+            flight.extend_from_slice(&verify);
+        }
 
         let verify_data = finished_verify_data(hash, &server_handshake_secret, &transcript.hash());
         let finished = Message::encode(HandshakeType::Finished, &verify_data);
@@ -1049,6 +1369,7 @@ impl ServerHandshake<'_> {
             opener,
             client_application_secret,
             server_application_secret,
+            master,
             expect,
             client_certificates: Vec::new(),
             client_certificate_transcript: Vec::new(),
@@ -1175,7 +1496,7 @@ impl ServerHandshake<'_> {
         else {
             return Err(ServerError::Failed);
         };
-        let negotiated = *negotiated;
+        let mut negotiated = *negotiated;
 
         let verify_data = parse_finished(message.body)?;
         if !verify_finished(
@@ -1197,18 +1518,103 @@ impl ServerHandshake<'_> {
             &negotiated.server_application_secret,
             negotiated.aead.key_len(),
         );
+        let mut sealer = Sealer::new(negotiated.aead, &server_keys.key, &server_keys.iv)?;
+
+        // `res master` covers the transcript through the *client's* Finished,
+        // so it can only be derived once that message is in — every other
+        // secret in this handshake is bound to an earlier point. The client
+        // half derives its half of this from the same message, and the two
+        // agreeing is what makes a ticket redeemable.
+        negotiated.transcript.add_message(message);
+        let out = self.issue_tickets(&negotiated, &mut sealer)?;
 
         self.state = State::Done(Box::new(Connection::from_parts(
             negotiated.aead,
             negotiated.hash,
             negotiated.suite,
-            Sealer::new(negotiated.aead, &server_keys.key, &server_keys.iv)?,
+            sealer,
             Opener::new(negotiated.aead, &client_keys.key, &client_keys.iv)?,
             negotiated.server_application_secret,
             negotiated.client_application_secret,
             negotiated.client_certificates,
         )));
-        Ok(Vec::new())
+        Ok(out)
+    }
+
+    /// Build the NewSessionTickets this handshake earned, sealed under the
+    /// application key.
+    ///
+    /// Empty when no [`Tickets`] is configured, which is the posture this
+    /// server had before `rusty_tls#43` and remains a legitimate one.
+    ///
+    /// Each ticket gets its own nonce, and the nonce is what makes two tickets
+    /// from one connection two different keys rather than one key issued
+    /// twice. A server that reused it would hand out `n` copies of a single
+    /// PSK and quietly undo the reason for issuing more than one.
+    ///
+    /// `sealer` is the connection's own, used here and then handed on, so the
+    /// sequence number the connection starts from is the one that follows
+    /// these records rather than zero again.
+    fn issue_tickets(&self, negotiated: &Negotiated, sealer: &mut Sealer) -> Result<Vec<u8>> {
+        let Some(tickets) = self.config.tickets else {
+            return Ok(Vec::new());
+        };
+        if tickets.count == 0 {
+            return Ok(Vec::new());
+        }
+
+        let resumption_master = negotiated
+            .master
+            .derive("res master", &negotiated.transcript.hash());
+        let identity = TicketContents::identity_of(self.config.certificates);
+
+        let mut flight = Vec::new();
+        for _ in 0..tickets.count {
+            let nonce = random_bytes(32)?;
+            let psk = expand_label(
+                negotiated.hash,
+                &resumption_master,
+                "resumption",
+                &nonce,
+                negotiated.hash.len(),
+            );
+            let sealed = TicketContents {
+                suite: negotiated.suite,
+                issued_at: tickets.now,
+                lifetime: tickets.lifetime,
+                identity: identity.clone(),
+                psk,
+            }
+            .seal(tickets.keys.current)
+            .map_err(ServerError::Ticket)?;
+
+            // `ticket_age_add` is fresh per ticket and random: it is what a
+            // client adds to the ticket's real age before reporting it, so a
+            // predictable one would let an observer correlate two connections
+            // by the difference between the ages they report.
+            let age_add = u32::from_be_bytes(
+                random_bytes(4)?
+                    .try_into()
+                    .expect("four random octets are four octets"),
+            );
+
+            let mut body = Writer::new();
+            body.u32(tickets.lifetime);
+            body.u32(age_add);
+            body.vector_u8(|w| w.bytes(&nonce));
+            body.vector_u16(|w| w.bytes(&sealed));
+            // No extensions. The only one defined for this message is
+            // `early_data`, and ADR-0003 puts 0-RTT out of scope — offering a
+            // `max_early_data_size` would be advertising a feature this server
+            // refuses in the next handshake.
+            body.vector_u16(|_| {});
+            flight.extend_from_slice(&Message::encode(
+                HandshakeType::NewSessionTicket,
+                &body.into_vec(),
+            ));
+        }
+
+        Ok(sealer.seal(ContentType::Handshake, &flight, 0)?)
     }
 }
 

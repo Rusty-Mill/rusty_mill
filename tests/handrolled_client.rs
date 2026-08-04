@@ -1439,9 +1439,10 @@ fn a_session_ticket_is_never_handed_to_the_caller_as_data() {
     let record = server.seal(ContentType::Handshake, &ticket);
 
     let incoming = connection.read(&record).expect("the ticket is tolerated");
-    let Incoming::Ticket(session) = incoming else {
+    let Incoming::Tickets(sessions) = incoming else {
         panic!("a session ticket surfaced as {incoming:?} rather than a Ticket");
     };
+    let session = sessions.first().expect("Tickets is never empty");
     assert_eq!(session.ticket, b"an opaque ticket");
     assert_eq!(session.lifetime, 7200);
     // The derived key is the whole point of surfacing it: a Session whose PSK
@@ -2407,12 +2408,12 @@ fn a_rustls_server_now_sends_session_tickets() {
     let mut tickets = 0usize;
     for record in take_records(&mut stream) {
         match connection.read(&record).expect("a post-handshake record") {
-            Incoming::Ticket(session) => {
+            Incoming::Tickets(sessions) => {
                 assert!(
-                    !session.psk().is_empty(),
+                    sessions.iter().all(|session| !session.psk().is_empty()),
                     "a ticket arrived with no derived key"
                 );
-                tickets += 1;
+                tickets += sessions.len();
             }
             Incoming::Application(data) => {
                 panic!("a post-handshake message surfaced as data: {data:02x?}")
@@ -2510,7 +2511,7 @@ fn run_against(
                     .read(&record)
                     .map_err(|err| format!("post-handshake: {err}"))?
                 {
-                    Incoming::Ticket(session) => sessions.push(*session),
+                    Incoming::Tickets(arrived) => sessions.extend(arrived),
                     Incoming::Application(data) => {
                         return Err(format!(
                             "a post-handshake message surfaced as data: {data:02x?}"
@@ -2760,5 +2761,184 @@ fn the_offer_carries_the_obfuscated_ticket_age() {
         offer.binders[0].len(),
         hash.len(),
         "a binder is one hash length, under the PSK's own hash"
+    );
+}
+
+/// A ServerHello of this test's own devising, to reach checks no correct
+/// server produces.
+///
+/// Everything here is refused *before* the key exchange or any Finished, which
+/// is what makes a synthetic hello enough: the checks under test all run on the
+/// ServerHello itself, and a hostile server is exactly a peer that sends one
+/// like this. `session_id` is read back out of the client's own hello, because
+/// §4.1.3's echo is checked first and a hello that failed it would never reach
+/// what is being tested.
+fn synthetic_server_hello(
+    client_hello: &[u8],
+    suite: CipherSuite,
+    selected_identity: Option<u16>,
+) -> Vec<u8> {
+    let parsed = messages(&client_hello[5..]).expect("the client's hello parses");
+    let hello = ClientHello::parse(parsed[0].body).expect("a ClientHello");
+
+    let mut share = rusty_tls::handrolled::wire::Writer::new();
+    share.u16(0x001d); // x25519
+    share.vector_u16(|w| w.bytes(&[0x42u8; 32]));
+    let share = share.into_vec();
+    let versions = vec![0x03, 0x04];
+    let selected = selected_identity.map(u16::to_be_bytes);
+
+    let mut extensions = vec![
+        rusty_tls::handrolled::handshake::Extension {
+            typ: 51, // key_share
+            data: &share,
+        },
+        rusty_tls::handrolled::handshake::Extension {
+            typ: 43, // supported_versions
+            data: &versions,
+        },
+    ];
+    if let Some(index) = &selected {
+        extensions.push(rusty_tls::handrolled::handshake::Extension {
+            typ: 41, // pre_shared_key
+            data: index,
+        });
+    }
+
+    let random = [0x11u8; 32];
+    let server_hello = ServerHello {
+        random: &random,
+        session_id: hello.session_id,
+        cipher_suite: suite.0,
+        extensions,
+    };
+    let encoded = Message::encode(HandshakeType::ServerHello, &server_hello.encode());
+    let mut record = vec![22u8, 0x03, 0x03];
+    record.extend_from_slice(&(encoded.len() as u16).to_be_bytes());
+    record.extend_from_slice(&encoded);
+    record
+}
+
+/// Establish one session against `rustls`, to have something to offer back.
+fn a_session(pki: &Pki, anchors: &[TrustAnchor<'_>]) -> Session {
+    let server_config = resumable_server_config(pki);
+    run_against(&resumption_config(anchors, None), &server_config, |hello| {
+        hello
+    })
+    .expect("the first handshake")
+    .sessions
+    .into_iter()
+    .next()
+    .expect("rustls issued no ticket")
+}
+
+/// A `pre_shared_key` in a ServerHello that answers a hello which offered none
+/// is refused.
+///
+/// The server would be naming a key the client never chose, and the client
+/// would then extract its early secret from it. There is no benign reading of
+/// this, which is why it is refused rather than ignored.
+#[test]
+fn a_pre_shared_key_that_was_not_offered_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+
+    let config = resumption_config(&anchors, None);
+    let (mut client, hello) = ClientHandshake::start(&config).expect("start");
+    let reply = synthetic_server_hello(&hello, CipherSuite::TLS_AES_128_GCM_SHA256, Some(0));
+
+    assert_eq!(
+        client.read_record(&reply),
+        Err(ClientError::UnofferedPsk),
+        "the client accepted a PSK it never offered"
+    );
+}
+
+/// A `selected_identity` past the end of the offer is refused.
+///
+/// §4.2.11 makes it an index into the client's own list. This client offers one
+/// identity, so anything but zero names nothing — and a client that treated an
+/// out-of-range index as "the one I sent" would be resuming on the server's say
+/// so rather than its own.
+#[test]
+fn a_selected_identity_that_was_not_offered_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let session = a_session(&pki, &anchors);
+
+    let config = resumption_config(
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 1_000,
+        }),
+    );
+    let (mut client, hello) = ClientHandshake::start(&config).expect("start");
+    let reply = synthetic_server_hello(&hello, session.suite, Some(1));
+
+    assert_eq!(
+        client.read_record(&reply),
+        Err(ClientError::BadPskIdentity(1)),
+        "the client accepted an identity index it never sent"
+    );
+}
+
+/// A PSK accepted under a cipher suite whose hash is not the PSK's is refused.
+///
+/// §4.2.11 requires the two to match, and the requirement is not a
+/// compatibility nicety: the binder, the early secret, and every secret below
+/// it are computed under one specific hash. A client that carried on would be
+/// running a different key schedule from the server and would discover it three
+/// messages later as a Finished that did not verify — an error that says
+/// nothing about the cause.
+///
+/// No correct server does this, and no interop test can therefore reach the
+/// check. Measured: before this test existed, deleting the check entirely
+/// passed every other test in this repo.
+#[test]
+fn a_psk_accepted_under_the_wrong_hash_is_refused() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256, SERVER);
+    let root = anchor(&pki.root_der);
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let session = a_session(&pki, &anchors);
+
+    // The suite the session ran under, and one on the other hash.
+    let (_, established) = session.suite.parts().expect("a known suite");
+    let other = [
+        CipherSuite::TLS_AES_128_GCM_SHA256,
+        CipherSuite::TLS_AES_256_GCM_SHA384,
+    ]
+    .into_iter()
+    .find(|suite| suite.parts().expect("a known suite").1 != established)
+    .expect("the two suites do not run on the same hash");
+
+    let config = resumption_config(
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 1_000,
+        }),
+    );
+    let (mut client, hello) = ClientHandshake::start(&config).expect("start");
+    let reply = synthetic_server_hello(&hello, other, Some(0));
+
+    assert_eq!(
+        client.read_record(&reply),
+        Err(ClientError::PskHashMismatch),
+        "a PSK established under {established:?} was accepted under a suite on another hash"
     );
 }
