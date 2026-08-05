@@ -97,11 +97,32 @@ nothing and a weakened forward-secrecy story is worth something.
 - 0-RTT, and with it the latency win that is most of the reason people ask for
   resumption at all. Anyone who needs it needs the follow-up ADR first.
 
+  "For now" still means for now. What changed on 2026-08-05 is only that this
+  is no longer *tracked* as pending work — see the `#58` entry below. The
+  engine refuses `early_data` on both halves rather than ignoring it, which is
+  what keeps the decision visible in the code rather than only here.
+
 **Created:**
 
 - [`rusty_tls#58`](https://github.com/baileyrd/rusty_tls/issues/58) — 0-RTT and
-  its anti-replay design, so the decision is tracked rather than merely
-  deferred. The ADR is the first deliverable there and gates the code.
+  its anti-replay design. **Filed, considered, and closed as `not planned` on
+  2026-08-05.** It is linked here as the record of that decision, not as
+  something tracking work.
+
+  **The gate in the Decision section above is unchanged.** 0-RTT stays out
+  until a named consumer asks for it *and* an anti-replay design lands in its
+  own ADR. Closing the issue does not move that gate; it stops an open issue
+  implying an intent nobody holds. Reopening `#58` is the way back in, and its
+  closing comment records what a revival would already have to hand and the two
+  things it should not rediscover the hard way — that stateless resumption and
+  single-use tickets conflict, and that anti-replay cannot be tested against a
+  correct peer, because a correct peer never replays.
+
+  The reason for closing is the **absence of a named consumer**, not the
+  difficulty. ADR-0002 makes this engine permanently non-default; 0-RTT's whole
+  value is latency; a non-default experiment gains close to nothing from a
+  saved round trip and would take on the one TLS 1.3 feature whose security
+  property RFC 8446 itself only bounds rather than eliminates.
 
   **Corrected 2026-08-04.** This bullet originally claimed the follow-up issue
   had been created. It had not been, and nothing checked the claim until
