@@ -109,7 +109,7 @@ println!("{}", run.output_text());
 
 // Asynchronous: start now, poll later
 let started = client.run_async("echo", [Message::user("hello")]).await?;
-let finished = client.wait_for_run(started.run_id, None).await?;
+let finished = client.wait_for_run(started.run_id, WaitOptions::default()).await?;
 ```
 
 ### Streaming
@@ -178,7 +178,8 @@ Cancellation is *accepted* before it is *applied* — and with several replicas 
 by one replica and applied by another — so the snapshot in the `202` can still read `in-progress`:
 
 ```rust
-let cancelled = client.cancel_and_wait(run_id).await?;   // polls until the run is terminal
+// Polls until the run is terminal, giving up after WaitOptions::timeout.
+let cancelled = client.cancel_and_wait(run_id, WaitOptions::default()).await?;
 ```
 
 ### Sessions
@@ -285,10 +286,46 @@ streaming clients on any replica, or a `Resume`/`Cancel` routing *in* to the exe
 replica. A backend therefore needs exactly one pub/sub primitive: a Redis channel, a
 Postgres `LISTEN`/`NOTIFY` channel, or an in-process broadcast.
 
+### When a replica dies
+
+The sole-writer invariant has a weak point: a writer can die. Without something
+watching, the run it was executing would stay non-terminal forever, with nothing left
+to consume a resume, apply a cancel, or write a terminal state.
+
+Each executing replica therefore holds a short **lease** on its runs and keeps renewing
+it. A non-terminal run whose lease has lapsed has demonstrably lost its writer, so the
+next replica asked about it marks it `failed` and publishes `run.failed` — which
+unblocks streaming and `sync` callers on every replica.
+
+```rust
+AcpServer::builder()
+    .replica_id("agent-host-7")           // shows up as the lease owner in logs
+    .lease_ttl(Duration::from_secs(30))   // window between death and reaping
+    .sync_timeout(Duration::from_secs(300))
+```
+
+Two deliberate choices:
+
+- **Failed, not retried.** Re-running elsewhere would repeat whatever output and side
+  effects the run already produced, and ACP promises no idempotency. Taking over a run
+  is only safe for agents that opt in, which is not something the protocol lets us know.
+- **Reaped lazily, on read.** No background sweeper: the check costs one lease lookup on
+  reads that were already hitting the store, and `sync` waiters re-check every lease
+  interval so they self-heal rather than waiting out their timeout.
+
+Waits are bounded on both sides. `sync` returns the run as it stands after
+`sync_timeout` rather than hanging — so check `status` rather than assuming terminal —
+and the client's `wait_for_run` / `cancel_and_wait` take `WaitOptions` with a deadline:
+
+```rust
+let run = client.wait_for_run(run_id, WaitOptions::default()).await?;
+let run = client.wait_for_run(run_id, WaitOptions::default().without_timeout()).await?;
+```
+
 ### Writing your own backend
 
 Implement [`Store`](https://docs.rs/rusty-acp/latest/rusty_acp/server/store/trait.Store.html) —
-eight methods covering run snapshots, the event log, sessions and per-run pub/sub. The
+run snapshots, the event log, sessions, ownership leases and per-run pub/sub. The
 trait documents the invariants a backend may rely on and the two it must provide
 (subscription liveness on return, and atomic session appends). `InMemoryStore` and
 `RedisStore` are both implemented against exactly that contract, and the multi-replica
@@ -360,11 +397,12 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-81 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+91 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
-cancelling it through the other.
+cancelling it through the other — including killing a replica's whole runtime mid-run and
+asserting the run gets reaped rather than hanging.
 
 The multi-replica suite runs against **both** backends. The Redis half is skipped unless
 `ACP_TEST_REDIS_URL` is set; when it *is* set, an unreachable Redis fails the run rather than

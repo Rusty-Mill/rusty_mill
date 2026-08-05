@@ -128,6 +128,10 @@ impl RedisStore {
         format!("{}:session:{session_id}:messages", self.config.key_prefix)
     }
 
+    fn lease_key(&self, run_id: RunId) -> String {
+        format!("{}:lease:{run_id}", self.config.key_prefix)
+    }
+
     fn session_state_key(&self, session_id: SessionId) -> String {
         format!("{}:session:{session_id}:state", self.config.key_prefix)
     }
@@ -354,6 +358,35 @@ impl Store for RedisStore {
 
         self.touch(&meta_key).await?;
         self.touch(&messages_key).await
+    }
+
+    async fn renew_lease(&self, run_id: RunId, owner: &str, ttl: Duration) -> StoreResult<()> {
+        let mut connection = self.connection.clone();
+        // Redis expires the key on its own, which is exactly the property we
+        // need: a replica that dies stops renewing and the lease lapses without
+        // anyone having to notice.
+        let _: () = connection
+            .set_ex(self.lease_key(run_id), owner, ttl.as_secs().max(1))
+            .await
+            .map_err(|err| redis_error("renew run lease", err))?;
+        Ok(())
+    }
+
+    async fn lease_owner(&self, run_id: RunId) -> StoreResult<Option<String>> {
+        let mut connection = self.connection.clone();
+        connection
+            .get(self.lease_key(run_id))
+            .await
+            .map_err(|err| redis_error("read run lease", err))
+    }
+
+    async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {
+        let mut connection = self.connection.clone();
+        let _: () = connection
+            .del(self.lease_key(run_id))
+            .await
+            .map_err(|err| redis_error("release run lease", err))?;
+        Ok(())
     }
 
     async fn get_session_state(

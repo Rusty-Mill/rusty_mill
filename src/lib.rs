@@ -138,6 +138,18 @@ pub enum AcpError {
     /// The supplied base URL or endpoint path was not a valid URL.
     #[error("invalid url: {0}")]
     InvalidUrl(String),
+
+    /// A client-side wait gave up before the run settled.
+    ///
+    /// The run is not necessarily broken — it may simply be slower than the
+    /// deadline allowed. `status` is what it had reached when the wait ended.
+    #[error("timed out waiting for run {run_id}; last seen `{status}`")]
+    Timeout {
+        /// The run that was being waited on.
+        run_id: String,
+        /// The run's status when the wait gave up.
+        status: String,
+    },
 }
 
 impl AcpError {

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use rusty_acp::{
-    client::{collect_run, AcpClient},
+    client::{collect_run, AcpClient, WaitOptions},
     server::{agent_fn, AcpServer, RunContext},
     types::{
         AgentManifest, AgentName, AwaitRequest, Error, ErrorCode, Event, Message, MessagePart,
@@ -176,8 +176,10 @@ async fn async_run_returns_immediately_and_can_be_polled() {
     let started = client.run_async("echo", [Message::user("later")]).await.unwrap();
     assert!(!started.status.is_terminal() || started.status == RunStatus::Completed);
 
-    let finished =
-        client.wait_for_run(started.run_id, Some(Duration::from_millis(10))).await.unwrap();
+    let finished = client
+        .wait_for_run(started.run_id, WaitOptions::default().poll_every(Duration::from_millis(10)))
+        .await
+        .unwrap();
     assert_eq!(finished.run_id, started.run_id);
     assert_eq!(finished.status, RunStatus::Completed);
     assert_eq!(finished.output_text(), "later");
@@ -297,7 +299,7 @@ async fn cancelling_a_running_agent_terminates_it() {
     let client = start_server().await;
 
     let started = client.run_async("forever", [Message::user("hang")]).await.unwrap();
-    let cancelled = client.cancel_and_wait(started.run_id).await.unwrap();
+    let cancelled = client.cancel_and_wait(started.run_id, WaitOptions::default()).await.unwrap();
 
     assert_eq!(cancelled.status, RunStatus::Cancelled);
     assert!(cancelled.finished_at.is_some());
@@ -314,7 +316,7 @@ async fn cancelling_an_awaiting_run_terminates_it() {
     let paused = client.run_sync("greeter", [Message::user("hi")]).await.unwrap();
     assert_eq!(paused.status, RunStatus::Awaiting);
 
-    let cancelled = client.cancel_and_wait(paused.run_id).await.unwrap();
+    let cancelled = client.cancel_and_wait(paused.run_id, WaitOptions::default()).await.unwrap();
     assert_eq!(cancelled.status, RunStatus::Cancelled);
 }
 

@@ -37,6 +37,49 @@ use crate::{
 /// Default interval between polls in [`AcpClient::wait_for_run`].
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Default ceiling on how long [`AcpClient::wait_for_run`] keeps polling.
+pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long to keep polling a run, and how often.
+///
+/// The timeout exists because a run can outlive the replica executing it. That
+/// replica's lease lapses and the run is failed the next time anyone asks about
+/// it — which polling triggers — but a server without leases, or an
+/// unreachable one, would otherwise leave a caller looping forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaitOptions {
+    /// How long to sleep between polls.
+    pub poll_interval: Duration,
+    /// Give up after this long. `None` polls until the run settles.
+    pub timeout: Option<Duration>,
+}
+
+impl Default for WaitOptions {
+    fn default() -> Self {
+        Self { poll_interval: DEFAULT_POLL_INTERVAL, timeout: Some(DEFAULT_WAIT_TIMEOUT) }
+    }
+}
+
+impl WaitOptions {
+    /// Poll at a different interval.
+    pub fn poll_every(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    /// Give up after `timeout`.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Poll until the run settles, however long that takes.
+    pub fn without_timeout(mut self) -> Self {
+        self.timeout = None;
+        self
+    }
+}
+
 /// A client for the ACP HTTP API.
 ///
 /// Cloning is cheap: the underlying [`reqwest::Client`] is shared.
@@ -192,18 +235,43 @@ impl AcpClient {
     }
 
     /// Poll a run until it reaches a terminal state or pauses awaiting input.
-    pub async fn wait_for_run(
+    ///
+    /// Gives up after [`WaitOptions::timeout`], reporting the status it last
+    /// saw rather than looping forever.
+    ///
+    /// ```no_run
+    /// # use rusty_acp::client::{AcpClient, WaitOptions};
+    /// # use rusty_acp::types::RunId;
+    /// # async fn demo(client: AcpClient, run_id: RunId) -> Result<(), rusty_acp::AcpError> {
+    /// let run = client.wait_for_run(run_id, WaitOptions::default()).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_run(&self, run_id: RunId, options: WaitOptions) -> Result<Run> {
+        self.poll_until(run_id, options, |run| run.status.is_terminal() || run.status.is_awaiting())
+            .await
+    }
+
+    /// Poll a run until `settled` accepts it, or the timeout elapses.
+    async fn poll_until(
         &self,
         run_id: RunId,
-        poll_interval: Option<Duration>,
+        options: WaitOptions,
+        settled: impl Fn(&Run) -> bool,
     ) -> Result<Run> {
-        let interval = poll_interval.unwrap_or(DEFAULT_POLL_INTERVAL);
+        let deadline = options.timeout.map(|timeout| tokio::time::Instant::now() + timeout);
         loop {
             let run = self.get_run(run_id).await?;
-            if run.status.is_terminal() || run.status.is_awaiting() {
+            if settled(&run) {
                 return Ok(run);
             }
-            tokio::time::sleep(interval).await;
+            if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                return Err(AcpError::Timeout {
+                    run_id: run_id.to_string(),
+                    status: run.status.to_string(),
+                });
+            }
+            tokio::time::sleep(options.poll_interval).await;
         }
     }
 
@@ -251,15 +319,9 @@ impl AcpClient {
     /// but a run that finished before the cancellation landed stays
     /// [`Completed`](crate::types::RunStatus::Completed) or
     /// [`Failed`](crate::types::RunStatus::Failed).
-    pub async fn cancel_and_wait(&self, run_id: RunId) -> Result<Run> {
+    pub async fn cancel_and_wait(&self, run_id: RunId, options: WaitOptions) -> Result<Run> {
         self.cancel_run(run_id).await?;
-        loop {
-            let run = self.get_run(run_id).await?;
-            if run.status.is_terminal() {
-                return Ok(run);
-            }
-            tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;
-        }
+        self.poll_until(run_id, options, |run| run.status.is_terminal()).await
     }
 
     /// Fetch the full event log of a run.

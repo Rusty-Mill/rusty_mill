@@ -21,6 +21,7 @@ use serde::Deserialize;
 
 use crate::{
     server::{
+        reap_if_abandoned,
         store::{Notification, NotificationStream},
         AcpServer,
     },
@@ -130,6 +131,17 @@ async fn get_agent(
     Ok(Json(manifest))
 }
 
+/// Read a run, failing it first if its executing replica is gone.
+///
+/// Every path that reads a run goes through here, so an abandoned run is
+/// noticed by whoever next asks about it. That is deliberately lazy: no
+/// background sweeper, no extra moving parts, and the check costs one lease
+/// lookup on reads that were already hitting the store.
+async fn require_live_run(server: &Arc<AcpServer>, run_id: RunId) -> ApiResult<Run> {
+    let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
+    reap_if_abandoned(server.store(), run).await.map_err(ApiError::from)
+}
+
 /// Either a JSON body or an SSE stream, depending on the requested [`RunMode`].
 enum RunResponse {
     Json(StatusCode, Box<Run>),
@@ -172,8 +184,8 @@ async fn resume_run(
         .into());
     }
 
+    let run = require_live_run(&server, run_id).await?;
     let store = server.store();
-    let run = store.require_run(run_id).await.map_err(ApiError::from)?;
     if run.status != RunStatus::Awaiting {
         return Err(Error::invalid_input(format!(
             "run {run_id} is `{}`; only an `awaiting` run can be resumed",
@@ -207,7 +219,7 @@ async fn deliver(
         }
         RunMode::Sync => {
             wait_until_settled(server, run_id, notifications).await?;
-            let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
+            let run = require_live_run(server, run_id).await?;
             Ok(RunResponse::Json(StatusCode::OK, Box::new(run)))
         }
         RunMode::Stream => Ok(RunResponse::Stream(
@@ -238,17 +250,57 @@ async fn wait_until_settled(
         }
     }
 
-    while let Some(notification) = notifications.next().await {
-        let Some(event) = notification.event() else {
-            continue;
+    // Between notifications, check that the run still has an owner. Without
+    // this a caller would wait out the whole timeout on a run whose replica had
+    // already died — the run.failed that unblocks them is only published once
+    // somebody looks.
+    let lease_ttl = server.lease_ttl();
+    let deadline = server.sync_timeout().map(|timeout| tokio::time::Instant::now() + timeout);
+
+    loop {
+        let next = notifications.next();
+        let tick = tokio::time::sleep(lease_ttl);
+
+        let notification = match deadline {
+            Some(deadline) => tokio::select! {
+                notification = next => notification,
+                _ = tick => None,
+                _ = tokio::time::sleep_until(deadline) => {
+                    // Not an error: the run is still going, and the caller gets
+                    // an honest snapshot of where it got to.
+                    tracing::debug!(%run_id, "sync request timed out; returning the run as it stands");
+                    return Ok(());
+                }
+            },
+            None => tokio::select! {
+                notification = next => notification,
+                _ = tick => None,
+            },
         };
-        // `run.awaiting` and the terminal `run.*` events are exactly the set
-        // that ends a stream, which is the same set that settles a sync call.
-        if event.is_terminal() {
-            return Ok(());
+
+        match notification {
+            // `run.awaiting` and the terminal `run.*` events are exactly the
+            // set that ends a stream, which is the same set that settles a
+            // sync call.
+            Some(notification) => {
+                if notification.event().is_some_and(Event::is_terminal) {
+                    return Ok(());
+                }
+            }
+            // Either the tick fired or the channel closed. Check for
+            // abandonment; if the run is settled either way, we are done.
+            None => {
+                let run = server.store().get_run(run_id).await.map_err(ApiError::from)?;
+                let Some(run) = run else {
+                    return Ok(());
+                };
+                let run = reap_if_abandoned(server.store(), run).await.map_err(ApiError::from)?;
+                if run.status.is_terminal() || run.status.is_awaiting() {
+                    return Ok(());
+                }
+            }
         }
     }
-    Ok(())
 }
 
 type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
@@ -296,8 +348,7 @@ async fn get_run(
     Path(run_id): Path<String>,
 ) -> ApiResult<Json<Run>> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
-    let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
-    Ok(Json(run))
+    Ok(Json(require_live_run(&server, run_id).await?))
 }
 
 async fn cancel_run(
@@ -305,8 +356,8 @@ async fn cancel_run(
     Path(run_id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<Run>)> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
+    let run = require_live_run(&server, run_id).await?;
     let store = server.store();
-    let run = store.require_run(run_id).await.map_err(ApiError::from)?;
 
     if !run.status.is_terminal() {
         // The executing replica decides when the run actually stops, so the
@@ -323,10 +374,11 @@ async fn list_run_events(
     Path(run_id): Path<String>,
 ) -> ApiResult<Json<RunEventsListResponse>> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
-    let store = server.store();
-    // Confirm the run exists so an unknown id is a 404 rather than an empty list.
-    store.require_run(run_id).await.map_err(ApiError::from)?;
-    let events = store.events(run_id).await.map_err(ApiError::from)?;
+    // Confirm the run exists so an unknown id is a 404 rather than an empty
+    // list — and reap it first, so the log ends with `run.failed` rather than
+    // trailing off mid-run.
+    require_live_run(&server, run_id).await?;
+    let events = server.store().events(run_id).await.map_err(ApiError::from)?;
     Ok(Json(RunEventsListResponse { events }))
 }
 
