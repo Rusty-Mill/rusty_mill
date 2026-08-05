@@ -520,6 +520,11 @@ ClientInfo::default()
     .await?
 ```
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Nothing is tagged or released yet, so
+everything to date sits under Unreleased.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
