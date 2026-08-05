@@ -28,25 +28,35 @@ use std::time::Duration;
 use crate::types::RunStatus;
 
 /// Runs currently executing on this replica, by agent.
+#[cfg(feature = "metrics")]
 pub(crate) const RUNS_IN_FLIGHT: &str = "acp_runs_in_flight";
 /// Runs that reached a terminal state, by agent and status.
+#[cfg(feature = "metrics")]
 pub(crate) const RUNS_TOTAL: &str = "acp_runs_total";
 /// How long runs took to reach a terminal state, by agent and status.
+#[cfg(feature = "metrics")]
 pub(crate) const RUN_DURATION: &str = "acp_run_duration_seconds";
 /// Lease renewals that failed. Several must be missed before a lease lapses,
 /// so a nonzero rate here is a warning rather than an outage.
+#[cfg(feature = "metrics")]
 pub(crate) const LEASE_RENEW_FAILURES: &str = "acp_lease_renew_failures_total";
 /// Runs failed because their executing replica stopped renewing.
+#[cfg(feature = "metrics")]
 pub(crate) const RUNS_REAPED: &str = "acp_runs_reaped_total";
 /// Attempts to claim an abandoned run, by whether this replica won.
+#[cfg(feature = "metrics")]
 pub(crate) const RECOVERY_CLAIMS: &str = "acp_recovery_claims_total";
 /// Replacement runs started for a recoverable run.
+#[cfg(feature = "metrics")]
 pub(crate) const RECOVERIES_STARTED: &str = "acp_recoveries_started_total";
 /// Abandoned runs left failed because their attempt budget was spent.
+#[cfg(feature = "metrics")]
 pub(crate) const RECOVERY_EXHAUSTED: &str = "acp_recovery_exhausted_total";
 /// Store operations, by operation name.
+#[cfg(feature = "metrics")]
 pub(crate) const STORE_OPERATION_DURATION: &str = "acp_store_operation_duration_seconds";
 /// Store operations that returned an error, by operation name.
+#[cfg(feature = "metrics")]
 pub(crate) const STORE_FAILURES: &str = "acp_store_failures_total";
 
 /// Register descriptions and units with whatever recorder is installed.
@@ -170,15 +180,14 @@ pub(crate) fn recovery_exhausted(agent: &str) {
 }
 
 /// A store operation finished.
+///
+/// Gated with the emitting: its only caller is `MeteredStore`, which is itself
+/// behind this feature.
+#[cfg(feature = "metrics")]
 pub(crate) fn store_operation(operation: &'static str, elapsed: Duration, failed: bool) {
-    #[cfg(feature = "metrics")]
-    {
-        metrics::histogram!(STORE_OPERATION_DURATION, "operation" => operation)
-            .record(elapsed.as_secs_f64());
-        if failed {
-            metrics::counter!(STORE_FAILURES, "operation" => operation).increment(1);
-        }
+    metrics::histogram!(STORE_OPERATION_DURATION, "operation" => operation)
+        .record(elapsed.as_secs_f64());
+    if failed {
+        metrics::counter!(STORE_FAILURES, "operation" => operation).increment(1);
     }
-    #[cfg(not(feature = "metrics"))]
-    let _ = (operation, elapsed, failed);
 }
