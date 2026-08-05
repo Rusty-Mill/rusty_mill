@@ -73,6 +73,21 @@ fn backends(runtime: &Runtime) -> Vec<(&'static str, Arc<dyn Store>)> {
     backends
 }
 
+/// Run `body` against every available backend, then drop the stores *inside*
+/// the runtime.
+///
+/// The drop location matters. A `PostgresStore` holds a pool, and sqlx returns
+/// a connection to its pool by spawning onto the current runtime — so dropping
+/// one with no runtime context panics inside a destructor, which Rust cannot
+/// unwind out of and turns into an abort.
+fn for_each_backend(runtime: &Runtime, mut body: impl FnMut(&'static str, &Arc<dyn Store>)) {
+    let backends = backends(runtime);
+    for (name, store) in &backends {
+        body(name, store);
+    }
+    runtime.block_on(async move { drop(backends) });
+}
+
 /// A run already present in `store`, ready to be appended to.
 fn seeded_run(runtime: &Runtime, store: &Arc<dyn Store>) -> Run {
     let run = Run::new(AgentName::new("bench").unwrap(), None);
@@ -85,15 +100,15 @@ fn append_event(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/append_event");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
         let event = Event::MessagePart { part: MessagePart::text("a plausible token") };
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime)
                 .iter(|| async { store.append_event(run.run_id, &event).await.unwrap() });
         });
-    }
+    });
 
     group.finish();
 }
@@ -104,16 +119,16 @@ fn publish_unsubscribed(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/publish/no-subscriber");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async {
                 let event = Event::MessagePart { part: MessagePart::text("token") };
                 store.publish(run.run_id, Notification::event_at(0, event)).await.unwrap()
             });
         });
-    }
+    });
 
     group.finish();
 }
@@ -124,17 +139,21 @@ fn publish_subscribed(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/publish/one-subscriber");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
-        let _subscription = runtime.block_on(store.subscribe(run.run_id)).expect("subscribe");
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
+        let subscription = runtime.block_on(store.subscribe(run.run_id)).expect("subscribe");
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async {
                 let event = Event::MessagePart { part: MessagePart::text("token") };
                 store.publish(run.run_id, Notification::event_at(0, event)).await.unwrap()
             });
         });
-    }
+
+        // Inside the runtime: a Postgres subscription is a dedicated
+        // connection, returned to its pool by a spawn on drop.
+        runtime.block_on(async move { drop(subscription) });
+    });
 
     group.finish();
 }
@@ -144,13 +163,13 @@ fn put_run(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/put_run");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async { store.put_run(&run).await.unwrap() });
         });
-    }
+    });
 
     group.finish();
 }
@@ -160,13 +179,13 @@ fn get_run(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/get_run");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async { store.get_run(run.run_id).await.unwrap() });
         });
-    }
+    });
 
     group.finish();
 }
@@ -179,8 +198,8 @@ fn events_from(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/events_from");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
         runtime.block_on(async {
             for index in 0..LOG_LENGTH {
                 let event = Event::generic(serde_json::json!({ "n": index }));
@@ -190,17 +209,17 @@ fn events_from(c: &mut Criterion) {
 
         // From near the end: the shape of an actual reconnection, and the case
         // that would be linear in the whole log if the backend filtered.
-        group.bench_with_input(BenchmarkId::new("tail", name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::new("tail", name), store, |b, store| {
             b.to_async(&runtime)
                 .iter(|| async { store.events_from(run.run_id, LOG_LENGTH - 10).await.unwrap() });
         });
 
         // From the start: a fresh stream on an existing run, and the honest
         // worst case.
-        group.bench_with_input(BenchmarkId::new("whole", name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::new("whole", name), store, |b, store| {
             b.to_async(&runtime).iter(|| async { store.events_from(run.run_id, 0).await.unwrap() });
         });
-    }
+    });
 
     group.finish();
 }
@@ -211,10 +230,10 @@ fn append_session_messages(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/append_session_messages");
 
-    for (name, store) in backends(&runtime) {
+    for_each_backend(&runtime, |name, store| {
         let session_id = SessionId::new();
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async {
                 store
                     .append_session_messages(
@@ -226,7 +245,7 @@ fn append_session_messages(c: &mut Criterion) {
                     .unwrap()
             });
         });
-    }
+    });
 
     group.finish();
 }
@@ -237,10 +256,10 @@ fn renew_lease(c: &mut Criterion) {
     let runtime = runtime();
     let mut group = c.benchmark_group("store/renew_lease");
 
-    for (name, store) in backends(&runtime) {
-        let run = seeded_run(&runtime, &store);
+    for_each_backend(&runtime, |name, store| {
+        let run = seeded_run(&runtime, store);
 
-        group.bench_with_input(BenchmarkId::from_parameter(name), &store, |b, store| {
+        group.bench_with_input(BenchmarkId::from_parameter(name), store, |b, store| {
             b.to_async(&runtime).iter(|| async {
                 store
                     .renew_lease(run.run_id, "bench-replica", Duration::from_secs(30))
@@ -248,7 +267,7 @@ fn renew_lease(c: &mut Criterion) {
                     .unwrap()
             });
         });
-    }
+    });
 
     group.finish();
 }
