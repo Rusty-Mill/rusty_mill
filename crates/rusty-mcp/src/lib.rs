@@ -63,6 +63,7 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod resources;
 pub mod runtime;
 pub mod shutdown;
 pub mod tasks;
@@ -132,7 +133,11 @@ where
 pub mod __private {
     pub use rmcp::{
         ErrorData,
-        model::{CancelTaskParams, GetTaskParams, GetTaskResult, UpdateTaskParams},
+        model::{
+            CancelTaskParams, GetTaskParams, GetTaskResult, ListResourceTemplatesResult,
+            ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+            ReadResourceResponse, ReadResourceResult, UpdateTaskParams,
+        },
         service::{RequestContext, RoleServer},
     };
 }

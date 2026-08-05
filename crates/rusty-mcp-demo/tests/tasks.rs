@@ -15,6 +15,10 @@ use rmcp::{
     service::RunningService,
 };
 
+#[path = "../src/prompts.rs"]
+mod prompts;
+#[path = "../src/resources.rs"]
+mod resources;
 #[path = "../src/server.rs"]
 mod server;
 #[path = "../src/tools/mod.rs"]

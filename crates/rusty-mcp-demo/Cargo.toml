@@ -19,6 +19,7 @@ path = "src/main.rs"
 rusty-mcp = { workspace = true }
 rmcp = { workspace = true, features = ["server", "macros", "schemars"] }
 clap = { workspace = true }
+serde_json = { workspace = true }
 schemars = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -55,6 +55,7 @@ Inside the scaffold:
 | `shutdown` | SIGINT / SIGTERM handling |
 | `error` | `ServeError`, plus `ToolError` for tool bodies |
 | `auth` | OAuth 2.1 resource-server layer (see [Authorization](#authorization)) |
+| `resources` | Resource registry with URI templates (see [Resources and prompts](#resources-and-prompts)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
@@ -95,6 +96,75 @@ Notes that save time:
 - **A protocol error is not a tool failure.** `ErrorData` means the call could
   not be processed. A tool that ran but failed in its domain ("no such user")
   should return a normal result with `isError: true`, so the model can react.
+
+## Resources and prompts
+
+Tools are one of three things a server exposes. The other two are **resources**
+(data the client can read) and **prompts** (templates a *user* invokes, usually
+as a slash command — the model never picks one on its own).
+
+`rmcp` gives prompts the same router treatment as tools, so they compose the
+same way:
+
+```rust
+#[prompt_router(router = "demo_prompts", vis = "pub(crate)")]
+impl DemoServer {
+    #[prompt(name = "summarize", description = "Summarize text.")]
+    pub async fn summarize(&self, Parameters(args): Parameters<SummarizeArgs>)
+        -> Vec<PromptMessage> { /* ... */ }
+}
+```
+
+Note `prompt_router` takes its router name as a **string literal**, where
+`tool_router` takes an identifier — an easy five minutes to lose.
+
+Resources have no router in `rmcp`, so this crate provides one:
+
+```rust
+use rusty_mcp::resources::{ReadRequest, ResourceRegistry};
+
+let resources = ResourceRegistry::new()
+    // Fixed content.
+    .with_text(Resource::new("config://demo", "demo-config"), r#"{"a":1}"#)
+    // Generated per read.
+    .with_reader(Resource::new("status://uptime", "uptime"), |req: ReadRequest| async move {
+        Ok(vec![ResourceContents::text(uptime(), req.uri.clone())])
+    })
+    // A templated family.
+    .with_template(
+        ResourceTemplate::new("db://tables/{table}", "table-schema"),
+        |req: ReadRequest| async move {
+            let table = req.param("table").unwrap_or_default();
+            /* ... */
+        },
+    );
+```
+
+Then, alongside the handler attributes:
+
+```rust
+#[tool_handler(router = self.tool_router)]
+#[prompt_handler(router = self.prompt_router)]
+impl ServerHandler for DemoServer {
+    fn get_info(&self) -> ServerInfo { /* enable_resources(), enable_prompts() */ }
+    rusty_mcp::forward_resource_methods!(resources);
+}
+```
+
+The registry handles what you'd otherwise write by hand: cache hints on all
+three responses, concrete URIs matching ahead of templates, and not-found
+errors — which `rmcp` renders as `-32602` for 2026-07-28 peers and the legacy
+`-32002` for older ones, since the code changed in this revision.
+
+### Template variables never cross `/`
+
+`db://tables/{table}` will not match `db://tables/../../etc/passwd`. That URI
+falls through to not-found rather than reaching your reader with a traversal
+payload — which matters most for the case people reach for first, a
+filesystem-backed resource. Values are percent-decoded after matching, so the
+decoding cannot reintroduce a separator.
+
+Templates are RFC 6570 **level 1**: `{var}` placeholders only, no operators.
 
 ## Shared state
 

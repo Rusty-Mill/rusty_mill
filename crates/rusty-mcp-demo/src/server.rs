@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use rmcp::{
     ServerHandler,
-    handler::server::router::tool::ToolRouter,
+    handler::server::router::{prompt::PromptRouter, tool::ToolRouter},
     model::{ServerCapabilities, ServerInfo},
-    tool_handler,
+    prompt_handler, tool_handler,
 };
+use rusty_mcp::resources::ResourceRegistry;
 use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
 
 use crate::tools::slow::COUNTDOWN;
@@ -27,7 +28,9 @@ pub struct DemoState {
 pub struct DemoServer {
     pub(crate) state: Arc<DemoState>,
     pub(crate) tasks: TaskSupport,
+    pub(crate) resources: ResourceRegistry,
     tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
 }
 
 impl DemoServer {
@@ -53,11 +56,22 @@ impl DemoServer {
         Self {
             state,
             tasks,
-            // Each tool module contributes its own router; `+` merges them.
-            // Adding a module is one more term here and nothing else.
+            resources: crate::resources::registry(),
+            // Each module contributes its own router; `+` merges them. Adding a
+            // module is one more term here and nothing else.
             tool_router: Self::calculator_tools() + Self::text_tools() + Self::slow_tools(),
+            prompt_router: Self::demo_prompts(),
         }
     }
+}
+
+/// How long this process has been running.
+///
+/// Backs the `status://uptime` resource, which exists to show a resource whose
+/// content is produced per read rather than fixed at startup.
+pub fn process_uptime() -> std::time::Duration {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed()
 }
 
 /// Only `countdown` is slow enough to be worth a task handle; the arithmetic
@@ -74,6 +88,7 @@ impl Default for DemoServer {
 }
 
 #[tool_handler(router = self.tool_router)]
+#[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for DemoServer {
     fn get_info(&self) -> ServerInfo {
         // `rusty_mcp::server_info` pins the advertised revision to 2026-07-28;
@@ -83,15 +98,20 @@ impl ServerHandler for DemoServer {
             env!("CARGO_PKG_VERSION"),
             ServerCapabilities::builder()
                 .enable_tools()
+                .enable_prompts()
+                .enable_resources()
                 .enable_tasks()
                 .build(),
         )
         .with_instructions(
             "Small arithmetic and text utilities, used to demonstrate the \
                  rusty-mcp scaffold. Prefer `divide` over `add` when you need \
-             the remainder as well.",
+             the remainder as well. Resources expose configuration, uptime and \
+             table schemas; prompts cover summarizing text and explaining \
+             errors.",
         )
     }
 
     rusty_mcp::forward_task_methods!(tasks);
+    rusty_mcp::forward_resource_methods!(resources);
 }

@@ -40,6 +40,7 @@ tower-layer = "0.3"
 # `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
+percent-encoding = "2"
 
 [dev-dependencies]
 base64 = "0.22"
