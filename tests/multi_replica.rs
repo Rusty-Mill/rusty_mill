@@ -12,7 +12,7 @@
 
 #![cfg(all(feature = "client", feature = "server"))]
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use rusty_acp::{
@@ -108,6 +108,8 @@ fn memory_store() -> Arc<dyn Store> {
 /// the backend it was meant to exercise.
 #[cfg(feature = "redis-store")]
 async fn redis_store() -> Option<Arc<dyn Store>> {
+    use std::time::Duration;
+
     use rusty_acp::server::store::{RedisStore, RedisStoreConfig};
 
     let url = std::env::var("ACP_TEST_REDIS_URL").ok()?;
