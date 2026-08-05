@@ -418,7 +418,7 @@ impl Inventory {
     pub fn source_status(&self) -> Result<Vec<SourceStatus>> {
         let mut out = Vec::new();
         for id in SourceId::ALL {
-            let row: Option<(String, Option<i64>, Option<String>, Option<i64>)> = self
+            let row: Option<StatusRow> = self
                 .conn
                 .query_row(
                     "SELECT state, last_ok_at, last_error, frozen_at
@@ -439,16 +439,9 @@ impl Inventory {
                     err,
                     frozen,
                 ),
-                None => (
-                    if crate::paths::is_installed(id) {
-                        SourceState::Absent
-                    } else {
-                        SourceState::Absent
-                    },
-                    None,
-                    None,
-                    None,
-                ),
+                // No status row: this source has never been through an index
+                // pass, whether or not the tool is installed.
+                None => (SourceState::Absent, None, None, None),
             };
 
             let (conversation_count, message_count): (i64, i64) = self.conn.query_row(
@@ -675,6 +668,9 @@ enum Upsert {
     Inserted,
     Updated,
 }
+
+/// `(state, last_ok_at, last_error, frozen_at)` as stored.
+type StatusRow = (String, Option<i64>, Option<String>, Option<i64>);
 
 fn load_embedder(conn: &Connection) -> Box<dyn Embedder> {
     let stored: Option<Vec<u8>> = conn

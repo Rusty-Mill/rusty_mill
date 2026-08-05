@@ -60,7 +60,7 @@ pub fn scan_roots(roots: Vec<PathBuf>, ctx: &mut ScanContext) -> Result<Vec<Pars
                 let updated: Option<Value> = row
                     .get::<_, String>(2)
                     .map(Value::String)
-                    .or_else(|_| row.get::<_, i64>(2).map(|n| Value::from(n)))
+                    .or_else(|_| row.get::<_, i64>(2).map(Value::from))
                     .ok();
                 let data = match row.get::<_, String>(3) {
                     Ok(s) => s,

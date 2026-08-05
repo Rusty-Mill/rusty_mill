@@ -410,8 +410,8 @@ fn randomized_svd_terms(a: &Coo, k: usize) -> Option<Vec<f32>> {
         let mut b = Dense::zeros(sketch, a.cols);
         for &(r, col, v) in &a.entries {
             let qrow = q.row(r as usize);
-            for s in 0..sketch {
-                b.data[s * a.cols + col as usize] += qrow[s] * v;
+            for (s, &qs) in qrow.iter().enumerate().take(sketch) {
+                b.data[s * a.cols + col as usize] += qs * v;
             }
         }
         for i in 0..sketch {
@@ -436,8 +436,8 @@ fn randomized_svd_terms(a: &Coo, k: usize) -> Option<Vec<f32>> {
         let qrow = q.row(t);
         for j in 0..k {
             let mut acc = 0.0f32;
-            for s in 0..sketch {
-                acc += qrow[s] * eigenvectors.data[s * sketch + j];
+            for (s, &qs) in qrow.iter().enumerate().take(sketch) {
+                acc += qs * eigenvectors.data[s * sketch + j];
             }
             let scale = eigenvalues[j].max(0.0).powf(0.25);
             out[t * k + j] = acc * scale;
