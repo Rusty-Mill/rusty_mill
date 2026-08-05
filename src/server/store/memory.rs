@@ -11,8 +11,8 @@ use tokio::sync::broadcast;
 
 use crate::{
     server::store::{
-        message_url, state_url, Notification, NotificationStream, SessionRecord, Store,
-        StoreResult, DEFAULT_MAX_RUNS,
+        message_url, state_url, Notification, NotificationStream, RecoveryRecord, SessionRecord,
+        Store, StoreResult, DEFAULT_MAX_RUNS,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -49,6 +49,8 @@ pub struct InMemoryStore {
     session_states: RwLock<HashMap<SessionId, serde_json::Value>>,
     /// Ownership leases: run to (owner, expiry).
     leases: RwLock<HashMap<RunId, (String, Instant)>>,
+    /// Recovery records, present only for runs whose agent opted in.
+    recovery: RwLock<HashMap<RunId, RecoveryRecord>>,
     max_runs: usize,
 }
 
@@ -67,6 +69,7 @@ impl InMemoryStore {
             sessions: RwLock::new(HashMap::new()),
             session_states: RwLock::new(HashMap::new()),
             leases: RwLock::new(HashMap::new()),
+            recovery: RwLock::new(HashMap::new()),
             max_runs: max_runs.max(1),
         }
     }
@@ -236,6 +239,40 @@ impl Store for InMemoryStore {
                 (*expires_at > Instant::now()).then(|| owner.clone())
             },
         ))
+    }
+
+    async fn try_claim_lease(
+        &self,
+        run_id: RunId,
+        owner: &str,
+        ttl: Duration,
+    ) -> StoreResult<bool> {
+        // Held across the check and the insert, so two claimants cannot both
+        // see the slot empty.
+        let mut leases = self.leases.write().expect("lease map poisoned");
+        let taken = leases.get(&run_id).is_some_and(|(_, expires_at)| *expires_at > Instant::now());
+        if taken {
+            return Ok(false);
+        }
+        leases.insert(run_id, (owner.to_string(), Instant::now() + ttl));
+        Ok(true)
+    }
+
+    async fn put_recovery_record(
+        &self,
+        run_id: RunId,
+        record: Option<&RecoveryRecord>,
+    ) -> StoreResult<()> {
+        let mut recovery = self.recovery.write().expect("recovery map poisoned");
+        match record {
+            Some(record) => recovery.insert(run_id, record.clone()),
+            None => recovery.remove(&run_id),
+        };
+        Ok(())
+    }
+
+    async fn recovery_record(&self, run_id: RunId) -> StoreResult<Option<RecoveryRecord>> {
+        Ok(self.recovery.read().expect("recovery map poisoned").get(&run_id).cloned())
     }
 
     async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {

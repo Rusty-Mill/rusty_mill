@@ -83,12 +83,28 @@ async fn replica(store: Arc<dyn Store>) -> AcpClient {
         },
     );
 
+    // Every replica hosts the same agents, which is the premise of the whole
+    // deployment shape — and a hard requirement for recovery, since the replica
+    // that reaps an abandoned run is the one that has to re-run it.
+    let hangs = agent_fn(
+        AgentManifest::new(
+            AgentName::new("hangs").unwrap(),
+            "Replayable, but never finishes on its own",
+        ),
+        |ctx: RunContext| async move {
+            ctx.cancelled().await;
+            Ok(())
+        },
+    )
+    .with_recovery();
+
     let router = AcpServer::builder()
         .agent(echo)
         .agent(greeter)
         .agent(historian)
         .agent(counter)
         .agent(forever)
+        .agent(hangs)
         .store(store)
         // Pinning the base URL is what a load balancer address would do: history
         // links must not depend on which replica served the request.
@@ -128,6 +144,14 @@ impl KillableReplica {
 
 /// Start a replica whose lease lapses quickly, on a runtime a test can drop.
 fn short_lease_replica(store: Arc<dyn Store>) -> (AcpClient, KillableReplica) {
+    short_lease_replica_with(store, 3)
+}
+
+/// As [`short_lease_replica`], with an explicit recovery attempt budget.
+fn short_lease_replica_with(
+    store: Arc<dyn Store>,
+    max_recovery_attempts: u32,
+) -> (AcpClient, KillableReplica) {
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -147,13 +171,30 @@ fn short_lease_replica(store: Arc<dyn Store>) -> (AcpClient, KillableReplica) {
                 },
             );
 
+            // Replayable, and never finishes on its own — so a run of it is
+            // reliably still in flight when its replica is destroyed, and its
+            // replacement is reliably still running afterwards.
+            let hangs = agent_fn(
+                AgentManifest::new(
+                    AgentName::new("hangs").unwrap(),
+                    "Replayable, but never finishes on its own",
+                ),
+                |ctx: RunContext| async move {
+                    ctx.cancelled().await;
+                    Ok(())
+                },
+            )
+            .with_recovery();
+
             let router = AcpServer::builder()
                 .agent(forever)
+                .agent(hangs)
                 .store(store)
                 .base_url("http://acp.example")
                 // Short enough to observe in a test; the mechanism is identical
                 // at the 30s default.
                 .lease_ttl(Duration::from_secs(1))
+                .max_recovery_attempts(max_recovery_attempts)
                 .build()
                 .expect("server builds")
                 .into_router();
@@ -507,6 +548,123 @@ async fn a_live_run_is_not_reaped(store: Arc<dyn Store>) {
     assert_eq!(cancelled.status, RunStatus::Cancelled);
 }
 
+/// Pull the replacement run id out of an abandoned run's error, if it has one.
+fn replaced_by(run: &rusty_acp::types::Run) -> Option<String> {
+    run.error.as_ref()?.data.as_ref()?.get("replaced_by")?.as_str().map(str::to_string)
+}
+
+/// A recoverable run whose replica dies is replaced by a fresh, linked run.
+///
+/// The abandoned run keeps its own history and stays failed; the replacement
+/// gets a new id and a clean log. Nothing already streamed to a client is
+/// retracted, and no run ends up with two sets of output.
+async fn a_recoverable_run_is_replaced_when_its_replica_dies(store: Arc<dyn Store>) {
+    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
+    let b = replica(store).await;
+
+    let started = a.run_async("hangs", [Message::user("work")]).await.unwrap();
+    replica_a.kill();
+
+    let abandoned = b
+        .wait_for_run(
+            started.run_id,
+            WaitOptions::default()
+                .poll_every(Duration::from_millis(100))
+                .with_timeout(Duration::from_secs(15)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(abandoned.status, RunStatus::Failed);
+
+    // The failed run points at its replacement, using the specification's own
+    // slot for structured error detail.
+    let replacement_id = replaced_by(&abandoned).expect("the failed run links to its replacement");
+    assert_ne!(replacement_id, started.run_id.to_string());
+
+    // The replacement is a real, running run — not just a recorded id.
+    let replacement_id: rusty_acp::types::RunId = replacement_id.parse().unwrap();
+    let replacement = b.get_run(replacement_id).await.unwrap();
+    assert!(!replacement.status.is_terminal(), "the replacement should be running");
+    assert_eq!(replacement.agent_name, abandoned.agent_name);
+
+    // It records what it replaces, and cancelling it proves it is genuinely
+    // executing rather than a phantom record.
+    let events = b.list_run_events(replacement_id).await.unwrap();
+    let replaces = events.iter().find_map(|event| match event {
+        rusty_acp::types::Event::Generic { generic } => generic.get("replaces").cloned(),
+        _ => None,
+    });
+    assert_eq!(
+        replaces.and_then(|value| value.as_str().map(str::to_string)),
+        Some(started.run_id.to_string())
+    );
+
+    let cancelled = b
+        .cancel_and_wait(
+            replacement_id,
+            WaitOptions::default().with_timeout(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+}
+
+/// An agent that has not opted in is never replayed.
+///
+/// The whole point of the default: replaying an agent with external side
+/// effects would repeat them, and the server cannot tell which agents those are.
+async fn a_run_that_did_not_opt_in_is_only_failed(store: Arc<dyn Store>) {
+    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
+    let b = replica(store).await;
+
+    // `forever` does not call `with_recovery`.
+    let started = a.run_async("forever", [Message::user("work")]).await.unwrap();
+    replica_a.kill();
+
+    let abandoned = b
+        .wait_for_run(
+            started.run_id,
+            WaitOptions::default()
+                .poll_every(Duration::from_millis(100))
+                .with_timeout(Duration::from_secs(15)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(abandoned.status, RunStatus::Failed);
+    assert_eq!(replaced_by(&abandoned), None, "an agent that did not opt in must not be replayed");
+}
+
+/// Recovery stops once the attempt budget is spent.
+///
+/// With a budget of one, the first attempt is also the last: the run is failed
+/// without a replacement, so a run that kills whatever executes it cannot
+/// migrate around the fleet forever.
+async fn recovery_stops_at_the_attempt_budget(store: Arc<dyn Store>) {
+    // The budget has to be set on *both*: the replica that reaps an abandoned
+    // run is the one that decides whether to replace it, so a fleet with
+    // mismatched budgets behaves like whichever replica happened to notice.
+    let (a, replica_a) = short_lease_replica_with(Arc::clone(&store), 1);
+    let (b, _replica_b) = short_lease_replica_with(store, 1);
+
+    let started = a.run_async("hangs", [Message::user("work")]).await.unwrap();
+    replica_a.kill();
+
+    let abandoned = b
+        .wait_for_run(
+            started.run_id,
+            WaitOptions::default()
+                .poll_every(Duration::from_millis(100))
+                .with_timeout(Duration::from_secs(15)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(abandoned.status, RunStatus::Failed);
+    assert_eq!(replaced_by(&abandoned), None, "the budget was spent on the first attempt");
+}
+
 // ---------------------------------------------------------------------------
 // Backend bindings.
 // ---------------------------------------------------------------------------
@@ -558,4 +716,7 @@ backend_tests!(
     session_state_is_exposed_as_a_link,
     a_run_whose_replica_dies_is_reaped,
     a_live_run_is_not_reaped,
+    a_recoverable_run_is_replaced_when_its_replica_dies,
+    a_run_that_did_not_opt_in_is_only_failed,
+    recovery_stops_at_the_attempt_budget,
 );

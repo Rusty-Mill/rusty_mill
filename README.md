@@ -322,6 +322,39 @@ let run = client.wait_for_run(run_id, WaitOptions::default()).await?;
 let run = client.wait_for_run(run_id, WaitOptions::default().without_timeout()).await?;
 ```
 
+### Recovering a lost run, instead of just failing it
+
+Failing an abandoned run is always correct but unambitious — the work is lost and the
+client resubmits. An agent that declares itself replayable gets more: when its replica
+dies, the server starts a **replacement run** and links the two.
+
+```rust
+let summarize = agent_fn(manifest, |ctx| async move { /* ... */ })
+    .with_recovery();            // or `fn recoverable(&self) -> bool { true }`
+```
+
+```text
+run A: failed     error.data.replaced_by = <run B>
+   └── run B: running    generic event { replaces: <run A>, attempt: 2 }
+```
+
+The abandoned run keeps its own history and stays failed. Nothing already streamed to a
+client is retracted, and no run ends up with two sets of output — which is exactly why
+this is a *new* run rather than a re-execution in place. Both links use the
+specification's own extension points: `Error.data` on the failed run, a `generic` event
+on the replacement.
+
+Three caveats:
+
+- **The default is off, deliberately.** Replaying an agent that takes a payment or sends
+  a message repeats it. ACP carries no idempotency contract, so the server cannot work
+  out which agents are safe — it has to be told.
+- **Every replica must host the same agents**, and share `max_recovery_attempts`. The
+  replica that notices an abandoned run is the one that re-runs it; if it does not have
+  that agent registered, the run is failed as usual.
+- **There is an attempt ceiling** (default 3), so a run that kills whatever executes it
+  cannot migrate around the fleet forever.
+
 ### Writing your own backend
 
 Implement [`Store`](https://docs.rs/rusty-acp/latest/rusty_acp/server/store/trait.Store.html) —
@@ -397,12 +430,13 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-91 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+101 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
 cancelling it through the other — including killing a replica's whole runtime mid-run and
-asserting the run gets reaped rather than hanging.
+asserting the run gets reaped rather than hanging, and that a replayable one is replaced
+by a fresh linked run.
 
 The multi-replica suite runs against **both** backends. The Redis half is skipped unless
 `ACP_TEST_REDIS_URL` is set; when it *is* set, an unreachable Redis fails the run rather than

@@ -57,6 +57,35 @@
 //! abandoned and failed by whichever replica next reads it — see
 //! [`AcpServerBuilder::lease_ttl`] and [`Store::renew_lease`].
 //!
+//! # Recovering a lost run
+//!
+//! Failing an abandoned run is always correct but unambitious: the work is
+//! lost and the client resubmits. An agent that declares itself
+//! [`recoverable`](Agent::recoverable) gets more — when its replica dies, the
+//! server starts a **replacement run** with the same input and session and a
+//! fresh id, and links the two:
+//!
+//! ```text
+//! run A: failed   error.data.replaced_by = <run B>
+//!    └── run B: running   generic event { replaces: <run A>, attempt: 2 }
+//! ```
+//!
+//! The abandoned run keeps its own history and stays failed. Nothing already
+//! streamed to a client is retracted, and no run ever ends up with two sets of
+//! output — which is why this is a new run rather than a re-execution in place.
+//!
+//! Three things are worth knowing before opting in:
+//!
+//! - **The default is `false`, deliberately.** Replaying an agent that takes a
+//!   payment or sends a message repeats it. ACP carries no idempotency
+//!   contract, so the server cannot infer which agents are safe.
+//! - **Every replica must host the same agents.** The replica that notices an
+//!   abandoned run is the one that re-runs it; if it does not have that agent
+//!   registered, the run is failed as usual.
+//! - **There is an attempt ceiling** — see
+//!   [`AcpServerBuilder::max_recovery_attempts`] — so a run that kills whatever
+//!   executes it cannot migrate around the fleet forever.
+//!
 //! See the [`store`] module for what a backend must guarantee.
 
 mod agent;
@@ -75,7 +104,9 @@ use crate::types::{
 
 pub use agent::{agent_fn, Agent, FnAgent, MessageWriter, RunContext};
 pub use run::RunHandle;
-pub use store::{InMemoryStore, Notification, SessionRecord, Store, DEFAULT_MAX_RUNS};
+pub use store::{
+    InMemoryStore, Notification, RecoveryRecord, SessionRecord, Store, DEFAULT_MAX_RUNS,
+};
 
 #[cfg(feature = "redis-store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis-store")))]
@@ -107,6 +138,13 @@ const LEASE_RENEW_DIVISOR: u32 = 3;
 /// and the caller is left with nothing to act on.
 pub const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How many times a run may be started before recovery gives up on it.
+///
+/// Counts attempts, not retries: `1` disables recovery entirely. Without a
+/// ceiling, a run that reliably kills whatever executes it would migrate around
+/// the fleet forever.
+pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
+
 /// A configured ACP server: a set of agents plus the store backing their runs.
 ///
 /// Build one with [`AcpServer::builder`], then call
@@ -120,6 +158,7 @@ pub struct AcpServer {
     replica_id: String,
     lease_ttl: Duration,
     sync_timeout: Option<Duration>,
+    max_recovery_attempts: u32,
 }
 
 impl std::fmt::Debug for dyn Agent {
@@ -164,6 +203,11 @@ impl AcpServer {
     /// How long a `sync` request waits before returning the run as it stands.
     pub fn sync_timeout(&self) -> Option<Duration> {
         self.sync_timeout
+    }
+
+    /// How many times a run may be started before recovery gives up.
+    pub fn max_recovery_attempts(&self) -> u32 {
+        self.max_recovery_attempts
     }
 
     /// Manifests of every registered agent, in registration order.
@@ -220,21 +264,70 @@ impl AcpServer {
                 Error::not_found(format!("agent {} not found", request.agent_name))
             })?;
 
-        let manifest = agent.manifest();
-        check_input_content_types(&manifest, &request.input)?;
+        check_input_content_types(&agent.manifest(), &request.input)?;
 
         // Resolve the session before the run, so history is captured as it
         // stood before this run's input was added.
         let (session, history) = self.resolve_session(&request).await?;
-        let session_id = session.as_ref().map(|session| session.id);
 
-        let run = Run::new(request.agent_name.clone(), session_id);
+        self.launch(
+            LaunchSpec {
+                agent,
+                agent_name: request.agent_name,
+                input: request.input,
+                session,
+                history,
+                attempt: 1,
+                // A first attempt contributes its input to the session; a
+                // replacement must not, since the run it replaces already did.
+                record_input_in_session: true,
+                replaces: None,
+            },
+            base_url,
+        )
+        .await
+    }
+
+    /// Create a run, take its lease, and spawn its agent.
+    ///
+    /// Shared by fresh runs and by the replacements created when a run is
+    /// recovered, so both go through exactly the same setup.
+    async fn launch(
+        self: &Arc<Self>,
+        spec: LaunchSpec,
+        base_url: &str,
+    ) -> Result<(RunId, NotificationStream), Error> {
+        let LaunchSpec {
+            agent,
+            agent_name,
+            input,
+            session,
+            history,
+            attempt,
+            record_input_in_session,
+            replaces,
+        } = spec;
+
+        let session_id = session.as_ref().map(|session| session.id);
+        let run = Run::new(agent_name.clone(), session_id);
         let run_id = run.run_id;
 
         // Take ownership *before* the run exists in the store. A run that is
         // visible but unowned would look abandoned, and a reaper could fail it
         // before it ever started.
         self.store.renew_lease(run_id, &self.replica_id, self.lease_ttl).await?;
+
+        // Only recoverable agents get their input persisted. For everyone else
+        // the absence of a record is what makes fail-fast the default.
+        if agent.recoverable() {
+            self.store
+                .put_recovery_record(
+                    run_id,
+                    Some(&RecoveryRecord { input: input.clone(), attempt }),
+                )
+                .await?;
+        }
+
         self.store.put_run(&run).await?;
 
         // Subscribe before emitting anything so a streaming client sees
@@ -246,14 +339,27 @@ impl AcpServer {
         handle.spawn_control_listener(control_stream);
         handle.set_created().await?;
 
-        if let Some(session_id) = session_id {
-            self.store.append_session_messages(session_id, base_url, request.input.clone()).await?;
+        // Record the lineage on the run itself, using the one extension point
+        // the specification gives us for agent-defined data.
+        if let Some(replaced) = replaces {
+            handle
+                .emit(Event::generic(serde_json::json!({
+                    "replaces": replaced.to_string(),
+                    "attempt": attempt,
+                })))
+                .await?;
+        }
+
+        if record_input_in_session {
+            if let Some(session_id) = session_id {
+                self.store.append_session_messages(session_id, base_url, input.clone()).await?;
+            }
         }
 
         let ctx = RunContext::new(
-            request.agent_name,
+            agent_name,
             run_id,
-            request.input,
+            input,
             session,
             history,
             base_url.to_string(),
@@ -268,6 +374,57 @@ impl AcpServer {
         });
 
         Ok((run_id, client_stream))
+    }
+
+    /// Start a fresh run to replace one that was abandoned.
+    ///
+    /// Same agent, same input, same session, new id. The session's history is
+    /// *not* extended with the input again — the abandoned run already recorded
+    /// it, and duplicating it would corrupt the conversation.
+    async fn start_replacement(
+        self: &Arc<Self>,
+        abandoned: &Run,
+        record: &RecoveryRecord,
+    ) -> Result<RunId, Error> {
+        let agent = self.agents.get(&abandoned.agent_name).cloned().ok_or_else(|| {
+            Error::not_found(format!(
+                "agent {} is no longer registered on this replica, so run {} cannot be recovered",
+                abandoned.agent_name, abandoned.run_id
+            ))
+        })?;
+
+        let (session, history) = match abandoned.session_id {
+            Some(session_id) => {
+                let record = self.store.ensure_session(Session::with_id(session_id)).await?;
+                (Some(record.session), record.messages)
+            }
+            None => (None, Vec::new()),
+        };
+
+        let base_url = self.base_url.clone().unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let (replacement, _) = self
+            .launch(
+                LaunchSpec {
+                    agent,
+                    agent_name: abandoned.agent_name.clone(),
+                    input: record.input.clone(),
+                    session,
+                    history,
+                    attempt: record.attempt + 1,
+                    record_input_in_session: false,
+                    replaces: Some(abandoned.run_id),
+                },
+                &base_url,
+            )
+            .await?;
+
+        tracing::info!(
+            abandoned = %abandoned.run_id,
+            %replacement,
+            attempt = record.attempt + 1,
+            "started a replacement run"
+        );
+        Ok(replacement)
     }
 
     /// Determine the session for a run and the history it should see.
@@ -287,6 +444,18 @@ impl AcpServer {
             None => (None, Vec::new()),
         })
     }
+}
+
+/// Everything [`AcpServer::launch`] needs to start one run.
+struct LaunchSpec {
+    agent: Arc<dyn Agent>,
+    agent_name: AgentName,
+    input: Vec<Message>,
+    session: Option<Session>,
+    history: Vec<Message>,
+    attempt: u32,
+    record_input_in_session: bool,
+    replaces: Option<RunId>,
 }
 
 /// Reject input the agent has not declared it can consume.
@@ -328,39 +497,89 @@ async fn renew_lease_until_dropped(
     }
 }
 
-/// Fail a run whose executing replica is gone.
+/// Fail a run whose executing replica is gone, and replace it if it may be
+/// replayed.
 ///
 /// A non-terminal run with no live lease has lost its only writer: nothing is
 /// left to consume a resume, apply a cancel, or ever write a terminal state.
 /// Rather than leave it hanging, mark it failed and publish `run.failed` so
 /// waiters on every replica unblock.
 ///
-/// Returns the run as it stands — reaped or not.
+/// If the agent declared itself [`recoverable`](Agent::recoverable) and the
+/// attempt budget is not spent, a **replacement run** is then started here,
+/// with the same input and session and a fresh id. The abandoned run keeps its
+/// own history and stays failed — the two are linked rather than merged, so no
+/// run ever ends up with two sets of output and nothing already streamed to a
+/// client is retracted.
 ///
-/// The run is *failed*, not retried. Re-running it elsewhere would mean
-/// repeating whatever output and side effects it already produced, and ACP
-/// makes no idempotency promise.
-pub(crate) async fn reap_if_abandoned(store: &Arc<dyn Store>, run: Run) -> Result<Run, Error> {
+/// Returns the run as it stands — reaped or not.
+pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Result<Run, Error> {
+    let store = &server.store;
     if run.status.is_terminal() || store.lease_owner(run.run_id).await?.is_some() {
         return Ok(run);
     }
 
     let run_id = run.run_id;
+
+    // Failing is idempotent, but starting a replacement is not: two replicas
+    // must not both decide to recover the same run. Whoever wins this claim
+    // does the work; the others leave the run alone and will see the outcome on
+    // their next read.
+    if !store.try_claim_lease(run_id, &server.replica_id, server.lease_ttl).await? {
+        return Ok(run);
+    }
+
     tracing::warn!(%run_id, "run has no live lease; failing it as abandoned");
+
+    let recovery = store.recovery_record(run_id).await?;
+    let replacement = match &recovery {
+        Some(record) if record.attempt < server.max_recovery_attempts => {
+            match server.start_replacement(&run, record).await {
+                Ok(replacement) => Some(replacement),
+                Err(error) => {
+                    // A failed replacement must not stop the original being
+                    // failed, or the client is back to waiting forever.
+                    tracing::error!(%run_id, %error, "failed to start a replacement run");
+                    None
+                }
+            }
+        }
+        Some(record) => {
+            tracing::warn!(
+                %run_id,
+                attempt = record.attempt,
+                "not replacing the run: the recovery attempt budget is spent"
+            );
+            None
+        }
+        None => None,
+    };
 
     let mut reaped = run;
     reaped.status = RunStatus::Failed;
     reaped.finished_at = Some(chrono::Utc::now());
     reaped.await_request = None;
-    reaped.error = Some(Error::server_error(
-        "the replica executing this run stopped responding, so the run was abandoned.          Its lease expired without renewal; any output it had already produced is preserved.",
-    ));
+    reaped.error = Some(match replacement {
+        Some(replacement) => Error::server_error(
+            "the replica executing this run stopped responding, so the run was abandoned. \
+             A replacement run was started; see `data.replaced_by`.",
+        )
+        // `Error::data` is the specification's own slot for structured detail,
+        // so the link travels to the client without inventing a field.
+        .with_data(serde_json::json!({ "replaced_by": replacement.to_string() })),
+        None => Error::server_error(
+            "the replica executing this run stopped responding, so the run was abandoned. \
+             Its lease expired without renewal; any output it had already produced is preserved.",
+        ),
+    });
 
     store.put_run(&reaped).await?;
     let event = Event::RunFailed { run: Box::new(reaped.clone()) };
     store.append_event(run_id, &event).await?;
     store.publish(run_id, Notification::Event(event)).await?;
-    // Nothing owns it now, and nothing should try to.
+
+    // The abandoned run is finished and its input is no longer needed.
+    store.put_recovery_record(run_id, None).await?;
     store.release_lease(run_id).await?;
 
     Ok(reaped)
@@ -418,6 +637,10 @@ async fn execute(
     if let Err(error) = server.store.release_lease(run_id).await {
         tracing::warn!(%run_id, %error, "failed to release run lease");
     }
+    // A finished run will never be replayed, so stop holding its input.
+    if let Err(error) = server.store.put_recovery_record(run_id, None).await {
+        tracing::warn!(%run_id, %error, "failed to clear the recovery record");
+    }
 
     if let Some(session_id) = session_id {
         let output = handle.snapshot().output;
@@ -441,6 +664,7 @@ pub struct AcpServerBuilder {
     replica_id: Option<String>,
     lease_ttl: Option<Duration>,
     sync_timeout: Option<Option<Duration>>,
+    max_recovery_attempts: Option<u32>,
 }
 
 impl std::fmt::Debug for AcpServerBuilder {
@@ -510,6 +734,9 @@ impl AcpServerBuilder {
 
     /// Name this replica. Defaults to a fresh identifier per process.
     ///
+    /// Unlike the other settings here, this one is *meant* to differ between
+    /// replicas — it is what identifies the holder of a run's lease.
+    ///
     /// The value is the owner recorded on run leases, so a stable, meaningful
     /// name (a pod name, a hostname) makes it obvious in logs which replica was
     /// executing an abandoned run.
@@ -526,6 +753,21 @@ impl AcpServerBuilder {
     /// dead one and failing a run that was about to finish.
     pub fn lease_ttl(mut self, lease_ttl: Duration) -> Self {
         self.lease_ttl = Some(lease_ttl);
+        self
+    }
+
+    /// Cap how many times a run may be started before recovery gives up.
+    /// Defaults to [`DEFAULT_MAX_RECOVERY_ATTEMPTS`].
+    ///
+    /// Counts attempts, not retries, so `1` turns recovery off while leaving
+    /// abandoned runs still promptly failed.
+    ///
+    /// Set this to the same value on every replica. The replica that *notices*
+    /// an abandoned run is the one that decides whether to replace it, so a
+    /// fleet with mismatched budgets behaves like whichever replica got there
+    /// first.
+    pub fn max_recovery_attempts(mut self, attempts: u32) -> Self {
+        self.max_recovery_attempts = Some(attempts.max(1));
         self
     }
 
@@ -584,6 +826,9 @@ impl AcpServerBuilder {
                 .unwrap_or_else(|| format!("replica-{}", uuid::Uuid::new_v4())),
             lease_ttl: self.lease_ttl.unwrap_or(DEFAULT_LEASE_TTL),
             sync_timeout: self.sync_timeout.unwrap_or(Some(DEFAULT_SYNC_TIMEOUT)),
+            max_recovery_attempts: self
+                .max_recovery_attempts
+                .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
         })
     }
 }
