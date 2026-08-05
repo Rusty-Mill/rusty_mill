@@ -32,6 +32,7 @@ pub mod paths;
 pub mod search;
 pub mod sources;
 pub mod update;
+pub mod vectors;
 pub mod watch;
 
 pub use error::{Error, Result};

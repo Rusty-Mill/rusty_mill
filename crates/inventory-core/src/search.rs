@@ -10,12 +10,13 @@
 //! A hit found only by the semantic side is labelled, because "a result with
 //! none of your words otherwise looks like a bug".
 
-use crate::embed::{decode_vector, linalg::cosine, Embedder};
+use crate::embed::Embedder;
 use crate::model::{Conversation, SourceId};
+use crate::vectors::VectorCache;
 use crate::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// RRF's smoothing constant. 60 is the value from the original paper and is
 /// what keeps a single list's top hit from dominating the fusion.
@@ -158,47 +159,44 @@ fn keyword_search(conn: &Connection, query: &SearchQuery) -> Result<Vec<(i64, St
     }
 }
 
+/// Conversations a source/recency filter permits, or `None` when everything
+/// is permitted — which is the common case, and skips the query entirely.
+fn allowed_ids(conn: &Connection, query: &SearchQuery) -> Result<Option<HashSet<i64>>> {
+    if query.sources.is_empty() && query.since.is_none() {
+        return Ok(None);
+    }
+    let sql = format!(
+        "SELECT c.id FROM conversations c WHERE (?1 = 0 OR c.updated_at >= ?1){}",
+        source_filter(&query.sources)
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([query.since.unwrap_or(0)], |r| r.get::<_, i64>(0))?;
+    Ok(Some(rows.flatten().collect()))
+}
+
 fn semantic_search(
     conn: &Connection,
+    cache: &VectorCache,
     embedder: &dyn Embedder,
     query: &SearchQuery,
 ) -> Result<Vec<i64>> {
     let q = embedder.embed(&query.text);
-    let sql = format!(
-        "SELECT e.conversation_id, e.vec
-         FROM embeddings e
-         JOIN conversations c ON c.id = e.conversation_id
-         WHERE e.model = ?1
-           AND (?2 = 0 OR c.updated_at >= ?2){}",
-        source_filter(&query.sources)
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(
-        rusqlite::params![embedder.name(), query.since.unwrap_or(0)],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?)),
-    )?;
+    // An all-zero vector is the embedder abstaining: nothing in the query was
+    // in its vocabulary. Scoring it would rank everything equally-unrelated.
+    if q.iter().all(|x| *x == 0.0) {
+        return Ok(Vec::new());
+    }
 
-    let mut scored: Vec<(i64, f32)> = rows
-        .flatten()
-        .filter_map(|(id, blob)| {
-            let v = decode_vector(&blob);
-            (v.len() == q.len()).then(|| (id, cosine(&q, &v)))
-        })
-        .collect();
-
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(CANDIDATE_DEPTH);
+    let allow = allowed_ids(conn, query)?;
     // A near-zero cosine is noise, not a match; including it would put
     // unrelated conversations under a "found by meaning" label.
-    Ok(scored
-        .into_iter()
-        .filter(|(_, s)| *s > 0.05)
-        .map(|(id, _)| id)
-        .collect())
+    let hits = cache.search(&q, CANDIDATE_DEPTH, allow.as_ref(), 0.05);
+    Ok(hits.into_iter().map(|(id, _)| id).collect())
 }
 
 pub fn search(
     conn: &Connection,
+    cache: &VectorCache,
     embedder: &dyn Embedder,
     query: &SearchQuery,
 ) -> Result<SearchResponse> {
@@ -213,7 +211,7 @@ pub fn search(
 
     let keyword = keyword_search(conn, query)?;
     let semantic = if query.meaning {
-        semantic_search(conn, embedder, query)?
+        semantic_search(conn, cache, embedder, query)?
     } else {
         Vec::new()
     };

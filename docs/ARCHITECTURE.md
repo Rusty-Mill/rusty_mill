@@ -32,6 +32,7 @@ implementation.
 | `index` | The `Inventory` type: indexing, freeze/repair, retention, stats. |
 | `capture` | Quick capture and the clipboard scratchpad. |
 | `handoff` | Session resumption and hand-off primers. |
+| `vectors` | Resident vector set, exact scan, and the clustered index over it. |
 | `watch` | Debounced polling of the source stores, so the index stays live. |
 | `update` | Update-check *policy*. Deliberately contains no transport. |
 | `format` | Human-readable dates, relative times, byte sizes. |
@@ -152,6 +153,60 @@ Consequences, stated plainly:
 `Embedder` is a trait, so dropping in a shipped static model later is a new
 implementation, not a rewrite.
 
+### Making semantic search scale
+
+Two layers, and the first matters more than the second.
+
+**The vectors live in memory.** The original implementation read every
+embedding blob out of SQLite and decoded it on *every query* — as-you-type,
+that is the same megabytes re-read and re-parsed per keystroke. `VectorSet`
+loads them once into one contiguous `Vec<f32>`. The scan was never the
+expensive part; the I/O and the decode were.
+
+**An IVF index narrows the scan, above a measured threshold.** `IvfIndex`
+clusters the set with k-means and probes only the nearest clusters. The
+threshold is evidence, not intuition — `examples/vector_bench.rs`, 128
+dimensions, time for one exact scan:
+
+| vectors | per query |
+|---------|-----------|
+| 5,000 | 0.6 ms |
+| 20,000 | 2.7 ms |
+| 50,000 | 7.0 ms |
+| 200,000 | 29 ms |
+| 1,000,000 | 141 ms |
+
+A heavy user with years of history across six tools lands in the tens of
+thousands, where the exact scan is comfortably inside an as-you-type budget.
+So `MIN_VECTORS_FOR_INDEX` is 50,000: below it the index would trade recall
+for nothing.
+
+Three rules make an approximate index safe in front of an exact one, all
+adopted from `rusty_remind_me`'s `ann_index.rs`:
+
+- **Never a source of truth.** No index, a stale one, or too few survivors
+  after filtering all fall back to the exact scan. A search must never fail —
+  or silently return less — because an optimisation was unavailable.
+- **It narrows candidates; it does not score them.** The index picks a
+  shortlist, exact cosines are computed over it, so scores are identical to
+  the brute-force ones and RRF fusion cannot tell the index ran.
+- **Staleness is detected.** The index records the model and vector count it
+  was built from; either changing means it is ignored. A stale index quietly
+  returning deleted conversations is worse than no index, because the results
+  look plausible.
+
+Clustering is plain k-means here rather than a bound C++ ANN library: it
+reuses arithmetic already present for the embedder and keeps the promise that
+this builds with nothing installed. It runs during an index pass, never on a
+search path — a search must not silently pay for a build.
+
+Two calibration notes worth keeping. Probing one cluster gives poor recall,
+because a query near a boundary has its neighbours split across several, so at
+least an eighth of clusters are probed. And recall must be measured against
+*realistic* queries: a uniform-random query sits far from every cluster, which
+makes "nearest cluster" nearly arbitrary. The test perturbs real members,
+which is what a query embedding actually is.
+
 ### Keeping the index live
 
 The source stores are stat-ed on an interval rather than watched through
@@ -226,7 +281,7 @@ Recorded rather than glossed over.
 
 ## Testing
 
-66 tests, no network, no fixtures checked in as binaries.
+74 tests, no network, no fixtures checked in as binaries.
 
 - **Unit tests** cover each parser against realistic records, the timestamp and
   calendar round-trip, FTS query escaping, the linear algebra against known
@@ -236,6 +291,10 @@ Recorded rather than glossed over.
   confirm re-indexing is idempotent, break a source and prove it freezes
   *without losing history* and then repairs itself, and exercise capture,
   scratchpad, resume, primer and retention.
+- **Vector tests** cover the guarantees rather than the implementation: the
+  index agrees with the exact scan on ≥90% of top hits and ≥85% of top-10,
+  every hit it returns is scored exactly, a stale index is ignored, and a
+  filter that guts the shortlist falls back rather than returning a short page.
 - **Watcher tests** run against real files without a fixture machine, via
   `poll_paths_at`, and cover the debounce directly: a file being written is
   deferred until it settles, a growing file stays deferred across ticks, the
