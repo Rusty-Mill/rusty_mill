@@ -20,6 +20,29 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.23.0
+
+- **Added `platform::term::{ConsoleState, ConsoleAcquisition}`** — the
+  console-*acquisition* facet extraction map D9 flagged but left unbuilt
+  (`AttachConsole`/`AllocConsole`/`FreeConsole`, for a GUI-subsystem
+  Windows process that starts with no console at all). Built
+  speculatively, without a confirmed live consumer, on the owner's
+  explicit call — the same posture PTY hosting (D13) was built under.
+  `ConsoleAcquisition` is a deliberately separate opt-in trait from
+  `Terminal` (only `WindowsTerminal` implements it), mirroring
+  `JobControlTerminal`'s own asymmetry in the other direction. Landed
+  with `docs/design-discussion-console.md` (the reconciliation pass,
+  since the `rusty_naner` donor D9 actually attributes this facet to
+  wasn't in reach — built instead from the *other* D9 donor,
+  `rusty_win32`'s real `AllocConsole`/`AttachConsole`/`FreeConsole`
+  primitives, plus its own `CONIN$`/`CONOUT$`-reopen technique promoted
+  from test-only to production code) and a new registered divergence
+  (`docs/divergences.md` #012: no Linux implementor at all, not a
+  runtime `Unsupported`, since the GUI-subsystem/console-subsystem split
+  this facet exists for has no Unix analog).
+
+  `y`, not `z`: a new public trait and enum on `platform`.
+
 ### 0.22.1
 
 - **Extracted the shared parity assertions into `platform-parity`**, a

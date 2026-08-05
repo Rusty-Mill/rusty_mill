@@ -114,12 +114,18 @@ PAL-owned); cooked↔raw suspend/resume is exactly a second
 already produces the right outcome. `docs/behavior/term.md` records
 this as a deliberate scoping decision, not an oversight.
 
-Still excluded (real D9 material, no forcing consumer yet): Unix
-job-control terminal handoff (`tcsetpgrp` give/reclaim, SIGTSTP/
-SIGCONT — waits on rush interactive or another job-control consumer)
-and rusty_naner's console-*acquisition* facet (attach/alloc/redirect
-for GUI-subsystem processes — waits on the rusty_naner convergence
-being scheduled).
+Job-control terminal handoff (`tcsetpgrp` give/reclaim) landed
+separately with D1's job-control slice (2026-07-21) — see this
+document's own D1 entry cross-reference, `docs/extraction-map.md`.
+
+Console *acquisition* (`AttachConsole`/`AllocConsole`/`FreeConsole` +
+`CONIN$`/`CONOUT$` reopen, `platform::term::ConsoleAcquisition`) landed
+2026-08-05 — the owner's explicit call to build it speculatively
+(no confirmed live consumer; the `rusty_naner` convergence this entry
+originally said it was waiting on still hasn't been scheduled), the
+same posture PTY hosting (D13, Phase 7) was built under. See
+`docs/design-discussion-console.md` for the full design pass and
+`docs/extraction-map.md`'s D9 entry for the landed-slice summary.
 
 ---
 
