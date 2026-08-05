@@ -581,10 +581,19 @@ ClientInfo::default()
     .await?
 ```
 
+## Using it
+
+Neither crate is published to crates.io. Depend on it by git tag:
+
+```toml
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.1.0" }
+```
+
+Add `features = ["jwt"]` for the JWKS-backed token validator.
+
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md). Nothing is tagged or released yet, so
-everything to date sits under Unreleased.
+See [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
