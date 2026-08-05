@@ -1,3 +1,31 @@
+> **ARCHIVED.** Closed out: row 1 shipped (PR #266); row 2 turned out to be
+> a false lead, not a real gap — retracted rather than merged (see below).
+> Kept for the historical record, not as a live backlog.
+>
+> - **`CreatePseudoConsole`'s `PSEUDOCONSOLE_INHERIT_CURSOR`** — closed
+>   #263, merged in
+>   [PR #266](https://github.com/baileyrd/rusty_win32/pull/266) as
+>   `conpty::create_with_flags`.
+> - **`UpdateProcThreadAttribute`'s `PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`**
+>   — implemented in
+>   [PR #267](https://github.com/baileyrd/rusty_win32/pull/267), but real
+>   `windows-latest` CI failed reproducibly (`Win32Error(31)`,
+>   `ERROR_GEN_FAILURE`) on two separate pushes of identical code.
+>   Microsoft's official `UpdateProcThreadAttribute` documentation states
+>   `dwFlags` "is reserved and must be zero"; `PROC_THREAD_ATTRIBUTE_REPLACE_VALUE`
+>   does not appear anywhere in that current, official parameter
+>   documentation — only mingw-w64's `processthreadsapi.h` declares the
+>   constant, and it does not correspond to a functional capability on
+>   real Windows. PR #267 was closed without merging; issue #264 was
+>   closed as not-planned. `AttributeList::update`'s existing hardcoded
+>   `dwFlags = 0` was already correct.
+>
+> Left as a caution for future parity-loop passes: a header-declared
+> constant is a *candidate*, not proof of a working capability — real
+> Windows behavior (or, short of that, current official documentation) is
+> the actual source of truth, and mingw-w64's headers can carry stale or
+> otherwise non-functional declarations.
+
 # Gap analysis: rusty_win32 `conpty` vs. the real Win32 ConPTY API surface
 
 Reference surface: `wincon.h`'s ConPTY declarations (`CreatePseudoConsole`/
