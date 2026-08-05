@@ -28,15 +28,17 @@ jobs:
           - rust: beta
             features: --all-features
           # The MSRV job must match `rust-version` in Cargo.toml, and covers the
-          # default features only: the optional `redis-store` feature pulls in
-          # `redis`, whose own MSRV is higher. Letting an optional dependency
-          # raise the floor for everyone would be the wrong trade.
+          # default features only: the optional `redis-store` and
+          # `postgres-store` features pull in `redis` and `sqlx`, whose own
+          # MSRVs are higher. Letting an optional dependency raise the floor for
+          # everyone would be the wrong trade.
           - rust: "1.86"
             features: ""
 
-    # The multi-replica suite runs against a real Redis rather than a stub.
-    # Setting ACP_TEST_REDIS_URL makes those tests *required*: if Redis is
-    # unreachable they fail rather than quietly skipping.
+    # The multi-replica suite runs against real backends rather than stubs.
+    # Setting ACP_TEST_REDIS_URL and ACP_TEST_POSTGRES_URL makes those tests
+    # *required*: if a backend is unreachable they fail rather than quietly
+    # skipping.
     services:
       redis:
         image: redis:7
@@ -46,9 +48,21 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      postgres:
+        image: postgres:16
+        ports: ["5432:5432"]
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: acp_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     env:
       ACP_TEST_REDIS_URL: redis://127.0.0.1:6379
+      ACP_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/acp_test
 
     steps:
       - uses: actions/checkout@v5
@@ -105,6 +119,8 @@ jobs:
             flags: --no-default-features --features server
           - name: redis-store
             flags: --no-default-features --features redis-store
+          - name: postgres-store
+            flags: --no-default-features --features postgres-store
           - name: well-known
             flags: --no-default-features --features well-known
           - name: all

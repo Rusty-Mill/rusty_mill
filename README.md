@@ -16,6 +16,7 @@ The crate gives you three layers, each usable on its own:
 | `rusty_acp::client` | `client` | An HTTP client for calling **any** ACP server, in any language, including SSE streaming. |
 | `rusty_acp::server` | `server` | An [`axum`] router that hosts **your** agents behind the standard endpoints. |
 | `rusty_acp::server::store` | `redis-store` | A Redis-backed store, for several replicas behind a load balancer. |
+| `rusty_acp::server::store` | `postgres-store` | A Postgres-backed store: the same, with history that outlives a key expiry and is queryable. |
 | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
@@ -43,14 +44,15 @@ rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", default-features = 
 # one layer, without the other
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", default-features = false, features = ["client"] }
 
-# + Redis-backed HA, or open discovery
+# + a shared store for HA, or open discovery
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["redis-store"] }
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["postgres-store"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["well-known"] }
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
-`redis-store` feature requires **1.88**, since the `redis` crate's own floor is higher; an
-optional dependency does not raise the MSRV for everyone else.
+`redis-store` and `postgres-store` features require **1.88**, since `redis` and `sqlx` have
+higher floors of their own; an optional dependency does not raise the MSRV for everyone else.
 
 ## Serve an agent
 
@@ -317,6 +319,31 @@ it is shared:
 - Resuming with `mode: stream` against one replica streams events emitted by the agent
   running inside another.
 
+### Choosing a backend
+
+Two shared stores ship with the crate. They implement the same trait and pass the same
+multi-replica suite, so the choice is about what happens to a run *after* it finishes:
+
+| | `RedisStore` | `PostgresStore` |
+| --- | --- | --- |
+| Expiry | A key TTL, 24h by default — the HA guide's model | None. `sweep()` deletes finished runs past a configured retention, and only when you call it |
+| History | Gone when the TTL lapses | Kept until you decide otherwise |
+| Queries | By run id only | Ordinary SQL: which runs failed today, which agent is busiest, what a session contained |
+| Setup | None | Tables are created on connect |
+
+```rust
+use rusty_acp::server::store::PostgresStore;
+
+let store = PostgresStore::connect("postgres://localhost/acp").await?;
+```
+
+Retention is **off by default**, since unbounded history is usually the reason to reach for
+Postgres in the first place. Turn it on with `PostgresStoreConfig::retention` and call
+`sweep()` from a job you control — nothing deletes anything on its own.
+
+Sessions are never swept. They outlive the runs that fed them, and a conversation is not
+garbage because its last turn is old.
+
 ### How it works
 
 Two ideas carry the design:
@@ -404,9 +431,10 @@ Three caveats:
 Implement [`Store`](https://github.com/baileyrd/rusty_acp/blob/main/src/server/store/mod.rs) —
 run snapshots, the event log, sessions, ownership leases and per-run pub/sub. The
 trait documents the invariants a backend may rely on and the two it must provide
-(subscription liveness on return, and atomic session appends). `InMemoryStore` and
-`RedisStore` are both implemented against exactly that contract, and the multi-replica
-test suite runs unchanged against either.
+(subscription liveness on return, and atomic session appends). `InMemoryStore`,
+`RedisStore` and `PostgresStore` are all implemented against exactly that contract, and
+the multi-replica test suite runs unchanged against each of them — which is the check
+that the contract is real rather than a description of whichever backend came first.
 
 [ha]: https://agentcommunicationprotocol.dev/how-to/high-availability
 
@@ -478,7 +506,7 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-117 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+150 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
@@ -486,20 +514,27 @@ cancelling it through the other — including killing a replica's whole runtime 
 asserting the run gets reaped rather than hanging, and that a replayable one is replaced
 by a fresh linked run.
 
-Two suites deliberately avoid racing what they test, since the gaps they cover are microseconds
-wide and would otherwise pass by luck: `ordering.rs` and `resumption.rs` both wrap the store in a
-decorator that makes the window wide and fixed, so a violation fails every time rather than
-occasionally.
+Four suites deliberately avoid racing what they test, since the gaps they cover are
+microseconds wide and would otherwise pass by luck: `ordering.rs`, `resumption.rs`,
+`reaping.rs` and `cancellation_handoff.rs` each wrap the store in a decorator that makes the
+window wide and fixed, so a violation fails every time rather than occasionally.
 
-The multi-replica suite runs against **both** backends. The Redis half is skipped unless
-`ACP_TEST_REDIS_URL` is set; when it *is* set, an unreachable Redis fails the run rather than
-quietly skipping:
+That approach earned its keep here: adding the Postgres backend, where every write is a
+network round-trip rather than a memory write, surfaced three ordering bugs that every
+backend had and neither of the fast ones ever exposed.
+
+The multi-replica suite runs against **all three** backends. The Redis and Postgres halves are
+skipped unless their URLs are set; when one *is* set, an unreachable backend fails the run
+rather than quietly skipping — a suite that silently tests nothing is worse than one that is
+honestly absent:
 
 ```sh
-ACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+ACP_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+ACP_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/acp_test \
+  cargo test --all-features
 ```
 
-CI runs the suite on stable, beta and the 1.86 MSRV against a real Redis service, plus
+CI runs the suite on stable, beta and the 1.86 MSRV against real Redis and Postgres services, plus
 `rustfmt`, `clippy -D warnings`, each feature combination built alone, a nightly `cargo doc`
 with `-D warnings`, and `cargo package`.
 

@@ -6,9 +6,9 @@
 //! controls it through the **other**. That is the property that lets replicas
 //! sit behind a load balancer with no session affinity.
 //!
-//! Every case runs twice: once against [`InMemoryStore`] and once against
-//! [`RedisStore`]. The Redis cases are skipped when no Redis is configured —
-//! see [`redis_store`].
+//! Every case runs three times: against [`InMemoryStore`], [`RedisStore`] and
+//! `PostgresStore`. The Redis and Postgres cases are skipped when those
+//! backends are not configured — see [`redis_backend`] and [`postgres_backend`].
 
 #![cfg(all(feature = "client", feature = "server"))]
 
@@ -144,15 +144,16 @@ impl KillableReplica {
 }
 
 /// Start a replica whose lease lapses quickly, on a runtime a test can drop.
-fn short_lease_replica(store: Arc<dyn Store>) -> (AcpClient, KillableReplica) {
-    short_lease_replica_with(store, 3)
+fn short_lease_replica(backend: &Backend) -> (AcpClient, KillableReplica) {
+    short_lease_replica_with(backend, 3)
 }
 
 /// As [`short_lease_replica`], with an explicit recovery attempt budget.
 fn short_lease_replica_with(
-    store: Arc<dyn Store>,
+    backend: &Backend,
     max_recovery_attempts: u32,
 ) -> (AcpClient, KillableReplica) {
+    let backend = backend.clone();
     let (addr_tx, addr_rx) = std::sync::mpsc::channel();
     let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
 
@@ -163,6 +164,11 @@ fn short_lease_replica_with(
             .expect("replica runtime builds");
 
         runtime.block_on(async move {
+            // Connected *inside* this runtime, so destroying the runtime takes this
+            // replica's own connections with it and leaves the survivor's alone —
+            // which is what losing a process does.
+            let store = backend.connect().await;
+
             let forever = agent_fn(
                 AgentManifest::new(AgentName::new("forever").unwrap(), "Never finishes on its own"),
                 |ctx: RunContext| async move {
@@ -217,38 +223,110 @@ fn short_lease_replica_with(
 }
 
 /// Two replicas sharing one store.
-async fn replicas(store: Arc<dyn Store>) -> (AcpClient, AcpClient) {
-    let a = replica(Arc::clone(&store)).await;
-    let b = replica(store).await;
+async fn replicas(backend: &Backend) -> (AcpClient, AcpClient) {
+    let a = replica(backend.connect().await).await;
+    let b = replica(backend.connect().await).await;
     assert_ne!(a.base_url(), b.base_url(), "replicas must be distinct servers");
     (a, b)
 }
 
-fn memory_store() -> Arc<dyn Store> {
-    Arc::new(InMemoryStore::default())
+/// Where a test's replicas get their storage.
+///
+/// Deliberately a *factory* rather than one shared handle. The replicas this
+/// suite models are separate processes, and for a pooled backend that is not a
+/// detail: a test that destroys a replica's runtime would otherwise take
+/// connections the surviving replica still depends on, and the survivor would
+/// stall on a pool that thinks they are alive. Each replica connects for
+/// itself, exactly as another process would.
+///
+/// `InMemoryStore` is the exception, and not really one: it has no external
+/// storage to connect to, so sharing the handle *is* sharing the storage.
+#[derive(Clone)]
+enum Backend {
+    Memory(Arc<dyn Store>),
+    #[cfg(feature = "redis-store")]
+    Redis {
+        url: String,
+        key_prefix: String,
+    },
+    #[cfg(feature = "postgres-store")]
+    Postgres {
+        url: String,
+        table_prefix: String,
+    },
 }
 
-/// A Redis-backed store, or `None` when Redis is not configured.
+impl Backend {
+    /// A store handle for one replica.
+    async fn connect(&self) -> Arc<dyn Store> {
+        match self {
+            Backend::Memory(store) => Arc::clone(store),
+            #[cfg(feature = "redis-store")]
+            Backend::Redis { url, key_prefix } => {
+                use rusty_acp::server::store::{RedisStore, RedisStoreConfig};
+                let config = RedisStoreConfig {
+                    key_prefix: key_prefix.clone(),
+                    ttl: Some(Duration::from_secs(60)),
+                };
+                Arc::new(
+                    RedisStore::connect_with(url, config)
+                        .await
+                        .expect("ACP_TEST_REDIS_URL is set but Redis is unreachable"),
+                )
+            }
+            #[cfg(feature = "postgres-store")]
+            Backend::Postgres { url, table_prefix } => {
+                use rusty_acp::server::store::{PostgresStore, PostgresStoreConfig};
+                let config = PostgresStoreConfig {
+                    table_prefix: table_prefix.clone(),
+                    // A replica needs few connections and the suite runs many
+                    // replicas in one process; the default 10 each is sized for
+                    // a deployment, not for seventeen of them at once.
+                    max_connections: 4,
+                    ..PostgresStoreConfig::default()
+                };
+                Arc::new(
+                    PostgresStore::connect_with(url, config)
+                        .await
+                        .expect("ACP_TEST_POSTGRES_URL is set but Postgres is unreachable"),
+                )
+            }
+        }
+    }
+}
+
+fn memory_backend() -> Backend {
+    Backend::Memory(Arc::new(InMemoryStore::default()))
+}
+
+/// The Redis backend, or `None` when Redis is not configured.
 ///
 /// Set `ACP_TEST_REDIS_URL` to run these. When it is set the connection *must*
 /// succeed — a misconfigured CI job fails loudly rather than quietly skipping
 /// the backend it was meant to exercise.
 #[cfg(feature = "redis-store")]
-async fn redis_store() -> Option<Arc<dyn Store>> {
-    use std::time::Duration;
-
-    use rusty_acp::server::store::{RedisStore, RedisStoreConfig};
-
+fn redis_backend() -> Option<Backend> {
     let url = std::env::var("ACP_TEST_REDIS_URL").ok()?;
-    // A fresh prefix per store keeps concurrent tests from colliding.
-    let config = RedisStoreConfig {
-        key_prefix: format!("acp-test:{}", uuid::Uuid::new_v4()),
-        ttl: Some(Duration::from_secs(60)),
-    };
-    let store = RedisStore::connect_with(&url, config)
-        .await
-        .expect("ACP_TEST_REDIS_URL is set but Redis is unreachable");
-    Some(Arc::new(store))
+    // A fresh prefix per test keeps concurrent tests from colliding, while the
+    // replicas within one test share it — that shared prefix is what makes them
+    // one deployment.
+    Some(Backend::Redis { url, key_prefix: format!("acp-test:{}", uuid::Uuid::new_v4()) })
+}
+
+/// The Postgres backend, or `None` when Postgres is not configured.
+///
+/// Set `ACP_TEST_POSTGRES_URL` to run these. As with Redis, a URL that is set
+/// but unreachable fails rather than skipping — a backend that quietly tests
+/// nothing is worse than one that is honestly absent.
+#[cfg(feature = "postgres-store")]
+fn postgres_backend() -> Option<Backend> {
+    let url = std::env::var("ACP_TEST_POSTGRES_URL").ok()?;
+    // Postgres identifiers cannot start with a digit and dislike hyphens, hence
+    // the shape.
+    Some(Backend::Postgres {
+        url,
+        table_prefix: format!("acp_test_{}", uuid::Uuid::new_v4().simple()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -256,8 +334,8 @@ async fn redis_store() -> Option<Arc<dyn Store>> {
 // ---------------------------------------------------------------------------
 
 /// A run started on one replica is readable from the other.
-async fn run_is_visible_from_the_other_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn run_is_visible_from_the_other_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let run = a.run_sync("echo", [Message::user("hello")]).await.unwrap();
     assert_eq!(run.status, RunStatus::Completed);
@@ -269,8 +347,8 @@ async fn run_is_visible_from_the_other_replica(store: Arc<dyn Store>) {
 }
 
 /// The event log written by one replica is served by the other, in order.
-async fn event_log_is_readable_from_the_other_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn event_log_is_readable_from_the_other_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let run = a.run_sync("echo", [Message::user("hello")]).await.unwrap();
 
@@ -284,8 +362,8 @@ async fn event_log_is_readable_from_the_other_replica(store: Arc<dyn Store>) {
 }
 
 /// An agent awaiting on one replica is resumed through the other.
-async fn resume_routes_to_the_executing_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn resume_routes_to_the_executing_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     // Replica A starts the run and parks it.
     let paused = a.run_sync("greeter", [Message::user("hi")]).await.unwrap();
@@ -313,8 +391,8 @@ async fn resume_routes_to_the_executing_replica(store: Arc<dyn Store>) {
 ///
 /// This is the cross-replica streaming case: the agent runs inside replica A
 /// and publishes events there, while the SSE connection is served by replica B.
-async fn resume_streams_events_across_replicas(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn resume_streams_events_across_replicas(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let paused = a.run_sync("greeter", [Message::user("hi")]).await.unwrap();
     assert_eq!(paused.status, RunStatus::Awaiting);
@@ -346,8 +424,8 @@ async fn resume_streams_events_across_replicas(store: Arc<dyn Store>) {
 }
 
 /// A run executing on one replica is cancelled through the other.
-async fn cancel_routes_to_the_executing_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn cancel_routes_to_the_executing_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
 
@@ -360,8 +438,8 @@ async fn cancel_routes_to_the_executing_replica(store: Arc<dyn Store>) {
 }
 
 /// Cancelling an awaiting run works across replicas too.
-async fn cancel_reaches_an_awaiting_run_across_replicas(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn cancel_reaches_an_awaiting_run_across_replicas(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let paused = a.run_sync("greeter", [Message::user("hi")]).await.unwrap();
     assert_eq!(paused.status, RunStatus::Awaiting);
@@ -371,8 +449,8 @@ async fn cancel_reaches_an_awaiting_run_across_replicas(store: Arc<dyn Store>) {
 }
 
 /// A session written by one replica is served, and extended, by the other.
-async fn sessions_are_shared_between_replicas(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn sessions_are_shared_between_replicas(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
     let session_id = SessionId::new();
 
     let request = |text: &str| {
@@ -399,8 +477,8 @@ async fn sessions_are_shared_between_replicas(store: Arc<dyn Store>) {
 /// Asserted through the agent itself rather than by dereferencing history URLs:
 /// those point at the configured load-balancer address, which is right for a
 /// real deployment but not resolvable from a test.
-async fn agents_see_history_written_by_the_other_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn agents_see_history_written_by_the_other_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
     let session_id = SessionId::new();
 
     let request = |text: &str| {
@@ -419,8 +497,8 @@ async fn agents_see_history_written_by_the_other_replica(store: Arc<dyn Store>) 
 
 /// A streamed run started on one replica lands its output where the other can
 /// read it.
-async fn streamed_output_is_persisted_for_other_replicas(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn streamed_output_is_persisted_for_other_replicas(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
 
     let stream = a.stream("echo", [Message::user("streamed")]).await.unwrap();
     let run = collect_run(stream).await.unwrap();
@@ -431,8 +509,8 @@ async fn streamed_output_is_persisted_for_other_replicas(store: Arc<dyn Store>) 
 }
 
 /// State written by an agent on one replica is readable by one on the other.
-async fn session_state_crosses_replicas(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn session_state_crosses_replicas(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
     let session_id = SessionId::new();
 
     let request = || {
@@ -447,8 +525,8 @@ async fn session_state_crosses_replicas(store: Arc<dyn Store>) {
 }
 
 /// Storing state points `Session.state` at the document, and the URL resolves.
-async fn session_state_is_exposed_as_a_link(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn session_state_is_exposed_as_a_link(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
     let session_id = SessionId::new();
 
     a.create_run(
@@ -481,9 +559,9 @@ async fn session_state_is_exposed_as_a_link(store: Arc<dyn Store>) {
 /// closest a test can get to losing the process.
 ///
 /// [sw]: https://github.com/baileyrd/rusty_acp/issues/8
-async fn a_run_whose_replica_dies_is_reaped(store: Arc<dyn Store>) {
-    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
-    let b = replica(store).await;
+async fn a_run_whose_replica_dies_is_reaped(backend: Backend) {
+    let (a, replica_a) = short_lease_replica(&backend);
+    let b = replica(backend.connect().await).await;
 
     let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
     assert!(!started.status.is_terminal());
@@ -521,9 +599,9 @@ async fn a_run_whose_replica_dies_is_reaped(store: Arc<dyn Store>) {
 ///
 /// The guard against an over-eager reaper: a replica that keeps renewing its
 /// lease keeps its runs, however long they take.
-async fn a_live_run_is_not_reaped(store: Arc<dyn Store>) {
-    let (a, _replica_a) = short_lease_replica(Arc::clone(&store));
-    let b = replica(store).await;
+async fn a_live_run_is_not_reaped(backend: Backend) {
+    let (a, _replica_a) = short_lease_replica(&backend);
+    let b = replica(backend.connect().await).await;
 
     let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
 
@@ -559,9 +637,9 @@ fn replaced_by(run: &rusty_acp::types::Run) -> Option<String> {
 /// The abandoned run keeps its own history and stays failed; the replacement
 /// gets a new id and a clean log. Nothing already streamed to a client is
 /// retracted, and no run ends up with two sets of output.
-async fn a_recoverable_run_is_replaced_when_its_replica_dies(store: Arc<dyn Store>) {
-    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
-    let b = replica(store).await;
+async fn a_recoverable_run_is_replaced_when_its_replica_dies(backend: Backend) {
+    let (a, replica_a) = short_lease_replica(&backend);
+    let b = replica(backend.connect().await).await;
 
     let started = a.run_async("hangs", [Message::user("work")]).await.unwrap();
     replica_a.kill();
@@ -615,9 +693,9 @@ async fn a_recoverable_run_is_replaced_when_its_replica_dies(store: Arc<dyn Stor
 ///
 /// The whole point of the default: replaying an agent with external side
 /// effects would repeat them, and the server cannot tell which agents those are.
-async fn a_run_that_did_not_opt_in_is_only_failed(store: Arc<dyn Store>) {
-    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
-    let b = replica(store).await;
+async fn a_run_that_did_not_opt_in_is_only_failed(backend: Backend) {
+    let (a, replica_a) = short_lease_replica(&backend);
+    let b = replica(backend.connect().await).await;
 
     // `forever` does not call `with_recovery`.
     let started = a.run_async("forever", [Message::user("work")]).await.unwrap();
@@ -642,12 +720,12 @@ async fn a_run_that_did_not_opt_in_is_only_failed(store: Arc<dyn Store>) {
 /// With a budget of one, the first attempt is also the last: the run is failed
 /// without a replacement, so a run that kills whatever executes it cannot
 /// migrate around the fleet forever.
-async fn recovery_stops_at_the_attempt_budget(store: Arc<dyn Store>) {
+async fn recovery_stops_at_the_attempt_budget(backend: Backend) {
     // The budget has to be set on *both*: the replica that reaps an abandoned
     // run is the one that decides whether to replace it, so a fleet with
     // mismatched budgets behaves like whichever replica happened to notice.
-    let (a, replica_a) = short_lease_replica_with(Arc::clone(&store), 1);
-    let (b, _replica_b) = short_lease_replica_with(store, 1);
+    let (a, replica_a) = short_lease_replica_with(&backend, 1);
+    let (b, _replica_b) = short_lease_replica_with(&backend, 1);
 
     let started = a.run_async("hangs", [Message::user("work")]).await.unwrap();
     replica_a.kill();
@@ -672,8 +750,8 @@ async fn recovery_stops_at_the_attempt_budget(store: Arc<dyn Store>) {
 /// reconnection has no reason to send it back to the replica the client was
 /// talking to, and with the run's log in the shared store it does not need to.
 /// The replica serving the replay here is not the one executing the run.
-async fn a_dropped_stream_resumes_on_the_other_replica(store: Arc<dyn Store>) {
-    let (a, b) = replicas(store).await;
+async fn a_dropped_stream_resumes_on_the_other_replica(backend: Backend) {
+    let (a, b) = replicas(&backend).await;
     let http = reqwest::Client::new();
 
     // Runs on A, and pauses awaiting input — so the log is settled and finite
@@ -734,7 +812,7 @@ macro_rules! backend_tests {
             $(
                 #[tokio::test]
                 async fn $name() {
-                    super::$name(memory_store()).await;
+                    super::$name(memory_backend()).await;
                 }
             )+
         }
@@ -745,14 +823,32 @@ macro_rules! backend_tests {
             $(
                 #[tokio::test]
                 async fn $name() {
-                    let Some(store) = redis_store().await else {
+                    let Some(backend) = redis_backend() else {
                         eprintln!(
                             "skipping {}: set ACP_TEST_REDIS_URL to run the Redis backend tests",
                             stringify!($name)
                         );
                         return;
                     };
-                    super::$name(store).await;
+                    super::$name(backend).await;
+                }
+            )+
+        }
+
+        #[cfg(feature = "postgres-store")]
+        mod postgres {
+            use super::*;
+            $(
+                #[tokio::test]
+                async fn $name() {
+                    let Some(backend) = postgres_backend() else {
+                        eprintln!(
+                            "skipping {}: set ACP_TEST_POSTGRES_URL to run the Postgres backend tests",
+                            stringify!($name)
+                        );
+                        return;
+                    };
+                    super::$name(backend).await;
                 }
             )+
         }
