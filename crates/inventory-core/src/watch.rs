@@ -375,8 +375,12 @@ mod tests {
         assert_eq!(tick.deferred.len(), 1);
 
         // Restore the original bytes and mtime.
+        //
+        // The handle has to be opened for writing: Windows needs
+        // FILE_WRITE_ATTRIBUTES to set timestamps, so a read-only handle
+        // fails with "Access is denied" there while working fine on Unix.
         std::fs::write(&f, "hello").unwrap();
-        let restored = std::fs::File::open(&f).unwrap();
+        let restored = std::fs::OpenOptions::new().write(true).open(&f).unwrap();
         restored
             .set_times(
                 std::fs::FileTimes::new()
