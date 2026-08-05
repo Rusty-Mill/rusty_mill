@@ -335,6 +335,15 @@ impl AcpServer {
         let client_stream = self.store.subscribe(run_id).await?;
         let control_stream = self.store.subscribe(run_id).await?;
 
+        // Before `run.created` goes out, for the same reason the output is
+        // appended before the terminal event: a client woken by an event must
+        // not read a session that is behind the run it just heard about.
+        if record_input_in_session {
+            if let Some(session_id) = session_id {
+                self.store.append_session_messages(session_id, base_url, input.clone()).await?;
+            }
+        }
+
         let (handle, resume_rx) = RunHandle::new(Arc::clone(&self.store), run);
         handle.spawn_control_listener(control_stream);
         handle.set_created().await?;
@@ -348,12 +357,6 @@ impl AcpServer {
                     "attempt": attempt,
                 })))
                 .await?;
-        }
-
-        if record_input_in_session {
-            if let Some(session_id) = session_id {
-                self.store.append_session_messages(session_id, base_url, input.clone()).await?;
-            }
         }
 
         let ctx = RunContext::new(
@@ -616,18 +619,38 @@ async fn execute(
         biased;
         _ = cancel.cancelled() => {
             tracing::debug!(%run_id, "run cancelled");
-            handle.set_cancelled().await
+            Outcome::Cancelled
         }
         result = agent.run(ctx) => match result {
-            Ok(()) => handle.set_completed().await,
+            Ok(()) => Outcome::Completed,
             Err(error) => {
                 tracing::warn!(%run_id, %error, "agent run failed");
-                handle.set_failed(error).await
+                Outcome::Failed(error)
             }
         },
     };
 
-    if let Err(error) = outcome {
+    // Finish the output and get it into the session *before* the run is marked
+    // terminal. That transition publishes the event which releases a `sync`
+    // caller, and a caller told its run is done must not then read a session
+    // history missing that run's output.
+    let outcome = match record_output(&server, &handle, session_id, &base_url).await {
+        Ok(()) => outcome,
+        // A history write we could not complete is not a run that completed.
+        // Same reasoning as emitting: a storage outage should fail the run
+        // rather than leave it looking finished with its output missing.
+        Err(error) => {
+            tracing::error!(%run_id, %error, "failed to append run output to session");
+            Outcome::Failed(error)
+        }
+    };
+
+    let recorded = match outcome {
+        Outcome::Completed => handle.set_completed().await,
+        Outcome::Cancelled => handle.set_cancelled().await,
+        Outcome::Failed(error) => handle.set_failed(error).await,
+    };
+    if let Err(error) = recorded {
         tracing::error!(%run_id, %error, "failed to record run outcome");
     }
 
@@ -641,17 +664,37 @@ async fn execute(
     if let Err(error) = server.store.put_recovery_record(run_id, None).await {
         tracing::warn!(%run_id, %error, "failed to clear the recovery record");
     }
+}
 
-    if let Some(session_id) = session_id {
-        let output = handle.snapshot().output;
-        if !output.is_empty() {
-            if let Err(error) =
-                server.store.append_session_messages(session_id, &base_url, output).await
-            {
-                tracing::error!(%run_id, %error, "failed to append run output to session");
-            }
-        }
+/// How a run ended, before that ending is written down.
+///
+/// The terminal write is deferred so the session history can be brought up to
+/// date first, which means the outcome has to be carried rather than applied
+/// where it is decided.
+enum Outcome {
+    Completed,
+    Cancelled,
+    Failed(Error),
+}
+
+/// Close off the run's output and append it to the session, if it has one.
+///
+/// Always finalises the output, session or not: an agent that returned
+/// mid-message has a message to flush either way.
+async fn record_output(
+    server: &Arc<AcpServer>,
+    handle: &Arc<RunHandle>,
+    session_id: Option<SessionId>,
+    base_url: &str,
+) -> Result<(), Error> {
+    let output = handle.finalize_output().await?;
+
+    let Some(session_id) = session_id else { return Ok(()) };
+    if output.is_empty() {
+        return Ok(());
     }
+    server.store.append_session_messages(session_id, base_url, output).await?;
+    Ok(())
 }
 
 /// Builder for [`AcpServer`].

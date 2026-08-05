@@ -114,6 +114,44 @@ impl RunHandle {
         });
     }
 
+    /// Close off the run's output and return it, flushing a message the agent
+    /// left open by returning mid-message.
+    ///
+    /// Split out of the terminal transition rather than left inside it because
+    /// the caller has work to do *between* the output being final and the run
+    /// being marked terminal — recording it in the session. The terminal event
+    /// is what releases a `sync` caller, so anything that must be visible to
+    /// that caller has to happen before it, and that in turn needs the output
+    /// finalised first.
+    ///
+    /// Returns an empty vec for an already-terminal run, whose output was
+    /// recorded when it got there.
+    pub(crate) async fn finalize_output(&self) -> Result<Vec<Message>, Error> {
+        let (flushed, output) = {
+            let mut state = self.state.lock().expect("run state poisoned");
+            if state.run.status.is_terminal() {
+                return Ok(Vec::new());
+            }
+            let mut flushed = None;
+            if let Some(mut pending) = state.pending.take() {
+                if !pending.parts.is_empty() {
+                    pending.complete();
+                    state.run.output.push(pending.clone());
+                    flushed = Some(pending);
+                }
+            }
+            (flushed, state.run.output.clone())
+        };
+
+        if let Some(message) = flushed {
+            let run_id = self.run_id();
+            let event = Event::MessageCompleted { message };
+            self.store.append_event(run_id, &event).await?;
+            self.store.publish(run_id, Notification::Event(event)).await?;
+        }
+        Ok(output)
+    }
+
     /// Record an event: update local state, append it to the durable log, and
     /// publish it to every subscriber.
     pub async fn emit(&self, event: Event) -> Result<(), Error> {
@@ -175,6 +213,8 @@ impl RunHandle {
                 return Ok(());
             }
             // Flush a message left open by an agent that returned mid-message.
+            // `finalize_output` has normally taken it already; this covers any
+            // terminal write that did not go through it.
             let mut flushed = None;
             if status.is_terminal() {
                 if let Some(mut pending) = state.pending.take() {
