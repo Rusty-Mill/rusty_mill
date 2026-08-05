@@ -52,7 +52,7 @@ type ApiResult<T> = Result<T, ApiError>;
 
 /// Build the router serving every ACP endpoint.
 pub(crate) fn router(server: Arc<AcpServer>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/ping", get(ping))
         .route("/agents", get(list_agents))
         .route("/agents/{name}", get(get_agent))
@@ -62,7 +62,32 @@ pub(crate) fn router(server: Arc<AcpServer>) -> Router {
         .route("/runs/{run_id}/events", get(list_run_events))
         .route("/session/{session_id}", get(get_session))
         .route("/session/{session_id}/messages/{index}", get(get_session_message))
-        .with_state(server)
+        .route("/session/{session_id}/state", get(get_session_state));
+
+    #[cfg(feature = "well-known")]
+    let router = router.route("/.well-known/agent.yml", get(well_known_agents));
+
+    router.with_state(server)
+}
+
+/// Open discovery: the registered manifests as YAML at the well-known location.
+///
+/// ACP defines this so a crawler or another agent can find what a domain hosts
+/// without knowing the ACP endpoints. The content is built from the same
+/// manifests `GET /agents` serves, so the two cannot drift.
+#[cfg(feature = "well-known")]
+async fn well_known_agents(State(server): State<Arc<AcpServer>>) -> ApiResult<Response> {
+    let body = serde_norway::to_string(&AgentsListResponse { agents: server.manifests() })
+        .map_err(|err| {
+            ApiError(Error::server_error(format!("failed to serialize agent manifests: {err}")))
+        })?;
+    Ok((
+        StatusCode::OK,
+        // RFC 9512 registers `application/yaml`.
+        [(axum::http::header::CONTENT_TYPE, "application/yaml")],
+        body,
+    )
+        .into_response())
 }
 
 async fn ping() -> Json<serde_json::Value> {
@@ -312,6 +337,24 @@ async fn get_session(
     let session_id: SessionId = session_id.parse().map_err(ApiError::from)?;
     let record = server.store().require_session(session_id).await.map_err(ApiError::from)?;
     Ok(Json(record.session))
+}
+
+/// Resource endpoint backing the `state` URL on a [`Session`].
+///
+/// ACP models state as a link, so this is where that link resolves to. The
+/// document is whatever the agent stored, verbatim.
+async fn get_session_state(
+    State(server): State<Arc<AcpServer>>,
+    Path(session_id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let session_id: SessionId = session_id.parse().map_err(ApiError::from)?;
+    let store = server.store();
+    // Distinguish "no such session" from "session with no state yet".
+    store.require_session(session_id).await.map_err(ApiError::from)?;
+    let state = store.get_session_state(session_id).await.map_err(ApiError::from)?;
+    state.map(Json).ok_or_else(|| {
+        ApiError(Error::not_found(format!("session {session_id} has no stored state")))
+    })
 }
 
 /// Resource endpoint backing the message URLs in a [`Session`]'s history.

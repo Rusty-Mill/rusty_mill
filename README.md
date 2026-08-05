@@ -16,6 +16,7 @@ The crate gives you three layers, each usable on its own:
 | `rusty_acp::client` | `client` | An HTTP client for calling **any** ACP server, in any language, including SSE streaming. |
 | `rusty_acp::server` | `server` | An [`axum`] router that hosts **your** agents behind the standard endpoints. |
 | `rusty_acp::server::store` | `redis-store` | A Redis-backed store, for several replicas behind a load balancer. |
+| open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
 TypeScript, LangChain or CrewAI one.
@@ -34,6 +35,7 @@ rusty-acp = { version = "0.1", default-features = false }                      #
 rusty-acp = { version = "0.1", default-features = false, features = ["client"] }
 rusty-acp = { version = "0.1", default-features = false, features = ["server"] }
 rusty-acp = { version = "0.1", features = ["redis-store"] }   # + Redis-backed HA
+rusty-acp = { version = "0.1", features = ["well-known"] }    # + open discovery
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
@@ -197,6 +199,48 @@ let messages = client.fetch_session_history(&session).await?;   // follows every
 Inside an agent, `ctx.history()` gives the messages this server already holds, and
 `ctx.session()` gives the full link list for anything hosted elsewhere.
 
+### Stateful agents
+
+Replaying the whole history every turn gets expensive. An agent can instead persist its own
+state for the session — a summary, accumulated preferences, a working set:
+
+```rust
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct Memory { summary: String, turns: u32 }
+
+let mut memory: Memory = ctx.load_state().await?.unwrap_or_default();
+memory.turns += 1;
+memory.summary = summarize(&memory.summary, ctx.input_text());
+ctx.store_state(&memory).await?;
+```
+
+State is scoped to the session, shared by every run in it, and survives across replicas.
+Following ACP's model, `Session.state` holds a *link* to the document rather than the document
+itself, so `GET /session/{id}` stays small however large the state grows.
+
+### Artifacts
+
+An artifact is a named output — a file, image, or structured result — that a client can offer
+for download or render richly. ACP defines no separate type: an artifact is simply a message
+part with a `name`.
+
+```rust
+ctx.reply_artifact("result.json", "application/json", r#"{"ok": true}"#).await?;
+
+// Binary content is encoded and declared together, so the two can't drift apart:
+ctx.reply_part(MessagePart::binary_artifact("chart.png", "image/png", png_bytes)).await?;
+```
+
+`MessagePart::decoded_content()` reverses it on the receiving side, undoing base64 when that is
+the declared encoding.
+
+### Open discovery
+
+With the `well-known` feature, the server also publishes its manifests as YAML at
+`/.well-known/agent.yml`, so a crawler or another agent can find what a domain hosts without
+knowing the ACP endpoints. The content is built from the same manifests `GET /agents` serves,
+so the two cannot drift.
+
 ## Running several replicas
 
 Runs live in process memory by default, which is right for a single agent host.
@@ -268,6 +312,12 @@ Every endpoint and schema in the ACP v0.2.0 [OpenAPI document][openapi] is imple
 | `GET /runs/{run_id}/events` | ✅ | `list_run_events` |
 | `GET /session/{session_id}` | ✅ | `get_session`, `fetch_session_history` |
 
+Plus resource endpoints backing the links ACP puts in a session — `GET /session/{id}/messages/{i}`
+for history and `GET /session/{id}/state` for state — and, with the `well-known` feature,
+`GET /.well-known/agent.yml` for open discovery. None of those are in the OpenAPI document: the
+spec says history and state are URLs on resource servers, and leaves where they point to the
+implementation.
+
 Also covered:
 
 - **All seven run states** — `created`, `in-progress`, `awaiting`, `cancelling`, `cancelled`,
@@ -285,6 +335,13 @@ Also covered:
   the `user` / `agent` / `agent/{name}` pattern, both at parse time.
 - **The error model** — `server_error`, `invalid_input` and `not_found` mapped to HTTP 500, 422
   and 404 in both directions.
+- **Stateful agents** — `load_state`/`store_state` scoped to the session, exposed as a link.
+- **Artifacts** — named outputs with base64 handled for binary content.
+
+Two things the spec mentions are deliberately not implemented, because there is nothing stable to
+implement against: **embedded/offline discovery** via container labels (the spec states the label
+format is not standardized) and **registry-based discovery** (stated as "not yet part of official
+ACP spec").
 
 ## Examples
 
@@ -303,7 +360,7 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-66 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+81 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and

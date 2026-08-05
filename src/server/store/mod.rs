@@ -176,6 +176,29 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
         messages: Vec<Message>,
     ) -> StoreResult<()>;
 
+    /// Read the state document an agent stored for a session.
+    ///
+    /// Returns `None` when the session has no state, or does not exist.
+    async fn get_session_state(
+        &self,
+        session_id: SessionId,
+    ) -> StoreResult<Option<serde_json::Value>>;
+
+    /// Replace a session's state document.
+    ///
+    /// Must also point [`Session::state`] at the document, using
+    /// [`state_url`] against `base_url`. ACP models state as a *link* rather
+    /// than inline content, so `GET /session/{id}` stays small however large
+    /// the state grows.
+    ///
+    /// State is scoped to the session and outlives any single run.
+    async fn put_session_state(
+        &self,
+        session_id: SessionId,
+        base_url: &str,
+        state: serde_json::Value,
+    ) -> StoreResult<()>;
+
     /// Read a run, or produce a `not_found` error.
     async fn require_run(&self, run_id: RunId) -> StoreResult<Run> {
         self.get_run(run_id)
@@ -197,4 +220,12 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
 /// links to messages rather than inline content.
 pub fn message_url(base_url: &str, session_id: SessionId, index: usize) -> String {
     format!("{}/session/{}/messages/{}", base_url.trim_end_matches('/'), session_id, index)
+}
+
+/// Build the resource URL for a session's state document.
+///
+/// This is the URL that populates [`Session::state`]. Like history, ACP models
+/// state as a link rather than inline content.
+pub fn state_url(base_url: &str, session_id: SessionId) -> String {
+    format!("{}/session/{}/state", base_url.trim_end_matches('/'), session_id)
 }

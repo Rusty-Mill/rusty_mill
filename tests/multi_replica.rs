@@ -61,6 +61,19 @@ async fn replica(store: Arc<dyn Store>) -> AcpClient {
         },
     );
 
+    // Uses session state rather than history to remember: the point is that
+    // state written on one replica is readable on another.
+    let counter = agent_fn(
+        AgentManifest::new(AgentName::new("counter").unwrap(), "Counts turns in session state"),
+        |ctx: RunContext| async move {
+            let previous: u32 = ctx.load_state().await?.unwrap_or(0);
+            let next = previous + 1;
+            ctx.store_state(&next).await?;
+            ctx.reply_text(format!("turn {next}")).await?;
+            Ok(())
+        },
+    );
+
     let forever = agent_fn(
         AgentManifest::new(AgentName::new("forever").unwrap(), "Never finishes on its own"),
         |ctx: RunContext| async move {
@@ -74,6 +87,7 @@ async fn replica(store: Arc<dyn Store>) -> AcpClient {
         .agent(echo)
         .agent(greeter)
         .agent(historian)
+        .agent(counter)
         .agent(forever)
         .store(store)
         // Pinning the base URL is what a load balancer address would do: history
@@ -303,6 +317,49 @@ async fn streamed_output_is_persisted_for_other_replicas(store: Arc<dyn Store>) 
     assert_eq!(seen_by_b.output_text(), "streamed");
 }
 
+/// State written by an agent on one replica is readable by one on the other.
+async fn session_state_crosses_replicas(store: Arc<dyn Store>) {
+    let (a, b) = replicas(store).await;
+    let session_id = SessionId::new();
+
+    let request = || {
+        RunCreateRequest::new(AgentName::new("counter").unwrap(), [Message::user("go")])
+            .with_session_id(session_id)
+    };
+
+    // First turn on A writes state; second on B must read what A wrote.
+    assert_eq!(a.create_run(request()).await.unwrap().output_text(), "turn 1");
+    assert_eq!(b.create_run(request()).await.unwrap().output_text(), "turn 2");
+    assert_eq!(a.create_run(request()).await.unwrap().output_text(), "turn 3");
+}
+
+/// Storing state points `Session.state` at the document, and the URL resolves.
+async fn session_state_is_exposed_as_a_link(store: Arc<dyn Store>) {
+    let (a, b) = replicas(store).await;
+    let session_id = SessionId::new();
+
+    a.create_run(
+        RunCreateRequest::new(AgentName::new("counter").unwrap(), [Message::user("go")])
+            .with_session_id(session_id),
+    )
+    .await
+    .unwrap();
+
+    // Both replicas report the same link, built from the shared base URL rather
+    // than from whichever replica happened to serve the request.
+    for client in [&a, &b] {
+        let session = client.get_session(session_id).await.unwrap();
+        assert_eq!(
+            session.state.as_deref(),
+            Some(format!("http://acp.example/session/{session_id}/state").as_str())
+        );
+    }
+
+    // The state itself is not inlined into the session.
+    let raw = serde_json::to_value(b.get_session(session_id).await.unwrap()).unwrap();
+    assert!(raw["state"].is_string(), "state must be a link, not the document");
+}
+
 // ---------------------------------------------------------------------------
 // Backend bindings.
 // ---------------------------------------------------------------------------
@@ -350,4 +407,6 @@ backend_tests!(
     sessions_are_shared_between_replicas,
     agents_see_history_written_by_the_other_replica,
     streamed_output_is_persisted_for_other_replicas,
+    session_state_crosses_replicas,
+    session_state_is_exposed_as_a_link,
 );

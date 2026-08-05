@@ -67,6 +67,7 @@ pub struct RunContext {
     input: Vec<Message>,
     session: Option<Session>,
     history: Vec<Message>,
+    base_url: String,
     handle: Arc<RunHandle>,
     resume_rx: Mutex<mpsc::Receiver<AwaitResume>>,
 }
@@ -79,6 +80,7 @@ impl RunContext {
         input: Vec<Message>,
         session: Option<Session>,
         history: Vec<Message>,
+        base_url: String,
         handle: Arc<RunHandle>,
         resume_rx: mpsc::Receiver<AwaitResume>,
     ) -> Self {
@@ -88,6 +90,7 @@ impl RunContext {
             input,
             session,
             history,
+            base_url,
             handle,
             resume_rx: Mutex::new(resume_rx),
         }
@@ -127,6 +130,64 @@ impl RunContext {
     /// order.
     pub fn history(&self) -> &[Message] {
         &self.history
+    }
+
+    /// Read the state this agent stored for the session on an earlier run.
+    ///
+    /// State is how a [stateful agent][sa] carries something forward — a
+    /// conversation summary, accumulated preferences, a working set — without
+    /// replaying the whole history. It is scoped to the session, shared by
+    /// every run in it, and survives across replicas.
+    ///
+    /// Returns `Ok(None)` when nothing has been stored yet. Fails if the run is
+    /// not part of a session, since there would be nothing to scope state to.
+    ///
+    /// ```no_run
+    /// # use rusty_acp::server::RunContext;
+    /// # use rusty_acp::types::Error;
+    /// # #[derive(serde::Serialize, serde::Deserialize, Default)]
+    /// # struct Memory { turns: u32 }
+    /// # async fn run(ctx: RunContext) -> Result<(), Error> {
+    /// let mut memory: Memory = ctx.load_state().await?.unwrap_or_default();
+    /// memory.turns += 1;
+    /// ctx.store_state(&memory).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// [sa]: https://agentcommunicationprotocol.dev/core-concepts/stateful-agents
+    pub async fn load_state<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, Error> {
+        let session_id = self.require_session_id()?;
+        let Some(value) = self.handle.store().get_session_state(session_id).await? else {
+            return Ok(None);
+        };
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(|err| Error::server_error(format!("failed to decode session state: {err}")))
+    }
+
+    /// Replace the session's state document.
+    ///
+    /// The session's `state` field is pointed at the stored document, following
+    /// ACP's model of state as a link rather than inline content — so
+    /// `GET /session/{id}` stays small however large the state grows.
+    ///
+    /// Fails if the run is not part of a session.
+    pub async fn store_state<T: serde::Serialize + ?Sized>(&self, state: &T) -> Result<(), Error> {
+        let session_id = self.require_session_id()?;
+        let value = serde_json::to_value(state).map_err(|err| {
+            Error::invalid_input(format!("failed to encode session state: {err}"))
+        })?;
+        self.handle.store().put_session_state(session_id, &self.base_url, value).await
+    }
+
+    fn require_session_id(&self) -> Result<crate::types::SessionId, Error> {
+        self.session.as_ref().map(|session| session.id).ok_or_else(|| {
+            Error::invalid_input(
+                "this run is not part of a session; state is session-scoped, so start the run \
+                 with a `session_id`",
+            )
+        })
     }
 
     /// The role this agent should use for the messages it emits.
@@ -169,6 +230,32 @@ impl RunContext {
     /// Emit a single-part message with an explicit content type.
     pub async fn reply_part(&self, part: MessagePart) -> Result<(), Error> {
         self.emit_message(Message::new(self.role(), [part])).await
+    }
+
+    /// Emit a named [artifact][ar] — a file, image, or structured output a
+    /// client can offer for download or render richly.
+    ///
+    /// ```no_run
+    /// # use rusty_acp::server::RunContext;
+    /// # use rusty_acp::types::Error;
+    /// # async fn run(ctx: RunContext) -> Result<(), Error> {
+    /// ctx.reply_artifact("result.json", "application/json", r#"{"ok": true}"#).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// For binary content, build the part with
+    /// [`MessagePart::binary_artifact`] and pass it to
+    /// [`reply_part`](RunContext::reply_part).
+    ///
+    /// [ar]: https://agentcommunicationprotocol.dev/how-to/generate-artifacts
+    pub async fn reply_artifact(
+        &self,
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Result<(), Error> {
+        self.reply_part(MessagePart::artifact(name, content_type, content)).await
     }
 
     /// Begin a message that will be streamed part by part.

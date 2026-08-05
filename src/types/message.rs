@@ -239,6 +239,103 @@ impl MessagePart {
         Self { metadata: Some(trajectory.into()), ..Default::default() }
     }
 
+    /// A named [artifact][ar] carrying text or structured content.
+    ///
+    /// An artifact is simply a part with a `name`: ACP defines no separate
+    /// type. The name is what lets a client give it specific handling — offer
+    /// it as a download, render it richly, or feed it into the next step.
+    ///
+    /// ```
+    /// # use rusty_acp::types::MessagePart;
+    /// let part = MessagePart::artifact(
+    ///     "result.json",
+    ///     "application/json",
+    ///     r#"{"status": "success"}"#,
+    /// );
+    /// assert!(part.is_artifact());
+    /// ```
+    ///
+    /// For binary content use [`binary_artifact`](MessagePart::binary_artifact),
+    /// which handles the base64 encoding and the matching `content_encoding`
+    /// together.
+    ///
+    /// [ar]: https://agentcommunicationprotocol.dev/how-to/generate-artifacts
+    pub fn artifact(
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: Some(name.into()),
+            content_type: content_type.into(),
+            content: Some(content.into()),
+            ..Default::default()
+        }
+    }
+
+    /// A named [artifact][ar] carrying binary content, base64-encoded.
+    ///
+    /// Encodes the bytes *and* sets [`ContentEncoding::Base64`] together.
+    /// Doing those separately is easy to get half-right, and a part whose
+    /// content is encoded but whose `content_encoding` still says `plain` is
+    /// silently wrong on the wire.
+    ///
+    /// ```
+    /// # use rusty_acp::types::{ContentEncoding, MessagePart};
+    /// let part = MessagePart::binary_artifact("chart.png", "image/png", [0x89, 0x50]);
+    /// assert_eq!(part.encoding(), ContentEncoding::Base64);
+    /// assert_eq!(part.artifact_name(), Some("chart.png"));
+    /// ```
+    ///
+    /// [ar]: https://agentcommunicationprotocol.dev/how-to/generate-artifacts
+    pub fn binary_artifact(
+        name: impl Into<String>,
+        content_type: impl Into<String>,
+        bytes: impl AsRef<[u8]>,
+    ) -> Self {
+        use base64::Engine as _;
+        Self {
+            name: Some(name.into()),
+            content_type: content_type.into(),
+            content: Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            content_encoding: Some(ContentEncoding::Base64),
+            ..Default::default()
+        }
+    }
+
+    /// Whether this part is a named artifact.
+    pub fn is_artifact(&self) -> bool {
+        self.name.is_some()
+    }
+
+    /// The artifact name, if this part is one.
+    pub fn artifact_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Decode the part's content into bytes, undoing base64 when that is the
+    /// declared encoding.
+    ///
+    /// Returns `None` when the part carries no inline content — a
+    /// `content_url` part, or a metadata-only one.
+    pub fn decoded_content(&self) -> Result<Option<Vec<u8>>, Error> {
+        let Some(content) = self.content.as_deref() else {
+            return Ok(None);
+        };
+        match self.encoding() {
+            ContentEncoding::Plain => Ok(Some(content.as_bytes().to_vec())),
+            ContentEncoding::Base64 => {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.decode(content).map(Some).map_err(|err| {
+                    Error::invalid_input(format!(
+                        "part declares `base64` encoding but its content is not valid \
+                             base64: {err}"
+                    ))
+                })
+            }
+        }
+    }
+
     /// Set the part name.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
