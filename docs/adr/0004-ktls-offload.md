@@ -1,9 +1,16 @@
 # ADR-0004: kTLS offload — scope, seam, and the questions that block it
 
-Status: **Proposed** — not accepted. Two of the decisions below belong to a
-person, and one belongs to another repository. Written so they can be made
-rather than drifted into.
+Status: **Accepted** — 2026-08-05, as recommended. D1, D2 and D3 were the
+decisions reserved for a person; all three are accepted in the form proposed
+below. D4 was settled on evidence and has since been re-measured.
 Date: 2026-08-03
+Accepted: 2026-08-05
+
+`rusty_tls#14` is closed as `not planned` under D3. That closes the *tracking*,
+not the option: this ADR is now the record, and it forecloses nothing. If a
+consumer with a measured bottleneck ever appears, reopening #14 and following
+D1 → probe → TX → RX is the path, and every decision it needs is already made
+below.
 
 ## Context
 
@@ -41,6 +48,12 @@ asserting they agree. kTLS has no Windows or BSD counterpart.
 **4. A modern kernel is not sufficient.** Measured here: kernel 6.18.5, and
 `setsockopt(SOL_TCP, TCP_ULP, "tls")` returns **ENOENT** because the `tls`
 module is absent and a container generally cannot load it.
+
+Re-measured 2026-08-05 on a second machine before accepting: kernel
+`6.18.5-fc-v18`, no `/sys/module/tls`, no `tls` in `/proc/modules`, and the
+probe against a live socket returns `ENOENT` again. Two independent runs, same
+answer — which is what D4 rests on, and the reason it is the one decision here
+that was never anyone's to prefer.
 
 ## Decisions proposed
 
@@ -110,13 +123,33 @@ handle KeyUpdate, so D1 has to be answered first either way.
 
 ## Consequences
 
-If accepted as recommended, this ADR **closes nothing and unblocks the
-cheapest work**: a capability probe that reports what a machine can do, with no
-data path and no API change, is honest and self-contained. Everything past it
-waits for a named consumer.
+**Accepted:**
 
-If overruled and the work proceeds, the order is forced: D1 (policy) → probe →
-TX → RX, because each later stage depends on the earlier one's answer.
+- D1, D2 and D3 are decided in the form proposed. D3 is the operative one:
+  **not yet**, on the consumer gate `ARCHITECTURE.md` already applies to this
+  exact item.
+- The capability probe this ADR described as "the cheapest work" is **not**
+  built. It would be public surface for a feature nobody is building, in a
+  crate whose Non-goals section runs a consumer gate — and `rusty_tls#25`'s
+  most expensive lesson was about surface that exists without being reachable.
+  Cheap is not the same as warranted.
+- `rusty_tls#14` is closed as `not planned`. An open issue implies intent, and
+  after `#58` (0-RTT) and `#41` (TLS 1.2) closed under the same gate, leaving
+  this one open would have implied a distinction that is not being drawn.
 
-**Foreclosed either way:** nothing. This ADR records decisions; it removes no
-option that is currently available.
+**Foreclosed:** nothing. This ADR records decisions; it removes no option that
+is currently available, and D1–D4 are exactly what a revival would otherwise
+have to work out from scratch.
+
+**Where the record now lives.** `ARCHITECTURE.md`'s Non-goals entry, and this
+ADR. Between them they carry more than the issue did: the Non-goals line states
+the gate, and this states the four decisions that gate was hiding — including
+the one that matters most, which is that **kTLS's payoff is zero-copy and this
+crate has no API that could express it.** `TlsStream` is `Read + Write` over a
+generic, so the bytes are already in userspace. That is not a scheduling
+problem and no consumer changes it.
+
+**Left for whoever revives this.** The rustils governance question in finding 3
+is still open and still theirs: kTLS does not fit `platform`'s portable trait
+surface, and saying so is an amendment to that repo's `docs/rfc-v2.md` §3
+rather than a decision this ADR can make.

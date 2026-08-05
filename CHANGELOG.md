@@ -6,6 +6,29 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 
 ### Changed
+- **ADR-0004 (kTLS offload) accepted, and rusty_tls#14 closed as
+  `not planned`.** D1, D2 and D3 were reserved for a person; all three are
+  accepted as proposed. D3 is the operative one — **not yet**, on the consumer
+  gate `ARCHITECTURE.md` already applies to kTLS by name.
+
+  D4 was re-measured on a second machine before accepting: kernel
+  `6.18.5-fc-v18`, no `tls` module, and `setsockopt(SOL_TCP, TCP_ULP, "tls")`
+  returns `ENOENT` against a live socket. Two independent runs, same answer, so
+  detection can only ever be a probe and the fallback is the default path.
+
+  **The capability probe the ADR called "the cheapest work" was deliberately
+  not built.** It would be public surface for a feature nobody is building, in
+  a crate that runs a consumer gate — and rusty_tls#25's most expensive lesson
+  was about surface that exists without being reachable. Cheap is not the same
+  as warranted.
+
+  Nothing is foreclosed. The ADR is now the record, and it carries what the
+  issue did not: the four decisions a revival would otherwise redo, including
+  that **kTLS's payoff is zero-copy and this crate has no API that could
+  express it** — `TlsStream` is `Read + Write` over a generic, so bytes are
+  already in userspace. No consumer changes that.
+
+  Documentation only, so no version bump.
 - **TLS 1.2 is declined rather than pending.** rusty_tls#41 closed as
   `not planned`; ADR-0002's stage table and its stage 4 narrative are amended to
   record that, plus a second measurement.
