@@ -1,17 +1,26 @@
 # Changelog
 
 All notable changes to this project are recorded here. The format follows
-[Keep a Changelog][kac], and the project aims to follow [Semantic
-Versioning][semver] once it starts tagging releases.
+[Keep a Changelog][kac] and [Semantic Versioning][semver].
 
-**Nothing has been released yet.** There are no tags, and neither crate is
-published to crates.io — consume `rusty-mcp` via a git or path dependency. The
-`0.1.0` in `Cargo.toml` is a placeholder, so everything built so far sits under
-Unreleased rather than being back-dated into a version that never shipped.
+Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
+
+```toml
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.1.0" }
+```
+
+Being `0.x`, the API may still break in a minor release. Breaking changes will
+be called out here.
 
 Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
+
+Nothing yet.
+
+## [0.1.0] — 2026-08-05
+
+First tagged release. Everything below shipped together.
 
 ### Added
 
@@ -159,6 +168,7 @@ easy to get wrong:
 [#5]: https://github.com/baileyrd/rusty_mcp/pull/5
 [#6]: https://github.com/baileyrd/rusty_mcp/pull/6
 [#8]: https://github.com/baileyrd/rusty_mcp/pull/8
+[0.1.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.1.0
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [spec]: https://modelcontextprotocol.io/specification/2026-07-28
