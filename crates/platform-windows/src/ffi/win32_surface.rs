@@ -56,10 +56,7 @@ pub use windows_sys::Win32::System::Console::{
 // ConsoleAcquisition`): `AllocConsole`/`FreeConsole`/`AttachConsole` are
 // the GUI-subsystem attach-vs-alloc personality itself;
 // `ATTACH_PARENT_PROCESS` is `AttachConsole`'s documented sentinel for
-// "my own parent's console"; `GetConsoleWindow` backs the initial-state
-// probe (a non-null `HWND` means a console is already attached, the
-// `ConsoleState::Inherited` case) since there is no direct "do I have a
-// console" query otherwise; `SetStdHandle` is the fixup step that
+// "my own parent's console"; `SetStdHandle` is the fixup step that
 // repoints this process's own std slots at the freshly (re)opened
 // console handles `reopen_std_handles` obtains via `CreateFileW`
 // (already admitted above) against the `CONIN$`/`CONOUT$` well-known
@@ -68,10 +65,14 @@ pub use windows_sys::Win32::System::Console::{
 // opened with two separate calls), matching the standard Win32 pattern
 // (and `rusty_win32`'s own test-only `open_console` helper, promoted
 // here to production code); `GENERIC_READ`/`GENERIC_WRITE` are that
-// `CreateFileW` call's access-rights argument.
+// `CreateFileW` call's access-rights argument. No `GetConsoleWindow`:
+// it was the initial-state probe's first version and windows-latest CI
+// caught why that was wrong — see `sys::console::has_console`'s own
+// doc comment for the real ConPTY-hosted-console false negative it
+// produced.
 pub use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
 pub use windows_sys::Win32::System::Console::{
-    AllocConsole, AttachConsole, FreeConsole, GetConsoleWindow, SetStdHandle, ATTACH_PARENT_PROCESS,
+    AllocConsole, AttachConsole, FreeConsole, SetStdHandle, ATTACH_PARENT_PROCESS,
 };
 pub use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,

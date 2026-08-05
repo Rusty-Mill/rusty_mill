@@ -112,6 +112,30 @@ detection here (unlikely, but not ruled out) can add it without breaking
 this contract, the same way `is_raw` was added as its own explicit
 method rather than folded into a cached `enter_raw` flag.
 
+## CI-caught bug: `GetConsoleWindow` is the wrong "has a console" probe
+
+The first version of `initial_state()`'s seed probe used `GetConsoleWindow`
+(non-null `HWND` ⇒ a console is attached). `windows-latest` CI (PR #92)
+caught why that's wrong: the runner's `pwsh` invocation for `cargo test`
+is attached to a real console (`AllocConsole` correctly refused with
+`ERROR_ACCESS_DENIED` when a test tried to allocate a second one) that
+nonetheless has **no `HWND`** — the same "ConPTY-hosted consoles have no
+window" fact this crate's own `platform::pty` backend already
+established (`docs/design-discussion-pty.md`). `GetConsoleWindow`
+returning null therefore does not mean "no console"; it only means "no
+*windowed* console," and CI's own runner shape falsified the assumption
+immediately. Fixed by probing attachment the same way
+[`reopen_std_handles`] already opens `CONIN$`/`CONOUT$` — open `CONIN$`
+and check whether it succeeds, which is true for both windowed and
+window-less (ConPTY-hosted) consoles alike. `sys::console::has_console`
+carries the full story in its own doc comment. The lesson generalizes:
+this crate's Windows backend already treats "does this look like a
+console app" as a `GetConsoleMode`-succeeding question rather than a
+window-existence one everywhere else (`sys::console::is_tty`'s own
+doc comment says so explicitly) — the acquisition-state probe should
+have followed the same discipline from the start rather than reaching
+for `GetConsoleWindow` as a shortcut.
+
 ## What stays out of scope
 
 - **Unix**: no analog at all — every Unix process either inherits a

@@ -228,14 +228,34 @@ pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
 // had at start; these change *which* console it has.
 
 /// Whether this process currently has any console attached at all —
-/// `GetConsoleWindow` returning a non-null `HWND`. Used only to seed
-/// [`initial_state`]; unlike [`is_tty`], this is window-based, not
-/// handle-based, so it answers "is a console attached" even when every
-/// std handle happens to be redirected away from it.
-fn has_console_window() -> bool {
-    // SAFETY: `GetConsoleWindow` takes no arguments and has no
-    // precondition.
-    !unsafe { w::GetConsoleWindow() }.is_null()
+/// probed by attempting to open `CONIN$` and immediately closing it on
+/// success. **Deliberately not `GetConsoleWindow`**: a first version of
+/// this probe used it, and `windows-latest` CI caught the real bug that
+/// choice hides — a ConPTY-hosted console (this crate's own
+/// `platform::pty` backend, and, it turns out, however the Actions
+/// runner hosts `pwsh` for a `cargo test` step) has no `HWND` at all,
+/// so `GetConsoleWindow` returning null does not mean "no console" the
+/// way it does for a classic conhost-windowed console. That false
+/// negative made [`initial_state`] report `None` for a process that
+/// genuinely had one attached, which made a test's `free_console()`
+/// wrongly no-op, which made the next `alloc_console()` fail with a
+/// real, correctly-reported `ERROR_ACCESS_DENIED` — the OS was right;
+/// the probe was wrong. Opening `CONIN$` answers "is a console attached
+/// right now" directly, independent of whether that console has a
+/// window (unlike [`is_tty`], which is std-handle-based and would miss
+/// an attached-but-redirected-away-from console the same wrong
+/// direction).
+fn has_console() -> bool {
+    match reopen("CONIN$", w::GENERIC_READ) {
+        Ok(h) => {
+            // SAFETY: `h` is the live handle `reopen` just returned;
+            // this probe only needs to know the open succeeded, not
+            // keep the handle.
+            unsafe { w::CloseHandle(h) };
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 /// [`WindowsTerminal`](crate::WindowsTerminal)'s starting
@@ -249,7 +269,7 @@ fn has_console_window() -> bool {
 /// platform::term::ConsoleAcquisition::console_state) re-runs on every
 /// call.
 pub fn initial_state() -> ConsoleState {
-    if has_console_window() {
+    if has_console() {
         ConsoleState::Inherited
     } else {
         ConsoleState::None
