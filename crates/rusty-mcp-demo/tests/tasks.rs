@@ -244,6 +244,7 @@ async fn tasks_list_still_reports_every_tool() {
             "add",
             "countdown",
             "divide",
+            "drop_table",
             "slugify",
             "text_stats",
             "touch_resource"

@@ -23,6 +23,8 @@ rmcp = { workspace = true, features = [
     "schemars",
     "transport-io",
     "transport-streamable-http-server",
+    "request-state",
+    "elicitation",
 ] }
 axum = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
