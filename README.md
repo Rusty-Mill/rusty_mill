@@ -56,6 +56,7 @@ Inside the scaffold:
 | `error` | `ServeError`, plus `ToolError` for tool bodies |
 | `auth` | OAuth 2.1 resource-server layer (see [Authorization](#authorization)) |
 | `resources` | Resource registry with URI templates (see [Resources and prompts](#resources-and-prompts)) |
+| `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
@@ -449,6 +450,48 @@ authorization server such as Keycloak, Auth0, or WorkOS.
 
 Authorization is HTTP-only by design: the spec says stdio servers **SHOULD NOT**
 use it and should read credentials from the environment instead.
+
+## Tracing
+
+The 2026-07-28 spec reserves three **bare** `_meta` keys — `traceparent`,
+`tracestate` and `baggage` — as an explicit exception to the reverse-DNS prefix
+rule, so MCP interoperates with existing OpenTelemetry tooling ([SEP-414]).
+
+`rmcp` carries those strings; `rusty_mcp::trace` gives them meaning:
+
+```rust
+use rusty_mcp::trace::TraceContext;
+
+let span = TraceContext::from_request(&ctx)
+    .map(|tc| tc.span("tools/call"))
+    .unwrap_or_else(|| tracing::info_span!("tools/call"));
+let _guard = span.enter();
+```
+
+Every log line inside that span carries `trace_id` and `parent_span_id`, so a
+request can be followed from the client, through this server, to whatever it
+calls next. Propagating onward is `tc.child(new_span_id)` then
+`child.apply_to(&mut params)`.
+
+Note this correlates logs; it does not itself emit spans to a collector.
+`tracing` cannot adopt a remote parent on its own, so the ids are recorded as
+fields — a `tracing-opentelemetry` layer can build the real parent link from the
+same values, without this crate picking an exporter for you.
+
+### Two behaviours worth knowing
+
+- **A malformed `traceparent` is treated as absent, not as an error.** W3C
+  requires starting a fresh trace rather than propagating something
+  unparseable. Erroring instead would let a broken upstream fail your requests;
+  passing the raw bytes through would corrupt every trace downstream. Parsing
+  is strict: all-zero ids, wrong field widths, non-hex and version `ff` are all
+  rejected, while unknown future versions still parse.
+- **Baggage is untrusted.** It crosses service boundaries unauthenticated, so
+  anyone who can reach the client can put values in it. Use it for diagnostics,
+  never for authorization. `Baggage` enforces the W3C caps (180 entries, 8 KiB)
+  so an oversized header cannot exhaust memory.
+
+[SEP-414]: https://modelcontextprotocol.io/specification/2026-07-28/basic/index#opentelemetry-trace-context
 
 ## Development
 
