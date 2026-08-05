@@ -92,13 +92,36 @@ impl Default for HttpConfig {
     }
 }
 
+/// Cleanup to run once the transport has stopped accepting work.
+///
+/// Boxed so it can be stored in [`ServerConfig`] and called from the runtime.
+pub type ShutdownHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
+
 /// Everything the runtime needs to start a server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Transport to listen on.
     pub transport: Transport,
     /// `tracing-subscriber` filter directive, e.g. `info` or `rusty_mcp=debug`.
     pub log_filter: String,
+    /// Run after the transport stops, before [`crate::serve`] returns.
+    ///
+    /// Use it to drain work that outlives a request — most often
+    /// [`crate::tasks::TaskSupport::drain`]. Without a hook the process exits
+    /// as soon as the transport closes and anything still running is dropped
+    /// mid-step.
+    pub shutdown_hook: Option<ShutdownHook>,
+}
+
+impl std::fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("transport", &self.transport)
+            .field("log_filter", &self.log_filter)
+            .field("shutdown_hook", &self.shutdown_hook.is_some())
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -106,6 +129,7 @@ impl Default for ServerConfig {
         Self {
             transport: Transport::Stdio,
             log_filter: "info".to_string(),
+            shutdown_hook: None,
         }
     }
 }
@@ -133,6 +157,37 @@ impl ServerConfig {
     /// Override the log filter directive.
     pub fn with_log_filter(mut self, filter: impl Into<String>) -> Self {
         self.log_filter = filter.into();
+        self
+    }
+
+    /// Run `hook` after the transport stops.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use rusty_mcp::{ServerConfig, tasks::TaskSupport};
+    /// let tasks = TaskSupport::new();
+    /// let config = ServerConfig::stdio().with_shutdown_hook({
+    ///     let tasks = tasks.clone();
+    ///     move || {
+    ///         let tasks = tasks.clone();
+    ///         Box::pin(async move {
+    ///             let abandoned = tasks.drain(Duration::from_secs(10)).await;
+    ///             if abandoned > 0 {
+    ///                 tracing::warn!(abandoned, "aborted tasks still running at shutdown");
+    ///             }
+    ///         })
+    ///     }
+    /// });
+    /// # let _ = config;
+    /// ```
+    pub fn with_shutdown_hook<F>(mut self, hook: F) -> Self
+    where
+        F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.shutdown_hook = Some(Arc::new(hook));
         self
     }
 }

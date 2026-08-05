@@ -77,7 +77,12 @@
 //! }
 //! ```
 
-use std::{collections::BTreeSet, future::Future, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    future::Future,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use rmcp::{
     ErrorData,
@@ -88,6 +93,9 @@ use rmcp::{
     service::{RequestContext, RoleServer},
     task_manager::{TaskContext, TaskExit, TaskManager, TaskOptions},
 };
+
+/// How often [`TaskSupport::drain`] rechecks for outstanding tasks.
+const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Which tools run as tasks.
 #[derive(Debug, Clone, Default)]
@@ -279,9 +287,33 @@ impl TaskSupport {
         self.manager.running_task_count()
     }
 
-    /// Abort running tasks. Call during shutdown.
+    /// Abort running tasks immediately.
+    ///
+    /// Prefer [`TaskSupport::drain`], which gives work in flight a chance to
+    /// finish first.
     pub fn shutdown(&self) {
         self.manager.shutdown();
+    }
+
+    /// Let running tasks finish, then abort whatever is left.
+    ///
+    /// Returns how many were still running when the grace period expired — a
+    /// non-zero count means clients polling those task ids will never see a
+    /// result, which is worth logging.
+    ///
+    /// Wire this into shutdown with
+    /// [`ServerConfig::with_shutdown_hook`](crate::config::ServerConfig::with_shutdown_hook);
+    /// without it the process exits and in-flight tasks are dropped mid-step.
+    pub async fn drain(&self, grace: Duration) -> usize {
+        let deadline = Instant::now() + grace;
+
+        while self.running_count() > 0 && Instant::now() < deadline {
+            tokio::time::sleep(DRAIN_POLL_INTERVAL.min(grace)).await;
+        }
+
+        let abandoned = self.running_count();
+        self.manager.shutdown();
+        abandoned
     }
 }
 

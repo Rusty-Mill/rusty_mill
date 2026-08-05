@@ -103,6 +103,9 @@ impl Cli {
         ServerConfig {
             transport,
             log_filter: self.log,
+            // Cleanup needs owned handles, so it is attached in code rather
+            // than derived from flags.
+            shutdown_hook: None,
         }
     }
 }
