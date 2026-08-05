@@ -16,25 +16,19 @@ impl Source for Codex {
         SourceId::Codex
     }
 
+    fn files(&self) -> Vec<std::path::PathBuf> {
+        super::walk_with_extension(&self.roots(), "jsonl", 5)
+    }
+
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
         let mut out = Vec::new();
-        for root in self.roots() {
-            for entry in walkdir::WalkDir::new(&root)
-                .max_depth(5)
-                .into_iter()
-                .filter_map(|e| e.ok())
-            {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                if !ctx.should_read(SourceId::Codex, path) {
-                    continue;
-                }
-                if let Some(conv) = parse_rollout(path)? {
-                    if ctx.since.is_none_or(|s| conv.conversation.updated_at >= s) {
-                        out.push(conv);
-                    }
+        for path in self.files() {
+            if !ctx.should_read(SourceId::Codex, &path) {
+                continue;
+            }
+            if let Some(conv) = parse_rollout(&path)? {
+                if ctx.since.is_none_or(|s| conv.conversation.updated_at >= s) {
+                    out.push(conv);
                 }
             }
         }

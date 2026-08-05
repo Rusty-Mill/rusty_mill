@@ -32,6 +32,7 @@ pub mod paths;
 pub mod search;
 pub mod sources;
 pub mod update;
+pub mod watch;
 
 pub use error::{Error, Result};
 pub use index::{IndexReport, Inventory, RetentionOption, SourceReport, Stats};
@@ -40,6 +41,7 @@ pub use model::{
     SourceStatus,
 };
 pub use search::{MatchedVia, SearchHit, SearchQuery, SearchResponse};
+pub use watch::{WatchTick, Watcher};
 
 /// The version reported in the command palette.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

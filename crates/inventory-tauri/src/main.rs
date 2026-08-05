@@ -325,6 +325,47 @@ fn register_shortcuts(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
+/// Index the backlog, then keep the index live.
+///
+/// The inventory mutex is taken only for the indexing itself, never across
+/// the sleep — otherwise every search would block behind the watcher's idle
+/// interval.
+fn background_index_loop(app: tauri::AppHandle) {
+    use inventory_core::Watcher;
+
+    let index_once = |app: &tauri::AppHandle| -> bool {
+        let Some(state) = app.try_state::<AppState>() else {
+            return false;
+        };
+        let Ok(mut inv) = state.inventory.lock() else {
+            return false;
+        };
+        match inv.index(false) {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("index failed: {e}");
+                false
+            }
+        }
+    };
+
+    index_once(&app);
+    let _ = app.emit("index-complete", ());
+
+    let mut watcher = Watcher::default();
+    watcher.prime();
+
+    loop {
+        std::thread::sleep(inventory_core::watch::DEFAULT_INTERVAL);
+        let tick = watcher.poll();
+        if tick.needs_index() && index_once(&app) {
+            // The panel re-runs its current query on this, so a conversation
+            // finished seconds ago is already in the results.
+            let _ = app.emit("index-complete", ());
+        }
+    }
+}
+
 /// Menu bar presence: the app has no dock icon and no window of its own until
 /// a shortcut summons one, so the tray is the only thing that proves it is
 /// running.
@@ -416,18 +457,10 @@ fn main() {
                 show_panel(&handle, "search");
             }
 
-            // First pass in the background: "First pass takes seconds. After
-            // that it stays live as you work."
-            std::thread::spawn(move || {
-                if let Some(state) = handle.try_state::<AppState>() {
-                    if let Ok(mut inv) = state.inventory.lock() {
-                        if let Err(e) = inv.index(false) {
-                            eprintln!("initial index failed: {e}");
-                        }
-                    }
-                }
-                let _ = handle.emit("index-complete", ());
-            });
+            // "First pass takes seconds. After that it stays live as you
+            // work." The first pass runs off the UI thread; the watcher then
+            // keeps the index current for as long as the app is running.
+            std::thread::spawn(move || background_index_loop(handle));
             Ok(())
         })
         .run(tauri::generate_context!())

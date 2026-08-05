@@ -11,6 +11,10 @@ impl Source for Kiro {
         SourceId::Kiro
     }
 
+    fn files(&self) -> Vec<std::path::PathBuf> {
+        vscdb::store_files(&self.roots())
+    }
+
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
         vscdb::scan_fork(SourceId::Kiro, self.roots(), ctx)
     }

@@ -52,6 +52,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Keep the index live: watch the source stores and index as they change.
+    Watch {
+        /// Seconds between stats of the source stores.
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+        /// Seconds a file must be untouched before it is read, so a
+        /// transcript is never indexed while an agent is still writing it.
+        #[arg(long, default_value_t = inventory_core::watch::DEFAULT_GRACE_SECS)]
+        grace: i64,
+    },
     /// Per-source status, including anything frozen.
     Sources,
     /// Print a whole conversation.
@@ -147,6 +157,7 @@ fn run() -> Result<()> {
             days,
             json,
         } => cmd_search(&cli, query, source, *limit, !*no_meaning, *days, *json),
+        Command::Watch { interval, grace } => cmd_watch(&cli, *interval, *grace),
         Command::Sources => cmd_sources(&cli),
         Command::Show { id } => cmd_show(&cli, *id),
         Command::Capture { text } => cmd_capture(&cli, text),
@@ -280,6 +291,91 @@ fn cmd_search(
         render::search_results(&response, &text);
     }
     Ok(())
+}
+
+fn cmd_watch(cli: &Cli, interval: u64, grace: i64) -> Result<()> {
+    use inventory_core::Watcher;
+    use std::time::Duration;
+
+    let mut inv = open(cli)?;
+    let interval = Duration::from_secs(interval.max(1));
+
+    // Index the backlog once, then prime the watcher against the state that
+    // index just consumed — so the first tick reports what changed *since*,
+    // not the whole disk over again.
+    let first = inv.index(false)?;
+    println!(
+        "{}",
+        paint(
+            DIM,
+            &format!(
+                "Indexed {} new, {} updated in {}ms.",
+                first.total_added(),
+                first.total_updated(),
+                first.elapsed_ms
+            )
+        )
+    );
+
+    let mut watcher = Watcher::new(grace);
+    watcher.prime();
+    println!(
+        "{}",
+        paint(
+            DIM,
+            &format!(
+                "Watching {} files across the installed tools, every {}s. Ctrl-C to stop.",
+                watcher.tracked_count(),
+                interval.as_secs()
+            )
+        )
+    );
+
+    loop {
+        std::thread::sleep(interval);
+        let tick = watcher.poll();
+        if !tick.needs_index() {
+            continue;
+        }
+
+        let names: Vec<&str> = tick
+            .changed_sources
+            .iter()
+            .map(|s| s.display_name())
+            .collect();
+        let report = inv.index(false)?;
+        println!(
+            "{} {}",
+            paint(
+                DIM,
+                &format!(
+                    "{:>10}",
+                    format::relative(inventory_core::model::now_unix())
+                )
+            ),
+            paint(
+                DIM,
+                &format!(
+                    "{} · {} new, {} updated ({}ms)",
+                    names.join(", "),
+                    report.total_added(),
+                    report.total_updated(),
+                    report.elapsed_ms
+                )
+            )
+        );
+        for entry in report.frozen() {
+            if let Some(source) = entry.source {
+                println!(
+                    "           {}",
+                    paint(
+                        WARN,
+                        &format!("{} froze — existing history kept", source.display_name())
+                    )
+                );
+            }
+        }
+    }
 }
 
 fn cmd_sources(cli: &Cli) -> Result<()> {
