@@ -54,8 +54,8 @@
 //! If a replica dies mid-run, the run it was executing would otherwise stay
 //! non-terminal forever. Each executing replica holds a renewed lease on its
 //! runs, so a non-terminal run whose lease has lapsed is recognised as
-//! abandoned and failed — see [`AcpServerBuilder::lease_ttl`] and
-//! [`reap_if_abandoned`].
+//! abandoned and failed by whichever replica next reads it — see
+//! [`AcpServerBuilder::lease_ttl`] and [`Store::renew_lease`].
 //!
 //! See the [`store`] module for what a backend must guarantee.
 
@@ -90,8 +90,9 @@ const DEFAULT_BASE_URL: &str = "http://localhost:8000";
 /// How long a run's ownership lease survives without renewal.
 ///
 /// A replica that stops renewing for this long is treated as gone and its runs
-/// are failed. Comfortably longer than [`LEASE_RENEW_DIVISOR`] makes it, so a
-/// slow tick or a brief pause is not mistaken for death.
+/// are failed. Renewal happens three times per lease lifetime, so several
+/// renewals have to be missed before the lease lapses and a slow tick or brief
+/// pause is not mistaken for death.
 pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 
 /// The lease is renewed every `ttl / LEASE_RENEW_DIVISOR`, so several renewals
