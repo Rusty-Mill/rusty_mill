@@ -11,6 +11,7 @@
 //! | [`types`] | always on | The complete wire format: manifests, messages, runs, events, sessions, errors. |
 //! | [`client`] | `client` | An HTTP client for calling any ACP server, including SSE streaming. |
 //! | [`server`] | `server` | An [`axum`] router that hosts your own agents behind the standard endpoints. |
+//! | [`server::store`] | `redis-store` | A Redis-backed [`Store`](server::store::Store), for several replicas behind a load balancer. |
 //!
 //! ## Serving an agent
 //!
@@ -30,7 +31,7 @@
 //!
 //!     async fn run(&self, ctx: RunContext) -> Result<(), Error> {
 //!         let text = ctx.input_text();
-//!         ctx.reply_text(text);
+//!         ctx.reply_text(text).await?;
 //!         Ok(())
 //!     }
 //! }
@@ -56,6 +57,29 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Running several replicas
+//!
+//! Runs live in process memory by default. Give every replica the same shared
+//! [`Store`](server::store::Store) and they share one view of every run — any
+//! replica can serve any request, and no session affinity is needed:
+//!
+//! ```no_run
+//! # #[cfg(feature = "redis-store")]
+//! # async fn serve(agent: impl rusty_acp::server::Agent) -> Result<(), Box<dyn std::error::Error>> {
+//! use rusty_acp::server::{store::RedisStore, AcpServer};
+//!
+//! let store = RedisStore::connect("redis://127.0.0.1/").await?;
+//! let router = AcpServer::builder()
+//!     .agent(agent)
+//!     .store(std::sync::Arc::new(store))
+//!     .build()?
+//!     .into_router();
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`server::store`] for what a backend must guarantee.
 //!
 //! [acp]: https://agentcommunicationprotocol.dev
 

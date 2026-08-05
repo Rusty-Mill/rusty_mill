@@ -21,7 +21,7 @@ async fn start_server() -> AcpClient {
     let echo = agent_fn(
         AgentManifest::new(AgentName::new("echo").unwrap(), "Echoes the input back"),
         |ctx: RunContext| async move {
-            ctx.reply_text(ctx.input_text());
+            ctx.reply_text(ctx.input_text()).await?;
             Ok(())
         },
     );
@@ -29,11 +29,11 @@ async fn start_server() -> AcpClient {
     let words = agent_fn(
         AgentManifest::new(AgentName::new("words").unwrap(), "Streams one part per word"),
         |ctx: RunContext| async move {
-            let mut writer = ctx.begin_message();
+            let mut writer = ctx.begin_message().await?;
             for word in ctx.input_text().split_whitespace() {
-                writer.push_text(word);
+                writer.push_text(word).await?;
             }
-            writer.finish();
+            writer.finish().await?;
             Ok(())
         },
     );
@@ -44,7 +44,7 @@ async fn start_server() -> AcpClient {
             let resume =
                 ctx.await_request(AwaitRequest::new(json!({ "question": "name?" }))).await?;
             let name = resume.as_value()["answer"].as_str().unwrap_or("stranger").to_string();
-            ctx.reply_text(format!("Hello, {name}!"));
+            ctx.reply_text(format!("Hello, {name}!")).await?;
             Ok(())
         },
     );
@@ -57,7 +57,7 @@ async fn start_server() -> AcpClient {
     let forever = agent_fn(
         AgentManifest::new(AgentName::new("forever").unwrap(), "Never finishes on its own"),
         |ctx: RunContext| async move {
-            ctx.emit_generic(json!({ "phase": "started" }));
+            ctx.emit_generic(json!({ "phase": "started" })).await?;
             ctx.cancelled().await;
             Ok(())
         },
@@ -67,7 +67,7 @@ async fn start_server() -> AcpClient {
         AgentManifest::new(AgentName::new("vision").unwrap(), "Only accepts images")
             .with_input_content_types(["image/*"]),
         |ctx: RunContext| async move {
-            ctx.reply_text("saw an image");
+            ctx.reply_text("saw an image").await?;
             Ok(())
         },
     );
@@ -337,7 +337,7 @@ async fn an_agent_sees_the_local_history_of_its_session() {
     let history_reporter = agent_fn(
         AgentManifest::new(AgentName::new("historian").unwrap(), "Reports how much it remembers"),
         |ctx: RunContext| async move {
-            ctx.reply_text(format!("{} prior messages", ctx.history().len()));
+            ctx.reply_text(format!("{} prior messages", ctx.history().len())).await?;
             Ok(())
         },
     );

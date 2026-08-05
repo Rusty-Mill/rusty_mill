@@ -22,6 +22,8 @@ server = [
     "dep:async-trait",
     "dep:futures-util",
 ]
+# Redis-backed Store, for running several replicas behind a load balancer.
+redis-store = ["server", "dep:redis"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -43,6 +45,12 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 ] }
 eventsource-stream = { version = "0.2", optional = true }
 
+# redis-store
+redis = { version = "1", optional = true, default-features = false, features = [
+    "tokio-comp",
+    "connection-manager",
+] }
+
 # server
 axum = { version = "0.8", optional = true }
 tokio-util = { version = "0.7", optional = true }
@@ -57,6 +65,7 @@ tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
 axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 
@@ -74,4 +83,8 @@ required-features = ["client"]
 
 [[example]]
 name = "awaiting_agent"
+required-features = ["server"]
+
+[[example]]
+name = "ha_server"
 required-features = ["server"]
