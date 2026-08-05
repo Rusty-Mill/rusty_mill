@@ -4,6 +4,14 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `gap-analysis.md` (the `conpty`-vs-real-Win32-ConPTY parity-loop pass,
+  PR #265) closed out and moved to `docs/archive/gap-analysis-conpty.md`
+  with a status banner: one row shipped (#263, PR #266), the other
+  retracted as a false lead (#264/PR #267 — a header-declared constant
+  that real Windows CI and Microsoft's own docs showed isn't an actual
+  working capability).
+
 ### Added
 - `conpty::create_with_flags` plus `conpty::PSEUDOCONSOLE_INHERIT_CURSOR` —
   closes issue #263, a parity-loop gap: `conpty::create` hardcoded
