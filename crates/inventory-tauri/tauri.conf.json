@@ -27,7 +27,8 @@
       "dmg"
     ],
     "icon": [
-      "icons/icon.png"
+      "icons/icon.png",
+      "icons/icon.ico"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"

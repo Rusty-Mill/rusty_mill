@@ -4,7 +4,7 @@
 use inventory_core::keychain::StaticKey;
 use inventory_core::model::SourceState;
 use inventory_core::{Inventory, SearchQuery, SourceId};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 /// `paths` is configured by environment variable, which is process-global, so
@@ -13,7 +13,9 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 struct Fixture {
     _guard: MutexGuard<'static, ()>,
-    home: tempfile::TempDir,
+    /// Held only to keep the directory alive for the test's lifetime — the
+    /// fixture reaches it through the path tables, not through this handle.
+    _home: tempfile::TempDir,
     data: tempfile::TempDir,
 }
 
@@ -26,13 +28,9 @@ impl Fixture {
         std::env::set_var(inventory_core::paths::DATA_ENV, data.path());
         Fixture {
             _guard: guard,
-            home,
+            _home: home,
             data,
         }
-    }
-
-    fn home(&self) -> &Path {
-        self.home.path()
     }
 
     fn index_path(&self) -> PathBuf {
@@ -49,6 +47,24 @@ impl Drop for Fixture {
         std::env::remove_var(inventory_core::paths::HOME_ENV);
         std::env::remove_var(inventory_core::paths::DATA_ENV);
     }
+}
+
+/// Where this platform actually expects a source to live.
+///
+/// The fixture used to hardcode Linux paths, which meant it silently tested
+/// nothing on macOS and Windows — three of the six sources were simply absent.
+/// Deriving the root from the real path table instead makes this suite a test
+/// *of* the path tables on whichever platform it runs.
+fn root_for(source: SourceId) -> PathBuf {
+    inventory_core::paths::candidates(source)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| panic!("{source} has no candidate root on this platform"))
+}
+
+/// The `state.vscdb` a VS Code fork's global storage lives in.
+fn fork_store(source: SourceId) -> PathBuf {
+    root_for(source).join("globalStorage").join("state.vscdb")
 }
 
 fn write(path: PathBuf, body: &str) -> PathBuf {
@@ -79,12 +95,12 @@ fn recent() -> i64 {
 }
 
 /// A machine with all six tools installed and one conversation each.
-fn install_all_six(home: &Path) {
+fn install_all_six() {
     let t = recent();
     let t_ms = t * 1000;
     // Claude Code — JSONL transcript.
     write(
-        home.join(".claude/projects/-work-api/sess-1.jsonl"),
+        root_for(SourceId::ClaudeCode).join("-work-api/sess-1.jsonl"),
         &format!(
             r#"{{"type":"user","sessionId":"sess-1","cwd":"/work/api","gitBranch":"main","timestamp":{t},"message":{{"role":"user","content":"Monochromatic design with SVG icons"}}}}
 {{"type":"assistant","timestamp":{t},"message":{{"role":"assistant","content":[{{"type":"text","text":"Use currentColor so the icons inherit."}}]}}}}"#
@@ -93,7 +109,7 @@ fn install_all_six(home: &Path) {
 
     // Codex — rollout JSONL.
     write(
-        home.join(".codex/sessions/2026/08/05/rollout-1.jsonl"),
+        root_for(SourceId::Codex).join("2026/08/05/rollout-1.jsonl"),
         &format!(
             r#"{{"id":"codex-1","timestamp":{t},"cwd":"/work/db"}}
 {{"type":"message","role":"user","timestamp":{t},"content":[{{"type":"input_text","text":"Postgres index tuning for the search table"}}]}}
@@ -103,7 +119,7 @@ fn install_all_six(home: &Path) {
 
     // Cursor / Kiro / Antigravity — VS Code fork stores.
     vscdb(
-        home.join(".config/Cursor/User/globalStorage/state.vscdb"),
+        fork_store(SourceId::Cursor),
         &[(
             "workbench.panel.aichat.view.aichat.chatdata",
             serde_json::json!({"tabs":[{"tabId":"cursor-1","chatTitle":"Git remote setup and waitlist",
@@ -114,7 +130,7 @@ fn install_all_six(home: &Path) {
         )],
     );
     vscdb(
-        home.join(".config/Kiro/User/globalStorage/state.vscdb"),
+        fork_store(SourceId::Kiro),
         &[(
             "chat.sessions",
             serde_json::json!({"sessionId":"kiro-1","lastUpdatedAt": t_ms,
@@ -124,7 +140,7 @@ fn install_all_six(home: &Path) {
         )],
     );
     vscdb(
-        home.join(".config/Antigravity/User/globalStorage/state.vscdb"),
+        fork_store(SourceId::Antigravity),
         &[(
             "agent.store",
             serde_json::json!({"id":"anti-1","lastUpdatedAt": t_ms,
@@ -135,7 +151,7 @@ fn install_all_six(home: &Path) {
     );
 
     // Zed — its own thread database.
-    let zed = home.join(".local/share/zed/threads/threads.db");
+    let zed = root_for(SourceId::Zed).join("threads.db");
     std::fs::create_dir_all(zed.parent().unwrap()).unwrap();
     let conn = rusqlite::Connection::open(&zed).unwrap();
     conn.execute_batch(
@@ -164,7 +180,7 @@ fn install_all_six(home: &Path) {
 #[test]
 fn indexes_all_six_sources_and_searches_across_them() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
+    install_all_six();
 
     let mut inv = fx.open();
     let report = inv.index(false).unwrap();
@@ -235,7 +251,7 @@ fn indexes_all_six_sources_and_searches_across_them() {
 #[test]
 fn reindexing_is_idempotent_and_skips_unchanged_files() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
+    install_all_six();
 
     let mut inv = fx.open();
     let first = inv.index(false).unwrap();
@@ -262,10 +278,8 @@ fn reindexing_is_idempotent_and_skips_unchanged_files() {
 #[test]
 fn a_broken_source_freezes_and_then_repairs_itself() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
-    let store = fx
-        .home()
-        .join(".config/Cursor/User/globalStorage/state.vscdb");
+    install_all_six();
+    let store = fork_store(SourceId::Cursor);
 
     let mut inv = fx.open();
     inv.index(false).unwrap();
@@ -330,7 +344,7 @@ fn a_broken_source_freezes_and_then_repairs_itself() {
 #[test]
 fn quick_capture_surfaces_what_you_already_worked_out() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
+    install_all_six();
     let mut inv = fx.open();
     inv.index(false).unwrap();
 
@@ -390,7 +404,7 @@ fn the_scratchpad_is_off_until_it_is_turned_on() {
 #[test]
 fn resume_and_primer_carry_a_conversation_elsewhere() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
+    install_all_six();
     let mut inv = fx.open();
     inv.index(false).unwrap();
 
@@ -429,11 +443,11 @@ fn resume_and_primer_carry_a_conversation_elsewhere() {
 #[test]
 fn retention_windows_report_their_cost_and_apply() {
     let fx = Fixture::new();
-    install_all_six(fx.home());
+    install_all_six();
     // One conversation from well outside every window but "everything".
     let old = inventory_core::model::now_unix() - 400 * 86_400;
     write(
-        fx.home().join(".claude/projects/-work-old/sess-old.jsonl"),
+        root_for(SourceId::ClaudeCode).join("-work-old/sess-old.jsonl"),
         &format!(
             r#"{{"type":"user","sessionId":"sess-old","timestamp":{old},"message":{{"role":"user","content":"ancient kubernetes incident postmortem"}}}}"#
         ),
