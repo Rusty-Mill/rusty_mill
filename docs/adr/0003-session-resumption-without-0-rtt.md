@@ -99,5 +99,20 @@ nothing and a weakened forward-secrecy story is worth something.
 
 **Created:**
 
-- A follow-up issue for 0-RTT and its anti-replay design, so the decision is
-  tracked rather than merely deferred.
+- [`rusty_tls#58`](https://github.com/baileyrd/rusty_tls/issues/58) — 0-RTT and
+  its anti-replay design, so the decision is tracked rather than merely
+  deferred. The ADR is the first deliverable there and gates the code.
+
+  **Corrected 2026-08-04.** This bullet originally claimed the follow-up issue
+  had been created. It had not been, and nothing checked the claim until
+  `#43`'s resumption work landed in `0.9.0` and the ADR was read back against
+  the issue list. The issue exists now.
+
+  Worth recording rather than quietly fixing, because the failure is one this
+  repo keeps meeting in a different costume: a document asserting coverage it
+  does not have, with nothing that would notice. It is the same shape as the
+  vacuous green tests `#25` records and the shape-not-value binder tests `#43`
+  had to unpick — and here it mattered, because this bullet is what made 0-RTT
+  *deferred* rather than silently *dropped*. For eight days the deferral had no
+  tracked home, while the engine's own module docs pointed at this ADR and this
+  ADR pointed at nothing.

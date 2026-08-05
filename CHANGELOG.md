@@ -5,6 +5,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Fixed
+- **ADR-0003 claimed a follow-up issue that did not exist.** Its "Consequences →
+  Created" bullet said a 0-RTT anti-replay issue had been filed; none had.
+  Corrected in place, and the issue now exists as rusty_tls#58. Documentation
+  only — no code change, so no version bump.
+
+  Recorded rather than quietly fixed: that bullet is what made 0-RTT *deferred*
+  rather than silently *dropped*, so for eight days the deferral had no tracked
+  home while the engine's module docs pointed at an ADR that pointed at nothing.
+  A document asserting coverage it does not have, with nothing that would
+  notice, is the same failure this repo has met twice before in code.
+
 ## [0.9.0] - 2026-08-04
 
 Built and tested against the same sibling revs as 0.2.x–0.8.0. Neither moved.
