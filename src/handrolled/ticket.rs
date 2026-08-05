@@ -421,8 +421,9 @@ impl TicketContents {
     /// was issued to, or is not measuring what it claims to be measuring.
     /// Declining to resume for it costs one full handshake.
     ///
-    /// Anti-replay proper needs the strike-register design in `rusty_tls#58`,
-    /// and needs it before any early data exists to replay.
+    /// Anti-replay proper needs a strike-register design that does not exist,
+    /// and would need it before any early data existed to replay.
+    /// `rusty_tls#58` records why it was not built.
     pub fn age_is_plausible(&self, obfuscated_ticket_age: u32, now: i64, skew_ms: u32) -> bool {
         let reported = self.reported_age_ms(obfuscated_ticket_age);
         // Saturating throughout: a ticket from a server whose clock is wildly

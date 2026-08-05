@@ -5,6 +5,30 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-08-05
+
+`z` under §2: doc comments only. No public item's shape changed.
+
+### Changed
+- **0-RTT is declined rather than deferred.** rusty_tls#58 was filed, considered,
+  and closed as `not planned`; ADR-0003 is amended to record that, so its
+  "Created" bullet does not go stale a second time.
+
+  **The ADR's decision gate is unchanged** — 0-RTT stays out until a named
+  consumer asks *and* an anti-replay design lands in its own ADR. What changed
+  is that no open issue implies an intent nobody holds. The reason is the
+  absence of a consumer, not the difficulty: ADR-0002 makes this engine
+  permanently non-default, 0-RTT's whole value is latency, and a non-default
+  experiment gains close to nothing from a saved round trip.
+
+  No behaviour change. `early_data` is still refused on both halves, and no
+  `max_early_data_size` is advertised.
+- **Three doc comments in `src/` referred to rusty_tls#58 as live work.** One
+  said outright that it "tracks" 0-RTT, which stopped being true the moment the
+  issue closed. Reworded to describe it as the record of a decision. A `z` bump
+  because doc comments change no public item's shape — the repo's own rule for
+  what `z` is reserved for.
+
 ## [0.10.0] - 2026-08-05
 
 Built and tested against the same sibling revs as 0.2.x–0.9.0. Neither moved.

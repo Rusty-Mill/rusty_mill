@@ -93,7 +93,8 @@
 //! a sanity bound and not anti-replay** — a resumed handshake runs a fresh key
 //! exchange, so replaying one gets an attacker a connection it cannot read.
 //! The field exists for 0-RTT, which ADR-0003 puts out of scope and
-//! `rusty_tls#58` tracks.
+//! `rusty_tls#58` records the decision not to build — closed as not planned,
+//! for want of a consumer rather than for want of a design.
 //!
 //! # Client certificates
 //!
@@ -441,7 +442,7 @@ pub struct Tickets<'a> {
     /// Too tight a window declines clients whose clocks are merely ordinary.
     /// Too loose a one declines nothing. Neither makes a resumption
     /// replay-proof; nothing here does, and `rusty_tls#58` is where that would
-    /// be designed.
+    /// have to be designed if anyone ever wanted it.
     pub max_age_skew_ms: Option<u32>,
     /// How many tickets to issue after a handshake.
     ///
