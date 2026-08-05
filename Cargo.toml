@@ -86,6 +86,7 @@ axum = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_norway = "0.9"
 metrics-util = "0.20.4"
+criterion = { version = "0.8.2", features = ["async_tokio"] }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -106,3 +107,17 @@ required-features = ["server"]
 [[example]]
 name = "ha_server"
 required-features = ["server"]
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "store"
+harness = false
+required-features = ["server"]
+
+[[bench]]
+name = "run"
+harness = false
+required-features = ["server", "client"]
