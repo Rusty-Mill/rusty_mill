@@ -6,8 +6,10 @@ use crate::keychain::{self, KeyProvider};
 use crate::model::*;
 use crate::search::{self, SearchQuery, SearchResponse};
 use crate::sources::{self, ScanContext};
+use crate::vectors::{IvfIndex, VectorCache, VectorSet};
 use crate::{Error, Result};
 use rusqlite::Connection;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 const SETTING_RETENTION: &str = "retention";
@@ -22,6 +24,10 @@ pub struct Inventory {
     conn: Connection,
     path: PathBuf,
     embedder: Box<dyn Embedder>,
+    /// Vectors held in memory so a search does not re-read and re-decode every
+    /// embedding blob on each keystroke. Dropped whenever embeddings change,
+    /// and rebuilt on the next search.
+    cache: RefCell<Option<VectorCache>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -40,6 +46,8 @@ pub struct IndexReport {
     pub retrained: bool,
     pub embeddings_written: usize,
     pub pruned: usize,
+    /// Whether the corpus is now large enough to carry a clustered index.
+    pub indexed_vectors: bool,
     pub elapsed_ms: u128,
 }
 
@@ -107,6 +115,7 @@ impl Inventory {
             conn,
             path: path.to_path_buf(),
             embedder,
+            cache: RefCell::new(None),
         })
     }
 
@@ -120,6 +129,59 @@ impl Inventory {
 
     pub fn embedder(&self) -> &dyn Embedder {
         self.embedder.as_ref()
+    }
+
+    /// Run `f` against the resident vectors, loading them if needed.
+    fn with_vectors<R>(&self, f: impl FnOnce(&VectorCache) -> R) -> Result<R> {
+        if self.cache.borrow().is_none() {
+            let set = VectorSet::load(&self.conn, self.embedder.name())?;
+            // A persisted index built from different vectors is discarded
+            // rather than trusted: stale clusters returning deleted
+            // conversations look plausible, which is what makes them worse
+            // than having no index at all.
+            let index = self.load_ann_index()?.filter(|i| i.matches(&set));
+            *self.cache.borrow_mut() = Some(VectorCache { set, index });
+        }
+        let borrowed = self.cache.borrow();
+        Ok(f(borrowed.as_ref().expect("just populated")))
+    }
+
+    fn invalidate_vectors(&self) {
+        *self.cache.borrow_mut() = None;
+    }
+
+    fn load_ann_index(&self) -> Result<Option<IvfIndex>> {
+        let payload: Option<Vec<u8>> = self
+            .conn
+            .query_row("SELECT payload FROM ann_index WHERE id = 1", [], |r| {
+                r.get(0)
+            })
+            .ok();
+        Ok(payload.as_deref().and_then(IvfIndex::deserialize))
+    }
+
+    /// Cluster the embeddings, if there are enough of them to be worth it.
+    fn rebuild_ann_index(&self) -> Result<bool> {
+        let set = VectorSet::load(&self.conn, self.embedder.name())?;
+        let Some(index) = IvfIndex::build(&set) else {
+            // Below the threshold the exact scan is already fast enough, so any
+            // stored index is now just a way to be wrong.
+            self.conn.execute("DELETE FROM ann_index", [])?;
+            return Ok(false);
+        };
+        self.conn.execute(
+            "INSERT INTO ann_index(id, model, vectors, built_at, payload)
+             VALUES (1, ?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET model=excluded.model, vectors=excluded.vectors,
+                 built_at=excluded.built_at, payload=excluded.payload",
+            rusqlite::params![
+                self.embedder.name(),
+                set.len() as i64,
+                now_unix(),
+                index.serialize()
+            ],
+        )?;
+        Ok(true)
     }
 
     // --- indexing ----------------------------------------------------------
@@ -182,6 +244,12 @@ impl Inventory {
         let (retrained, written) = self.refresh_embeddings()?;
         report.retrained = retrained;
         report.embeddings_written = written;
+
+        // Clustering is done here, never on a search path: a search must not
+        // silently pay for an index build, which would turn one slow query
+        // into a pathologically slow one exactly when someone is waiting.
+        report.indexed_vectors = self.rebuild_ann_index()?;
+        self.invalidate_vectors();
 
         db::set_setting(&self.conn, SETTING_LAST_INDEX, &now_unix().to_string())?;
         report.elapsed_ms = started.elapsed().as_millis();
@@ -279,6 +347,7 @@ impl Inventory {
              ON CONFLICT(conversation_id) DO UPDATE SET model=excluded.model, vec=excluded.vec",
             rusqlite::params![id, self.embedder.name(), encode_vector(&vec)],
         )?;
+        self.invalidate_vectors();
         Ok(())
     }
 
@@ -330,8 +399,11 @@ impl Inventory {
         )?;
 
         self.embedder = Box::new(model);
-        // The vector space changed, so every stored vector is now meaningless.
+        // The vector space changed, so every stored vector — and any index
+        // built over them — is now meaningless.
         self.conn.execute("DELETE FROM embeddings", [])?;
+        self.conn.execute("DELETE FROM ann_index", [])?;
+        self.invalidate_vectors();
         Ok((true, self.backfill_missing_embeddings()?))
     }
 
@@ -522,6 +594,9 @@ impl Inventory {
         }
         self.conn
             .execute("DELETE FROM conversations WHERE updated_at < ?1", [cutoff])?;
+        if !ids.is_empty() {
+            self.invalidate_vectors();
+        }
         Ok(ids.len())
     }
 
@@ -557,7 +632,7 @@ impl Inventory {
     // --- reading -----------------------------------------------------------
 
     pub fn search(&self, query: &SearchQuery) -> Result<SearchResponse> {
-        search::search(&self.conn, self.embedder.as_ref(), query)
+        self.with_vectors(|cache| search::search(&self.conn, cache, self.embedder.as_ref(), query))?
     }
 
     pub fn conversation(&self, id: i64) -> Result<(Conversation, Vec<Message>)> {

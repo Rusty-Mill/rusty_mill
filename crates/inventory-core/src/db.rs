@@ -5,7 +5,7 @@ use crate::{Error, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Open (creating if needed) the encrypted index at `path`.
 ///
@@ -233,6 +233,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             trained_at INTEGER NOT NULL,
             doc_count  INTEGER NOT NULL,
             payload    BLOB    NOT NULL
+        );
+
+        -- Clustered index over the embeddings, rebuilt when they are.
+        -- `model` and `vectors` are the staleness key: either changing means
+        -- the stored clusters no longer describe the live vectors.
+        CREATE TABLE IF NOT EXISTS ann_index (
+            id       INTEGER PRIMARY KEY CHECK (id = 1),
+            model    TEXT    NOT NULL,
+            vectors  INTEGER NOT NULL,
+            built_at INTEGER NOT NULL,
+            payload  BLOB    NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS settings (
