@@ -41,9 +41,17 @@ cargo build --release -p inventory-tauri
 ```
 
 The desktop crate is outside the workspace's `default-members`, so a plain
-`cargo build` and `cargo test` need no GUI toolkit. Building it on Linux needs
-`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev` and
-`librsvg2-dev`; macOS and Windows need nothing extra.
+`cargo build` and `cargo test` need no GUI toolkit.
+
+**macOS and Windows need nothing extra.** Linux needs GTK/WebKit for the
+desktop shell and libdbus for the keyring:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+    libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev
+```
+
+CI builds, lints and tests on all three platforms.
 
 ## Use
 
@@ -68,14 +76,17 @@ Search takes `--source`, `--limit`, `--days`, `--json`, and `--no-meaning`
 
 ### Desktop shortcuts
 
-| Action | Shortcut |
-| --- | --- |
-| Search | `⌘⇧Space` |
-| Quick capture | `⌘⇧N` |
-| Clipboard scratchpad | `⌘⇧V` |
-| Command palette | `⌘K` |
-| Toggle meaning search | `⌘M` |
-| Close | `Esc` |
+`⌘` on macOS, `Ctrl` on Windows and Linux — binding the Windows or Super key
+would collide with the OS and with most window managers.
+
+| Action | macOS | Windows / Linux |
+| --- | --- | --- |
+| Search | `⌘⇧Space` | `Ctrl⇧Space` |
+| Quick capture | `⌘⇧N` | `Ctrl⇧N` |
+| Clipboard scratchpad | `⌘⇧V` | `Ctrl⇧V` |
+| Command palette | `⌘K` | `Ctrl+K` |
+| Toggle meaning search | `⌘M` | `Ctrl+M` |
+| Close | `Esc` | `Esc` |
 
 Run `inventory-tauri --show` to open the panel immediately, which is how you
 confirm an install works without guessing at the shortcut.
@@ -124,6 +135,11 @@ The index lives in one file you can delete at any time:
 - Linux `~/.local/share/site.myinventory.app/inventory.sqlite3`
 - Windows `%APPDATA%\site.myinventory.app\inventory.sqlite3`
 
+The key that unlocks it lives in the macOS Keychain, the Windows Credential
+Manager, or a Linux Secret Service keyring. If the index exists and no key is
+found, Inventory stops and says so rather than minting a fresh key and failing
+to decrypt later.
+
 `inventory-core` has no HTTP dependency, so "makes no network calls" is
 checkable with `cargo tree`. Update checking is a trait the shell implements,
 and it can be turned off.
@@ -151,8 +167,10 @@ environment.
 
 ## Status
 
-This implements the reviewed capability list, is cross-platform where the
-original is macOS-only, and is not the shipping product. The two significant
-departures — a locally-trained embedding model instead of a shipped static
-one, and the Linux keychain backend — are documented in
+This implements the reviewed capability list and is not the shipping product.
+It builds, lints and tests on macOS, Windows and Linux, where the original is
+macOS-only — but only Linux has been exercised against real source stores so
+far, and the path tables for the other two are inferred rather than confirmed.
+The significant departure from the reviewed product — a locally-trained
+embedding model instead of a shipped static one — is documented in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#divergences-from-the-reviewed-product).

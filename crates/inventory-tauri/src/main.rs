@@ -294,19 +294,33 @@ fn show_panel(app: &tauri::AppHandle, mode: &str) {
     let _ = window.emit("panel-mode", mode);
 }
 
+/// The platform's "command" modifier.
+///
+/// `SUPER` is Command on macOS but the *Windows* key on Windows and the Super
+/// key on Linux — where those combinations are claimed by the OS and by most
+/// window managers respectively, so binding them would either fail outright or
+/// steal a shortcut the user's desktop already owns. Every other desktop app
+/// spells ⌘ as Ctrl off the Mac, and so does this.
+const COMMAND: Modifiers = if cfg!(target_os = "macos") {
+    Modifiers::SUPER
+} else {
+    Modifiers::CONTROL
+};
+
 fn register_shortcuts(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    // ⌘⇧Space search · ⌘⇧N capture · ⌘⇧V scratchpad.
+    // ⌘⇧Space search · ⌘⇧N capture · ⌘⇧V scratchpad
+    // (Ctrl⇧… on Windows and Linux).
     let bindings = [
         (
-            Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space),
+            Shortcut::new(Some(COMMAND | Modifiers::SHIFT), Code::Space),
             "search",
         ),
         (
-            Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyN),
+            Shortcut::new(Some(COMMAND | Modifiers::SHIFT), Code::KeyN),
             "capture",
         ),
         (
-            Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyV),
+            Shortcut::new(Some(COMMAND | Modifiers::SHIFT), Code::KeyV),
             "scratchpad",
         ),
     ];
@@ -370,16 +384,30 @@ fn background_index_loop(app: tauri::AppHandle) {
 /// a shortcut summons one, so the tray is the only thing that proves it is
 /// running.
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
-    let search = MenuItem::with_id(app, "search", "Search…", true, Some("Cmd+Shift+Space"))?;
-    let capture = MenuItem::with_id(app, "capture", "Quick capture…", true, Some("Cmd+Shift+N"))?;
+    // `CmdOrCtrl` renders as ⌘ on macOS and Ctrl elsewhere, matching what
+    // `register_shortcuts` actually binds.
+    let search = MenuItem::with_id(
+        app,
+        "search",
+        "Search…",
+        true,
+        Some("CmdOrCtrl+Shift+Space"),
+    )?;
+    let capture = MenuItem::with_id(
+        app,
+        "capture",
+        "Quick capture…",
+        true,
+        Some("CmdOrCtrl+Shift+N"),
+    )?;
     let scratch = MenuItem::with_id(
         app,
         "scratchpad",
         "Clipboard scratchpad…",
         true,
-        Some("Cmd+Shift+V"),
+        Some("CmdOrCtrl+Shift+V"),
     )?;
-    let palette = MenuItem::with_id(app, "palette", "Settings…", true, Some("Cmd+K"))?;
+    let palette = MenuItem::with_id(app, "palette", "Settings…", true, Some("CmdOrCtrl+K"))?;
     let quit = MenuItem::with_id(app, "quit", "Quit Inventory", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&search, &capture, &scratch, &palette, &quit])?;
 

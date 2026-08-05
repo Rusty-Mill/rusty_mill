@@ -21,6 +21,12 @@ pub const KEY_ENV: &str = "INVENTORY_INDEX_KEY";
 pub trait KeyProvider: Send + Sync {
     /// Hex-encoded 256-bit key, created on first call and stable thereafter.
     fn get_or_create(&self) -> Result<String>;
+    /// Is there already a stored key?
+    ///
+    /// Lets a caller tell "first run" from "the key that opened this index is
+    /// gone" — two situations that otherwise look identical right up until the
+    /// index fails to decrypt.
+    fn exists(&self) -> Result<bool>;
     /// Remove the stored key. Only used by `inv reset`.
     fn forget(&self) -> Result<()>;
     fn describe(&self) -> String;
@@ -53,6 +59,18 @@ impl KeyProvider for OsKeychain {
             }
             // Anything else — locked keychain, denied access, broken daemon —
             // is fatal. We do not rebuild.
+            Err(e) => Err(Error::KeyUnavailable(e.to_string())),
+        }
+    }
+
+    fn exists(&self) -> Result<bool> {
+        let entry = keyring::Entry::new(SERVICE, ACCOUNT)
+            .map_err(|e| Error::KeyUnavailable(format!("could not address the keychain: {e}")))?;
+        match entry.get_password() {
+            Ok(k) => Ok(!k.trim().is_empty()),
+            Err(keyring::Error::NoEntry) => Ok(false),
+            // An unreadable keychain is not the same as an absent key, and
+            // must not be reported as one.
             Err(e) => Err(Error::KeyUnavailable(e.to_string())),
         }
     }
@@ -104,6 +122,9 @@ impl StaticKey {
 impl KeyProvider for StaticKey {
     fn get_or_create(&self) -> Result<String> {
         Ok(self.hex.clone())
+    }
+    fn exists(&self) -> Result<bool> {
+        Ok(!self.hex.trim().is_empty())
     }
     fn forget(&self) -> Result<()> {
         Ok(())

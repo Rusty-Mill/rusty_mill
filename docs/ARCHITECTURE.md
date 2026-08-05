@@ -271,10 +271,11 @@ Recorded rather than glossed over.
 
 | Area | Reviewed product | Here | Why |
 | --- | --- | --- | --- |
-| **Platform** | macOS Apple Silicon only | macOS, Linux, Windows path tables | The core has no macOS-specific dependency; restricting it would be a choice, not a constraint. Only macOS is *tested* against real installs. |
+| **Platform** | macOS Apple Silicon only | macOS, Linux and Windows, all three built/linted/tested in CI | The core has no macOS-specific dependency; restricting it would be a choice, not a constraint. Path tables for macOS and Windows are inferred from each tool's conventions and have not yet been confirmed against a real install. |
 | **Semantic model** | Shipped static embedding model | Trained locally from the user's corpus, hashed fallback until it can be | Avoids downloading a model, and adapts to project-specific vocabulary. Costs a cold-start period and cross-machine reproducibility. |
-| **Linux keychain** | n/a | Kernel keyring (`keyutils`), not Secret Service | Secret Service pulls in `libdbus` headers at build time. The kernel keyring does not survive a reboot, so a Linux index may need its key reissued — acceptable for a platform the original does not support at all. |
+| **Linux keychain** | n/a | Secret Service | Costs a `libdbus-1-dev` build dependency. The kernel keyring (`keyutils`) avoids it but does not survive a reboot, which would silently regenerate the key and leave the existing index permanently unopenable — not a trade worth making. Headless machines supply `INVENTORY_INDEX_KEY`. |
 | **Update transport** | Built in, auto-installing | Policy only; transport is a trait | Keeps the core provably network-free. Auto-install is a packaging concern. |
+| **macOS transparency** | n/a | `macos-private-api` enabled | `WebviewWindowBuilder::transparent` does not exist on macOS without it, and the panel's translucent blurred card is its visual identity. It rules out Mac App Store distribution — not a constraint for a product sold direct, which this one is. Unconditional on Windows and Linux, which is why a Linux-only build never surfaced it. |
 | **Clip source app** | Tagged with the app | Tagged on macOS via `osascript`; untagged elsewhere | No cross-platform way to get the frontmost app without extra permissions. Untagged beats guessed. |
 | **Licensing** | Machine-bound, activated online once | Not implemented | Nothing to activate against. `inv palette` reports the licence line the product shows. |
 | **Zed compressed rows** | Presumably decompressed | Skipped | Zed has stored the thread blob compressed in some versions; a row that will not decode is skipped and the rest of the table still indexes. Adding zstd is a small, isolated change. |
