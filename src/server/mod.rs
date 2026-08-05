@@ -96,6 +96,7 @@ pub mod store;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use axum::{http::HeaderMap, Router};
+use tracing::Instrument;
 
 use crate::types::{
     AgentManifest, AgentName, Error, Event, Message, Run, RunCreateRequest, RunId, RunStatus,
@@ -532,6 +533,27 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
         return Ok(run);
     }
 
+    // Created only once a replica has *won* the claim, so exactly one span
+    // exists per abandoned run however many replicas noticed it. Everything
+    // below — including starting a replacement, which logs on its own — is
+    // nested under it.
+    //
+    // Instrumented rather than entered: the work below awaits, and a sync span
+    // guard held across an await attributes whatever else the executor runs to
+    // this span.
+    let span = tracing::info_span!(
+        "acp.reap",
+        run_id = %run_id,
+        agent = %run.agent_name,
+        replica = %server.replica_id,
+    );
+    reap_claimed(server, run_id).instrument(span).await
+}
+
+/// Fail an abandoned run this replica has already claimed the lease on.
+async fn reap_claimed(server: &Arc<AcpServer>, run_id: RunId) -> Result<Run, Error> {
+    let store = &server.store;
+
     tracing::warn!(%run_id, "run has no live lease; failing it as abandoned");
 
     // Winning the claim is not the same as the run still needing to be failed.
@@ -603,7 +625,19 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
     Ok(reaped)
 }
 
-/// Drive one run to a terminal state.
+/// Drive one run to a terminal state, inside a span identifying the run.
+///
+/// The span is what makes a fleet's logs readable: an agent's own output is
+/// emitted from inside `agent.run`, so without one it interleaves with every
+/// other concurrent run and cannot be told apart afterwards. Everything logged
+/// beneath this — by the server or by the agent — carries the run's identity
+/// for free.
+///
+/// Deliberately *not* a request span. A run outlives the request that created
+/// it, and can be resumed or cancelled through a different request on a
+/// different replica, so a per-request span could not cover it. Per-request
+/// spans are `tower-http`'s job, layered on the router like any other
+/// middleware.
 async fn execute(
     server: Arc<AcpServer>,
     agent: Arc<dyn Agent>,
@@ -614,6 +648,32 @@ async fn execute(
 ) {
     let run_id = handle.run_id();
 
+    let span = tracing::info_span!(
+        "acp.run",
+        run_id = %run_id,
+        agent = %ctx.agent_name(),
+        replica = %server.replica_id,
+        // Recorded below rather than inline: most runs have no session, and a
+        // field that is sometimes the string "None" is worse than one that is
+        // sometimes absent.
+        session_id = tracing::field::Empty,
+    );
+    if let Some(session_id) = session_id {
+        span.record("session_id", tracing::field::display(session_id));
+    }
+
+    run_to_terminal(server, agent, ctx, handle, session_id, base_url, run_id).instrument(span).await
+}
+
+async fn run_to_terminal(
+    server: Arc<AcpServer>,
+    agent: Arc<dyn Agent>,
+    ctx: RunContext,
+    handle: Arc<RunHandle>,
+    session_id: Option<SessionId>,
+    base_url: String,
+    run_id: RunId,
+) {
     // Held for exactly as long as the agent runs. If this process dies the task
     // dies with it, the lease lapses, and another replica can reap the run.
     let renewal = tokio::spawn(renew_lease_until_dropped(
@@ -673,7 +733,12 @@ async fn execute(
     // lease would expire anyway — but it stops a finished run looking owned.
     renewal.abort();
     if let Err(error) = server.store.release_lease(run_id).await {
-        tracing::warn!(%run_id, %error, "failed to release run lease");
+        // Debug, not warn: the comment above is the reason. The lease expires
+        // on its own, and the run is already terminal, so nothing downstream
+        // depends on this succeeding — a reaper that finds the stale lease will
+        // see a terminal run and leave it alone. Warning here would put a line
+        // an operator cannot act on next to ones they must.
+        tracing::debug!(%run_id, %error, "failed to release run lease");
     }
     // A finished run will never be replayed, so stop holding its input.
     if let Err(error) = server.store.put_recovery_record(run_id, None).await {

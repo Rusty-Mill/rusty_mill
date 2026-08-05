@@ -506,7 +506,7 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-150 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+154 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
@@ -537,6 +537,29 @@ ACP_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/acp_test \
 CI runs the suite on stable, beta and the 1.86 MSRV against real Redis and Postgres services, plus
 `rustfmt`, `clippy -D warnings`, each feature combination built alone, a nightly `cargo doc`
 with `-D warnings`, and `cargo package`.
+
+## Logging
+
+Every run executes inside a `tracing` span carrying the run id, agent name, replica id and
+session id. That matters because an agent's own output comes from inside `agent.run` — without
+the span it interleaves with every other concurrent run and cannot be told apart afterwards.
+With it, anything the agent logs is attributable for free:
+
+```sh
+RUST_LOG=info cargo run --example echo_server
+```
+
+```text
+INFO acp.run{run_id=0195e2a1-… agent=echo replica=agent-host-7}: my_agent: calling the model
+```
+
+Abandoning and recovering a run gets its own `acp.reap` span, opened only by the replica that
+*wins* the claim — so an abandoned run produces one span however many replicas noticed it.
+
+There are deliberately **no per-request spans**. A run outlives the request that created it and
+can be resumed or cancelled through a different request on a different replica, so a request
+span could never cover one. Requests are `tower-http`'s `TraceLayer`, layered on the router like
+any other middleware — the crate does not duplicate it.
 
 ## Notes on the server
 
