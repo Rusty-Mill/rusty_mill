@@ -37,6 +37,9 @@ Phase 8  Tun surface (D14)
 Phase 9  Windowing + Registry/Config (nexus-only, converge last)
 ─────────────────────────────────────────────────────────────
 parked   fork/execve vs posix_spawn — owner design decision
+parked   MSYS2/Cygwin-level Windows job control & signal parity —
+         owner design decision, no named consumer
+         (docs/design-discussion-msys-parity.md)
 ```
 
 Phases are not strictly sequential gates — 3 and 4 can interleave with
