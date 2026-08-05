@@ -121,6 +121,8 @@ jobs:
             flags: --no-default-features --features redis-store
           - name: postgres-store
             flags: --no-default-features --features postgres-store
+          - name: metrics
+            flags: --no-default-features --features metrics
           - name: well-known
             flags: --no-default-features --features well-known
           - name: all

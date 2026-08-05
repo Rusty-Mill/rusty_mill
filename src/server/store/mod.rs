@@ -47,6 +47,10 @@
 
 mod memory;
 
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+mod metered;
+
 #[cfg(feature = "redis-store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis-store")))]
 mod redis;
@@ -63,6 +67,10 @@ use serde::{Deserialize, Serialize};
 use crate::types::{AwaitResume, Error, Event, Message, Run, RunId, Session, SessionId};
 
 pub use memory::InMemoryStore;
+
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+pub use metered::MeteredStore;
 
 #[cfg(feature = "redis-store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis-store")))]
