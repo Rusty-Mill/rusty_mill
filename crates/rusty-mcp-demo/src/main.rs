@@ -24,7 +24,7 @@ mod tools;
 use std::{sync::Arc, time::Duration};
 
 use clap::Parser as _;
-use rusty_mcp::{Cli, ServerConfig};
+use rusty_mcp::{Cli, ServerConfig, subscriptions::ChangeBroadcaster};
 use server::{DemoServer, DemoState, default_task_support};
 
 /// How long in-flight tasks get to finish before they are aborted.
@@ -37,6 +37,10 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
     // call that created them.
     let state = Arc::new(DemoState::default());
     let tasks = default_task_support();
+    // One broadcaster for the process. Building it per handler would leave a
+    // `subscriptions/listen` request reading a channel that the request
+    // publishing the change never writes to.
+    let changes = ChangeBroadcaster::new();
 
     let config: ServerConfig = Cli::parse().into();
     let config = config.with_shutdown_hook({
@@ -59,9 +63,10 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
 
     rusty_mcp::serve(
         move || {
-            Ok(DemoServer::with_state_and_tasks(
+            Ok(DemoServer::with_parts(
                 Arc::clone(&state),
                 tasks.clone(),
+                changes.clone(),
             ))
         },
         config,

@@ -32,6 +32,9 @@ rmcp = { workspace = true, features = [
     "macros",
     "schemars",
     "transport-io",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
 ] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }

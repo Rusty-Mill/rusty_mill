@@ -240,7 +240,14 @@ async fn tasks_list_still_reports_every_tool() {
     names.sort();
     assert_eq!(
         names,
-        ["add", "countdown", "divide", "slugify", "text_stats"]
+        [
+            "add",
+            "countdown",
+            "divide",
+            "slugify",
+            "text_stats",
+            "touch_resource"
+        ]
     );
 
     client.cancel().await.expect("cancel");

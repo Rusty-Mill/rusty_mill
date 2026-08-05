@@ -286,7 +286,7 @@ async fn tools_still_work_alongside_resources_and_prompts() {
     let client = connect().await;
 
     let tools = client.list_tools(None).await.expect("tools/list");
-    assert_eq!(tools.tools.len(), 5);
+    assert_eq!(tools.tools.len(), 6);
 
     client.cancel().await.expect("cancel");
 }

@@ -57,6 +57,7 @@ Inside the scaffold:
 | `auth` | OAuth 2.1 resource-server layer (see [Authorization](#authorization)) |
 | `resources` | Resource registry with URI templates (see [Resources and prompts](#resources-and-prompts)) |
 | `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
+| `subscriptions` | Change notifications over `subscriptions/listen` (see [Change notifications](#change-notifications)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
@@ -450,6 +451,66 @@ authorization server such as Keycloak, Auth0, or WorkOS.
 
 Authorization is HTTP-only by design: the spec says stdio servers **SHOULD NOT**
 use it and should read credentials from the environment instead.
+
+## Change notifications
+
+2026-07-28 replaced the standalone HTTP GET stream and
+`resources/subscribe`/`resources/unsubscribe` with a single long-lived request:
+the client POSTs `subscriptions/listen`, opts in to the categories it wants, and
+the server streams notifications on that request's response until it ends.
+
+`rmcp` handles the protocol. What it leaves you is the loop — waiting for
+something in your application to change and forwarding it to every client
+currently listening. `ChangeBroadcaster` is that loop:
+
+```rust
+use rusty_mcp::subscriptions::ChangeBroadcaster;
+
+// Anywhere in your application:
+changes.resources_changed();
+changes.resource_updated("config://demo");
+```
+
+```rust
+impl ServerHandler for MyServer {
+    fn get_info(&self) -> ServerInfo { /* ... */ }
+    rusty_mcp::forward_subscription_methods!(changes);
+}
+```
+
+Publishing is infallible and non-blocking — having no listeners is the normal
+state, and application code shouldn't have to care whether anyone is subscribed.
+
+### Advertise what you intend to send
+
+`rmcp` intersects the client's requested filter with the capabilities from
+`get_info`, so **a category you forget to advertise is dropped without error**:
+the subscription succeeds and simply stays quiet. If notifications aren't
+arriving, check the flags first.
+
+```rust
+ServerCapabilities::builder()
+    .enable_resources()
+    .enable_resources_list_changed()   // required for resourcesListChanged
+    .enable_resources_subscribe()      // required for per-URI updates
+    .enable_prompts_list_changed()
+    .enable_tool_list_changed()
+    .build()
+```
+
+### Clone one broadcaster
+
+Same rule as `TaskSupport`: Streamable HTTP builds a fresh handler per request,
+so constructing a new broadcaster per handler would leave every subscription
+connected to a channel nobody publishes to.
+
+### On lag
+
+A slow listener that overflows its buffer gets `Lagged`. Rather than failing the
+subscription, `run` re-announces each accepted list-changed category — these are
+"re-fetch" signals, so the client ends up with fresh lists either way. Missed
+per-resource updates can't be recovered that way; a client needing exact update
+events should keep up or use a larger buffer.
 
 ## Tracing
 
