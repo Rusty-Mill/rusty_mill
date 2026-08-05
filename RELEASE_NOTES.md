@@ -6,6 +6,27 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## PR #266 — conpty: expose CreatePseudoConsole's PSEUDOCONSOLE_INHERIT_CURSOR flag
+**2026-08-05** · [#266](https://github.com/baileyrd/rusty_win32/pull/266)
+
+- **Added:** `conpty::create_with_flags` plus `conpty::PSEUDOCONSOLE_INHERIT_CURSOR`,
+  closing issue #263 — a gap found by a fresh, narrow parity-loop pass
+  (`gap-analysis.md`, PR #265) scoped to just the `conpty` module against the
+  real Win32 ConPTY surface, read directly from mingw-w64's headers rather
+  than assumed from memory. `conpty::create` had always hardcoded
+  `CreatePseudoConsole`'s `dwFlags` to `0`, so `PSEUDOCONSOLE_INHERIT_CURSOR`
+  — the only flag Windows documents for this function — could never be
+  requested. It makes the new pseudoconsole inherit the parent terminal's
+  current cursor position instead of starting at `(0,0)`, useful when
+  creating a pseudoconsole mid-session (e.g. after a resize/re-attach) so a
+  hosted application's rendering continues from where the parent left off.
+  `create_with_flags` is a wholly new function alongside `create` (verified
+  non-breaking: no change to `create`'s existing public signature); `create`
+  now forwards to `create_with_flags(..., 0)`, the same hardcoded value it
+  always passed.
+
+---
+
 ## PR #259 — process: add spawn_suspended_with_pseudoconsole
 **2026-07-24** · [#259](https://github.com/baileyrd/rusty_win32/pull/259)
 
