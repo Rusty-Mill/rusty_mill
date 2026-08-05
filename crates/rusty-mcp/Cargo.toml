@@ -37,8 +37,13 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 url = "2"
 tower-layer = "0.3"
+# `rust_crypto` keeps the build pure-Rust; `aws_lc_rs` would need a C toolchain.
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
 
 [dev-dependencies]
+base64 = "0.22"
+rand = "0.8"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { workspace = true, features = [
     "server",
@@ -50,6 +55,12 @@ rmcp = { workspace = true, features = [
     "transport-streamable-http-client",
     "transport-streamable-http-client-reqwest",
 ] }
+rsa = "0.9"
 schemars = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+
+[features]
+default = []
+# A JWKS-backed JWT validator for the authorization layer.
+jwt = ["dep:jsonwebtoken", "dep:reqwest", "tokio/sync"]

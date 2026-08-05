@@ -46,10 +46,23 @@ where
     S: ServerHandler + Send + 'static,
     F: HandlerFactory<S>,
 {
-    match config.transport {
+    let shutdown_hook = config.shutdown_hook.clone();
+
+    let result = match config.transport {
         Transport::Stdio => serve_stdio(factory).await,
         Transport::Http(http) => serve_http(factory, http).await,
+    };
+
+    // Runs even when the transport failed: work spawned before the failure
+    // still deserves a chance to finish, and dropping it silently is how
+    // half-written state happens.
+    if let Some(hook) = shutdown_hook {
+        tracing::debug!("running shutdown hook");
+        hook().await;
+        tracing::debug!("shutdown hook complete");
     }
+
+    result
 }
 
 async fn serve_stdio<S, F>(factory: F) -> Result<(), ServeError>

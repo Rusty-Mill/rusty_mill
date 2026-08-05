@@ -241,6 +241,26 @@ the other.
   ignores `cancelled()` runs to completion regardless.
 - **TTL bounds memory**, defaulting to an hour. Too short and a slow-polling
   client loses the result it was waiting for.
+- **Drain tasks on shutdown.** Without a hook the process exits when the
+  transport closes and in-flight tasks are dropped mid-step:
+
+  ```rust
+  let config = config.with_shutdown_hook({
+      let tasks = tasks.clone();
+      move || {
+          let tasks = tasks.clone();
+          Box::pin(async move {
+              let abandoned = tasks.drain(Duration::from_secs(10)).await;
+              if abandoned > 0 {
+                  tracing::warn!(abandoned, "aborted tasks still running at shutdown");
+              }
+          })
+      }
+  });
+  ```
+
+  `drain` returns how many were still running when the grace period expired —
+  a non-zero count means clients polling those ids will never see a result.
 
 [tasks]: https://modelcontextprotocol.io/seps/2663-tasks-extension
 
@@ -264,9 +284,37 @@ let config = ServerConfig {
 };
 ```
 
-Bring your own validation by implementing `TokenValidator` — JWT signature
-checks, RFC 7662 introspection, a lookup in your own store. `StaticTokenValidator`
-is for tests and local development only; it does no cryptography.
+### Validating tokens
+
+The `jwt` feature ships `JwtValidator`, which is what most deployments want —
+point it at your authorization server and it verifies signature, expiry,
+not-before and issuer against a cached JWKS:
+
+```toml
+rusty-mcp = { git = "...", features = ["jwt"] }
+```
+
+```rust
+let validator = JwtValidator::builder(
+    "https://auth.example.com",
+    "https://auth.example.com/.well-known/jwks.json",
+).build()?;
+```
+
+Defaults worth knowing: RS256 and ES256 only (symmetric algorithms have no
+place with a JWKS), 60s clock-skew leeway, a 5-minute JWKS cache, and a 30s
+floor between refetches provoked by an unknown `kid` — without that floor,
+random `kid` values would let anyone drive unbounded outbound requests to your
+authorization server.
+
+`JwtValidator` reads `aud` into the token and lets the **layer** compare it
+against the configured resource, rather than checking it itself. Two places
+checking the same value means two things to keep in sync, and the one that
+quietly stopped matching would be the one nobody noticed.
+
+For anything else — RFC 7662 introspection, a lookup in your own store —
+implement `TokenValidator`. `StaticTokenValidator` is for tests and local
+development only; it does no cryptography.
 
 ### What the layer enforces
 
