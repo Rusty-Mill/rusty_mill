@@ -85,7 +85,21 @@ pub type NotificationStream = Pin<Box<dyn Stream<Item = Notification> + Send>>;
 #[serde(rename_all = "snake_case")]
 pub enum Notification {
     /// An event was emitted by the run. Fans out to every subscriber.
-    Event(Event),
+    Event {
+        /// The event itself.
+        event: Event,
+        /// Where the event sits in the run's log, when it is a log entry.
+        ///
+        /// This is what lets a resuming stream splice a replay onto a live
+        /// subscription exactly: everything already replayed can be recognised
+        /// and dropped, and everything after it kept, without guessing from
+        /// arrival order.
+        ///
+        /// `None` for an event a backend synthesised rather than one the run
+        /// emitted — a lag notice, say. Those are not in the log, carry no SSE
+        /// id, and so leave a client's resume point untouched.
+        index: Option<u64>,
+    },
     /// A client supplied the payload an awaiting run was waiting for.
     /// Consumed by the replica executing the run.
     Resume(AwaitResume),
@@ -95,10 +109,29 @@ pub enum Notification {
 }
 
 impl Notification {
+    /// An event notification for an event at a known place in the log.
+    pub fn event_at(index: u64, event: Event) -> Self {
+        Notification::Event { event, index: Some(index) }
+    }
+
+    /// An event notification for something not in the log — a backend
+    /// diagnostic rather than anything the run emitted.
+    pub fn unlogged_event(event: Event) -> Self {
+        Notification::Event { event, index: None }
+    }
+
     /// The event, when this is an [`Notification::Event`].
     pub fn event(&self) -> Option<&Event> {
         match self {
-            Notification::Event(event) => Some(event),
+            Notification::Event { event, .. } => Some(event),
+            _ => None,
+        }
+    }
+
+    /// Where the event sits in the run's log, if this is a logged event.
+    pub fn index(&self) -> Option<u64> {
+        match self {
+            Notification::Event { index, .. } => *index,
             _ => None,
         }
     }
@@ -155,13 +188,37 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     /// Read a run snapshot, or `None` if the store has no such run.
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>>;
 
-    /// Append an event to a run's log.
+    /// Append an event to a run's log, returning the index it was given.
     ///
     /// The log backs `GET /runs/{run_id}/events` and must preserve order.
-    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<()>;
+    /// Indices are dense and start at zero, so an event's index is its position
+    /// in [`Store::events`] — that is what makes them usable as SSE ids, where
+    /// a client hands one back and expects everything after it.
+    ///
+    /// Appends to one run must be atomic with respect to each other: two
+    /// appends must not be given the same index. The
+    /// [sole-writer invariant](self#the-sole-writer-invariant) means there is
+    /// normally only one appender, but a backend must not rely on that to make
+    /// the index unique — a reaper on another replica can write to the log too.
+    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64>;
 
     /// Read a run's full event log, in emission order.
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>>;
+
+    /// Read a run's event log from `from` onwards, in emission order.
+    ///
+    /// Backs stream resumption, where a client says how far it got and the
+    /// server sends the rest. Reading the whole log and discarding the prefix
+    /// would make every reconnection cost the length of the run so far, so a
+    /// backend should seek rather than filter. An offset past the end is not an
+    /// error; it yields nothing.
+    ///
+    /// The default implementation is the correct-but-slow one, so an existing
+    /// backend keeps working.
+    async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        let events = self.events(run_id).await?;
+        Ok(events.into_iter().skip(from as usize).collect())
+    }
 
     /// Publish a notification on a run's channel.
     ///

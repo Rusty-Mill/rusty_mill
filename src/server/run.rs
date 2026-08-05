@@ -105,7 +105,7 @@ impl RunHandle {
                         // dropping the duplicate is correct.
                         let _ = handle.resume_tx.try_send(payload);
                     }
-                    Notification::Event(_) => {}
+                    Notification::Event { .. } => {}
                 }
                 if handle.status().is_terminal() {
                     break;
@@ -146,8 +146,8 @@ impl RunHandle {
         if let Some(message) = flushed {
             let run_id = self.run_id();
             let event = Event::MessageCompleted { message };
-            self.store.append_event(run_id, &event).await?;
-            self.store.publish(run_id, Notification::Event(event)).await?;
+            let index = self.store.append_event(run_id, &event).await?;
+            self.store.publish(run_id, Notification::event_at(index, event)).await?;
         }
         Ok(output)
     }
@@ -182,8 +182,8 @@ impl RunHandle {
             state.run.run_id
         };
 
-        self.store.append_event(run_id, &event).await?;
-        self.store.publish(run_id, Notification::Event(event)).await
+        let index = self.store.append_event(run_id, &event).await?;
+        self.store.publish(run_id, Notification::event_at(index, event)).await
     }
 
     /// Emit a `message.part` for the message currently being composed.
@@ -240,8 +240,8 @@ impl RunHandle {
 
         if let Some(message) = flushed {
             let event = Event::MessageCompleted { message };
-            self.store.append_event(run_id, &event).await?;
-            self.store.publish(run_id, Notification::Event(event)).await?;
+            let index = self.store.append_event(run_id, &event).await?;
+            self.store.publish(run_id, Notification::event_at(index, event)).await?;
         }
 
         // Persist before publishing, so anyone woken by the notification who
@@ -249,8 +249,8 @@ impl RunHandle {
         self.store.put_run(&snapshot).await?;
 
         if let Some(event) = Event::for_run(snapshot) {
-            self.store.append_event(run_id, &event).await?;
-            self.store.publish(run_id, Notification::Event(event)).await?;
+            let index = self.store.append_event(run_id, &event).await?;
+            self.store.publish(run_id, Notification::event_at(index, event)).await?;
         }
         Ok(())
     }

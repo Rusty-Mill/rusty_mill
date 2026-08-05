@@ -59,11 +59,14 @@ impl Store for SlowAppendStore {
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
         self.0.get_run(run_id).await
     }
-    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<()> {
+    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
         self.0.append_event(run_id, event).await
     }
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
         self.0.events(run_id).await
+    }
+    async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        self.0.events_from(run_id, from).await
     }
     async fn publish(&self, run_id: RunId, notification: Notification) -> StoreResult<()> {
         self.0.publish(run_id, notification).await

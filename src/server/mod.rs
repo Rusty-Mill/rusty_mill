@@ -578,8 +578,8 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
 
     store.put_run(&reaped).await?;
     let event = Event::RunFailed { run: Box::new(reaped.clone()) };
-    store.append_event(run_id, &event).await?;
-    store.publish(run_id, Notification::Event(event)).await?;
+    let index = store.append_event(run_id, &event).await?;
+    store.publish(run_id, Notification::event_at(index, event)).await?;
 
     // The abandoned run is finished and its input is no longer needed.
     store.put_recovery_record(run_id, None).await?;
