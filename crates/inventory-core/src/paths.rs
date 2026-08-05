@@ -35,6 +35,17 @@ fn app_support(home: &Path) -> PathBuf {
     }
 }
 
+/// Windows keeps machine-local (non-roaming) data separately, and several
+/// tools use it rather than Roaming. On macOS and Linux there is no such
+/// split, so this collapses onto the same directory.
+fn local_data(home: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        home.join("AppData").join("Local")
+    } else {
+        app_support(home)
+    }
+}
+
 /// Config root, which is where the VS Code forks live on Linux.
 fn config_root(home: &Path) -> PathBuf {
     if cfg!(target_os = "linux") {
@@ -77,26 +88,42 @@ pub fn candidates(source: SourceId) -> Vec<PathBuf> {
         // The three VS Code forks share Code's storage layout: a LevelDB-era
         // `ItemTable` key/value SQLite database, one global and one per
         // workspace.
-        SourceId::Cursor => vscode_fork_roots(&support, &config, "Cursor"),
-        SourceId::Kiro => vscode_fork_roots(&support, &config, "Kiro"),
-        SourceId::Antigravity => vscode_fork_roots(&support, &config, "Antigravity"),
+        SourceId::Cursor => vscode_fork_roots(&home, &support, &config, "Cursor"),
+        SourceId::Kiro => vscode_fork_roots(&home, &support, &config, "Kiro"),
+        SourceId::Antigravity => vscode_fork_roots(&home, &support, &config, "Antigravity"),
 
         // Zed keeps agent threads in its own SQLite database.
-        SourceId::Zed => vec![
-            support.join("Zed").join("threads"),
-            home.join(".local")
-                .join("share")
-                .join("zed")
-                .join("threads"),
-        ],
+        // Zed keeps agent threads in its own SQLite database. It uses a
+        // capitalised directory under Application Support on macOS, a
+        // lowercase one under XDG data on Linux, and Local (not Roaming)
+        // AppData on Windows.
+        SourceId::Zed => {
+            let mut out = vec![support.join("Zed").join("threads")];
+            for candidate in [
+                local_data(&home).join("Zed").join("threads"),
+                home.join(".local")
+                    .join("share")
+                    .join("zed")
+                    .join("threads"),
+            ] {
+                if !out.contains(&candidate) {
+                    out.push(candidate);
+                }
+            }
+            out
+        }
     }
 }
 
-fn vscode_fork_roots(support: &Path, config: &Path, name: &str) -> Vec<PathBuf> {
+fn vscode_fork_roots(home: &Path, support: &Path, config: &Path, name: &str) -> Vec<PathBuf> {
     let mut out = vec![support.join(name).join("User")];
-    let from_config = config.join(name).join("User");
-    if !out.contains(&from_config) {
-        out.push(from_config);
+    // Roaming is where Code and its forks put `User` on Windows, but a
+    // portable or per-machine install lands in Local instead.
+    for root in [config, &local_data(home)] {
+        let candidate = root.join(name).join("User");
+        if !out.contains(&candidate) {
+            out.push(candidate);
+        }
     }
     out
 }
@@ -116,9 +143,20 @@ pub fn is_installed(source: SourceId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `HOME_ENV` and `DATA_ENV` are process-global, so tests that install a
+    /// fixture home must not overlap — otherwise one test's cleanup makes
+    /// another fall back to the real home directory mid-assertion.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn locked() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn index_path_honours_override() {
+        let _guard = locked();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var(DATA_ENV, dir.path());
         let p = index_path();
@@ -127,8 +165,48 @@ mod tests {
         assert!(p.starts_with(dir.path()));
     }
 
+    /// Every candidate must sit under the (overridden) home directory —
+    /// a path table that reaches outside it would read another account's data.
+    #[test]
+    fn candidate_roots_stay_inside_the_home_directory() {
+        let _guard = locked();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(HOME_ENV, dir.path());
+        let all: Vec<(SourceId, PathBuf)> = SourceId::ALL
+            .into_iter()
+            .flat_map(|id| candidates(id).into_iter().map(move |p| (id, p)))
+            .collect();
+        std::env::remove_var(HOME_ENV);
+        for (id, path) in all {
+            assert!(
+                path.starts_with(dir.path()),
+                "{id} probes {} outside the home directory",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn candidate_roots_are_free_of_duplicates() {
+        let _guard = locked();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var(HOME_ENV, dir.path());
+        let per_source: Vec<(SourceId, Vec<PathBuf>)> = SourceId::ALL
+            .into_iter()
+            .map(|id| (id, candidates(id)))
+            .collect();
+        std::env::remove_var(HOME_ENV);
+        for (id, mut roots) in per_source {
+            let before = roots.len();
+            roots.sort();
+            roots.dedup();
+            assert_eq!(before, roots.len(), "{id} probes the same root twice");
+        }
+    }
+
     #[test]
     fn every_source_has_at_least_one_candidate_root() {
+        let _guard = locked();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var(HOME_ENV, dir.path());
         for id in SourceId::ALL {

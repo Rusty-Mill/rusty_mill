@@ -16,8 +16,26 @@ pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let key_hex = key.get_or_create()?;
     let existed = path.exists();
+
+    // An index with no key is not a first run — it is a lost key. Minting a
+    // new one here would "succeed" and then fail to decrypt, which reads as
+    // corruption rather than as what actually happened.
+    if existed && !key.exists()? {
+        return Err(Error::KeyUnavailable(format!(
+            "{} exists but {} holds no key for it.\n\
+             The index cannot be opened without the key it was written with. \
+             On Linux this happens when the key was stored in the kernel keyring, \
+             which does not survive a reboot; a Secret Service keyring does.\n\
+             If you have the key, set INVENTORY_INDEX_KEY. If not, the index has to \
+             be rebuilt: move it aside and re-index — your tools' own history is \
+             untouched and will be read again.",
+            path.display(),
+            key.describe()
+        )));
+    }
+
+    let key_hex = key.get_or_create()?;
 
     let conn = Connection::open(path)?;
     apply_key(&conn, &key_hex)?;
@@ -320,6 +338,28 @@ mod tests {
         }
         let err = open(&path, &StaticKey::new("b".repeat(64))).unwrap_err();
         assert!(matches!(err, Error::KeyMismatch(_)), "got {err:?}");
+    }
+
+    /// The Linux reboot case, and the reason `KeyProvider::exists` exists:
+    /// an index with no key must say so, not mint a fresh key and then fail to
+    /// decrypt with what reads like a corruption error.
+    #[test]
+    fn an_index_with_no_key_reports_the_lost_key_rather_than_minting_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory.sqlite3");
+        {
+            let _ = open(&path, &StaticKey::new("d".repeat(64))).unwrap();
+        }
+
+        // A provider holding nothing — the keychain came back empty.
+        match open(&path, &StaticKey::new("")) {
+            Err(Error::KeyUnavailable(msg)) => {
+                assert!(msg.contains("holds no key"), "unhelpful message: {msg}");
+                assert!(msg.contains("rebuilt"), "no recovery advice: {msg}");
+            }
+            Err(other) => panic!("expected a lost-key error, got {other:?}"),
+            Ok(_) => panic!("opened an encrypted index with no key"),
+        }
     }
 
     #[test]
