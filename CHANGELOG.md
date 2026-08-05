@@ -5,6 +5,28 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Changed
+- **TLS 1.2 is declined rather than pending.** rusty_tls#41 closed as
+  `not planned`; ADR-0002's stage table and its stage 4 narrative are amended to
+  record that, plus a second measurement.
+
+  **Re-measured from a different sandbox and it came back the same way** —
+  `tls-v1-2.badssl.com` and `tls-v1-1.badssl.com` both negotiate TLS 1.3 behind
+  an intercepting egress gateway, and this crate's own 1.3-only client completes
+  handshakes with both. Stated carefully in the ADR, because two agreeing
+  results invite the stronger reading: **two environments agreeing that neither
+  can see is not evidence about what there is to see.** The measurement moves
+  the condition from *unevaluated* to *unevaluable here*; it does not establish
+  that no TLS 1.2-only peer exists.
+
+  The deciding precondition was the other one, which is independent of the
+  egress problem: no consumer has named a TLS 1.2-only peer. The two were
+  `AND`-ed, so the gate is shut regardless.
+
+  No code change, and none is implied — the client still offers exactly `0x0304`
+  and still cannot be downgraded, because it still cannot speak anything to be
+  downgraded to. Documentation only, so no version bump.
+
 ## [0.10.1] - 2026-08-05
 
 `z` under §2: doc comments only. No public item's shape changed.
