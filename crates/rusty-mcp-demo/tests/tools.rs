@@ -91,6 +91,7 @@ async fn lists_tools_from_every_router() {
             "add",
             "countdown",
             "divide",
+            "drop_table",
             "slugify",
             "text_stats",
             "touch_resource"
@@ -221,7 +222,7 @@ async fn add_overflow_is_rejected_rather_than_panicking() {
         .list_tools(None)
         .await
         .expect("tools/list after error");
-    assert_eq!(tools.tools.len(), 6);
+    assert_eq!(tools.tools.len(), 7);
 
     client.cancel().await.expect("cancel");
 }

@@ -58,6 +58,7 @@ Inside the scaffold:
 | `resources` | Resource registry with URI templates (see [Resources and prompts](#resources-and-prompts)) |
 | `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
 | `subscriptions` | Change notifications over `subscriptions/listen` (see [Change notifications](#change-notifications)) |
+| `mrtr` | Asking the client for input mid-call (see [Asking the user](#asking-the-user)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
@@ -451,6 +452,81 @@ authorization server such as Keycloak, Auth0, or WorkOS.
 
 Authorization is HTTP-only by design: the spec says stdio servers **SHOULD NOT**
 use it and should read credentials from the environment instead.
+
+## Asking the user
+
+When a tool needs something from the client mid-call — a confirmation, a choice
+— 2026-07-28 does not let the server send it a request. The server *returns* an
+input request, the client answers, and **the client retries the original call**
+carrying its answers plus the `requestState` the server handed back
+([SEP-2322][mrtr]).
+
+The protocol is stateless, so that retry lands on a handler which remembers
+nothing. Everything needed to resume has to survive a round trip **through the
+client**.
+
+```rust
+use rusty_mcp::mrtr::{InputGate, Turn};
+
+#[tool(name = "drop_table", description = "Drop a table, after confirming.")]
+pub async fn drop_table(
+    &self,
+    Parameters(DropTableArgs { table }): Parameters<DropTableArgs>,
+    RequestState(request_state): RequestState,
+    InputResponses(responses): InputResponses,
+) -> Result<CallToolResponse, ErrorData> {
+    match self.confirmations.turn(DROP_TABLE, request_state.as_deref(), responses.as_ref())? {
+        Turn::Fresh => Ok(CallToolResponse::InputRequired(self.confirmations.ask(
+            DROP_TABLE,
+            &PendingDrop { table },
+            InputGate::<PendingDrop>::confirm("confirm-drop", "Really drop it?"),
+        )?)),
+
+        Turn::Resumed { state, answers } => {
+            if answers.accepted("confirm-drop") { /* act on state.table */ }
+            # todo!()
+        }
+    }
+}
+```
+
+### `requestState` is untrusted
+
+The client echoes it back verbatim, so a caller can change it. A server that
+keeps meaningful data there — a table name, a user id, an amount — and reads it
+back unverified has handed the client a way to rewrite the server's own memory
+mid-operation.
+
+`InputGate` seals it with HMAC-SHA256 and additionally:
+
+- **binds the state to the tool that created it**, so an answer given while
+  confirming one operation cannot authorize a different one;
+- **expires it** (5 minutes by default), so an answer cannot be replayed later;
+- **counts rounds**, so a server/client loop terminates.
+
+Two habits that matter more than the sealing:
+
+- **Act on the sealed state, not the retry's arguments.** A client can change
+  them between rounds; the user confirmed what was in the *prompt*. There's a
+  test (`the_confirmed_table_comes_from_the_sealed_state`) pinning this.
+- **Only an explicit yes is consent.** `accepted()` returns false for a
+  decline, a cancel, a missing answer, or a malformed one — a dropped
+  connection must not read as approval.
+
+### The signing key must be shared
+
+Use a stable per-deployment secret from configuration, not a per-process random
+value. With several instances behind a load balancer, the retry will not land on
+the instance that issued the state.
+
+### Scope
+
+MRTR carries sampling, elicitation and roots. **Sampling and roots are
+deprecated** in this revision, so `InputGate` gives elicitation the typed
+helpers and leaves the other two reachable through the raw `InputRequests` map
+rather than encouraging them.
+
+[mrtr]: https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr
 
 ## Change notifications
 

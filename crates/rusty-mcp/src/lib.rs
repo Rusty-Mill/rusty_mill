@@ -63,6 +63,7 @@ pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod mrtr;
 pub mod resources;
 pub mod runtime;
 pub mod shutdown;

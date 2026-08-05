@@ -9,7 +9,9 @@ use rmcp::{
     prompt_handler, tool_handler,
 };
 use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
-use rusty_mcp::{resources::ResourceRegistry, subscriptions::ChangeBroadcaster};
+use rusty_mcp::{mrtr::InputGate, resources::ResourceRegistry, subscriptions::ChangeBroadcaster};
+
+use crate::tools::confirm::PendingDrop;
 
 use crate::tools::slow::COUNTDOWN;
 
@@ -30,6 +32,7 @@ pub struct DemoServer {
     pub(crate) tasks: TaskSupport,
     pub(crate) resources: ResourceRegistry,
     pub(crate) changes: ChangeBroadcaster,
+    pub(crate) confirmations: InputGate<PendingDrop>,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
@@ -74,16 +77,27 @@ impl DemoServer {
             state,
             tasks,
             changes,
+            confirmations: demo_input_gate(),
             resources: crate::resources::registry(),
             // Each module contributes its own router; `+` merges them. Adding a
             // module is one more term here and nothing else.
             tool_router: Self::calculator_tools()
                 + Self::text_tools()
                 + Self::slow_tools()
-                + Self::notify_tools(),
+                + Self::notify_tools()
+                + Self::confirm_tools(),
             prompt_router: Self::demo_prompts(),
         }
     }
+}
+
+/// The signing key for MRTR request state.
+///
+/// A fixed key is fine for a demo. A real deployment must read this from
+/// configuration: it has to be identical across every instance, or a retry that
+/// lands on a different one behind the load balancer fails to open the state.
+fn demo_input_gate() -> InputGate<PendingDrop> {
+    InputGate::new(b"rusty-mcp-demo-request-state-signing-key".to_vec())
 }
 
 /// How long this process has been running.

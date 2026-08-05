@@ -16,7 +16,22 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `mrtr::InputGate`: Multi Round-Trip Requests (SEP-2322), for tools that need
+  input from the client mid-call. The server returns an input request and the
+  client retries the original call with its answers; since the protocol is
+  stateless, the state needed to resume travels through the client in
+  `requestState`.
+
+  That value is echoed back verbatim by the client, so `InputGate` seals it
+  with HMAC-SHA256, binds it to the tool that created it, expires it, and
+  bounds the number of rounds. `Answers::accepted` treats only an explicit yes
+  as consent.
+
+  Elicitation gets the typed helpers; sampling and roots are deprecated in this
+  revision and remain reachable through the raw `InputRequests` map without
+  being encouraged.
 
 ## [0.1.0] — 2026-08-05
 
