@@ -1812,6 +1812,7 @@ dependencies = [
  "clap",
  "http",
  "jsonwebtoken",
+ "percent-encoding",
  "rand 0.8.7",
  "reqwest",
  "rmcp",

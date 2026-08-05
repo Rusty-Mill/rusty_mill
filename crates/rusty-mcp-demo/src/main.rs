@@ -16,6 +16,8 @@
 //! selection, logging and shutdown. Everything specific to this server lives in
 //! [`server`] and [`tools`].
 
+mod prompts;
+mod resources;
 mod server;
 mod tools;
 
