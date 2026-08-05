@@ -5,6 +5,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `pe` module (new subsystem): `pe::PeFile` — a zero-copy,
+  allocation-free parser for the on-disk layout of a Portable Executable
+  image, the read half of a PE loader. Exposes the target `Machine`,
+  `Subsystem` (console vs GUI), DLL-vs-executable characteristics, entry
+  point, preferred image base, section table, data directories,
+  `rva_to_offset` translation, and iterators over the image's `exports`
+  (name + ordinal — the on-disk complement of `dynlib::get_proc_address`)
+  and imported module names (`imports`). Deliberately the crate's one
+  module with no Win32 export to wrap and, consequently, no `unsafe`
+  anywhere in it; like `error`, it takes a `&[u8]` rather than a live
+  handle and so is not `#[cfg(windows)]`-gated (a Windows binary can be
+  inspected from any host). Stops short of the *other* half of loading
+  (mapping/relocating/running an image in-process), which stays the OS
+  loader's job via `process`/`dynlib`.
 - `process::spawn_suspended_with_pseudoconsole` plus `StartupInfoExW`/
   `EXTENDED_STARTUPINFO_PRESENT` — a wholly new function alongside
   `process::spawn_suspended` (non-breaking) that starts a command
