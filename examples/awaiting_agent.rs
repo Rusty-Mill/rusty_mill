@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(Error::invalid_input("the answer must not be empty"));
             }
 
-            ctx.reply_text(format!("Hello, {}!", answer.answer.trim()));
+            ctx.reply_text(format!("Hello, {}!", answer.answer.trim())).await?;
             Ok(())
         },
     );

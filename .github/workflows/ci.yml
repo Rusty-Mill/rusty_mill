@@ -22,8 +22,34 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `msrv` must match `rust-version` in Cargo.toml.
-        rust: [stable, beta, "1.86"]
+        include:
+          - rust: stable
+            features: --all-features
+          - rust: beta
+            features: --all-features
+          # The MSRV job must match `rust-version` in Cargo.toml, and covers the
+          # default features only: the optional `redis-store` feature pulls in
+          # `redis`, whose own MSRV is higher. Letting an optional dependency
+          # raise the floor for everyone would be the wrong trade.
+          - rust: "1.86"
+            features: ""
+
+    # The multi-replica suite runs against a real Redis rather than a stub.
+    # Setting ACP_TEST_REDIS_URL makes those tests *required*: if Redis is
+    # unreachable they fail rather than quietly skipping.
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      ACP_TEST_REDIS_URL: redis://127.0.0.1:6379
+
     steps:
       - uses: actions/checkout@v5
 
@@ -37,11 +63,11 @@ jobs:
           key: ${{ matrix.rust }}
 
       - name: Test
-        run: cargo test --all-features --all-targets
+        run: cargo test ${{ matrix.features }} --all-targets
 
       # `--all-targets` skips doc tests, so run them separately.
       - name: Doc tests
-        run: cargo test --all-features --doc
+        run: cargo test ${{ matrix.features }} --doc
 
   fmt:
     name: Formatting
@@ -77,6 +103,8 @@ jobs:
             flags: --no-default-features --features client
           - name: server
             flags: --no-default-features --features server
+          - name: redis-store
+            flags: --no-default-features --features redis-store
           - name: all
             flags: --all-features
     steps:

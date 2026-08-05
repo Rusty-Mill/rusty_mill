@@ -6,7 +6,7 @@ use chrono::Utc;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::{
-    server::store::RunHandle,
+    server::run::RunHandle,
     types::{
         AgentManifest, AgentName, AwaitRequest, AwaitResume, Error, Event, Message, MessagePart,
         Role, RunId, Session,
@@ -34,7 +34,7 @@ use crate::{
 ///     }
 ///
 ///     async fn run(&self, ctx: RunContext) -> Result<(), Error> {
-///         ctx.reply_text(ctx.input_text().to_uppercase());
+///         ctx.reply_text(ctx.input_text().to_uppercase()).await?;
 ///         Ok(())
 ///     }
 /// }
@@ -51,6 +51,15 @@ pub trait Agent: Send + Sync + 'static {
 /// Everything an [`Agent`] needs for one run: its input, its session, and the
 /// handles used to emit output, pause for client input, and observe
 /// cancellation.
+///
+/// # Why emitting is `async`
+///
+/// Every emit writes to the configured [`Store`](crate::server::store::Store)
+/// and publishes to its subscribers. With the default in-process store that is
+/// nearly free; with a shared backend it is a network write that can fail, and
+/// the agent is the right place to decide what to do about that. The `?` on
+/// each call is what propagates a storage outage into a failed run rather than
+/// a silently truncated one.
 #[derive(Debug)]
 pub struct RunContext {
     agent_name: AgentName,
@@ -63,6 +72,7 @@ pub struct RunContext {
 }
 
 impl RunContext {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         agent_name: AgentName,
         run_id: RunId,
@@ -105,16 +115,16 @@ impl RunContext {
 
     /// The session this run belongs to, if any.
     ///
-    /// Its `history` holds message *URLs*; the messages this server itself
-    /// stores are already materialised in [`history`](RunContext::history).
-    /// Remote history must be fetched, for example with
+    /// Its `history` holds message *URLs*; the messages the store already holds
+    /// are materialised in [`history`](RunContext::history). Anything hosted
+    /// elsewhere must be fetched, for example with
     /// [`AcpClient::fetch_session_history`](crate::client::AcpClient::fetch_session_history).
     pub fn session(&self) -> Option<&Session> {
         self.session.as_ref()
     }
 
-    /// Messages from earlier runs in this session that this server holds
-    /// locally, in order.
+    /// Messages from earlier runs in this session that the store holds, in
+    /// order.
     pub fn history(&self) -> &[Message] {
         &self.history
     }
@@ -125,40 +135,40 @@ impl RunContext {
     }
 
     /// Emit an arbitrary event on the run's stream.
-    pub fn emit(&self, event: Event) {
-        self.handle.emit(event);
+    pub async fn emit(&self, event: Event) -> Result<(), Error> {
+        self.handle.emit(event).await
     }
 
     /// Emit an agent-defined `generic` event.
-    pub fn emit_generic(&self, payload: serde_json::Value) {
-        self.handle.emit(Event::generic(payload));
+    pub async fn emit_generic(&self, payload: serde_json::Value) -> Result<(), Error> {
+        self.handle.emit(Event::generic(payload)).await
     }
 
     /// Emit a complete message as `message.created` + `message.completed` and
     /// append it to the run's output.
-    pub fn emit_message(&self, mut message: Message) {
+    pub async fn emit_message(&self, mut message: Message) -> Result<(), Error> {
         if message.created_at.is_none() {
             message.created_at = Some(Utc::now());
         }
         let opening = Message { parts: Vec::new(), ..message.clone() };
-        self.handle.emit(Event::MessageCreated { message: opening });
+        self.handle.emit(Event::MessageCreated { message: opening }).await?;
         for part in &message.parts {
-            self.handle.emit_part(part.clone());
+            self.handle.emit_part(part.clone()).await?;
         }
         if message.completed_at.is_none() {
             message.complete();
         }
-        self.handle.emit(Event::MessageCompleted { message });
+        self.handle.emit(Event::MessageCompleted { message }).await
     }
 
     /// Emit a single-part `text/plain` message attributed to this agent.
-    pub fn reply_text(&self, text: impl Into<String>) {
-        self.emit_message(Message::new(self.role(), [MessagePart::text(text)]));
+    pub async fn reply_text(&self, text: impl Into<String>) -> Result<(), Error> {
+        self.emit_message(Message::new(self.role(), [MessagePart::text(text)])).await
     }
 
     /// Emit a single-part message with an explicit content type.
-    pub fn reply_part(&self, part: MessagePart) {
-        self.emit_message(Message::new(self.role(), [part]));
+    pub async fn reply_part(&self, part: MessagePart) -> Result<(), Error> {
+        self.emit_message(Message::new(self.role(), [part])).await
     }
 
     /// Begin a message that will be streamed part by part.
@@ -168,27 +178,28 @@ impl RunContext {
     /// [`finish`](MessageWriter::finish) emits `message.completed`. Dropping
     /// the writer without finishing leaves the message open; it is flushed
     /// automatically when the run reaches a terminal state.
-    pub fn begin_message(&self) -> MessageWriter<'_> {
-        self.begin_message_as(self.role())
+    pub async fn begin_message(&self) -> Result<MessageWriter<'_>, Error> {
+        self.begin_message_as(self.role()).await
     }
 
     /// Begin a streamed message attributed to a specific role.
-    pub fn begin_message_as(&self, role: Role) -> MessageWriter<'_> {
+    pub async fn begin_message_as(&self, role: Role) -> Result<MessageWriter<'_>, Error> {
         let message =
             Message { role, parts: Vec::new(), created_at: Some(Utc::now()), completed_at: None };
-        self.handle.emit(Event::MessageCreated { message: message.clone() });
-        MessageWriter { handle: &self.handle, message, finished: false }
+        self.handle.emit(Event::MessageCreated { message: message.clone() }).await?;
+        Ok(MessageWriter { handle: &self.handle, message })
     }
 
     /// Pause the run and ask the client for more input.
     ///
     /// The run moves to [`RunStatus::Awaiting`](crate::types::RunStatus::Awaiting)
-    /// with `await_request` set, and resolves when the client calls
-    /// `POST /runs/{run_id}` with an [`AwaitResume`]. If the run is cancelled
-    /// while awaiting, this returns an error, which the executor turns into a
-    /// cancellation rather than a failure.
+    /// with `await_request` set, and resolves when a client calls
+    /// `POST /runs/{run_id}` with an [`AwaitResume`] — against *any* replica,
+    /// not necessarily this one. If the run is cancelled while awaiting, this
+    /// returns an error, which the executor turns into a cancellation rather
+    /// than a failure.
     pub async fn await_request(&self, request: AwaitRequest) -> Result<AwaitResume, Error> {
-        self.handle.set_awaiting(request);
+        self.handle.set_awaiting(request).await?;
         let mut resume_rx = self.resume_rx.lock().await;
         let cancel = self.handle.cancel_token();
         tokio::select! {
@@ -198,7 +209,7 @@ impl RunContext {
             }
             resume = resume_rx.recv() => match resume {
                 Some(resume) => {
-                    self.handle.set_in_progress();
+                    self.handle.set_in_progress().await?;
                     Ok(resume)
                 }
                 None => Err(Error::server_error("run can no longer be resumed")),
@@ -224,7 +235,7 @@ impl RunContext {
         self.handle.cancel_token().cancelled().await;
     }
 
-    /// A snapshot of the run as the server currently sees it.
+    /// A snapshot of the run as this replica currently sees it.
     pub fn run(&self) -> crate::types::Run {
         self.handle.snapshot()
     }
@@ -237,20 +248,18 @@ impl RunContext {
 pub struct MessageWriter<'a> {
     handle: &'a Arc<RunHandle>,
     message: Message,
-    finished: bool,
 }
 
 impl MessageWriter<'_> {
     /// Emit one more part of the message.
-    pub fn push(&mut self, part: MessagePart) -> &mut Self {
+    pub async fn push(&mut self, part: MessagePart) -> Result<(), Error> {
         self.message.parts.push(part.clone());
-        self.handle.emit_part(part);
-        self
+        self.handle.emit_part(part).await
     }
 
     /// Emit one more `text/plain` part.
-    pub fn push_text(&mut self, text: impl Into<String>) -> &mut Self {
-        self.push(MessagePart::text(text))
+    pub async fn push_text(&mut self, text: impl Into<String>) -> Result<(), Error> {
+        self.push(MessagePart::text(text)).await
     }
 
     /// The parts emitted so far.
@@ -260,15 +269,11 @@ impl MessageWriter<'_> {
 
     /// Complete the message, emitting `message.completed` and appending it to
     /// the run's output.
-    pub fn finish(mut self) -> Message {
-        self.finished = true;
-        let mut message = std::mem::replace(
-            &mut self.message,
-            Message { role: Role::Agent, parts: Vec::new(), created_at: None, completed_at: None },
-        );
-        message.complete();
-        self.handle.emit(Event::MessageCompleted { message: message.clone() });
-        message
+    pub async fn finish(mut self) -> Result<Message, Error> {
+        self.message.complete();
+        let message = self.message.clone();
+        self.handle.emit(Event::MessageCompleted { message: message.clone() }).await?;
+        Ok(message)
     }
 }
 
@@ -281,7 +286,7 @@ impl MessageWriter<'_> {
 /// let agent = agent_fn(
 ///     AgentManifest::new(AgentName::new("echo").unwrap(), "Echoes the input"),
 ///     |ctx| async move {
-///         ctx.reply_text(ctx.input_text());
+///         ctx.reply_text(ctx.input_text()).await?;
 ///         Ok(())
 ///     },
 /// );

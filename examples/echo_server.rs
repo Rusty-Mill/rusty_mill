@@ -50,7 +50,7 @@ impl Agent for Echo {
     }
 
     async fn run(&self, ctx: RunContext) -> Result<(), Error> {
-        ctx.reply_text(ctx.input_text());
+        ctx.reply_text(ctx.input_text()).await?;
         Ok(())
     }
 }
@@ -75,17 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ctx.reply_part(rusty_acp::types::MessagePart::trajectory(TrajectoryMetadata {
                 message: Some("Splitting the input into words".to_string()),
                 ..Default::default()
-            }));
+            }))
+            .await?;
 
-            let mut writer = ctx.begin_message();
+            let mut writer = ctx.begin_message().await?;
             for word in ctx.input_text().split_whitespace() {
                 if ctx.is_cancelled() {
                     return Err(Error::server_error("cancelled"));
                 }
-                writer.push_text(format!("{word} "));
+                writer.push_text(format!("{word} ")).await?;
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
-            writer.finish();
+            writer.finish().await?;
             Ok(())
         },
     );

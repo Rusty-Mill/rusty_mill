@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use crate::{
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, Event, Message, Run, RunCreateRequest,
-        RunEventsListResponse, RunId, RunMode, RunResumeRequest, RunStatus, Session, SessionId,
+        RunEventsListResponse, RunId, RunMode, RunResumeRequest, Session, SessionId,
     },
     AcpError, Result,
 };
@@ -239,12 +239,23 @@ impl AcpClient {
         json(send(self.request(Method::POST, &format!("/runs/{run_id}/cancel"))).await?).await
     }
 
-    /// Cancel a run and poll until it leaves `cancelling`.
+    /// Cancel a run and poll until it reaches a terminal state.
+    ///
+    /// Waits for a *terminal* status rather than merely a non-`cancelling` one:
+    /// the server accepts a cancellation before applying it — and with several
+    /// replicas, the request may be accepted by one replica and applied by
+    /// another — so the run can still read `in-progress` right after
+    /// [`cancel_run`](AcpClient::cancel_run) returns.
+    ///
+    /// The final status is usually [`Cancelled`](crate::types::RunStatus::Cancelled),
+    /// but a run that finished before the cancellation landed stays
+    /// [`Completed`](crate::types::RunStatus::Completed) or
+    /// [`Failed`](crate::types::RunStatus::Failed).
     pub async fn cancel_and_wait(&self, run_id: RunId) -> Result<Run> {
         self.cancel_run(run_id).await?;
         loop {
             let run = self.get_run(run_id).await?;
-            if run.status != RunStatus::Cancelling {
+            if run.status.is_terminal() {
                 return Ok(run);
             }
             tokio::time::sleep(DEFAULT_POLL_INTERVAL).await;

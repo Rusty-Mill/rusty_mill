@@ -1,4 +1,8 @@
 //! The axum handlers implementing the ACP HTTP surface.
+//!
+//! Every handler reaches for the [`Store`](crate::server::store::Store) rather
+//! than any process-local map, so a request for a run can be served by any
+//! replica — including one that is not executing it.
 
 use std::{convert::Infallible, sync::Arc};
 
@@ -12,12 +16,14 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::stream::{self, Stream, StreamExt};
+use futures_util::stream::{Stream, StreamExt};
 use serde::Deserialize;
-use tokio::sync::{broadcast::error::RecvError, watch};
 
 use crate::{
-    server::{store::RunHandle, AcpServer},
+    server::{
+        store::{Notification, NotificationStream},
+        AcpServer,
+    },
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, ErrorCode, Event, Message, Run,
         RunCreateRequest, RunEventsListResponse, RunId, RunMode, RunResumeRequest, RunStatus,
@@ -114,8 +120,6 @@ impl IntoResponse for RunResponse {
     }
 }
 
-type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
-
 async fn create_run(
     State(server): State<Arc<AcpServer>>,
     headers: HeaderMap,
@@ -125,8 +129,9 @@ async fn create_run(
     let base_url = server.resolve_base_url(&headers);
     let mode = request.mode();
 
-    let (handle, ready) = server.start_run(request, &base_url).await.map_err(ApiError::from)?;
-    Ok(deliver(handle, ready, mode, StatusCode::ACCEPTED).await)
+    let (run_id, notifications) =
+        server.start_run(request, &base_url).await.map_err(ApiError::from)?;
+    deliver(&server, run_id, notifications, mode, StatusCode::ACCEPTED).await
 }
 
 async fn resume_run(
@@ -142,95 +147,108 @@ async fn resume_run(
         .into());
     }
 
-    let handle = server.store().require_run(run_id).map_err(ApiError::from)?;
-    if handle.status() != RunStatus::Awaiting {
+    let store = server.store();
+    let run = store.require_run(run_id).await.map_err(ApiError::from)?;
+    if run.status != RunStatus::Awaiting {
         return Err(Error::invalid_input(format!(
             "run {run_id} is `{}`; only an `awaiting` run can be resumed",
-            handle.status()
+            run.status
         ))
         .into());
     }
 
-    // Subscribe before delivering the payload so no event or status change is
-    // missed between resuming and observing the outcome.
-    let events = handle.subscribe();
-    let mut status = handle.watch_status();
-    status.borrow_and_update();
+    // Subscribe before publishing so nothing that the resume triggers is missed.
+    let notifications = store.subscribe(run_id).await.map_err(ApiError::from)?;
+    store
+        .publish(run_id, Notification::Resume(request.await_resume))
+        .await
+        .map_err(ApiError::from)?;
 
-    handle.send_resume(request.await_resume).await.map_err(ApiError::from)?;
-
-    let ready = Ready { events, status };
-    Ok(deliver(handle, ready, request.mode, StatusCode::ACCEPTED).await)
+    deliver(&server, run_id, notifications, request.mode, StatusCode::ACCEPTED).await
 }
 
-/// Subscriptions taken before a run starts or resumes, so the response can
-/// observe everything that follows.
-pub(crate) struct Ready {
-    pub events: tokio::sync::broadcast::Receiver<Event>,
-    pub status: watch::Receiver<RunStatus>,
-}
-
-/// Turn a started run into the response the requested mode calls for.
+/// Turn a started or resumed run into the response the requested mode calls for.
 async fn deliver(
-    handle: Arc<RunHandle>,
-    ready: Ready,
+    server: &Arc<AcpServer>,
+    run_id: RunId,
+    notifications: NotificationStream,
     mode: RunMode,
     async_status: StatusCode,
-) -> RunResponse {
+) -> ApiResult<RunResponse> {
     match mode {
-        RunMode::Async => RunResponse::Json(async_status, Box::new(handle.snapshot())),
-        RunMode::Sync => {
-            wait_until_settled(ready.status).await;
-            RunResponse::Json(StatusCode::OK, Box::new(handle.snapshot()))
+        RunMode::Async => {
+            let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
+            Ok(RunResponse::Json(async_status, Box::new(run)))
         }
-        RunMode::Stream => RunResponse::Stream(
-            Sse::new(event_stream(ready.events)).keep_alive(KeepAlive::default()).into_response(),
-        ),
+        RunMode::Sync => {
+            wait_until_settled(server, run_id, notifications).await?;
+            let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
+            Ok(RunResponse::Json(StatusCode::OK, Box::new(run)))
+        }
+        RunMode::Stream => Ok(RunResponse::Stream(
+            Sse::new(event_stream(notifications)).keep_alive(KeepAlive::default()).into_response(),
+        )),
     }
 }
 
 /// Wait until the run reaches a terminal state or pauses awaiting input.
 ///
-/// The receiver must already have its current value marked as seen.
-async fn wait_until_settled(mut status: watch::Receiver<RunStatus>) {
-    loop {
-        if status.changed().await.is_err() {
-            return;
-        }
-        let current = *status.borrow_and_update();
-        if current.is_terminal() || current.is_awaiting() {
-            return;
+/// The caller must have subscribed *before* the action it is waiting on, so
+/// nothing that action triggers can be missed.
+///
+/// The up-front read short-circuits only on a **terminal** status, never on
+/// `awaiting`. A resume is issued against a run that is already `awaiting`, and
+/// treating that as settled would return the pre-resume snapshot instead of
+/// waiting for the agent to act on the payload. A terminal run, by contrast,
+/// can never produce another notification, so returning immediately is the only
+/// correct answer.
+async fn wait_until_settled(
+    server: &Arc<AcpServer>,
+    run_id: RunId,
+    mut notifications: NotificationStream,
+) -> ApiResult<()> {
+    if let Some(run) = server.store().get_run(run_id).await.map_err(ApiError::from)? {
+        if run.status.is_terminal() {
+            return Ok(());
         }
     }
+
+    while let Some(notification) = notifications.next().await {
+        let Some(event) = notification.event() else {
+            continue;
+        };
+        // `run.awaiting` and the terminal `run.*` events are exactly the set
+        // that ends a stream, which is the same set that settles a sync call.
+        if event.is_terminal() {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
-/// Adapt the run's event broadcast into an SSE stream that ends after the
-/// terminal event.
-fn event_stream(events: tokio::sync::broadcast::Receiver<Event>) -> EventStream {
-    let stream = stream::unfold((events, false), |(mut events, done)| async move {
-        if done {
-            return None;
-        }
-        match events.recv().await {
-            Ok(event) => {
-                let done = event.is_terminal();
-                Some((sse_event(&event), (events, done)))
+type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
+
+/// Adapt a run's notifications into an SSE stream that ends after the terminal
+/// event, dropping control signals aimed at the executing replica.
+fn event_stream(notifications: NotificationStream) -> EventStream {
+    let mut done = false;
+    let stream = notifications.filter_map(move |notification| {
+        let item = if done {
+            None
+        } else {
+            match notification {
+                Notification::Event(event) => {
+                    done = event.is_terminal();
+                    Some(Ok(sse_event(&event)))
+                }
+                // Resume and Cancel are addressed to the replica running the
+                // agent, not to a watching client.
+                Notification::Resume(_) | Notification::Cancel => None,
             }
-            Err(RecvError::Closed) => None,
-            // Report the gap and keep streaming; the full log stays available
-            // from `GET /runs/{run_id}/events`.
-            Err(RecvError::Lagged(skipped)) => {
-                let event = Event::Error {
-                    error: Error::server_error(format!(
-                        "event stream lagged; {skipped} events were dropped. \
-                         Fetch GET /runs/{{run_id}}/events for the full log."
-                    )),
-                };
-                Some((sse_event(&event), (events, false)))
-            }
-        }
+        };
+        futures_util::future::ready(item)
     });
-    Box::pin(stream.map(Ok))
+    Box::pin(stream)
 }
 
 fn sse_event(event: &Event) -> SseEvent {
@@ -253,8 +271,8 @@ async fn get_run(
     Path(run_id): Path<String>,
 ) -> ApiResult<Json<Run>> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
-    let handle = server.store().require_run(run_id).map_err(ApiError::from)?;
-    Ok(Json(handle.snapshot()))
+    let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
+    Ok(Json(run))
 }
 
 async fn cancel_run(
@@ -262,9 +280,17 @@ async fn cancel_run(
     Path(run_id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<Run>)> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
-    let handle = server.store().require_run(run_id).map_err(ApiError::from)?;
-    handle.request_cancel();
-    Ok((StatusCode::ACCEPTED, Json(handle.snapshot())))
+    let store = server.store();
+    let run = store.require_run(run_id).await.map_err(ApiError::from)?;
+
+    if !run.status.is_terminal() {
+        // The executing replica decides when the run actually stops, so the
+        // snapshot returned here may still read `in-progress`. That is what
+        // 202 Accepted means.
+        store.publish(run_id, Notification::Cancel).await.map_err(ApiError::from)?;
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(run)))
 }
 
 async fn list_run_events(
@@ -272,8 +298,11 @@ async fn list_run_events(
     Path(run_id): Path<String>,
 ) -> ApiResult<Json<RunEventsListResponse>> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
-    let handle = server.store().require_run(run_id).map_err(ApiError::from)?;
-    Ok(Json(RunEventsListResponse { events: handle.events() }))
+    let store = server.store();
+    // Confirm the run exists so an unknown id is a 404 rather than an empty list.
+    store.require_run(run_id).await.map_err(ApiError::from)?;
+    let events = store.events(run_id).await.map_err(ApiError::from)?;
+    Ok(Json(RunEventsListResponse { events }))
 }
 
 async fn get_session(
@@ -281,7 +310,7 @@ async fn get_session(
     Path(session_id): Path<String>,
 ) -> ApiResult<Json<Session>> {
     let session_id: SessionId = session_id.parse().map_err(ApiError::from)?;
-    let record = server.store().require_session(session_id).map_err(ApiError::from)?;
+    let record = server.store().require_session(session_id).await.map_err(ApiError::from)?;
     Ok(Json(record.session))
 }
 
@@ -291,7 +320,7 @@ async fn get_session_message(
     Path((session_id, index)): Path<(String, usize)>,
 ) -> ApiResult<Json<Message>> {
     let session_id: SessionId = session_id.parse().map_err(ApiError::from)?;
-    let record = server.store().require_session(session_id).map_err(ApiError::from)?;
+    let record = server.store().require_session(session_id).await.map_err(ApiError::from)?;
     let message = record.messages.get(index).cloned().ok_or_else(|| {
         Error::new(
             ErrorCode::NotFound,
