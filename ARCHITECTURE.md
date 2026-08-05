@@ -15,9 +15,10 @@ they can't cover, e.g. `CREATE_SUSPENDED` spawning); a portable abstraction
 layer (no `cfg(unix)` branch anywhere in this crate — that split lives one
 level up, in `rush`'s own `sys` module). Most modules exist because a
 specific `rush`/`rusty_lines` call site needs them; a smaller "round 2" set
-(see `gap-analysis.md`) was added for Win32 parity/completeness on explicit
-direction, without a current consumer — those are called out as such in
-`lib.rs`'s module docs rather than pretending a call site exists.
+(see `docs/archive/gap-analysis.md`, closed out and archived — every item
+shipped) was added for Win32 parity/completeness on explicit direction,
+without a current consumer — those are called out as such in `lib.rs`'s
+module docs rather than pretending a call site exists.
 
 ## Boundaries
 Not a ports-and-adapters web service — there's no domain logic to keep free

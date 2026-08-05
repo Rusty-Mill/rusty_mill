@@ -11,7 +11,8 @@
 //!
 //! [`read_dir`] (`FindFirstFileW`/`FindNextFileW`) rounds this module out
 //! with directory listing — from a parity-loop pass against the real
-//! Win32 API surface (`gap-analysis.md`), the single biggest concrete gap
+//! Win32 API surface (`docs/archive/gap-analysis.md`, now closed out and
+//! archived), the single biggest concrete gap
 //! found: this module could stat individual paths but had no way to
 //! enumerate a directory's contents at all, which any future `ls`/tab-
 //! completion/glob implementation that walks a directory needs.

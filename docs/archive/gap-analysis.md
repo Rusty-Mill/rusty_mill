@@ -1,3 +1,13 @@
+> **ARCHIVED.** Closed out as of PR #259 (see the Status line below) — kept
+> for the historical record of the parity-loop sweep, not as a live backlog.
+> Every item shipped or was consciously deferred with a reason recorded
+> inline; nothing here should be read as outstanding work. For current
+> module status, see `README.md`'s "Status" section and `src/lib.rs`'s own
+> module docs, which are updated continuously as the crate grows (including
+> past this sweep — e.g. the `pe` module, added after this document and not
+> covered by it, since Portable-Executable parsing has no Win32 export to
+> gap-analyze against).
+
 # Gap analysis: rusty_win32 vs. the Win32 API surface (parity-loop, 2026-07-23)
 
 Reference surface: the real Win32 API, as declared in mingw-w64's C headers

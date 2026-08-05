@@ -1,6 +1,7 @@
 //! Windows file/directory security (owner + DACL) — `aclapi.h`, a new
 //! module added in round 2, previously excluded by `ARCHITECTURE.md`'s
-//! non-goals (see `gap-analysis.md`'s "Round 2: previously out-of-scope
+//! non-goals (see `docs/archive/gap-analysis.md`'s, now closed out and
+//! archived, "Round 2: previously out-of-scope
 //! subsystems" sweep), now in scope per explicit direction. No current
 //! `rush` feature asks for this yet.
 //!
@@ -9,7 +10,7 @@
 //! reimplementation of the whole Windows security model. SACLs/auditing,
 //! privilege/token manipulation, impersonation, and low-level
 //! absolute-SD plumbing are all explicitly out of scope (see
-//! `gap-analysis.md`'s own design notes for this module).
+//! `docs/archive/gap-analysis.md`'s own design notes for this module).
 //!
 //! This first piece is the core round trip: path → owner `PSID`/DACL
 //! `PACL`, and back. A `PSID`/`PACL`/security-descriptor blob is
@@ -133,8 +134,8 @@ unsafe extern "system" {
 // `ReparseDataBufferSymlinkHeader` already uses for a different
 // variable-length Win32 structure. This crate never reads `Acl`'s own
 // fields directly (not even `ace_count`) — always through
-// `GetAclInformation`/`GetAce`, matching `gap-analysis.md`'s design
-// notes for this module: an ACL is manipulated only through its own
+// `GetAclInformation`/`GetAce`, matching `docs/archive/gap-analysis.md`'s
+// design notes for this module: an ACL is manipulated only through its own
 // accessor functions, the same as a `PSID`.
 #[repr(C)]
 pub struct Acl {
@@ -511,8 +512,8 @@ pub enum TrusteeType {
 // TRUSTEE_W: `size_of` 32, `align_of` 8 — verified against mingw-w64's
 // own `aclapi.h` with a compiled `_Static_assert` probe. Genuinely
 // fixed-size, unlike `Acl`/`PSID` — an ordinary FFI-mirror struct with
-// full field access, per `gap-analysis.md`'s design notes for this
-// module.
+// full field access, per `docs/archive/gap-analysis.md`'s design notes
+// for this module.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Trustee {

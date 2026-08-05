@@ -1,3 +1,11 @@
+> **ARCHIVED.** Every functional gap this document identified (round 1 and
+> the round-2 addendum below) has since shipped, including items it
+> explicitly deferred at the time — ConPTY (§3, "Lower priority") is now
+> implemented (`conpty` module, PRs #256–#259). Kept for the historical
+> record, not as a live backlog. For current module status, see
+> `README.md`'s "Status" section and `src/lib.rs`'s own module docs, which
+> are updated continuously as the crate grows.
+
 # Capability assessment (2026-07-22)
 
 A from-the-code audit of what `rusty_win32` currently provides, what state it's

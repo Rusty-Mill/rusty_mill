@@ -114,8 +114,9 @@
 //!
 //! [`path::resolve_command`] (backed by [`path::search_path`], a
 //! `SearchPathW` wrapper) closes a gap the capability assessment
-//! (`docs/CAPABILITY_ASSESSMENT.md`) flagged as this crate's single biggest
-//! remaining *correctness* gap, not merely a nice-to-have: Windows has no
+//! (`docs/archive/CAPABILITY_ASSESSMENT.md`, now closed out and archived)
+//! flagged as this crate's single biggest remaining *correctness* gap, not
+//! merely a nice-to-have: Windows has no
 //! executable bit the way Unix does, so "is `foo` runnable" is answered
 //! entirely by file extension plus the `PATHEXT` environment variable
 //! (`.COM;.EXE;.BAT;.CMD;...`) instead of a `stat` mode check. Without this,
@@ -239,8 +240,9 @@
 //!
 //! [`path::current_dir`]/[`path::set_current_dir`] (`GetCurrentDirectoryW`/
 //! `SetCurrentDirectoryW`) come from a parity-loop pass against the real
-//! Win32 API surface (`gap-analysis.md`), not the round-2 capability
-//! assessment above — a systematic function-level sweep rather than a
+//! Win32 API surface (`docs/archive/gap-analysis.md`, now closed out and
+//! archived), not the round-2 capability assessment above — a systematic
+//! function-level sweep rather than a
 //! needs-driven inventory. This particular gap turned out to be the most
 //! surprising finding in that sweep: the actual Win32 primitives behind
 //! `cd`/`pwd`, and nothing in this crate wrapped them at all until now.
@@ -348,8 +350,9 @@ pub mod volume;
 pub mod watch;
 
 // `registry` is a brand-new round-2 subsystem (previously excluded by this
-// crate's own non-goals — see `gap-analysis.md`'s "Round 2: previously
-// out-of-scope subsystems" sweep), starting from just the `HKey` type and
+// crate's own non-goals — see `docs/archive/gap-analysis.md`'s (now closed
+// out and archived) "Round 2: previously out-of-scope subsystems" sweep),
+// starting from just the `HKey` type and
 // the five predefined root keys. Not re-exported at the crate root, for
 // the same reason as `job`'s/`fs`'s/`pipe`'s/`volume`'s/`watch`'s — reach
 // it via `rusty_win32::registry::*`.

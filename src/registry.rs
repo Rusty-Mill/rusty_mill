@@ -1,6 +1,7 @@
 //! Windows Registry access (`winreg.h`) — a new module added in round 2,
 //! previously excluded by `ARCHITECTURE.md`'s non-goals (see
-//! `gap-analysis.md`'s "Round 2: previously out-of-scope subsystems"
+//! `docs/archive/gap-analysis.md`'s, now closed out and archived, "Round
+//! 2: previously out-of-scope subsystems"
 //! sweep), now in scope per explicit direction. No current `rush` feature
 //! asks for this yet.
 //!

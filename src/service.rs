@@ -1,6 +1,7 @@
 //! Windows service control — `winsvc.h`, a new module added in round 2,
 //! previously excluded by `ARCHITECTURE.md`'s non-goals (see
-//! `gap-analysis.md`'s "Round 2: previously out-of-scope subsystems"
+//! `docs/archive/gap-analysis.md`'s, now closed out and archived, "Round
+//! 2: previously out-of-scope subsystems"
 //! sweep), now in scope per explicit round-2 direction.
 //!
 //! Scope: a `systemctl`-equivalent — list/query/start/stop a named
