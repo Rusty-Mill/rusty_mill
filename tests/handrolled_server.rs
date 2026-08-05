@@ -1739,6 +1739,9 @@ fn ticket_config<'a>(keys: TicketKeys<'a>, now: i64, lifetime: u32) -> Tickets<'
         keys,
         now,
         lifetime,
+        // The same window `rustls` uses for the equivalent judgement, so a
+        // `rustls` client reporting an honest age is not declined by it.
+        max_age_skew_ms: Some(60_000),
         count: 2,
     }
 }
@@ -2198,6 +2201,7 @@ fn this_client_resumes_against_this_server() {
         },
         now: options().time,
         lifetime: 7200,
+        max_age_skew_ms: Some(60_000),
         count: 2,
     };
     let server_config = ServerConfig {
@@ -2375,5 +2379,430 @@ fn a_ticket_does_not_resume_under_a_suite_with_a_different_hash() {
         second.handshake_kind(),
         Some(rustls::HandshakeKind::Full),
         "a PSK established under SHA-256 was used under SHA-384"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Resumption with client authentication — rusty_tls#43, the last gap
+// ---------------------------------------------------------------------------
+
+/// A `rustls` client with a certificate, and a config that will resume.
+fn resumable_authenticating_client_config(server: &Pki, client: &Pki) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(server.root_der.clone()))
+        .expect("the root is acceptable to rustls");
+    let chain: Vec<CertificateDer<'static>> = client
+        .chain
+        .iter()
+        .map(|der| CertificateDer::from(der.clone()))
+        .collect();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(rustls::pki_types::PrivatePkcs8KeyDer::from(
+        client.leaf_pkcs8.clone(),
+    ));
+    Arc::new(
+        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_root_certificates(roots)
+            .with_client_auth_cert(chain, key)
+            .expect("client auth config"),
+    )
+}
+
+/// As [`serve_rustls`], but reporting what the server recorded about the peer.
+///
+/// The chain is the whole point of these tests: on a resumed handshake no
+/// Certificate arrives, so whatever this returns came out of the ticket.
+fn serve_rustls_recording_peer(
+    config: &ServerConfig<'_>,
+    client_config: &Arc<rustls::ClientConfig>,
+) -> Result<(rustls::ClientConnection, Vec<Vec<u8>>), ServerError> {
+    let mut server = ServerHandshake::new(config);
+    let mut client = rustls::ClientConnection::new(
+        client_config.clone(),
+        RustlsName::try_from(SERVER).expect("name"),
+    )
+    .expect("client connection");
+
+    for _ in 0..8 {
+        let mut to_server = Vec::new();
+        while client.wants_write() {
+            client.write_tls(&mut to_server).expect("write_tls");
+        }
+
+        let mut from_server = Vec::new();
+        for record in take_records(&mut to_server) {
+            from_server.extend_from_slice(&server.read_record(&record)?);
+        }
+
+        if !from_server.is_empty() {
+            let mut cursor = std::io::Cursor::new(&from_server);
+            while client.read_tls(&mut cursor).expect("read_tls") > 0 {
+                client.process_new_packets().expect("process_new_packets");
+            }
+            client.process_new_packets().expect("process_new_packets");
+        }
+
+        if server.is_finished() && !client.is_handshaking() && !client.wants_write() {
+            let peer = server
+                .into_connection()
+                .expect("finished")
+                .peer_certificates()
+                .to_vec();
+            return Ok((client, peer));
+        }
+        if from_server.is_empty() && !client.wants_write() {
+            break;
+        }
+    }
+    panic!("the handshake did not complete");
+}
+
+/// **The last gap in `rusty_tls#43`.** A resumed connection still knows which
+/// client it is talking to.
+///
+/// Until tickets carried the client's chain, this server refused to combine
+/// resumption with client authentication at all — because the alternative was
+/// worse. A resumed handshake carries no Certificate from the client, so a
+/// server that resumed anyway would report an authenticated client as
+/// anonymous, and `ClientAuth::required` would go unenforced on precisely the
+/// connections a returning client makes most of.
+///
+/// The chain this asserts on cannot have come off the wire: `rustls` sends no
+/// Certificate in a resumed handshake, and would be violating §4.4.2 if it
+/// did. It came out of the ticket.
+#[test]
+fn a_resumed_handshake_still_knows_which_client_it_is_talking_to() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let root = Certificate::parse(&client_pki.root_der).expect("the client root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
+
+    let (first, first_peer) =
+        serve_rustls_recording_peer(&config, &client_config).expect("the first handshake");
+    assert_ne!(
+        first.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed),
+        "the first handshake resumed something"
+    );
+    assert_eq!(
+        first_peer, client_pki.chain,
+        "the full handshake did not record the client's chain"
+    );
+
+    let (second, second_peer) =
+        serve_rustls_recording_peer(&config, &client_config).expect("the second handshake");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed),
+        "resumption and client authentication still do not combine"
+    );
+    assert_eq!(
+        second_peer, client_pki.chain,
+        "a resumed connection lost the client it had authenticated — `required` is unenforced"
+    );
+}
+
+/// A ticket from a connection where the client presented nothing does not
+/// resume where a certificate is required.
+///
+/// This is the case the old refusal existed to prevent, reached from the other
+/// direction: the ticket is perfectly valid, its binder verifies, and resuming
+/// it would produce an authenticated-looking connection with no client behind
+/// it. Falling back costs one handshake, in which the client is asked.
+#[test]
+fn a_ticket_with_no_client_chain_does_not_resume_where_one_is_required() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    // Issued by a server that asks for no certificate at all.
+    let anonymous = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
+    serve_rustls_recording_peer(&anonymous, &client_config).expect("the first handshake");
+
+    // Offered to one that requires one.
+    let root = Certificate::parse(&client_pki.root_der).expect("the client root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let requiring = ServerConfig {
+        client_auth: Some(&auth),
+        ..anonymous
+    };
+    let (second, peer) = serve_rustls_recording_peer(&requiring, &client_config)
+        .expect("a client with an anonymous ticket was refused instead of asked");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "a ticket carrying no client identity resumed where one was required"
+    );
+    assert_eq!(
+        peer, client_pki.chain,
+        "the fallback handshake did not actually ask for a certificate"
+    );
+}
+
+/// A ticket carrying a client chain does not resume where client
+/// authentication has since been switched off.
+///
+/// The posture changed. Continuing a session that was authenticated, under a
+/// configuration that has withdrawn the requirement, would be honouring a
+/// decision nobody is making any more.
+#[test]
+fn a_ticket_with_a_client_chain_does_not_resume_where_client_auth_is_off() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let root = Certificate::parse(&client_pki.root_der).expect("the client root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let authenticating = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
+    serve_rustls_recording_peer(&authenticating, &client_config).expect("the first handshake");
+
+    let anonymous = ServerConfig {
+        client_auth: None,
+        ..authenticating
+    };
+    let (second, peer) =
+        serve_rustls_recording_peer(&anonymous, &client_config).expect("the second handshake");
+    assert_eq!(
+        second.handshake_kind(),
+        Some(rustls::HandshakeKind::Full),
+        "a ticket carrying a client chain resumed under a configuration that asks for none"
+    );
+    assert!(
+        peer.is_empty(),
+        "a server that asks for no certificate reported one anyway"
+    );
+}
+
+/// A client certificate that expired between the two connections does not
+/// resume.
+///
+/// The chain in a ticket is re-validated against the clock in force *now*, not
+/// the one at issuance. Otherwise a ticket's lifetime would silently become a
+/// licence to extend a certificate's, and a revoked-by-expiry client would
+/// keep getting in for as long as its tickets lasted.
+#[test]
+fn a_client_certificate_that_expired_since_issuance_does_not_resume() {
+    let server_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let client_pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&server_pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let root = Certificate::parse(&client_pki.root_der).expect("the client root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+    let auth = ClientAuth {
+        anchors: &anchors,
+        path: options(),
+        required: true,
+    };
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let config = ServerConfig {
+        certificates: &server_pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: Some(&auth),
+        tickets: Some(&tickets),
+    };
+    let client_config = resumable_authenticating_client_config(&server_pki, &client_pki);
+    serve_rustls_recording_peer(&config, &client_config).expect("the first handshake");
+
+    // The same server, later than the generated certificates' `not_after`.
+    // The ticket itself is given a matching lifetime so it is the *certificate*
+    // that is stale rather than the ticket.
+    let expired_path = PathOptions {
+        time: NOT_AFTER + 1,
+        ..options()
+    };
+    let later_auth = ClientAuth {
+        anchors: &anchors,
+        path: expired_path,
+        required: true,
+    };
+    let later_tickets = ticket_config(
+        TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        options().time,
+        7200,
+    );
+    let later = ServerConfig {
+        client_auth: Some(&later_auth),
+        tickets: Some(&later_tickets),
+        ..config
+    };
+
+    // `rustls` will not present an expired certificate's chain happily either,
+    // so the fallback handshake is expected to fail — what matters is that the
+    // *resumption* did not silently succeed on a certificate nobody would
+    // accept today.
+    match serve_rustls_recording_peer(&later, &client_config) {
+        Ok((second, _)) => assert_eq!(
+            second.handshake_kind(),
+            Some(rustls::HandshakeKind::Full),
+            "an expired client certificate resumed on the strength of a ticket"
+        ),
+        Err(err) => assert!(
+            matches!(err, ServerError::ClientCertificate(_)),
+            "the fallback failed, but not on the client's certificate: {err}"
+        ),
+    }
+}
+
+/// An implausible reported ticket age falls back to a full handshake.
+///
+/// Driven with this crate's own client, because the age is the one field a
+/// caller supplies directly — `rustls` reports an honest one and cannot be
+/// made to lie. See `TicketContents::age_is_plausible` on why this is a sanity
+/// bound and not anti-replay.
+#[test]
+fn an_implausible_ticket_age_falls_back_to_a_full_handshake() {
+    let pki = pki(&rcgen::PKCS_ECDSA_P256_SHA256);
+    let key = signing_key(&pki, &rcgen::PKCS_ECDSA_P256_SHA256);
+    let ticket_key = TicketKey::generate().expect("a ticket key");
+    let tickets = Tickets {
+        keys: TicketKeys {
+            current: &ticket_key,
+            previous: &[],
+        },
+        now: options().time,
+        lifetime: 7200,
+        max_age_skew_ms: Some(60_000),
+        count: 1,
+    };
+    let server_config = ServerConfig {
+        certificates: &pki.chain,
+        key: &key,
+        cipher_suites: CipherSuite::SUPPORTED,
+        groups: &[NamedGroup::X25519],
+        client_auth: None,
+        tickets: Some(&tickets),
+    };
+    let root = Certificate::parse(&pki.root_der).expect("root parses");
+    let anchors = [TrustAnchor {
+        subject: root.subject(),
+        public_key: root.subject_public_key_info(),
+        name_constraints: None,
+    }];
+
+    let first = run_both(&server_config, &anchors, None).expect("the first handshake");
+    let session = first.1.first().expect("no ticket issued").clone();
+
+    // Inside the window: it resumes.
+    let honest = run_both(
+        &server_config,
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 5_000,
+        }),
+    )
+    .expect("the honest handshake");
+    assert!(
+        honest.0.resumed(),
+        "a ticket reporting a plausible age did not resume"
+    );
+
+    // An hour of claimed age against a server that issued it a moment ago.
+    let absurd = run_both(
+        &server_config,
+        &anchors,
+        Some(Resumption {
+            session: &session,
+            age_ms: 3_600_000,
+        }),
+    )
+    .expect("the absurd handshake still completes, in full");
+    assert!(
+        !absurd.0.resumed(),
+        "a ticket reporting an age an hour out of step resumed anyway"
     );
 }

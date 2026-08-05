@@ -27,7 +27,9 @@ fn contents() -> TicketContents {
         suite: CipherSuite::TLS_AES_128_GCM_SHA256,
         issued_at: 1_800_000_000,
         lifetime: 7200,
+        age_add: 0x1234_5678,
         identity: TicketContents::identity_of(&[b"a certificate".to_vec()]),
+        client_certificates: Vec::new(),
         psk: vec![0xabu8; 32],
     }
 }
@@ -241,4 +243,137 @@ fn a_ticket_keys_debug_says_nothing_useful() {
     let rendered = format!("{key:?}");
     assert!(rendered.contains("redacted"), "{rendered}");
     assert!(!rendered.contains("11"), "{rendered}");
+}
+
+/// The reported age is exactly recoverable from the obfuscated one.
+///
+/// The obfuscation is an addition modulo 2³², so subtracting the addend loses
+/// nothing — including across the wrap, which is the case an implementation
+/// gets wrong and which a server that only ever saw small ages would never
+/// meet.
+#[test]
+fn the_obfuscated_age_is_exactly_reversible() {
+    let contents = contents();
+    for age in [0u32, 1, 5_000, u32::MAX / 2, u32::MAX - 1, u32::MAX] {
+        let obfuscated = age.wrapping_add(contents.age_add);
+        assert_eq!(
+            contents.reported_age_ms(obfuscated),
+            age,
+            "an age of {age} did not survive obfuscation"
+        );
+    }
+}
+
+/// Freshness of the reported age is judged against the server's own record,
+/// in both directions, and does not wrap into passing.
+///
+/// A ticket whose issuing clock is wildly ahead of this one must *fail* the
+/// check. Arithmetic that wrapped or went negative would turn the most
+/// suspicious input into the most plausible-looking one.
+#[test]
+fn an_implausible_reported_age_is_rejected() {
+    let contents = contents();
+    let issued = contents.issued_at;
+    let obfuscate = |age: u32| age.wrapping_add(contents.age_add);
+
+    // Issued a moment ago, and the client says so.
+    assert!(contents.age_is_plausible(obfuscate(0), issued, 60_000));
+    assert!(contents.age_is_plausible(obfuscate(60_000), issued, 60_000));
+    assert!(!contents.age_is_plausible(obfuscate(60_001), issued, 60_000));
+
+    // Ten seconds later, and the client agrees it is ten seconds old.
+    assert!(contents.age_is_plausible(obfuscate(10_000), issued + 10, 60_000));
+    // ...and disagrees by an hour.
+    assert!(!contents.age_is_plausible(obfuscate(3_600_000), issued + 10, 60_000));
+
+    // A clock far behind the issuing one: the elapsed time is negative, which
+    // must read as zero rather than as an enormous unsigned age.
+    assert!(contents.age_is_plausible(obfuscate(0), issued - 10_000, 60_000));
+    assert!(!contents.age_is_plausible(obfuscate(3_600_000), issued - 10_000, 60_000));
+
+    // And an elapsed time that overflows the millisecond arithmetic must not
+    // wrap into *agreeing* with the age a client reports. The value is chosen,
+    // not arbitrary: 4_294_968 seconds is the smallest elapsed time whose
+    // millisecond count exceeds 2³², and it wraps to 704 — so a server doing
+    // `(elapsed as u32) * 1000` would find a client claiming 704 ms to be
+    // perfectly plausible after a hundred and thirty-six years.
+    assert!(!contents.age_is_plausible(obfuscate(704), issued + 4_294_968, 60_000));
+    assert!(!contents.age_is_plausible(obfuscate(1_000), issued + 5_000_000, 60_000));
+    // Beyond `u32`'s range in seconds, where the conversion itself must
+    // saturate rather than truncate.
+    assert!(!contents.age_is_plausible(obfuscate(0), issued + 10_000_000_000, 60_000));
+}
+
+/// A ticket at a layout version this code does not write is *ignored*, not
+/// refused.
+///
+/// The distinction is the same one that makes key rotation survivable, applied
+/// to a different kind of rotation. A server that aborted on its own
+/// predecessor's tickets would turn every upgrade into an outage for whoever
+/// was mid-session — and unlike an unopenable ticket, this one decrypts
+/// perfectly, so nothing else would catch it.
+///
+/// `ring` is used directly because this crate's own encoder only ever writes
+/// the current version, which is exactly the property under test.
+#[test]
+fn a_ticket_at_another_layout_version_is_ignored_rather_than_refused() {
+    use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
+
+    let secret = [0x77u8; TicketKey::LEN];
+    let key = TicketKey::new(&secret).expect("a key");
+    let raw = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &secret).expect("ring key"));
+
+    // A plausible version-1 ticket: the layout this crate wrote before tickets
+    // grew `ticket_age_add` and the client's chain.
+    let mut plaintext = vec![1u8]; // version
+    plaintext.extend_from_slice(&0x1301u16.to_be_bytes());
+    plaintext.extend_from_slice(&0u32.to_be_bytes()); // issued_at, high
+    plaintext.extend_from_slice(&1_800_000_000u32.to_be_bytes()); // issued_at, low
+    plaintext.extend_from_slice(&7200u32.to_be_bytes()); // lifetime
+    plaintext.push(0); // identity, empty
+    plaintext.push(32); // psk
+    plaintext.extend_from_slice(&[0xabu8; 32]);
+
+    let nonce = [0x33u8; NONCE_LEN];
+    let mut sealed = plaintext;
+    raw.seal_in_place_append_tag(
+        Nonce::assume_unique_for_key(nonce),
+        Aad::from(b"rusty_tls resumption ticket v1"),
+        &mut sealed,
+    )
+    .expect("seal");
+    let mut ticket = nonce.to_vec();
+    ticket.extend_from_slice(&sealed);
+
+    assert!(
+        TicketContents::open(&ticket, &keys(&key, &[])).is_none(),
+        "a ticket at an older layout version was refused rather than ignored, \
+         which turns an upgrade into an outage"
+    );
+}
+
+/// A client chain survives the round trip, including an empty one.
+///
+/// The empty case is not a formality: "this client presented nothing" and
+/// "this ticket predates client chains" have to be distinguishable, and after
+/// the version bump above they are — the second does not decode at all.
+#[test]
+fn a_client_chain_survives_the_round_trip() {
+    let key = TicketKey::generate().expect("a key");
+
+    let mut authenticated = contents();
+    authenticated.client_certificates = vec![b"a client leaf".to_vec(), b"an issuer".to_vec()];
+    let sealed = authenticated.seal(&key).expect("seal");
+    let opened = TicketContents::open(&sealed, &keys(&key, &[]))
+        .expect("opened")
+        .expect("decoded");
+    assert_eq!(opened, authenticated);
+
+    let anonymous = contents();
+    assert!(anonymous.client_certificates.is_empty());
+    let sealed = anonymous.seal(&key).expect("seal");
+    let opened = TicketContents::open(&sealed, &keys(&key, &[]))
+        .expect("opened")
+        .expect("decoded");
+    assert_eq!(opened, anonymous);
 }

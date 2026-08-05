@@ -5,6 +5,62 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-08-05
+
+Built and tested against the same sibling revs as 0.2.x–0.9.0. Neither moved.
+
+`y` under §2: `Tickets` and `TicketContents` both gained public fields.
+
+### Added
+- **Resumption and client authentication now combine** (rusty_tls#43, the last
+  gap). A ticket carries the chain the client presented, so a resumed
+  connection reports the peer it is resuming instead of reporting none. `0.9.0`
+  refused to combine the two at all, because the alternative was worse: a
+  resumed handshake carries no Certificate from the client, so resuming anyway
+  would have left `ClientAuth::required` unenforced on precisely the
+  connections a returning client makes most of.
+  - The stored chain is **re-validated against the anchors and the clock in
+    force at resumption**, not at issuance. A ticket's lifetime is not a licence
+    to extend a certificate's.
+  - Proof of possession is deliberately not redone. The client proved it held
+    the key on the connection the ticket came from, and the binder proves it
+    holds the key derived from that connection.
+  - Every refusal in this area **falls back to a full handshake** rather than
+    aborting — the client is asked for a certificate again, which costs a round
+    trip and surprises nobody.
+- **The server checks `obfuscated_ticket_age`**, via the new
+  `Tickets::max_age_skew_ms`. `TicketContents` now carries the `ticket_age_add`
+  the connection chose, which is what makes the field readable at all — a
+  server that only *sent* the addend could never subtract it again, which is
+  why it went unchecked until now.
+  - **This is a sanity bound, not anti-replay**, and the docs say so at length.
+    A resumed handshake runs a fresh key exchange, so replaying one gets an
+    attacker a connection it cannot read. The field exists for 0-RTT, which
+    ADR-0003 puts out of scope and rusty_tls#58 tracks.
+
+### Changed
+- **`Tickets` gained a required `max_age_skew_ms` field.** `None` is the
+  previous behaviour — no check. `Some(60_000)` is a reasonable starting point
+  and is what `rustls` uses for the equivalent judgement.
+- **`TicketContents` gained `age_add` and `client_certificates`**, and the
+  sealed layout version went from 1 to 2.
+- **A ticket at an unrecognised layout version is now *ignored* rather than
+  refused**, the same way a ticket under a retired key is. A server that
+  aborted on its own predecessor's tickets would turn every upgrade into an
+  outage for whoever was mid-session — and unlike an unopenable ticket, an
+  old-version one decrypts perfectly, so nothing else would have caught it.
+
+**Measured, not assumed.** Twelve mutations, each asserted to have applied
+before its result was believed, each killed by a named test. One survived its
+first run: `(elapsed as u32) * 1000` in the age check wraps, and at an elapsed
+time of exactly 4,294,968 seconds it wraps to 704 — so a client claiming 704 ms
+would look perfectly plausible after a hundred and thirty-six years. The test
+now pins that specific value rather than a round number.
+
+**This closes rusty_tls#43.** Every item in ADR-0003's scope list is built, and
+both gaps `0.9.0` left open are closed. What remains out of scope is 0-RTT,
+which is rusty_tls#58 and needs its anti-replay ADR first.
+
 ### Fixed
 - **ADR-0003 claimed a follow-up issue that did not exist.** Its "Consequences →
   Created" bullet said a 0-RTT anti-replay issue had been filed; none had.
