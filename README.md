@@ -502,6 +502,46 @@ cargo run --example ha_server        # two replicas sharing one store
 
 Each example's header comment carries the equivalent `curl` invocations.
 
+## Benchmarks
+
+```sh
+cargo bench                       # in-memory only, no services needed
+ACP_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+ACP_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/acp_test \
+  cargo bench --all-features      # adds the networked backends
+```
+
+Three suites: `serialization` (the wire format, paid on every path), `store` (each backend
+operation by operation), and `run` (whole runs over real HTTP). A configured-but-unreachable
+backend is *skipped* here, unlike in the tests — a benchmark that cannot connect has nothing to
+report, whereas a test that cannot connect is silently testing nothing.
+
+Deliberately **not** a CI gate. Shared runners are noisy enough to produce false failures more
+often than real signal; the value is a local baseline to run before and after a change.
+
+Indicative figures from one developer machine — treat the *ratios* as the finding, not the
+absolute numbers:
+
+| Operation | in-memory | Redis | Postgres |
+| --- | --- | --- | --- |
+| `append_event` | 2.2 µs | 318 µs | 1.26 ms |
+| `publish`, no subscriber | 168 ns | 162 µs | 296 µs |
+| `publish`, one subscriber | 194 ns | 205 µs | 397 µs |
+
+That gap is the thing worth knowing. A token-by-token agent hits `append_event` and `publish`
+once per token, so on a shared store a thousand-token response is a thousand network
+round-trips — which is why emitting is `async` and returns `Result` at all, and why the choice
+between backends is a throughput decision rather than only a durability one.
+
+Two other numbers that shape the API:
+
+- **A whole `sync` run of an agent that returns immediately: ~320 µs**, over loopback HTTP with
+  the in-memory store. That is the framework's own floor — routing, serialization, the run
+  snapshot and the event log.
+- **Reading a session grows linearly with its length**: ~153 µs at one turn, ~606 µs at 200.
+  An agent is handed its history on every turn, which is precisely the cost
+  `load_state`/`store_state` exists to let it avoid.
+
 ## Tests
 
 ```sh
