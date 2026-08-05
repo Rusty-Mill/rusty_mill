@@ -12,6 +12,7 @@
 //! | [`client`] | `client` | An HTTP client for calling any ACP server, including SSE streaming. |
 //! | [`server`] | `server` | An [`axum`] router that hosts your own agents behind the standard endpoints. |
 //! | [`server::store`] | `redis-store` | A Redis-backed [`Store`](server::store::Store), for several replicas behind a load balancer. |
+//! | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
 //!
 //! ## Serving an agent
 //!

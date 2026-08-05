@@ -305,3 +305,55 @@ fn failed_run_converts_into_its_error() {
     assert_eq!(error.code, ErrorCode::ServerError);
     assert_eq!(error.message, "model unavailable");
 }
+
+#[test]
+fn artifacts_are_message_parts_with_a_name() {
+    let part = MessagePart::artifact("result.json", "application/json", r#"{"ok":true}"#);
+
+    // The spec defines no artifact type: it is exactly a named part.
+    let value = serde_json::to_value(&part).unwrap();
+    assert_eq!(value["name"], "result.json");
+    assert_eq!(value["content_type"], "application/json");
+    assert_eq!(value["content"], r#"{"ok":true}"#);
+    // Plain is the default, so it should not be written out.
+    assert!(value.get("content_encoding").is_none());
+
+    assert!(part.is_artifact());
+    assert_eq!(part.artifact_name(), Some("result.json"));
+    assert_eq!(serde_json::from_value::<MessagePart>(value).unwrap(), part);
+}
+
+#[test]
+fn binary_artifacts_encode_and_declare_base64_together() {
+    let bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a];
+    let part = MessagePart::binary_artifact("chart.png", "image/png", bytes);
+
+    let value = serde_json::to_value(&part).unwrap();
+    assert_eq!(value["content_encoding"], "base64");
+    assert_eq!(value["content"], "iVBORw0K");
+
+    // Round-trips back to the original bytes.
+    assert_eq!(part.decoded_content().unwrap().unwrap(), bytes.to_vec());
+}
+
+#[test]
+fn a_plain_part_is_not_an_artifact() {
+    let part = MessagePart::text("just prose");
+    assert!(!part.is_artifact());
+    assert_eq!(part.artifact_name(), None);
+    assert_eq!(part.decoded_content().unwrap().unwrap(), b"just prose".to_vec());
+}
+
+#[test]
+fn decoding_content_reports_malformed_base64() {
+    let part =
+        MessagePart::inline("image/png", "not base64!!").with_encoding(ContentEncoding::Base64);
+    let error = part.decoded_content().unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn a_part_with_no_inline_content_decodes_to_none() {
+    let part = MessagePart::from_url("image/png", "https://example.com/chart.png");
+    assert!(part.decoded_content().unwrap().is_none());
+}

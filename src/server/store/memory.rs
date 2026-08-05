@@ -10,8 +10,8 @@ use tokio::sync::broadcast;
 
 use crate::{
     server::store::{
-        message_url, Notification, NotificationStream, SessionRecord, Store, StoreResult,
-        DEFAULT_MAX_RUNS,
+        message_url, state_url, Notification, NotificationStream, SessionRecord, Store,
+        StoreResult, DEFAULT_MAX_RUNS,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -43,6 +43,9 @@ pub struct InMemoryStore {
     runs: RwLock<HashMap<RunId, RunEntry>>,
     order: Mutex<VecDeque<RunId>>,
     sessions: RwLock<HashMap<SessionId, SessionRecord>>,
+    /// State documents, held apart from the records so `SessionRecord` keeps
+    /// carrying a *link* to state rather than the state itself.
+    session_states: RwLock<HashMap<SessionId, serde_json::Value>>,
     max_runs: usize,
 }
 
@@ -59,6 +62,7 @@ impl InMemoryStore {
             runs: RwLock::new(HashMap::new()),
             order: Mutex::new(VecDeque::new()),
             sessions: RwLock::new(HashMap::new()),
+            session_states: RwLock::new(HashMap::new()),
             max_runs: max_runs.max(1),
         }
     }
@@ -208,6 +212,34 @@ impl Store for InMemoryStore {
             record.messages.push(message);
             record.session.history.push(message_url(base_url, session_id, index));
         }
+        Ok(())
+    }
+
+    async fn get_session_state(
+        &self,
+        session_id: SessionId,
+    ) -> StoreResult<Option<serde_json::Value>> {
+        Ok(self
+            .session_states
+            .read()
+            .expect("session state map poisoned")
+            .get(&session_id)
+            .cloned())
+    }
+
+    async fn put_session_state(
+        &self,
+        session_id: SessionId,
+        base_url: &str,
+        state: serde_json::Value,
+    ) -> StoreResult<()> {
+        self.session_states.write().expect("session state map poisoned").insert(session_id, state);
+        // Point the session at the document rather than inlining it.
+        let mut sessions = self.sessions.write().expect("session map poisoned");
+        let record = sessions
+            .entry(session_id)
+            .or_insert_with(|| SessionRecord::new(Session::with_id(session_id)));
+        record.session.state = Some(state_url(base_url, session_id));
         Ok(())
     }
 }

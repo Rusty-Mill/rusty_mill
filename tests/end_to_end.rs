@@ -72,6 +72,32 @@ async fn start_server() -> AcpClient {
         },
     );
 
+    // Reports what it loaded, then bumps it — so a caller can see state persist.
+    let remember = agent_fn(
+        AgentManifest::new(AgentName::new("remember").unwrap(), "Counts turns in session state"),
+        |ctx: RunContext| async move {
+            let previous: u32 = ctx.load_state().await?.unwrap_or(0);
+            ctx.store_state(&(previous + 1)).await?;
+            ctx.reply_text(format!("seen {previous}")).await?;
+            Ok(())
+        },
+    );
+
+    let artist = agent_fn(
+        AgentManifest::new(AgentName::new("artist").unwrap(), "Returns artifacts")
+            .with_output_content_types(["*/*"]),
+        |ctx: RunContext| async move {
+            ctx.reply_artifact("result.json", "application/json", r#"{"ok":true}"#).await?;
+            ctx.reply_part(MessagePart::binary_artifact(
+                "chart.png",
+                "image/png",
+                [0x89, 0x50, 0x4e],
+            ))
+            .await?;
+            Ok(())
+        },
+    );
+
     let router = AcpServer::builder()
         .agent(echo)
         .agent(words)
@@ -79,6 +105,8 @@ async fn start_server() -> AcpClient {
         .agent(boom)
         .agent(forever)
         .agent(vision)
+        .agent(remember)
+        .agent(artist)
         .build()
         .expect("server builds")
         .into_router();
@@ -103,7 +131,7 @@ async fn discovery_lists_agents_and_paginates() {
     let client = start_server().await;
 
     let all = client.list_all_agents().await.unwrap();
-    assert_eq!(all.len(), 6);
+    assert_eq!(all.len(), 8);
     assert_eq!(all[0].name.as_str(), "echo");
 
     let first_page = client.list_agents(Some(2), Some(0)).await.unwrap();
@@ -113,7 +141,7 @@ async fn discovery_lists_agents_and_paginates() {
     assert_ne!(first_page[0].name, second_page[0].name);
 
     // The spec's default page size is 10.
-    assert_eq!(client.list_agents(None, None).await.unwrap().len(), 6);
+    assert_eq!(client.list_agents(None, None).await.unwrap().len(), 8);
 }
 
 #[tokio::test]
@@ -422,4 +450,132 @@ async fn duplicate_agent_names_are_rejected() {
         .agent(agent_fn(manifest(), |_| async { Ok(()) }))
         .build();
     assert!(build.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Session state (#4)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn session_state_persists_across_runs() {
+    let client = start_server().await;
+    let session_id = SessionId::new();
+
+    let request = || {
+        RunCreateRequest::new(AgentName::new("remember").unwrap(), [Message::user("go")])
+            .with_session_id(session_id)
+    };
+
+    assert_eq!(client.create_run(request()).await.unwrap().output_text(), "seen 0");
+    assert_eq!(client.create_run(request()).await.unwrap().output_text(), "seen 1");
+    assert_eq!(client.create_run(request()).await.unwrap().output_text(), "seen 2");
+}
+
+#[tokio::test]
+async fn stored_state_is_reachable_through_the_session_link() {
+    let client = start_server().await;
+    let session_id = SessionId::new();
+
+    client
+        .create_run(
+            RunCreateRequest::new(AgentName::new("remember").unwrap(), [Message::user("go")])
+                .with_session_id(session_id),
+        )
+        .await
+        .unwrap();
+
+    let session = client.get_session(session_id).await.unwrap();
+    let state_url = session.state.as_deref().expect("state link is set");
+    assert!(state_url.ends_with(&format!("/session/{session_id}/state")));
+
+    // The link resolves, and yields what the agent stored.
+    let state: u32 = client.fetch_session_state(&session).await.unwrap().expect("state present");
+    assert_eq!(state, 1);
+}
+
+#[tokio::test]
+async fn a_session_without_state_reports_none() {
+    let client = start_server().await;
+    let session_id = SessionId::new();
+
+    client
+        .create_run(
+            RunCreateRequest::new(AgentName::new("echo").unwrap(), [Message::user("hi")])
+                .with_session_id(session_id),
+        )
+        .await
+        .unwrap();
+
+    let session = client.get_session(session_id).await.unwrap();
+    assert!(session.state.is_none(), "no state stored, so no link");
+    assert!(client.fetch_session_state::<serde_json::Value>(&session).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn storing_state_without_a_session_is_rejected() {
+    let client = start_server().await;
+
+    // No `session_id`, so there is nothing to scope state to.
+    let run = client.run_sync("remember", [Message::user("go")]).await.unwrap();
+
+    assert_eq!(run.status, RunStatus::Failed);
+    let error = run.into_result().unwrap_err();
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert!(error.message.contains("session"), "error should explain why: {}", error.message);
+}
+
+// ---------------------------------------------------------------------------
+// Artifacts (#6)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn artifacts_round_trip_with_their_names_and_encoding() {
+    let client = start_server().await;
+
+    let run = client.run_sync("artist", [Message::user("draw")]).await.unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+
+    let parts: Vec<_> = run.output.iter().flat_map(|message| &message.parts).collect();
+    assert_eq!(parts.len(), 2);
+
+    let json = parts[0];
+    assert_eq!(json.artifact_name(), Some("result.json"));
+    assert_eq!(json.content_type, "application/json");
+    assert_eq!(json.decoded_content().unwrap().unwrap(), br#"{"ok":true}"#);
+
+    let png = parts[1];
+    assert_eq!(png.artifact_name(), Some("chart.png"));
+    assert_eq!(png.content_type, "image/png");
+    // Survives the wire as base64 and decodes back to the original bytes.
+    assert_eq!(png.encoding(), rusty_acp::types::ContentEncoding::Base64);
+    assert_eq!(png.decoded_content().unwrap().unwrap(), vec![0x89, 0x50, 0x4e]);
+}
+
+// ---------------------------------------------------------------------------
+// Open discovery (#5)
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "well-known")]
+#[tokio::test]
+async fn well_known_serves_the_same_manifests_as_the_agents_endpoint() {
+    let client = start_server().await;
+
+    let response = client
+        .http_client()
+        .get(format!("{}/.well-known/agent.yml", client.base_url()))
+        .send()
+        .await
+        .unwrap();
+
+    assert!(response.status().is_success());
+    assert_eq!(
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
+        Some("application/yaml")
+    );
+
+    let yaml = response.text().await.unwrap();
+    let parsed: rusty_acp::types::AgentsListResponse = serde_norway::from_str(&yaml).unwrap();
+
+    // One source of truth: the YAML must match what `GET /agents` reports.
+    assert_eq!(parsed.agents, client.list_all_agents().await.unwrap());
 }

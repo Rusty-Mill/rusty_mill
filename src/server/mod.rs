@@ -206,6 +206,7 @@ impl AcpServer {
             request.input,
             session,
             history,
+            base_url.to_string(),
             Arc::clone(&handle),
             resume_rx,
         );

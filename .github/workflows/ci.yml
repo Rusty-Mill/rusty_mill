@@ -105,6 +105,8 @@ jobs:
             flags: --no-default-features --features server
           - name: redis-store
             flags: --no-default-features --features redis-store
+          - name: well-known
+            flags: --no-default-features --features well-known
           - name: all
             flags: --all-features
     steps:

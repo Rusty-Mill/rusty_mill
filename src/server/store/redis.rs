@@ -8,7 +8,7 @@ use redis::{aio::ConnectionManager, AsyncCommands, Client};
 
 use crate::{
     server::store::{
-        message_url, Notification, NotificationStream, SessionRecord, Store, StoreResult,
+        message_url, state_url, Notification, NotificationStream, SessionRecord, Store, StoreResult,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -126,6 +126,10 @@ impl RedisStore {
 
     fn session_messages_key(&self, session_id: SessionId) -> String {
         format!("{}:session:{session_id}:messages", self.config.key_prefix)
+    }
+
+    fn session_state_key(&self, session_id: SessionId) -> String {
+        format!("{}:session:{session_id}:state", self.config.key_prefix)
     }
 
     fn ttl_seconds(&self) -> Option<i64> {
@@ -350,5 +354,55 @@ impl Store for RedisStore {
 
         self.touch(&meta_key).await?;
         self.touch(&messages_key).await
+    }
+
+    async fn get_session_state(
+        &self,
+        session_id: SessionId,
+    ) -> StoreResult<Option<serde_json::Value>> {
+        let mut connection = self.connection.clone();
+        let raw: Option<String> = connection
+            .get(self.session_state_key(session_id))
+            .await
+            .map_err(|err| redis_error("read session state", err))?;
+        raw.as_deref().map(decode).transpose()
+    }
+
+    async fn put_session_state(
+        &self,
+        session_id: SessionId,
+        base_url: &str,
+        state: serde_json::Value,
+    ) -> StoreResult<()> {
+        let state_key = self.session_state_key(session_id);
+        let meta_key = self.session_meta_key(session_id);
+        let mut connection = self.connection.clone();
+
+        let _: () = connection
+            .set(&state_key, encode(&state)?)
+            .await
+            .map_err(|err| redis_error("write session state", err))?;
+
+        // Record the link on the session, creating it if this is the first
+        // thing written for it.
+        let raw: Option<String> =
+            connection.get(&meta_key).await.map_err(|err| redis_error("read session", err))?;
+        let mut meta: SessionMeta = match raw.as_deref() {
+            Some(raw) => decode(raw)?,
+            None => SessionMeta {
+                id: session_id,
+                state: None,
+                prefix_history: Vec::new(),
+                base_url: None,
+            },
+        };
+        meta.state = Some(state_url(base_url, session_id));
+        let _: () = connection
+            .set(&meta_key, encode(&meta)?)
+            .await
+            .map_err(|err| redis_error("write session", err))?;
+
+        self.touch(&state_key).await?;
+        self.touch(&meta_key).await
     }
 }
