@@ -1,6 +1,8 @@
 //! Server configuration: which transport to run and how to tune it.
 
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+use crate::auth::AuthConfig;
 
 /// Default HTTP listen address. Loopback-only, matching the transport's
 /// default `Host` allow-list.
@@ -65,6 +67,13 @@ pub struct HttpConfig {
     pub max_request_body_bytes: usize,
     /// Keep-alive ping interval for SSE responses. `None` disables pings.
     pub sse_keep_alive: Option<Duration>,
+    /// OAuth 2.1 resource-server authorization.
+    ///
+    /// `None` leaves the endpoint open, which is fine behind a gateway that
+    /// already authenticates callers. When set, the runtime guards the MCP
+    /// endpoint with [`crate::auth::RequireAuthLayer`] and publishes the
+    /// Protected Resource Metadata document unauthenticated alongside it.
+    pub auth: Option<Arc<AuthConfig>>,
 }
 
 impl Default for HttpConfig {
@@ -78,6 +87,7 @@ impl Default for HttpConfig {
             legacy_sessions: false,
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             sse_keep_alive: Some(Duration::from_secs(15)),
+            auth: None,
         }
     }
 }

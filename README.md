@@ -54,6 +54,7 @@ Inside the scaffold:
 | `telemetry` | Logging to **stderr**, never stdout |
 | `shutdown` | SIGINT / SIGTERM handling |
 | `error` | `ServeError`, plus `ToolError` for tool bodies |
+| `auth` | OAuth 2.1 resource-server layer (see [Authorization](#authorization)) |
 
 ## Writing tools
 
@@ -157,8 +158,93 @@ rusty-mcp-demo --transport http --bind 0.0.0.0:8080 \
   --allowed-origin https://app.example.com
 ```
 
-Authorization is out of scope for this scaffold — terminate OAuth at a gateway
-in front of the server, or add a `tower` layer around the mounted service.
+## Authorization
+
+Set `HttpConfig::auth` and the endpoint becomes an OAuth 2.1 **resource
+server**: `RequireAuthLayer` guards the MCP route, and the RFC 9728 Protected
+Resource Metadata document is published *unauthenticated* alongside it.
+
+```rust
+use rusty_mcp::auth::{AuthConfig, StaticTokenValidator, VerifiedToken};
+
+let auth = AuthConfig::new("https://mcp.example.com/mcp", Arc::new(my_validator))?
+    .with_authorization_servers(["https://auth.example.com"])
+    .with_scopes_supported(["mcp:read"])
+    .with_required_scopes(["mcp:read"]);
+
+let config = ServerConfig {
+    transport: Transport::Http(HttpConfig { auth: Some(Arc::new(auth)), ..Default::default() }),
+    ..Default::default()
+};
+```
+
+Bring your own validation by implementing `TokenValidator` — JWT signature
+checks, RFC 7662 introspection, a lookup in your own store. `StaticTokenValidator`
+is for tests and local development only; it does no cryptography.
+
+### What the layer enforces
+
+| Situation | Status | `WWW-Authenticate` |
+| --- | --- | --- |
+| No `Authorization` header | 401 | `Bearer scope=…, resource_metadata=…` (no `error`, per RFC 6750 §3.1) |
+| Not `Bearer`, or empty token | 400 | `error="invalid_request"` |
+| Token fails validation or is expired | 401 | `error="invalid_token"` |
+| Token minted for another resource | 401 | `error="invalid_token"` |
+| Valid token, missing scopes | 403 | `error="insufficient_scope", scope="…"` |
+| Validator itself is down | 503 | *(none)* |
+
+Three of those are worth calling out:
+
+- **Audience binding is enforced by the layer, not left to your validator.**
+  The spec's "MCP servers **MUST NOT** accept or transit any other tokens" is
+  aimed at a confused deputy — someone replaying a token minted for a different
+  service to borrow this server's privileges. A validator that forgets the
+  `aud` check would reopen that hole, so `AuthConfig::resource` is checked
+  centrally. If your validator provably binds the audience itself, say so with
+  `VerifiedToken::audience_checked_by_validator()`.
+- **Insufficient scope is 403, not 401.** Re-authenticating doesn't help; the
+  client needs a *broader* token. The challenge names every missing scope at
+  once, because drip-feeding them forces one authorization round trip per scope.
+- **A validator outage is 503 with no challenge.** A 401 would tell the client
+  its perfectly good token is bad and send the user through a pointless login.
+
+### The metadata URL is not where you'd guess
+
+RFC 9728 §3.1 inserts the well-known segment *before* the resource path. For
+resource `https://mcp.example.com/mcp` the document lives at:
+
+```
+https://mcp.example.com/.well-known/oauth-protected-resource/mcp
+```
+
+`AuthConfig::metadata_url()` and `metadata_path()` derive this for you.
+
+### Per-tool scopes
+
+`required_scopes` guards the whole endpoint. For finer grain, leave it empty and
+check inside a tool — the layer puts the `VerifiedToken` in the request
+extensions, which the transport forwards as `http::request::Parts`:
+
+```rust
+let token = ctx
+    .extensions
+    .get::<http::request::Parts>()
+    .and_then(|parts| parts.extensions.get::<VerifiedToken>());
+```
+
+Scope checks are plain set containment. If your scheme has hierarchies where a
+broader scope implies narrower ones, expand the implied scopes in your validator
+so they land in `VerifiedToken::scopes`.
+
+### Not included
+
+Only the resource-server half is here. Running an authorization server, the
+client-side flow (PKCE, `resource` parameter, RFC 9207 `iss` validation), and
+token issuance are all separate concerns — front this with a real
+authorization server such as Keycloak, Auth0, or WorkOS.
+
+Authorization is HTTP-only by design: the spec says stdio servers **SHOULD NOT**
+use it and should read credentials from the environment instead.
 
 ## Development
 

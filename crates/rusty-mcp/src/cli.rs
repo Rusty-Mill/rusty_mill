@@ -94,6 +94,9 @@ impl Cli {
                 max_request_body_bytes: self.max_body_bytes,
                 sse_keep_alive: (self.sse_keep_alive_secs > 0)
                     .then(|| Duration::from_secs(self.sse_keep_alive_secs)),
+                // Authorization needs a `TokenValidator`, which cannot come
+                // from a flag. Set it on the `HttpConfig` in code.
+                auth: None,
             }),
         };
 

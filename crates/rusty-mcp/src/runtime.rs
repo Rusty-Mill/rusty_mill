@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{Router, routing::get};
 use rmcp::{
     ServerHandler, ServiceExt,
     transport::{
@@ -20,6 +20,7 @@ use rmcp::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    auth::{AuthConfig, ProtectedResourceMetadata, RequireAuthLayer},
     config::{HttpConfig, ServerConfig, Transport},
     error::ServeError,
     shutdown,
@@ -87,7 +88,8 @@ where
     // own router. `NeverSessionManager` is the honest default under SEP-2567:
     // it refuses to mint sessions at all.
     let factory = Arc::new(factory);
-    let router = if http.legacy_sessions {
+    let auth = http.auth.clone();
+    let mut router = if http.legacy_sessions {
         let service = StreamableHttpService::new(
             {
                 let factory = Arc::clone(&factory);
@@ -96,7 +98,7 @@ where
             Arc::new(LocalSessionManager::default()),
             transport_config,
         );
-        mount(&http.path, service)
+        mount_guarded(&http.path, service, auth.as_ref())
     } else {
         let service = StreamableHttpService::new(
             {
@@ -106,8 +108,24 @@ where
             Arc::new(NeverSessionManager::default()),
             transport_config,
         );
-        mount(&http.path, service)
+        mount_guarded(&http.path, service, auth.as_ref())
     };
+
+    // The metadata document must stay reachable *without* a token: it is how a
+    // client that just received a 401 finds out where to authenticate. Adding
+    // it outside the guarded route is what keeps that from deadlocking.
+    if let Some(auth) = &auth {
+        router = router.route(
+            &auth.metadata_path(),
+            get({
+                let auth = Arc::clone(auth);
+                move || {
+                    let body = axum::Json(ProtectedResourceMetadata::from_config(&auth));
+                    async move { body }
+                }
+            }),
+        );
+    }
 
     let listener = tokio::net::TcpListener::bind(http.bind)
         .await
@@ -121,6 +139,7 @@ where
         address = %local_addr,
         path = %http.path,
         legacy_sessions = http.legacy_sessions,
+        authorized = http.auth.is_some(),
         "serving MCP over Streamable HTTP"
     );
 
@@ -130,6 +149,36 @@ where
 
     tracing::info!("http transport closed");
     Ok(())
+}
+
+/// Mount the MCP service at `path`, wrapped in the auth layer when configured.
+fn mount_guarded<T>(path: &str, service: T, auth: Option<&Arc<AuthConfig>>) -> Router
+where
+    T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    T::Response: axum::response::IntoResponse,
+    T::Future: Send + 'static,
+{
+    use tower_layer::Layer as _;
+
+    match auth {
+        Some(auth) => {
+            tracing::info!(
+                resource = auth.resource(),
+                metadata = %auth.metadata_path(),
+                required_scopes = ?auth.required_scopes,
+                "requiring OAuth 2.1 bearer authorization"
+            );
+            mount(
+                path,
+                RequireAuthLayer::from_shared(Arc::clone(auth)).layer(service),
+            )
+        }
+        None => mount(path, service),
+    }
 }
 
 /// Mount the MCP service at `path`.
