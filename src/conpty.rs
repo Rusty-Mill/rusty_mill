@@ -89,6 +89,15 @@ fn win32_error_from_hresult(hr: i32) -> Win32Error {
     }
 }
 
+/// `CreatePseudoConsole`'s only documented `dwFlags` bit —
+/// `PSEUDOCONSOLE_INHERIT_CURSOR`. Passed to [`create_with_flags`]: the new
+/// pseudoconsole inherits the parent terminal's *current* cursor position
+/// instead of starting at `(0,0)`, useful when creating a pseudoconsole
+/// mid-session (e.g. after a resize/re-attach) so a hosted application's
+/// rendering continues from where the parent left off rather than
+/// resetting. Verified against mingw-w64's own `wincon.h`.
+pub const PSEUDOCONSOLE_INHERIT_CURSOR: u32 = 0x0000_0001;
+
 /// Create a pseudoconsole bound to a pipe pair — `CreatePseudoConsole`.
 /// `input` is the read end of a pipe the caller writes keystrokes/input
 /// into (the pseudoconsole reads from it on the hosted application's
@@ -103,6 +112,10 @@ fn win32_error_from_hresult(hr: i32) -> Win32Error {
 /// [`crate::handle::close`]), keeping only the pipe pair's *other* ends
 /// (the ones it uses to actually talk to the hosted application) open.
 ///
+/// Requests no optional behavior (`dwFlags = 0`) — see
+/// [`create_with_flags`] for a caller that wants
+/// [`PSEUDOCONSOLE_INHERIT_CURSOR`].
+///
 /// # Safety
 ///
 /// `input`/`output` must be currently-open, valid pipe handles (e.g.
@@ -112,11 +125,35 @@ pub unsafe fn create(
     output: RawHandle,
     size: Coord,
 ) -> Result<Hpcon, Win32Error> {
+    // SAFETY: forwards this function's own safety contract unchanged;
+    // `0` is the same hardcoded `dwFlags` value this function always
+    // passed before `create_with_flags` existed.
+    unsafe { create_with_flags(input, output, size, 0) }
+}
+
+/// [`create`]'s more general counterpart — added alongside it, not
+/// replacing it — taking `CreatePseudoConsole`'s `dwFlags` explicitly.
+/// `flags` is normally `0` (equivalent to [`create`]) or
+/// [`PSEUDOCONSOLE_INHERIT_CURSOR`], the only flag Windows documents for
+/// this function. See [`create`] for the `input`/`output`/`size`
+/// parameters and the caller's responsibility to close its own copies of
+/// `input`/`output` afterward.
+///
+/// # Safety
+///
+/// Same contract as [`create`]: `input`/`output` must be currently-open,
+/// valid pipe handles (e.g. from [`crate::handle::create_pipe`]).
+pub unsafe fn create_with_flags(
+    input: RawHandle,
+    output: RawHandle,
+    size: Coord,
+    flags: u32,
+) -> Result<Hpcon, Win32Error> {
     let mut hpc: Hpcon = core::ptr::null_mut();
     // SAFETY: `input`/`output` are caller-supplied per this function's
-    // own safety contract; `hpc` is a valid out-pointer; `flags = 0`
-    // requests no optional behavior (this module supports none yet).
-    let hr = unsafe { CreatePseudoConsole(size, input, output, 0, &mut hpc) };
+    // own safety contract; `hpc` is a valid out-pointer; `flags` is a
+    // plain-old-data bitmask, not a pointer.
+    let hr = unsafe { CreatePseudoConsole(size, input, output, flags, &mut hpc) };
     if hr < 0 {
         Err(win32_error_from_hresult(hr))
     } else {
@@ -336,6 +373,45 @@ mod tests {
 
         // SAFETY: `input_write`/`output_read` are this test's own
         // remaining pipe ends, never passed to `create`/`close` above.
+        unsafe { handle::close(input_write) }
+            .expect("closing the input pipe's write end should succeed");
+        unsafe { handle::close(output_read) }
+            .expect("closing the output pipe's read end should succeed");
+    }
+
+    #[test]
+    fn create_with_flags_accepts_pseudoconsole_inherit_cursor() {
+        let (input_read, input_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's input pipe");
+        let (output_read, output_write) = handle::create_pipe()
+            .expect("create_pipe should succeed for the pseudoconsole's output pipe");
+
+        let size = Coord { x: 80, y: 25 };
+        // SAFETY: `input_read`/`output_write` are freshly created, open
+        // pipe handles from the calls above.
+        let hpc = unsafe {
+            create_with_flags(input_read, output_write, size, PSEUDOCONSOLE_INHERIT_CURSOR)
+        }
+        .expect("CreatePseudoConsole should succeed with PSEUDOCONSOLE_INHERIT_CURSOR set");
+        assert!(
+            !hpc.is_null(),
+            "a successful CreatePseudoConsole should report a non-null HPCON"
+        );
+
+        // SAFETY: per `create`'s documented pattern (`create_with_flags`
+        // shares it), close this test's own copies now that ConPTY has
+        // duplicated them internally.
+        unsafe { handle::close(input_read) }
+            .expect("closing this test's own copy of the input pipe's read end should succeed");
+        unsafe { handle::close(output_write) }
+            .expect("closing this test's own copy of the output pipe's write end should succeed");
+
+        // SAFETY: `hpc` is still open from the call above.
+        unsafe { close(hpc) };
+
+        // SAFETY: `input_write`/`output_read` are this test's own
+        // remaining pipe ends, never passed to `create_with_flags`/`close`
+        // above.
         unsafe { handle::close(input_write) }
             .expect("closing the input pipe's write end should succeed");
         unsafe { handle::close(output_read) }

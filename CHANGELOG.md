@@ -4,6 +4,15 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- `conpty::create_with_flags` plus `conpty::PSEUDOCONSOLE_INHERIT_CURSOR` —
+  closes issue #263, a parity-loop gap: `conpty::create` hardcoded
+  `CreatePseudoConsole`'s `dwFlags` to `0`, so the only flag Windows
+  documents for it (inherit the parent terminal's current cursor position
+  rather than starting at `(0,0)`) could never be requested. Added
+  alongside `create`, which now forwards to it with `flags = 0` — not a
+  signature change.
+
 ### Changed
 - `README.md`'s "Status" section rewritten to match the crate's actual
   current module set (it had drifted as far back as "Phase 5" while the
