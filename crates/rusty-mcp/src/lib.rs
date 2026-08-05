@@ -68,6 +68,7 @@ pub mod runtime;
 pub mod shutdown;
 pub mod tasks;
 pub mod telemetry;
+pub mod trace;
 
 pub use cli::{Cli, TransportArg};
 pub use config::{HttpConfig, ServerConfig, Transport};

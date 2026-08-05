@@ -3,7 +3,12 @@
 //! A second router, to show that adding a topic means adding a module and one
 //! `+` term — no central registry to update.
 
-use rmcp::{Json, handler::server::wrapper::Parameters, tool, tool_router};
+use rmcp::{
+    Json,
+    handler::server::wrapper::Parameters,
+    service::{RequestContext, RoleServer},
+    tool, tool_router,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -36,11 +41,22 @@ impl DemoServer {
     }
 
     /// Count words, characters and lines.
+    ///
+    /// Takes `RequestContext` purely to pick up the caller's trace context, so
+    /// this tool's log lines join the caller's trace rather than floating free.
     #[tool(description = "Count the words, characters and lines in some text.")]
     pub async fn text_stats(
         &self,
         Parameters(TextInput { text }): Parameters<TextInput>,
+        ctx: RequestContext<RoleServer>,
     ) -> Json<TextStats> {
+        let span = rusty_mcp::trace::TraceContext::from_request(&ctx)
+            .map(|tc| tc.span("tools/call text_stats"))
+            .unwrap_or_else(|| tracing::info_span!("tools/call text_stats"));
+        let _guard = span.enter();
+
+        tracing::debug!(bytes = text.len(), "counting text");
+
         Json(TextStats {
             words: text.split_whitespace().count(),
             characters: text.chars().count(),
