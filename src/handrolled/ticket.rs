@@ -41,12 +41,31 @@
 //! # What is sealed
 //!
 //! The PSK, the cipher suite it belongs to, when it was issued and for how
-//! long, and a digest of the certificate chain the issuing server was
-//! presenting. The last of those is what stops a ticket minted by one identity
-//! being redeemed against another that happens to share a ticket key — the
-//! sealing key alone does not bind a ticket to a certificate, and a deployment
-//! that reuses a key across two configurations would otherwise let a session
-//! authenticated by one chain be continued under the other.
+//! long, a digest of the certificate chain the issuing server was presenting,
+//! the `ticket_age_add` that connection chose, and the chain the *client*
+//! presented if it presented one.
+//!
+//! Two of those are worth a sentence each, because they are what a ticket
+//! carrying only a key cannot do:
+//!
+//! - **The server's chain digest** stops a ticket minted by one identity being
+//!   redeemed against another that happens to share a ticket key. The sealing
+//!   key alone does not bind a ticket to a certificate, and a deployment that
+//!   reuses a key across two configurations would otherwise let a session
+//!   authenticated by one chain be continued under the other.
+//! - **The client's chain** is what makes resumption and client authentication
+//!   able to coexist. A resumed handshake carries no Certificate from the
+//!   client, so a server that stored nothing would report an authenticated
+//!   client as anonymous — and
+//!   [`ClientAuth::required`](super::server::ClientAuth::required) would go
+//!   quietly unenforced on exactly the connections a resuming client makes
+//!   most of. Storing it lets the server re-validate that chain against the
+//!   clock at *resumption* time rather than at issuance time.
+//!
+//! What is deliberately **not** re-established is proof of possession. The
+//! client proved it held that certificate's private key on the connection the
+//! ticket came from, and the binder proves it holds the key derived from that
+//! connection. A second signature would prove nothing the binder has not.
 //!
 //! # Primitives
 //!
@@ -113,8 +132,14 @@ impl std::error::Error for TicketError {}
 /// refusal rather than a confusion.
 const TICKET_AAD: &[u8] = b"rusty_tls resumption ticket v1";
 
-/// The one version of the sealed layout this code writes and reads.
-const TICKET_VERSION: u8 = 1;
+/// The version of the sealed layout this code writes.
+///
+/// Bumped from 1 when tickets grew `ticket_age_add` and the client's chain. A
+/// ticket at any other version is *ignored* rather than refused — see
+/// [`TicketContents::open`] — because a version bump is a rotation of a
+/// different kind, and a server that aborted on its own predecessor's tickets
+/// would turn every upgrade into an outage for whoever was mid-session.
+const TICKET_VERSION: u8 = 2;
 
 /// A key a server seals resumption tickets with.
 ///
@@ -254,9 +279,23 @@ pub struct TicketContents {
     pub issued_at: i64,
     /// How long after `issued_at` the ticket may be redeemed, in seconds.
     pub lifetime: u32,
+    /// The `ticket_age_add` sent in this ticket's NewSessionTicket.
+    ///
+    /// Kept because it is the *only* way to read the age a client reports:
+    /// §4.2.11's `obfuscated_ticket_age` is the real age plus this, and a
+    /// server that did not remember the addend could not subtract it. Without
+    /// it the field is unreadable, which is how it went unchecked until
+    /// `rusty_tls#43` was finished.
+    pub age_add: u32,
     /// SHA-256 over the issuing server's certificate chain — see the module
     /// docs on why a ticket is bound to an identity and not only to a key.
     pub identity: Vec<u8>,
+    /// The chain the client presented, DER-encoded, empty if it presented
+    /// none.
+    ///
+    /// See the module docs: this is what lets a resumed connection report the
+    /// client it was resuming rather than reporting none.
+    pub client_certificates: Vec<Vec<u8>>,
     /// The resumption PSK.
     pub psk: Vec<u8>,
 }
@@ -283,35 +322,51 @@ impl TicketContents {
         writer.u32((self.issued_at >> 32) as u32);
         writer.u32(self.issued_at as u32);
         writer.u32(self.lifetime);
+        writer.u32(self.age_add);
         writer.vector_u8(|w| w.bytes(&self.identity));
+        writer.vector_u16(|w| {
+            for certificate in &self.client_certificates {
+                w.vector_u16(|w| w.bytes(certificate));
+            }
+        });
         writer.vector_u8(|w| w.bytes(&self.psk));
         writer.into_vec()
     }
 
-    fn decode(plaintext: &[u8]) -> Result<Self, TicketError> {
+    /// `Ok(None)` for a layout this code does not write — see
+    /// [`TICKET_VERSION`].
+    fn decode(plaintext: &[u8]) -> Result<Option<Self>, TicketError> {
         let mut reader = Reader::new(plaintext);
         if reader.u8()? != TICKET_VERSION {
-            return Err(TicketError::Malformed("its layout version is not this one"));
+            return Ok(None);
         }
         let suite = CipherSuite(reader.u16()?);
         let high = i64::from(reader.u32()?);
         let low = i64::from(reader.u32()?);
         let issued_at = (high << 32) | low;
         let lifetime = reader.u32()?;
+        let age_add = reader.u32()?;
         let identity = reader.vector_u8()?.to_vec();
+        let mut chain = Reader::new(reader.vector_u16()?);
+        let mut client_certificates = Vec::new();
+        while !chain.is_empty() {
+            client_certificates.push(chain.vector_u16()?.to_vec());
+        }
         let psk = reader.vector_u8()?.to_vec();
         reader.finish()?;
 
         if psk.is_empty() {
             return Err(TicketError::Malformed("it carries no key"));
         }
-        Ok(Self {
+        Ok(Some(Self {
             suite,
             issued_at,
             lifetime,
+            age_add,
             identity,
+            client_certificates,
             psk,
-        })
+        }))
     }
 
     /// Seal these contents under `key`.
@@ -320,16 +375,63 @@ impl TicketContents {
     }
 
     /// Open a ticket under any of `keys`, returning `None` if none of them
-    /// opens it.
+    /// opens it *or* if it opens and carries a layout this code does not
+    /// write.
     ///
-    /// A ticket that does not open is not an error at the protocol level: RFC
-    /// 8446 §4.2.11 lets a server ignore an identity it does not recognise and
-    /// fall back to a full handshake, and a server that aborted instead would
-    /// break every client whose ticket outlived a key rotation. A ticket that
-    /// *does* open and then turns out not to be a ticket is a different
-    /// matter, and comes back as `Some(Err(_))`.
+    /// Neither is an error at the protocol level: RFC 8446 §4.2.11 lets a
+    /// server ignore an identity it does not recognise and fall back to a full
+    /// handshake, and a server that aborted instead would break every client
+    /// whose ticket outlived a key rotation — or a deployment's own upgrade.
+    /// A ticket that opens *at this version* and then turns out not to be a
+    /// ticket is a different matter, and comes back as `Some(Err(_))`: this
+    /// server sealed something it cannot read, which is its own bug rather
+    /// than a client's doing.
     pub fn open(ticket: &[u8], keys: &TicketKeys<'_>) -> Option<Result<Self, TicketError>> {
-        keys.open(ticket).map(|plaintext| Self::decode(&plaintext))
+        match keys.open(ticket).map(|plaintext| Self::decode(&plaintext)) {
+            Some(Ok(Some(contents))) => Some(Ok(contents)),
+            Some(Ok(None)) | None => None,
+            Some(Err(err)) => Some(Err(err)),
+        }
+    }
+
+    /// The client's real ticket age, in milliseconds, from what it reported.
+    ///
+    /// §4.2.11: `obfuscated_ticket_age` is the age plus the `ticket_age_add`
+    /// this ticket was issued with, modulo 2³². Wrapping subtraction is the
+    /// inverse, and it is exact — the obfuscation loses nothing.
+    pub const fn reported_age_ms(&self, obfuscated_ticket_age: u32) -> u32 {
+        obfuscated_ticket_age.wrapping_sub(self.age_add)
+    }
+
+    /// Whether the age a client reports is consistent with when this server
+    /// issued the ticket, to within `skew_ms`.
+    ///
+    /// # This is a sanity bound, not anti-replay
+    ///
+    /// Worth being blunt, because the field's *purpose* invites the stronger
+    /// reading. `obfuscated_ticket_age` exists so a server doing 0-RTT can
+    /// bound how long a replayed early-data flight stays useful. ADR-0003 puts
+    /// 0-RTT out of scope, and no window checked here makes a 1-RTT
+    /// resumption replay-proof — a resumed handshake completes a fresh key
+    /// exchange, so replaying one gets an attacker a connection it cannot
+    /// read.
+    ///
+    /// What it does buy is smaller and real: a client whose reported age
+    /// disagrees with this server's own record is not the client this ticket
+    /// was issued to, or is not measuring what it claims to be measuring.
+    /// Declining to resume for it costs one full handshake.
+    ///
+    /// Anti-replay proper needs the strike-register design in `rusty_tls#58`,
+    /// and needs it before any early data exists to replay.
+    pub fn age_is_plausible(&self, obfuscated_ticket_age: u32, now: i64, skew_ms: u32) -> bool {
+        let reported = self.reported_age_ms(obfuscated_ticket_age);
+        // Saturating throughout: a ticket from a server whose clock is wildly
+        // ahead should fail this check, not wrap around into passing it.
+        let elapsed = now.saturating_sub(self.issued_at).max(0);
+        let actual = u32::try_from(elapsed)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(1000);
+        actual.abs_diff(reported) <= skew_ms
     }
 
     /// True if `now` is within `lifetime` seconds of when this was issued.

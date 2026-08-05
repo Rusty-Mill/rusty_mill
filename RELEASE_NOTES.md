@@ -23,6 +23,40 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.10.0
+**2026-08-05**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Added:** resumption and client authentication combine (#43, the last gap) —
+  a ticket carries the client's chain, so a resumed connection reports the peer
+  it is resuming. v0.9.0 refused to combine them because resuming would have
+  left `ClientAuth::required` unenforced.
+- **Added:** the server checks `obfuscated_ticket_age`, via
+  `Tickets::max_age_skew_ms`. **A sanity bound, not anti-replay** — a resumed
+  handshake runs a fresh key exchange, so replaying one gets an attacker a
+  connection it cannot read.
+- **Changed:** a ticket at an unrecognised layout version is ignored rather than
+  refused, so a deployment's own upgrade is not an outage for whoever is
+  mid-session.
+
+**Measured, not assumed.** Twelve mutations, each asserted to have applied
+before its result was believed, each killed by a named test. One survived first
+time: the age check's millisecond arithmetic wraps at exactly 4,294,968 seconds
+elapsed, making a client that claims 704 ms look plausible after a hundred and
+thirty-six years.
+
+### Upgrade notes
+
+- **`Tickets` gained a required `max_age_skew_ms` field.** `None` is the
+  previous behaviour; `Some(60_000)` matches what `rustls` uses.
+- **`TicketContents` gained `age_add` and `client_certificates`**, and the
+  sealed layout version went 1 → 2. Tickets issued by v0.9.0 are ignored rather
+  than refused, so clients holding one fall back to a full handshake.
+
+**This closes #43.** 0-RTT stays out of scope as #58, which needs its
+anti-replay ADR before any code.
+
 ## v0.9.0
 **2026-08-04**
 

@@ -39,13 +39,6 @@
 //! - **`psk_ke`.** A client that offers no `psk_dhe_ke` is answered with a full
 //!   handshake. Resuming without fresh key material trades the session's
 //!   forward secrecy for one saved key exchange.
-//! - **Resumption together with client authentication.** When
-//!   [`ServerConfig::client_auth`] is configured, a `pre_shared_key` offer is
-//!   answered with a full handshake. That is a gap and not a preference: these
-//!   tickets carry no client identity, so a resumed connection would report no
-//!   client certificate and [`ClientAuth::required`] would go quietly
-//!   unenforced. Falling back keeps the posture the configuration asked for.
-//!   See `rusty_tls#43`.
 //! - **TLS 1.2 and below.** A ClientHello that does not offer `0x0304` in
 //!   `supported_versions` gets a `protocol_version` alert, which is what stage
 //!   4a taught this code to send and to read.
@@ -77,6 +70,30 @@
 //!   client claims to hold, the binder is the only proof it holds it, and
 //!   falling back would make that proof optional — the handshake would still
 //!   complete, and nothing would have been checked.
+//!
+//! ## With client authentication
+//!
+//! The two combine, as of the end of `rusty_tls#43`. A ticket carries the
+//! chain the client presented, so a resumed connection reports the peer it is
+//! resuming rather than reporting none — which is what
+//! [`ClientAuth::required`] going quietly unenforced would have looked like.
+//!
+//! The chain is re-validated against the anchors and the clock in force at
+//! *resumption*, not at issuance: a ticket's lifetime is not a licence to
+//! extend a certificate's. What is not redone is proof of possession — the
+//! client proved it held that key on the connection the ticket came from, and
+//! the binder proves it holds the key derived from that connection.
+//! `ServerHandshake::client_is_still_acceptable` is where every rule lives,
+//! and every "no" there falls back to a full handshake rather than refusing.
+//!
+//! ## The age a client reports
+//!
+//! [`Tickets::max_age_skew_ms`] bounds how far `obfuscated_ticket_age` may
+//! disagree with this server's own record before a ticket is declined. **It is
+//! a sanity bound and not anti-replay** — a resumed handshake runs a fresh key
+//! exchange, so replaying one gets an attacker a connection it cannot read.
+//! The field exists for 0-RTT, which ADR-0003 puts out of scope and
+//! `rusty_tls#58` tracks.
 //!
 //! # Client certificates
 //!
@@ -412,6 +429,20 @@ pub struct Tickets<'a> {
     /// §4.6.1 caps it at seven days and says nothing about what is sensible
     /// below that.
     pub lifetime: u32,
+    /// How far a client's reported ticket age may differ from this server's
+    /// own record before the ticket is declined, in milliseconds.
+    ///
+    /// `None` checks nothing, which is what this server did before
+    /// `rusty_tls#43` was finished and remains a defensible choice — see
+    /// [`super::ticket::TicketContents::age_is_plausible`] on why this is a
+    /// sanity bound rather than anti-replay. `Some(60_000)` is a reasonable
+    /// starting point and is what `rustls` uses for the equivalent judgement.
+    ///
+    /// Too tight a window declines clients whose clocks are merely ordinary.
+    /// Too loose a one declines nothing. Neither makes a resumption
+    /// replay-proof; nothing here does, and `rusty_tls#58` is where that would
+    /// be designed.
+    pub max_age_skew_ms: Option<u32>,
     /// How many tickets to issue after a handshake.
     ///
     /// More than one lets a client open several connections later without
@@ -726,6 +757,13 @@ struct AcceptedPsk {
     index: u16,
     /// The key itself, out of the ticket.
     psk: Vec<u8>,
+    /// The client's chain, out of the ticket, empty if it presented none.
+    ///
+    /// Restored onto the connection so a resumed handshake reports the client
+    /// it resumed. It has already been re-validated against the *current*
+    /// clock by `accept_psk`; a chain that expired between issuance and now
+    /// never reaches here.
+    client_certificates: Vec<Vec<u8>>,
 }
 
 /// The groups a client says it supports, whether or not it sent a share for
@@ -860,15 +898,6 @@ impl ServerHandshake<'_> {
         let Some(tickets) = self.config.tickets else {
             return Ok(None);
         };
-        // Client authentication and resumption are not combined here, and the
-        // reason is a hole rather than a preference: these tickets carry no
-        // client identity, so a resumed connection would report no client
-        // certificate and `ClientAuth::required` would go quietly
-        // unenforced. Falling back to a full handshake keeps the posture the
-        // configuration asked for. See `rusty_tls#43`.
-        if self.config.client_auth.is_some() {
-            return Ok(None);
-        }
         match find(&hello.extensions, extension::PSK_KEY_EXCHANGE_MODES) {
             Some(modes) if offers_psk_dhe_ke(modes) => {}
             _ => return Ok(None),
@@ -901,6 +930,22 @@ impl ServerHandshake<'_> {
             if contents.identity != identity {
                 continue;
             }
+            // The age the client reports must agree with this server's own
+            // record. A sanity bound and not anti-replay — the method's own
+            // docs say why, at length, because the field's purpose invites the
+            // stronger reading.
+            if let Some(skew) = tickets.max_age_skew_ms {
+                if !contents.age_is_plausible(offered.obfuscated_ticket_age, tickets.now, skew) {
+                    continue;
+                }
+            }
+            // Whether the client this ticket belongs to can still be
+            // authenticated the way this configuration requires. Declining
+            // here costs one full handshake, in which the client is asked for
+            // a certificate again.
+            if !self.client_is_still_acceptable(&contents) {
+                continue;
+            }
 
             if !verify_psk_binder(hash, &contents.psk, &covered, offer.binders[index]) {
                 return Err(ServerError::BadBinder);
@@ -908,10 +953,66 @@ impl ServerHandshake<'_> {
             return Ok(Some(AcceptedPsk {
                 index: index as u16,
                 psk: contents.psk,
+                client_certificates: contents.client_certificates,
             }));
         }
 
         Ok(None)
+    }
+
+    /// Whether a ticket's client identity still satisfies this server's
+    /// current client-authentication posture.
+    ///
+    /// Resumption and client authentication combine, as of `rusty_tls#43`, and
+    /// combining them safely is entirely this function. A resumed handshake
+    /// carries no Certificate from the client, so without these rules a server
+    /// would either report an authenticated client as anonymous or accept an
+    /// authentication its configuration no longer asks for.
+    ///
+    /// Every "no" here is a *fall back to a full handshake*, never a refusal.
+    /// The client then presents its certificate again and is judged fresh,
+    /// which is the outcome that costs a round trip and surprises nobody.
+    ///
+    /// - **The posture changed since issuance.** A ticket carrying a client
+    ///   chain offered to a configuration with no [`ClientAuth`] is not
+    ///   resumed: this server no longer authenticates clients, and continuing
+    ///   a session that was authenticated would be honouring a decision the
+    ///   configuration has withdrawn.
+    /// - **Nothing to satisfy a requirement with.** A ticket carrying no
+    ///   client chain, offered where [`ClientAuth::required`] is set, is not
+    ///   resumed — that is the case where the gap this closes used to bite,
+    ///   because resuming would have left `required` unenforced on precisely
+    ///   the connections a returning client makes.
+    /// - **The chain no longer validates.** It is re-checked against the
+    ///   anchors and the clock in force *now*, not at issuance. A certificate
+    ///   that expired, or an anchor that was removed, between the two
+    ///   connections must not be carried across by a ticket; a ticket's
+    ///   lifetime is not a licence to extend a certificate's.
+    ///
+    /// What is deliberately *not* redone is proof of possession. The client
+    /// proved it held the key on the connection this ticket came from, and the
+    /// binder proves it holds the key derived from that connection. A second
+    /// CertificateVerify would prove nothing the binder has not.
+    fn client_is_still_acceptable(&self, contents: &TicketContents) -> bool {
+        let Some(auth) = self.config.client_auth else {
+            return contents.client_certificates.is_empty();
+        };
+        if contents.client_certificates.is_empty() {
+            return !auth.required;
+        }
+
+        let parsed: core::result::Result<Vec<Certificate<'_>>, _> = contents
+            .client_certificates
+            .iter()
+            .map(|der| Certificate::parse(der))
+            .collect();
+        let Ok(parsed) = parsed else {
+            return false;
+        };
+        let Some((end_entity, intermediates)) = parsed.split_first() else {
+            return false;
+        };
+        validate_path(end_entity, intermediates, auth.anchors, &auth.path).is_ok()
     }
 
     fn hello(&mut self, message: &Message<'_>) -> Result<Vec<u8>> {
@@ -1371,7 +1472,12 @@ impl ServerHandshake<'_> {
             server_application_secret,
             master,
             expect,
-            client_certificates: Vec::new(),
+            // A resumed handshake carries no Certificate from the client, so
+            // the chain comes out of the ticket rather than off the wire —
+            // already re-validated against the current clock by `accept_psk`.
+            // Empty here would report an authenticated client as anonymous,
+            // which is the gap `rusty_tls#43` closed.
+            client_certificates: psk.map(|psk| psk.client_certificates).unwrap_or_default(),
             client_certificate_transcript: Vec::new(),
         }));
         Ok(out)
@@ -1578,25 +1684,36 @@ impl ServerHandshake<'_> {
                 &nonce,
                 negotiated.hash.len(),
             );
-            let sealed = TicketContents {
-                suite: negotiated.suite,
-                issued_at: tickets.now,
-                lifetime: tickets.lifetime,
-                identity: identity.clone(),
-                psk,
-            }
-            .seal(tickets.keys.current)
-            .map_err(ServerError::Ticket)?;
-
             // `ticket_age_add` is fresh per ticket and random: it is what a
             // client adds to the ticket's real age before reporting it, so a
             // predictable one would let an observer correlate two connections
             // by the difference between the ages they report.
+            //
+            // Chosen *before* sealing, because it goes into the ticket as well
+            // as into the message. A server that only sent it could never
+            // subtract it again, and the age a client reports would be
+            // unreadable — which is exactly why it went unchecked until
+            // `rusty_tls#43` was finished.
             let age_add = u32::from_be_bytes(
                 random_bytes(4)?
                     .try_into()
                     .expect("four random octets are four octets"),
             );
+
+            let sealed = TicketContents {
+                suite: negotiated.suite,
+                issued_at: tickets.now,
+                lifetime: tickets.lifetime,
+                age_add,
+                identity: identity.clone(),
+                // Whatever the client presented on *this* connection, which is
+                // empty unless client authentication is configured. Carried so
+                // a resumed handshake can report the same peer.
+                client_certificates: negotiated.client_certificates.clone(),
+                psk,
+            }
+            .seal(tickets.keys.current)
+            .map_err(ServerError::Ticket)?;
 
             let mut body = Writer::new();
             body.u32(tickets.lifetime);

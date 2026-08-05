@@ -68,7 +68,8 @@
 //! ticket came from, not on this one. [`Connection::peer_certificates`] reports
 //! that earlier chain — carried forward in the [`Session`] — so the answer
 //! stays the same across a resumption instead of quietly becoming "no
-//! certificates".
+//! certificates". [`Connection::resumed`] is how an application with a policy
+//! about how recently a peer was checked tells the two cases apart.
 //!
 //! # Client certificates
 //!
