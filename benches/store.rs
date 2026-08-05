@@ -35,6 +35,10 @@ fn runtime() -> Runtime {
 }
 
 /// Every backend available in this environment, named for the report.
+///
+/// `mut` is only used by the feature-gated pushes below, so a build with
+/// neither networked backend enabled sees a binding that is never mutated.
+#[allow(unused_mut)]
 fn backends(runtime: &Runtime) -> Vec<(&'static str, Arc<dyn Store>)> {
     let mut backends: Vec<(&'static str, Arc<dyn Store>)> =
         vec![("in-memory", Arc::new(InMemoryStore::default()))];
