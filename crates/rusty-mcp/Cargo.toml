@@ -5,6 +5,8 @@ description = "Reusable scaffold for building Model Context Protocol servers in 
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
 readme = "../../README.md"
+# Not published to crates.io. Consume it via a git or path dependency.
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
