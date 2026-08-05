@@ -23,19 +23,29 @@ TypeScript, LangChain or CrewAI one.
 
 ## Install
 
+Not published to crates.io — depend on it from git:
+
 ```toml
 [dependencies]
-rusty-acp = "0.1"
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp" }
 ```
 
-Default features are `client` + `server`. Take just what you need:
+Add `rev = "<commit>"` to pin a reproducible build. Without one, Cargo tracks the default
+branch and picks up whatever has landed there on the next `cargo update`.
+
+Default features are `client` + `server`. Take just what you need — the feature names are
+the ones in the table above:
 
 ```toml
-rusty-acp = { version = "0.1", default-features = false }                      # types only
-rusty-acp = { version = "0.1", default-features = false, features = ["client"] }
-rusty-acp = { version = "0.1", default-features = false, features = ["server"] }
-rusty-acp = { version = "0.1", features = ["redis-store"] }   # + Redis-backed HA
-rusty-acp = { version = "0.1", features = ["well-known"] }    # + open discovery
+# types only
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", default-features = false }
+
+# one layer, without the other
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", default-features = false, features = ["client"] }
+
+# + Redis-backed HA, or open discovery
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["redis-store"] }
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["well-known"] }
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
@@ -357,7 +367,7 @@ Three caveats:
 
 ### Writing your own backend
 
-Implement [`Store`](https://docs.rs/rusty-acp/latest/rusty_acp/server/store/trait.Store.html) —
+Implement [`Store`](https://github.com/baileyrd/rusty_acp/blob/main/src/server/store/mod.rs) —
 run snapshots, the event log, sessions, ownership leases and per-run pub/sub. The
 trait documents the invariants a backend may rely on and the two it must provide
 (subscription liveness on return, and atomic session appends). `InMemoryStore` and
