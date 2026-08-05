@@ -18,6 +18,7 @@ The crate gives you three layers, each usable on its own:
 | `rusty_acp::server::store` | `redis-store` | A Redis-backed store, for several replicas behind a load balancer. |
 | `rusty_acp::server::store` | `postgres-store` | A Postgres-backed store: the same, with history that outlives a key expiry and is queryable. |
 | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
+| metrics | `metrics` | Records run, lease and store metrics through the [`metrics`] facade. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
 TypeScript, LangChain or CrewAI one.
@@ -48,6 +49,7 @@ rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", default-features = 
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["redis-store"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["postgres-store"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["well-known"] }
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["metrics"] }
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
@@ -506,7 +508,7 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-154 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+163 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
@@ -561,6 +563,43 @@ can be resumed or cancelled through a different request on a different replica, 
 span could never cover one. Requests are `tower-http`'s `TraceLayer`, layered on the router like
 any other middleware — the crate does not duplicate it.
 
+### Metrics
+
+With the `metrics` feature, the server records through the [`metrics`] facade. It records but
+does not export — whichever exporter you install receives them, and installing none costs an
+atomic load per call. Same bargain as the router: the crate does not pick your stack.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `acp_runs_total` | counter | `agent`, `status` |
+| `acp_run_duration_seconds` | histogram | `agent`, `status` |
+| `acp_runs_in_flight` | gauge | `agent` |
+| `acp_lease_renew_failures_total` | counter | — |
+| `acp_runs_reaped_total` | counter | `agent` |
+| `acp_recovery_claims_total` | counter | `outcome` (`won`/`lost`) |
+| `acp_recoveries_started_total` | counter | `agent` |
+| `acp_recovery_exhausted_total` | counter | `agent` |
+
+The lease and recovery counters are the ones worth a dashboard. Individually those events are
+already logged; what a log cannot answer is *"is this happening more than it used to"*, which is
+the question that matters when a fleet starts losing replicas.
+
+Store latency is opt-in, because wrapping the store you passed in would mean `server.store()`
+handing back something else:
+
+```rust
+use rusty_acp::server::store::MeteredStore;
+
+let store = MeteredStore::new(Arc::new(RedisStore::connect("redis://127.0.0.1/").await?));
+```
+
+That adds `acp_store_operation_duration_seconds` and `acp_store_failures_total`, labelled by
+operation — `put_run`, `append_event`, and so on.
+
+**No metric is labelled by run id**, and none should be: that is one time series per run, which
+degrades a metrics backend slowly enough that nobody connects it to the change that caused it.
+Run ids belong on spans, which is where they are. A test asserts this rather than a comment.
+
 ## Notes on the server
 
 - The default store holds runs in memory, capped by `AcpServerBuilder::max_runs` (default 1024).
@@ -583,3 +622,4 @@ Apache-2.0. See [LICENSE](LICENSE).
 [openapi]: https://github.com/i-am-bee/acp/blob/main/docs/spec/openapi.yaml
 [sessions]: https://agentcommunicationprotocol.dev/core-concepts/distributed-sessions
 [`axum`]: https://docs.rs/axum
+[`metrics`]: https://docs.rs/metrics

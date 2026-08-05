@@ -92,6 +92,7 @@ mod agent;
 mod routes;
 mod run;
 pub mod store;
+mod telemetry;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
@@ -112,6 +113,10 @@ pub use store::{
 #[cfg(feature = "redis-store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "redis-store")))]
 pub use store::{RedisStore, RedisStoreConfig};
+
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+pub use store::MeteredStore;
 
 use store::NotificationStream;
 
@@ -422,6 +427,7 @@ impl AcpServer {
             )
             .await?;
 
+        telemetry::recovery_started(abandoned.agent_name.as_str());
         tracing::info!(
             abandoned = %abandoned.run_id,
             %replacement,
@@ -495,7 +501,9 @@ async fn renew_lease_until_dropped(
         tokio::time::sleep(interval).await;
         if let Err(error) = store.renew_lease(run_id, &owner, ttl).await {
             // Losing a renewal is not fatal on its own; several must be missed
-            // before the lease lapses.
+            // before the lease lapses. The counter is what turns "one of these
+            // scrolled past" into "this is happening more than it used to".
+            telemetry::lease_renew_failed();
             tracing::warn!(%run_id, %error, "failed to renew run lease");
         }
     }
@@ -529,7 +537,9 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
     // must not both decide to recover the same run. Whoever wins this claim
     // does the work; the others leave the run alone and will see the outcome on
     // their next read.
-    if !store.try_claim_lease(run_id, &server.replica_id, server.lease_ttl).await? {
+    let won = store.try_claim_lease(run_id, &server.replica_id, server.lease_ttl).await?;
+    telemetry::recovery_claim(won);
+    if !won {
         return Ok(run);
     }
 
@@ -585,6 +595,7 @@ async fn reap_claimed(server: &Arc<AcpServer>, run_id: RunId) -> Result<Run, Err
             }
         }
         Some(record) => {
+            telemetry::recovery_exhausted(run.agent_name.as_str());
             tracing::warn!(
                 %run_id,
                 attempt = record.attempt,
@@ -617,6 +628,8 @@ async fn reap_claimed(server: &Arc<AcpServer>, run_id: RunId) -> Result<Run, Err
     let event = Event::RunFailed { run: Box::new(reaped.clone()) };
     let index = store.append_event(run_id, &event).await?;
     store.publish(run_id, Notification::event_at(index, event)).await?;
+
+    telemetry::run_reaped(reaped.agent_name.as_str());
 
     // The abandoned run is finished and its input is no longer needed.
     store.put_recovery_record(run_id, None).await?;
@@ -688,6 +701,11 @@ async fn run_to_terminal(
         renewal.abort();
         return;
     }
+
+    // Counted here rather than at creation: this is the point the run starts
+    // consuming this replica, which is what an in-flight gauge is asked about.
+    let agent_name = ctx.agent_name().to_string();
+    telemetry::run_started(&agent_name);
     let cancel = handle.cancel_token();
 
     let outcome = tokio::select! {
@@ -728,6 +746,16 @@ async fn run_to_terminal(
     if let Err(error) = recorded {
         tracing::error!(%run_id, %error, "failed to record run outcome");
     }
+
+    // Read back rather than inferred from `outcome`: a terminal transition is
+    // applied exactly once, so the snapshot is the authority on how the run
+    // actually ended and how long it took.
+    let final_run = handle.snapshot();
+    let elapsed = final_run
+        .finished_at
+        .map(|finished| finished.signed_duration_since(final_run.created_at))
+        .and_then(|delta| delta.to_std().ok());
+    telemetry::run_finished(&agent_name, final_run.status, elapsed);
 
     // The run is finished, so stop claiming it. Releasing is a courtesy — the
     // lease would expire anyway — but it stops a finished run looking owned.
@@ -919,6 +947,11 @@ impl AcpServerBuilder {
     /// Fails if no agent was registered, if two agents share a name, or if a
     /// manifest violates the specification.
     pub fn build(self) -> Result<AcpServer, Error> {
+        // Registering descriptions is idempotent, so doing it per server rather
+        // than once globally costs nothing and needs no initialisation call an
+        // operator could forget.
+        telemetry::describe();
+
         if self.agents.is_empty() {
             return Err(Error::invalid_input("an ACP server must register at least one agent"));
         }
