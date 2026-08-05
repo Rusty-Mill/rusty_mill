@@ -32,6 +32,7 @@ implementation.
 | `index` | The `Inventory` type: indexing, freeze/repair, retention, stats. |
 | `capture` | Quick capture and the clipboard scratchpad. |
 | `handoff` | Session resumption and hand-off primers. |
+| `watch` | Debounced polling of the source stores, so the index stays live. |
 | `update` | Update-check *policy*. Deliberately contains no transport. |
 | `format` | Human-readable dates, relative times, byte sizes. |
 
@@ -151,6 +152,36 @@ Consequences, stated plainly:
 `Embedder` is a trait, so dropping in a shipped static model later is a new
 implementation, not a rewrite.
 
+### Keeping the index live
+
+The source stores are stat-ed on an interval rather than watched through
+filesystem events. Polling needs no extra dependency, behaves identically on
+all three platforms, and a stat of a few hundred paths every few seconds is far
+cheaper than the indexing it gates — in a crate whose whole pitch is that it
+needs nothing installed, an event-based watcher would be a new dependency and a
+new class of platform-specific failure.
+
+The debounce is the part that matters. A file whose `(mtime, size)` has just
+changed is **deferred** until a later tick sees the same signature, so the
+indexer never reads a transcript an agent is still appending to. Without it, a
+live session would re-trigger indexing on every message — the exact opposite of
+"reading each file once". Parsers already skip a truncated trailing line, so a
+mid-write read costs correctness nothing; it costs *work*, repeatedly, on the
+machine of someone who is mid-task.
+
+Two cases the naive version gets wrong, both covered by tests:
+
+- A file older than the grace window settles **immediately**. Otherwise every
+  launch would sit through a full interval before touching the backlog already
+  on disk, and old files are by definition not being written to now.
+- A file that changes and reverts within one interval is **not** a change, and
+  its pending entry is cleared.
+
+`Watcher::prime()` records the current state without reporting it, so the first
+tick after the startup index reports what changed *since* that index rather
+than the whole disk again. A vanished file is forgotten but never triggers
+indexing: deleting a transcript does not delete what was indexed from it.
+
 ### Encryption and the key
 
 SQLCipher with a per-machine 256-bit key held in the OS keychain and never
@@ -195,7 +226,7 @@ Recorded rather than glossed over.
 
 ## Testing
 
-58 tests, no network, no fixtures checked in as binaries.
+66 tests, no network, no fixtures checked in as binaries.
 
 - **Unit tests** cover each parser against realistic records, the timestamp and
   calendar round-trip, FTS query escaping, the linear algebra against known
@@ -205,6 +236,10 @@ Recorded rather than glossed over.
   confirm re-indexing is idempotent, break a source and prove it freezes
   *without losing history* and then repairs itself, and exercise capture,
   scratchpad, resume, primer and retention.
+- **Watcher tests** run against real files without a fixture machine, via
+  `poll_paths_at`, and cover the debounce directly: a file being written is
+  deferred until it settles, a growing file stays deferred across ticks, the
+  backlog settles immediately, and priming suppresses the initial burst.
 - The semantic capability has a dedicated test
   (`lsa_relates_words_that_share_context`) proving two words that never
   co-occur end up close when they share context.

@@ -125,7 +125,7 @@ pub fn scan_fork(
     Ok(out)
 }
 
-fn store_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+pub(crate) fn store_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
         let global = root.join("globalStorage").join("state.vscdb");

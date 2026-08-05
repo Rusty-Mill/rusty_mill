@@ -11,6 +11,10 @@ impl Source for Cursor {
         SourceId::Cursor
     }
 
+    fn files(&self) -> Vec<std::path::PathBuf> {
+        vscdb::store_files(&self.roots())
+    }
+
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
         vscdb::scan_fork(SourceId::Cursor, self.roots(), ctx)
     }

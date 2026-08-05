@@ -97,9 +97,38 @@ pub trait Source: Send + Sync {
         !self.roots().is_empty()
     }
 
+    /// The files this source reads, enumerated without opening any of them.
+    ///
+    /// Separate from [`Source::scan`] because the watcher needs to know *what*
+    /// to stat on every tick without paying to parse any of it.
+    fn files(&self) -> Vec<PathBuf>;
+
     /// Read everything this source can offer. Errors freeze the source; they
     /// never delete what it previously contributed.
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>>;
+}
+
+/// Files under `roots` with the given extension. Both JSONL sources file
+/// transcripts a few directories deep, so this walks rather than globs.
+pub(crate) fn walk_with_extension(
+    roots: &[PathBuf],
+    extension: &str,
+    max_depth: usize,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for root in roots {
+        for entry in walkdir::WalkDir::new(root)
+            .max_depth(max_depth)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some(extension) {
+                out.push(path.to_path_buf());
+            }
+        }
+    }
+    out
 }
 
 pub fn all() -> Vec<Box<dyn Source>> {

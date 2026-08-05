@@ -20,6 +20,10 @@ impl Source for Zed {
         SourceId::Zed
     }
 
+    fn files(&self) -> Vec<PathBuf> {
+        thread_dbs(self.roots())
+    }
+
     fn scan(&self, ctx: &mut ScanContext) -> Result<Vec<ParsedConversation>> {
         scan_roots(self.roots(), ctx)
     }

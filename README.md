@@ -49,6 +49,7 @@ The desktop crate is outside the workspace's `default-members`, so a plain
 
 ```bash
 inv index                        # read every installed tool
+inv watch                        # keep the index live as you work
 inv search "container stuck"     # keyword + meaning, across all six
 inv sources                      # per-source status, including anything frozen
 inv show 42                      # print a whole conversation
@@ -84,6 +85,10 @@ confirm an install works without guessing at the shortcut.
 - **Six sources**, read-only, snapshotted before reading so indexing can never
   interfere with a running editor. History from before install is indexed on
   the first pass.
+- **Live indexing** — after the first pass the source stores are watched and
+  re-indexed as they change. A file still being written is held back until its
+  size and mtime settle, so an active session is indexed once when it pauses,
+  not once per message.
 - **Hybrid search** — SQLite FTS5 BM25 blended with on-device embeddings,
   fused by Reciprocal Rank Fusion, with recency as a third ranked list.
   Matched words are highlighted; hits found only by meaning are labelled.
