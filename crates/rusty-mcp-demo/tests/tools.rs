@@ -79,8 +79,12 @@ async fn lists_tools_from_every_router() {
     let mut names: Vec<_> = tools.tools.iter().map(|t| t.name.to_string()).collect();
     names.sort();
 
-    // Both routers contribute, merged by the `+` in `DemoServer::with_state`.
-    assert_eq!(names, ["add", "divide", "slugify", "text_stats"]);
+    // Every router contributes, merged by the `+` chain in
+    // `DemoServer::with_state_and_tasks`.
+    assert_eq!(
+        names,
+        ["add", "countdown", "divide", "slugify", "text_stats"]
+    );
 
     // Every tool carries a description and an input schema; without these the
     // model has nothing to select on.
@@ -206,7 +210,7 @@ async fn add_overflow_is_rejected_rather_than_panicking() {
         .list_tools(None)
         .await
         .expect("tools/list after error");
-    assert_eq!(tools.tools.len(), 4);
+    assert_eq!(tools.tools.len(), 5);
 
     client.cancel().await.expect("cancel");
 }
