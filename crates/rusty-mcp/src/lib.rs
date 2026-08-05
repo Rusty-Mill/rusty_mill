@@ -66,6 +66,7 @@ pub mod error;
 pub mod resources;
 pub mod runtime;
 pub mod shutdown;
+pub mod subscriptions;
 pub mod tasks;
 pub mod telemetry;
 pub mod trace;
@@ -137,8 +138,8 @@ pub mod __private {
         model::{
             CancelTaskParams, GetTaskParams, GetTaskResult, ListResourceTemplatesResult,
             ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
-            ReadResourceResponse, ReadResourceResult, UpdateTaskParams,
+            ReadResourceResponse, ReadResourceResult, SubscriptionFilter, UpdateTaskParams,
         },
-        service::{RequestContext, RoleServer},
+        service::{RequestContext, RoleServer, SubscriptionContext},
     };
 }

@@ -8,8 +8,8 @@ use rmcp::{
     model::{ServerCapabilities, ServerInfo},
     prompt_handler, tool_handler,
 };
-use rusty_mcp::resources::ResourceRegistry;
 use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
+use rusty_mcp::{resources::ResourceRegistry, subscriptions::ChangeBroadcaster};
 
 use crate::tools::slow::COUNTDOWN;
 
@@ -29,6 +29,7 @@ pub struct DemoServer {
     pub(crate) state: Arc<DemoState>,
     pub(crate) tasks: TaskSupport,
     pub(crate) resources: ResourceRegistry,
+    pub(crate) changes: ChangeBroadcaster,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
 }
@@ -47,19 +48,39 @@ impl DemoServer {
         Self::with_state_and_tasks(state, default_task_support())
     }
 
-    /// Build a server sharing both state and task manager.
+    /// Build a server sharing both state and task manager, with a **fresh**
+    /// change broadcaster.
     ///
-    /// Tasks outlive the call that created them, and Streamable HTTP builds a
-    /// fresh handler per request — so the factory must clone one `TaskSupport`
-    /// in rather than construct a new one, or every poll would miss.
+    /// Fine for stdio, where one handler serves the whole connection. Under
+    /// Streamable HTTP use [`DemoServer::with_parts`] instead: a handler is
+    /// built per request, so a broadcaster created here would leave a
+    /// `subscriptions/listen` request reading a channel that the request
+    /// publishing the change never writes to.
     pub fn with_state_and_tasks(state: Arc<DemoState>, tasks: TaskSupport) -> Self {
+        Self::with_parts(state, tasks, ChangeBroadcaster::new())
+    }
+
+    /// Build a server sharing state, tasks and the change broadcaster.
+    ///
+    /// The broadcaster must be cloned in rather than constructed per handler:
+    /// Streamable HTTP builds a fresh handler per request, and a new channel
+    /// each time would leave `subscriptions/listen` connected to nothing.
+    pub fn with_parts(
+        state: Arc<DemoState>,
+        tasks: TaskSupport,
+        changes: ChangeBroadcaster,
+    ) -> Self {
         Self {
             state,
             tasks,
+            changes,
             resources: crate::resources::registry(),
             // Each module contributes its own router; `+` merges them. Adding a
             // module is one more term here and nothing else.
-            tool_router: Self::calculator_tools() + Self::text_tools() + Self::slow_tools(),
+            tool_router: Self::calculator_tools()
+                + Self::text_tools()
+                + Self::slow_tools()
+                + Self::notify_tools(),
             prompt_router: Self::demo_prompts(),
         }
     }
@@ -100,6 +121,13 @@ impl ServerHandler for DemoServer {
                 .enable_tools()
                 .enable_prompts()
                 .enable_resources()
+                // The `list_changed` flags are what let a client subscribe to
+                // each category; without them the filter intersection drops it
+                // and the subscription stays silent.
+                .enable_resources_list_changed()
+                .enable_resources_subscribe()
+                .enable_prompts_list_changed()
+                .enable_tool_list_changed()
                 .enable_tasks()
                 .build(),
         )
@@ -114,4 +142,5 @@ impl ServerHandler for DemoServer {
 
     rusty_mcp::forward_task_methods!(tasks);
     rusty_mcp::forward_resource_methods!(resources);
+    rusty_mcp::forward_subscription_methods!(changes);
 }

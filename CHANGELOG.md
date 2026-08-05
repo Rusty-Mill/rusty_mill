@@ -71,6 +71,20 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   routers. Note `prompt_router` takes its router name as a **string literal**
   where `tool_router` takes an identifier.
 
+#### Change notifications ([#8])
+
+- `subscriptions::ChangeBroadcaster`, fanning application change events out to
+  every live `subscriptions/listen` subscription. 2026-07-28 replaced the
+  standalone HTTP GET stream and `resources/subscribe`/`resources/unsubscribe`
+  with this single long-lived request.
+- `forward_subscription_methods!`, generating `accepted_subscription_filter`
+  and `listen`.
+- Publishing is infallible and non-blocking; having no listeners is the normal
+  state rather than an error.
+- On broadcast lag, accepted list-changed categories are re-announced rather
+  than failing the subscription — these are re-fetch signals, so the client ends
+  up with fresh lists either way.
+
 #### Tracing ([#6])
 
 - `trace::TraceContext`, parsing and emitting W3C trace context over the bare
@@ -83,7 +97,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 - CI running `fmt --check`, `clippy --all-targets --all-features` under
   `-D warnings`, the test suite, and an MSRV (1.88) build.
-- 149 tests, including integration coverage over real sockets for both
+- 165 tests, including integration coverage over real sockets for both
   transports, authorization, tasks, resources, prompts and trace context.
 
 ### Security
@@ -133,6 +147,10 @@ easy to get wrong:
   sending one otherwise is rejected with `-32021` rather than degrading.
 - Roots, Sampling and Logging are **deprecated** in this revision with a
   12-month window. None are implemented here, deliberately.
+- **Subscription filters are intersected with advertised capabilities.** A
+  category the server does not advertise is dropped without error, so the
+  subscription succeeds and stays quiet — advertise the `list_changed` flags
+  for anything you intend to send.
 
 [#1]: https://github.com/baileyrd/rusty_mcp/pull/1
 [#2]: https://github.com/baileyrd/rusty_mcp/pull/2
@@ -140,6 +158,7 @@ easy to get wrong:
 [#4]: https://github.com/baileyrd/rusty_mcp/pull/4
 [#5]: https://github.com/baileyrd/rusty_mcp/pull/5
 [#6]: https://github.com/baileyrd/rusty_mcp/pull/6
+[#8]: https://github.com/baileyrd/rusty_mcp/pull/8
 [kac]: https://keepachangelog.com/en/1.1.0/
 [semver]: https://semver.org/spec/v2.0.0.html
 [spec]: https://modelcontextprotocol.io/specification/2026-07-28

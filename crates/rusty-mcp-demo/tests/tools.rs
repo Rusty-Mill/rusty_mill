@@ -87,7 +87,14 @@ async fn lists_tools_from_every_router() {
     // `DemoServer::with_state_and_tasks`.
     assert_eq!(
         names,
-        ["add", "countdown", "divide", "slugify", "text_stats"]
+        [
+            "add",
+            "countdown",
+            "divide",
+            "slugify",
+            "text_stats",
+            "touch_resource"
+        ]
     );
 
     // Every tool carries a description and an input schema; without these the
@@ -214,7 +221,7 @@ async fn add_overflow_is_rejected_rather_than_panicking() {
         .list_tools(None)
         .await
         .expect("tools/list after error");
-    assert_eq!(tools.tools.len(), 5);
+    assert_eq!(tools.tools.len(), 6);
 
     client.cancel().await.expect("cancel");
 }
