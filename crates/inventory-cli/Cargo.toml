@@ -1,0 +1,18 @@
+[package]
+name = "inventory-cli"
+description = "Search every AI agent and IDE conversation on your machine, from the terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "inv"
+path = "src/main.rs"
+
+[dependencies]
+inventory-core.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
