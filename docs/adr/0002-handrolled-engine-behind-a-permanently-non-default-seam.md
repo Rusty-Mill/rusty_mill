@@ -109,7 +109,7 @@ independently abandonable:
 | 3c-i | Ephemeral key exchange, and the TLS `SignatureScheme` namespace — including RSASSA-PSS, which 2b-i refused | **landed** |
 | 3c-ii | The client state machine — flight ordering, HelloRetryRequest, driving it all | **landed** |
 | 4a | The version boundary — alerts, and the RFC 8446 §4.1.3 downgrade sentinel | **landed** |
-| 4b | TLS 1.2 itself — **still gated on a real peer forcing it, and nothing does** | not started |
+| 4b | TLS 1.2 itself — **declined**; `rusty_tls#41` closed not planned, 2026-08-05 | not built |
 | 5 | Server side — the handshake, and the first thing here that signs | **landed** |
 
 Stage 2 is split because the original single row was two units of work with
@@ -401,6 +401,23 @@ is always the peer. That is a fact about where this was built, not about the
 internet, and it is recorded because the condition cannot be re-checked from
 the artefact later.
 
+**Re-measured 2026-08-05, from a different sandbox, and it came back the same
+way.** `tls-v1-2.badssl.com` *and* `tls-v1-1.badssl.com` — an endpoint that
+exists to be TLS 1.1-only — both negotiated TLS 1.3 with
+`TLS_AES_256_GCM_SHA384`, under a leaf issued by
+`O = Anthropic, CN = Egress Gateway SDS Issuing CA (production)`. This crate's
+own client, which offers exactly `0x0304`, completed full handshakes with both
+and got HTTP back; `PeerAlert(protocol_version)` never appeared. Forcing
+`openssl s_client -tls1_2` gets TLS 1.2 from the same endpoints, which is the
+proof that the gateway serves whatever the *client* asks for rather than
+whatever the origin supports.
+
+The distinction above survives the second measurement and is worth restating,
+because two agreeing results invite the stronger reading: **two environments
+agreeing that neither can see is not evidence about what there is to see.** The
+re-measurement moves the condition from *unevaluated* to *unevaluable here*. It
+does not establish that no TLS 1.2-only peer exists.
+
 What the condition *can* be given is a peer manufactured on demand: `rustls`
 restricted to `&[&rustls::version::TLS12]` refuses a TLS 1.3-only ClientHello
 and says why. That is now a permanent test of the version boundary, and it
@@ -428,6 +445,17 @@ fell out of it:
   same way: a check that buys diagnosis rather than a gate is worth keeping and
   worth not overselling.
 
+**Why 4b is declined rather than pending.** `rusty_tls#41` was closed as
+`not planned` on 2026-08-05, after the re-measurement above. The deciding
+precondition was not the egress problem — it was the second one, which is
+independent of it: **no consumer has named a TLS 1.2-only peer.** The two were
+`AND`-ed, so the gate is shut whatever a clean-egress measurement would say,
+and an open issue was implying an intent nobody holds.
+
+Reopening `#41` is the way back in if a consumer ever names one. Nothing below
+changes; the reasoning that made 4b a bad trade is the same reasoning that
+makes it a bad trade to leave nominally scheduled.
+
 **Why 4b has not been done, stated so it is a decision rather than an
 omission.** Speaking TLS 1.2 would give up a structural property the client has
 today: it cannot be downgraded, because it cannot speak anything to be
@@ -439,6 +467,9 @@ accepting that expansion has not been met. If a peer someone actually needs
 turns out to force TLS 1.2, the boundary that reports it is now in place, and
 the work is a well-understood 4b. Until then the honest answer is that the
 client refuses, and now says why.
+
+That paragraph was written while 4b was pending and reads the same now that it
+is declined, which is the point: the argument never depended on the schedule.
 
 Stage 5 was "last, or never". The "last" half is satisfied — every other row
 landed first — and the "never" half was a judgment about danger rather than a
