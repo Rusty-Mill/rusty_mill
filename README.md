@@ -34,8 +34,18 @@ isn't a port of `rusty_libc`'s architecture.
 - [`time`] — `now_monotonic`/`now_realtime` via
   `QueryPerformanceCounter`/`GetSystemTimePreciseAsFileTime`.
 
-ConPTY is deliberately not implemented — see `src/lib.rs`'s module docs for
-why that's the right call for `rusty_lines`' own-process raw-mode reads.
+This status list lags the code — the crate has since grown a round-2 batch
+of subsystems (`registry`, `security`, `service`, `net`, `conpty`,
+`windowing`) plus a `pe` Portable-Executable parser; `src/lib.rs`'s module
+docs are the running, up-to-date design log. In particular ConPTY *is* now
+implemented (`conpty::create`/`resize`/`close` and
+`process::spawn_suspended_with_pseudoconsole`), for hosting a fully-
+interactive child rather than `rusty_lines`' own-process raw-mode reads —
+the two are different needs, as those module docs explain. The `pe` module
+is the read half of a PE loader (headers, sections, exports, imports over a
+`&[u8]`); it stops short of mapping/relocating/running an image, which stays
+the OS loader's job via `process`/`dynlib`.
+
 See `docs/CAPABILITY_ASSESSMENT.md` in this repo, and
 `docs/WINDOWS_BACKEND_ANALYSIS.md` in the rush repo, for the full
 primitive-by-primitive analysis and remaining gaps this crate is being built

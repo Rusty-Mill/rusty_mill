@@ -245,6 +245,20 @@
 //! surprising finding in that sweep: the actual Win32 primitives behind
 //! `cd`/`pwd`, and nothing in this crate wrapped them at all until now.
 //!
+//! [`pe`] is the deliberate odd one out. Every module above wraps a
+//! documented `kernel32`/`advapi32`/`ws2_32`/… export reached via
+//! `unsafe extern "system"` FFI; [`pe`] wraps *nothing* — it parses the
+//! on-disk bytes of a Portable Executable image ([`pe::PeFile`]) with no OS
+//! call and, for that reason, no `unsafe` anywhere in it. It is the read
+//! half of a loader: the machine, subsystem (console vs GUI), entry point,
+//! sections, data directories, exported symbols, and imported modules a
+//! caller wants to know *before* handing a path to `CreateProcessW` or
+//! `LoadLibraryW`. It stays available off-Windows like [`error`] (its input
+//! is a `&[u8]`, not a live handle), and it stops short of the *other* half
+//! of loading — mapping, relocating, and running an image in-process — which
+//! is runtime logic this crate's thin-wrapper charter deliberately leaves to
+//! the OS loader (see [`pe`]'s own module docs).
+//!
 //! Safe wrappers return `Result<T, Win32Error>`; a raw Win32 error code
 //! never escapes unwrapped. `unsafe` is confined to the `extern "system"`
 //! FFI declarations and functions that take a caller-supplied raw handle or
@@ -378,3 +392,12 @@ pub mod net;
 pub mod conpty;
 #[cfg(windows)]
 pub mod windowing;
+
+// `pe` is a pure Portable-Executable byte parser — the one module with no
+// Win32 export to wrap and, consequently, no `unsafe` anywhere in it. Like
+// `error`, its input is a `&[u8]` rather than a live handle, so it stays
+// available off-Windows (a Windows binary can be inspected from any host)
+// and is *not* `#[cfg(windows)]`-gated. Not re-exported at the crate root,
+// for the same reason as the other multi-item modules above — reach it via
+// `rusty_win32::pe::*`.
+pub mod pe;
