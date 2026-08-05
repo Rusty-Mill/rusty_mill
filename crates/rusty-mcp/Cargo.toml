@@ -5,6 +5,8 @@ description = "Reusable scaffold for building Model Context Protocol servers in 
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
 readme = "../../README.md"
+# Not published to crates.io. Consume it via a git or path dependency.
+publish = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -22,15 +24,19 @@ rmcp = { workspace = true, features = [
     "transport-io",
     "transport-streamable-http-server",
 ] }
-axum = { workspace = true }
+axum = { workspace = true, features = ["json"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 tokio-util = { workspace = true }
 clap = { workspace = true }
+http = "1"
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tower-service = "0.3"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+url = "2"
+tower-layer = "0.3"
 
 [dev-dependencies]
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }

@@ -59,6 +59,7 @@
 
 #![doc(html_root_url = "https://docs.rs/rusty-mcp/0.1.0")]
 
+pub mod auth;
 pub mod cli;
 pub mod config;
 pub mod error;
