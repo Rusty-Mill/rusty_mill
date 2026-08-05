@@ -14,6 +14,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use eventsource_stream::Eventsource;
 use futures_util::StreamExt;
 use rusty_acp::{
     client::{collect_run, AcpClient, WaitOptions},
@@ -665,6 +666,62 @@ async fn recovery_stops_at_the_attempt_budget(store: Arc<dyn Store>) {
     assert_eq!(replaced_by(&abandoned), None, "the budget was spent on the first attempt");
 }
 
+/// A stream dropped on one replica is resumed on the other, without a gap.
+///
+/// The point of resumption in a fleet: the load balancer that routes the
+/// reconnection has no reason to send it back to the replica the client was
+/// talking to, and with the run's log in the shared store it does not need to.
+/// The replica serving the replay here is not the one executing the run.
+async fn a_dropped_stream_resumes_on_the_other_replica(store: Arc<dyn Store>) {
+    let (a, b) = replicas(store).await;
+    let http = reqwest::Client::new();
+
+    // Runs on A, and pauses awaiting input — so the log is settled and finite
+    // while the run is still live, with no timing to wait on.
+    let paused = a.run_sync("greeter", [Message::user("hi")]).await.unwrap();
+    assert_eq!(paused.status, RunStatus::Awaiting);
+
+    let read_stream = |base: String, last: Option<u64>| {
+        let http = http.clone();
+        async move {
+            let mut request = http
+                .get(format!("{base}/runs/{}/events", paused.run_id))
+                .header("accept", "text/event-stream");
+            if let Some(last) = last {
+                request = request.header("last-event-id", last.to_string());
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 200);
+
+            let mut collected: Vec<(u64, String)> = Vec::new();
+            let mut stream = response.bytes_stream().eventsource();
+            while let Some(message) = stream.next().await {
+                let message = message.unwrap();
+                collected.push((message.id.parse().unwrap(), message.event.clone()));
+                // `run.awaiting` is terminal for a stream.
+                if message.event == "run.awaiting" {
+                    break;
+                }
+            }
+            collected
+        }
+    };
+
+    // Read the whole log through A, then resume partway through B.
+    let whole = read_stream(a.base_url().to_string(), None).await;
+    assert!(whole.len() >= 3, "expected a log to resume into, got {whole:?}");
+
+    let resume_after = whole[0].0;
+    let tail = read_stream(b.base_url().to_string(), Some(resume_after)).await;
+
+    let expected: Vec<(u64, String)> = whole.iter().skip(1).cloned().collect();
+    assert_eq!(
+        tail, expected,
+        "the other replica must serve exactly the events after the one acknowledged"
+    );
+    assert_eq!(tail.last().unwrap().1, "run.awaiting");
+}
+
 // ---------------------------------------------------------------------------
 // Backend bindings.
 // ---------------------------------------------------------------------------
@@ -719,4 +776,5 @@ backend_tests!(
     a_recoverable_run_is_replaced_when_its_replica_dies,
     a_run_that_did_not_opt_in_is_only_failed,
     recovery_stops_at_the_attempt_budget,
+    a_dropped_stream_resumes_on_the_other_replica,
 );

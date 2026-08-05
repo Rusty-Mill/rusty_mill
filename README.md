@@ -141,6 +141,40 @@ while let Some(event) = stream.next().await {
 The stream ends **after** the terminal event, so the final `run.*` snapshot is never lost to the
 cut-off. `client::collect_run` drains a stream straight into that final `Run`.
 
+#### Surviving a dropped connection
+
+A streaming run routinely outlives the connection carrying it — proxies time idle connections
+out, load balancers recycle them, replicas die. Every streamed event is tagged with its index in
+the run's durable log, so a stream that drops is picked up from the last event the client saw
+rather than restarted or abandoned:
+
+```rust
+let client = AcpClient::builder("http://localhost:8000")
+    .reconnect(ReconnectPolicy { max_attempts: 5, ..Default::default() })  // the default
+    .build()?;
+
+let client = AcpClient::builder("http://localhost:8000")
+    .reconnect(ReconnectPolicy::disabled())   // a dropped stream simply ends
+    .build()?;
+```
+
+Nothing changes at the call site: `stream`, `stream_run` and `stream_resume` yield the same
+gapless sequence whether or not the connection survived it. The attempt ceiling counts
+*consecutive* failures and is reset by any event that arrives, so a long run that drops
+repeatedly while still making progress is not cut off.
+
+Other clients can do the same thing directly, since it is ordinary SSE:
+
+```sh
+curl -N -H 'Accept: text/event-stream' -H 'Last-Event-ID: 41' \
+  http://localhost:8000/runs/$RUN_ID/events
+```
+
+The server subscribes before it reads the log, which is what makes the splice gapless — anything
+appended after the read arrives live, anything before it is in the read. That leaves an overlap
+rather than a gap, and the index is what removes it exactly. Resuming a run that has already
+finished replays the log and closes.
+
 On the server side, stream output part by part:
 
 ```rust
@@ -398,6 +432,10 @@ for history and `GET /session/{id}/state` for state — and, with the `well-know
 spec says history and state are URLs on resource servers, and leaves where they point to the
 implementation.
 
+`GET /runs/{run_id}/events` also answers `Accept: text/event-stream` with a resumable SSE stream
+honouring `Last-Event-ID`. That is an extension too — the OpenAPI document describes only the
+JSON list, which remains what a client gets by default.
+
 Also covered:
 
 - **All seven run states** — `created`, `in-progress`, `awaiting`, `cancelling`, `cancelled`,
@@ -440,13 +478,18 @@ Each example's header comment carries the equivalent `curl` invocations.
 cargo test --all-features
 ```
 
-101 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+117 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
 cancelling it through the other — including killing a replica's whole runtime mid-run and
 asserting the run gets reaped rather than hanging, and that a replayable one is replaced
 by a fresh linked run.
+
+Two suites deliberately avoid racing what they test, since the gaps they cover are microseconds
+wide and would otherwise pass by luck: `ordering.rs` and `resumption.rs` both wrap the store in a
+decorator that makes the window wide and fixed, so a violation fails every time rather than
+occasionally.
 
 The multi-replica suite runs against **both** backends. The Redis half is skipped unless
 `ACP_TEST_REDIS_URL` is set; when it *is* set, an unreachable Redis fails the run rather than

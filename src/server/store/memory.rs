@@ -147,13 +147,17 @@ impl Store for InMemoryStore {
             .and_then(|entry| entry.run.clone()))
     }
 
-    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<()> {
+    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
         let mut runs = self.runs.write().expect("run map poisoned");
         match runs.get_mut(&run_id) {
-            Some(entry) => entry.events.push(event.clone()),
-            None => return Err(Error::not_found(format!("run {run_id} not found"))),
+            // The write lock is what makes the index unique: a concurrent
+            // append cannot observe the same length.
+            Some(entry) => {
+                entry.events.push(event.clone());
+                Ok(entry.events.len() as u64 - 1)
+            }
+            None => Err(Error::not_found(format!("run {run_id} not found"))),
         }
-        Ok(())
     }
 
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
@@ -163,6 +167,16 @@ impl Store for InMemoryStore {
             .expect("run map poisoned")
             .get(&run_id)
             .map(|entry| entry.events.clone())
+            .unwrap_or_default())
+    }
+
+    async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        Ok(self
+            .runs
+            .read()
+            .expect("run map poisoned")
+            .get(&run_id)
+            .map(|entry| entry.events.iter().skip(from as usize).cloned().collect())
             .unwrap_or_default())
     }
 
@@ -187,7 +201,7 @@ impl Store for InMemoryStore {
                              Fetch GET /runs/{{run_id}}/events for the full log."
                         )),
                     };
-                    Some((Notification::Event(event), receiver))
+                    Some((Notification::unlogged_event(event), receiver))
                 }
             }
         })))

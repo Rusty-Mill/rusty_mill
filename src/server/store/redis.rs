@@ -204,21 +204,36 @@ impl Store for RedisStore {
         raw.as_deref().map(decode).transpose()
     }
 
-    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<()> {
+    async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
         let key = self.events_key(run_id);
         let mut connection = self.connection.clone();
         // RPUSH is atomic, so concurrent appends cannot interleave or be lost.
-        let _: () = connection
+        // It returns the list's new length, which makes the index the append
+        // was given free — and unique, since no two appends can be told the
+        // same length.
+        let length: u64 = connection
             .rpush(&key, encode(event)?)
             .await
             .map_err(|err| redis_error("append event", err))?;
-        self.touch(&key).await
+        self.touch(&key).await?;
+        Ok(length - 1)
     }
 
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
         let mut connection = self.connection.clone();
         let raw: Vec<String> = connection
             .lrange(self.events_key(run_id), 0, -1)
+            .await
+            .map_err(|err| redis_error("read events", err))?;
+        raw.iter().map(|entry| decode(entry)).collect()
+    }
+
+    async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        let mut connection = self.connection.clone();
+        // LRANGE seeks, so a reconnection costs the tail rather than the whole
+        // run so far.
+        let raw: Vec<String> = connection
+            .lrange(self.events_key(run_id), from as isize, -1)
             .await
             .map_err(|err| redis_error("read events", err))?;
         raw.iter().map(|entry| decode(entry)).collect()

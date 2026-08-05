@@ -157,6 +157,21 @@ impl IntoResponse for RunResponse {
     }
 }
 
+/// The event log, in whichever shape the client asked for.
+enum RunEventsResponse {
+    Json(RunEventsListResponse),
+    Stream(Response),
+}
+
+impl IntoResponse for RunEventsResponse {
+    fn into_response(self) -> Response {
+        match self {
+            RunEventsResponse::Json(events) => Json(events).into_response(),
+            RunEventsResponse::Stream(response) => response,
+        }
+    }
+}
+
 async fn create_run(
     State(server): State<Arc<AcpServer>>,
     headers: HeaderMap,
@@ -222,8 +237,12 @@ async fn deliver(
             let run = require_live_run(server, run_id).await?;
             Ok(RunResponse::Json(StatusCode::OK, Box::new(run)))
         }
+        // A run being started or resumed has nothing to replay: the caller is
+        // watching from here on, not catching up.
         RunMode::Stream => Ok(RunResponse::Stream(
-            Sse::new(event_stream(notifications)).keep_alive(KeepAlive::default()).into_response(),
+            Sse::new(event_stream(0, Vec::new(), notifications))
+                .keep_alive(KeepAlive::default())
+                .into_response(),
         )),
     }
 }
@@ -305,31 +324,88 @@ async fn wait_until_settled(
 
 type EventStream = std::pin::Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
 
+/// How far a stream has got, and whether it is finished.
+struct StreamCursor {
+    /// The lowest log index not yet sent.
+    next_index: u64,
+    done: bool,
+}
+
 /// Adapt a run's notifications into an SSE stream that ends after the terminal
 /// event, dropping control signals aimed at the executing replica.
-fn event_stream(notifications: NotificationStream) -> EventStream {
-    let mut done = false;
-    let stream = notifications.filter_map(move |notification| {
-        let item = if done {
-            None
-        } else {
-            match notification {
-                Notification::Event(event) => {
-                    done = event.is_terminal();
-                    Some(Ok(sse_event(&event)))
-                }
-                // Resume and Cancel are addressed to the replica running the
-                // agent, not to a watching client.
-                Notification::Resume(_) | Notification::Cancel => None,
-            }
-        };
-        futures_util::future::ready(item)
+///
+/// `replay` is the slice of the log to send before attaching to the live
+/// subscription, with `first_index` the index of its first entry. A fresh
+/// stream passes an empty replay starting at zero.
+///
+/// # Splicing the replay onto the live subscription
+///
+/// The caller must subscribe **before** reading the log. That ordering is what
+/// rules out a gap: anything appended after the read arrives live, and anything
+/// before it is in the read, so no event can fall between the two. It does
+/// admit an overlap — events appended between subscribing and reading appear in
+/// both — and that is what the index is for. A live event whose index was
+/// already covered by the replay is dropped, exactly, rather than guessed at
+/// from arrival order.
+fn event_stream(
+    first_index: u64,
+    replay: Vec<Event>,
+    notifications: NotificationStream,
+) -> EventStream {
+    let replayed = futures_util::stream::iter(
+        replay
+            .into_iter()
+            .enumerate()
+            .map(move |(offset, event)| (Some(first_index + offset as u64), event)),
+    );
+
+    let live = notifications.filter_map(|notification| {
+        futures_util::future::ready(match notification {
+            Notification::Event { event, index } => Some((index, event)),
+            // Resume and Cancel are addressed to the replica running the agent,
+            // not to a watching client.
+            Notification::Resume(_) | Notification::Cancel => None,
+        })
     });
+
+    let cursor = StreamCursor { next_index: first_index, done: false };
+    let stream = futures_util::stream::unfold(
+        (Box::pin(replayed.chain(live)), cursor),
+        |(mut inner, mut cursor)| async move {
+            // Checked before awaiting, so a stream that has sent its terminal
+            // event ends rather than holding the connection open waiting for a
+            // notification that can never come.
+            if cursor.done {
+                return None;
+            }
+            while let Some((index, event)) = inner.next().await {
+                if index.is_some_and(|index| index < cursor.next_index) {
+                    continue;
+                }
+                if let Some(index) = index {
+                    cursor.next_index = index + 1;
+                }
+                cursor.done = event.is_terminal();
+                return Some((Ok(sse_event(index, &event)), (inner, cursor)));
+            }
+            None
+        },
+    );
     Box::pin(stream)
 }
 
-fn sse_event(event: &Event) -> SseEvent {
-    match SseEvent::default().event(event.event_type()).json_data(event) {
+/// Render an event as SSE, tagging it with its log index so a client that
+/// drops can ask for everything after it.
+///
+/// An event with no index is one a backend synthesised rather than one the run
+/// emitted. It deliberately carries no `id`, so receiving one does not move the
+/// client's resume point past anything real.
+fn sse_event(index: Option<u64>, event: &Event) -> SseEvent {
+    let sse = match index {
+        Some(index) => SseEvent::default().id(index.to_string()),
+        None => SseEvent::default(),
+    };
+    match sse.event(event.event_type()).json_data(event) {
         Ok(sse) => sse,
         Err(err) => SseEvent::default().event("error").data(
             serde_json::to_string(&Event::Error {
@@ -369,17 +445,61 @@ async fn cancel_run(
     Ok((StatusCode::ACCEPTED, Json(run)))
 }
 
+/// The run's event log: a JSON list, or an SSE stream if the client asks for
+/// one with `Accept: text/event-stream`.
+///
+/// The streaming half is how a dropped stream is resumed. It is an extension —
+/// the OpenAPI document describes only the list — so the JSON form stays the
+/// default and a client that says nothing gets exactly what the spec promises.
 async fn list_run_events(
     State(server): State<Arc<AcpServer>>,
     Path(run_id): Path<String>,
-) -> ApiResult<Json<RunEventsListResponse>> {
+    headers: HeaderMap,
+) -> ApiResult<RunEventsResponse> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
     // Confirm the run exists so an unknown id is a 404 rather than an empty
     // list — and reap it first, so the log ends with `run.failed` rather than
     // trailing off mid-run.
     require_live_run(&server, run_id).await?;
-    let events = server.store().events(run_id).await.map_err(ApiError::from)?;
-    Ok(Json(RunEventsListResponse { events }))
+
+    if !wants_event_stream(&headers) {
+        let events = server.store().events(run_id).await.map_err(ApiError::from)?;
+        return Ok(RunEventsResponse::Json(RunEventsListResponse { events }));
+    }
+
+    // Resume after the last event the client acknowledged; with no header, send
+    // the log from the beginning.
+    let from = last_event_id(&headers).map_or(0, |last| last + 1);
+
+    // Subscribe before reading the log. See `event_stream` for why this
+    // ordering is what makes the splice gapless.
+    let notifications = server.store().subscribe(run_id).await.map_err(ApiError::from)?;
+    let replay = server.store().events_from(run_id, from).await.map_err(ApiError::from)?;
+
+    Ok(RunEventsResponse::Stream(
+        Sse::new(event_stream(from, replay, notifications))
+            .keep_alive(KeepAlive::default())
+            .into_response(),
+    ))
+}
+
+/// Whether the client asked for an SSE stream rather than the JSON list.
+fn wants_event_stream(headers: &HeaderMap) -> bool {
+    headers.get(axum::http::header::ACCEPT).and_then(|value| value.to_str().ok()).is_some_and(
+        |accept| {
+            accept.split(',').any(|entry| {
+                entry.split(';').next().is_some_and(|media| media.trim() == "text/event-stream")
+            })
+        },
+    )
+}
+
+/// The index a resuming client last saw, from `Last-Event-ID`.
+///
+/// An unparseable value is treated as absent: replaying the whole log is
+/// wasteful but correct, where guessing an offset would not be.
+fn last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers.get("last-event-id")?.to_str().ok()?.trim().parse().ok()
 }
 
 async fn get_session(

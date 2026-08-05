@@ -40,6 +40,51 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// Default ceiling on how long [`AcpClient::wait_for_run`] keeps polling.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How a dropped event stream is resumed.
+///
+/// A streaming run can outlive the connection carrying it: proxies time idle
+/// connections out, load balancers recycle them, and the replica executing the
+/// run can die. The event log is durable and ordered, so a stream that drops
+/// can be picked up from the last event the client saw rather than restarted or
+/// abandoned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectPolicy {
+    /// How many times in a row to reconnect before giving up.
+    ///
+    /// Reset by any event that arrives, so a long run that drops repeatedly but
+    /// keeps making progress is not cut off by the ceiling. Zero disables
+    /// resumption.
+    pub max_attempts: u32,
+    /// Delay before the first reconnection, doubling with each consecutive
+    /// failure.
+    pub initial_backoff: Duration,
+    /// Ceiling the backoff doubles up to.
+    pub max_backoff: Duration,
+}
+
+impl ReconnectPolicy {
+    /// Never resume: a dropped stream simply ends.
+    pub fn disabled() -> Self {
+        Self { max_attempts: 0, ..Self::default() }
+    }
+
+    /// The delay before the reconnection following `attempts` failures.
+    fn backoff_for(&self, attempts: u32) -> Duration {
+        let factor = 2u32.saturating_pow(attempts.min(16));
+        self.initial_backoff.saturating_mul(factor).min(self.max_backoff)
+    }
+}
+
+impl Default for ReconnectPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            initial_backoff: Duration::from_millis(200),
+            max_backoff: Duration::from_secs(5),
+        }
+    }
+}
+
 /// How long to keep polling a run, and how often.
 ///
 /// The timeout exists because a run can outlive the replica executing it. That
@@ -87,6 +132,7 @@ impl WaitOptions {
 pub struct AcpClient {
     http: Client,
     base_url: String,
+    reconnect: ReconnectPolicy,
 }
 
 impl AcpClient {
@@ -97,7 +143,12 @@ impl AcpClient {
 
     /// Start configuring a client.
     pub fn builder(base_url: impl Into<String>) -> AcpClientBuilder {
-        AcpClientBuilder { base_url: base_url.into(), http: None, timeout: None }
+        AcpClientBuilder {
+            base_url: base_url.into(),
+            http: None,
+            timeout: None,
+            reconnect: ReconnectPolicy::default(),
+        }
     }
 
     /// Build a client from an existing [`reqwest::Client`].
@@ -217,7 +268,7 @@ impl AcpClient {
         request.validate()?;
         let request = RunCreateRequest { mode: Some(RunMode::Stream), ..request };
         let response = send(self.request(Method::POST, "/runs").json(&request)).await?;
-        event_stream(check_status(response).await?)
+        event_stream(self.clone(), check_status(response).await?)
     }
 
     /// Stream a run of `agent_name` over the given input.
@@ -296,7 +347,7 @@ impl AcpClient {
         let path = format!("/runs/{}", request.run_id);
         let request = RunResumeRequest { mode: RunMode::Stream, ..request };
         let response = send(self.request(Method::POST, &path).json(&request)).await?;
-        event_stream(check_status(response).await?)
+        event_stream(self.clone(), check_status(response).await?)
     }
 
     /// Request cancellation of a run.
@@ -370,6 +421,7 @@ pub struct AcpClientBuilder {
     base_url: String,
     http: Option<Client>,
     timeout: Option<Duration>,
+    reconnect: ReconnectPolicy,
 }
 
 impl AcpClientBuilder {
@@ -385,6 +437,15 @@ impl AcpClientBuilder {
     /// Streaming runs can outlive any timeout, so leave this unset for them.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// How to resume an event stream whose connection drops.
+    ///
+    /// Defaults to [`ReconnectPolicy::default`]. Pass
+    /// [`ReconnectPolicy::disabled`] to let a dropped stream simply end.
+    pub fn reconnect(mut self, reconnect: ReconnectPolicy) -> Self {
+        self.reconnect = reconnect;
         self
     }
 
@@ -409,7 +470,7 @@ impl AcpClientBuilder {
             }
         };
 
-        Ok(AcpClient { http, base_url })
+        Ok(AcpClient { http, base_url, reconnect: self.reconnect })
     }
 }
 
@@ -447,45 +508,136 @@ async fn json<T: DeserializeOwned>(response: Response) -> Result<T> {
     })
 }
 
-/// Adapt an SSE response into a stream of [`Event`]s.
-fn event_stream(response: Response) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
-    let stream = response.bytes_stream().eventsource().map(|item| match item {
-        Ok(message) => serde_json::from_str::<Event>(&message.data).map_err(|err| {
-            AcpError::Stream(format!(
-                "failed to decode `{}` event: {err}; data: {}",
-                message.event, message.data
-            ))
-        }),
+/// One decoded SSE message: the event, and the log index the server tagged it
+/// with.
+type IndexedEvent = (Option<u64>, Event);
+
+/// A stream of SSE messages from one HTTP response.
+type SseStream = std::pin::Pin<Box<dyn Stream<Item = Result<IndexedEvent>> + Send>>;
+
+/// Adapt an SSE response into decoded events paired with their log index.
+fn sse_messages(response: Response) -> SseStream {
+    Box::pin(response.bytes_stream().eventsource().map(|item| match item {
+        Ok(message) => {
+            let event = serde_json::from_str::<Event>(&message.data).map_err(|err| {
+                AcpError::Stream(format!(
+                    "failed to decode `{}` event: {err}; data: {}",
+                    message.event, message.data
+                ))
+            })?;
+            Ok((message.id.trim().parse::<u64>().ok(), event))
+        }
         Err(err) => Err(AcpError::Stream(err.to_string())),
-    });
-    Ok(Box::pin(TerminalInclusive { inner: Box::pin(stream), done: false }))
+    }))
 }
 
-/// Ends the stream *after* yielding the terminal event, so callers see the
-/// final `run.*` snapshot rather than losing it to the cut-off.
-struct TerminalInclusive<S> {
-    inner: std::pin::Pin<Box<S>>,
+/// What a resuming stream needs to pick up where it left off.
+struct ResumeState {
+    client: AcpClient,
+    /// Learned from the first `run.*` event. Until it is known there is nothing
+    /// to reconnect *to*, so an early drop cannot be resumed.
+    run_id: Option<RunId>,
+    /// The last index the server tagged, and so the point to resume after.
+    last_index: Option<u64>,
+    /// Consecutive failed reconnections; reset by any event that arrives.
+    attempts: u32,
+    /// `None` while disconnected, which is what drives a reconnection.
+    inner: Option<SseStream>,
     done: bool,
 }
 
-impl<S: Stream<Item = Result<Event>>> Stream for TerminalInclusive<S> {
-    type Item = Result<Event>;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        if self.done {
-            return std::task::Poll::Ready(None);
+impl ResumeState {
+    /// Reconnect and attach to the run's log after the last event seen.
+    ///
+    /// `Ok(false)` means resumption is not available — either it is switched
+    /// off, the attempt ceiling is spent, or no event has yet said which run
+    /// this is.
+    async fn reconnect(&mut self) -> Result<bool> {
+        let policy = &self.client.reconnect;
+        let Some(run_id) = self.run_id else { return Ok(false) };
+        if self.attempts >= policy.max_attempts {
+            return Ok(false);
         }
-        let polled = self.inner.as_mut().poll_next(cx);
-        if let std::task::Poll::Ready(Some(Ok(event))) = &polled {
-            if event.is_terminal() {
-                self.done = true;
+
+        let backoff = policy.backoff_for(self.attempts);
+        self.attempts += 1;
+        tokio::time::sleep(backoff).await;
+
+        let mut request = self
+            .client
+            .request(Method::GET, &format!("/runs/{run_id}/events"))
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(last) = self.last_index {
+            request = request.header("last-event-id", last.to_string());
+        }
+
+        let response = check_status(send(request).await?).await?;
+        self.inner = Some(sse_messages(response));
+        Ok(true)
+    }
+}
+
+/// Adapt an SSE response into a stream of [`Event`]s that survives a dropped
+/// connection.
+///
+/// Ends *after* the terminal event, so callers see the final `run.*` snapshot
+/// rather than losing it to the cut-off. Anything else that ends the underlying
+/// response — a proxy idle-timeout, a load balancer recycling a connection, the
+/// executing replica dying — is a drop rather than an ending, and is retried
+/// against the run's durable log under the client's [`ReconnectPolicy`].
+fn event_stream(
+    client: AcpClient,
+    response: Response,
+) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
+    let state = ResumeState {
+        client,
+        run_id: None,
+        last_index: None,
+        attempts: 0,
+        inner: Some(sse_messages(response)),
+        done: false,
+    };
+
+    Ok(Box::pin(futures_util::stream::unfold(state, |mut state| async move {
+        if state.done {
+            return None;
+        }
+        loop {
+            let next = match state.inner.as_mut() {
+                Some(inner) => inner.next().await,
+                None => match state.reconnect().await {
+                    Ok(true) => continue,
+                    // Resumption is unavailable; the stream ends where it was
+                    // cut rather than pretending the run finished.
+                    Ok(false) => return None,
+                    Err(err) => {
+                        state.done = true;
+                        return Some((Err(err), state));
+                    }
+                },
+            };
+
+            match next {
+                Some(Ok((index, event))) => {
+                    if index.is_some() {
+                        state.last_index = index;
+                    }
+                    if state.run_id.is_none() {
+                        state.run_id = event.run().map(|run| run.run_id);
+                    }
+                    // A stream that is delivering again has earned a fresh
+                    // budget; the ceiling is on consecutive failures.
+                    state.attempts = 0;
+                    state.done = event.is_terminal();
+                    return Some((Ok(event), state));
+                }
+                // The response ended without a terminal event, or failed
+                // mid-flight. Either way the run may still be going, so this is
+                // a disconnection rather than the end of the stream.
+                Some(Err(_)) | None => state.inner = None,
             }
         }
-        polled
-    }
+    })))
 }
 
 /// Collect a run event stream into its final [`Run`] snapshot.
