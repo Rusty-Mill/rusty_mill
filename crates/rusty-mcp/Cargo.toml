@@ -1,0 +1,49 @@
+[package]
+name = "rusty-mcp"
+version = "0.1.0"
+description = "Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28)"
+keywords = ["mcp", "model-context-protocol", "ai", "llm"]
+categories = ["network-programming", "development-tools"]
+readme = "../../README.md"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rmcp = { workspace = true, features = [
+    "server",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio-util = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tower-service = "0.3"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
+rmcp = { workspace = true, features = [
+    "server",
+    "client",
+    "macros",
+    "schemars",
+    "transport-io",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+] }
+schemars = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
