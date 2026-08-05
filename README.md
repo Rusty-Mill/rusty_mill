@@ -1,5 +1,9 @@
 # rusty-acp
 
+[![CI](https://github.com/baileyrd/rusty_acp/actions/workflows/ci.yml/badge.svg)](https://github.com/baileyrd/rusty_acp/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rustc-1.86%2B-orange.svg)](#install)
+
 A Rust implementation of the [Agent Communication Protocol][acp] (ACP) **v0.2.0** — the open,
 REST-based standard for making AI agents interoperable across frameworks, languages and
 organisations.
@@ -29,6 +33,8 @@ rusty-acp = { version = "0.1", default-features = false }                      #
 rusty-acp = { version = "0.1", default-features = false, features = ["client"] }
 rusty-acp = { version = "0.1", default-features = false, features = ["server"] }
 ```
+
+Minimum supported Rust version is **1.86**, verified in CI on every change.
 
 ## Serve an agent
 
@@ -237,6 +243,10 @@ cargo test --all-features
 48 tests: wire-format round-trips for every schema, and end-to-end coverage of discovery, all
 three run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity, and the error paths.
+
+CI runs the suite on stable, beta and the 1.86 MSRV, plus `rustfmt`, `clippy -D warnings`, each
+of the four feature combinations built alone, a nightly `cargo doc` with `-D warnings`, and
+`cargo package`.
 
 ## Notes on the server
 

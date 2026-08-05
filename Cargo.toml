@@ -2,7 +2,7 @@
 name = "rusty-acp"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.86"
 description = "Agent Communication Protocol (ACP) v0.2.0 for Rust: protocol types, an HTTP client, and a server framework for hosting agents."
 license = "Apache-2.0"
 repository = "https://github.com/baileyrd/rusty_acp"
