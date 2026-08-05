@@ -534,6 +534,21 @@ pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Resu
 
     tracing::warn!(%run_id, "run has no live lease; failing it as abandoned");
 
+    // Winning the claim is not the same as the run still needing to be failed.
+    // `run` was read before the lease check, and the executing replica may have
+    // reached a terminal state in between — writing its own outcome and
+    // releasing the lease, which is what let this claim succeed at all. Failing
+    // it now from the stale snapshot would overwrite a completed or cancelled
+    // run, breaking the terminal-once rule.
+    //
+    // The window is microseconds on an in-process store and wide enough to hit
+    // every time on one whose round-trips are milliseconds.
+    let run = store.require_run(run_id).await?;
+    if run.status.is_terminal() {
+        store.release_lease(run_id).await?;
+        return Ok(run);
+    }
+
     let recovery = store.recovery_record(run_id).await?;
     let replacement = match &recovery {
         Some(record) if record.attempt < server.max_recovery_attempts => {
