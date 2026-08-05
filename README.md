@@ -10,46 +10,64 @@ is `extern "system"` FFI against `kernel32.dll` (and later `advapi32.dll`),
 not raw `asm!` — see the crate's own module docs (`src/lib.rs`) for why this
 isn't a port of `rusty_libc`'s architecture.
 
-## Status: Phase 5
+## Status
+
+Past its original five-phase plan — every phase below shipped, plus two
+full follow-on batches (a needs-driven "round 2" of previously out-of-scope
+subsystems, then a systematic parity-loop sweep against the real Win32 API
+surface). `src/lib.rs`'s own module docs are the authoritative,
+continuously updated design log (why each module exists, in the order it
+was added); this is a snapshot of the current module set, not a substitute
+for that log.
 
 - [`error::Win32Error`] — a `GetLastError()` wrapper with named `ERROR_*`
-  constants, `Display`, `core::error::Error`, and an opt-in `std` feature
-  adding `From<Win32Error> for std::io::Error`.
-- [`console::install_ctrl_handler`] / [`console::remove_ctrl_handler`] —
-  `SetConsoleCtrlHandler`, closing rush's single highest-value, lowest-risk
-  Windows gap: `trap 'cmd' TERM` is accepted but silently never fires today,
-  for lack of anything to install a handler.
+  constants, `Display`, `core::error::Error`, `FormatMessageW`-backed full
+  message text, and an opt-in `std` feature adding
+  `From<Win32Error> for std::io::Error`.
+- [`console`] — Ctrl-handler installation (`SetConsoleCtrlHandler`/
+  `GenerateConsoleCtrlEvent`), raw-mode primitives (`GetConsoleMode`/
+  `SetConsoleMode`/`ReadFile`/`wait_readable`/`window_size`), console
+  codepage, and synthetic character/key-event input for tests.
 - [`handle`] — `DuplicateHandle`/`CreatePipe`/`SetHandleInformation`/
-  `CloseHandle`, the primitive rush's own fd-3-and-up gap needs.
+  `PeekNamedPipe`/`CloseHandle`.
+- [`dynlib`] — `LoadLibraryW`/`GetProcAddress`/`FreeLibrary`, for a DLL not
+  linked at build time.
 - [`process`] and [`job`] — `spawn_suspended`/`resume`/`wait`/`wait_any`,
-  environment-block overrides for a spawned child, and the full Windows Job
-  Object lifecycle (`create`/`assign`/`set_kill_on_close`/
-  `clear_kill_on_close`/`terminate`/`process_ids`) rush's background-job
-  tracking (`&`, `jobs`, `wait`, `kill`, `$!`) is built against.
-- [`console`] raw-mode primitives — `get_mode`/`set_mode`
-  (`GetConsoleMode`/`SetConsoleMode`), `read` (`ReadFile`), `wait_readable`
-  (`WaitForSingleObject`), `window_size` (`GetConsoleScreenBufferInfo`), and
-  `write_char_events` (`WriteConsoleInputW`, for driving a raw-mode reader
-  with synthetic input in tests).
+  process groups + scoped Ctrl-Break, `TerminateProcess`/`OpenProcess`-by-pid,
+  `GetProcessTimes`, environment-block overrides and snapshotting, process/
+  thread enumeration, and the full Windows Job Object lifecycle including
+  completion-port notifications and CPU/IO resource limits.
 - [`time`] — `now_monotonic`/`now_realtime` via
   `QueryPerformanceCounter`/`GetSystemTimePreciseAsFileTime`.
+- [`path`] — `PATHEXT`-aware command resolution, current-directory
+  get/set, and short/long path conversion.
+- [`fs`] — `stat`, symlink creation, and related file primitives.
+- [`pipe`] — named pipes (`CreateNamedPipeW`/`ConnectNamedPipeW`/
+  `WaitNamedPipeW`).
+- [`volume`] — drive/volume enumeration.
+- [`watch`] — `ReadDirectoryChangesW`, over `OVERLAPPED` I/O.
+- `registry`, `security`, `service`, `net` — round-2 subsystems: registry
+  value CRUD, file/directory ACLs, service control, and TCP/UDP sockets.
+- `conpty` — the pseudoconsole lifecycle (`CreatePseudoConsole`/
+  `ResizePseudoConsole`/`ClosePseudoConsole`) plus
+  `process::spawn_suspended_with_pseudoconsole`, for hosting a
+  fully-interactive child (a terminal-emulator use case, distinct from
+  `rusty_lines`' own-process raw-mode reads above).
+- `windowing` — User32/GDI32 window, message, and framebuffer bindings.
+- `pe` — a zero-`unsafe` parser for the on-disk layout of a Portable
+  Executable image (headers, sections, data directories, exports,
+  imports) — the read half of a PE loader. Takes a `&[u8]` rather than a
+  live handle, so unlike every other module here it's not
+  `#[cfg(windows)]`-gated; it stops short of mapping/relocating/running
+  an image in-process, which stays the OS loader's job via
+  `process`/`dynlib`.
 
-This status list lags the code — the crate has since grown a round-2 batch
-of subsystems (`registry`, `security`, `service`, `net`, `conpty`,
-`windowing`) plus a `pe` Portable-Executable parser; `src/lib.rs`'s module
-docs are the running, up-to-date design log. In particular ConPTY *is* now
-implemented (`conpty::create`/`resize`/`close` and
-`process::spawn_suspended_with_pseudoconsole`), for hosting a fully-
-interactive child rather than `rusty_lines`' own-process raw-mode reads —
-the two are different needs, as those module docs explain. The `pe` module
-is the read half of a PE loader (headers, sections, exports, imports over a
-`&[u8]`); it stops short of mapping/relocating/running an image, which stays
-the OS loader's job via `process`/`dynlib`.
-
-See `docs/CAPABILITY_ASSESSMENT.md` in this repo, and
-`docs/WINDOWS_BACKEND_ANALYSIS.md` in the rush repo, for the full
-primitive-by-primitive analysis and remaining gaps this crate is being built
-against.
+`docs/archive/gap-analysis.md` and `docs/archive/CAPABILITY_ASSESSMENT.md`
+are both closed-out gap sweeps, archived once every item either shipped or
+was consciously deferred with a reason recorded inline — kept for the
+historical record, not as a live backlog. See
+`docs/WINDOWS_BACKEND_ANALYSIS.md` in the rush repo for that project's own
+side of the primitive-by-primitive analysis this crate is built against.
 
 ## Testing
 

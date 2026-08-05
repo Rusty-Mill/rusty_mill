@@ -4,6 +4,15 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `README.md`'s "Status" section rewritten to match the crate's actual
+  current module set (it had drifted as far back as "Phase 5" while the
+  crate grew round-2 subsystems, a parity-loop sweep, `conpty`, and `pe`).
+  `gap-analysis.md` and `docs/CAPABILITY_ASSESSMENT.md` — both fully
+  closed out, with every item shipped or consciously deferred — moved to
+  `docs/archive/` with an archival banner, so neither reads as a live
+  backlog; all in-repo references to their old paths updated to match.
+
 ### Added
 - `pe` module (new subsystem): `pe::PeFile` — a zero-copy,
   allocation-free parser for the on-disk layout of a Portable Executable
