@@ -65,6 +65,7 @@ pub mod config;
 pub mod error;
 pub mod runtime;
 pub mod shutdown;
+pub mod tasks;
 pub mod telemetry;
 
 pub use cli::{Cli, TransportArg};
@@ -124,4 +125,14 @@ where
     let config: ServerConfig = Cli::parse().into();
     telemetry::init(&config.log_filter);
     serve(factory, config).await
+}
+
+/// Type re-exports for macros in this crate. Not a stable API.
+#[doc(hidden)]
+pub mod __private {
+    pub use rmcp::{
+        ErrorData,
+        model::{CancelTaskParams, GetTaskParams, GetTaskResult, UpdateTaskParams},
+        service::{RequestContext, RoleServer},
+    };
 }

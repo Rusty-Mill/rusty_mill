@@ -55,6 +55,7 @@ Inside the scaffold:
 | `shutdown` | SIGINT / SIGTERM handling |
 | `error` | `ServeError`, plus `ToolError` for tool bodies |
 | `auth` | OAuth 2.1 resource-server layer (see [Authorization](#authorization)) |
+| `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
 
@@ -157,6 +158,91 @@ rusty-mcp-demo --transport http --bind 0.0.0.0:8080 \
   --allowed-host mcp.example.com \
   --allowed-origin https://app.example.com
 ```
+
+## Long-running tools
+
+A tool that takes minutes should not hold a request open for minutes. The
+[tasks extension][tasks] (`io.modelcontextprotocol/tasks`, SEP-2663) lets the
+server answer `tools/call` with a **task handle**; the client polls `tasks/get`
+until it settles. In 2026-07-28 this moved out of the core protocol into an
+opt-in extension, and the blocking `tasks/result` became polling.
+
+Add a `TaskSupport` to your server, advertise the capability, and forward the
+three task methods:
+
+```rust
+use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
+
+#[derive(Clone)]
+pub struct MyServer {
+    tasks: TaskSupport,
+    tool_router: ToolRouter<Self>,
+}
+
+// Only name the tools that are actually slow.
+let tasks = TaskSupport::with_policy(TaskPolicy::named(["countdown"]));
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for MyServer {
+    fn get_info(&self) -> ServerInfo {
+        rusty_mcp::server_info("my-server", "0.1.0",
+            ServerCapabilities::builder().enable_tools().enable_tasks().build())
+    }
+
+    rusty_mcp::forward_task_methods!(tasks);
+}
+```
+
+Then let `TaskSupport::run` decide per call, inside an ordinary `#[tool]` fn:
+
+```rust
+#[tool(description = "Count down in steps, slowly.")]
+pub async fn countdown(
+    &self,
+    Parameters(args): Parameters<CountdownArgs>,
+    ctx: RequestContext<RoleServer>,
+) -> Result<CallToolResponse, ErrorData> {
+    self.tasks.run(&ctx, COUNTDOWN, move |task| countdown_body(args, task)).await
+}
+```
+
+Two things make that work: taking `RequestContext` gives the tool the
+per-request client capabilities, and returning `CallToolResponse` is what lets
+it hand back a handle instead of a result.
+
+### Why one body, not two
+
+**A task handle may only go to a client that declared the extension.** Send one
+to a client that did not and dispatch rejects it with `-32021`, which surfaces
+as a confusing failure rather than graceful degradation. So every task-capable
+tool has to work both ways.
+
+`run` picks the path and executes the same body either way. Write it against
+`TaskCtx`, which degrades to no-ops off-task — `set_status_message` does
+nothing, and `cancelled()` never resolves, so it stays safe as a `select!` arm:
+
+```rust
+tokio::select! {
+    _ = ctx.cancelled() => return Err(TaskExit::Cancelled),
+    _ = tokio::time::sleep(step) => {}
+}
+```
+
+Writing the two paths separately is how they drift — a fix lands on one and not
+the other.
+
+### Notes
+
+- **Clone one `TaskSupport`, don't construct per request.** Streamable HTTP
+  builds a fresh handler per request while tasks outlive the call that created
+  them; a new manager per request means every poll misses.
+- **Cancellation is cooperative.** `tasks/cancel` is acknowledged immediately
+  and the task settles as `cancelled` only if its body checks. A body that
+  ignores `cancelled()` runs to completion regardless.
+- **TTL bounds memory**, defaulting to an hour. Too short and a slow-polling
+  client loses the result it was waiting for.
+
+[tasks]: https://modelcontextprotocol.io/seps/2663-tasks-extension
 
 ## Authorization
 

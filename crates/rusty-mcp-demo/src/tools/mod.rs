@@ -6,4 +6,5 @@
 //! grouped by topic without a central registry to keep in sync.
 
 pub mod calculator;
+pub mod slow;
 pub mod text;
