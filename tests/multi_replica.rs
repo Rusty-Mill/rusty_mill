@@ -12,11 +12,11 @@
 
 #![cfg(all(feature = "client", feature = "server"))]
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use futures_util::StreamExt;
 use rusty_acp::{
-    client::{collect_run, AcpClient},
+    client::{collect_run, AcpClient, WaitOptions},
     server::{agent_fn, store::InMemoryStore, store::Store, AcpServer, RunContext},
     types::{
         AgentManifest, AgentName, AwaitRequest, Message, RunCreateRequest, RunMode,
@@ -101,6 +101,77 @@ async fn replica(store: Arc<dyn Store>) -> AcpClient {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
     AcpClient::new(format!("http://{addr}")).unwrap()
+}
+
+/// A replica running on its own Tokio runtime, on its own thread, so a test can
+/// destroy it the way a process death would.
+///
+/// Aborting the serving task is not enough: the run executor and its lease
+/// renewal are separate spawned tasks and would keep renewing, so the run would
+/// never look abandoned. Dropping the whole runtime takes every task with it,
+/// which is exactly what losing the process does.
+struct KillableReplica {
+    shutdown: tokio::sync::oneshot::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl KillableReplica {
+    /// Destroy the replica and wait until its runtime is really gone.
+    ///
+    /// Joining the thread makes this deterministic: once it returns, nothing
+    /// belonging to that replica can renew a lease again.
+    fn kill(self) {
+        let _ = self.shutdown.send(());
+        let _ = self.thread.join();
+    }
+}
+
+/// Start a replica whose lease lapses quickly, on a runtime a test can drop.
+fn short_lease_replica(store: Arc<dyn Store>) -> (AcpClient, KillableReplica) {
+    let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+    let (shutdown, shutdown_rx) = tokio::sync::oneshot::channel();
+
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("replica runtime builds");
+
+        runtime.block_on(async move {
+            let forever = agent_fn(
+                AgentManifest::new(AgentName::new("forever").unwrap(), "Never finishes on its own"),
+                |ctx: RunContext| async move {
+                    ctx.emit_generic(json!({ "phase": "started" })).await?;
+                    ctx.cancelled().await;
+                    Ok(())
+                },
+            );
+
+            let router = AcpServer::builder()
+                .agent(forever)
+                .store(store)
+                .base_url("http://acp.example")
+                // Short enough to observe in a test; the mechanism is identical
+                // at the 30s default.
+                .lease_ttl(Duration::from_secs(1))
+                .build()
+                .expect("server builds")
+                .into_router();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addr_tx.send(listener.local_addr().unwrap()).unwrap();
+            let _ = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+        });
+        // Dropping the runtime here aborts the run executor and its lease
+        // renewal along with everything else this replica had in flight.
+    });
+
+    let addr = addr_rx.recv().expect("replica reports its address");
+    (AcpClient::new(format!("http://{addr}")).unwrap(), KillableReplica { shutdown, thread })
 }
 
 /// Two replicas sharing one store.
@@ -239,7 +310,7 @@ async fn cancel_routes_to_the_executing_replica(store: Arc<dyn Store>) {
     let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
 
     // The agent is parked inside A; the cancellation arrives at B.
-    let cancelled = b.cancel_and_wait(started.run_id).await.unwrap();
+    let cancelled = b.cancel_and_wait(started.run_id, WaitOptions::default()).await.unwrap();
     assert_eq!(cancelled.status, RunStatus::Cancelled);
     assert!(cancelled.finished_at.is_some());
 
@@ -253,7 +324,7 @@ async fn cancel_reaches_an_awaiting_run_across_replicas(store: Arc<dyn Store>) {
     let paused = a.run_sync("greeter", [Message::user("hi")]).await.unwrap();
     assert_eq!(paused.status, RunStatus::Awaiting);
 
-    let cancelled = b.cancel_and_wait(paused.run_id).await.unwrap();
+    let cancelled = b.cancel_and_wait(paused.run_id, WaitOptions::default()).await.unwrap();
     assert_eq!(cancelled.status, RunStatus::Cancelled);
 }
 
@@ -360,6 +431,82 @@ async fn session_state_is_exposed_as_a_link(store: Arc<dyn Store>) {
     assert!(raw["state"].is_string(), "state must be a link, not the document");
 }
 
+/// A run whose executing replica dies is failed rather than left hanging.
+///
+/// This is the failure the [sole-writer invariant][sw] exposes: with the
+/// executing replica gone, nothing is left to write a terminal state, consume a
+/// resume, or apply a cancel. Killing the task that serves replica A is the
+/// closest a test can get to losing the process.
+///
+/// [sw]: https://github.com/baileyrd/rusty_acp/issues/8
+async fn a_run_whose_replica_dies_is_reaped(store: Arc<dyn Store>) {
+    let (a, replica_a) = short_lease_replica(Arc::clone(&store));
+    let b = replica(store).await;
+
+    let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
+    assert!(!started.status.is_terminal());
+
+    // Replica A stops existing, taking its lease renewal with it.
+    replica_a.kill();
+
+    // B notices the moment anyone asks: no live lease on a non-terminal run
+    // means the writer is gone.
+    let reaped = b
+        .wait_for_run(
+            started.run_id,
+            WaitOptions::default()
+                .poll_every(Duration::from_millis(100))
+                .with_timeout(Duration::from_secs(15)),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reaped.status, RunStatus::Failed);
+    assert!(reaped.finished_at.is_some());
+    let error = reaped.clone().into_result().unwrap_err();
+    assert!(
+        error.message.contains("abandoned"),
+        "the error should say what happened: {}",
+        error.message
+    );
+
+    // And the event log ends with run.failed rather than trailing off mid-run.
+    let events = b.list_run_events(started.run_id).await.unwrap();
+    assert!(matches!(events.last(), Some(rusty_acp::types::Event::RunFailed { .. })));
+}
+
+/// A live run is never mistaken for an abandoned one.
+///
+/// The guard against an over-eager reaper: a replica that keeps renewing its
+/// lease keeps its runs, however long they take.
+async fn a_live_run_is_not_reaped(store: Arc<dyn Store>) {
+    let (a, _replica_a) = short_lease_replica(Arc::clone(&store));
+    let b = replica(store).await;
+
+    let started = a.run_async("forever", [Message::user("hang")]).await.unwrap();
+
+    // Several lease lifetimes pass with the replica alive and renewing.
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let seen = b.get_run(started.run_id).await.unwrap();
+        assert!(
+            !seen.status.is_terminal(),
+            "a renewing replica must keep its run: {}",
+            seen.status
+        );
+    }
+
+    // Still cancellable, so the run is genuinely alive rather than merely unreaped.
+    let cancelled = a
+        .cancel_and_wait(
+            started.run_id,
+            WaitOptions::default().with_timeout(Duration::from_secs(10)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, RunStatus::Cancelled);
+}
+
 // ---------------------------------------------------------------------------
 // Backend bindings.
 // ---------------------------------------------------------------------------
@@ -409,4 +556,6 @@ backend_tests!(
     streamed_output_is_persisted_for_other_replicas,
     session_state_crosses_replicas,
     session_state_is_exposed_as_a_link,
+    a_run_whose_replica_dies_is_reaped,
+    a_live_run_is_not_reaped,
 );

@@ -3,6 +3,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Mutex, RwLock},
+    time::{Duration, Instant},
 };
 
 use futures_util::stream;
@@ -46,6 +47,8 @@ pub struct InMemoryStore {
     /// State documents, held apart from the records so `SessionRecord` keeps
     /// carrying a *link* to state rather than the state itself.
     session_states: RwLock<HashMap<SessionId, serde_json::Value>>,
+    /// Ownership leases: run to (owner, expiry).
+    leases: RwLock<HashMap<RunId, (String, Instant)>>,
     max_runs: usize,
 }
 
@@ -63,6 +66,7 @@ impl InMemoryStore {
             order: Mutex::new(VecDeque::new()),
             sessions: RwLock::new(HashMap::new()),
             session_states: RwLock::new(HashMap::new()),
+            leases: RwLock::new(HashMap::new()),
             max_runs: max_runs.max(1),
         }
     }
@@ -212,6 +216,30 @@ impl Store for InMemoryStore {
             record.messages.push(message);
             record.session.history.push(message_url(base_url, session_id, index));
         }
+        Ok(())
+    }
+
+    async fn renew_lease(&self, run_id: RunId, owner: &str, ttl: Duration) -> StoreResult<()> {
+        self.leases
+            .write()
+            .expect("lease map poisoned")
+            .insert(run_id, (owner.to_string(), Instant::now() + ttl));
+        Ok(())
+    }
+
+    async fn lease_owner(&self, run_id: RunId) -> StoreResult<Option<String>> {
+        Ok(self.leases.read().expect("lease map poisoned").get(&run_id).and_then(
+            |(owner, expires_at)| {
+                // Expiry is checked on read rather than swept: an expired lease
+                // is indistinguishable from an absent one, which is all callers
+                // need to know.
+                (*expires_at > Instant::now()).then(|| owner.clone())
+            },
+        ))
+    }
+
+    async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {
+        self.leases.write().expect("lease map poisoned").remove(&run_id);
         Ok(())
     }
 

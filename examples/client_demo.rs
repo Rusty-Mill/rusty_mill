@@ -9,7 +9,7 @@
 
 use futures_util::StreamExt;
 use rusty_acp::{
-    client::AcpClient,
+    client::{AcpClient, WaitOptions},
     types::{Event, Message, RunCreateRequest, SessionId},
 };
 
@@ -36,7 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("== async run ==");
     let started = client.run_async("echo", [Message::user("Take your time")]).await?;
     println!("  accepted: {} ({})", started.run_id, started.status);
-    let finished = client.wait_for_run(started.run_id, None).await?;
+    let finished = client.wait_for_run(started.run_id, WaitOptions::default()).await?;
     println!("  finished: {} — {}\n", finished.status, finished.output_text());
 
     if agents.iter().any(|manifest| manifest.name.as_str() == "slow-writer") {

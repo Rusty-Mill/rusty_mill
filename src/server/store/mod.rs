@@ -24,6 +24,12 @@
 //! for a given run. Implementors do not need to serialise concurrent writes to
 //! the same run, because there are none.
 //!
+//! The invariant's weak point is that a writer can *die*. A run would then stay
+//! non-terminal forever, with nothing left to consume a resume or apply a
+//! cancel. [`Store::renew_lease`] closes that: the executing replica keeps a
+//! short-lived lease, so a non-terminal run whose lease has lapsed is
+//! recognisably abandoned and gets failed rather than hanging.
+//!
 //! # One channel for two jobs
 //!
 //! [`Notification`] carries both directions of traffic over a single
@@ -45,7 +51,7 @@ mod memory;
 #[cfg_attr(docsrs, doc(cfg(feature = "redis-store")))]
 mod redis;
 
-use std::pin::Pin;
+use std::{pin::Pin, time::Duration};
 
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
@@ -198,6 +204,32 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
         base_url: &str,
         state: serde_json::Value,
     ) -> StoreResult<()>;
+
+    /// Claim or extend this replica's ownership of a run.
+    ///
+    /// The lease is what makes the [sole-writer invariant](self#the-sole-writer-invariant)
+    /// survivable: while a replica executes a run it keeps renewing the lease,
+    /// so a **non-terminal run with no live lease has lost its writer** and can
+    /// be recognised as abandoned rather than hanging forever.
+    ///
+    /// Implementations must expire the lease `ttl` after the last renewal,
+    /// without needing anyone to come back and delete it — the whole point is
+    /// that it outlives a replica that stopped being able to do anything.
+    ///
+    /// Renewing is unconditional: the executing replica is the only writer, so
+    /// there is no other claimant to lose a race with.
+    async fn renew_lease(&self, run_id: RunId, owner: &str, ttl: Duration) -> StoreResult<()>;
+
+    /// The replica currently holding a run's lease, or `None` if the lease has
+    /// expired or was never taken.
+    async fn lease_owner(&self, run_id: RunId) -> StoreResult<Option<String>>;
+
+    /// Drop a run's lease, once it has reached a terminal state.
+    ///
+    /// Releasing is an optimisation, not a requirement: an unreleased lease
+    /// simply expires. It exists so a finished run stops looking owned straight
+    /// away.
+    async fn release_lease(&self, run_id: RunId) -> StoreResult<()>;
 
     /// Read a run, or produce a `not_found` error.
     async fn require_run(&self, run_id: RunId) -> StoreResult<Run> {
