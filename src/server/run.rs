@@ -292,7 +292,20 @@ impl RunHandle {
             state.run.status = RunStatus::Cancelling;
             state.run.clone()
         };
+        // Write `cancelling` *before* signalling, so this is a hand-off rather
+        // than a race. Signalling first wakes the executor immediately, and its
+        // terminal write then races this one: two tasks writing snapshots of the
+        // same run, which is exactly what the sole-writer invariant forbids. On
+        // an in-process store this write almost always lands first anyway; where
+        // a write is a network round-trip it frequently does not, leaving the
+        // store on the non-terminal `cancelling` after the executor has finished
+        // and released its lease — so the run is later reaped as abandoned.
+        //
+        // If this write fails the token is never signalled here, which is what
+        // the caller's error path is for: it signals directly, accepting a
+        // missing `cancelling` rather than a cancellation that never happens.
+        self.store.put_run(&snapshot).await?;
         self.cancel.cancel();
-        self.store.put_run(&snapshot).await
+        Ok(())
     }
 }
