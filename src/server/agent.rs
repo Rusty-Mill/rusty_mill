@@ -46,6 +46,39 @@ pub trait Agent: Send + Sync + 'static {
 
     /// Execute one run.
     async fn run(&self, ctx: RunContext) -> Result<(), Error>;
+
+    /// Whether a run of this agent may be replayed from its original input.
+    ///
+    /// **Defaults to `false`**, and that default is the safe one: when the
+    /// replica executing a run dies, the run is failed and the client
+    /// resubmits. Opting in lets the server instead start a replacement run
+    /// automatically — see [the recovery docs](crate::server#recovering-a-lost-run).
+    ///
+    /// Only return `true` if running the agent twice on the same input is
+    /// harmless. It is **not** harmless if the agent takes a payment, sends a
+    /// message, or writes anything the second run would duplicate. The server
+    /// cannot work this out — ACP carries no idempotency contract — so it has
+    /// to be told.
+    ///
+    /// ```
+    /// # use rusty_acp::server::{Agent, RunContext};
+    /// # use rusty_acp::types::{AgentManifest, AgentName, Error};
+    /// # struct Summarize;
+    /// #[async_trait::async_trait]
+    /// impl Agent for Summarize {
+    ///     # fn manifest(&self) -> AgentManifest {
+    ///     #     AgentManifest::new(AgentName::new("summarize").unwrap(), "Summarizes text")
+    ///     # }
+    ///     // Reading input and producing a summary has no external effects.
+    ///     fn recoverable(&self) -> bool {
+    ///         true
+    ///     }
+    ///     # async fn run(&self, ctx: RunContext) -> Result<(), Error> { Ok(()) }
+    /// }
+    /// ```
+    fn recoverable(&self) -> bool {
+        false
+    }
 }
 
 /// Everything an [`Agent`] needs for one run: its input, its session, and the
@@ -383,7 +416,7 @@ where
     F: Fn(RunContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<(), Error>> + Send + 'static,
 {
-    FnAgent { manifest, run }
+    FnAgent { manifest, run, recoverable: false }
 }
 
 /// An [`Agent`] backed by a closure. Built by [`agent_fn`].
@@ -391,6 +424,22 @@ where
 pub struct FnAgent<F> {
     manifest: AgentManifest,
     run: F,
+    recoverable: bool,
+}
+
+impl<F> FnAgent<F> {
+    /// Declare that runs of this agent may be replayed from their input.
+    ///
+    /// The same opt-in as [`Agent::recoverable`], and subject to the same
+    /// caveat: only safe when running the closure twice on one input is
+    /// harmless.
+    ///
+    /// Named `with_recovery` rather than `recoverable` so it cannot be confused
+    /// with the trait method it sets.
+    pub fn with_recovery(mut self) -> Self {
+        self.recoverable = true;
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -405,5 +454,9 @@ where
 
     async fn run(&self, ctx: RunContext) -> Result<(), Error> {
         (self.run)(ctx).await
+    }
+
+    fn recoverable(&self) -> bool {
+        self.recoverable
     }
 }

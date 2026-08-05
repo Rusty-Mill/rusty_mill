@@ -8,7 +8,8 @@ use redis::{aio::ConnectionManager, AsyncCommands, Client};
 
 use crate::{
     server::store::{
-        message_url, state_url, Notification, NotificationStream, SessionRecord, Store, StoreResult,
+        message_url, state_url, Notification, NotificationStream, RecoveryRecord, SessionRecord,
+        Store, StoreResult,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -130,6 +131,10 @@ impl RedisStore {
 
     fn lease_key(&self, run_id: RunId) -> String {
         format!("{}:lease:{run_id}", self.config.key_prefix)
+    }
+
+    fn recovery_key(&self, run_id: RunId) -> String {
+        format!("{}:recovery:{run_id}", self.config.key_prefix)
     }
 
     fn session_state_key(&self, session_id: SessionId) -> String {
@@ -378,6 +383,70 @@ impl Store for RedisStore {
             .get(self.lease_key(run_id))
             .await
             .map_err(|err| redis_error("read run lease", err))
+    }
+
+    async fn try_claim_lease(
+        &self,
+        run_id: RunId,
+        owner: &str,
+        ttl: Duration,
+    ) -> StoreResult<bool> {
+        let mut connection = self.connection.clone();
+        // SET NX EX is a single atomic operation, so exactly one claimant wins.
+        let claimed: Option<String> = redis::cmd("SET")
+            .arg(self.lease_key(run_id))
+            .arg(owner)
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl.as_secs().max(1))
+            .query_async(&mut connection)
+            .await
+            .map_err(|err| redis_error("claim run lease", err))?;
+        Ok(claimed.is_some())
+    }
+
+    async fn put_recovery_record(
+        &self,
+        run_id: RunId,
+        record: Option<&RecoveryRecord>,
+    ) -> StoreResult<()> {
+        let key = self.recovery_key(run_id);
+        let mut connection = self.connection.clone();
+        match record {
+            Some(record) => {
+                let payload = encode(record)?;
+                match self.ttl_seconds() {
+                    Some(seconds) => {
+                        let _: () = connection
+                            .set_ex(&key, payload, seconds as u64)
+                            .await
+                            .map_err(|err| redis_error("write recovery record", err))?;
+                    }
+                    None => {
+                        let _: () = connection
+                            .set(&key, payload)
+                            .await
+                            .map_err(|err| redis_error("write recovery record", err))?;
+                    }
+                }
+            }
+            None => {
+                let _: () = connection
+                    .del(&key)
+                    .await
+                    .map_err(|err| redis_error("clear recovery record", err))?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn recovery_record(&self, run_id: RunId) -> StoreResult<Option<RecoveryRecord>> {
+        let mut connection = self.connection.clone();
+        let raw: Option<String> = connection
+            .get(self.recovery_key(run_id))
+            .await
+            .map_err(|err| redis_error("read recovery record", err))?;
+        raw.as_deref().map(decode).transpose()
     }
 
     async fn release_lease(&self, run_id: RunId) -> StoreResult<()> {

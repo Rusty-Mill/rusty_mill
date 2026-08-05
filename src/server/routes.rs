@@ -139,7 +139,7 @@ async fn get_agent(
 /// lookup on reads that were already hitting the store.
 async fn require_live_run(server: &Arc<AcpServer>, run_id: RunId) -> ApiResult<Run> {
     let run = server.store().require_run(run_id).await.map_err(ApiError::from)?;
-    reap_if_abandoned(server.store(), run).await.map_err(ApiError::from)
+    reap_if_abandoned(server, run).await.map_err(ApiError::from)
 }
 
 /// Either a JSON body or an SSE stream, depending on the requested [`RunMode`].
@@ -294,7 +294,7 @@ async fn wait_until_settled(
                 let Some(run) = run else {
                     return Ok(());
                 };
-                let run = reap_if_abandoned(server.store(), run).await.map_err(ApiError::from)?;
+                let run = reap_if_abandoned(server, run).await.map_err(ApiError::from)?;
                 if run.status.is_terminal() || run.status.is_awaiting() {
                     return Ok(());
                 }

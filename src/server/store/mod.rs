@@ -104,6 +104,25 @@ impl Notification {
     }
 }
 
+/// What a recoverable run needs in order to be re-run elsewhere.
+///
+/// Only written for agents that declare themselves
+/// [`recoverable`](crate::server::Agent::recoverable). Its absence is what
+/// tells a reaper that a run must not be replayed, so the safe answer is also
+/// the default — an agent has to opt in before anything is stored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecoveryRecord {
+    /// The run's original input, replayed verbatim into the replacement.
+    ///
+    /// [`Run`] does not carry its own input, so it is kept here rather than
+    /// reconstructed — a session's history would only work for runs that had a
+    /// session, and would drift as the session grew.
+    pub input: Vec<Message>,
+    /// Which attempt this run is. The first is 1; each replacement increments,
+    /// so a run that keeps killing its replica eventually stops being replaced.
+    pub attempt: u32,
+}
+
 /// A session together with the messages a store holds for it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -223,6 +242,28 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     /// The replica currently holding a run's lease, or `None` if the lease has
     /// expired or was never taken.
     async fn lease_owner(&self, run_id: RunId) -> StoreResult<Option<String>>;
+
+    /// Take a run's lease **only if** nobody else holds it.
+    ///
+    /// Returns whether the caller now owns it. Unlike [`Store::renew_lease`],
+    /// this must be atomic against other claimants: it is what stops two
+    /// replicas both deciding to recover the same abandoned run and producing
+    /// two replacements for it.
+    ///
+    /// Failing a run is idempotent and needs no claim — two reapers writing the
+    /// same outcome is harmless. Recovering one is not.
+    async fn try_claim_lease(&self, run_id: RunId, owner: &str, ttl: Duration)
+        -> StoreResult<bool>;
+
+    /// Record what a run would need to be re-run, or clear it with `None`.
+    async fn put_recovery_record(
+        &self,
+        run_id: RunId,
+        record: Option<&RecoveryRecord>,
+    ) -> StoreResult<()>;
+
+    /// Read a run's recovery record. `None` means the run must not be replayed.
+    async fn recovery_record(&self, run_id: RunId) -> StoreResult<Option<RecoveryRecord>>;
 
     /// Drop a run's lease, once it has reached a terminal state.
     ///
