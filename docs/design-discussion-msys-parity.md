@@ -221,7 +221,17 @@ semantics against *any* pid.
    VT input stream to add ICANON/ISIG-style signal-generating-character
    emulation *without* replacing the pty transport itself is a smaller,
    different option worth naming separately rather than conflating with
-   "build MSYS2's pty."
+   "build MSYS2's pty." **Scoped to implementation depth**:
+   `docs/design-discussion-msys-pty.md` takes the shim option further —
+   finds that ConPTY's real (virtual) Windows console underneath
+   probably already gives line editing and Ctrl-C for free (unlike
+   Cygwin's own pty, which has no console under it at all and must
+   reimplement everything), narrowing the real gap to just
+   `VSUSP`/`VQUIT` — but surfaces a real, unresolved correctness hazard
+   this narrower scope creates: the master-side shim has no visibility
+   into whether the hosted child is currently in raw mode, and
+   forcibly intercepting Ctrl-Z/Ctrl-\ regardless would break a
+   raw-mode program that wants to see them as ordinary input.
 
 ## What this document does not decide
 
@@ -233,9 +243,10 @@ ceiling MSYS2 itself has always had). That is the RFC-level call the
 owner makes before any of this becomes code — this is the input to that
 call, not the call itself.
 
-**Status of the four subsystems' deeper scoping**: 1 (pgid/session
-table), 2 (signal delivery), and 3 (real Stop/Cont) each now have their
-own implementation-depth document, linked at their respective open
-questions above. 4 (pty line discipline) remains scoped only at this
-document's original one-paragraph level — open question 5 above is
-still the furthest this effort has gone on it.
+**Status of the four subsystems' deeper scoping**: all four — 1
+(pgid/session table), 2 (signal delivery), 3 (real Stop/Cont), and 4
+(pty line discipline) — now have their own implementation-depth
+document, linked at their respective open questions above. None of the
+five documents in this family (this one plus the four it spawned) has
+decided to build anything; each still ends on an owner's call and a
+missing named consumer.
