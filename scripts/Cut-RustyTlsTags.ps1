@@ -150,7 +150,7 @@ function Assert-Prerequisites {
     # intercepts api.github.com and answers 403 on its behalf.
     $probe = Invoke-Gh @('api', "repos/$Repo", '--jq', '.full_name') -AllowFailure
     if ($probe.ExitCode -ne 0) {
-        throw "Cannot reach $Repo through gh. Check ``gh auth status``, that the token carries ``repo`` scope, and that nothing is intercepting api.github.com. gh said: $($probe.Output)"
+        throw "Cannot reach $Repo through gh. Check that the token is valid and carries ``repo`` scope, and that nothing is intercepting api.github.com. (``gh auth status`` is worth reading but not trusting -- its exit code is 0 even for an invalid token.) gh said: $($probe.Output)"
     }
     Write-Verbose "Authenticated, and $Repo is readable."
 }
