@@ -57,7 +57,7 @@
 //!
 //! [spec 2026-07-28]: https://modelcontextprotocol.io/specification/2026-07-28
 
-#![doc(html_root_url = "https://docs.rs/rusty-mcp/0.4.1")]
+#![doc(html_root_url = "https://docs.rs/rusty-mcp/0.5.0")]
 
 pub mod auth;
 pub mod cli;
