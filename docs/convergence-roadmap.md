@@ -972,6 +972,23 @@ architecture.md's own assessment:
   windowing, and does not force this surface (architecture.md
   correction, D-survey).
 
+**Design pass held 2026-08-06** — `docs/design-discussion-windowing-registry.md`,
+this phase's first real design pass (both bullets above were
+provisional, never checked against nexus's actual source). Reading
+`shell/src-tauri/src/{persistence,windows}.rs` directly found a
+stronger verdict than either bullet: Windowing has *zero* OS-syscall
+surface at all (no `windows-sys`/`x11`/`wayland`/`cocoa` anywhere in
+nexus's Tauri crate — not "thin pass-through," no pass-through),
+and Registry/Config's one real gap (known-directory resolution,
+`app_config_dir`-equivalent) is answered by Tauri itself for this
+consumer, not hand-rolled the way "`dirs` paths" implied — the same
+"complete, working, no gap, no expressed desire to migrate" verdict
+`CredentialVault` already got. Still not decided whether to close this
+phase outright (matching `rusty_lsp`'s own "converges by doing
+essentially nothing" precedent) or build the one narrow, generalizable
+primitive found (known-directory resolution) speculatively anyway —
+open questions in the linked document.
+
 ---
 
 ## Decided: fork/execve vs posix_spawn
