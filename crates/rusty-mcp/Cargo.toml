@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reusable scaffold for building Model Context Protocol servers in Rust (spec 2026-07-28)"
 keywords = ["mcp", "model-context-protocol", "ai", "llm"]
 categories = ["network-programming", "development-tools"]
