@@ -6,7 +6,7 @@ All notable changes to this project are recorded here. The format follows
 Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.1" }
 ```
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
@@ -15,6 +15,44 @@ be called out here.
 Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
+
+## [0.4.1] — 2026-08-06
+
+### Fixed
+
+- **Depending on this crate by git printed a cargo error on every build.**
+  0.4.0 shipped `template/Cargo.toml` containing `name = "{{project-name}}"`.
+  Cargo scans a git checkout for manifests when resolving a git dependency, and
+  does so independently of the workspace `exclude` list, so every consumer saw
+
+  ```
+  error: invalid character `{` in package name: `{{project-name}}`
+  ```
+
+  on every build. The build still succeeded, which is why it went unnoticed —
+  it is pure noise in someone else's terminal, and it appears nowhere in this
+  repository's own output.
+
+  The template manifest is now named `{{ 'Cargo' }}.toml`. `cargo generate`
+  renders Liquid in filenames as well as file contents, so it still arrives as
+  `Cargo.toml` in a generated project, while cargo ignores it here. Copying the
+  directory by hand now needs that one rename, which the README states.
+
+  `scripts/check-template.sh` asserts `template/Cargo.toml` does not exist, so
+  this cannot come back. The workspace `exclude = ["template"]` is dropped: it
+  suppressed the error locally while leaving consumers to see it, which is the
+  worst of both.
+
+  Anyone on `v0.4.0` should move to `v0.4.1`. Nothing else differs.
+
+### Notes
+
+This was found by checking, after tagging, that the template's own git
+dependency on the `v0.4.0` tag actually resolved — the first time that tag
+existed to test against. `check-template.sh` cannot catch it by construction, because
+it rewrites the dependency to a **path** and so never exercises the git route
+that every real consumer takes. That blind spot is now documented in the
+README.
 
 ## [0.4.0] — 2026-08-06
 
@@ -360,6 +398,7 @@ easy to get wrong:
 [#5]: https://github.com/baileyrd/rusty_mcp/pull/5
 [#6]: https://github.com/baileyrd/rusty_mcp/pull/6
 [#8]: https://github.com/baileyrd/rusty_mcp/pull/8
+[0.4.1]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.2.0

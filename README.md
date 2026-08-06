@@ -72,9 +72,18 @@ cargo generate --git https://github.com/baileyrd/rusty_mcp template
 ```
 
 You get a compiling MCP server with two example tools, a test that drives it
-through a real client, and a README covering the rest. No `cargo generate`? The
-`template/` directory is an ordinary crate — copy it, then replace
+through a real client, and a README covering the rest. No `cargo generate`?
+Copy `template/`, rename `{{ 'Cargo' }}.toml` to `Cargo.toml`, and replace
 `{{project-name}}` and `{{description}}`.
+
+That filename is deliberate. Cargo scans a git checkout for manifests when
+resolving a git dependency, and it does so independently of the workspace
+`exclude` list — so a real `Cargo.toml` holding `name = "{{project-name}}"`
+printed `error: invalid character` on every build of every project depending on
+this crate. Harmless to the build, pure noise in someone else's terminal.
+`cargo generate` renders Liquid in filenames as well as contents, so
+`{{ 'Cargo' }}.toml` arrives as `Cargo.toml` while staying invisible to cargo
+here.
 
 The demo crate is the other half of this: `template` is where you start,
 `crates/rusty-mcp-demo` is what to read when you need resources, prompts,
@@ -90,6 +99,13 @@ feature, so following the instructions verbatim did not compile.
 So CI generates the project and builds, lints and tests it on every pull
 request, against the working tree rather than the published tag. A library
 change that breaks the template fails the PR that made it.
+
+It has a blind spot worth knowing: because it rewrites the dependency to a
+path, it never exercises the **git** dependency, which is how everyone else
+consumes this. That is exactly where the `{{project-name}}` manifest noise
+above hid — found only once v0.4.0 existed to depend on. `check-template.sh`
+now asserts that `template/Cargo.toml` does not exist, so that specific failure
+cannot come back.
 
 `check-versions.sh` separately asserts that every `tag = "vX.Y.Z"` in the docs
 and the template names the current crate version — which is exactly the failure
@@ -825,7 +841,7 @@ do alone — adopting a **remote parent**, so this server's spans become childre
 of the caller's rather than a separate trace:
 
 ```toml
-rusty-mcp = { git = "...", tag = "v0.4.0", features = ["otel"] }
+rusty-mcp = { git = "...", tag = "v0.4.1", features = ["otel"] }
 ```
 
 ```rust
@@ -972,7 +988,7 @@ ClientInfo::default()
 Neither crate is published to crates.io. Depend on it by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.1" }
 ```
 
 Add `features = ["jwt"]` for the JWKS-backed token validator.
