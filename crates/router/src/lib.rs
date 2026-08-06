@@ -17,13 +17,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use cache::ResponseCache;
+use cache::{ResponseCache, SemanticCache};
 use client_budget::{ClientBudgetSetting, SpendState};
 pub use config::{
-    AutoRoutingConfig, BudgetPeriod, CacheConfig, ClientConfig, ClientRole, Config, FreeTierEntry,
-    GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend, PersistenceConfig,
-    PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind, RouteAlias,
-    ServerConfig, WebSearchConfig, WebhookConfig,
+    AutoRoutingConfig, BudgetPeriod, CacheConfig, CacheMode, ClientConfig, ClientRole, Config,
+    FreeTierEntry, GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend,
+    PersistenceConfig, PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind,
+    RouteAlias, ServerConfig, WebSearchConfig, WebhookConfig,
 };
 pub use error::RouterError;
 pub use free_tiers::FreeTierStatus;
@@ -37,8 +37,9 @@ use webhook::WebhookNotifier;
 
 use futures::stream::StreamExt;
 use rp_core::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, EmbeddingsRequest, EmbeddingsResponse,
-    ModelInfo, ModelPricing, Provider, ProviderError, ProviderPreferences, RateLimiter, Usage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, EmbeddingsInput, EmbeddingsRequest,
+    EmbeddingsResponse, ModelInfo, ModelPricing, Provider, ProviderError, ProviderPreferences,
+    RateLimiter, Usage,
 };
 use rp_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatibleProvider};
 
@@ -387,6 +388,29 @@ fn maybe_apply_rtk(req: &ChatRequest) -> Option<ChatRequest> {
     changed.then_some(compressed)
 }
 
+/// Flattens a request's messages into one string for the semantic cache
+/// to embed: `"<role>: <text>\n"` per message, non-text content (image/
+/// audio/file parts) dropped the same way `MessageContent::as_plain_text`
+/// already drops it for roles that only ever see text. Role is included
+/// so a user/assistant turn with the same words in a different position
+/// doesn't embed identically -- conversation shape matters to what a
+/// cached response actually answered.
+fn request_text_for_embedding(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .map(|m| {
+            let role = format!("{:?}", m.role).to_lowercase();
+            let text = m
+                .content
+                .as_ref()
+                .map(rp_core::MessageContent::as_plain_text)
+                .unwrap_or_default();
+            format!("{role}: {text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Holds every provider adapter that could be built from config (i.e. its
 /// API key env var was set), the named fallback-chain aliases, static
 /// per-model pricing (used for `provider.sort: "price"` and for computing
@@ -489,11 +513,24 @@ pub struct Router {
     /// resolved. `None` means `"web_search": true` on a request is a
     /// no-op -- the same as before this field existed.
     web_search: Option<Arc<WebSearchClient>>,
-    /// `[cache]`, if configured -- an exact-match cache of non-streaming
-    /// `dispatch` responses (see `cache::ResponseCache`). `None` means
-    /// every request always reaches a provider, same as before this
-    /// field existed.
+    /// `[cache]`, if configured with `mode = "exact"` (the default) --
+    /// an exact-match cache of non-streaming `dispatch` responses (see
+    /// `cache::ResponseCache`). `None` means either caching is off, or
+    /// `semantic_cache` below is active instead -- the two are mutually
+    /// exclusive per request, never both.
     cache: Option<Arc<RwLock<ResponseCache>>>,
+    /// `[cache]`, if configured with `mode = "semantic"` and
+    /// `embedding_model` resolves to a configured provider (see
+    /// `Router::from_config`) -- an embedding-cosine-similarity cache of
+    /// non-streaming `dispatch` responses (see `cache::SemanticCache`).
+    /// `None` means either caching is off, or `cache` above is active
+    /// instead. Falls back to `cache` (with a startup warning) if
+    /// `embedding_model` is unset or unresolvable.
+    semantic_cache: Option<Arc<RwLock<SemanticCache>>>,
+    /// The `"provider/model"` `semantic_cache` calls (via this router's
+    /// own `embeddings()`) to embed a request's message text. Always
+    /// `Some` exactly when `semantic_cache` is `Some`.
+    embedding_model: Option<String>,
     /// "provider/model" -> operator-declared free-token budget, from
     /// `[[free_tiers]]`. Static config, like `pricing` -- never mutated
     /// after startup.
@@ -813,11 +850,42 @@ impl Router {
 
         // No external credential to resolve, unlike moderation/web_search
         // above -- this is purely an in-process cache, so there's nothing
-        // to skip-with-a-warning over.
-        let cache = config
-            .cache
-            .as_ref()
-            .map(|cfg| Arc::new(RwLock::new(ResponseCache::new(cfg))));
+        // to skip-with-a-warning over. "semantic" mode additionally needs
+        // embedding_model to actually resolve to a configured provider;
+        // if it doesn't, this falls back to exact-match caching with a
+        // warning -- the same soft-failure pattern moderation/web_search
+        // already use for an unresolvable api_key_env.
+        let (cache, semantic_cache, embedding_model) = match &config.cache {
+            None => (None, None, None),
+            Some(cfg) if cfg.mode == CacheMode::Exact => (
+                Some(Arc::new(RwLock::new(ResponseCache::new(cfg)))),
+                None,
+                None,
+            ),
+            Some(cfg) => {
+                let resolvable = cfg.embedding_model.as_ref().is_some_and(|m| {
+                    m.split_once('/')
+                        .is_some_and(|(provider, _)| providers.contains_key(provider))
+                });
+                if resolvable {
+                    (
+                        None,
+                        Some(Arc::new(RwLock::new(SemanticCache::new(cfg)))),
+                        cfg.embedding_model.clone(),
+                    )
+                } else {
+                    tracing::warn!(
+                        "[cache].mode = \"semantic\" but embedding_model is unset or its \
+                         provider isn't configured; falling back to exact-match caching"
+                    );
+                    (
+                        Some(Arc::new(RwLock::new(ResponseCache::new(cfg)))),
+                        None,
+                        None,
+                    )
+                }
+            }
+        };
 
         let free_tier_settings = free_tiers::settings_from_config(&config.free_tiers);
 
@@ -846,6 +914,8 @@ impl Router {
             moderation,
             web_search,
             cache,
+            semantic_cache,
+            embedding_model,
             free_tier_settings: Arc::new(free_tier_settings),
             free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -1634,14 +1704,114 @@ impl Router {
         }
     }
 
+    /// Embeds `text` via `embedding_model` (this router's own
+    /// `embeddings()` dispatch path -- the same fallback/retry chain
+    /// resolution a chat request gets). `None` on any failure (the model
+    /// doesn't resolve, every candidate errors, the response carries no
+    /// data) -- semantic caching fails open: an embedding-call problem
+    /// only means this one request skips the cache, never that the
+    /// request itself fails, the same resilience pattern
+    /// moderation/web_search already use for their own backend calls.
+    async fn embed_for_cache(&self, model: &str, text: &str) -> Option<Vec<f32>> {
+        let req = EmbeddingsRequest {
+            model: model.to_string(),
+            input: EmbeddingsInput::Single(text.to_string()),
+            encoding_format: None,
+            dimensions: None,
+        };
+        match self.embeddings(&req).await {
+            Ok(resp) => resp.data.into_iter().next().map(|d| d.embedding),
+            Err(e) => {
+                tracing::warn!(
+                    "semantic cache: embedding call failed, skipping cache for this request: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Semantic-mode cache lookup -- embeds `req`'s message text and
+    /// checks it against `cache`'s stored entries sharing the same
+    /// non-message scope (see `SemanticCache::scope_key_for`). `None` on
+    /// a miss, an unconfigured `embedding_model` (shouldn't happen --
+    /// `semantic_cache` is only ever `Some` when `embedding_model` also
+    /// is, see `from_config`), or an embedding-call failure.
+    async fn semantic_cache_get(
+        &self,
+        req: &ChatRequest,
+        cache: &Arc<RwLock<SemanticCache>>,
+    ) -> Option<ChatResponse> {
+        let model = self.embedding_model.as_ref()?;
+        let embedding = self
+            .embed_for_cache(model, &request_text_for_embedding(req))
+            .await?;
+        let scope_key = SemanticCache::scope_key_for(req);
+        let resp = cache.write().unwrap().get(scope_key, &embedding);
+        self.metrics
+            .record_cache_lookup(if resp.is_some() { "hit" } else { "miss" });
+        resp
+    }
+
+    /// Semantic-mode cache insert, mirroring `semantic_cache_get`'s own
+    /// embedding/scope-key computation. A no-op (not an error) on an
+    /// embedding-call failure -- the response was already returned to the
+    /// client by the time this runs, so there's nothing left to fail.
+    async fn semantic_cache_insert(
+        &self,
+        req: &ChatRequest,
+        cache: &Arc<RwLock<SemanticCache>>,
+        resp: ChatResponse,
+    ) {
+        let Some(model) = &self.embedding_model else {
+            return;
+        };
+        let Some(embedding) = self
+            .embed_for_cache(model, &request_text_for_embedding(req))
+            .await
+        else {
+            return;
+        };
+        let scope_key = SemanticCache::scope_key_for(req);
+        cache.write().unwrap().insert(scope_key, embedding, resp);
+    }
+
+    /// Resolves `req.model` to a provider chain and dispatches, falling
+    /// back on a retryable error -- the response-cache-aware entry point;
+    /// see `dispatch_uncached` for the actual dispatch logic. Checks
+    /// whichever cache is active first (`[cache].mode`'s `"semantic"` or
+    /// `"exact"`, never both at once -- see `Router::from_config`), and
+    /// inserts a successful response into it afterward.
     pub async fn dispatch(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
+        if !req.is_streaming() {
+            if let Some(semantic) = self.semantic_cache.clone() {
+                if let Some(resp) = self.semantic_cache_get(req, &semantic).await {
+                    return Ok(resp);
+                }
+                let resp = self.dispatch_uncached(req).await?;
+                self.semantic_cache_insert(req, &semantic, resp.clone())
+                    .await;
+                return Ok(resp);
+            }
+        }
+
         let cache_key = self.cache_key_for(req);
         if let Some(key) = cache_key {
             if let Some(resp) = self.cache_get(key) {
                 return Ok(resp);
             }
         }
+        let resp = self.dispatch_uncached(req).await?;
+        if let Some(key) = cache_key {
+            self.cache_insert(key, resp.clone());
+        }
+        Ok(resp)
+    }
 
+    /// The actual chain-resolution-and-dispatch logic, shared by every
+    /// `dispatch` cache path (semantic, exact, or neither) -- none of
+    /// those need their own copy of fallback/retry/instrumentation, only
+    /// a different cache check wrapped around this.
+    async fn dispatch_uncached(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
         let target_model = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
         let chain = self.apply_preferences(&target_model, chain, req.provider.as_ref())?;
@@ -1744,9 +1914,6 @@ impl Router {
                         });
                     }
 
-                    if let Some(key) = cache_key {
-                        self.cache_insert(key, resp.clone());
-                    }
                     return Ok(resp);
                 }
                 Err(e) if e.is_retryable() => {
@@ -1991,6 +2158,8 @@ mod tests {
             moderation: None,
             web_search: None,
             cache: None,
+            semantic_cache: None,
+            embedding_model: None,
             free_tier_settings: Arc::new(HashMap::new()),
             free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -5774,6 +5943,9 @@ mod tests {
             cache: Some(Arc::new(RwLock::new(ResponseCache::new(&CacheConfig {
                 ttl_secs,
                 max_entries,
+                mode: CacheMode::Exact,
+                similarity_threshold: 0.85,
+                embedding_model: None,
             })))),
             ..router
         }
@@ -5927,6 +6099,99 @@ mod tests {
         let stats = &snapshot["anthropic/m1"];
         assert_eq!(stats.requests, 1);
         assert!((stats.cost_usd - expected_cost).abs() < 1e-12);
+    }
+
+    // --- semantic cache (cache.mode = "semantic") -------------------------------
+
+    fn router_with_semantic_cache(providers: Vec<(&str, Arc<dyn Provider>)>) -> Router {
+        let router = test_router(providers, vec![], vec![], vec![], vec![]);
+        let cache_config = CacheConfig {
+            ttl_secs: 60,
+            max_entries: 10,
+            mode: CacheMode::Semantic,
+            similarity_threshold: 0.85,
+            embedding_model: Some("anthropic/text-embed".to_string()),
+        };
+        Router {
+            semantic_cache: Some(Arc::new(RwLock::new(SemanticCache::new(&cache_config)))),
+            embedding_model: Some("anthropic/text-embed".to_string()),
+            ..router
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_hit_skips_the_second_chat_call() {
+        // MockProvider's embeddings() returns a constant vector regardless
+        // of input text, so a second dispatch's lookup embedding always
+        // matches the first's insert embedding -- this test is exercising
+        // the caching *mechanism* (embed -> store -> embed -> compare ->
+        // hit), not real-world semantic matching.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let req = test_request("anthropic/m1");
+
+        let first = router.dispatch(&req).await.expect("should succeed");
+        // First dispatch: 1 lookup-embedding call (miss, empty cache) + 1
+        // chat call + 1 insert-embedding call = 3.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let second = router.dispatch(&req).await.expect("should succeed");
+        // Second dispatch: 1 lookup-embedding call, hits -- no chat call,
+        // no insert-embedding call.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "a cache hit must skip both the chat call and the insert-embedding call"
+        );
+        assert_eq!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_miss_still_dispatches_and_populates_the_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let req = test_request("anthropic/m1");
+
+        let resp = router.dispatch(&req).await.expect("should succeed");
+        assert_eq!(resp.model, "anthropic/m1");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "a miss must still reach the provider and then populate the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_is_bypassed_for_a_streaming_request() {
+        // dispatch_stream never consults [cache] at all -- semantic or
+        // exact -- same scope restriction the exact-match cache already
+        // has (see cache.rs's module docs).
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let mut req = test_request("anthropic/m1");
+        req.stream = Some(true);
+
+        // Would panic/error if dispatch_stream tried to route through the
+        // semantic-cache path (it has no chat_stream-aware handling) --
+        // succeeding at all demonstrates it's untouched.
+        let _stream = router
+            .dispatch_stream(&req)
+            .await
+            .expect("streaming should bypass the cache entirely and dispatch normally");
     }
 
     // --- BYOK (provider.byok) -------------------------------------------------

@@ -57,6 +57,13 @@ entries are tracked by PR rather than by release.
   operator CLI (`config check`/`providers list`/`keys check`) built
   directly on `rp-router::Config`, so it can never drift from the schema
   the real server loads. Not built into the Docker image.
+- **Added:** `[cache].mode = "semantic"` — opt-in alongside the existing
+  exact-match caching, embedding-cosine-similarity matching on message
+  text only (every other field still has to match exactly). Embeds via
+  this router's own `/v1/embeddings` dispatch path
+  (`[cache].embedding_model`); falls back to exact-match at startup with
+  a warning if that model doesn't resolve. Fails open on an embedding-
+  call failure, same as Moderation's own backend-failure handling.
 
 ---
 

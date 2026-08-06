@@ -1346,6 +1346,43 @@ that never actually happened. Every lookup increments the
 `rusty_provider_cache_lookups_total` Prometheus counter, labeled `hit` or
 `miss`. `[cache]` absent leaves caching fully off, with no overhead.
 
+### Semantic mode
+
+`[cache].mode = "semantic"` swaps exact-match for embedding-cosine-
+similarity matching on message content, while keeping every other field
+exact-match — so a differently-worded-but-equivalent request can still
+hit:
+
+```toml
+[cache]
+mode = "semantic"
+similarity_threshold = 0.85   # optional, this is the default
+embedding_model = "openai/text-embedding-3-small"
+```
+
+`embedding_model` is a `"provider/model"` string, exactly like `model`
+elsewhere — this router embeds the request's messages by calling it
+through its own [`POST /v1/embeddings`](#post-v1embeddings) dispatch path
+(fallback/retry included, since `embedding_model` can itself be a
+`[[routes]]` alias). `similarity_threshold` (0.0-1.0, higher is stricter)
+is the minimum cosine similarity for a lookup to count as a hit.
+`model`, every sampling parameter, `tools`, and `provider` preferences
+still have to match *exactly* — "semantic" only ever fuzzes the message
+text, nothing else. An embedding-call failure (network error, the
+provider down) fails open: that one request just skips the cache in both
+directions rather than failing, the same resilience pattern
+[Moderation](#moderation)'s own backend failures already get. A request
+with `"stream": true` still bypasses caching entirely in either mode,
+same as exact.
+
+Without `embedding_model` set, or if it names a provider this process
+didn't actually configure, `"semantic"` mode falls back to `"exact"` at
+startup with a warning — same soft-failure pattern a misconfigured
+provider or moderation backend already gets, rather than refusing to
+start the router. `mode` defaults to `"exact"`, so an existing `[cache]`
+section with no `mode` set keeps its current exact-match behavior
+unchanged.
+
 ## Admin API
 
 Setting `server.admin_key_env` unlocks a small admin API for inspecting
