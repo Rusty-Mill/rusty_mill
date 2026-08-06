@@ -6,6 +6,27 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 
 ### Added
+- **`New-RustyTlsReleases.ps1` gained `-PublishDrafts`**, the other half of
+  `-Draft`. The script could create releases and could hold them back, but had
+  no way to release what it had held back — so a drafted run had to be finished
+  by hand in the UI, one click per release.
+
+  It publishes in **ascending version order**, sorted rather than taken from the
+  order `$Releases` happens to be written in, because "Latest" is whatever was
+  published most recently unless told otherwise. A string sort would put
+  `v0.10.0` before `v0.9.0` and leave the wrong release as Latest; the sort is
+  by `[version]`, and that specific case is what the test pins.
+
+  **It verifies the receipt rather than the exit code.** A draft's URL is
+  `releases/tag/untagged-<hash>` and becomes `releases/tag/vX.Y.Z` on
+  publication, so the returned URL says whether the publish actually happened.
+  An API answering `0` while handing back a draft URL is caught and counted as
+  a failure. Given how this session found `gh auth status` exiting `0` on an
+  invalid token, an exit code is not on its own evidence that a thing occurred.
+
+  It creates nothing, touches only drafts whose tag is listed in `$Releases`,
+  and states the number of entries checked when there is nothing to do — so
+  "no drafts" is distinguishable from "matched nothing".
 - **The release tooling is in the repo, under `scripts/`.**
   `Cut-RustyTlsTags.ps1` creates the annotated version tags;
   `New-RustyTlsReleases.ps1` creates the GitHub releases for them, with bodies

@@ -27,6 +27,18 @@
     Create every release as a draft, so you can review the rendered bodies in the
     GitHub UI before publishing. Recommended for the first run.
 
+.PARAMETER PublishDrafts
+    Publish the existing DRAFT releases instead of creating anything. This is
+    the other half of -Draft: draft first, read the rendered bodies in the UI,
+    then publish with this.
+
+    Only drafts whose tag appears in $Releases below are touched. A draft for
+    some other tag is left alone rather than swept up, because this script's
+    table is the statement of what it is responsible for.
+
+    Creates nothing. A tag with no release at all is reported, not created --
+    use a normal run for that.
+
 .PARAMETER Latest
     Tag to mark as the "Latest" release. Defaults to the highest version in the
     table. Pass an empty string to let GitHub decide.
@@ -39,9 +51,21 @@
     ./New-RustyTlsReleases.ps1 -Draft
     Create all eleven as drafts for review.
 
+.EXAMPLE
+    ./New-RustyTlsReleases.ps1 -PublishDrafts -WhatIf
+    Show which drafts would be published, without calling the API.
+
+.EXAMPLE
+    ./New-RustyTlsReleases.ps1 -PublishDrafts
+    Publish them, oldest first, leaving $Latest as the "Latest" release.
+
 .NOTES
     Requires the gh CLI, authenticated with a token carrying `repo` scope
-    (contents: write). Verify with:  gh auth status
+    (contents: write).
+
+    Do NOT verify that with `gh auth status` -- it exits 0 even when it prints
+    "The token in GH_TOKEN is invalid." This script probes with a real request
+    instead, for that reason.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -49,11 +73,18 @@ param(
     [string] $Repo          = 'baileyrd/rusty_tls',
     [string] $ChangelogPath = './CHANGELOG.md',
     [switch] $Draft,
+    [switch] $PublishDrafts,
     [string] $Latest        = 'v0.10.1'
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Argument validation first, before anything reaches the network. A run that
+# cannot be correct should say so immediately rather than after two API calls.
+if ($Draft -and $PublishDrafts) {
+    throw '-Draft and -PublishDrafts are opposites: one creates releases held back from publication, the other releases what is held back. Pick one.'
+}
 
 # ---------------------------------------------------------------------------
 # The releases to cut.
@@ -176,15 +207,104 @@ function Get-ChangelogSection {
 # ---------------------------------------------------------------------------
 Write-Host "Repository: $Repo" -ForegroundColor Cyan
 
-$existingReleaseTags = @{}
+# Keyed by tag, holding the whole release rather than just its URL: publishing
+# needs the id, and deciding whether to publish needs the draft flag. A draft
+# IS returned by this endpoint for an authorised caller, which is what makes a
+# normal run skip a tag that is only drafted rather than creating a duplicate.
+$existingReleases = @{}
 $releasesJson = gh api "repos/$Repo/releases?per_page=100" --paginate 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw "Could not list releases for $Repo. gh said: $releasesJson"
 }
 foreach ($r in ($releasesJson | ConvertFrom-Json)) {
-    $existingReleaseTags[$r.tag_name] = $r.html_url
+    $existingReleases[$r.tag_name] = [pscustomobject]@{
+        Id = $r.id; Draft = $r.draft; Url = $r.html_url
+    }
 }
-Write-Host ("Existing releases: {0}" -f $(if ($existingReleaseTags.Count) { ($existingReleaseTags.Keys | Sort-Object) -join ', ' } else { '(none)' }))
+Write-Host ("Existing releases: {0}" -f $(if ($existingReleases.Count) {
+    (($existingReleases.Keys | Sort-Object) | ForEach-Object {
+        "$_$(if ($existingReleases[$_].Draft) { ' (draft)' })" }) -join ', '
+} else { '(none)' }))
+
+# ---------------------------------------------------------------------------
+# -PublishDrafts: flip existing drafts to published. Creates nothing, reads no
+# changelog, and returns before the creation path below.
+#
+# Publishing is a PATCH, not a POST -- a draft is an existing release with
+# draft=true, so publishing it is an edit. That also makes a second run
+# harmless: patching a published release to draft=false leaves it as it is.
+# ---------------------------------------------------------------------------
+if ($PublishDrafts) {
+
+    # Ascending version order matters, and is not the table's order to assume:
+    # "Latest" is whatever was published most recently unless make_latest says
+    # otherwise, so publishing newest-first would leave the oldest release
+    # sitting as Latest for anyone who looked in between. Sorted here rather
+    # than relying on how $Releases happens to be written.
+    $ordered = $Releases |
+        Sort-Object @{ Expression = { [version] ($_.Tag.TrimStart('v')) } }
+
+    $draftPlan = foreach ($entry in $ordered) {
+        $tag  = $entry.Tag
+        $have = $existingReleases[$tag]
+        [pscustomobject]@{
+            Tag      = $tag
+            Id       = $(if ($have) { $have.Id } else { $null })
+            Action   = $(if (-not $have)      { 'no release (a normal run creates it)' }
+                         elseif (-not $have.Draft) { 'already published' }
+                         else                 { 'publish' })
+            Latest   = $($Latest -and $tag -eq $Latest)
+        }
+    }
+
+    $draftPlan |
+        Format-Table Tag, Id, Action, Latest -AutoSize |
+        Out-String -Width 200 |
+        Write-Host
+
+    $toPublish = @($draftPlan | Where-Object Action -eq 'publish')
+
+    # Say nothing-to-do out loud rather than reporting a silent success. Zero
+    # drafts is a legitimate state, but it is indistinguishable from "the tag
+    # filter matched nothing" unless the count is stated.
+    if (-not $toPublish.Count) {
+        Write-Host "No drafts to publish. ($($draftPlan.Count) entries checked.)" -ForegroundColor Yellow
+        return
+    }
+
+    $published = 0
+    $failed    = 0
+    foreach ($d in $toPublish) {
+        $label = "release $($d.Tag)$(if ($d.Latest) { ' [latest]' })"
+        if (-not $PSCmdlet.ShouldProcess($Repo, "Publish $label")) { continue }
+
+        $out = gh api "repos/$Repo/releases/$($d.Id)" --method PATCH `
+                  -F 'draft=false' -f "make_latest=$(if ($d.Latest) { 'true' } else { 'false' })" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "FAILED $($d.Tag): $out"
+            $failed++
+            continue
+        }
+
+        # A draft's URL is .../releases/tag/untagged-<hash> and becomes
+        # .../releases/tag/<tag> once published, so the URL is the receipt.
+        # Check it rather than trusting the exit code.
+        $url = ($out | ConvertFrom-Json).html_url
+        if ($url -match 'untagged-') {
+            Write-Warning "$($d.Tag): API reported success but the URL is still a draft URL ($url)"
+            $failed++
+        }
+        else {
+            Write-Host "published $($d.Tag)  $url" -ForegroundColor Green
+            $published++
+        }
+    }
+
+    Write-Host ''
+    Write-Host "published=$published failed=$failed" -ForegroundColor Cyan
+    if ($failed) { exit 1 }
+    return
+}
 
 $changelogLines = Get-Content -LiteralPath $ChangelogPath
 
@@ -216,8 +336,9 @@ $plan = foreach ($entry in $Releases) {
     }
 
     # -- no release may already exist ---------------------------------------
-    if ($existingReleaseTags.ContainsKey($tag)) {
-        $problems.Add("a release already exists: $($existingReleaseTags[$tag])")
+    if ($existingReleases.ContainsKey($tag)) {
+        $have = $existingReleases[$tag]
+        $problems.Add("a release already exists$(if ($have.Draft) { ' as a draft -- publish it with -PublishDrafts' }): $($have.Url)")
     }
 
     # -- the body must resolve ----------------------------------------------
