@@ -38,10 +38,12 @@ Phase 9  Windowing + Registry/Config (nexus-only, converge last)
 ─────────────────────────────────────────────────────────────
 parked   fork/execve vs posix_spawn — owner design decision
 parked   MSYS2/Cygwin-level Windows job control & signal parity —
-         owner design decision, no named consumer. All four subsystems
-         now scoped to implementation depth (docs/design-discussion-
-         msys-parity.md, -pgid-table.md, -signals.md, -stop-cont.md,
-         -pty.md); none decided, still gated on an owner call.
+         DECIDED 2026-08-06: parked indefinitely, no consumer built
+         against. All four subsystems scoped to implementation depth
+         (docs/design-discussion-msys-parity.md, -pgid-table.md,
+         -signals.md, -stop-cont.md, -pty.md; decision recorded in
+         docs/decision-request-msys-parity.md). Revisit only if a real
+         consumer appears.
 ```
 
 Phases are not strictly sequential gates — 3 and 4 can interleave with
