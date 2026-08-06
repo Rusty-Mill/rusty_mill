@@ -75,23 +75,25 @@ redaction/blocking (`[[guardrails]]` — regex-based, not agentgateway's
 NER-style "PII-shield," but same slot), OpenTelemetry-adjacent observability
 (`GET /metrics` Prometheus, per-provider stats).
 
-**Identified but not filed as parity-gap issues** — both cross the skill's
-own stop-and-ask line (new protocol surface / new third-party dependency).
-User declined both for this run (2026-08-06): stays chat-completions-only,
-static-key auth. Left here for a future, separately-scoped run to pick up:
+**Identified but initially not filed as parity-gap issues** — both crossed
+the skill's own stop-and-ask line (new protocol surface / new third-party
+dependency), so neither was auto-implemented in the original run:
 
-- **MCP (Model Context Protocol) gateway support.** agentgateway proxies MCP
-  tool calls with per-identity tool scoping; rusty_provider only speaks
-  OpenAI-shaped chat completions today. This is a second protocol surface,
-  not an additive endpoint — new dependency, new request/response shapes,
-  real design surface (transport: stdio vs. SSE vs. streamable-HTTP; how
-  tool scoping composes with existing `[[clients]]` auth).
-- **JWT/OIDC authentication.** Today's auth is a static bearer token
-  (`server.api_key_env` / `[[clients]].api_key_env`) checked by string
-  equality — no token verification library, no IdP/JWKS fetching. Adding
-  JWT/OIDC as an alternative auth mode needs a new dependency
-  (`jsonwebtoken` + JWKS fetching) and a decision on how it composes with
-  existing client/budget/rate-limit identity.
+- **JWT/OIDC authentication — done.** User approved this as an explicit
+  follow-up on 2026-08-06. Shipped in #109/#110 (merged): `[jwt]` config,
+  `hs256_secret_env` (shared secret) or `jwks_url` (RS256, cached by `kid`),
+  optional `issuer`/`audience` validation, additive alongside
+  `server.api_key_env`/`[[clients]]`, fails closed on any verification
+  failure. New dependency `jsonwebtoken`, approved at the time. Verified via
+  a live smoke-test (#111 fixed a follow-on gap: `rp-cli` hadn't been
+  updated to know about `jwt.hs256_secret_env`).
+- **MCP (Model Context Protocol) gateway support — still declined/deferred.**
+  agentgateway proxies MCP tool calls with per-identity tool scoping;
+  rusty_provider only speaks OpenAI-shaped chat completions today. This is a
+  second protocol surface, not an additive endpoint — new dependency, new
+  request/response shapes, real design surface (transport: stdio vs. SSE vs.
+  streamable-HTTP; how tool scoping composes with existing `[[clients]]`
+  auth). Left here for a future, separately-scoped run to pick up.
 
 One additional gap **was** filed since it's additive and dependency-free
 (the router can already call an embeddings provider itself):
