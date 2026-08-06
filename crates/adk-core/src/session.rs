@@ -82,8 +82,10 @@ mod tests {
     #[test]
     fn contents_skips_partial_and_empty_events() {
         let mut s = Session::new("s1", "app", "u1");
-        s.events.push(Event::new("inv", "user").with_content(Content::user_text("hi")));
-        s.events.push(Event::new("inv", "agent").with_text("Par").as_partial());
+        s.events
+            .push(Event::new("inv", "user").with_content(Content::user_text("hi")));
+        s.events
+            .push(Event::new("inv", "agent").with_text("Par").as_partial());
         s.events.push(Event::new("inv", "agent")); // no content
         s.events.push(Event::new("inv", "agent").with_text("Paris"));
 

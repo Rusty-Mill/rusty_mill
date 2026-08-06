@@ -1,0 +1,205 @@
+# rusty-adk
+
+A Rust implementation of the [Agent Development Kit (ADK) 2.0][adk] architecture.
+
+ADK 2.0 ships SDKs for Python, Go, TypeScript, Java, and Kotlin — but not Rust.
+`rusty-adk` is a port of its architecture: the same data model, the same
+graph-based execution engine, the same tool and callback contracts, expressed
+idiomatically in Rust.
+
+```rust
+use rusty_adk::prelude::*;
+use std::sync::Arc;
+
+/// Retrieves the current weather for a city.
+#[adk_tool(crate = ::rusty_adk::tools)]
+async fn get_weather(city: String) -> Result<serde_json::Value> {
+    Ok(rusty_adk::tools::success(serde_json::json!({
+        "report": format!("It is sunny in {city}."),
+    })))
+}
+
+# async fn run() -> Result<()> {
+let agent = LlmAgent::builder("weather_agent")
+    .model(Arc::new(GeminiModel::from_env("gemini-flash-latest")?))
+    .instruction("Answer weather questions using the get_weather tool.")
+    .tool(get_weather_tool())
+    .build()?;
+
+let services = Services::new(Arc::new(InMemorySessionService::new()));
+let runner = Runner::new("weather_app", agent.shared(), services);
+let session = runner.create_session("user-1", None).await?;
+
+let answer = runner
+    .run_to_completion(&session.user_id, &session.id,
+                       Content::user_text("Weather in Paris?"), None)
+    .await?;
+# Ok(()) }
+```
+
+## What ADK 2.0 is, and what this implements
+
+Version 2.0 moved ADK from a hierarchical agent executor to a **graph execution
+engine**: agents, tools, and plain functions are all evaluated as nodes in a
+workflow graph, and data flows between them through `Event.output` rather than
+through session state. The `Event` schema gained `node_info` and `output` to
+carry that.
+
+This port implements:
+
+| Area | Implemented |
+|---|---|
+| **Data model** | `Content`/`Part`, `Event` (with `node_info`, `output`, `routes`), `EventActions`, prefix-scoped `State`, `Session`, `InvocationContext`, `RunConfig` |
+| **Graph engine** | `Node`, concurrent frontier execution, route matchers (string/int/bool/multi/default), fan-out, `JoinNode` fan-in, per-node retries, step budget |
+| **Human-in-the-loop** | `resume_or_request_input` suspends a run; the resume point is persisted and the node re-executes with the answer |
+| **Tools** | `Tool` trait, `ToolContext`, `FunctionTool`, `#[adk_tool]`, toolsets, long-running tools, confirmation gating, artifacts, memory search |
+| **Agents** | `LlmAgent` with the full tool-calling loop, `SequentialAgent`, `ParallelAgent`, `LoopAgent`, `AgentNode` |
+| **Callbacks** | before/after agent, model, and tool — returning a value replaces the wrapped step |
+| **Runtime** | `Runner`'s yield → commit → resume loop, streaming, cancellation |
+| **Services** | `SessionService`, `ArtifactService`, `MemoryService` traits with in-memory implementations |
+| **Models** | `Model` trait, `MockModel`, Gemini and Anthropic connectors |
+| **Interop** | MCP server (stdio + streamable HTTP) and MCP client toolset |
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for how the pieces fit together, and for
+the places where a Rust idiom differs from the reference SDKs.
+
+## Install
+
+```toml
+[dependencies]
+rusty-adk = "0.1"
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+```
+
+Default features bring in the `#[adk_tool]` macro, the MCP transports, and the
+live model connectors. Trim what you don't need:
+
+```toml
+rusty-adk = { version = "0.1", default-features = false, features = ["macros"] }
+```
+
+## Concepts
+
+### Tools
+
+A tool's doc comment becomes the description the model reads, and its schema is
+derived from the signature. An `Option<T>` argument is optional; a
+`&ToolContext` argument is injected by the framework and hidden from the model.
+
+```rust
+/// Reimburses an amount to the user.
+#[adk_tool(crate = ::rusty_adk::tools)]
+async fn reimburse(amount: i64, ctx: &ToolContext) -> Result<serde_json::Value> {
+    ctx.set_state("user:last_refund", amount);
+    Ok(rusty_adk::tools::success(serde_json::json!({"reimbursed": amount})))
+}
+```
+
+Arguments are validated against the schema before the body runs, and the result
+is normalized to ADK's object convention — a scalar return is wrapped under a
+`result` key.
+
+### State
+
+State keys are scoped by prefix, and writes are staged until an event carries
+them:
+
+| Prefix | Scope | Persisted |
+|---|---|---|
+| `app:` | every user and session of the app | yes |
+| `user:` | one user, across their sessions | yes |
+| `temp:` | the current invocation only | no |
+| *(none)* | the current session | yes |
+
+A write becomes durable only once the `Runner` has processed the event carrying
+its delta. That ordering is the contract: code resuming after a yielded event
+can rely on its state having landed.
+
+### Graphs
+
+```rust
+let graph = Graph::new(
+    vec![triage, billing_agent, technical_agent],
+    EdgeBuilder::new()
+        .start("triage")
+        .add_route("triage", "billing", Route::string("BILLING"))
+        .add_route("triage", "technical", Route::string("TECHNICAL"))
+        .add_default("triage", "billing")
+        .build(),
+)?;
+```
+
+Nodes in a frontier run concurrently. A node's `NodeOutcome::output` becomes its
+successor's input; a `JoinNode` waits for every predecessor and hands its
+successor a map keyed by predecessor name.
+
+### Human-in-the-loop
+
+```rust
+let approve = FunctionNode::new("approve", NodeConfig::default(), |ctx| {
+    let ctx = ctx.clone();
+    Box::pin(async move {
+        // Suspends on the first pass; returns the answer after resume.
+        let answer = ctx.resume_or_request_input("Approve this refund?", None)?;
+        Ok(NodeOutcome::output(answer))
+    })
+})
+.shared();
+```
+
+The run ends cleanly at the suspension. Resume it with
+`runner.resume(user_id, session_id, ResumeRequest::new(interrupt_id, payload))`.
+
+## Interoperating with the other ADK SDKs
+
+ADK defines no language-neutral wire protocol for tools, so a Rust tool reaches
+a Python, Go, TypeScript, Java, or Kotlin agent over **MCP**:
+
+```rust
+let server = McpServer::new("rust-weather", vec![get_weather_tool()], services);
+serve_stdio(&server).await
+```
+
+```python
+McpToolset(connection_params=StdioConnectionParams(
+    server_params=StdioServerParameters(command="./rust-weather-server", args=[]),
+))
+```
+
+The reverse works too: `McpToolset` in this crate consumes any MCP server's
+tools as ADK tools.
+
+## Examples
+
+```bash
+cargo run -p weather-agent      # agent + tools, routing, fan-out/join, HITL
+cargo run -p mcp-tool-server    # serve Rust tools over MCP (stdio)
+cargo run -p mcp-tool-server -- --http
+```
+
+`weather-agent` runs offline against `MockModel`, so it needs no API key. Build
+it with `--features live` and set `GOOGLE_API_KEY` or `ANTHROPIC_API_KEY` to
+drive it with a real model.
+
+## Development
+
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+```
+
+## Relationship to Google's ADK
+
+This is an independent implementation of the architecture described at
+[adk.dev][adk]. It is not affiliated with or endorsed by Google, and it does not
+share code with the official SDKs. Where the published documentation does not
+specify an internal layout — `Event.node_info` is the main case — this crate
+defines its own and says so in the API docs.
+
+## License
+
+Apache-2.0.
+
+[adk]: https://adk.dev/2.0/

@@ -146,12 +146,7 @@ impl SessionService for InMemorySessionService {
             .collect())
     }
 
-    async fn delete_session(
-        &self,
-        app_name: &str,
-        user_id: &str,
-        session_id: &str,
-    ) -> Result<()> {
+    async fn delete_session(&self, app_name: &str, user_id: &str, session_id: &str) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let key = (
             app_name.to_string(),
@@ -309,9 +304,7 @@ impl ArtifactService for InMemoryArtifactService {
         let mut keys: Vec<String> = store
             .keys()
             .filter(|(app, user, scope, _)| {
-                app == app_name
-                    && user == user_id
-                    && (scope.is_empty() || scope == session_id)
+                app == app_name && user == user_id && (scope.is_empty() || scope == session_id)
             })
             .map(|(_, _, _, filename)| filename.clone())
             .collect();

@@ -68,7 +68,10 @@ impl Graph {
     pub fn new(nodes: Vec<SharedNode>, edges: Vec<Edge>) -> Result<Self> {
         let mut map: HashMap<String, SharedNode> = HashMap::new();
         for node in nodes {
-            if map.insert(node.name().to_string(), Arc::clone(&node)).is_some() {
+            if map
+                .insert(node.name().to_string(), Arc::clone(&node))
+                .is_some()
+            {
                 return Err(AdkError::Graph(format!(
                     "duplicate node name '{}'",
                     node.name()

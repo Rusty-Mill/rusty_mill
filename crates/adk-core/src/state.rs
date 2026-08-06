@@ -186,8 +186,10 @@ impl State {
 
     /// Drops every `temp:` key. Called when an invocation ends.
     pub fn clear_temp(&mut self) {
-        self.base.retain(|k, _| StateScope::of(k) != StateScope::Temp);
-        self.delta.retain(|k, _| StateScope::of(k) != StateScope::Temp);
+        self.base
+            .retain(|k, _| StateScope::of(k) != StateScope::Temp);
+        self.delta
+            .retain(|k, _| StateScope::of(k) != StateScope::Temp);
     }
 
     /// The committed entries in one scope, keyed without their prefix.
@@ -271,8 +273,14 @@ mod tests {
             ]
             .into(),
         );
-        assert_eq!(s.scoped(StateScope::User), [("login_count".into(), json!(5))].into());
-        assert_eq!(s.scoped(StateScope::Session), [("plain".into(), json!("x"))].into());
+        assert_eq!(
+            s.scoped(StateScope::User),
+            [("login_count".into(), json!(5))].into()
+        );
+        assert_eq!(
+            s.scoped(StateScope::Session),
+            [("plain".into(), json!("x"))].into()
+        );
     }
 
     #[test]

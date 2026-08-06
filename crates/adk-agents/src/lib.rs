@@ -90,7 +90,12 @@ mod tests {
         agent: &dyn Agent,
         ctx: &InvocationContext,
     ) -> adk_core::Result<Vec<Event>> {
-        agent.run(ctx).collect::<Vec<_>>().await.into_iter().collect()
+        agent
+            .run(ctx)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
     }
 
     fn weather_tool() -> ToolSource {
@@ -101,7 +106,9 @@ mod tests {
             |args, _ctx| {
                 Box::pin(async move {
                     let city = args.get("city").and_then(|v| v.as_str()).unwrap_or("?");
-                    Ok(adk_tools::success(json!({"report": format!("Sunny in {city}.")})))
+                    Ok(adk_tools::success(
+                        json!({"report": format!("Sunny in {city}.")}),
+                    ))
                 })
             },
         );
@@ -134,7 +141,10 @@ mod tests {
             .unwrap();
 
         drain(&agent, &context_with("hi")).await;
-        let sent = model.recorded_requests()[0].system_instruction.clone().unwrap();
+        let sent = model.recorded_requests()[0]
+            .system_instruction
+            .clone()
+            .unwrap();
         assert!(sent.contains("You are terse."));
         assert!(sent.contains("Answer the question."));
     }
@@ -192,7 +202,10 @@ mod tests {
         let response = events[1].function_responses()[0];
         assert_eq!(response.name, "get_weather");
         assert_eq!(response.response["status"], "success");
-        assert!(response.response["report"].as_str().unwrap().contains("Paris"));
+        assert!(response.response["report"]
+            .as_str()
+            .unwrap()
+            .contains("Paris"));
         assert_eq!(events[2].text(), "It is sunny in Paris.");
     }
 
@@ -236,12 +249,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_tool_becomes_an_error_result_the_model_can_recover_from() {
-        let failing = FunctionTool::new(
-            "boom",
-            "Always fails.",
-            Schema::object(),
-            |_args, _ctx| Box::pin(async { Err(adk_core::AdkError::tool("boom", "exploded")) }),
-        );
+        let failing =
+            FunctionTool::new("boom", "Always fails.", Schema::object(), |_args, _ctx| {
+                Box::pin(async { Err(adk_core::AdkError::tool("boom", "exploded")) })
+            });
         let model = MockModel::new()
             .push_call_json("boom", json!({}))
             .push_text("That tool failed.");
@@ -253,19 +264,27 @@ mod tests {
             .unwrap();
 
         let events = drain(&agent, &context_with("go")).await;
-        assert_eq!(events[1].function_responses()[0].response["status"], "error");
+        assert_eq!(
+            events[1].function_responses()[0].response["status"],
+            "error"
+        );
         assert_eq!(events.last().unwrap().text(), "That tool failed.");
     }
 
     #[tokio::test]
     async fn skip_summarization_ends_the_turn_at_the_tool_result() {
-        let tool = FunctionTool::new("raw", "Returns user-ready output.", Schema::object(), |_a, ctx| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                ctx.skip_summarization();
-                Ok(adk_tools::success(json!({"data": 1})))
-            })
-        });
+        let tool = FunctionTool::new(
+            "raw",
+            "Returns user-ready output.",
+            Schema::object(),
+            |_a, ctx| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    ctx.skip_summarization();
+                    Ok(adk_tools::success(json!({"data": 1})))
+                })
+            },
+        );
         let model = MockModel::new()
             .push_call_json("raw", json!({}))
             .push_text("this should never be reached");
@@ -332,7 +351,12 @@ mod tests {
         let events = drain(&agent, &context_with("refund me")).await;
         let confirmations = &events[1].actions.requested_tool_confirmations;
         assert_eq!(confirmations.len(), 1);
-        assert!(confirmations.values().next().unwrap().hint.contains("Approve"));
+        assert!(confirmations
+            .values()
+            .next()
+            .unwrap()
+            .hint
+            .contains("Approve"));
         // The gate held: the tool body never ran.
         assert_eq!(ran.load(Ordering::SeqCst), 0);
     }
@@ -353,7 +377,10 @@ mod tests {
             .unwrap();
 
         let err = drain_result(&agent, &context_with("go")).await.unwrap_err();
-        assert!(matches!(err, adk_core::AdkError::LimitExceeded(_)), "got: {err}");
+        assert!(
+            matches!(err, adk_core::AdkError::LimitExceeded(_)),
+            "got: {err}"
+        );
     }
 
     // ---- schemas ----
@@ -457,15 +484,19 @@ mod tests {
 
     #[tokio::test]
     async fn an_after_model_callback_can_replace_the_response() {
-        let agent = LlmAgent::builder("a")
-            .model(Arc::new(MockModel::new().push_text("raw")))
-            .callbacks(Callbacks::new().after_model(|_ctx, _resp| {
-                Box::pin(async { Some(LlmResponse::text("filtered")) })
-            }))
-            .build()
-            .unwrap();
+        let agent =
+            LlmAgent::builder("a")
+                .model(Arc::new(MockModel::new().push_text("raw")))
+                .callbacks(Callbacks::new().after_model(|_ctx, _resp| {
+                    Box::pin(async { Some(LlmResponse::text("filtered")) })
+                }))
+                .build()
+                .unwrap();
 
-        assert_eq!(drain(&agent, &context_with("go")).await[0].text(), "filtered");
+        assert_eq!(
+            drain(&agent, &context_with("go")).await[0].text(),
+            "filtered"
+        );
     }
 
     #[tokio::test]
@@ -480,14 +511,18 @@ mod tests {
             .callbacks(Callbacks::new().before_tool(|_ctx, name, _args| {
                 let name = name.to_string();
                 Box::pin(async move {
-                    (name == "get_weather").then(|| json!({"status": "success", "report": "stubbed"}))
+                    (name == "get_weather")
+                        .then(|| json!({"status": "success", "report": "stubbed"}))
                 })
             }))
             .build()
             .unwrap();
 
         let events = drain(&agent, &context_with("go")).await;
-        assert_eq!(events[1].function_responses()[0].response["report"], "stubbed");
+        assert_eq!(
+            events[1].function_responses()[0].response["report"],
+            "stubbed"
+        );
     }
 
     #[tokio::test]
@@ -557,7 +592,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_sequential_agent_runs_sub_agents_in_order() {
-        let agent = SequentialAgent::new("pipeline", vec![scripted("first", "1"), scripted("second", "2")]);
+        let agent = SequentialAgent::new(
+            "pipeline",
+            vec![scripted("first", "1"), scripted("second", "2")],
+        );
         let events = drain(&agent, &context_with("go")).await;
         let authors: Vec<&str> = events.iter().map(|e| e.author.as_str()).collect();
         assert_eq!(authors, vec!["first", "second"]);
@@ -578,13 +616,18 @@ mod tests {
 
     #[tokio::test]
     async fn a_loop_agent_stops_when_a_sub_agent_escalates() {
-        let escalating = FunctionTool::new("finish", "Marks the task complete.", Schema::object(), |_a, ctx| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                ctx.escalate();
-                Ok(adk_tools::success(json!({"done": true})))
-            })
-        });
+        let escalating = FunctionTool::new(
+            "finish",
+            "Marks the task complete.",
+            Schema::object(),
+            |_a, ctx| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    ctx.escalate();
+                    Ok(adk_tools::success(json!({"done": true})))
+                })
+            },
+        );
 
         let worker = LlmAgent::builder("worker")
             .model(Arc::new(
@@ -601,7 +644,11 @@ mod tests {
         let events = drain(&agent, &context_with("go")).await;
         assert!(events.iter().any(|e| e.actions.escalate));
         // The loop stopped at the escalation rather than running to the cap.
-        assert!(events.len() <= 3, "expected an early exit, got {} events", events.len());
+        assert!(
+            events.len() <= 3,
+            "expected an early exit, got {} events",
+            events.len()
+        );
     }
 
     #[tokio::test]

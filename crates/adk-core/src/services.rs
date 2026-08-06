@@ -38,8 +38,7 @@ pub trait SessionService: Send + Sync {
     async fn list_sessions(&self, app_name: &str, user_id: &str) -> Result<Vec<Session>>;
 
     /// Deletes a session and its history.
-    async fn delete_session(&self, app_name: &str, user_id: &str, session_id: &str)
-        -> Result<()>;
+    async fn delete_session(&self, app_name: &str, user_id: &str, session_id: &str) -> Result<()>;
 
     /// Appends an event, merging its `state_delta` into the session.
     ///

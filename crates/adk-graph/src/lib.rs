@@ -86,11 +86,13 @@ mod tests {
             .collect()
     }
 
-    async fn collect_result(
-        graph: &Graph,
-        ctx: InvocationContext,
-    ) -> adk_core::Result<Vec<Event>> {
-        graph.run(ctx, None).collect::<Vec<_>>().await.into_iter().collect()
+    async fn collect_result(graph: &Graph, ctx: InvocationContext) -> adk_core::Result<Vec<Event>> {
+        graph
+            .run(ctx, None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect()
     }
 
     // ---- validation ----
@@ -162,12 +164,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_typed_node_reports_an_input_type_mismatch() {
-        let typed = FunctionNode::typed::<i64, i64, _>(
-            "needs_int",
-            NodeConfig::default(),
-            |n, _ctx| Box::pin(async move { Ok(n + 1) }),
-        )
-        .shared();
+        let typed =
+            FunctionNode::typed::<i64, i64, _>("needs_int", NodeConfig::default(), |n, _ctx| {
+                Box::pin(async move { Ok(n + 1) })
+            })
+            .shared();
 
         let graph = Graph::new(
             vec![value_node("text", json!("not a number")), typed],

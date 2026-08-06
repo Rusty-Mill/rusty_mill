@@ -92,9 +92,7 @@ impl MockModel {
         self.scripts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push_back(Script::Stream(
-                chunks.into_iter().map(Into::into).collect(),
-            ));
+            .push_back(Script::Stream(chunks.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -230,7 +228,10 @@ mod tests {
     #[tokio::test]
     async fn function_calls_can_be_scripted() {
         let model = MockModel::new().push_call_json("get_weather", json!({"city": "Paris"}));
-        let response = model.generate_content(LlmRequest::new("mock")).await.unwrap();
+        let response = model
+            .generate_content(LlmRequest::new("mock"))
+            .await
+            .unwrap();
         let calls = response.content.as_ref().unwrap().function_calls();
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].args["city"], "Paris");
@@ -253,7 +254,10 @@ mod tests {
     #[tokio::test]
     async fn a_streamed_script_collapses_when_called_non_streaming() {
         let model = MockModel::new().push_stream(["a", "b"]);
-        let response = model.generate_content(LlmRequest::new("mock")).await.unwrap();
+        let response = model
+            .generate_content(LlmRequest::new("mock"))
+            .await
+            .unwrap();
         assert_eq!(response.text_content(), "ab");
     }
 }

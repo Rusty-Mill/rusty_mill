@@ -30,7 +30,7 @@ categories = ["asynchronous", "api-bindings"]
 adk-core = { version = "0.1.0", path = "crates/adk-core" }
 adk-macros = { version = "0.1.0", path = "crates/adk-macros" }
 adk-tools = { version = "0.1.0", path = "crates/adk-tools" }
-adk-models = { version = "0.1.0", path = "crates/adk-models" }
+adk-models = { version = "0.1.0", path = "crates/adk-models", default-features = false }
 adk-sessions = { version = "0.1.0", path = "crates/adk-sessions" }
 adk-graph = { version = "0.1.0", path = "crates/adk-graph" }
 adk-agents = { version = "0.1.0", path = "crates/adk-agents" }

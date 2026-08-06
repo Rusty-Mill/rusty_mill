@@ -10,9 +10,8 @@ use std::sync::Arc;
 use crate::node::{Node, NodeConfig, NodeContext, NodeOutcome};
 
 /// The closure shape a [`FunctionNode`] wraps.
-pub type NodeFn = Arc<
-    dyn for<'a> Fn(&'a NodeContext) -> BoxFuture<'a, Result<NodeOutcome>> + Send + Sync,
->;
+pub type NodeFn =
+    Arc<dyn for<'a> Fn(&'a NodeContext) -> BoxFuture<'a, Result<NodeOutcome>> + Send + Sync>;
 
 /// A node that runs a closure.
 ///

@@ -7,7 +7,7 @@
 //! # Sampling parameters
 //!
 //! Current Claude models reject `temperature`, `top_p`, and `top_k` with a 400.
-//! [`GenerateContentConfig`] holds them as `Option`, and this connector sends a
+//! [`crate::GenerateContentConfig`] holds them as `Option`, and this connector sends a
 //! field only when the caller set it — so the default configuration is valid on
 //! every model, and a caller who sets them has explicitly opted in.
 
@@ -39,9 +39,8 @@ pub struct AnthropicModel {
 impl AnthropicModel {
     /// Builds a connector for `model`, reading the key from `ANTHROPIC_API_KEY`.
     pub fn from_env(model: impl Into<String>) -> Result<Self> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY").map_err(|_| {
-            AdkError::Config("ANTHROPIC_API_KEY is not set".into())
-        })?;
+        let api_key = std::env::var("ANTHROPIC_API_KEY")
+            .map_err(|_| AdkError::Config("ANTHROPIC_API_KEY is not set".into()))?;
         Ok(Self::new(model, api_key))
     }
 
@@ -67,7 +66,10 @@ impl AnthropicModel {
         body.insert("model".into(), json!(request.model));
         body.insert(
             "max_tokens".into(),
-            json!(request.config.max_output_tokens.unwrap_or(DEFAULT_MAX_TOKENS)),
+            json!(request
+                .config
+                .max_output_tokens
+                .unwrap_or(DEFAULT_MAX_TOKENS)),
         );
 
         if let Some(system) = &request.system_instruction {
@@ -337,8 +339,8 @@ pub type ToolResponse = FunctionResponse;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::Schema;
     use crate::request::GenerateContentConfig;
+    use adk_core::Schema;
 
     fn model() -> AnthropicModel {
         AnthropicModel::new("claude-opus-5", "test-key")
@@ -372,10 +374,12 @@ mod tests {
 
     #[test]
     fn tool_declarations_use_lowercase_schema_types() {
-        let request = LlmRequest::new("claude-opus-5").with_tools(vec![
-            adk_core::FunctionDeclaration::new("get_weather", "Gets weather.")
-                .with_parameters(Schema::object().property("city", Schema::string())),
-        ]);
+        let request =
+            LlmRequest::new("claude-opus-5").with_tools(vec![adk_core::FunctionDeclaration::new(
+                "get_weather",
+                "Gets weather.",
+            )
+            .with_parameters(Schema::object().property("city", Schema::string()))]);
         let body = model().build_body(&request);
         let schema = &body["tools"][0]["input_schema"];
         assert_eq!(schema["type"], "object");

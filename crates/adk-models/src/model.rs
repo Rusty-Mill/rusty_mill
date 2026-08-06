@@ -31,7 +31,9 @@ pub trait Model: Send + Sync {
         &'a self,
         request: LlmRequest,
     ) -> BoxStream<'a, Result<LlmResponse>> {
-        Box::pin(stream::once(async move { self.generate_content(request).await }))
+        Box::pin(stream::once(
+            async move { self.generate_content(request).await },
+        ))
     }
 
     /// Whether this model supports streaming natively.
@@ -147,9 +149,18 @@ mod tests {
 
     fn registry() -> ModelRegistry {
         let mut r = ModelRegistry::new();
-        r.register_prefix("gemini-", Arc::new(MockModel::echo("gemini")) as SharedModel);
-        r.register_prefix("gemini-2.5", Arc::new(MockModel::echo("gemini-2.5")) as SharedModel);
-        r.register("custom-model", Arc::new(MockModel::echo("exact")) as SharedModel);
+        r.register_prefix(
+            "gemini-",
+            Arc::new(MockModel::echo("gemini")) as SharedModel,
+        );
+        r.register_prefix(
+            "gemini-2.5",
+            Arc::new(MockModel::echo("gemini-2.5")) as SharedModel,
+        );
+        r.register(
+            "custom-model",
+            Arc::new(MockModel::echo("exact")) as SharedModel,
+        );
         r
     }
 

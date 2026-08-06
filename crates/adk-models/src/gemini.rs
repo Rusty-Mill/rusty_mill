@@ -175,7 +175,11 @@ impl GeminiModel {
         {
             if let Some(text) = part.get("text").and_then(Value::as_str) {
                 // A part flagged as thought carries reasoning, not answer text.
-                if part.get("thought").and_then(Value::as_bool).unwrap_or(false) {
+                if part
+                    .get("thought")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
                     parts.push(Part::Thought(text.to_string()));
                 } else {
                     parts.push(Part::Text(text.to_string()));

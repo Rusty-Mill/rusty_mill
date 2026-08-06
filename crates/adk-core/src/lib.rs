@@ -47,7 +47,7 @@ pub use content::{Blob, Content, FileData, FunctionCall, FunctionResponse, Part,
 pub use context::{InvocationContext, RunConfig, StreamingMode};
 pub use error::{AdkError, Result};
 pub use event::{Args, Event, EventActions, NodeInfo, RequestInput, ToolConfirmation};
-pub use schema::{FunctionDeclaration, Schema, SchemaType};
+pub use schema::{FunctionDeclaration, HasSchema, Schema, SchemaType};
 pub use services::{
     ArtifactService, ArtifactVersion, MemoryEntry, MemoryService, Services, SessionService,
 };

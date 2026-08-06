@@ -309,6 +309,56 @@ impl FunctionDeclaration {
     }
 }
 
+/// Maps a Rust type to the [`Schema`] describing it.
+///
+/// Implemented for the types a tool parameter can reasonably be. The
+/// `#[adk_tool]` macro uses this to derive a declaration from a function
+/// signature, so adding an impl here makes that type usable as a parameter.
+pub trait HasSchema {
+    /// The schema describing this type.
+    fn schema() -> Schema;
+}
+
+macro_rules! impl_schema_type {
+    ($($ty:ty => $ctor:expr),* $(,)?) => {
+        $(impl HasSchema for $ty {
+            fn schema() -> Schema {
+                $ctor
+            }
+        })*
+    };
+}
+
+impl_schema_type! {
+    String => Schema::string(),
+    bool => Schema::boolean(),
+    i8 => Schema::integer(),
+    i16 => Schema::integer(),
+    i32 => Schema::integer(),
+    i64 => Schema::integer(),
+    u8 => Schema::integer(),
+    u16 => Schema::integer(),
+    u32 => Schema::integer(),
+    u64 => Schema::integer(),
+    usize => Schema::integer(),
+    isize => Schema::integer(),
+    f32 => Schema::number(),
+    f64 => Schema::number(),
+    Value => Schema::default(),
+}
+
+impl<T: HasSchema> HasSchema for Vec<T> {
+    fn schema() -> Schema {
+        Schema::array(T::schema())
+    }
+}
+
+impl<T: HasSchema> HasSchema for Option<T> {
+    fn schema() -> Schema {
+        T::schema().nullable()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +382,9 @@ mod tests {
 
     #[test]
     fn optional_property_may_be_omitted() {
-        assert!(weather_schema().validate(&json!({"city": "Paris"}), "").is_ok());
+        assert!(weather_schema()
+            .validate(&json!({"city": "Paris"}), "")
+            .is_ok());
     }
 
     #[test]
@@ -351,7 +403,9 @@ mod tests {
 
     #[test]
     fn wrong_type_is_rejected_with_a_path() {
-        let err = weather_schema().validate(&json!({"city": 42}), "").unwrap_err();
+        let err = weather_schema()
+            .validate(&json!({"city": 42}), "")
+            .unwrap_err();
         assert!(err.to_string().contains("city"), "got: {err}");
         assert!(err.to_string().contains("expected string"), "got: {err}");
     }
@@ -366,7 +420,22 @@ mod tests {
     #[test]
     fn null_is_rejected_unless_nullable() {
         assert!(Schema::string().validate(&Value::Null, "x").is_err());
-        assert!(Schema::string().nullable().validate(&Value::Null, "x").is_ok());
+        assert!(Schema::string()
+            .nullable()
+            .validate(&Value::Null, "x")
+            .is_ok());
+    }
+
+    #[test]
+    fn rust_types_map_to_the_expected_schema_types() {
+        assert_eq!(String::schema().schema_type, Some(SchemaType::String));
+        assert_eq!(i64::schema().schema_type, Some(SchemaType::Integer));
+        assert_eq!(f64::schema().schema_type, Some(SchemaType::Number));
+        assert_eq!(bool::schema().schema_type, Some(SchemaType::Boolean));
+        let list = <Vec<String>>::schema();
+        assert_eq!(list.schema_type, Some(SchemaType::Array));
+        assert_eq!(list.items.unwrap().schema_type, Some(SchemaType::String));
+        assert_eq!(<Option<i64>>::schema().nullable, Some(true));
     }
 
     #[test]

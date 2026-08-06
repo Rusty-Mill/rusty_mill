@@ -15,10 +15,8 @@ pub type ToolFuture<'a> = BoxFuture<'a, Result<Value>>;
 /// The callable a [`FunctionTool`] wraps, before being shared.
 pub trait ToolCallable: for<'a> Fn(Args, &'a ToolContext) -> ToolFuture<'a> + Send + Sync {}
 
-impl<T> ToolCallable for T where
-    T: for<'a> Fn(Args, &'a ToolContext) -> ToolFuture<'a> + Send + Sync
-{
-}
+impl<T> ToolCallable for T where T: for<'a> Fn(Args, &'a ToolContext) -> ToolFuture<'a> + Send + Sync
+{}
 
 /// The closure shape a [`FunctionTool`] wraps.
 pub type ToolFn = Arc<dyn ToolCallable>;

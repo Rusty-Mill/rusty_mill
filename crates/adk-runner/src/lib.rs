@@ -260,8 +260,8 @@ impl std::fmt::Debug for Runner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_agents::{Agent, LlmAgent};
-    use adk_core::{Schema, SessionService};
+    use adk_agents::LlmAgent;
+    use adk_core::Schema;
     use adk_models::MockModel;
     use adk_sessions::InMemorySessionService;
     use adk_tools::{FunctionTool, ToolSource};
@@ -277,7 +277,12 @@ mod tests {
 
     async fn collect(runner: &Runner, session: &Session, text: &str) -> Vec<Event> {
         runner
-            .run(&session.user_id, &session.id, Content::user_text(text), None)
+            .run(
+                &session.user_id,
+                &session.id,
+                Content::user_text(text),
+                None,
+            )
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -321,14 +326,19 @@ mod tests {
 
     #[tokio::test]
     async fn temp_state_does_not_survive_the_invocation() {
-        let tool = FunctionTool::new("scratch", "Writes scratch state.", Schema::object(), |_a, ctx| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                ctx.set_state("temp:scratch", 1);
-                ctx.set_state("durable", 2);
-                Ok(adk_tools::success(json!({})))
-            })
-        });
+        let tool = FunctionTool::new(
+            "scratch",
+            "Writes scratch state.",
+            Schema::object(),
+            |_a, ctx| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    ctx.set_state("temp:scratch", 1);
+                    ctx.set_state("durable", 2);
+                    Ok(adk_tools::success(json!({})))
+                })
+            },
+        );
         let agent = LlmAgent::builder("a")
             .model(Arc::new(
                 MockModel::new()

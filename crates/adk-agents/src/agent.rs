@@ -6,7 +6,7 @@
 //! evaluated inside the workflow graph. Rust cannot express that as trait
 //! inheritance here, because the two have genuinely different execution
 //! shapes: an agent streams [`Event`]s, while a node returns a single
-//! [`NodeOutcome`](adk_graph::NodeOutcome). Instead, [`AgentNode`] adapts any
+//! [`adk_graph::NodeOutcome`]. Instead, [`AgentNode`] adapts any
 //! agent into a [`Node`], which gives the same composition — agents, tools,
 //! and functions all appearing as nodes in one graph — without pretending the
 //! two signatures are the same.

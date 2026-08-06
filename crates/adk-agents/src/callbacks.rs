@@ -85,7 +85,11 @@ pub type AfterModelCallback = Arc<
 ///
 /// Returning `Some(value)` skips the tool and uses that value as its result.
 pub type BeforeToolCallback = Arc<
-    dyn for<'a> Fn(&'a CallbackContext, &'a str, &'a Args) -> BoxFuture<'a, Option<serde_json::Value>>
+    dyn for<'a> Fn(
+            &'a CallbackContext,
+            &'a str,
+            &'a Args,
+        ) -> BoxFuture<'a, Option<serde_json::Value>>
         + Send
         + Sync,
 >;
@@ -130,7 +134,10 @@ impl Callbacks {
     /// Sets the before-agent callback.
     pub fn before_agent<F>(mut self, f: F) -> Self
     where
-        F: for<'a> Fn(&'a CallbackContext) -> BoxFuture<'a, Option<Content>> + Send + Sync + 'static,
+        F: for<'a> Fn(&'a CallbackContext) -> BoxFuture<'a, Option<Content>>
+            + Send
+            + Sync
+            + 'static,
     {
         self.before_agent = Some(Arc::new(f));
         self
@@ -139,7 +146,10 @@ impl Callbacks {
     /// Sets the after-agent callback.
     pub fn after_agent<F>(mut self, f: F) -> Self
     where
-        F: for<'a> Fn(&'a CallbackContext) -> BoxFuture<'a, Option<Content>> + Send + Sync + 'static,
+        F: for<'a> Fn(&'a CallbackContext) -> BoxFuture<'a, Option<Content>>
+            + Send
+            + Sync
+            + 'static,
     {
         self.after_agent = Some(Arc::new(f));
         self
@@ -148,7 +158,10 @@ impl Callbacks {
     /// Sets the before-model callback.
     pub fn before_model<F>(mut self, f: F) -> Self
     where
-        F: for<'a> Fn(&'a CallbackContext, &'a mut LlmRequest) -> BoxFuture<'a, Option<LlmResponse>>
+        F: for<'a> Fn(
+                &'a CallbackContext,
+                &'a mut LlmRequest,
+            ) -> BoxFuture<'a, Option<LlmResponse>>
             + Send
             + Sync
             + 'static,
@@ -172,7 +185,11 @@ impl Callbacks {
     /// Sets the before-tool callback.
     pub fn before_tool<F>(mut self, f: F) -> Self
     where
-        F: for<'a> Fn(&'a CallbackContext, &'a str, &'a Args) -> BoxFuture<'a, Option<serde_json::Value>>
+        F: for<'a> Fn(
+                &'a CallbackContext,
+                &'a str,
+                &'a Args,
+            ) -> BoxFuture<'a, Option<serde_json::Value>>
             + Send
             + Sync
             + 'static,

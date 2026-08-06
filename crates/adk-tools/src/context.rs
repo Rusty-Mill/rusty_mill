@@ -165,7 +165,8 @@ impl ToolContext {
             .clone()
             .unwrap_or_else(|| adk_core::new_id("call"));
         self.with_actions(|a| {
-            a.requested_auth_configs.insert(call_id.clone(), auth_config);
+            a.requested_auth_configs
+                .insert(call_id.clone(), auth_config);
         });
         AdkError::ConfirmationRequired {
             function_call_id: call_id,
@@ -213,7 +214,11 @@ impl ToolContext {
     }
 
     /// Loads an artifact, defaulting to its latest version.
-    pub async fn load_artifact(&self, filename: &str, version: Option<u64>) -> Result<Option<Part>> {
+    pub async fn load_artifact(
+        &self,
+        filename: &str,
+        version: Option<u64>,
+    ) -> Result<Option<Part>> {
         let service = self
             .invocation
             .services()

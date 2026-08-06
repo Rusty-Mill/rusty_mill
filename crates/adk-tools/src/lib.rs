@@ -54,6 +54,21 @@ pub mod function;
 pub mod tool;
 pub mod toolset;
 
+/// Re-exports the `#[adk_tool]` macro's generated code depends on.
+///
+/// Routing every generated path through one module means a crate using the
+/// macro needs exactly one dependency in scope — this one, or whatever path is
+/// named with `#[adk_tool(crate = ...)]`.
+#[doc(hidden)]
+pub mod __macro_support {
+    pub use adk_core::{AdkError, Args, FunctionDeclaration, HasSchema, Result, Schema};
+    pub use async_trait::async_trait;
+    pub use serde_json;
+    pub use std::sync::Arc;
+
+    pub use crate::{Tool, ToolContext};
+}
+
 pub use context::ToolContext;
 pub use function::{FunctionTool, ToolCallable, ToolFn, ToolFuture};
 pub use tool::{invoke_tool, ConfirmationPolicy, ConfirmationPredicate, SharedTool, Tool};
@@ -113,7 +128,10 @@ mod tests {
 
     #[test]
     fn success_wraps_scalars_before_adding_status() {
-        assert_eq!(success(json!(42)), json!({"status": "success", "result": 42}));
+        assert_eq!(
+            success(json!(42)),
+            json!({"status": "success", "result": 42})
+        );
     }
 
     #[test]

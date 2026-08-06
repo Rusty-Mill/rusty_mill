@@ -171,7 +171,7 @@ impl LlmAgent {
             .content
             .as_ref()
             .map(|c| c.function_calls().into_iter().cloned().collect())
-            .unwrap_or_else(Vec::new);
+            .unwrap_or_default();
 
         for call in calls {
             let call_id = call.id.clone().unwrap_or_else(|| adk_core::new_id("call"));
@@ -700,7 +700,10 @@ mod tests {
     fn substitution_fills_known_placeholders() {
         let mut state = State::new();
         state.set("topic", "otters");
-        assert_eq!(substitute("Write about: {topic}.", &state), "Write about: otters.");
+        assert_eq!(
+            substitute("Write about: {topic}.", &state),
+            "Write about: otters."
+        );
     }
 
     #[test]
