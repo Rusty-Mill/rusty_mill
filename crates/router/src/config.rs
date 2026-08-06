@@ -50,6 +50,16 @@ pub struct ServerConfig {
     /// open.
     #[serde(default)]
     pub admin_key_env: Option<String>,
+    /// Ceiling on requests being handled at once, server-wide, across every
+    /// caller and route -- distinct from `default_rate_limit_rpm`/
+    /// `[[clients]].requests_per_minute`, which bound one caller's rate but
+    /// not the total in-flight count. A request that arrives once this many
+    /// are already in flight gets `503` immediately rather than queuing,
+    /// so a burst spread across many clients (or a single client under a
+    /// generous/no rate limit) can't exhaust upstream provider rate limits
+    /// or local resources with no backpressure. Unset means no cap.
+    #[serde(default)]
+    pub max_concurrent_requests: Option<usize>,
 }
 
 impl Default for ServerConfig {
@@ -61,6 +71,7 @@ impl Default for ServerConfig {
             api_key_env: None,
             default_rate_limit_rpm: None,
             admin_key_env: None,
+            max_concurrent_requests: None,
         }
     }
 }
@@ -782,6 +793,7 @@ mod tests {
         assert_eq!(config.server.default_rate_limit_rpm, None);
         assert_eq!(config.server.admin_key_env, None);
         assert_eq!(config.server.max_body_bytes, 20 * 1024 * 1024);
+        assert_eq!(config.server.max_concurrent_requests, None);
     }
 
     #[test]
@@ -797,6 +809,7 @@ mod tests {
             default_rate_limit_rpm = 60
             admin_key_env = "RP_ADMIN_KEY"
             max_body_bytes = 1048576
+            max_concurrent_requests = 50
             "#,
         )
         .unwrap();
@@ -806,6 +819,7 @@ mod tests {
         assert_eq!(config.server.default_rate_limit_rpm, Some(60));
         assert_eq!(config.server.admin_key_env.as_deref(), Some("RP_ADMIN_KEY"));
         assert_eq!(config.server.max_body_bytes, 1048576);
+        assert_eq!(config.server.max_concurrent_requests, Some(50));
     }
 
     // --- providers -------------------------------------------------------------

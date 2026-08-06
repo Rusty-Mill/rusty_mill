@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use axum::extract::{ConnectInfo, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -68,6 +69,29 @@ pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Respons
     }
 
     Some(json_error(401, "missing or invalid API key"))
+}
+
+/// Enforces `server.max_concurrent_requests` (`state.concurrency_limiter`)
+/// across every route, ahead of auth/rate-limiting: a `try_acquire` costs
+/// nothing but a semaphore check, so a saturated server sheds load before
+/// paying for anything more expensive. `None` limiter (the default, no cap
+/// configured) is a no-op.
+///
+/// Sheds with an immediate `503` rather than queuing behind
+/// `Semaphore::acquire` -- a caller waiting behind a long queue at a
+/// saturated server is worse than a caller told plainly to retry.
+pub async fn concurrency_limit(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(limiter) = &state.concurrency_limiter else {
+        return next.run(request).await;
+    };
+    match Arc::clone(limiter).try_acquire_owned() {
+        Ok(_permit) => next.run(request).await,
+        Err(_) => json_error(503, "server is at capacity, try again shortly"),
+    }
 }
 
 /// Guards the MCP endpoint (`[mcp]`) with the exact same `check_auth` every
@@ -296,6 +320,7 @@ mod tests {
             jwt: None,
             mcp: None,
             mcp_path: "/mcp".to_string(),
+            concurrency_limiter: None,
         }
     }
 

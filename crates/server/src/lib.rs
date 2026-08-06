@@ -88,5 +88,9 @@ pub fn build_app(state: AppState) -> AxumRouter {
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .layer(DefaultBodyLimit::max(max_body_bytes))
+        // Outermost: a shed request costs a semaphore try-acquire and
+        // nothing else -- ahead of body-limit/CORS/tracing, the same
+        // "cheapest rejection first" ordering `mount_mcp`'s own guard uses.
+        .layer(from_fn_with_state(state.clone(), routes::concurrency_limit))
         .with_state(state)
 }

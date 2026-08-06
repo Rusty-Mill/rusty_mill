@@ -104,6 +104,11 @@ async fn main() -> anyhow::Result<()> {
         .map(|c| c.path.clone())
         .unwrap_or_else(|| "/mcp".to_string());
 
+    let concurrency_limiter = config.server.max_concurrent_requests.map(|max| {
+        tracing::info!(max, "global concurrency cap enabled");
+        Arc::new(tokio::sync::Semaphore::new(max))
+    });
+
     let state = AppState {
         router,
         api_key,
@@ -116,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         jwt,
         mcp,
         mcp_path,
+        concurrency_limiter,
     };
 
     if std::env::var("MCP_STDIO").is_ok() {

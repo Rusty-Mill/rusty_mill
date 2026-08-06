@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use rp_core::RateLimiter;
 use rp_mcp::RustyMcpServer;
 use rp_router::{ClientConfig, Router};
+use tokio::sync::Semaphore;
 
 use crate::jwt::JwtVerifier;
 
@@ -63,4 +64,12 @@ pub struct AppState {
     /// Path the MCP endpoint is mounted at when `mcp` is `Some`
     /// (`[mcp].path`, default `/mcp`). Unused otherwise.
     pub mcp_path: String,
+    /// Server-wide in-flight request cap (`server.max_concurrent_requests`),
+    /// enforced by `concurrency_limit` as a `try_acquire` -- a request that
+    /// arrives once every permit is checked out gets `503` immediately
+    /// rather than queuing. `None` means no cap, the same as before this
+    /// field existed. Distinct from `rate_limiter` above: that bounds one
+    /// caller's *rate*, this bounds the *total in-flight count* across
+    /// every caller and route.
+    pub concurrency_limiter: Option<Arc<Semaphore>>,
 }

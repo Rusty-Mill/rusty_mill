@@ -24,6 +24,12 @@ port = 8080
 # this. Leaving it unset disables the admin API entirely (404s, as if the
 # routes didn't exist).
 # admin_key_env = "RUSTY_PROVIDER_ADMIN_KEY"
+# Ceiling on requests being handled at once, server-wide, across every
+# caller and route -- distinct from default_rate_limit_rpm/
+# [[clients]].requests_per_minute above, which bound one caller's rate but
+# not the total in-flight count. A request past this cap gets 503
+# immediately rather than queuing. Unset (the default) means no cap.
+# max_concurrent_requests = 200
 
 # --- JWT/OIDC auth (optional) ------------------------------------------------
 # An additional way to authenticate, alongside (never instead of) api_key_env/

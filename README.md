@@ -982,6 +982,25 @@ up in `GET /metrics` (`rusty_provider_dispatch_attempts_total` with
 the same in-memory, per-process, resets-on-restart token buckets as
 everything else this router tracks itself.
 
+### Concurrency cap
+
+`server.max_concurrent_requests` bounds requests being handled *at once*,
+server-wide, across every caller and route — a different axis from the
+rate limiting above, which bounds one caller's request *rate* but not the
+total number in flight. A burst spread across many clients (or a single
+client under a generous/no rate limit) can still exhaust upstream provider
+rate limits or local resources with no backpressure; this closes that gap:
+
+```toml
+[server]
+max_concurrent_requests = 200
+```
+
+Once that many requests are in flight, the next one gets `503` immediately
+rather than queuing — a caller waiting behind a long queue at an already-
+saturated server is worse than one told plainly to retry. Unset (the
+default) means no cap, same as before this existed.
+
 ## Request body size limit
 
 `server.max_body_bytes` caps an inbound request body, in bytes, rejected
