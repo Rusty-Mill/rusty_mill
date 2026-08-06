@@ -58,8 +58,10 @@ surface where every admitted symbol is listed and justified.
   `libc` crate (default, D-2) and **rusty_libc** raw syscalls behind
   `track-p` (D-12). Migrated call-by-call: read/write, the openat family
   (statx), pipe2/poll, kill/wait4/rt_sigaction incl. the SA_RESTORER
-  trampoline. Remaining: posix_spawn (design decision — see below),
-  getdents64 and pidfd_open (upstream additions to rusty_libc).
+  trampoline. `posix_spawn` stays permanently on both configurations —
+  a decided design choice, not a gap (see "Decided" below); remaining
+  open items are getdents64 and pidfd_open (upstream additions to
+  rusty_libc).
 - **platform-windows** — `sys/{nt,proc,fileio,csignals}` + `winargv` over
   windows-sys (D-1). **rusty_win32** is the extraction donor whose typed-
   handle and wait_any patterns were mined (extraction map D-repos); it
@@ -167,11 +169,33 @@ time; a tool needing a gated surface (rusty_naner → Terminal) is itself
 the named consumer that unparks it. Convergence PRs land in the tool's
 repo; new-surface PRs land here, consumer named in §3's table first.
 
-## Open item recorded
+## Decided: Layer 1 Linux spawn stays `posix_spawn`
 
-The one active disagreement between this picture and current code:
-Layer 1 Linux spawn is `posix_spawn` (libc userspace) while the target
-picture says raw fork/execve. Adopting rusty_libc's fork+execve means
-owning the async-signal-safety story `posix_spawn` outsources to glibc.
-Decision parked with the owner; until then `posix_spawn` remains on both
-the libc and track-p configurations.
+This picture used to show raw `fork`/`execve` as the Layer 1 Linux
+target, disagreeing with the code's actual `posix_spawn` choice —
+recorded here as an open item and left for an owner call
+(`docs/decision-request-fork-execve.md` has the full investigation).
+
+**Decided 2026-08-06: option 1 — stay on `posix_spawn` indefinitely.**
+This picture now reflects that as the settled design, not an
+aspiration current code falls short of. Reasoning, in brief (full
+record in the decision doc): `posix_spawn` already removes the
+async-signal-safe critical region entirely — every allocation happens
+in the parent, before the call — which is the safety property that
+matters, not something raw fork would improve on. PTY hosting (D13)
+already faced this identical fork-vs-`posix_spawn` choice under real
+pressure and picked `posix_spawn` (`POSIX_SPAWN_SETSID` in place of
+`fork`+`TIOCSCTTY`) specifically to avoid reopening this hazard —
+established precedent, not a fresh call made in isolation. And
+`docs/decision-request-fork-execve.md`'s own research found "adopting
+rusty_libc's fork+execve" describes donor material that doesn't
+exist yet (no `fork`/`execve`/`clone` anywhere in that crate) — going
+raw would mean commissioning a new hazard class in a second repo, with
+no named consumer forcing it, for a benefit that's Track P's own
+aspirational "no glibc in the spawn path" rather than a concrete
+requirement.
+
+`memfd_create` (D11) — the one piece this decision's "if resolved
+toward raw" branch would have needed as a prerequisite — landed
+independently anyway (`docs/decision-request-fork-execve.md`'s option
+3): useful on its own, not contingent on this outcome.
