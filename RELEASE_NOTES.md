@@ -24,6 +24,17 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #111 — rp-cli: cover [jwt].hs256_secret_env in keys check / config check
+**2026-08-06** · [#111](https://github.com/baileyrd/rusty_provider/pull/111)
+
+- **Fixed:** `rp-cli keys check` silently omitted `jwt.hs256_secret_env`
+  (added after `rp-cli` itself was written) from its audit, and
+  `config check` never reported JWT status at all. Found via a live
+  smoke-test of the running server rather than the existing test suite.
+  Both now report it, mirroring the existing admin-API status line.
+
+---
+
 ## PR #110 — Add [jwt] JWT/OIDC bearer-token authentication
 **2026-08-06** · [#110](https://github.com/baileyrd/rusty_provider/pull/110)
 
