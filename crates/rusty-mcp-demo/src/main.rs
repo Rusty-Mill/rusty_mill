@@ -16,6 +16,7 @@
 //! selection, logging and shutdown. Everything specific to this server lives in
 //! [`server`] and [`tools`].
 
+mod completions;
 mod prompts;
 mod resources;
 mod server;
@@ -60,6 +61,14 @@ async fn main() -> Result<(), rusty_mcp::ServeError> {
     });
 
     rusty_mcp::telemetry::init(&config.log_filter);
+
+    // A completion registered against a prompt or template that does not exist
+    // answers every request with an empty list, which a client cannot tell from
+    // having nothing to suggest. Say so at startup rather than never.
+    let dangling = DemoServer::new().dangling_completions();
+    if !dangling.is_empty() {
+        tracing::warn!(?dangling, "completions registered against nothing");
+    }
 
     rusty_mcp::serve(
         move || {

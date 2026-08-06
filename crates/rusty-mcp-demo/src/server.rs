@@ -9,7 +9,10 @@ use rmcp::{
     prompt_handler, tool_handler,
 };
 use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
-use rusty_mcp::{mrtr::InputGate, resources::ResourceRegistry, subscriptions::ChangeBroadcaster};
+use rusty_mcp::{
+    completion::CompletionRegistry, mrtr::InputGate, resources::ResourceRegistry,
+    subscriptions::ChangeBroadcaster,
+};
 
 use crate::tools::confirm::PendingDrop;
 
@@ -31,6 +34,7 @@ pub struct DemoServer {
     pub(crate) state: Arc<DemoState>,
     pub(crate) tasks: TaskSupport,
     pub(crate) resources: ResourceRegistry,
+    pub(crate) completions: CompletionRegistry,
     pub(crate) changes: ChangeBroadcaster,
     pub(crate) confirmations: InputGate<PendingDrop>,
     tool_router: ToolRouter<Self>,
@@ -79,6 +83,7 @@ impl DemoServer {
             changes,
             confirmations: demo_input_gate(),
             resources: crate::resources::registry(),
+            completions: crate::completions::registry(),
             // Each module contributes its own router; `+` merges them. Adding a
             // module is one more term here and nothing else.
             tool_router: Self::calculator_tools()
@@ -88,6 +93,26 @@ impl DemoServer {
                 + Self::confirm_tools(),
             prompt_router: Self::demo_prompts(),
         }
+    }
+
+    /// Completions registered against a prompt or template that does not exist.
+    ///
+    /// Worth checking, because the failure is silent: a typo in a prompt name
+    /// is accepted at registration, and the client — asking under the real name
+    /// — gets an empty list back, which looks exactly like having nothing to
+    /// suggest. `tests::every_completion_points_at_something` runs this, so a
+    /// rename that orphans a completion fails CI rather than shipping.
+    pub fn dangling_completions(&self) -> Vec<String> {
+        let prompts: Vec<String> = self
+            .prompt_router
+            .list_all()
+            .into_iter()
+            .map(|prompt| prompt.name.to_string())
+            .collect();
+        let prompts: Vec<&str> = prompts.iter().map(String::as_str).collect();
+
+        self.completions
+            .dangling(&prompts, &self.resources.template_uris())
     }
 }
 
@@ -142,6 +167,9 @@ impl ServerHandler for DemoServer {
                 .enable_resources_subscribe()
                 .enable_prompts_list_changed()
                 .enable_tool_list_changed()
+                // Without this a client never calls `completion/complete`, and
+                // the registry below is dead weight.
+                .enable_completions()
                 .enable_tasks()
                 .build(),
         )
@@ -156,5 +184,20 @@ impl ServerHandler for DemoServer {
 
     rusty_mcp::forward_task_methods!(tasks);
     rusty_mcp::forward_resource_methods!(resources);
+    rusty_mcp::forward_completion_methods!(completions);
     rusty_mcp::forward_subscription_methods!(changes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_completion_points_at_something() {
+        let dangling = DemoServer::new().dangling_completions();
+        assert!(
+            dangling.is_empty(),
+            "these completions will never fire: {dangling:?}"
+        );
+    }
 }

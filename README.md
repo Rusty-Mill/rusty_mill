@@ -170,6 +170,99 @@ decoding cannot reintroduce a separator.
 
 Templates are RFC 6570 **level 1**: `{var}` placeholders only, no operators.
 
+### Lists are paginated
+
+`resources/list` and `resources/templates/list` page at
+`DEFAULT_PAGE_SIZE` (100), overridable with `.with_page_size(n)`. The
+generated handlers thread the client's cursor through, so there is nothing to
+wire up.
+
+The cursor carries a **key, not an index**, and pages are ordered by URI rather
+than by registration order. Two things follow, and both are the reason for the
+choice:
+
+- A fabricated cursor names some position in the key space instead of an offset
+  into a slice, so there is no out-of-range read to defend against.
+- An entry added or removed between requests cannot shift the page boundary. A
+  cursor stays valid even when the entry it names is the one that was deleted.
+
+A cursor that does not decode — wrong encoding, wrong version, or minted for
+the other sequence — is `-32602`, not a silently empty page. A client that has
+lost its place should be told.
+
+## Completion
+
+`completion/complete` is what lets a client suggest values for a prompt
+argument or a resource-template variable, instead of the user having to already
+know that `db://tables/{table}` wants `users`. `rmcp` ships the wire types but
+no router, so this crate provides one:
+
+```rust
+use rmcp::model::Reference;
+use rusty_mcp::completion::{CompletionRegistry, CompletionRequest};
+
+let completions = CompletionRegistry::new()
+    // A fixed list.
+    .with_values(
+        Reference::for_prompt("explain-error"),
+        "language",
+        ["rust", "python", "typescript"],
+    )
+    // Computed per request — and able to depend on the arguments already
+    // filled in, which is what makes a `column` argument narrow to the
+    // `table` the user just picked.
+    .with_completer(
+        Reference::for_resource("db://{schema}/{table}"),
+        "table",
+        |req: CompletionRequest| async move {
+            Ok(tables_in(req.argument("schema").unwrap_or("public")))
+        },
+    );
+```
+
+```rust
+impl ServerHandler for DemoServer {
+    fn get_info(&self) -> ServerInfo { /* ... enable_completions() */ }
+    rusty_mcp::forward_completion_methods!(completions);
+}
+```
+
+A completer returns **candidates**, not a finished result. Prefix matching
+(case-insensitive), sorting, the spec's 100-value cap and the `hasMore` flag
+are applied for you, and `total` reports the count *before* the cap so a client
+can tell "these are the only three" from "here are 100 of many".
+
+### Advertise it or nothing happens
+
+`enable_completions()` is not optional decoration. A client that is not told
+the server completes will never call the method, and the registry is dead
+weight.
+
+### A typo is silent without `dangling()`
+
+Registering a completion against a prompt name that does not exist is accepted
+without complaint, and the client — asking under the real name — gets an empty
+list, which is indistinguishable from having nothing to suggest. Nothing ever
+errors.
+
+Checking at registration time would mean the completion registry holding a
+reference to the prompt router and the resource registry, which inverts the
+composition everything else here uses. So the check is a call instead:
+
+```rust
+let dangling = completions.dangling(&prompt_names, &resources.template_uris());
+assert!(dangling.is_empty(), "completions that will never fire: {dangling:?}");
+```
+
+The demo runs this both as a test — so a prompt rename that orphans a
+completion fails CI — and at startup, where it logs a warning.
+
+### It runs while someone is typing
+
+Clients call completion per keystroke, or close to it. A completer that queries
+a database on every call is felt directly as input lag; cache the candidate
+list and let the registry do the filtering.
+
 ## Shared state
 
 Streamable HTTP builds a **fresh handler per request**, so anything that must

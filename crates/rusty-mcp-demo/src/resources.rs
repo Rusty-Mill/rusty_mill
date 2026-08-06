@@ -7,7 +7,7 @@ use rmcp::model::{ErrorData, Resource, ResourceContents, ResourceTemplate};
 use rusty_mcp::resources::{ReadRequest, ResourceRegistry};
 
 /// Tables the `db://tables/{table}` template will serve.
-const TABLES: &[(&str, &[&str])] = &[
+pub(crate) const TABLES: &[(&str, &[&str])] = &[
     ("users", &["id", "email", "created_at"]),
     ("orders", &["id", "user_id", "total_cents"]),
 ];

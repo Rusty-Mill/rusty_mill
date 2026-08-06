@@ -61,6 +61,7 @@
 
 pub mod auth;
 pub mod cli;
+pub mod completion;
 pub mod config;
 pub mod error;
 pub mod mrtr;
@@ -139,9 +140,10 @@ pub mod __private {
     pub use rmcp::{
         ErrorData,
         model::{
-            CancelTaskParams, GetTaskParams, GetTaskResult, ListResourceTemplatesResult,
-            ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
-            ReadResourceResponse, ReadResourceResult, SubscriptionFilter, UpdateTaskParams,
+            CancelTaskParams, CompleteRequestParams, CompleteResult, GetTaskParams, GetTaskResult,
+            ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+            ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
+            SubscriptionFilter, UpdateTaskParams,
         },
         service::{RequestContext, RoleServer, SubscriptionContext},
     };
