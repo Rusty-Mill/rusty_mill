@@ -1580,6 +1580,15 @@ deleted at runtime through this API — the change just doesn't get written
 back to `config.toml`, so a later restart reverts it to what the file
 says.
 
+Every successful mutation (`admin_create_client`, `admin_update_client`,
+`admin_delete_client`, `admin_reset_client_spend`) emits a structured
+`tracing::info!` audit line — `identity` (`"global"` or `"scoped"`),
+`organization` (empty for global or an unscoped caller), `action`, and
+`target` (the client name acted on) — so "who changed this client's
+budget, and when" is answerable from logs. Rejected/no-op requests (`404`,
+`409`, a validation error) aren't logged here, since nothing changed for
+there to be anything to record.
+
 ## Organizations, workspaces & roles
 
 `[[clients]]` entries (config-defined or admin-API-provisioned) can carry
