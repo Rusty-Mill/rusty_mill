@@ -1291,6 +1291,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rp-cli"
+version = "0.1.0"
+dependencies = [
+ "regex",
+ "rp-router",
+]
+
+[[package]]
 name = "rp-core"
 version = "0.1.0"
 dependencies = [

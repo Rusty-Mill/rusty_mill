@@ -53,6 +53,10 @@ entries are tracked by PR rather than by release.
   existing `"middle-out"`. A built-in, content-sniffed 5-category filter
   catalog (git/test/build/package/generic) compacts `role: "tool"` message
   text before dispatch; composes with `"middle-out"` when both are set.
+- **Added:** `rp-cli` — a new 5th workspace crate, a synchronous read-only
+  operator CLI (`config check`/`providers list`/`keys check`) built
+  directly on `rp-router::Config`, so it can never drift from the schema
+  the real server loads. Not built into the Docker image.
 
 ---
 

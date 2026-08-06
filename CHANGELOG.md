@@ -13,6 +13,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `"free_tier_remaining"`.
 - `transforms: ["rtk"]` — built-in tool-output compression (git/test/
   build/package/generic categories), composable with `"middle-out"`.
+- `rp-cli` — new 5th workspace crate, a read-only operator CLI (`config
+  check`/`providers list`/`keys check`).
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002).

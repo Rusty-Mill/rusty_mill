@@ -60,6 +60,35 @@ orchestrator's liveness/readiness probes at [`/health` and
 also baked into the image for Compose/Fly/Railway-style deployments that
 check container health directly rather than via an external prober.
 
+### Operator CLI
+
+`rp-cli` is a small, synchronous, read-only companion binary for checking
+a config before you deploy it — it never makes a network call and never
+prints a resolved secret's value, only whether its env var is set:
+
+```sh
+cargo run -p rp-cli -- config check --path config.toml
+cargo run -p rp-cli -- providers list --path config.toml
+cargo run -p rp-cli -- keys check --path config.toml
+```
+
+- **`config check`** — parses `config.toml` (the exact same `Config` type
+  and TOML schema `rp-server` loads at startup, so there's nothing for
+  this to drift out of sync with), then reports provider/route/client
+  counts, which providers will actually activate vs. get skipped (and
+  why), any invalid `[[guardrails]]` regex, and whether persistence/the
+  admin API are configured.
+- **`providers list`** — every `[providers.*]` entry with its resolved
+  status (`active` or `skipped (X not set)`).
+- **`keys check`** — every `*_env` field this config references (provider/
+  client keys, `server.api_key_env`/`admin_key_env`, and any configured
+  `[persistence]`/`[webhook]`/`[moderation]`/`[web_search]` credential),
+  each marked `set`/`NOT SET` — never the actual value.
+
+`--path` defaults to `config.toml` in the current directory. Not built
+into the Docker image described above (`rp-server` only) — run it from a
+checkout, or `cargo install --path crates/cli` for a standalone binary.
+
 ## API
 
 ### `POST /v1/chat/completions`

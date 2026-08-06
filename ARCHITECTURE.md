@@ -28,7 +28,7 @@ fallback logic is written once and never branches on provider identity.
 
 ## Structure
 
-A 4-crate Cargo workspace, layered so each crate only depends on the ones
+A 5-crate Cargo workspace, layered so each crate only depends on the ones
 before it:
 
 - `rp-core` — the shared request/response types (OpenAI chat-completions
@@ -49,6 +49,11 @@ before it:
   extraction/auth, and translating `Router` results to HTTP responses.
   Deliberately thin — almost no policy logic lives here, so the same
   `Router` could in principle be driven by a different transport.
+- `rp-cli` — a small, synchronous, read-only operator tool (`config
+  check`/`providers list`/`keys check`) built on `rp-router::Config`
+  directly, so it can never drift from the schema `rp-server` actually
+  loads. Not part of the request-serving path at all, and not built into
+  the Docker image.
 
 This is a modular monolith by design, not a stepping stone to
 microservices — one process, one deploy artifact. The crate boundaries
