@@ -179,6 +179,43 @@ appended after the read arrives live, anything before it is in the read. That le
 rather than a gap, and the index is what removes it exactly. Resuming a run that has already
 finished replays the log and closes.
 
+#### Riding out a transient failure
+
+The same fleet that drops streams also drops ordinary requests: a balancer returns 502 mid-deploy,
+a replica still starting returns 503, a connection is recycled between the request and the
+response. The client retries these itself, with exponential backoff and jitter, honouring
+`Retry-After` when the server sends one:
+
+```rust
+let client = AcpClient::builder("http://localhost:8000")
+    .retry(RetryPolicy { max_retries: 3, ..Default::default() })   // the default
+    .build()?;
+
+let client = AcpClient::builder("http://localhost:8000")
+    .retry(RetryPolicy::disabled())   // every failure reaches the caller
+    .build()?;
+```
+
+Retried: connect errors, timeouts, 429, 502, 503 and 504. **Not 500** — that is what a server
+returns when the *agent* failed, which a second attempt reproduces rather than resolves.
+
+**Creating or resuming a run is not retried by default**, and reads and cancellations are. The
+asymmetry is deliberate: a submission that timed out may well have been received and started, and
+ACP has no idempotency key that would let a retry collapse into the first attempt — so retrying can
+leave two runs behind, each with the side effects of one. Reading twice costs a round trip, and
+cancelling a run that is already cancelling is a no-op. Callers whose agents are idempotent, or who
+would rather have a duplicate run than a failed submission, can opt in:
+
+```rust
+.retry(RetryPolicy { retry_run_submission: true, ..Default::default() })
+```
+
+`wait_for_run` and `cancel_and_wait` treat a transient failure mid-wait as *not settled yet* rather
+than as an answer, and keep polling until their deadline — a wait that exists to outlast a slow run
+should not be ended by one bad poll. If the deadline arrives with the failure still happening, that
+failure is what is reported, not a timeout that would hide it. Switching retrying off switches this
+off too, so `RetryPolicy::disabled()` means one thing everywhere.
+
 On the server side, stream output part by part:
 
 ```rust
@@ -394,6 +431,10 @@ and the client's `wait_for_run` / `cancel_and_wait` take `WaitOptions` with a de
 let run = client.wait_for_run(run_id, WaitOptions::default()).await?;
 let run = client.wait_for_run(run_id, WaitOptions::default().without_timeout()).await?;
 ```
+
+Losing the replica a caller happened to be talking to is the ordinary case here rather than an
+outage, which is why the client [retries transient failures](#riding-out-a-transient-failure)
+instead of surfacing them.
 
 ### Recovering a lost run, instead of just failing it
 

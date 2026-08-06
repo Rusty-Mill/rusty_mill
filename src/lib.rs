@@ -161,6 +161,24 @@ impl AcpError {
         }
     }
 
+    /// Whether this failure is worth trying again.
+    ///
+    /// True for a transport failure, and for the statuses that mean *not now*:
+    /// 429, 502, 503 and 504. **Not** true of 500 — that is what a server
+    /// returns when the agent itself failed, and a second attempt reproduces it
+    /// rather than resolving it.
+    ///
+    /// The client applies this itself under its
+    /// [`RetryPolicy`](client::RetryPolicy); it is public so that callers
+    /// wrapping their own loop around a run can make the same distinction.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            AcpError::Transport(_) => true,
+            AcpError::Http { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+            _ => false,
+        }
+    }
+
     /// Whether this is a [`ErrorCode::NotFound`](types::ErrorCode::NotFound)
     /// protocol error, or an HTTP 404.
     pub fn is_not_found(&self) -> bool {
