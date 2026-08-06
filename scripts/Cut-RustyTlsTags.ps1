@@ -142,10 +142,16 @@ function Assert-Prerequisites {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
         throw "gh CLI not found on PATH. https://cli.github.com/"
     }
-    $auth = Invoke-Gh @('auth', 'status') -AllowFailure
-    if ($auth.ExitCode -ne 0) { throw "gh is not authenticated. Run: gh auth login" }
+    # `gh auth status` is NOT checked here, deliberately: it exits 0 even when
+    # it prints "The token in GH_TOKEN is invalid." -- measured, not assumed.
+    # An exit code that says success while the body says failure is worse than
+    # no check, so the probe below is the whole test. It also covers what
+    # `auth status` cannot know: too-narrow scopes, and a network path that
+    # intercepts api.github.com and answers 403 on its behalf.
     $probe = Invoke-Gh @('api', "repos/$Repo", '--jq', '.full_name') -AllowFailure
-    if ($probe.ExitCode -ne 0) { throw "Cannot read $Repo through gh. $($probe.Output)" }
+    if ($probe.ExitCode -ne 0) {
+        throw "Cannot reach $Repo through gh. Check ``gh auth status``, that the token carries ``repo`` scope, and that nothing is intercepting api.github.com. gh said: $($probe.Output)"
+    }
     Write-Verbose "Authenticated, and $Repo is readable."
 }
 

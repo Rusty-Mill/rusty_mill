@@ -5,6 +5,29 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Fixed
+- **Both scripts under `scripts/` gated on `gh auth status`, which exits `0`
+  even when it prints "The token in `GH_TOKEN` is invalid."** Measured, not
+  assumed. An exit code reporting success while the body reports failure makes
+  the check decorative, and in `New-RustyTlsReleases.ps1` that check guarded
+  every call below it.
+
+  Both now probe with a real authenticated request instead. That also covers
+  what `auth status` cannot know: a token whose scopes are too narrow, and a
+  network path that intercepts `api.github.com` and answers `403` on its
+  behalf — which is exactly what this repo's own build environment does, and
+  is how the bug was found.
+
+  `Cut-RustyTlsTags.ps1` was already protected by accident: it made the same
+  mistake but followed it with an API probe that does return non-zero. The
+  redundant `auth status` check is gone from both, rather than left to imply a
+  guarantee it never provided.
+
+  **This is the same shape as the ANSI-colour incident this repo has already
+  recorded once** — a check believed because of an exit code that was not the
+  exit code of the thing being checked. There, colour codes hid a failure from
+  a grep. Here, `gh` reports `0` for a state it has just described as broken.
+
 ### Added
 - **The release tooling is in the repo, under `scripts/`.**
   `Cut-RustyTlsTags.ps1` creates the annotated version tags;
