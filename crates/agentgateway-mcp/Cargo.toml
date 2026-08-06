@@ -1,0 +1,5 @@
+[package]
+name = "agentgateway-mcp"
+version = "0.1.0"
+edition.workspace = true
+publish = false
