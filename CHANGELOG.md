@@ -16,6 +16,34 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
+### Added
+
+- An exemption marker for `scripts/check-versions.sh` ([#28]):
+
+  ```markdown
+  <!-- check-versions: ignore -->
+  ```
+
+  It covers the rest of its own line, the line after it, and — when that next
+  line opens a fenced code block — the whole block. That last rule is there
+  because the most useful thing to write is the snippet that actually misled
+  someone, and a marker cannot go inside a fence without rendering as code.
+
+  The check matches textually, so it had fired three times on prose *quoting*
+  an old snippet — every time in a passage explaining the bug the check exists
+  to prevent — and each time the fix was to reword the documentation into
+  something vaguer. All three passages are restored to showing the real
+  snippet.
+
+  Nothing is inferred beyond those rules. `--list-exemptions` prints every one
+  with its file and line, so exempting something cannot be quiet.
+
+  `--self-test` asserts both directions on throwaway fixtures — unmarked stale
+  tags rejected, marked ones accepted, same-line and fenced markers honoured,
+  the exemption ending at the closing fence, and exempting *everything* still
+  failing rather than silently guarding nothing. It runs in CI. This check had
+  never been observed to reject anything before now.
+
 ### Fixed
 
 - **`tools/list` and `prompts/list` accepted a pagination cursor and ignored
@@ -63,6 +91,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   value, same path.
 
 [#26]: https://github.com/baileyrd/rusty_mcp/issues/26
+[#28]: https://github.com/baileyrd/rusty_mcp/issues/28
 
 ## [0.4.1] — 2026-08-06
 
@@ -95,8 +124,9 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ### Notes
 
-This was found by checking, after tagging, that the template's own git
-dependency on the `v0.4.0` tag actually resolved — the first time that tag
+This was found by checking, after tagging, that the template's own
+<!-- check-versions: ignore -->
+`tag = "v0.4.0"` dependency actually resolved — the first time that tag
 existed to test against. `check-template.sh` cannot catch it by construction, because
 it rewrites the dependency to a **path** and so never exercises the git route
 that every real consumer takes. That blind spot is now documented in the
@@ -204,9 +234,11 @@ examined. Those deviations are recorded here rather than quietly dropped.
 
 - `scripts/check-versions.sh`, asserting that every `tag = "vX.Y.Z"` in the
   README, the CHANGELOG preamble and the template names the current crate
-  version. This is a regression test for something that already shipped: the
-  README told readers to depend on the `v0.2.0` tag with `features = ["otel"]`,
-  a tag predating the feature, so following it verbatim did not compile.
+  version. This is a regression test for something that already shipped — the
+  README told readers to use
+  <!-- check-versions: ignore -->
+  `rusty-mcp = { git = "...", tag = "v0.2.0", features = ["otel"] }`, a tag
+  predating the feature, so following it verbatim did not compile.
 
 ### Fixed
 

@@ -94,9 +94,15 @@ tasks, subscriptions or MRTR wired up for real.
 ### The template cannot rot
 
 A template is a second copy of the API surface, and second copies go stale
-silently — this repo has already shipped one instance, a README telling readers
-to depend on the `v0.2.0` tag with `features = ["otel"]`. That tag predated the
-feature, so following the instructions verbatim did not compile.
+silently — this repo has already shipped one instance. The README told readers:
+
+<!-- check-versions: ignore -->
+```toml
+rusty-mcp = { git = "...", tag = "v0.2.0", features = ["otel"] }
+```
+
+That tag predated the `otel` feature, so following the instructions verbatim
+did not compile.
 
 So CI generates the project and builds, lints and tests it on every pull
 request, against the working tree rather than the published tag. A library
@@ -113,12 +119,29 @@ cannot come back.
 and the template names the current crate version — which is exactly the failure
 above, caught this time.
 
-Both run locally too:
+Prose that *quotes* an old snippet, like the one above, is exempted explicitly:
+
+```markdown
+<!-- check-versions: ignore -->
+```
+
+That covers the rest of its line, the line after, and — when that next line
+opens a fenced block — the whole block. It exists because the check fired three
+times on passages explaining the very bug it prevents, and each time the fix
+was to make the documentation vaguer. A check that degrades the docs every time
+it fires is taxing the wrong thing.
+
+Nothing is inferred beyond those rules, and every exemption is listable:
 
 ```bash
-./scripts/check-versions.sh
+./scripts/check-versions.sh                    # check
+./scripts/check-versions.sh --list-exemptions  # what is exempted, and where
+./scripts/check-versions.sh --self-test        # prove both directions work
 ./scripts/check-template.sh
 ```
+
+The self-test runs in CI. A check nobody has watched fail is a check nobody
+knows works — and this one had never been seen to reject anything.
 
 ## Writing tools
 
