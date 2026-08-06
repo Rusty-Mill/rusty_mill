@@ -107,6 +107,7 @@ type ApiResult<T> = Result<T, ApiError>;
 pub(crate) fn router(server: Arc<AcpServer>) -> Router {
     let router = Router::new()
         .route("/ping", get(ping))
+        .route("/ready", get(ready))
         .route("/agents", get(list_agents))
         .route("/agents/{name}", get(get_agent))
         .route("/runs", post(create_run))
@@ -147,6 +148,36 @@ async fn well_known_agents(State(server): State<Arc<AcpServer>>) -> ApiResult<Re
 
 async fn ping() -> Json<serde_json::Value> {
     Json(serde_json::json!({}))
+}
+
+/// Readiness, for a load balancer rather than for an ACP client.
+///
+/// **Not part of ACP**, which specifies `/ping` and nothing else. `/ping` is
+/// liveness — this process is up — and a supervisor deciding whether to restart
+/// wants exactly that. A load balancer deciding whether to *route* is asking
+/// something else, and answering it with liveness means a replica whose store
+/// is unreachable keeps taking traffic and failing everything it is handed.
+///
+/// 200 when this replica should be sent work, 503 when it should not. The body
+/// is deliberately not an ACP error object: nothing here is an ACP failure, and
+/// an ACP client should never be reading this endpoint at all.
+async fn ready(State(server): State<Arc<AcpServer>>) -> Response {
+    let readiness = server.readiness().await;
+    let status =
+        if readiness.is_ready() { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+
+    let mut body = serde_json::json!({
+        "ready": readiness.is_ready(),
+        "accepting": server.is_accepting(),
+        "executing": server.executing(),
+    });
+    if let Some(reason) = readiness.reason() {
+        body["reason"] = serde_json::Value::String(reason.to_string());
+    }
+    if let crate::server::Readiness::StoreUnreachable(detail) = &readiness {
+        body["detail"] = serde_json::Value::String(detail.clone());
+    }
+    (status, Json(body)).into_response()
 }
 
 /// Pagination for `GET /agents`.

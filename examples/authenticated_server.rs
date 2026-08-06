@@ -19,7 +19,8 @@
 //! cargo run --example authenticated_server --features well-known
 //!
 //! # Open, on purpose:
-//! curl -s localhost:8000/ping                             # health check
+//! curl -s localhost:8000/ping                             # liveness
+//! curl -s localhost:8000/ready                            # readiness
 //! curl -s localhost:8000/.well-known/agent.yml            # open discovery
 //!
 //! # Closed:
@@ -51,10 +52,13 @@ use rusty_acp::types::{AgentManifest, AgentName, Message, RunCreateRequest, Sess
 ///
 /// This list is the part worth copying. Everything else here is ordinary axum.
 ///
-/// - **`/ping`** is the health check. A load balancer probes it, and a load
-///   balancer has no credentials — put this behind the token and every replica
-///   is marked unhealthy, which looks like an outage rather than a misconfigured
-///   exemption list.
+/// - **`/ping`** is the liveness check and **`/ready`** the readiness one. A
+///   load balancer probes both, and a load balancer has no credentials — put
+///   either behind the token and every replica is marked unhealthy, which looks
+///   like an outage rather than a misconfigured exemption list. `/ready` is the
+///   more dangerous of the two to forget: a 401 there is indistinguishable from
+///   "do not send me traffic", so the whole fleet quietly drops out of
+///   rotation while every process stays perfectly healthy.
 /// - **`/.well-known/agent.yml`** is *open discovery*. Its entire purpose is
 ///   that an unauthenticated crawler or another agent can find out what this
 ///   domain hosts without knowing anything about it first. A token in front of
@@ -65,7 +69,7 @@ use rusty_acp::types::{AgentManifest, AgentName, Message, RunCreateRequest, Sess
 /// `/agents` endpoint is the API. Keeping the advertisement open while the API
 /// is closed is the intended shape, and it is why ACP defines both.
 fn is_public(path: &str) -> bool {
-    matches!(path, "/ping" | "/.well-known/agent.yml")
+    matches!(path, "/ping" | "/ready" | "/.well-known/agent.yml")
 }
 
 /// Reject anything that does not carry the expected bearer token.
@@ -246,9 +250,10 @@ mod tests {
     /// A load balancer has no credentials, and a crawler reading open discovery
     /// is the entire point of the well-known document.
     #[tokio::test]
-    async fn the_health_check_and_open_discovery_stay_open() {
+    async fn the_health_checks_and_open_discovery_stay_open() {
         let base = serve().await;
         assert_eq!(status(&format!("{base}/ping"), None).await, 200);
+        assert_eq!(status(&format!("{base}/ready"), None).await, 200);
         assert_eq!(status(&format!("{base}/.well-known/agent.yml"), None).await, 200);
     }
 

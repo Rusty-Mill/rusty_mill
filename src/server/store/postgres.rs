@@ -336,6 +336,18 @@ impl Store for PostgresStore {
         Ok(())
     }
 
+    async fn check_health(&self) -> StoreResult<()> {
+        // Cheapest thing that proves a connection can be got from the pool and
+        // used. A pool that is exhausted fails here, which is the point: it is
+        // indistinguishable from an unreachable server to anything trying to
+        // run an agent.
+        sqlx::query("SELECT 1")
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|err| pg_error("health check", err))
+    }
+
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
         let row = sqlx::query(&format!("SELECT run FROM {} WHERE run_id = $1", self.table("runs")))
             .bind(*run_id.as_uuid())

@@ -201,6 +201,19 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     /// [sole-writer invariant](self#the-sole-writer-invariant).
     async fn put_run(&self, run: &Run) -> StoreResult<()>;
 
+    /// Check the backend is reachable.
+    ///
+    /// Backs the readiness endpoint, so it is on a path a load balancer probes
+    /// on a schedule. Make it the cheapest round trip the backend offers — a
+    /// `PING`, a `SELECT 1` — and never a write: this runs most often exactly
+    /// when the store is already struggling.
+    ///
+    /// The default is `Ok(())`, which is the truth for a store that cannot be
+    /// unreachable. [`InMemoryStore`] is the process asking the question.
+    async fn check_health(&self) -> StoreResult<()> {
+        Ok(())
+    }
+
     /// Read a run snapshot, or `None` if the store has no such run.
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>>;
 

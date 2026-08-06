@@ -339,8 +339,10 @@ everybody — and the router is a plain `axum::Router`, so a tower layer is all 
 
 What is not generic is **which endpoints must stay open**:
 
-- **`/ping`** is the health check, probed by a load balancer that has no credentials. Behind a
-  token, every replica reads as unhealthy — an outage, caused by an exemption list.
+- **`/ping`** is the liveness check and **`/ready`** the readiness one, both probed by a load
+  balancer that has no credentials. Behind a token, every replica reads as unhealthy — an outage,
+  caused by an exemption list. `/ready` is the worse of the two to forget: a 401 there is
+  indistinguishable from "do not send me traffic".
 - **`/.well-known/agent.yml`** is *open discovery*. Being readable by an unauthenticated crawler
   is the whole purpose. A token in front of it does not secure it; it deletes it.
 
@@ -508,6 +510,42 @@ This is not a rate limit. Requests per second is a tower middleware concern; thi
 agent invocations are alive at once, which only the server can know. With the `metrics` feature,
 `acp_runs_executing` and `acp_runs_rejected_total` are what you tune the number against.
 
+### Telling a load balancer where to send work
+
+`GET /ping` is ACP's health check and answers "this process is up" — which is what a supervisor
+deciding whether to *restart* wants. A load balancer deciding whether to *route* is asking a
+different question, and answering it with liveness means a replica whose store is unreachable
+keeps taking traffic and failing everything it is handed.
+
+`GET /ready` answers that one. **Not part of ACP** — an extension, like the session resource
+endpoints and the SSE variant of the event log:
+
+```sh
+curl -s localhost:8000/ready
+# {"ready":true,"accepting":true,"executing":3}
+
+# Draining, or the store is gone — 503, and:
+# {"ready":false,"accepting":false,"executing":2,"reason":"draining"}
+```
+
+Unready means one of two things: this replica is [draining](#when-a-replica-is-deployed-over), or
+its store cannot be reached. Both are cases where a run started here would fail, and neither is a
+reason to restart the process — which is exactly why the two signals are separate.
+
+**Being [at capacity](#when-a-replica-is-full) is deliberately not unready.** A full replica is
+healthy and empties as its runs finish. Reporting it unready would pull it out of rotation under
+load, pushing its share onto replicas that are also full, which report unready in turn — until a
+busy fleet has removed itself from service. A 429 sheds one request; an unready replica sheds all
+of them.
+
+The store check is cached for a second, so a probe schedule does not become load on the store —
+most sharply when the store is the thing already struggling. A drain is a local flag and is
+reported immediately, since it costs the store nothing to know.
+
+If you put auth in front of the server, this needs exempting along with `/ping`. A 401 on `/ready`
+is indistinguishable from "do not send me traffic", so the whole fleet quietly leaves rotation
+while every process stays perfectly healthy — see [Authentication](#authentication).
+
 ### When a replica is deployed over
 
 Everything above is about a replica that *dies*. A replica being deployed over is the same
@@ -519,7 +557,8 @@ let (server, router) = AcpServer::builder().agent(my_agent).build()?.into_shared
 
 // On SIGTERM:
 server.stop_accepting();                  // POST /runs answers 503 + Retry-After
-                                          // ...tell your load balancer here...
+                                          // ...and GET /ready starts answering 503,
+                                          // so the balancer stops routing here...
 let abandoned = server.drain(Duration::from_secs(60)).await;
 ```
 
@@ -614,6 +653,9 @@ for history and `GET /session/{id}/state` for state — and, with the `well-know
 `GET /.well-known/agent.yml` for open discovery. None of those are in the OpenAPI document: the
 spec says history and state are URLs on resource servers, and leaves where they point to the
 implementation.
+
+`GET /ready` is an extension too — a readiness signal for a load balancer, distinct from ACP's
+`/ping` liveness check. See [Telling a load balancer where to send work](#telling-a-load-balancer-where-to-send-work).
 
 `GET /runs/{run_id}/events` also answers `Accept: text/event-stream` with a resumable SSE stream
 honouring `Last-Event-ID`. That is an extension too — the OpenAPI document describes only the
