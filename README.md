@@ -42,7 +42,8 @@ Two sharp edges this scaffold handles for you:
 | Path | What it is |
 | --- | --- |
 | `crates/rusty-mcp` | The reusable scaffold. Depend on this. |
-| `crates/rusty-mcp-demo` | An example server built on it. Copy this to start. |
+| `crates/rusty-mcp-demo` | An example server exercising every feature. Read this. |
+| `template` | A minimal starting point (see [Starting a server](#starting-a-server)) |
 
 Inside the scaffold:
 
@@ -59,8 +60,47 @@ Inside the scaffold:
 | `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
 | `subscriptions` | Change notifications over `subscriptions/listen` (see [Change notifications](#change-notifications)) |
 | `mrtr` | Asking the client for input mid-call (see [Asking the user](#asking-the-user)) |
-| `otel` | OTLP span export (see [Exporting spans](#exporting-spans)) |
+| `completion` | Argument completion (see [Completion](#completion)) |
+| `otel` | OTLP span and metric export (see [Exporting spans](#exporting-spans)) |
+| `limits` | Concurrency and timeout shedding (see [Limits](#limits)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
+
+## Starting a server
+
+```bash
+cargo generate --git https://github.com/baileyrd/rusty_mcp template
+```
+
+You get a compiling MCP server with two example tools, a test that drives it
+through a real client, and a README covering the rest. No `cargo generate`? The
+`template/` directory is an ordinary crate — copy it, then replace
+`{{project-name}}` and `{{description}}`.
+
+The demo crate is the other half of this: `template` is where you start,
+`crates/rusty-mcp-demo` is what to read when you need resources, prompts,
+tasks, subscriptions or MRTR wired up for real.
+
+### The template cannot rot
+
+A template is a second copy of the API surface, and second copies go stale
+silently — this repo has already shipped one instance, a README telling readers
+to depend on the `v0.2.0` tag with `features = ["otel"]`. That tag predated the
+feature, so following the instructions verbatim did not compile.
+
+So CI generates the project and builds, lints and tests it on every pull
+request, against the working tree rather than the published tag. A library
+change that breaks the template fails the PR that made it.
+
+`check-versions.sh` separately asserts that every `tag = "vX.Y.Z"` in the docs
+and the template names the current crate version — which is exactly the failure
+above, caught this time.
+
+Both run locally too:
+
+```bash
+./scripts/check-versions.sh
+./scripts/check-template.sh
+```
 
 ## Writing tools
 

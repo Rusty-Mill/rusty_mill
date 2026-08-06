@@ -87,6 +87,23 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
   No new dependencies: the permit pool is a `tokio::sync::Semaphore`.
 
+- `template/`, a minimal starting point ([#18]). `cargo generate --git
+  https://github.com/baileyrd/rusty_mcp template` produces a compiling server
+  with two example tools and a test that drives it through a real client;
+  without `cargo generate` it is an ordinary crate to copy.
+
+  The decision recorded on that issue was that a template is only worth having
+  if it cannot rot, since it is a second copy of the API surface. So CI
+  generates the project and builds, lints and tests it on every pull request —
+  **against the working tree rather than the published tag**, so a library
+  change that breaks the template fails the pull request that made it.
+
+- `scripts/check-versions.sh`, asserting that every `tag = "vX.Y.Z"` in the
+  README, the CHANGELOG preamble and the template names the current crate
+  version. This is a regression test for something that already shipped: the
+  README told readers to depend on the `v0.2.0` tag with `features = ["otel"]`,
+  a tag predating the feature, so following it verbatim did not compile.
+
 ### Fixed
 
 - **List results accepted a pagination cursor and ignored it** ([#15]).
@@ -119,6 +136,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 [#15]: https://github.com/baileyrd/rusty_mcp/issues/15
 [#16]: https://github.com/baileyrd/rusty_mcp/issues/16
 [#17]: https://github.com/baileyrd/rusty_mcp/issues/17
+[#18]: https://github.com/baileyrd/rusty_mcp/issues/18
 
 ## [0.3.0] — 2026-08-06
 

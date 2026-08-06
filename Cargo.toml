@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/rusty-mcp", "crates/rusty-mcp-demo"]
+# `template/` is a `cargo generate` source, not a crate: its Cargo.toml holds
+# `{{project-name}}` placeholders and does not parse as a manifest.
+exclude = ["template"]
 
 [workspace.package]
 edition = "2024"
