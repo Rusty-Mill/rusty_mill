@@ -103,6 +103,9 @@ pub struct RunContext {
     base_url: String,
     handle: Arc<RunHandle>,
     resume_rx: Mutex<mpsc::Receiver<AwaitResume>>,
+    /// This replica's permission to be running this agent. Given up while the
+    /// run is parked awaiting a client, and dropped when the run ends.
+    slot: super::Slot,
 }
 
 impl RunContext {
@@ -116,6 +119,7 @@ impl RunContext {
         base_url: String,
         handle: Arc<RunHandle>,
         resume_rx: mpsc::Receiver<AwaitResume>,
+        slot: super::Slot,
     ) -> Self {
         Self {
             agent_name,
@@ -126,6 +130,7 @@ impl RunContext {
             base_url,
             handle,
             resume_rx: Mutex::new(resume_rx),
+            slot,
         }
     }
 
@@ -320,6 +325,11 @@ impl RunContext {
     /// than a failure.
     pub async fn await_request(&self, request: AwaitRequest) -> Result<AwaitResume, Error> {
         self.handle.set_awaiting(request).await?;
+
+        // Give the execution slot back while parked. The client this run is
+        // waiting on may never answer, and holding capacity for it would let
+        // idle conversations starve work that is ready to run.
+        self.slot.park();
         let mut resume_rx = self.resume_rx.lock().await;
         let cancel = self.handle.cancel_token();
         tokio::select! {
@@ -329,6 +339,7 @@ impl RunContext {
             }
             resume = resume_rx.recv() => match resume {
                 Some(resume) => {
+                    self.slot.unpark();
                     self.handle.set_in_progress().await?;
                     Ok(resume)
                 }

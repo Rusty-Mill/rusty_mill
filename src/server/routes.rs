@@ -40,6 +40,13 @@ use crate::{
 /// deliberately retryable rejection into a hard failure for a default client.
 const DRAINING_RETRY_AFTER_SECS: u64 = 5;
 
+/// How long a client is asked to wait when this replica is at capacity.
+///
+/// Shorter than the draining one: a full replica empties as its runs finish,
+/// where a draining one is never coming back. Inside the client's default retry
+/// ceiling for the same reason.
+const AT_CAPACITY_RETRY_AFTER_SECS: u64 = 2;
+
 /// What a request can fail with before it reaches an agent.
 pub(crate) enum ApiError {
     /// An [`Error`] rendered with the status code ACP conventionally pairs
@@ -47,6 +54,8 @@ pub(crate) enum ApiError {
     Acp(Error),
     /// This replica is going away and is no longer starting runs.
     Draining,
+    /// This replica is already running as much as it agreed to.
+    AtCapacity,
 }
 
 impl From<Error> for ApiError {
@@ -74,6 +83,18 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::RETRY_AFTER, DRAINING_RETRY_AFTER_SECS.to_string())],
                 "this replica is draining and is not starting new runs",
+            )
+                .into_response(),
+            // 429 rather than 503: the replica is healthy and taking work, it
+            // just has as much as it agreed to. A 503 would say the same thing
+            // to a client — both are transient and both carry `Retry-After` —
+            // but it says something different to everyone reading the logs, and
+            // "overloaded" and "shutting down" want different responses from an
+            // operator.
+            ApiError::AtCapacity => (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, AT_CAPACITY_RETRY_AFTER_SECS.to_string())],
+                "this replica is already running as many runs as it is configured to",
             )
                 .into_response(),
         }
@@ -216,11 +237,25 @@ async fn create_run(
         return Err(ApiError::Draining);
     }
     request.validate().map_err(ApiError::from)?;
+
+    // Admission before any store write, so a refused run leaves nothing behind
+    // to read, reap or clean up. The slot is held by the run from here until it
+    // finishes.
+    let Some(slot) = server.admit() else {
+        tracing::warn!(
+            executing = server.executing(),
+            limit = ?server.max_concurrent_runs(),
+            "refusing a run: at capacity"
+        );
+        crate::server::telemetry::run_rejected();
+        return Err(ApiError::AtCapacity);
+    };
+
     let base_url = server.resolve_base_url(&headers);
     let mode = request.mode();
 
     let (run_id, notifications) =
-        server.start_run(request, &base_url).await.map_err(ApiError::from)?;
+        server.start_run(slot, request, &base_url).await.map_err(ApiError::from)?;
     deliver(&server, run_id, notifications, mode, StatusCode::ACCEPTED).await
 }
 

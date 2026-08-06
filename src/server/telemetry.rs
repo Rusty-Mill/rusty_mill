@@ -58,6 +58,19 @@ pub(crate) const STORE_OPERATION_DURATION: &str = "acp_store_operation_duration_
 /// Store operations that returned an error, by operation name.
 #[cfg(feature = "metrics")]
 pub(crate) const STORE_FAILURES: &str = "acp_store_failures_total";
+/// Runs executing an agent body right now, excluding those parked awaiting a
+/// client. This is what `max_concurrent_runs` is measured against.
+#[cfg(feature = "metrics")]
+pub(crate) const RUNS_EXECUTING: &str = "acp_runs_executing";
+/// Run submissions refused because this replica was at capacity.
+///
+/// **Unlabelled, deliberately.** The obvious label would be the agent name, but
+/// a submission is refused at the door — before the agent is looked up — so the
+/// name is whatever the caller sent. Labelling it would let anyone mint an
+/// unbounded number of time series by posting nonsense, which is a worse
+/// problem than the one the label would solve.
+#[cfg(feature = "metrics")]
+pub(crate) const RUNS_REJECTED: &str = "acp_runs_rejected_total";
 
 /// Register descriptions and units with whatever recorder is installed.
 ///
@@ -106,7 +119,35 @@ pub(crate) fn describe() {
             "Store operation latency, by operation"
         );
         metrics::describe_counter!(STORE_FAILURES, "Store operations that returned an error");
+        metrics::describe_gauge!(
+            RUNS_EXECUTING,
+            "Runs executing an agent body on this replica, excluding those awaiting a client"
+        );
+        metrics::describe_counter!(
+            RUNS_REJECTED,
+            "Run submissions refused because this replica was at its concurrency ceiling"
+        );
     }
+}
+
+/// This replica is now running `executing` agent bodies.
+///
+/// Set rather than incremented: the count already exists as one number under a
+/// lock, and deriving a gauge from paired increments would let a missed
+/// decrement — a run that ends on a path nobody thought about — drift the gauge
+/// away from the value the admission check actually uses. An operator tuning a
+/// ceiling against a lying gauge is worse served than one with no gauge.
+pub(crate) fn runs_executing(executing: usize) {
+    #[cfg(feature = "metrics")]
+    metrics::gauge!(RUNS_EXECUTING).set(executing as f64);
+    #[cfg(not(feature = "metrics"))]
+    let _ = executing;
+}
+
+/// A run submission was refused for want of capacity.
+pub(crate) fn run_rejected() {
+    #[cfg(feature = "metrics")]
+    metrics::counter!(RUNS_REJECTED).increment(1);
 }
 
 /// A run began executing on this replica.

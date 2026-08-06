@@ -175,10 +175,22 @@ pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(60);
 /// away, and it has time to act. Tracking what is in flight is what lets it use
 /// that knowledge instead of throwing it away and letting every rolling deploy
 /// look like a crash.
+///
+/// It also holds this replica's execution capacity. The two belong together:
+/// both answer "should this replica take on this run", differing only in why
+/// the answer might be no.
 #[derive(Debug)]
-struct InFlight {
+pub(crate) struct InFlight {
     /// Whether new runs still start here.
     accepting: AtomicBool,
+    /// How many runs may execute at once, if a ceiling was set.
+    limit: Option<usize>,
+    /// Runs holding an execution slot right now.
+    ///
+    /// Not the same as `running.len()`: a run parked awaiting a client answer
+    /// is still this replica's to finish, but is costing it a suspended future
+    /// and nothing more.
+    executing: Mutex<usize>,
     /// Runs currently executing, so the ones that outlast a drain can be found
     /// and have their leases released.
     running: Mutex<HashSet<RunId>>,
@@ -189,12 +201,61 @@ struct InFlight {
 }
 
 impl InFlight {
-    fn new() -> Self {
+    fn new(limit: Option<usize>) -> Self {
         Self {
             accepting: AtomicBool::new(true),
+            limit,
+            executing: Mutex::new(0),
             running: Mutex::new(HashSet::new()),
             idle: watch::channel(0).0,
         }
+    }
+
+    /// Take a slot for a new run, if this replica has one to give.
+    ///
+    /// `None` means at capacity, and the caller's job is to say so rather than
+    /// to queue. An unbounded queue is the same failure with a longer fuse, and
+    /// a bounded one is a second capacity number to tune for nothing the
+    /// ceiling does not already provide — the client can wait far more cheaply
+    /// than the server can hold the request open on its behalf.
+    fn admit(self: &Arc<Self>) -> Option<Slot> {
+        let mut executing = self.executing.lock().expect("capacity counter poisoned");
+        if self.limit.is_some_and(|limit| *executing >= limit) {
+            return None;
+        }
+        *executing += 1;
+        telemetry::runs_executing(*executing);
+        Some(Slot { capacity: Arc::clone(self), held: AtomicBool::new(true) })
+    }
+
+    /// Take a slot for work the fleet has already accepted, over the ceiling if
+    /// need be.
+    ///
+    /// Used for a replacement run. Refusing one would not defer the work, it
+    /// would lose the run — recovery has nobody to retry it, unlike a client
+    /// meeting a 429.
+    fn take(self: &Arc<Self>) -> Slot {
+        let mut executing = self.executing.lock().expect("capacity counter poisoned");
+        *executing += 1;
+        telemetry::runs_executing(*executing);
+        drop(executing);
+        Slot { capacity: Arc::clone(self), held: AtomicBool::new(true) }
+    }
+
+    fn release(&self) {
+        let mut executing = self.executing.lock().expect("capacity counter poisoned");
+        *executing = executing.saturating_sub(1);
+        telemetry::runs_executing(*executing);
+    }
+
+    fn reacquire(&self) {
+        let mut executing = self.executing.lock().expect("capacity counter poisoned");
+        *executing += 1;
+        telemetry::runs_executing(*executing);
+    }
+
+    fn executing(&self) -> usize {
+        *self.executing.lock().expect("capacity counter poisoned")
     }
 
     fn enter(&self, run_id: RunId) {
@@ -226,6 +287,46 @@ impl InFlight {
     }
 }
 
+/// One unit of this replica's execution capacity, held while a run is actually
+/// running an agent body.
+///
+/// Released while the run is parked awaiting a client answer, and taken again
+/// when the answer arrives. That asymmetry is the point of the type: an
+/// `awaiting` run is waiting on a human who may never come back, and counting
+/// it against capacity would let idle conversations starve live work.
+///
+/// Reacquiring is deliberately unchecked. The run was admitted once already,
+/// and refusing it here would strand a conversation mid-sentence to protect a
+/// ceiling — so a burst of resumes can briefly exceed the limit. The limit
+/// governs what this replica *takes on*, not an instantaneous invariant.
+#[derive(Debug)]
+pub(crate) struct Slot {
+    capacity: Arc<InFlight>,
+    held: AtomicBool,
+}
+
+impl Slot {
+    /// Give the slot up while the run waits for a client.
+    pub(crate) fn park(&self) {
+        if self.held.swap(false, Ordering::SeqCst) {
+            self.capacity.release();
+        }
+    }
+
+    /// Take it back now the client has answered.
+    pub(crate) fn unpark(&self) {
+        if !self.held.swap(true, Ordering::SeqCst) {
+            self.capacity.reacquire();
+        }
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.park();
+    }
+}
+
 /// A configured ACP server: a set of agents plus the store backing their runs.
 ///
 /// Build one with [`AcpServer::builder`], then call
@@ -240,7 +341,7 @@ pub struct AcpServer {
     lease_ttl: Duration,
     sync_timeout: Option<Duration>,
     max_recovery_attempts: u32,
-    in_flight: InFlight,
+    in_flight: Arc<InFlight>,
 }
 
 impl std::fmt::Debug for dyn Agent {
@@ -292,6 +393,20 @@ impl AcpServer {
         self.max_recovery_attempts
     }
 
+    /// How many runs may execute here at once, if a ceiling was set.
+    pub fn max_concurrent_runs(&self) -> Option<usize> {
+        self.in_flight.limit
+    }
+
+    /// How many runs are running an agent body right now.
+    ///
+    /// Excludes runs parked awaiting a client answer, which is what
+    /// [`max_concurrent_runs`](AcpServer::max_concurrent_runs) is measured
+    /// against.
+    pub fn executing(&self) -> usize {
+        self.in_flight.executing()
+    }
+
     /// Whether this replica is still starting new runs.
     ///
     /// False from [`stop_accepting`](AcpServer::stop_accepting) onwards. Worth
@@ -306,6 +421,15 @@ impl AcpServer {
     /// How many runs this replica is executing right now.
     pub fn in_flight(&self) -> usize {
         self.in_flight.len()
+    }
+
+    /// Take an execution slot for a new run, if this replica has one.
+    ///
+    /// `None` means at capacity. The caller answers 429 rather than waiting:
+    /// holding the request open would spend a connection and a task on exactly
+    /// the replica that has none to spare.
+    pub(crate) fn admit(&self) -> Option<Slot> {
+        self.in_flight.admit()
     }
 
     /// Stop starting new runs here.
@@ -441,6 +565,7 @@ impl AcpServer {
     /// onwards.
     async fn start_run(
         self: &Arc<Self>,
+        slot: Slot,
         request: RunCreateRequest,
         base_url: &str,
     ) -> Result<(RunId, NotificationStream), Error> {
@@ -457,6 +582,7 @@ impl AcpServer {
 
         self.launch(
             LaunchSpec {
+                slot,
                 agent,
                 agent_name: request.agent_name,
                 input: request.input,
@@ -483,6 +609,7 @@ impl AcpServer {
         base_url: &str,
     ) -> Result<(RunId, NotificationStream), Error> {
         let LaunchSpec {
+            slot,
             agent,
             agent_name,
             input,
@@ -553,6 +680,7 @@ impl AcpServer {
             base_url.to_string(),
             Arc::clone(&handle),
             resume_rx,
+            slot,
         );
 
         let server = Arc::clone(self);
@@ -600,6 +728,7 @@ impl AcpServer {
         let (replacement, _) = self
             .launch(
                 LaunchSpec {
+                    slot: self.in_flight.take(),
                     agent,
                     agent_name: abandoned.agent_name.clone(),
                     input: record.input.clone(),
@@ -644,6 +773,8 @@ impl AcpServer {
 
 /// Everything [`AcpServer::launch`] needs to start one run.
 struct LaunchSpec {
+    /// This replica's permission to run it, held until the run finishes.
+    slot: Slot,
     agent: Arc<dyn Agent>,
     agent_name: AgentName,
     input: Vec<Message>,
@@ -1012,6 +1143,7 @@ pub struct AcpServerBuilder {
     lease_ttl: Option<Duration>,
     sync_timeout: Option<Option<Duration>>,
     max_recovery_attempts: Option<u32>,
+    max_concurrent_runs: Option<usize>,
 }
 
 impl std::fmt::Debug for AcpServerBuilder {
@@ -1067,6 +1199,38 @@ impl AcpServerBuilder {
     /// balancer rather than at whichever replica happened to serve the request.
     pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// Cap how many runs may execute on this replica at once.
+    ///
+    /// Unset by default, which is unbounded — every run is a spawned task, and
+    /// nothing stops a busy enough server from accumulating them until memory
+    /// runs out. Set this and `POST /runs` answers **429 with a `Retry-After`**
+    /// over the ceiling instead, which is a load an operator can see and a
+    /// client can wait out.
+    ///
+    /// Counts runs *executing an agent body*. A run parked awaiting a client
+    /// answer gives its slot up until the answer arrives: it is waiting on a
+    /// human who may never return, and holding capacity for it would let idle
+    /// conversations starve work that is ready to run. A resumed run takes its
+    /// slot back unchecked, so a burst of answers can briefly exceed the
+    /// ceiling — this bounds what the replica *takes on*, and stranding a
+    /// conversation mid-sentence to defend a number would be the wrong trade.
+    ///
+    /// Not a rate limit. Requests per second is a tower middleware concern; this
+    /// is how many agent invocations are alive at once, which only the server
+    /// can know.
+    ///
+    /// ```
+    /// # use rusty_acp::server::AcpServer;
+    /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// let server = AcpServer::builder().max_concurrent_runs(64).build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn max_concurrent_runs(mut self, max_concurrent_runs: usize) -> Self {
+        self.max_concurrent_runs = Some(max_concurrent_runs);
         self
     }
 
@@ -1181,7 +1345,7 @@ impl AcpServerBuilder {
             max_recovery_attempts: self
                 .max_recovery_attempts
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
-            in_flight: InFlight::new(),
+            in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
         })
     }
 }

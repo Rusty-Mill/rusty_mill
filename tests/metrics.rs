@@ -305,3 +305,71 @@ fn an_unwrapped_store_is_not_timed() {
         );
     });
 }
+
+/// The rejection counter, and the deliberate absence of a label on it.
+///
+/// The obvious label would be the agent name. But a submission is refused
+/// before the agent is *looked up*, so the name need only be syntactically
+/// valid — it need not name an agent this server hosts. Labelling it would let
+/// anyone mint unbounded time series by submitting fresh names, which is a
+/// worse problem than the one the label solves.
+#[test]
+fn refusals_are_counted_without_a_caller_controlled_label() {
+    with_recorder(|snapshotter| {
+        let recorded = runtime().block_on(async {
+            let forever = agent_fn(
+                AgentManifest::new(AgentName::new("forever").unwrap(), "Never finishes"),
+                |ctx: RunContext| async move {
+                    ctx.cancelled().await;
+                    Ok(())
+                },
+            );
+            let (server, router) = AcpServer::builder()
+                .agent(forever)
+                .max_concurrent_runs(1)
+                .build()
+                .unwrap()
+                .into_shared_router();
+
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = AcpClient::new(format!("http://{addr}")).unwrap();
+
+            client.run_async("forever", [Message::user("go")]).await.unwrap();
+            // Refused twice: once under a registered name, once under a name
+            // that is valid but hosted nowhere — which still reaches the
+            // capacity check, and so would still mint a label.
+            for agent in ["forever", "not-a-real-agent"] {
+                let _ = client.run_async(agent, [Message::user("go")]).await;
+            }
+            assert_eq!(server.executing(), 1);
+
+            // Snapshotted inside the runtime: dropping it drops the run task,
+            // which drops its slot and takes the gauge back to zero. Correct
+            // behaviour — a slot outliving the future holding it would be the
+            // bug — but it means the reading has to be taken while the run is
+            // still alive.
+            snapshot(snapshotter)
+        });
+
+        let recorded = recorded;
+        let rejected = find(&recorded, "acp_runs_rejected_total");
+        assert_eq!(rejected.len(), 1, "one series, whatever names were submitted: {rejected:?}");
+        assert_eq!(counter_value(rejected[0]), 2);
+        assert!(
+            rejected[0].labels.is_empty(),
+            "a caller-controlled label is an unbounded cardinality hazard: {:?}",
+            rejected[0].labels
+        );
+
+        // The gauge an operator tunes the ceiling against.
+        let executing = find(&recorded, "acp_runs_executing");
+        assert_eq!(executing.len(), 1, "the depth gauge is unlabelled too");
+        assert!(
+            matches!(executing[0].value, DebugValue::Gauge(value) if value.into_inner() == 1.0),
+            "expected one run executing, got {:?}",
+            executing[0].value
+        );
+    });
+}
