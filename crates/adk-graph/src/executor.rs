@@ -271,16 +271,27 @@ impl Graph {
                 let mut next_frontier: Vec<WorkItem> = Vec::new();
 
                 for ((item, node, ctx, mut rx), outcome) in running.into_iter().zip(outcomes) {
-                    // Forward whatever the node emitted while it ran.
+                    // Collect whatever the node emitted while it ran. These are
+                    // held rather than yielded immediately so that a suspension
+                    // can attach its resume record to the outgoing event.
                     rx.close();
+                    let mut emitted: Vec<Event> = Vec::new();
                     while let Some(event) = rx.recv().await {
-                        yield event;
+                        emitted.push(event);
                     }
 
                     let outcome = match outcome {
-                        Ok(outcome) => outcome,
+                        Ok(outcome) => {
+                            for event in emitted {
+                                yield event;
+                            }
+                            outcome
+                        }
                         Err(AdkError::NodeInterrupted { interrupt_id }) => {
                             // Persist the resume point and end the run cleanly.
+                            // The record is staged as a state write, so it must
+                            // ride out on an event or it will never be
+                            // committed and the run could not be resumed.
                             Self::write_pending(
                                 &invocation,
                                 &PendingInterrupt {
@@ -291,9 +302,34 @@ impl Graph {
                                     step,
                                 },
                             );
+                            // Carry the record out on the event so a session
+                            // service persists it, and apply it locally too so
+                            // a graph driven without a runner can still be
+                            // resumed from the same context.
+                            let delta = invocation.take_state_delta();
+                            invocation.with_state_mut(|state| state.commit(delta.clone()));
+                            match emitted.pop() {
+                                Some(mut last) => {
+                                    last.actions.state_delta.extend(delta);
+                                    for event in emitted {
+                                        yield event;
+                                    }
+                                    yield last;
+                                }
+                                None => {
+                                    let mut carrier =
+                                        Event::new(&invocation.invocation_id, &item.node)
+                                            .with_node_info(ctx.node_info(node.node_type()));
+                                    carrier.actions.state_delta = delta;
+                                    yield carrier;
+                                }
+                            }
                             return;
                         }
                         Err(err) => {
+                            for event in emitted {
+                                yield event;
+                            }
                             yield Event::new(&invocation.invocation_id, &item.node)
                                 .with_node_info(ctx.node_info(node.node_type()))
                                 .with_error(err.code(), err.to_string());
