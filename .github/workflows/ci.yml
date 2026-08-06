@@ -30,6 +30,29 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  template:
+    name: template
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Install snippets must name the current version. The README once told
+      # readers to depend on a tag that predated the feature it was describing.
+      - name: Check version references
+        run: ./scripts/check-versions.sh
+
+      # A template is a second copy of the API surface, and second copies rot.
+      # Building what it generates is what keeps it honest: a library change
+      # that breaks the template fails here rather than at the next person to
+      # run `cargo generate`.
+      - name: Build the generated project
+        run: ./scripts/check-template.sh
+
   msrv:
     name: msrv (1.88)
     runs-on: ubuntu-latest
