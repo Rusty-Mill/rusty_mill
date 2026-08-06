@@ -84,6 +84,16 @@ pub use postgres::{PostgresStore, PostgresStoreConfig};
 /// terminal ones.
 pub const DEFAULT_MAX_RUNS: usize = 1024;
 
+/// How many sessions an [`InMemoryStore`] keeps before evicting the least
+/// recently used.
+///
+/// Runs have always been bounded; sessions were not, which made "this store's
+/// memory is bounded" true of one half and not the other. The asymmetry was
+/// invisible under a load test that reuses one session and obvious on a
+/// long-lived server with many short conversations — the shape a hosted agent
+/// actually has.
+pub const DEFAULT_MAX_SESSIONS: usize = 1024;
+
 /// Result of a store operation.
 ///
 /// Backends report failures as [`Error`] so they surface to clients as ordinary

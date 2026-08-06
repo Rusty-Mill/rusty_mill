@@ -116,6 +116,7 @@ pub use agent::{agent_fn, Agent, FnAgent, MessageWriter, RunContext};
 pub use run::RunHandle;
 pub use store::{
     InMemoryStore, Notification, RecoveryRecord, SessionRecord, Store, DEFAULT_MAX_RUNS,
+    DEFAULT_MAX_SESSIONS,
 };
 
 #[cfg(feature = "redis-store")]
@@ -1233,6 +1234,7 @@ pub struct AcpServerBuilder {
     store: Option<Arc<dyn Store>>,
     base_url: Option<String>,
     max_runs: Option<usize>,
+    max_sessions: Option<usize>,
     replica_id: Option<String>,
     lease_ttl: Option<Duration>,
     sync_timeout: Option<Option<Duration>>,
@@ -1325,6 +1327,20 @@ impl AcpServerBuilder {
     /// ```
     pub fn max_concurrent_runs(mut self, max_concurrent_runs: usize) -> Self {
         self.max_concurrent_runs = Some(max_concurrent_runs);
+        self
+    }
+
+    /// Cap how many sessions the default [`InMemoryStore`] retains. Defaults
+    /// to [`DEFAULT_MAX_SESSIONS`].
+    ///
+    /// Past the cap the least recently used session is dropped, along with its
+    /// state document. An evicted session is indistinguishable from one that
+    /// never existed, so an agent's conversation silently starts over — the
+    /// eviction is logged at `warn` for exactly that reason.
+    ///
+    /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
+    pub fn max_sessions(mut self, max_sessions: usize) -> Self {
+        self.max_sessions = Some(max_sessions);
         self
     }
 
@@ -1423,7 +1439,10 @@ impl AcpServerBuilder {
         }
 
         let store = self.store.unwrap_or_else(|| {
-            Arc::new(InMemoryStore::new(self.max_runs.unwrap_or(DEFAULT_MAX_RUNS)))
+            Arc::new(InMemoryStore::with_limits(
+                self.max_runs.unwrap_or(DEFAULT_MAX_RUNS),
+                self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS),
+            ))
         });
 
         Ok(AcpServer {
