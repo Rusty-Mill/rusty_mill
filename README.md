@@ -670,6 +670,8 @@ A replacement's own record starts clean, so one that then dies for real is charg
 Sequencing with axum's own graceful shutdown matters. `stop_accepting` first, so requests arriving
 during the drain are refused rather than started; axum's shutdown second, to stop accepting
 connections; `drain` last, since the run tasks are not tied to the connections that started them.
+`cargo run --example graceful_shutdown` runs that sequence across two replicas, and carries tests
+that fail on the wrong order rather than leaving it as advice.
 
 ### Recovering a lost run, instead of just failing it
 
@@ -777,6 +779,7 @@ cargo run --example echo_server      # two agents: one plain, one streaming
 cargo run --example awaiting_agent   # pauses mid-run to ask a question
 cargo run --example client_demo      # drives every client operation against a running server
 cargo run --example ha_server        # two replicas sharing one store
+cargo run --example graceful_shutdown   # taking one replica out without killing its work
 
 cargo run --example authenticated_server --features well-known   # bearer token, both halves
 ```

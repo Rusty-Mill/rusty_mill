@@ -117,6 +117,15 @@ required-features = ["server", "client", "well-known"]
 # could drift from it.
 test = true
 
+[[example]]
+name = "graceful_shutdown"
+required-features = ["server", "client"]
+# The ordering of the three shutdown steps is the whole subject, and it is the
+# kind of thing that gets copied out of an example wholesale. `test = true` so
+# the order is asserted against a running pair of replicas rather than only
+# described in a comment nobody re-checks.
+test = true
+
 [[bench]]
 name = "serialization"
 harness = false
