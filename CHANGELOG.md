@@ -38,6 +38,29 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   exist. That failure is otherwise silent: the registration is accepted and the
   client is answered with an empty list forever.
 
+- `otel::metrics`, exporting metrics alongside spans ([#16]). The same
+  `OtelConfig` drives both, so the two share an endpoint and resource;
+  `without_metrics()` turns them off.
+
+  `McpMetricsLayer` records `mcp.server.requests`,
+  `mcp.server.request.duration` and `mcp.server.requests.in_flight` from the
+  SEP-2243 `Mcp-Method`/`Mcp-Name` headers, so no request body is parsed. It
+  mounts **outside** the authorization layer, so a request rejected with a
+  `401` is still counted — a flood of bad tokens should not look like no
+  traffic.
+
+  `TaskSupport::with_metrics` counts `mcp.server.tasks.{started,finished}`.
+  Tasks need their own instruments because the work outlives the request that
+  handed out the handle, so an HTTP-level layer never sees how one ended.
+
+  Every label comes from a closed set fixed before any request arrives: an
+  unknown method is `other`, and a name is recorded only for `tools/call` and
+  `prompts/get` and only when it appears in `with_known_names`. The URI in
+  `resources/read`'s `Mcp-Name` and the task id in the task methods' are never
+  labelled. Calling a tool that does not exist must not be able to mint a
+  label; there are tests driving forged names through the layer and asserting
+  they never reach the collector.
+
 ### Fixed
 
 - **List results accepted a pagination cursor and ignored it** ([#15]).
@@ -68,6 +91,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 [#14]: https://github.com/baileyrd/rusty_mcp/issues/14
 [#15]: https://github.com/baileyrd/rusty_mcp/issues/15
+[#16]: https://github.com/baileyrd/rusty_mcp/issues/16
 
 ## [0.3.0] — 2026-08-06
 

@@ -97,6 +97,56 @@ use rmcp::{
 /// How often [`TaskSupport::drain`] rechecks for outstanding tasks.
 const DRAIN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Task counters, or nothing at all without the `otel` feature.
+///
+/// A newtype rather than a bare `Option` so the call sites below read the same
+/// either way: with the feature off this is a zero-sized struct whose methods
+/// compile to nothing, and `tasks.rs` needs no `cfg` noise around each call.
+#[derive(Clone, Default)]
+struct TaskMetrics {
+    #[cfg(feature = "otel")]
+    instruments: Option<Arc<crate::otel::metrics::Instruments>>,
+}
+
+impl std::fmt::Debug for TaskMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        #[cfg(feature = "otel")]
+        let enabled = self.instruments.is_some();
+        #[cfg(not(feature = "otel"))]
+        let enabled = false;
+        write!(f, "{enabled}")
+    }
+}
+
+impl TaskMetrics {
+    fn started(&self) {
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = &self.instruments {
+            instruments.task_started();
+        }
+    }
+
+    fn settled(&self, _result: &Result<CallToolResult, TaskExit>) {
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = &self.instruments {
+            use crate::otel::metrics::TaskOutcome;
+
+            instruments.task_finished(match _result {
+                Ok(_) => TaskOutcome::Completed,
+                Err(TaskExit::Cancelled) => TaskOutcome::Cancelled,
+                Err(TaskExit::Error(_)) => TaskOutcome::Failed,
+            });
+        }
+    }
+
+    fn abandoned(&self, _count: usize) {
+        #[cfg(feature = "otel")]
+        if let Some(instruments) = &self.instruments {
+            instruments.tasks_abandoned(_count);
+        }
+    }
+}
+
 /// Which tools run as tasks.
 #[derive(Debug, Clone, Default)]
 pub enum TaskPolicy {
@@ -138,6 +188,7 @@ pub struct TaskSupport {
     policy: Arc<TaskPolicy>,
     poll_interval_ms: u64,
     ttl_ms: Option<u64>,
+    metrics: TaskMetrics,
 }
 
 impl std::fmt::Debug for TaskSupport {
@@ -147,6 +198,7 @@ impl std::fmt::Debug for TaskSupport {
             .field("poll_interval_ms", &self.poll_interval_ms)
             .field("ttl_ms", &self.ttl_ms)
             .field("running", &self.manager.running_task_count())
+            .field("metrics", &self.metrics)
             .finish()
     }
 }
@@ -167,7 +219,20 @@ impl TaskSupport {
             // does not feel stalled, slow enough not to hammer the server.
             poll_interval_ms: 1_000,
             ttl_ms: Some(60 * 60 * 1_000),
+            metrics: TaskMetrics::default(),
         }
+    }
+
+    /// Count tasks started, settled and abandoned.
+    ///
+    /// Take the instruments from [`crate::otel::OtelGuard::instruments`]. This
+    /// is where the tasks extension differs from ordinary requests: the work
+    /// outlives the call that created it, so an HTTP-level metrics layer sees
+    /// only the request that handed out the handle, never how the task ended.
+    #[cfg(feature = "otel")]
+    pub fn with_metrics(mut self, instruments: Arc<crate::otel::metrics::Instruments>) -> Self {
+        self.metrics.instruments = Some(instruments);
+        self
     }
 
     /// Task support covering only the tools `policy` names.
@@ -222,8 +287,19 @@ impl TaskSupport {
             .with_poll_interval_ms(self.poll_interval_ms)
             .with_ttl_ms(self.ttl_ms);
 
+        let metrics = self.metrics.clone();
+        metrics.started();
+
         let task = self.manager.spawn(options, move |ctx| {
-            Box::pin(operation(TaskCtx::spawned(ctx)))
+            let running = operation(TaskCtx::spawned(ctx));
+            Box::pin(async move {
+                // Recorded here rather than at the call site: a task settles
+                // long after `tools/call` returned, so this is the only place
+                // that knows how it ended.
+                let result = running.await;
+                metrics.settled(&result);
+                result
+            })
         });
 
         CreateTaskResult::new(task)
@@ -312,6 +388,7 @@ impl TaskSupport {
         }
 
         let abandoned = self.running_count();
+        self.metrics.abandoned(abandoned);
         self.manager.shutdown();
         abandoned
     }

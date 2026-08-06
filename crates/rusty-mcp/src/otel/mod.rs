@@ -38,15 +38,23 @@
 //! we; if it did not, we stay quiet. Deciding independently is how traces end
 //! up half-recorded, with gaps exactly where a service made its own choice.
 
-use std::time::Duration;
+pub mod metrics;
 
-use opentelemetry::{KeyValue, trace::TracerProvider as _};
-use opentelemetry_otlp::{SpanExporter, WithExportConfig as _};
+use std::{sync::Arc, time::Duration};
+
+use opentelemetry::{KeyValue, metrics::MeterProvider as _, trace::TracerProvider as _};
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig as _};
 use opentelemetry_sdk::{
     Resource,
+    metrics::{PeriodicReader, SdkMeterProvider},
     trace::{Sampler, SdkTracerProvider},
 };
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+
+use crate::otel::metrics::Instruments;
+
+/// Instrumentation scope name for this crate's instruments.
+const SCOPE: &str = "rusty-mcp";
 
 /// Starting an OTLP pipeline failed.
 #[derive(Debug, thiserror::Error)]
@@ -75,6 +83,15 @@ pub struct OtelConfig {
     pub sample_ratio: f64,
     /// How long `shutdown` waits for the buffer to drain.
     pub shutdown_timeout: Duration,
+    /// Export metrics as well as spans.
+    ///
+    /// On by default. Metrics are what alerts fire on; traces are what you read
+    /// afterwards, and a parent-based sampler means the spans this server
+    /// records are the ones its callers chose, not a representative sample of
+    /// its own traffic.
+    pub metrics: bool,
+    /// How often metrics are pushed to the collector.
+    pub metrics_interval: Duration,
 }
 
 impl OtelConfig {
@@ -86,7 +103,21 @@ impl OtelConfig {
             endpoint: None,
             sample_ratio: 1.0,
             shutdown_timeout: Duration::from_secs(5),
+            metrics: true,
+            metrics_interval: Duration::from_secs(30),
         }
+    }
+
+    /// Export spans only.
+    pub fn without_metrics(mut self) -> Self {
+        self.metrics = false;
+        self
+    }
+
+    /// How often to push metrics to the collector.
+    pub fn with_metrics_interval(mut self, interval: Duration) -> Self {
+        self.metrics_interval = interval;
+        self
     }
 
     /// Set `service.version`.
@@ -130,11 +161,13 @@ impl OtelConfig {
 #[derive(Debug)]
 pub struct OtelGuard {
     provider: SdkTracerProvider,
+    meters: Option<SdkMeterProvider>,
+    instruments: Option<Arc<Instruments>>,
     timeout: Duration,
 }
 
 impl OtelGuard {
-    /// Flush buffered spans and stop the pipeline.
+    /// Flush buffered telemetry and stop the pipeline.
     ///
     /// Idempotent, and safe to call from a shutdown hook.
     pub fn shutdown(&self) {
@@ -143,6 +176,11 @@ impl OtelGuard {
             // otherwise looks like the code was never instrumented.
             tracing::error!(%err, "failed to flush spans before shutdown");
         }
+        if let Some(meters) = &self.meters
+            && let Err(err) = meters.shutdown_with_timeout(self.timeout)
+        {
+            tracing::error!(%err, "failed to flush metrics before shutdown");
+        }
     }
 
     /// Flush without stopping, for a checkpoint mid-run.
@@ -150,6 +188,27 @@ impl OtelGuard {
         if let Err(err) = self.provider.force_flush() {
             tracing::warn!(%err, "failed to flush spans");
         }
+        if let Some(meters) = &self.meters
+            && let Err(err) = meters.force_flush()
+        {
+            tracing::warn!(%err, "failed to flush metrics");
+        }
+    }
+
+    /// The instruments this crate records to, when metrics are enabled.
+    ///
+    /// Share this: `Arc` it into [`metrics::McpMetricsLayer`] for request
+    /// metrics and into [`crate::tasks::TaskSupport::with_metrics`] for task
+    /// metrics. Both are no-ops if you never wire them up — an instrument that
+    /// nothing records to exports nothing.
+    pub fn instruments(&self) -> Option<&Arc<Instruments>> {
+        self.instruments.as_ref()
+    }
+
+    /// The underlying meter provider, for instruments this crate does not
+    /// define.
+    pub fn meter_provider(&self) -> Option<&SdkMeterProvider> {
+        self.meters.as_ref()
     }
 
     /// A shutdown hook for [`crate::ServerConfig::with_shutdown_hook`].
@@ -192,6 +251,9 @@ impl Drop for OtelGuard {
         // Best effort. An explicit `shutdown()` is better because it can report
         // failure; this only catches the case where nobody called it.
         let _ = self.provider.shutdown_with_timeout(self.timeout);
+        if let Some(meters) = &self.meters {
+            let _ = meters.shutdown_with_timeout(self.timeout);
+        }
     }
 }
 
@@ -236,9 +298,35 @@ pub fn pipeline(
 
     let tracer = provider.tracer(config.service_name.clone());
 
+    let (meters, instruments) = if config.metrics {
+        let exporter = {
+            let mut builder = MetricExporter::builder().with_tonic();
+            if let Some(endpoint) = &config.endpoint {
+                builder = builder.with_endpoint(endpoint.clone());
+            }
+            builder.build()?
+        };
+
+        let reader = PeriodicReader::builder(exporter)
+            .with_interval(config.metrics_interval)
+            .build();
+
+        let meters = SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(config.resource())
+            .build();
+
+        let instruments = Arc::new(Instruments::new(&meters.meter(SCOPE)));
+        (Some(meters), Some(instruments))
+    } else {
+        (None, None)
+    };
+
     Ok((
         OtelGuard {
             provider,
+            meters,
+            instruments,
             timeout: config.shutdown_timeout,
         },
         tracer,
