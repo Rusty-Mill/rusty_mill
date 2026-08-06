@@ -49,6 +49,10 @@ entries are tracked by PR rather than by release.
   (shuffles the chain for simple load distribution, no new dependency —
   a tiny in-crate splitmix64 PRNG), and `"free_tier_remaining"` (descending
   by headroom against the `[[free_tiers]]` budgets above).
+- **Added:** `transforms: ["rtk"]` — tool-output compression alongside the
+  existing `"middle-out"`. A built-in, content-sniffed 5-category filter
+  catalog (git/test/build/package/generic) compacts `role: "tool"` message
+  text before dispatch; composes with `"middle-out"` when both are set.
 
 ---
 

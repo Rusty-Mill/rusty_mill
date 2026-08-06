@@ -359,6 +359,42 @@ candidate but sent unmodified to another. Without a `context_length` on
 record for the candidate, or without `transforms` set at all, the request
 goes out unmodified — same as today.
 
+`transforms: ["rtk"]` opts into a different kind of compression, aimed at
+tool-call-heavy coding-agent sessions rather than raw message count:
+
+```jsonc
+{
+  "model": "smart",
+  "transforms": ["rtk"],
+  "messages": [
+    {"role": "user", "content": "run the tests"},
+    {"role": "assistant", "tool_calls": ["..."]},
+    {"role": "tool", "tool_call_id": "...", "content": "running 500 tests\ntest a::b ... ok\n... (huge)"}
+  ]
+}
+```
+
+Every `role: "tool"` message's text is stripped of ANSI escape codes and
+run through a built-in filter, chosen by sniffing the content (not the
+originating command, which this router never sees): `git` (status/diff
+output — collapses long runs of repeated file-status lines), `test`
+(cargo/pytest/jest-shaped output — collapses consecutive passing-test
+lines while always keeping failures and the summary line), `build`
+(compiler output — collapses repeated `Compiling`-style lines while always
+keeping `warning:`/`error:` lines), `package` (npm/pip-shaped install
+output — keeps only summary lines like `added N packages`), and a generic
+fallback (deduplicates repeated lines, then keeps the first/last 40 lines
+of anything still very long). Every category leaves short/already-compact
+output untouched. System/user/assistant messages are never touched — only
+`role: "tool"` content.
+
+`"rtk"` and `"middle-out"` compose when both are set: `"rtk"` runs first
+(so tool messages are already shrunk before `"middle-out"`'s token-budget
+estimate runs against them), then `"middle-out"` drops whole messages if
+the request is still over budget after that. This is a fixed built-in
+5-category catalog, not OmniRoute's TOML-configurable, 49-filter one — see
+`crates/router/src/rtk.rs` if you need a category it doesn't cover yet.
+
 ### Sampling parameters
 
 Beyond `temperature`, `top_p`, `max_tokens`, and `stop`, a request can set a

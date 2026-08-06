@@ -11,6 +11,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   self-tracked free-token budget reporting per "provider/model".
 - Three new `provider.sort` strategies: `"quality"`, `"random"`,
   `"free_tier_remaining"`.
+- `transforms: ["rtk"]` — built-in tool-output compression (git/test/
+  build/package/generic categories), composable with `"middle-out"`.
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002).

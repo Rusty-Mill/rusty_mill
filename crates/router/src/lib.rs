@@ -9,6 +9,7 @@ mod metrics;
 mod moderation;
 mod persistence;
 mod presets;
+mod rtk;
 mod web_search;
 mod webhook;
 
@@ -333,6 +334,57 @@ fn maybe_apply_middle_out(
     let mut truncated = req.clone();
     truncated.messages = apply_middle_out(&req.messages, budget_tokens);
     Some(truncated)
+}
+
+/// If `req` opts into `"rtk"`, compresses every `role: "tool"` message's
+/// text content through `rtk::compress` -- stripping ANSI, collapsing
+/// duplicate lines, and category-specific compaction (git/test/build/
+/// package/generic, see `rtk.rs`). Returns `None` when the transform
+/// wasn't requested or there were no tool messages to compress, in which
+/// case the caller sends `req` unmodified, same as `maybe_apply_middle_out`.
+/// Only text content is touched -- non-text parts (there shouldn't be any
+/// on a tool message, but nothing here assumes that) pass through as-is.
+fn maybe_apply_rtk(req: &ChatRequest) -> Option<ChatRequest> {
+    let wants_rtk = req
+        .transforms
+        .as_ref()
+        .is_some_and(|t| t.iter().any(|s| s == "rtk"));
+    if !wants_rtk {
+        return None;
+    }
+
+    let mut compressed = req.clone();
+    let mut changed = false;
+    for message in &mut compressed.messages {
+        if message.role != rp_core::Role::Tool {
+            continue;
+        }
+        let Some(content) = &mut message.content else {
+            continue;
+        };
+        match content {
+            rp_core::MessageContent::Text(text) => {
+                let new_text = rtk::compress(text);
+                if &new_text != text {
+                    *text = new_text;
+                    changed = true;
+                }
+            }
+            rp_core::MessageContent::Parts(parts) => {
+                for part in parts {
+                    if let rp_core::ContentPart::Text { text } = part {
+                        let new_text = rtk::compress(text);
+                        if &new_text != text {
+                            *text = new_text;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed.then_some(compressed)
 }
 
 /// Holds every provider adapter that could be built from config (i.e. its
@@ -1616,9 +1668,15 @@ impl Router {
                 continue;
             }
 
+            // "rtk" (tool-output compression) applies first, so
+            // "middle-out"'s token-budget estimate reflects the already-
+            // shrunk tool messages rather than their raw size -- both
+            // transforms compose when a request sets both.
+            let rtk_req = maybe_apply_rtk(req);
+            let base_req = rtk_req.as_ref().unwrap_or(req);
             let truncated_req =
-                maybe_apply_middle_out(req, provider_name, model_name, &self.pricing);
-            let req_to_send = truncated_req.as_ref().unwrap_or(req);
+                maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
+            let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
@@ -1737,9 +1795,15 @@ impl Router {
                 continue;
             }
 
+            // "rtk" (tool-output compression) applies first, so
+            // "middle-out"'s token-budget estimate reflects the already-
+            // shrunk tool messages rather than their raw size -- both
+            // transforms compose when a request sets both.
+            let rtk_req = maybe_apply_rtk(req);
+            let base_req = rtk_req.as_ref().unwrap_or(req);
             let truncated_req =
-                maybe_apply_middle_out(req, provider_name, model_name, &self.pricing);
-            let req_to_send = truncated_req.as_ref().unwrap_or(req);
+                maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
+            let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
@@ -4977,6 +5041,108 @@ mod tests {
             .dispatch(&req)
             .await
             .expect("dispatch should succeed even though the request was truncated");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // --- rtk (transforms: ["rtk"]) ------------------------------------------
+
+    fn tool_msg(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: rp_core::Role::Tool,
+            content: Some(rp_core::MessageContent::text(text)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn maybe_apply_rtk_is_none_when_transform_not_requested() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.messages = vec![tool_msg("On branch main\nnothing to commit\n")];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_rtk_is_none_when_there_are_no_tool_messages() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        req.messages = vec![msg("system", 40), msg("user", 40)];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_rtk_compresses_a_tool_messages_text() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        let mut long_status = String::from("On branch main\n");
+        for _ in 0..20 {
+            long_status.push_str("modified: src/lib.rs\n");
+        }
+        req.messages = vec![msg("user", 10), tool_msg(&long_status)];
+
+        let compressed = maybe_apply_rtk(&req).expect("should compress the tool message");
+        let rp_core::MessageContent::Text(tool_text) =
+            compressed.messages[1].content.as_ref().unwrap()
+        else {
+            panic!("expected plain text content");
+        };
+        assert!(tool_text.len() < long_status.len());
+        assert!(tool_text.contains("repeated"));
+        // The non-tool message is untouched.
+        assert_eq!(compressed.messages[0].content, req.messages[0].content);
+    }
+
+    #[test]
+    fn maybe_apply_rtk_leaves_a_short_tool_message_unchanged_and_returns_none() {
+        // Nothing worth compressing -- classify+compress round-trips to
+        // the same text, so this must report "no change" rather than a
+        // spurious rewrite.
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        req.messages = vec![tool_msg("2 + 2 = 4")];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_composes_rtk_before_middle_out() {
+        // A large tool message that, uncompressed, would blow the
+        // context budget middle-out enforces -- but rtk should shrink it
+        // enough that middle-out never needs to drop the surrounding
+        // messages. Both transforms requested together must compose, not
+        // just the last one applied winning.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let mut router = test_router(vec![("anthropic", mock)], vec![], vec![], vec![], vec![]);
+        router.pricing = Arc::new(HashMap::from([(
+            "anthropic/claude-sonnet-5".to_string(),
+            PriceRates {
+                prompt_ppm: 3.0,
+                completion_ppm: 15.0,
+                cache_read_ppm: 3.0,
+                cache_write_ppm: 3.0,
+                context_length: Some(200_000),
+                quality_score: None,
+            },
+        )]));
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string(), "middle-out".to_string()]);
+        let mut long_status = String::from("On branch main\n");
+        for _ in 0..50 {
+            long_status.push_str("modified: src/lib.rs\n");
+        }
+        req.messages = vec![msg("system", 10), tool_msg(&long_status), msg("user", 10)];
+
+        router
+            .dispatch(&req)
+            .await
+            .expect("dispatch should succeed with both transforms requested");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
