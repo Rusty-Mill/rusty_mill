@@ -81,6 +81,13 @@ pub struct HttpConfig {
     /// for, and a layer mounted inside the guard would never see one.
     #[cfg(feature = "otel")]
     pub metrics: Option<crate::otel::metrics::McpMetricsLayer>,
+    /// Concurrency and timeout limits for this endpoint.
+    ///
+    /// `None` leaves both unbounded, which is the existing behaviour. Unlike
+    /// the `Host` allow-list there is no default that is right for everyone —
+    /// the number depends entirely on what your tools do, and picking one here
+    /// would be a silent regression for any server already handling more.
+    pub limits: Option<crate::limits::LimitsLayer>,
 }
 
 impl Default for HttpConfig {
@@ -97,6 +104,7 @@ impl Default for HttpConfig {
             auth: None,
             #[cfg(feature = "otel")]
             metrics: None,
+            limits: None,
         }
     }
 }

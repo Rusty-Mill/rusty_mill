@@ -326,6 +326,77 @@ rusty-mcp-demo --transport http --bind 0.0.0.0:8080 \
   --allowed-origin https://app.example.com
 ```
 
+### Limits
+
+The request body cap is on by default — 4 MiB, `--max-body-bytes`. It is
+enforced incrementally per body frame, so an oversized request gets `413`
+without ever being fully read into memory.
+
+Concurrency and timeouts are **off** by default and worth turning on for
+anything public:
+
+```bash
+rusty-mcp-demo --transport http --bind 0.0.0.0:8080 \
+  --max-concurrent 256 \
+  --request-timeout-secs 30
+```
+
+or in code, via `HttpConfig::limits`:
+
+```rust
+use rusty_mcp::limits::LimitsLayer;
+
+http.limits = Some(
+    LimitsLayer::new()
+        .with_max_concurrent(256)
+        .with_timeout(Duration::from_secs(30)),
+);
+```
+
+Unlike the `Host` allow-list these have no safe default: the right number
+depends entirely on what your tools do, and shipping one would be a silent
+regression for any server already handling more.
+
+#### Shedding, not queueing
+
+Over the limit, a request gets `503` with `Retry-After` immediately. It is not
+queued. A queue in front of an overloaded server converts a capacity problem
+into a latency problem — every client waits longer, times out, and retries,
+which is how a brief spike becomes a sustained outage. Refusing quickly lets a
+client back off while the requests already accepted still finish on time.
+
+This is also why the limit is not applied in `poll_ready`: returning `Pending`
+there is backpressure, and backpressure means the caller waits.
+
+#### Layer order is outside-in
+
+**limits → metrics → authorization → handler**, cheapest rejection first.
+
+A shed request costs a semaphore try-acquire and nothing else. Inside the auth
+layer it would pay for a token validation — and with `JwtValidator`, possibly a
+JWKS lookup — before being told there was no capacity for it anyway. There is a
+test that fills the server, sends an unauthenticated request, and asserts it
+comes back `503` rather than `401`.
+
+The trade is that shed requests are invisible to the metrics layer. That's the
+right way round: the `503` rate is something your load balancer already sees,
+whereas a rejected token is only visible here.
+
+#### What the timeout does not cover
+
+Time to *produce* a response, not time to stream one. A long-lived
+`subscriptions/listen` is unaffected — the transport returns the SSE response
+promptly and streams events afterwards, so the part being timed is short even
+though the request lives for hours. This is verified rather than assumed: a
+test holds a subscription open for five times the timeout and then requires a
+published change to arrive.
+
+A tool running **inline** does hold the response open for its whole duration
+and will be cut off with `504`. That is the intended behaviour, and the reason
+to reach for [tasks](#long-running-tools) for anything slow — a task releases
+its permit as soon as the handle goes back to the client, so long work never
+counts against the concurrency limit.
+
 ## Long-running tools
 
 A tool that takes minutes should not hold a request open for minutes. The

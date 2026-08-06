@@ -61,6 +61,32 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   label; there are tests driving forged names through the layer and asserting
   they never reach the collector.
 
+- `limits::LimitsLayer`, bounding concurrent requests and how long each may
+  take ([#17]). Both off by default and set through `HttpConfig::limits`, or
+  `--max-concurrent` / `--request-timeout-secs`. Unlike the `Host` allow-list
+  there is no default that is right for everyone, and shipping one would be a
+  silent regression for any server already handling more.
+
+  Over the limit a request is **shed** with `503` and `Retry-After`, not
+  queued. A queue in front of an overloaded server turns a capacity problem
+  into a latency problem, which is how a spike becomes an outage. The limit is
+  deliberately not applied in `poll_ready`, since returning `Pending` there is
+  backpressure, and backpressure means waiting.
+
+  Layer order is now outside-in: **limits → metrics → authorization →
+  handler**. A shed request costs a semaphore try-acquire and nothing else,
+  rather than paying for a token validation before being told there was no
+  capacity for it.
+
+  The timeout bounds time to *produce* a response, not to stream one, so a
+  long-lived `subscriptions/listen` is unaffected — verified by a test that
+  holds one open for five times the timeout. A tool running inline does hold
+  the response open and is cut off with `504`; a tool handed to `TaskSupport`
+  releases its permit as soon as the handle goes back to the client, so long
+  work never counts against the limit.
+
+  No new dependencies: the permit pool is a `tokio::sync::Semaphore`.
+
 ### Fixed
 
 - **List results accepted a pagination cursor and ignored it** ([#15]).
@@ -92,6 +118,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 [#14]: https://github.com/baileyrd/rusty_mcp/issues/14
 [#15]: https://github.com/baileyrd/rusty_mcp/issues/15
 [#16]: https://github.com/baileyrd/rusty_mcp/issues/16
+[#17]: https://github.com/baileyrd/rusty_mcp/issues/17
 
 ## [0.3.0] — 2026-08-06
 
