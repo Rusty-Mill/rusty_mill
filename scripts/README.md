@@ -28,13 +28,31 @@ Both support `-WhatIf`. Use it — each does more verification than it does
 work, and `-WhatIf` runs all of the former and none of the latter.
 
 ```powershell
-./Cut-RustyTlsTags.ps1 -WhatIf          # what would be tagged
-./Cut-RustyTlsTags.ps1                  # tag, prompting per tag
+./Cut-RustyTlsTags.ps1 -WhatIf                  # what would be tagged
+./Cut-RustyTlsTags.ps1                          # tag, prompting per tag
 
-./New-RustyTlsReleases.ps1 -WhatIf      # what would be released
-./New-RustyTlsReleases.ps1 -Draft       # create as drafts, to read first
-./New-RustyTlsReleases.ps1              # publish
+./New-RustyTlsReleases.ps1 -WhatIf              # what would be released
+./New-RustyTlsReleases.ps1                      # create and publish in one go
+
+./New-RustyTlsReleases.ps1 -Draft               # create as drafts, to read first
+./New-RustyTlsReleases.ps1 -PublishDrafts       # ...then release what you drafted
 ```
+
+`-Draft` and `-PublishDrafts` are the two halves of the same workflow, and
+passing both is an error rather than a no-op. Drafting first is worth it the
+first time: release bodies come out of `CHANGELOG.md` and how they render is
+easier to judge in the UI than in a diff.
+
+**A draft is not attached to its tag.** Its URL reads
+`releases/tag/untagged-<hash>` until it is published, at which point it becomes
+`releases/tag/vX.Y.Z`. `-PublishDrafts` checks that transition on every release
+rather than trusting the API's exit code, because "succeeded, and here is a
+draft URL" is a state the API can return.
+
+`-PublishDrafts` publishes in ascending version order, so `Latest` lands on the
+newest rather than on whichever happened to go last. It only touches drafts
+whose tag is listed in `$Releases`, and it creates nothing — a tag with no
+release at all is reported so a normal run can create it.
 
 Run `New-RustyTlsReleases.ps1` from the repository root so it finds
 `CHANGELOG.md`, or pass `-ChangelogPath`.
