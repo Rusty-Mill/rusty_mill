@@ -749,6 +749,71 @@ If your process already builds a subscriber, use `otel::pipeline()` for the
 tracer and add the layer yourself — `otel::init()` installs a global subscriber
 and only the first call in a process wins.
 
+### Metrics
+
+Traces are what you read *after* being paged. Metrics are what page you — and
+they are not recoverable from the spans here, because the parent-based sampler
+means the recorded spans are the ones your **callers** chose to sample, which
+is not a representative sample of this server's traffic.
+
+The same pipeline exports both. Metrics are on by default; `without_metrics()`
+turns them off.
+
+```rust
+let guard = otel::init(OtelConfig::new("my-mcp-server"), "info")?;
+let instruments = guard.instruments().expect("metrics are enabled");
+
+// Request metrics: a tower layer on the HTTP endpoint.
+http.metrics = Some(
+    McpMetricsLayer::new(Arc::clone(instruments))
+        .with_known_names(["add", "divide", "summarize"]),
+);
+
+// Task metrics: the tasks extension needs its own, since the work outlives
+// the request that handed out the handle.
+let tasks = TaskSupport::new().with_metrics(Arc::clone(instruments));
+```
+
+You get `mcp.server.requests` (by method, name and outcome),
+`mcp.server.request.duration`, `mcp.server.requests.in_flight`, and
+`mcp.server.tasks.{started,finished}`.
+
+#### Cardinality is the thing to get wrong
+
+A metrics backend does not degrade gracefully when a label set explodes — it
+falls over, and takes the rest of your metrics with it. Every label here comes
+from a closed set fixed before any request arrives:
+
+- `mcp.method` is matched against the methods the spec defines; anything else
+  is `other`. A client cannot mint a label by inventing a method.
+- `mcp.name` is recorded only for `tools/call` and `prompts/get`, and only for
+  names passed to `with_known_names`. **Calling a tool that does not exist must
+  not create a label** — the call fails, but a naive implementation records the
+  label first.
+- `resources/read` puts the **URI** in `Mcp-Name`, and task methods put the
+  task id there. Neither is ever used as a label. Both are unbounded.
+
+Both guarantees have tests that drive forged names through the layer and assert
+they never reach the collector.
+
+#### `outcome` is transport-level
+
+The layer sees HTTP, so a tool returning `isError: true` counts as `ok` —
+JSON-RPC puts application errors in a `200` body, and a middleware that does
+not parse bodies cannot see them. Count those in the tool if you need them.
+`401` and `403` get their own `unauthorized` outcome, because an auth problem
+is a different page at 3am than a malformed request.
+
+#### The layer sits outside authorization
+
+Deliberate, and tested end to end: a request rejected with a `401` is still
+counted. Mounted inside the guard, a flood of bad tokens would look like no
+traffic at all.
+
+Labels come from the SEP-2243 `Mcp-Method` and `Mcp-Name` headers, so no
+request body is ever parsed. This covers HTTP only — a stdio server is one
+process serving one client over a pipe, with no middleware position to occupy.
+
 ### Two behaviours worth knowing
 
 - **A malformed `traceparent` is treated as absent, not as an error.** W3C

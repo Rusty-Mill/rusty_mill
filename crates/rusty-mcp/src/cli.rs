@@ -97,6 +97,10 @@ impl Cli {
                 // Authorization needs a `TokenValidator`, which cannot come
                 // from a flag. Set it on the `HttpConfig` in code.
                 auth: None,
+                // Metrics need instruments from a live pipeline, so this is
+                // set in code too — see `otel::OtelGuard::instruments`.
+                #[cfg(feature = "otel")]
+                metrics: None,
             }),
         };
 

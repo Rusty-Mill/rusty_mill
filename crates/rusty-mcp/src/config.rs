@@ -74,6 +74,13 @@ pub struct HttpConfig {
     /// endpoint with [`crate::auth::RequireAuthLayer`] and publishes the
     /// Protected Resource Metadata document unauthenticated alongside it.
     pub auth: Option<Arc<AuthConfig>>,
+    /// Record request metrics for this endpoint.
+    ///
+    /// Applied **outside** the authorization layer, so a rejected request is
+    /// still counted — a spike in `401`s is exactly the thing you want a metric
+    /// for, and a layer mounted inside the guard would never see one.
+    #[cfg(feature = "otel")]
+    pub metrics: Option<crate::otel::metrics::McpMetricsLayer>,
 }
 
 impl Default for HttpConfig {
@@ -88,6 +95,8 @@ impl Default for HttpConfig {
             max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
             sse_keep_alive: Some(Duration::from_secs(15)),
             auth: None,
+            #[cfg(feature = "otel")]
+            metrics: None,
         }
     }
 }

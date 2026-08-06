@@ -102,6 +102,12 @@ where
     // it refuses to mint sessions at all.
     let factory = Arc::new(factory);
     let auth = http.auth.clone();
+
+    #[cfg(feature = "otel")]
+    let metrics = http.metrics.clone();
+    #[cfg(not(feature = "otel"))]
+    let metrics: MetricsLayer = None;
+
     let mut router = if http.legacy_sessions {
         let service = StreamableHttpService::new(
             {
@@ -111,7 +117,7 @@ where
             Arc::new(LocalSessionManager::default()),
             transport_config,
         );
-        mount_guarded(&http.path, service, auth.as_ref())
+        mount_guarded(&http.path, service, auth.as_ref(), metrics.as_ref())
     } else {
         let service = StreamableHttpService::new(
             {
@@ -121,7 +127,7 @@ where
             Arc::new(NeverSessionManager::default()),
             transport_config,
         );
-        mount_guarded(&http.path, service, auth.as_ref())
+        mount_guarded(&http.path, service, auth.as_ref(), metrics.as_ref())
     };
 
     // The metadata document must stay reachable *without* a token: it is how a
@@ -164,8 +170,28 @@ where
     Ok(())
 }
 
-/// Mount the MCP service at `path`, wrapped in the auth layer when configured.
-fn mount_guarded<T>(path: &str, service: T, auth: Option<&Arc<AuthConfig>>) -> Router
+/// The metrics layer, or a type nothing can construct when `otel` is off.
+///
+/// `Infallible` rather than `()` on purpose: without the feature the `Some`
+/// branch is uninhabited, so the compiler proves the metrics path is gone
+/// rather than leaving a runtime `None` check behind.
+#[cfg(feature = "otel")]
+type MetricsLayer = Option<crate::otel::metrics::McpMetricsLayer>;
+#[cfg(not(feature = "otel"))]
+type MetricsLayer = Option<std::convert::Infallible>;
+
+/// Mount the MCP service at `path`, wrapped in the layers that are configured.
+///
+/// Order matters: metrics go **outside** authorization, so a request rejected
+/// with a `401` is still counted. Mounted inside the guard, the metrics layer
+/// would only ever see requests that already got past it — and a flood of
+/// rejected tokens would look like no traffic at all.
+fn mount_guarded<T>(
+    path: &str,
+    service: T,
+    auth: Option<&Arc<AuthConfig>>,
+    metrics: Option<&<MetricsLayer as IntoInner>::Inner>,
+) -> Router
 where
     T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
         + Clone
@@ -185,11 +211,51 @@ where
                 required_scopes = ?auth.required_scopes,
                 "requiring OAuth 2.1 bearer authorization"
             );
-            mount(
+            mount_metered(
                 path,
                 RequireAuthLayer::from_shared(Arc::clone(auth)).layer(service),
+                metrics,
             )
         }
+        None => mount_metered(path, service, metrics),
+    }
+}
+
+/// Names the `T` inside an `Option<T>`, so one signature covers both features.
+trait IntoInner {
+    type Inner;
+}
+
+impl<T> IntoInner for Option<T> {
+    type Inner = T;
+}
+
+/// Mount `service`, wrapped in the metrics layer when one is configured.
+fn mount_metered<T>(
+    path: &str,
+    service: T,
+    metrics: Option<&<MetricsLayer as IntoInner>::Inner>,
+) -> Router
+where
+    T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    T::Response: axum::response::IntoResponse,
+    T::Future: Send + 'static,
+{
+    match metrics {
+        #[cfg(feature = "otel")]
+        Some(layer) => {
+            use tower_layer::Layer as _;
+            tracing::info!("recording request metrics");
+            mount(path, layer.layer(service))
+        }
+        // Without the feature this arm is uninhabited, so the match is
+        // exhaustive on `None` alone.
+        #[cfg(not(feature = "otel"))]
+        Some(never) => match *never {},
         None => mount(path, service),
     }
 }
