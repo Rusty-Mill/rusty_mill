@@ -11,6 +11,7 @@ dependencies = [
  "agentgateway-core",
  "agentgateway-mcp",
  "agentgateway-proxy",
+ "agentgateway-tls",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -22,6 +23,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "rand 0.8.7",
+ "rcgen",
  "reqwest",
  "rmcp",
  "rsa",
@@ -50,7 +52,7 @@ dependencies = [
  "rusty-mcp",
  "serde_json",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
 ]
@@ -64,7 +66,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "thiserror",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
@@ -74,7 +76,7 @@ dependencies = [
  "agentgateway-config",
  "http",
  "regex",
- "thiserror",
+ "thiserror 2.0.19",
  "tracing",
 ]
 
@@ -87,7 +89,7 @@ dependencies = [
  "regex",
  "rmcp",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
 ]
@@ -103,7 +105,22 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "thiserror",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-tls"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "rusty_tls",
+ "rusty_tokio",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
 ]
@@ -499,6 +516,31 @@ checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "crossbeam-deque"
+version = "0.8.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
+dependencies = [
+ "crossbeam-epoch",
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-epoch"
+version = "0.9.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 
 [[package]]
 name = "crypto-bigint"
@@ -1311,7 +1353,7 @@ dependencies = [
  "jni-sys",
  "log",
  "simd_cesu8",
- "thiserror",
+ "thiserror 2.0.19",
  "walkdir",
  "windows-link",
 ]
@@ -1586,7 +1628,7 @@ dependencies = [
  "futures-sink",
  "js-sys",
  "pin-project-lite",
- "thiserror",
+ "thiserror 2.0.19",
  "tracing",
 ]
 
@@ -1601,7 +1643,7 @@ dependencies = [
  "opentelemetry-proto",
  "opentelemetry_sdk",
  "prost",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tonic",
  "tonic-types",
@@ -1633,7 +1675,7 @@ dependencies = [
  "percent-encoding",
  "portable-atomic",
  "rand 0.9.5",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
 ]
@@ -1747,6 +1789,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
+name = "platform"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "platform-bsd"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+dependencies = [
+ "libc",
+ "platform 0.21.0",
+]
+
+[[package]]
+name = "platform-bsd"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "libc",
+ "platform 0.22.1",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.21.0"
+source = "git+https://github.com/baileyrd/rustils?rev=863687cac2177d01e0d6da3f827b7fedf4709c07#863687cac2177d01e0d6da3f827b7fedf4709c07"
+dependencies = [
+ "libc",
+ "platform 0.21.0",
+]
+
+[[package]]
+name = "platform-linux"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "libc",
+ "platform 0.22.1",
+]
+
+[[package]]
+name = "platform-windows"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform 0.22.1",
+ "winargv",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1854,7 +1958,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tracing",
  "web-time",
@@ -1877,7 +1981,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror",
+ "thiserror 2.0.19",
  "tinyvec",
  "tracing",
  "web-time",
@@ -2004,6 +2108,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "pem",
+ "ring",
+ "rustls-pki-types",
+ "time",
+ "yasna",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2062,6 +2179,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -2142,7 +2260,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "sse-stream",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -2221,6 +2339,7 @@ checksum = "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
 dependencies = [
  "aws-lc-rs",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -2237,6 +2356,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]
@@ -2312,7 +2440,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "thiserror",
+ "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tower-layer",
@@ -2322,6 +2450,64 @@ dependencies = [
  "tracing-subscriber",
  "url",
 ]
+
+[[package]]
+name = "rusty_libc"
+version = "0.0.1"
+source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
+
+[[package]]
+name = "rusty_std"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_std?rev=3ab2361e4b8bc873ecd8404178cac7288fbff2b7#3ab2361e4b8bc873ecd8404178cac7288fbff2b7"
+dependencies = [
+ "rusty_libc",
+ "rusty_win32",
+]
+
+[[package]]
+name = "rusty_tls"
+version = "0.10.1"
+source = "git+https://github.com/baileyrd/rusty_tls?rev=7ac6956e41635d11d8314dfe637f98df697cdd08#7ac6956e41635d11d8314dfe637f98df697cdd08"
+dependencies = [
+ "platform 0.22.1",
+ "platform-bsd 0.22.1",
+ "platform-linux 0.22.1",
+ "platform-windows",
+ "rustls",
+ "rusty_tokio",
+]
+
+[[package]]
+name = "rusty_tokio"
+version = "0.2.0"
+source = "git+https://github.com/baileyrd/rusty_tokio?rev=6d3bb05a45a393e4cf902013b05189dd168f6106#6d3bb05a45a393e4cf902013b05189dd168f6106"
+dependencies = [
+ "bytes",
+ "crossbeam-deque",
+ "libc",
+ "platform 0.21.0",
+ "platform-bsd 0.21.0",
+ "platform-linux 0.21.0",
+ "rusty_std",
+ "rusty_tokio-macros",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "rusty_tokio-macros"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_tokio?rev=6d3bb05a45a393e4cf902013b05189dd168f6106#6d3bb05a45a393e4cf902013b05189dd168f6106"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "rusty_win32"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_win32?rev=a128d758c7c5683b908a48eb84d0b0e4308fc586#a128d758c7c5683b908a48eb84d0b0e4308fc586"
 
 [[package]]
 name = "ryu"
@@ -2575,7 +2761,7 @@ checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
  "num-bigint",
  "num-traits",
- "thiserror",
+ "thiserror 2.0.19",
  "time",
 ]
 
@@ -2705,11 +2891,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09a43598840e33d5b0331f38c5e30d13bb11c11210a4b58f0d9b18a5a5eefcd9"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.19",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3241,6 +3447,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "winargv"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform 0.22.1",
+]
+
+[[package]]
 name = "windows"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3352,6 +3566,15 @@ dependencies = [
 
 [[package]]
 name = "windows-sys"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
+dependencies = [
+ "windows-targets",
+]
+
+[[package]]
+name = "windows-sys"
 version = "0.61.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
@@ -3443,6 +3666,15 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
+]
 
 [[package]]
 name = "yoke"

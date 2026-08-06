@@ -61,6 +61,7 @@ tool's own name.
 | `agentgateway-auth` | The `jwtAuth` policy, over [`rusty_mcp`][rusty_mcp]'s JWKS validator. |
 | `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
+| `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway` | The binary: data plane assembly, sockets, graceful shutdown. |
 
 Three decisions are worth knowing up front, because they shape everything else.
@@ -121,6 +122,7 @@ Implemented and tested:
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
 - `retry` with backoff, and `localRateLimit` token buckets — see
   [Retries and rate limits](#retries-and-rate-limits)
+- TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
@@ -139,7 +141,10 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 - `service` backends (service discovery), `dynamic` backends
 - `mcpAuthorization.rules` (upstream's policy-expression form; the
   `allowTools`/`denyTools` lists are ours and *are* enforced)
-- TLS termination (`HTTPS`/`TLS` listener protocols)
+- SNI: one certificate per port. Two listeners on one port with different
+  certificates is a startup error rather than a guess
+- `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
+  forwarded
 - `retry`, `localRateLimit`, header modifiers and `urlRewrite` are modelled but
   not yet applied
 - `service` backends need service discovery; use `host` with a literal address
@@ -240,6 +245,36 @@ answers, so `backendRequestTimeout` genuinely bounds the wait here.
 A route mixing `host` with a backend kind this build cannot serve is refused
 rather than served: silently dropping the unsupported share onto the hosts
 would send traffic somewhere the operator never asked for.
+
+## TLS
+
+```yaml
+binds:
+  - port: 8443
+    listeners:
+      - protocol: HTTPS
+        tls:
+          cert: /etc/certs/tls.crt   # chain, leaf first
+          key: /etc/certs/tls.key    # PKCS#8, PKCS#1 or SEC1
+        routes: [...]
+```
+
+Termination goes through [`rusty_tls`][rusty_tls], the ecosystem's one TLS
+implementation, so the gateway does not roll its own. ALPN advertises `h2` and
+`http/1.1`; over TLS that is how the HTTP version gets chosen, and a client
+capable of HTTP/2 gets it.
+
+Certificates are read at startup, so a missing or malformed one stops the
+gateway booting instead of failing every handshake later. `X-Forwarded-Proto`
+reports `https` for a TLS listener — an upstream generating absolute URLs from
+that header would otherwise emit `http://` links into an `https://` page and
+trip mixed-content blocking.
+
+**One certificate per port.** `rusty_tls` builds its acceptor from a single
+chain and does not surface `rustls`' `ResolvesServerCert`, so SNI-based
+selection is not available. Two listeners on one port with different
+certificates is refused at startup rather than quietly serving the first one's
+certificate to the second one's clients.
 
 ## Retries and rate limits
 
@@ -422,13 +457,37 @@ and needs its own bucket.
 Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 `unwrap_used = warn`) is adopted verbatim in this workspace.
 
+## On `rusty_tls`
+
+TLS termination is [`rusty_tls`][rusty_tls] — a `rustls` 0.23 wrapper — rather
+than `tokio-rustls`, so the gateway is not the one consumer in this ecosystem
+that rolls its own TLS.
+
+Its async server adapter is written against `rusty_tokio`'s `AsyncRead` and
+`AsyncWrite`, while this gateway runs on `tokio` and hands connections to
+`hyper`, so a TLS stream is adapted twice: the socket goes in as a
+`rusty_tokio` stream and the decrypted stream comes back out as a `tokio` one.
+**That costs nothing per byte.** Both runtimes' `ReadBuf` is an initialized
+`&mut [u8]` plus a filled cursor, so the inner reader writes directly into the
+outer buffer's spare capacity and the adapter only forwards the count — no
+intermediate buffer, no copy, no `unsafe`. The price of the choice is
+dependency weight (`rusty_tokio` for its trait definitions, and `rustils`'
+`platform` crates that only client-side trust anchors use), not throughput.
+
+One deliberate exception to the crate's "consumers import `rusty_tls`, never
+`rustls`" rule: `rusty_tls` does not install a `rustls` `CryptoProvider`, and
+`rustls` refuses to guess when more than one is present in a build. This
+workspace has two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` — so it
+panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
+once, which needs a direct `rustls` dependency pinned to the same 0.23.
+
 ## Tests
 
 ```bash
 cargo test --workspace
 ```
 
-143 tests. The config tests are anchored on YAML taken verbatim from
+155 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -456,3 +515,4 @@ tested at a single resolution, on one machine, when CI was not busy.
 
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp
+[rusty_tls]: https://github.com/baileyrd/rusty_tls

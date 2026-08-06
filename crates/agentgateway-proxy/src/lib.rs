@@ -25,7 +25,7 @@ use hyper_util::rt::TokioExecutor;
 
 pub use balance::{BalanceError, Endpoints};
 pub use retry::{MAX_REPLAY_BYTES, Retry};
-pub use transform::{HeaderError, Headers, RewriteError, Rewrite};
+pub use transform::{HeaderError, Headers, RewriteError, Rewrite, Scheme};
 
 use retry::RequestBody;
 
@@ -128,12 +128,14 @@ impl HostProxy {
     ///
     /// `matched_prefix` is the route prefix that matched, which a `prefix`
     /// rewrite replaces. `peer` is the client address, recorded in the
-    /// forwarded-for chain.
+    /// forwarded-for chain, and `scheme` is the listener's, reported as
+    /// `X-Forwarded-Proto`.
     pub async fn proxy(
         &self,
         request: Request<Incoming>,
         matched_prefix: Option<&str>,
         peer: Option<IpAddr>,
+        scheme: Scheme,
     ) -> Response<ProxyBody> {
         let (mut parts, body) = request.into_parts();
 
@@ -144,7 +146,7 @@ impl HostProxy {
         // able to make one of our own headers hop-by-hop by naming it in
         // `Connection`.
         transform::strip_hop_by_hop(&mut parts.headers);
-        transform::add_forwarded(&mut parts.headers, peer, host.as_ref());
+        transform::add_forwarded(&mut parts.headers, peer, host.as_ref(), scheme);
         transform::apply_backend_auth(&mut parts.headers, self.backend_auth.as_ref());
         if let Some(headers) = &self.request_headers {
             headers.apply(&mut parts.headers);
@@ -203,6 +205,12 @@ impl HostProxy {
             };
 
             let mut attempt_parts = parts.clone();
+            // The version the *client* used is a property of its connection,
+            // not the upstream's. A client arriving over HTTP/2 -- which is
+            // what ALPN negotiates on a TLS listener -- would otherwise make
+            // us attempt h2 prior-knowledge against a cleartext upstream that
+            // only speaks HTTP/1.1, and every such request 502s.
+            attempt_parts.version = http::Version::HTTP_11;
             // The upstream's `Host` must name the upstream, not us, or a
             // name-based virtual host upstream serves the wrong site.
             if let Ok(value) = HeaderValue::try_from(authority.as_str()) {

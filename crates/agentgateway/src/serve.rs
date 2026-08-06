@@ -17,6 +17,8 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tower_layer::Layer as _;
 
+use agentgateway_proxy::Scheme;
+
 use crate::gateway::Gateway;
 
 /// Bind every address and serve until SIGINT or SIGTERM.
@@ -117,38 +119,73 @@ async fn accept_loop(
         // appends to.
         let peer = Some(peer.ip());
 
+        let terminator = gateway.tls(port);
         let gateway = Arc::clone(&gateway);
         let shutdown = shutdown.clone();
         let limits = limits.clone();
+
         tokio::spawn(async move {
-            // `tower::service_fn`, not hyper's: the limits layer is a tower
-            // layer, so the stack is built in tower terms and bridged to hyper
-            // once at the outside.
-            let service = TowerToHyperService::new(limits.layer(tower::service_fn(
-                move |request| {
-                    let gateway = Arc::clone(&gateway);
-                    async move { gateway.handle(port, peer, request).await }
-                },
-            )));
-
-            let builder = ConnBuilder::new(TokioExecutor::new());
-            let connection =
-                builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
-            tokio::pin!(connection);
-
-            tokio::select! {
-                result = connection.as_mut() => {
-                    if let Err(err) = result {
-                        tracing::debug!(%port, %err, "connection closed with error");
-                    }
+            match terminator {
+                Some(terminator) => {
+                    // The handshake happens on this connection's own task, so
+                    // a slow or hostile client stalls only itself rather than
+                    // holding up the accept loop for everyone.
+                    let tls = match terminator.accept(stream).await {
+                        Ok(tls) => tls,
+                        Err(err) => {
+                            tracing::debug!(%port, %err, "TLS handshake failed");
+                            return;
+                        }
+                    };
+                    serve_connection(tls, gateway, port, Scheme::Https, peer, limits, shutdown).await;
                 }
-                _ = shutdown.cancelled() => {
-                    // Let in-flight requests finish; MCP calls can be long.
-                    connection.as_mut().graceful_shutdown();
-                    let _ = connection.await;
+                None => {
+                    serve_connection(stream, gateway, port, Scheme::Http, peer, limits, shutdown).await;
                 }
             }
         });
+    }
+}
+
+/// Serve one connection, whether it arrived over TLS or in the clear.
+///
+/// Generic over the stream so the TLS and cleartext paths share every line
+/// after the handshake: a second copy of this would be a second place for the
+/// graceful-shutdown handling to drift.
+async fn serve_connection<S>(
+    stream: S,
+    gateway: Arc<Gateway>,
+    port: u16,
+    scheme: Scheme,
+    peer: Option<std::net::IpAddr>,
+    limits: LimitsLayer,
+    shutdown: CancellationToken,
+) where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    // `tower::service_fn`, not hyper's: the limits layer is a tower layer, so
+    // the stack is built in tower terms and bridged to hyper once at the
+    // outside.
+    let service = TowerToHyperService::new(limits.layer(tower::service_fn(move |request| {
+        let gateway = Arc::clone(&gateway);
+        async move { gateway.handle(port, peer, scheme, request).await }
+    })));
+
+    let builder = ConnBuilder::new(TokioExecutor::new());
+    let connection = builder.serve_connection_with_upgrades(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+
+    tokio::select! {
+        result = connection.as_mut() => {
+            if let Err(err) = result {
+                tracing::debug!(%port, %err, "connection closed with error");
+            }
+        }
+        _ = shutdown.cancelled() => {
+            // Let in-flight requests finish; MCP calls can be long.
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
     }
 }
 
