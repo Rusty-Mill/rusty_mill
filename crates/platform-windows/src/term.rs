@@ -1,18 +1,31 @@
-//! `Terminal` impl over `sys::console` (extraction map D9).
+//! `Terminal` impl over `sys::console` (extraction map D9), plus
+//! `ConsoleAcquisition` (the `rusty_naner` facet).
 
 use std::time::Duration;
 
 use platform::error::Result;
-use platform::term::{TermStream, Terminal, WinSize};
+use platform::term::{ConsoleAcquisition, ConsoleState, TermStream, Terminal, WinSize};
 
 use crate::sys::console;
 
 /// The Windows terminal, over the process's std handles. Raw-mode state
 /// (the saved console modes) lives here for correct, idempotent
-/// enter/leave pairing.
-#[derive(Default)]
+/// enter/leave pairing. `console_state` tracks which console-acquisition
+/// personality this handle last put the process into — instance state,
+/// not a live OS probe, the same discipline `saved` already uses for
+/// raw mode.
 pub struct WindowsTerminal {
     saved: Option<console::SavedModes>,
+    console_state: ConsoleState,
+}
+
+impl Default for WindowsTerminal {
+    fn default() -> Self {
+        Self {
+            saved: None,
+            console_state: console::initial_state(),
+        }
+    }
 }
 
 impl WindowsTerminal {
@@ -60,5 +73,34 @@ impl Terminal for WindowsTerminal {
 
     fn set_echo(&mut self, on: bool) -> Result<bool> {
         console::set_echo(on)
+    }
+}
+
+impl ConsoleAcquisition for WindowsTerminal {
+    fn console_state(&self) -> ConsoleState {
+        self.console_state
+    }
+
+    fn alloc_console(&mut self) -> Result<()> {
+        console::alloc()?;
+        console::reopen_std_handles()?;
+        self.console_state = ConsoleState::Allocated;
+        Ok(())
+    }
+
+    fn attach_console(&mut self, pid: Option<u32>) -> Result<()> {
+        console::attach(pid)?;
+        console::reopen_std_handles()?;
+        self.console_state = ConsoleState::Attached;
+        Ok(())
+    }
+
+    fn free_console(&mut self) -> Result<()> {
+        if self.console_state == ConsoleState::None {
+            return Ok(());
+        }
+        console::free()?;
+        self.console_state = ConsoleState::None;
+        Ok(())
     }
 }

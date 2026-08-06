@@ -242,10 +242,34 @@ forces it):
 - **Test harness for free**: `rusty_win32/console.rs`
   `write_char_events`/`WriteConsoleInputW` — synthetic keystrokes, the
   Windows analog of writing into a pty master; drives a raw-mode reader
-  end-to-end in CI.
+  end-to-end in CI. Not yet ported (no forcing consumer for it
+  specifically) — the console-*acquisition* landing below is a distinct
+  facet from this one.
 
 Consumers per architecture.md: rusty_naner, rush interactive (Phase 5),
 rusty_lines' host. Windows fg/bg absence is already characterized (D8).
+
+**Landed (console acquisition slice) 2026-08-05** — the owner's explicit
+call, same posture PTY hosting (D13) was built under: no confirmed live
+consumer, built speculatively. `platform::term::{ConsoleState,
+ConsoleAcquisition}` — `alloc_console`/`attach_console`/`free_console`
+over `rusty_win32`'s real `AllocConsole`/`AttachConsole`/`FreeConsole`
+primitives, plus a `CONIN$`/`CONOUT$` reopen (promoting
+`rusty_win32`'s own test-only `open_console` helper to production code)
+and a best-effort VT-processing enable so the rest of
+`platform::term::Terminal` works immediately against a freshly acquired
+console with no separate fixup step. `ConsoleAcquisition` is a
+deliberately separate opt-in trait from `Terminal`, only implemented by
+`WindowsTerminal` — the mirror-image asymmetry to `JobControlTerminal`
+(Unix-only, no Windows implementor). `rusty_naner`'s own donor source
+(the D9 entry above's actual attribution for this facet) wasn't in this
+session's reach, so `ConsoleState`'s four variants
+(`None`/`Inherited`/`Allocated`/`Attached`) are derived from
+`rusty_win32`'s real primitives plus ordinary Win32 domain knowledge,
+not ported verbatim — see `docs/design-discussion-console.md` for the
+full reasoning and what's deliberately still out of scope (the
+`write_char_events` test-harness facet above, `rusty_win32`'s
+title/codepage/fill/cursor primitives, `platform-mock`).
 
 ### D10 — Wait-status completion: `waitid`/WNOWAIT + stopped/continued
 

@@ -133,13 +133,48 @@ because the existing surface already covers them:
   *sending* those signals to a job; this trait is only the
   terminal-ownership half.
 
+## Console acquisition (landed 2026-08-05)
+
+- `ConsoleAcquisition::alloc_console`/`attach_console`/`free_console` —
+  `AllocConsole`/`AttachConsole`/`FreeConsole`, for a GUI-subsystem
+  process that starts with no console at all. A deliberately separate
+  trait from `Terminal`, mirroring `JobControlTerminal`'s own asymmetry
+  in the other direction: only `WindowsTerminal` implements it (Unix has
+  no GUI-subsystem/console-subsystem split to acquire a console into).
+- `alloc_console`/`attach_console` always reopen `CONIN$`/`CONOUT$`
+  (`CreateFileW`, immune to std-handle redirection) and install them via
+  `SetStdHandle`, plus a best-effort VT-processing enable on the new
+  stdout — every other `Terminal` method already implemented above
+  observes the newly acquired console immediately, no separate fixup
+  step. Needed because neither `AllocConsole` nor `AttachConsole`
+  updates a std slot that was ever explicitly redirected — a documented
+  Windows quirk (`docs/design-discussion-console.md` has the full
+  story).
+- `console_state()` reports `None`/`Inherited`/`Allocated`/`Attached` —
+  instance state (like `enter_raw`'s saved-modes discipline), not a live
+  OS probe (unlike `is_raw`'s deliberate live-probing): see
+  `docs/design-discussion-console.md` for why that split is the right
+  one here.
+- `free_console` is idempotent — a no-op, not an error, when no console
+  is currently attached, matching `leave_raw`'s own "without a prior
+  enter it's a no-op" contract rather than surfacing whatever
+  `FreeConsole` itself reports for "nothing to free".
+- **Live-verified only** (CI-only, this crate's whole backend is
+  cross-compile-checked from a Linux host — same discipline as the PTY
+  surface's own Windows tests): `platform-windows/tests/
+  console_acquisition.rs` exercises real `AllocConsole`/`AttachConsole`/
+  `FreeConsole` calls against the test process's own console, serialized
+  through a single mutex since acquisition is whole-process state, not
+  per-instance.
+- **Not landed**: `rusty_win32`'s `write_char_events`/`WriteConsoleInputW`
+  synthetic-keystroke test harness (D9's own "test harness for free"
+  bullet) — a distinct facet, waiting for a consumer that needs to drive
+  a raw-mode reader through synthetic input in CI.
+
 ## Not in slice 1 or 2 (recorded, gated)
 
 - PTY hosting (D13) is a distinct Process×Terminal surface (openpty vs
   ConPTY), not part of raw-mode/winsize.
-- Console *acquisition* for GUI-subsystem processes (attach/alloc/
-  redirect — the rusty_naner facet) is separate from raw-mode on an
-  already-inherited console; a future slice.
 - Byte→key decode (keymap policy — emacs/vi bindings — stays with the
   consumer, same as shell expansion/globbing stays with rush).
 

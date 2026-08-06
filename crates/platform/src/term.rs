@@ -48,10 +48,14 @@
 //! folded into raw-mode/winsize); resize *notification* (a genuine
 //! divergence `rusty_term` proves: a SIGWINCH stream on Unix vs no
 //! Windows equivalent, so Windows consumers poll — `behavior/term.md`
-//! records it); byte→key decode (keymap policy, stays with the
-//! consumer); and console *acquisition* for GUI-subsystem processes
-//! (attach/alloc/redirect — from rusty_naner, a separate facet from
-//! raw-mode on an already-inherited console).
+//! records it); and byte→key decode (keymap policy, stays with the
+//! consumer).
+//!
+//! **Console *acquisition*** for GUI-subsystem processes (attach/alloc/
+//! redirect — from `rusty_naner`) is a separate facet from raw-mode on
+//! an already-inherited console, built speculatively on the owner's
+//! explicit call (the same posture PTY hosting was built under, D13):
+//! see [`ConsoleState`]/[`ConsoleAcquisition`], below.
 //!
 //! Raw mode is **stateful and process-visible** (termios flags /
 //! console modes): [`Terminal::enter_raw`] saves the previous state and
@@ -162,4 +166,87 @@ pub trait JobControlTerminal {
     /// precondition themselves — ignoring `SIGTTOU` as part of every
     /// call — rather than leaving it to the caller to remember.
     fn give_terminal(&self, pgid: u32) -> Result<()>;
+}
+
+/// Which of the console-acquisition personalities the calling process is
+/// currently in — the D9 facet from the `rusty_naner` donor
+/// (`naner-core/console.rs`), landed as its own opt-in trait
+/// ([`ConsoleAcquisition`], below) rather than folded into [`Terminal`].
+///
+/// This state (and the trait that reports/changes it) exists only
+/// because Windows draws a distinction Unix does not: a Windows process
+/// can be built for the GUI subsystem (`/SUBSYSTEM:WINDOWS`), which gets
+/// **no console at all** unless it explicitly acquires one — a state
+/// with no Unix analog (every Unix process either inherits a controlling
+/// terminal at exec time or doesn't; there is no separate "go acquire
+/// one now" step to model). Mirrors [`JobControlTerminal`]'s own
+/// asymmetry in the other direction: that trait is Unix-only with no
+/// Windows implementor, this one is (in practice) Windows-only with no
+/// Unix implementor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsoleState {
+    /// No console is attached to this process at all — the GUI-subsystem
+    /// default, or the state after [`ConsoleAcquisition::free_console`].
+    None,
+    /// A console was inherited at process-creation time — the ordinary
+    /// case for a console-subsystem process launched from a shell; every
+    /// other [`Terminal`] capability in this module already operates
+    /// against it with no acquisition step required.
+    Inherited,
+    /// A brand-new console was acquired via
+    /// [`ConsoleAcquisition::alloc_console`].
+    Allocated,
+    /// Another process's console (typically the parent's) was acquired
+    /// via [`ConsoleAcquisition::attach_console`].
+    Attached,
+}
+
+/// Console *acquisition* for GUI-subsystem processes — `AttachConsole`/
+/// `AllocConsole`/`FreeConsole`, plus the `CONOUT$`/`CONIN$` reopen and
+/// VT re-enable a caller needs afterward to actually use the newly
+/// acquired console through this same module's [`Terminal`] surface.
+/// D9's `rusty_naner` facet, deliberately a separate opt-in trait from
+/// `Terminal` for the same reason [`JobControlTerminal`] is: no portable
+/// twin exists (Unix has no GUI-subsystem/console-subsystem split to
+/// acquire a console *into*), so a consumer that needs this opts in
+/// explicitly rather than every `Terminal` implementor answering for a
+/// capability only one of them has.
+///
+/// **Ordering contract**: after a successful [`alloc_console`](
+/// ConsoleAcquisition::alloc_console) or [`attach_console`](
+/// ConsoleAcquisition::attach_console), the process's std handles are
+/// already repointed at the new console (`CONOUT$`/`CONIN$`/`CONERR$`
+/// reopened and installed via `SetStdHandle`) and VT output processing
+/// is re-enabled on the new stdout — every other [`Terminal`] method
+/// this trait's implementor also implements observes the new console
+/// immediately, with no separate fixup step for the caller to remember.
+pub trait ConsoleAcquisition {
+    /// The console personality this process is currently in — a cheap,
+    /// non-probing accessor reporting what this handle's own
+    /// `alloc_console`/`attach_console`/`free_console` calls last left
+    /// it as (seeded from a real inherited-console probe at
+    /// construction), not a fresh OS query on every call.
+    fn console_state(&self) -> ConsoleState;
+
+    /// Allocate a brand-new console for this process (`AllocConsole`)
+    /// and repoint its std handles onto it. Fails with
+    /// `ErrorKind::PermissionDenied` — Windows' own `AllocConsole`
+    /// failure code for the case, surfaced as-is rather than remapped —
+    /// if this process already has a console; free it first with
+    /// [`free_console`](Self::free_console).
+    fn alloc_console(&mut self) -> Result<()>;
+
+    /// Attach to another process's console (`AttachConsole`) and
+    /// repoint this process's std handles onto it. `pid = None` attaches
+    /// to whatever console (if any) launched this process — the usual
+    /// case for a GUI-subsystem process reusing its parent's console
+    /// rather than allocating its own. Fails if this process already has
+    /// a console, or if the target has none.
+    fn attach_console(&mut self, pid: Option<u32>) -> Result<()>;
+
+    /// Detach this process from its current console (`FreeConsole`) —
+    /// e.g. before [`alloc_console`](Self::alloc_console) a second time
+    /// to create a fresh one. A no-op, not an error, when no console is
+    /// currently attached.
+    fn free_console(&mut self) -> Result<()>;
 }

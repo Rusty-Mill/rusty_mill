@@ -1,7 +1,10 @@
 //! Console terminal primitives (extraction map D9, via the rusty_win32
-//! donor): tty probe, viewport size, raw mode over console modes, and
+//! donor): tty probe, viewport size, raw mode over console modes,
 //! (slice 2, roadmap Phase 2) live raw-mode probing, poll/read on
-//! stdin, and echo toggling.
+//! stdin, and echo toggling, plus (the `rusty_naner`-facet slice)
+//! console *acquisition* — `alloc`/`attach`/`free` and the std-handle
+//! reopen that makes an acquired console immediately usable through
+//! every function above.
 //!
 //! The isatty analog IS `GetConsoleMode` succeeding — a redirected
 //! (pipe/file) std handle fails the call. Raw mode clears the cooked
@@ -15,10 +18,11 @@ use std::ffi::OsStr;
 use std::time::Duration;
 
 use platform::error::Result;
-use platform::term::TermStream;
+use platform::term::{ConsoleState, TermStream};
 
 use crate::ffi::win32_surface as w;
 use crate::sys::errmap;
+use crate::util::wide::to_wide_nul;
 
 /// The std-handle slot for a stream — handle values stop at this
 /// boundary (RFC v2 §5).
@@ -214,4 +218,173 @@ pub fn read_chunk(buf: &mut [u8]) -> Result<usize> {
         return Err(errmap::last_win32_err("ReadFile", OsStr::new("")));
     }
     Ok(n as usize)
+}
+
+// Console *acquisition* (`platform::term::ConsoleAcquisition`, D9's
+// rusty_naner facet) — alloc/attach/free plus the std-handle reopen a
+// caller needs afterward to actually use the acquired console through
+// this same module's other functions. Distinct from everything above:
+// those all operate on whatever console (if any) this process already
+// had at start; these change *which* console it has.
+
+/// Whether this process currently has any console attached at all —
+/// probed by attempting to open `CONIN$` and immediately closing it on
+/// success. **Deliberately not `GetConsoleWindow`**: a first version of
+/// this probe used it, and `windows-latest` CI caught the real bug that
+/// choice hides — a ConPTY-hosted console (this crate's own
+/// `platform::pty` backend, and, it turns out, however the Actions
+/// runner hosts `pwsh` for a `cargo test` step) has no `HWND` at all,
+/// so `GetConsoleWindow` returning null does not mean "no console" the
+/// way it does for a classic conhost-windowed console. That false
+/// negative made [`initial_state`] report `None` for a process that
+/// genuinely had one attached, which made a test's `free_console()`
+/// wrongly no-op, which made the next `alloc_console()` fail with a
+/// real, correctly-reported `ERROR_ACCESS_DENIED` — the OS was right;
+/// the probe was wrong. Opening `CONIN$` answers "is a console attached
+/// right now" directly, independent of whether that console has a
+/// window (unlike [`is_tty`], which is std-handle-based and would miss
+/// an attached-but-redirected-away-from console the same wrong
+/// direction).
+fn has_console() -> bool {
+    match reopen("CONIN$", w::GENERIC_READ) {
+        Ok(h) => {
+            // SAFETY: `h` is the live handle `reopen` just returned;
+            // this probe only needs to know the open succeeded, not
+            // keep the handle.
+            unsafe { w::CloseHandle(h) };
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// [`WindowsTerminal`](crate::WindowsTerminal)'s starting
+/// [`ConsoleState`] — `Inherited` if a console was already attached at
+/// process creation (the ordinary console-subsystem case), `None`
+/// otherwise (a GUI-subsystem process with no console yet). Never
+/// reports `Allocated`/`Attached`: those states only exist after this
+/// same handle's own [`alloc`]/[`attach`] call, which is exactly what
+/// `WindowsTerminal` uses this function for — a one-time probe at
+/// construction, not a live query [`ConsoleAcquisition::console_state`](
+/// platform::term::ConsoleAcquisition::console_state) re-runs on every
+/// call.
+pub fn initial_state() -> ConsoleState {
+    if has_console() {
+        ConsoleState::Inherited
+    } else {
+        ConsoleState::None
+    }
+}
+
+/// Allocate a brand-new console for this process — `AllocConsole`.
+/// Fails with `ErrorKind::PermissionDenied` (Windows' own
+/// `ERROR_ACCESS_DENIED`) if this process already has one.
+pub fn alloc() -> Result<()> {
+    // SAFETY: `AllocConsole` takes no arguments and has no precondition.
+    if unsafe { w::AllocConsole() } == 0 {
+        return Err(errmap::last_win32_err("AllocConsole", OsStr::new("")));
+    }
+    Ok(())
+}
+
+/// Detach this process from its current console — `FreeConsole`.
+pub fn free() -> Result<()> {
+    // SAFETY: `FreeConsole` takes no arguments and has no precondition.
+    if unsafe { w::FreeConsole() } == 0 {
+        return Err(errmap::last_win32_err("FreeConsole", OsStr::new("")));
+    }
+    Ok(())
+}
+
+/// Attach to another process's console — `AttachConsole`. `pid = None`
+/// maps to `ATTACH_PARENT_PROCESS`, attaching to whatever console (if
+/// any) launched this process.
+pub fn attach(pid: Option<u32>) -> Result<()> {
+    let process_id = pid.unwrap_or(w::ATTACH_PARENT_PROCESS);
+    // SAFETY: `AttachConsole` takes a plain `DWORD` process id (or the
+    // documented `ATTACH_PARENT_PROCESS` sentinel) and has no other
+    // precondition.
+    if unsafe { w::AttachConsole(process_id) } == 0 {
+        return Err(errmap::last_win32_err("AttachConsole", OsStr::new("")));
+    }
+    Ok(())
+}
+
+/// Open a real handle to whatever console this process is currently
+/// attached to — `CreateFileW("CONIN$"/"CONOUT$", ...)`, the documented
+/// way to get a console handle that is immune to std-handle redirection
+/// (unlike `GetStdHandle`, which keeps returning whatever was inherited
+/// or last set, console-attached or not).
+fn reopen(name: &str, access: u32) -> Result<w::HANDLE> {
+    let wide = to_wide_nul(OsStr::new(name));
+    // SAFETY: `wide` is a valid, NUL-terminated UTF-16 string naming a
+    // well-known console pseudo-device; no security-attributes pointer
+    // is needed (this handle is not meant to be inherited by a future
+    // child — nothing here spawns one).
+    let h = unsafe {
+        w::CreateFileW(
+            wide.as_ptr(),
+            access,
+            w::FILE_SHARE_READ | w::FILE_SHARE_WRITE,
+            std::ptr::null(),
+            w::OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if h.is_null() || h == w::INVALID_HANDLE_VALUE {
+        return Err(errmap::last_win32_err("CreateFileW", OsStr::new(name)));
+    }
+    Ok(h)
+}
+
+/// Repoint this process's std handles onto whatever console it is
+/// currently attached to — `CONIN$`/`CONOUT$` reopened via
+/// [`reopen`] and installed with `SetStdHandle`, since neither
+/// `AllocConsole` nor `AttachConsole` update a std slot that was ever
+/// explicitly redirected (a documented Windows quirk: a `cargo test`
+/// process under a CI runner with stdin closed keeps `GetStdHandle`
+/// returning the old, redirected handle even after acquiring a real
+/// console, unless something reopens it explicitly — the reason this
+/// function exists at all rather than trusting acquisition alone).
+/// Stdout and stderr are two independent handles onto the same
+/// `CONOUT$` screen buffer (Windows has no distinct "CONERR$"); VT
+/// output processing is re-enabled on the freshly opened stdout handle,
+/// best-effort, so [`enter_raw`]'s own VT expectations already hold for
+/// a caller that never touches raw mode explicitly. Called by
+/// [`crate::term::WindowsTerminal`] right after a successful
+/// [`alloc`]/[`attach`] — never on its own from outside this crate.
+pub fn reopen_std_handles() -> Result<()> {
+    let hin = reopen("CONIN$", w::GENERIC_READ | w::GENERIC_WRITE)?;
+    let hout = reopen("CONOUT$", w::GENERIC_READ | w::GENERIC_WRITE)?;
+    let herr = reopen("CONOUT$", w::GENERIC_READ | w::GENERIC_WRITE)?;
+
+    // SAFETY: `hin` is a live, valid handle just opened above;
+    // `SetStdHandle` stores the value into this process's std slot
+    // without duplicating or otherwise invalidating it (this comment's
+    // reasoning applies unchanged to the two calls below it).
+    if unsafe { w::SetStdHandle(w::STD_INPUT_HANDLE, hin) } == 0 {
+        return Err(errmap::last_win32_err("SetStdHandle", OsStr::new("stdin")));
+    }
+    // SAFETY: see above.
+    if unsafe { w::SetStdHandle(w::STD_OUTPUT_HANDLE, hout) } == 0 {
+        return Err(errmap::last_win32_err("SetStdHandle", OsStr::new("stdout")));
+    }
+    // SAFETY: see above.
+    if unsafe { w::SetStdHandle(w::STD_ERROR_HANDLE, herr) } == 0 {
+        return Err(errmap::last_win32_err("SetStdHandle", OsStr::new("stderr")));
+    }
+
+    // Best-effort VT enable, matching `enter_raw`'s own stdout posture
+    // (see its doc comment): a failure here doesn't fail acquisition
+    // itself, it just means a caller gets the same "VT is best-effort"
+    // contract `enter_raw` already documents.
+    let mut mode: w::CONSOLE_MODE = 0;
+    // SAFETY: `hout` is a live handle just opened and installed above.
+    if unsafe { w::GetConsoleMode(hout, &mut mode) } != 0 {
+        let vt = mode | w::ENABLE_PROCESSED_OUTPUT | w::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        // SAFETY: see above.
+        unsafe { w::SetConsoleMode(hout, vt) };
+    }
+    Ok(())
 }

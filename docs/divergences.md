@@ -326,3 +326,38 @@ implementation convenience.
   `platform-windows/src/lib.rs`'s own module doc; nothing here executes
   outside CI's `windows-latest` leg).
 - **Accepted**: 2026-07-23, with rustils#83.
+
+## 012 — console acquisition exists only on Windows
+
+- **Windows**: `platform::term::ConsoleAcquisition` —
+  `alloc_console`/`attach_console`/`free_console` — lets a process that
+  starts with no console (the GUI-subsystem, `/SUBSYSTEM:WINDOWS`,
+  default) acquire one on demand, implemented by `WindowsTerminal`.
+- **Linux**: no implementor at all — `ConsoleAcquisition` is not
+  implemented by `LinuxTerminal`, not `Err(ErrorKind::Unsupported)` at
+  runtime. A caller that needs this capability opts in via the trait
+  bound at compile time, the same shape `JobControlTerminal` already
+  established in the opposite direction (Unix-only, no Windows
+  implementor).
+- **OS limitation**: the GUI-subsystem/console-subsystem split
+  (`/SUBSYSTEM:WINDOWS` vs `/SUBSYSTEM:CONSOLE`, decided at link time)
+  is a PE/Win32 loader concept with no Unix analog — every Unix process
+  either inherits a controlling terminal at exec time or has none, with
+  no separate "go acquire a console now" step to model. Offering
+  `alloc_console`/`attach_console` as fallible-but-present methods on
+  Linux would invite a caller to write Windows-only logic against a
+  nominally portable API; leaving the capability off the trait entirely
+  (rather than on it and always failing) makes that impossible instead
+  of just unlikely, the same reasoning `JobControlTerminal`'s own
+  divergence (this registry, D9/D1) already accepted for its own
+  Windows gap.
+- **Pinning tests**: `crates/platform-windows/tests/
+  console_acquisition.rs` — CI-only, same discipline as entry #011
+  above (this crate's backend is cross-compile-checked from a Linux
+  host; nothing here executes outside CI's `windows-latest` leg). No
+  Linux-side pin: there is no method to call and fail, so there is
+  nothing for a Linux test to assert against — the absence of the trait
+  impl itself is the whole of the divergence, verified by `cargo check`
+  simply having no `impl ConsoleAcquisition for LinuxTerminal` to find.
+- **Accepted**: 2026-08-05, with the console-acquisition slice
+  (`docs/design-discussion-console.md`, extraction map D9).
