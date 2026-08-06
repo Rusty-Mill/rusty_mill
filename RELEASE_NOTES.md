@@ -24,6 +24,21 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #110 — Add [jwt] JWT/OIDC bearer-token authentication
+**2026-08-06** · [#110](https://github.com/baileyrd/rusty_provider/pull/110)
+
+- **Added:** `[jwt]` config — JWT/OIDC bearer-token auth, additive
+  alongside `server.api_key_env`/`[[clients]]`. `hs256_secret_env`
+  (shared secret) or `jwks_url` (RS256, cached by `kid`), optional
+  `issuer`/`audience` validation. Fails closed on any verification
+  failure; the validation algorithm is always chosen by this router's
+  own configured mode, never trusted from the token's own `alg` header.
+  Follow-up to the OmniRoute/agentgateway parity-loop run (#100) — closes
+  #109. No JWT-claims-to-client-identity mapping in this pass (documented
+  as out of scope).
+
+---
+
 ## PR #100 — Parity-loop: close additive capability gaps vs. OmniRoute/agentgateway
 **2026-08-06** · [#100](https://github.com/baileyrd/rusty_provider/pull/100)
 
