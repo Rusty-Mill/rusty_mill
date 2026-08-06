@@ -1,5 +1,54 @@
 [package]
 name = "agentgateway"
 version = "0.1.0"
+description = "An AI-native gateway for MCP, speaking agentgateway's configuration"
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
 publish = false
+
+[[bin]]
+name = "agentgateway"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+agentgateway-config = { workspace = true }
+agentgateway-core = { workspace = true }
+agentgateway-mcp = { workspace = true }
+
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
+tokio-util = { workspace = true }
+tower-service = "0.3"
+http = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server"] }
+bytes = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+rmcp = { workspace = true, features = [
+    "client",
+    "server",
+    "transport-io",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
+tokio-util = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

@@ -50,24 +50,45 @@ pub enum RouterError {
 #[derive(Debug)]
 pub struct Router {
     binds: Vec<CompiledBind>,
+    routes: usize,
 }
 
 impl Router {
     /// Compile a configuration into a routing table.
     pub fn build(config: &Config) -> Result<Self, RouterError> {
         let mut binds = Vec::with_capacity(config.binds.len());
+        let mut next_id = 0usize;
         for (b, bind) in config.binds.iter().enumerate() {
             let mut listeners = Vec::with_capacity(bind.listeners.len());
             for (l, listener) in bind.listeners.iter().enumerate() {
                 let at = format!("binds[{b}].listeners[{l}]");
-                listeners.push(CompiledListener::build(listener, &at)?);
+                listeners.push(CompiledListener::build(listener, &at, &mut next_id)?);
             }
             binds.push(CompiledBind {
                 port: bind.port,
                 listeners,
             });
         }
-        Ok(Self { binds })
+        Ok(Self {
+            binds,
+            routes: next_id,
+        })
+    }
+
+    /// How many routes this router holds.
+    ///
+    /// Every [`CompiledRoute::id`] is less than this, so a caller can size a
+    /// side table of per-route state by it.
+    pub fn route_count(&self) -> usize {
+        self.routes
+    }
+
+    /// Every route in the table, in id order.
+    pub fn routes(&self) -> impl Iterator<Item = &CompiledRoute> {
+        self.binds
+            .iter()
+            .flat_map(|bind| bind.listeners.iter())
+            .flat_map(|listener| listener.routes.iter())
     }
 
     /// Every port this router expects a socket on.
@@ -147,10 +168,13 @@ impl CompiledListener {
     fn build(
         listener: &agentgateway_config::Listener,
         at: &str,
+        next_id: &mut usize,
     ) -> Result<CompiledListener, RouterError> {
         let mut routes = Vec::with_capacity(listener.routes.len());
         for (r, route) in listener.routes.iter().enumerate() {
-            routes.push(CompiledRoute::build(route, &format!("{at}.routes[{r}]"))?);
+            let id = *next_id;
+            *next_id += 1;
+            routes.push(CompiledRoute::build(route, &format!("{at}.routes[{r}]"), id)?);
         }
 
         let mut order = Vec::new();
@@ -252,6 +276,9 @@ pub struct Selection<'a> {
 /// A route with its patterns compiled.
 #[derive(Debug)]
 pub struct CompiledRoute {
+    /// Stable index into a caller's per-route side table. Assigned in build
+    /// order and dense, so `Vec` indexing works.
+    pub id: usize,
     /// Route name, for logs and metrics.
     pub name: Option<String>,
     /// Hostnames this route serves. Empty means any.
@@ -265,12 +292,17 @@ pub struct CompiledRoute {
 }
 
 impl CompiledRoute {
-    fn build(route: &agentgateway_config::Route, at: &str) -> Result<Self, RouterError> {
+    fn build(
+        route: &agentgateway_config::Route,
+        at: &str,
+        id: usize,
+    ) -> Result<Self, RouterError> {
         let mut matches = Vec::with_capacity(route.matches.len());
         for (m, matcher) in route.matches.iter().enumerate() {
             matches.push(RouteMatcher::build(matcher, &format!("{at}.matches[{m}]"))?);
         }
         Ok(CompiledRoute {
+            id,
             name: route.name.clone(),
             hostnames: route
                 .hostnames
