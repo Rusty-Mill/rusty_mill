@@ -6,7 +6,7 @@ All notable changes to this project are recorded here. The format follows
 Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.3.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.0" }
 ```
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
@@ -15,6 +15,12 @@ be called out here.
 Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
+
+## [0.4.0] — 2026-08-06
+
+The first release driven by filed issues rather than ad-hoc requests: every
+entry below closes one, and two of them changed shape once the code was
+examined. Those deviations are recorded here rather than quietly dropped.
 
 ### Added
 
@@ -131,6 +137,24 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   `forward_resource_methods!` need no change; a hand-written handler calling
   these directly passes `None` to keep the old behaviour, minus the truncation.
 - `base64` moves from a dev-dependency to a dependency, for cursor encoding.
+- `HttpConfig` gains `limits`, and `metrics` under the `otel` feature. Both
+  default to `None`, so an existing config built with `..Default::default()`
+  is unaffected; a config built by naming every field needs the new ones.
+
+### Notes
+
+Two issues did not land as filed, and the difference is worth knowing:
+
+- **[#17] claimed there was no request body cap. There already was one** — 4
+  MiB by default, `--max-body-bytes`, enforced by `rmcp` incrementally per body
+  frame, so an oversized request never gets fully buffered. That was checked
+  before implementing, and the issue was corrected rather than a duplicate
+  shipped.
+- **[#14] asked for registration-time validation of completion references.**
+  Delivered as `dangling()` instead, checked at wiring time. The strict version
+  would require `CompletionRegistry` to hold references to the prompt router
+  and the resource registry, inverting the composition every other registry
+  here uses. Same guarantee, one call instead of an inverted dependency.
 
 [#14]: https://github.com/baileyrd/rusty_mcp/issues/14
 [#15]: https://github.com/baileyrd/rusty_mcp/issues/15
@@ -336,6 +360,7 @@ easy to get wrong:
 [#5]: https://github.com/baileyrd/rusty_mcp/pull/5
 [#6]: https://github.com/baileyrd/rusty_mcp/pull/6
 [#8]: https://github.com/baileyrd/rusty_mcp/pull/8
+[0.4.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.3.0
 [0.2.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.2.0
 [0.1.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.1.0
