@@ -95,6 +95,116 @@ kind = "openai"
 base_url = "https://api.fireworks.ai/inference/v1"
 api_key_env = "FIREWORKS_API_KEY"
 
+# --- Curated presets (optional, commented out) --------------------------------
+# More OpenAI-wire-compatible backends, ready to uncomment -- kind = "openai"
+# already covers any of these, the same way it covers Groq/Together/Fireworks
+# above. base_urls are current as of this file's writing; provider APIs move
+# endpoints occasionally, so double-check against the provider's own docs if
+# one of these 401s/404s outright. See docs/PROVIDERS.md for a fuller table
+# (free-tier notes, ToS caveats) -- this block is deliberately just the
+# config needed to turn one on.
+
+# [providers.mistral]
+# kind = "openai"
+# base_url = "https://api.mistral.ai/v1"
+# api_key_env = "MISTRAL_API_KEY"
+
+# [providers.cerebras]
+# kind = "openai"
+# base_url = "https://api.cerebras.ai/v1"
+# api_key_env = "CEREBRAS_API_KEY"
+
+# [providers.sambanova]
+# kind = "openai"
+# base_url = "https://api.sambanova.ai/v1"
+# api_key_env = "SAMBANOVA_API_KEY"
+
+# [providers.deepseek]
+# kind = "openai"
+# base_url = "https://api.deepseek.com/v1"
+# api_key_env = "DEEPSEEK_API_KEY"
+
+# [providers.openrouter]
+# kind = "openai"
+# base_url = "https://openrouter.ai/api/v1"
+# api_key_env = "OPENROUTER_API_KEY"
+
+# [providers.huggingface]
+# kind = "openai"
+# base_url = "https://router.huggingface.co/v1"
+# api_key_env = "HUGGINGFACE_API_KEY"
+
+# [providers.nvidia]
+# kind = "openai"
+# base_url = "https://integrate.api.nvidia.com/v1"
+# api_key_env = "NVIDIA_API_KEY"
+
+# [providers.novita]
+# kind = "openai"
+# base_url = "https://api.novita.ai/v3/openai"
+# api_key_env = "NOVITA_API_KEY"
+
+# [providers.deepinfra]
+# kind = "openai"
+# base_url = "https://api.deepinfra.com/v1/openai"
+# api_key_env = "DEEPINFRA_API_KEY"
+
+# [providers.nebius]
+# kind = "openai"
+# base_url = "https://api.studio.nebius.ai/v1"
+# api_key_env = "NEBIUS_API_KEY"
+
+# [providers.moonshot]
+# kind = "openai"
+# base_url = "https://api.moonshot.ai/v1"
+# api_key_env = "MOONSHOT_API_KEY"
+
+# [providers.zhipu]
+# kind = "openai"
+# base_url = "https://api.z.ai/api/paas/v4"
+# api_key_env = "ZHIPU_API_KEY"
+
+# [providers.dashscope]
+# kind = "openai"
+# base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+# api_key_env = "DASHSCOPE_API_KEY"
+
+# [providers.xai]
+# kind = "openai"
+# base_url = "https://api.x.ai/v1"
+# api_key_env = "XAI_API_KEY"
+
+# [providers.perplexity]
+# kind = "openai"
+# base_url = "https://api.perplexity.ai"
+# api_key_env = "PERPLEXITY_API_KEY"
+
+# [providers.cohere]
+# kind = "openai"
+# base_url = "https://api.cohere.ai/compatibility/v1"
+# api_key_env = "COHERE_API_KEY"
+
+# [providers.hyperbolic]
+# kind = "openai"
+# base_url = "https://api.hyperbolic.xyz/v1"
+# api_key_env = "HYPERBOLIC_API_KEY"
+
+# [providers.featherless]
+# kind = "openai"
+# base_url = "https://api.featherless.ai/v1"
+# api_key_env = "FEATHERLESS_API_KEY"
+
+# [providers.lingyiwanwu]
+# kind = "openai"
+# base_url = "https://api.lingyiwanwu.com/v1"
+# api_key_env = "LINGYIWANWU_API_KEY"
+
+# Cloudflare Workers AI's base_url is per-account -- replace ACCOUNT_ID.
+# [providers.cloudflare]
+# kind = "openai"
+# base_url = "https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai/v1"
+# api_key_env = "CLOUDFLARE_API_KEY"
+
 # --- Route aliases -----------------------------------------------------------
 # A named fallback chain of "provider/model" entries. Clients pass the alias
 # as `model` and the router tries each entry in order, falling back on

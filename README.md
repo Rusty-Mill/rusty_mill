@@ -1429,6 +1429,14 @@ requests that opt into `"provider": {"sort": "price"}`; a provider's `zdr`
 flag is optional and only affects requests that opt into
 `"provider": {"zdr": true}`.
 
+`config.example.toml` also ships a commented-out block of curated presets
+for more OpenAI-wire-compatible backends beyond the six enabled by
+default — see [docs/PROVIDERS.md](docs/PROVIDERS.md) for the fuller
+reference table (what each one is, free-tier/ToS notes). Adding one is a
+config change only: `kind = "openai"` already covers any backend speaking
+OpenAI's `/chat/completions` shape, the same way Groq/Together/Fireworks
+already share one adapter.
+
 ## Using with local agent tools (Hermes, OpenClaw, etc.)
 
 Any local coding-agent tool that lets you point it at a custom

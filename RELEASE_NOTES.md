@@ -24,6 +24,23 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #100 — Parity-loop: close additive capability gaps vs. OmniRoute/agentgateway
+**2026-08-06** · [#100](https://github.com/baileyrd/rusty_provider/pull/100)
+
+- **Changed:** `ARCHITECTURE.md`'s non-goals softened from "no dashboard" /
+  "not multi-tenant SaaS" to "no UI" — a JSON-only reporting surface is in
+  scope, an HTML/Electron/PWA dashboard is not. See
+  [ADR-0002](docs/adr/0002-reporting-surface-is-json-only.md).
+- **Added:** `docs/PROVIDERS.md` — a curated reference table of ~20 more
+  OpenAI-wire-compatible backends (Mistral, Cerebras, SambaNova, DeepSeek,
+  OpenRouter, Hugging Face, NVIDIA NIM, Novita, DeepInfra, Nebius, Moonshot,
+  Zhipu, DashScope/Qwen, xAI, Perplexity, Cohere, Hyperbolic, Featherless,
+  01.AI, Cloudflare Workers AI), plus matching commented-out presets in
+  `config.example.toml`. All config-only — `kind = "openai"` already covers
+  any of them, same as Groq/Together/Fireworks today.
+
+---
+
 ## PR #98 — Update ARCHITECTURE.md's stale caching claims
 **2026-07-22** · [#98](https://github.com/baileyrd/rusty_provider/pull/98)
 
