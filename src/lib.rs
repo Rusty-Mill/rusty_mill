@@ -14,6 +14,8 @@
 //!   agent-card discovery, task lifecycle management, and streaming for
 //!   free, over both the JSON-RPC and HTTP+JSON/REST protocol bindings at
 //!   once.
+//! - [`signing`] (feature `signing`): Agent Card JWS signing and
+//!   verification (spec Section 8.4).
 //!
 //! # Scope
 //!
@@ -33,6 +35,8 @@ mod codec;
 pub mod error;
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "signing")]
+pub mod signing;
 mod timestamp;
 pub mod types;
 
