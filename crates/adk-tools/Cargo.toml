@@ -1,0 +1,20 @@
+[package]
+name = "adk-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tool abstraction for the Rust ADK: Tool trait, FunctionTool, ToolContext, toolsets"
+
+[dependencies]
+adk-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+adk-sessions.workspace = true
