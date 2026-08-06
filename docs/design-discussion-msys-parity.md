@@ -186,7 +186,15 @@ semantics against *any* pid.
    entries on next table touch — verified only by reading the source
    grounding this document, not something to copy structurally per the
    licensing note above), and whether a Windows service/detached
-   process (no console at all) can participate.
+   process (no console at all) can participate. **Scoped to
+   implementation depth**: `docs/design-discussion-msys-pgid-table.md`
+   found the real shape is a per-*pid* shared-memory segment (not one
+   monolithic table), architecturally identical to subsystem 2's
+   per-pid named pipe — plus a real, deliberately *different* security
+   posture from subsystems 2/3 (world-readable, owner-writable, matching
+   POSIX `getpgid`'s own visibility) and a two-tier liveness check
+   (cooperative self-reported state vs. `OpenProcess`-verified ground
+   truth) neither prior document needed to address.
 4. **`SuspendThread`-based `SIGSTOP`/`SIGCONT` is a known-fragile
    primitive.** `SuspendThread` on a thread that holds a lock (loader
    lock, heap lock, CRT lock) can deadlock the *entire* stopped process
@@ -213,7 +221,17 @@ semantics against *any* pid.
    VT input stream to add ICANON/ISIG-style signal-generating-character
    emulation *without* replacing the pty transport itself is a smaller,
    different option worth naming separately rather than conflating with
-   "build MSYS2's pty."
+   "build MSYS2's pty." **Scoped to implementation depth**:
+   `docs/design-discussion-msys-pty.md` takes the shim option further —
+   finds that ConPTY's real (virtual) Windows console underneath
+   probably already gives line editing and Ctrl-C for free (unlike
+   Cygwin's own pty, which has no console under it at all and must
+   reimplement everything), narrowing the real gap to just
+   `VSUSP`/`VQUIT` — but surfaces a real, unresolved correctness hazard
+   this narrower scope creates: the master-side shim has no visibility
+   into whether the hosted child is currently in raw mode, and
+   forcibly intercepting Ctrl-Z/Ctrl-\ regardless would break a
+   raw-mode program that wants to see them as ordinary input.
 
 ## What this document does not decide
 
@@ -224,3 +242,11 @@ helps rustils-spawned trees, not arbitrary Windows processes, the same
 ceiling MSYS2 itself has always had). That is the RFC-level call the
 owner makes before any of this becomes code — this is the input to that
 call, not the call itself.
+
+**Status of the four subsystems' deeper scoping**: all four — 1
+(pgid/session table), 2 (signal delivery), 3 (real Stop/Cont), and 4
+(pty line discipline) — now have their own implementation-depth
+document, linked at their respective open questions above. None of the
+five documents in this family (this one plus the four it spawned) has
+decided to build anything; each still ends on an owner's call and a
+missing named consumer.
