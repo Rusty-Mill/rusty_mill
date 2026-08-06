@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use rp_core::RateLimiter;
+use rp_mcp::RustyMcpServer;
 use rp_router::{ClientConfig, Router};
 
 use crate::jwt::JwtVerifier;
@@ -54,4 +55,12 @@ pub struct AppState {
     /// `check_admin_auth` -- `/v1/admin/*` stays `admin_key`/admin-role
     /// clients only.
     pub jwt: Option<Arc<JwtVerifier>>,
+    /// The combined MCP handler (native tools + proxied upstreams), if
+    /// `[mcp].enabled = true`. `None` means the MCP endpoint isn't mounted
+    /// at all -- `build_app` skips it entirely rather than mounting a
+    /// disabled stub.
+    pub mcp: Option<Arc<RustyMcpServer>>,
+    /// Path the MCP endpoint is mounted at when `mcp` is `Some`
+    /// (`[mcp].path`, default `/mcp`). Unused otherwise.
+    pub mcp_path: String,
 }

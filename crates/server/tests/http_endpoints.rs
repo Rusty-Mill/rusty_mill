@@ -60,6 +60,18 @@ async fn spawn_app(config_toml: &str) -> String {
         JwtVerifier::new(cfg, hs256_secret).map(Arc::new)
     });
 
+    let mcp = match &config.mcp {
+        Some(mcp_config) if mcp_config.enabled => {
+            Some(rp_mcp::build(mcp_config, Arc::clone(&router)).await)
+        }
+        _ => None,
+    };
+    let mcp_path = config
+        .mcp
+        .as_ref()
+        .map(|c| c.path.clone())
+        .unwrap_or_else(|| "/mcp".to_string());
+
     let state = AppState {
         router,
         api_key,
@@ -70,6 +82,8 @@ async fn spawn_app(config_toml: &str) -> String {
         admin_key,
         max_body_bytes: config.server.max_body_bytes,
         jwt,
+        mcp,
+        mcp_path,
     };
 
     let app = build_app(state);
@@ -2644,4 +2658,75 @@ async fn embeddings_maps_an_unconfigured_provider_to_424() {
         .unwrap();
 
     assert_eq!(resp.status(), 424);
+}
+
+#[tokio::test]
+async fn mcp_endpoint_rejects_unauthenticated_requests_when_a_key_is_configured() {
+    let key_var = unique_env_var("MCP_SERVER_API_KEY");
+    std::env::set_var(&key_var, "s3cret");
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        api_key_env = "{key_var}"
+
+        [mcp]
+        enabled = true
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json")
+        .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 401);
+}
+
+/// Exercises the mounted MCP endpoint with a real `rmcp` client -- the same
+/// wire protocol a desktop client would use -- covering the whole path:
+/// `check_auth` guarding the nest, the Streamable HTTP transport, and
+/// `RustyMcpServer`'s merged `tools/list`/`tools/call`.
+#[tokio::test]
+async fn mcp_endpoint_serves_native_tools_to_a_real_mcp_client() {
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+
+    let key_var = unique_env_var("MCP_SERVER_API_KEY");
+    std::env::set_var(&key_var, "s3cret");
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        api_key_env = "{key_var}"
+
+        [mcp]
+        enabled = true
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("{base_url}/mcp"))
+            .auth_header("s3cret"),
+    );
+    let client = tokio::time::timeout(std::time::Duration::from_secs(5), ().serve(transport))
+        .await
+        .expect("handshake timed out")
+        .expect("client handshake failed");
+
+    let tools = client.peer().list_tools(None).await.expect("list_tools");
+    let mut names: Vec<String> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+    names.sort();
+    assert_eq!(names, vec!["chat_completion", "embeddings", "list_models"]);
+
+    let _ = client.cancel().await;
 }

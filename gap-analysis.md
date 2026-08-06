@@ -87,13 +87,23 @@ dependency), so neither was auto-implemented in the original run:
   failure. New dependency `jsonwebtoken`, approved at the time. Verified via
   a live smoke-test (#111 fixed a follow-on gap: `rp-cli` hadn't been
   updated to know about `jwt.hs256_secret_env`).
-- **MCP (Model Context Protocol) gateway support — still declined/deferred.**
-  agentgateway proxies MCP tool calls with per-identity tool scoping;
-  rusty_provider only speaks OpenAI-shaped chat completions today. This is a
-  second protocol surface, not an additive endpoint — new dependency, new
-  request/response shapes, real design surface (transport: stdio vs. SSE vs.
-  streamable-HTTP; how tool scoping composes with existing `[[clients]]`
-  auth). Left here for a future, separately-scoped run to pick up.
+- **MCP (Model Context Protocol) support — done.** User approved this as an
+  explicit follow-up on 2026-08-06, explicitly asking for both directions
+  ("expose rusty_provider as an MCP server" and "proxy other MCP servers"),
+  reusing [`baileyrd/rusty_mcp`](https://github.com/baileyrd/rusty_mcp) as
+  the scaffold rather than hand-rolling MCP plumbing. New `rp-mcp` crate:
+  `chat_completion`/`list_models`/`embeddings` tools wrapping the router's
+  own dispatch (server direction), plus a gateway proxying configured
+  `[[mcp.upstreams]]` (stdio subprocess or Streamable HTTP) under
+  `"{upstream}/{tool}"` names (gateway direction), merged into one
+  `tools/list`. Mounted inside rp-server's existing app/port, reusing the
+  same `server.api_key_env`/`[[clients]]`/`[jwt]` auth rather than
+  `rusty_mcp`'s own OAuth 2.1 — see `docs/MCP.md` for the full design
+  rationale. New dependencies `rusty-mcp` (git) and `rmcp`, approved at the
+  time as part of the same instruction. Verified via `crates/mcp/tests/`
+  and `crates/server/tests/http_endpoints.rs`'s `mcp_endpoint_*` tests, both
+  driving the merged handler with a real `rmcp` client over an in-process
+  transport.
 
 One additional gap **was** filed since it's additive and dependency-free
 (the router can already call an embeddings provider itself):

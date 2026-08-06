@@ -6,8 +6,11 @@ license.workspace = true
 
 [dependencies]
 rp-core.workspace = true
+rp-mcp.workspace = true
 rp-providers.workspace = true
 rp-router.workspace = true
+rmcp = { workspace = true, features = ["server", "transport-streamable-http-server"] }
+rusty-mcp.workspace = true
 tokio.workspace = true
 axum.workspace = true
 tower.workspace = true
@@ -25,3 +28,4 @@ jsonwebtoken.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }

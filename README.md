@@ -22,6 +22,11 @@ SDK/client at it.
   and 5xx errors.
 - `crates/server` (`rp-server`) — the axum HTTP server exposing the
   OpenAI-compatible API.
+- `crates/mcp` (`rp-mcp`) — MCP (Model Context Protocol) support, built on
+  [`rusty_mcp`](https://github.com/baileyrd/rusty_mcp): rusty_provider's own
+  routing exposed as MCP tools, plus a gateway proxying other MCP servers'
+  tools through the same endpoint. See [MCP](#mcp-model-context-protocol)
+  below.
 
 ## Running
 
@@ -881,6 +886,49 @@ and rate limiting falls back to the same source-IP bucket an unmatched
 caller gets (see [Rate limiting](#rate-limiting) below) rather than a
 dedicated per-subject one. `/v1/admin/*` is unaffected by `[jwt]` entirely
 — it stays `server.admin_key_env`/admin-role `[[clients]]` only.
+
+## MCP (Model Context Protocol)
+
+`[mcp]` gives rusty_provider a Model Context Protocol surface, in both
+directions at once:
+
+- **Server**: its own routing exposed as MCP tools (`chat_completion`,
+  `list_models`, `embeddings`) — any MCP client can call it directly.
+- **Gateway**: other MCP servers' tools proxied through the same endpoint,
+  namespaced `"{upstream}/{tool}"` — one client connection point instead of
+  many.
+
+```toml
+[mcp]
+enabled = true
+path = "/mcp"   # optional, this is the default
+
+[[mcp.upstreams]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp.upstreams]]
+name = "example"
+transport = "http"
+url = "https://mcp.example.com/mcp"
+bearer_token_env = "EXAMPLE_MCP_TOKEN"   # optional
+```
+
+The endpoint is mounted inside this same app and port, guarded by the exact
+same `server.api_key_env`/`[[clients]]`/`[jwt]` auth every other route
+already uses — there's no separate MCP auth model to configure. An upstream
+that fails to connect at startup is logged and simply absent from the tool
+list, the same soft-failure pattern `[jwt]`/`[webhook]`/`[persistence]`
+already use.
+
+For a desktop client that spawns its MCP server as a stdio subprocess
+instead of talking HTTP, set `MCP_STDIO=1` when starting `rp-server` — it
+serves the same combined tool set over stdio instead of binding a port.
+
+Full walkthrough (connecting a real client, testing upstreams, the wire
+protocol details) in [`docs/MCP.md`](docs/MCP.md).
 
 ## Rate limiting
 

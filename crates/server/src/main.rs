@@ -90,6 +90,20 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mcp = match &config.mcp {
+        Some(mcp_config) if mcp_config.enabled => {
+            let handler = rp_mcp::build(mcp_config, Arc::clone(&router)).await;
+            tracing::info!(path = %mcp_config.path, upstreams = mcp_config.upstreams.len(), "MCP endpoint enabled");
+            Some(handler)
+        }
+        _ => None,
+    };
+    let mcp_path = config
+        .mcp
+        .as_ref()
+        .map(|c| c.path.clone())
+        .unwrap_or_else(|| "/mcp".to_string());
+
     let state = AppState {
         router,
         api_key,
@@ -100,7 +114,18 @@ async fn main() -> anyhow::Result<()> {
         admin_key,
         max_body_bytes: config.server.max_body_bytes,
         jwt,
+        mcp,
+        mcp_path,
     };
+
+    if std::env::var("MCP_STDIO").is_ok() {
+        let Some(mcp) = state.mcp.clone() else {
+            anyhow::bail!("MCP_STDIO is set but [mcp].enabled is not true in config");
+        };
+        tracing::info!("serving MCP over stdio (MCP_STDIO set)");
+        rusty_mcp::serve(move || Ok((*mcp).clone()), rusty_mcp::ServerConfig::stdio()).await?;
+        return Ok(());
+    }
 
     let app = build_app(state);
 
