@@ -13,6 +13,7 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, Router};
 use agentgateway_mcp::Federation;
@@ -43,6 +44,7 @@ pub struct Gateway {
 /// Per-route serving state.
 struct RouteState {
     cors: Option<CorsMatcher>,
+    jwt: Option<JwtAuthenticator>,
     backend: BackendState,
 }
 
@@ -62,6 +64,7 @@ impl Gateway {
         let mut routes = Vec::with_capacity(router.route_count());
         routes.resize_with(router.route_count(), || RouteState {
             cors: None,
+            jwt: None,
             backend: BackendState::Unsupported("route has no backend".into()),
         });
 
@@ -72,6 +75,14 @@ impl Gateway {
                 .unwrap_or_else(|| format!("route #{}", route.id));
 
             let cors = route.policies.cors.as_ref().map(CorsMatcher::new);
+
+            // Built here, not per request: a `file:` JWKS that is missing or
+            // malformed should stop the gateway booting rather than turn every
+            // request into a 503.
+            let jwt = match route.policies.jwt_auth.as_ref() {
+                Some(policy) => Some(JwtAuthenticator::new(policy, &at)?),
+                None => None,
+            };
 
             let backend = match route.backends.first().map(|b| &b.target) {
                 Some(BackendTarget::Mcp(mcp)) => {
@@ -105,7 +116,11 @@ impl Gateway {
                 None => BackendState::Unsupported("route has no backend".into()),
             };
 
-            routes[route.id] = RouteState { cors, backend };
+            routes[route.id] = RouteState {
+                cors,
+                jwt,
+                backend,
+            };
         }
 
         Ok(Gateway { router, routes })
@@ -144,6 +159,21 @@ impl Gateway {
             Some(CorsDecision::NotCors) | None => None,
         };
 
+        // Authentication runs after the preflight branch above and before the
+        // backend. The ordering is load-bearing: browsers do not send
+        // `Authorization` on a preflight, so requiring a token there would
+        // make every cross-origin call fail before the real request is ever
+        // sent.
+        if let Some(jwt) = &state.jwt
+            && let Err(rejection) = jwt.authenticate(request.headers()).await
+        {
+            let mut response = reject(&rejection);
+            if let Some(headers) = cors_headers {
+                response.headers_mut().extend(headers);
+            }
+            return Ok(response);
+        }
+
         let mut response = match &state.backend {
             BackendState::Mcp(service) => {
                 // `call` takes &mut self, but the service is cheap to clone and
@@ -163,6 +193,24 @@ impl Gateway {
         }
         Ok(response)
     }
+}
+
+/// Turn an authentication failure into a response.
+fn reject(rejection: &AuthRejection) -> Response<GatewayBody> {
+    let mut response = status(rejection.status, &rejection.description);
+    if let Some(challenge) = rejection.challenge()
+        && let Ok(value) = http::HeaderValue::try_from(challenge)
+    {
+        response.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+    } else if rejection.status == StatusCode::UNAUTHORIZED {
+        // A 401 without a challenge is a protocol violation, and a client that
+        // gets one has no way to learn it should authenticate.
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            http::HeaderValue::from_static(agentgateway_auth::BEARER_CHALLENGE),
+        );
+    }
+    response
 }
 
 fn kind_name(target: &BackendTarget) -> &'static str {

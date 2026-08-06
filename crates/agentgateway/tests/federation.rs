@@ -296,7 +296,9 @@ async fn a_route_that_does_not_match_is_a_404() {
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+    // The returned future only joins the accept loops; the tests drive the
+    // gateway over HTTP and cancel it directly, so it is deliberately dropped.
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
         .await
         .expect("gateway should bind");
 
