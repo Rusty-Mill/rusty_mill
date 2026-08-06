@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusty_acp::client::AcpClient;
+use rusty_acp::client::{AcpClient, WaitOptions};
 use rusty_acp::server::store::{InMemoryStore, Store};
 use rusty_acp::server::{agent_fn, AcpServer, RunContext};
 use rusty_acp::types::{
@@ -153,7 +153,8 @@ async fn a_run_outlasting_the_deadline_has_its_lease_released() {
 
     let abandoned = replica.server.shutdown(SHORT_DEADLINE).await;
 
-    assert_eq!(abandoned, vec![run.run_id], "the straggler should be reported");
+    assert_eq!(abandoned.unfinished, vec![run.run_id], "the straggler should be reported");
+    assert!(abandoned.parked.is_empty(), "nothing was parked");
     assert_eq!(
         replica.store.lease_owner(run.run_id).await.unwrap(),
         None,
@@ -295,8 +296,121 @@ async fn shutting_down_twice_is_harmless() {
     let first = replica.server.shutdown(SHORT_DEADLINE).await;
     let second = replica.server.shutdown(SHORT_DEADLINE).await;
 
-    assert_eq!(first, vec![run.run_id]);
-    assert_eq!(second, vec![run.run_id], "the run is still going, so it is still reported");
-    let ids: Vec<RunId> = second;
+    assert_eq!(first.unfinished, vec![run.run_id]);
+    assert_eq!(
+        second.unfinished,
+        vec![run.run_id],
+        "the run is still going, so it is still reported"
+    );
+    let ids: Vec<RunId> = second.run_ids().collect();
     assert_eq!(ids.len(), 1);
+}
+
+/// The regression #44 recorded: a drain used to wait its whole deadline for a
+/// conversation that was never going to finish.
+///
+/// A parked run is a suspended future waiting on a client. There is nothing to
+/// drain, so a replica holding only parked runs should be done immediately.
+#[tokio::test]
+async fn a_drain_does_not_wait_for_a_parked_conversation() {
+    let replica = Replica::memory().await;
+    let parked = replica.client.run_sync("asker", [Message::user("hi")]).await.unwrap();
+    assert_eq!(parked.status, RunStatus::Awaiting);
+
+    let started = std::time::Instant::now();
+    let drained = replica.server.shutdown(Duration::from_secs(30)).await;
+
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "waited {:?} for a conversation that cannot finish",
+        started.elapsed()
+    );
+    assert!(drained.unfinished.is_empty(), "a parked run is not unfinished work");
+    assert_eq!(drained.parked, vec![parked.run_id], "the conversation was not reported");
+}
+
+/// A parked run is handed back rather than left owned by a replica that is
+/// leaving — but reported as *parked*, because the reason matters to whoever
+/// reads the shutdown log.
+#[tokio::test]
+async fn a_parked_conversation_is_handed_back_promptly() {
+    let replica = Replica::memory().await;
+    let parked = replica.client.run_sync("asker", [Message::user("hi")]).await.unwrap();
+
+    replica.server.shutdown(Duration::from_secs(30)).await;
+
+    assert_eq!(
+        replica.store.lease_owner(parked.run_id).await.unwrap(),
+        None,
+        "a departing replica left a parked conversation looking owned"
+    );
+    let snapshot = replica.store.get_run(parked.run_id).await.unwrap().unwrap();
+    assert_eq!(snapshot.status, RunStatus::Awaiting, "the departing replica decided its fate");
+}
+
+/// The two categories are distinguishable, because they call for different
+/// responses: a longer deadline for one, nothing at all for the other.
+#[tokio::test]
+async fn unfinished_and_parked_are_reported_separately() {
+    let replica = Replica::memory().await;
+    let running = replica.start_blocking_run().await;
+    let parked = replica.client.run_sync("asker", [Message::user("hi")]).await.unwrap();
+
+    let drained = replica.server.shutdown(SHORT_DEADLINE).await;
+
+    assert_eq!(drained.unfinished, vec![running.run_id]);
+    assert_eq!(drained.parked, vec![parked.run_id]);
+    assert_eq!(drained.len(), 2);
+    assert_eq!(drained.run_ids().count(), 2);
+}
+
+/// A conversation that ended before the drain must not be reported as parked.
+///
+/// The slot is given up on park and taken back on resume; without clearing the
+/// parked set on the way out, a finished conversation would be handed back to a
+/// fleet that has nothing to do with it.
+#[tokio::test]
+async fn a_resumed_conversation_is_not_reported_as_parked() {
+    let replica = Replica::memory().await;
+    let parked = replica.client.run_sync("asker", [Message::user("hi")]).await.unwrap();
+
+    let resumed = replica
+        .client
+        .resume_run(RunResumeRequest::new(
+            parked.run_id,
+            AwaitResume::new(serde_json::json!({ "answer": "Ada" })),
+            RunMode::Sync,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, RunStatus::Completed);
+
+    let drained = replica.server.shutdown(Duration::from_secs(30)).await;
+    assert!(drained.is_empty(), "a finished conversation was handed back: {drained:?}");
+}
+
+/// A conversation *cancelled* while parked must not be reported either.
+///
+/// This is the case the resumed one above does not reach: a resume unparks the
+/// run, but a cancellation ends it while still parked, so only clearing the set
+/// on the way out catches it. Without that, every cancelled conversation is
+/// handed back to a fleet that has nothing left to do with it.
+#[tokio::test]
+async fn a_conversation_cancelled_while_parked_is_not_reported() {
+    let replica = Replica::memory().await;
+    let parked = replica.client.run_sync("asker", [Message::user("hi")]).await.unwrap();
+    assert_eq!(parked.status, RunStatus::Awaiting);
+
+    let cancelled = replica
+        .client
+        .cancel_and_wait(
+            parked.run_id,
+            WaitOptions::default().poll_every(Duration::from_millis(10)),
+        )
+        .await
+        .unwrap();
+    assert!(cancelled.status.is_terminal(), "left as {}", cancelled.status);
+
+    let drained = replica.server.shutdown(Duration::from_secs(30)).await;
+    assert!(drained.is_empty(), "a cancelled conversation was handed back: {drained:?}");
 }

@@ -617,6 +617,22 @@ replacement started at once, anything else is failed by the next replica to read
 happen when a lease lapses; releasing is what makes them happen *now* rather than up to
 `lease_ttl` later.
 
+**A run parked `awaiting` a client is not waited for at all.** It is a suspended future waiting on
+someone who may never answer, so a drain that counted it would sit out its whole deadline for a
+conversation doing nothing. It is handed back immediately instead, and reported separately:
+
+```rust
+let drained = server.shutdown(DEFAULT_DRAIN_DEADLINE).await;
+drained.unfinished   // ran out of deadline — consider a longer one
+drained.parked       // clients were mid-conversation
+```
+
+Be clear about what that costs. **A parked conversation cannot survive its replica.** An agent that
+paused to ask a question is suspended part-way through its own function, and that position lives in
+this process — no other replica can resume from it. A `recoverable` agent gets a replacement
+started from its input, which re-asks the question; anything else is failed. What the drain buys is
+that this happens promptly and legibly, not that the conversation lives.
+
 One limitation worth knowing: a replacement started this way spends a recovery attempt, exactly
 as a crash-caused one does. A long-running recoverable run caught by several drains in one rolling
 deploy can exhaust `max_recovery_attempts` for reasons that have nothing to do with the agent.

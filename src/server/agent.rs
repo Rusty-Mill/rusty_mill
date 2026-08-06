@@ -329,7 +329,7 @@ impl RunContext {
         // Give the execution slot back while parked. The client this run is
         // waiting on may never answer, and holding capacity for it would let
         // idle conversations starve work that is ready to run.
-        self.slot.park();
+        self.slot.park(self.run_id);
         let mut resume_rx = self.resume_rx.lock().await;
         let cancel = self.handle.cancel_token();
         tokio::select! {
@@ -339,7 +339,7 @@ impl RunContext {
             }
             resume = resume_rx.recv() => match resume {
                 Some(resume) => {
-                    self.slot.unpark();
+                    self.slot.unpark(self.run_id);
                     self.handle.set_in_progress().await?;
                     Ok(resume)
                 }
