@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/cli",
     "crates/core",
+    "crates/mcp",
     "crates/providers",
     "crates/router",
     "crates/server",
@@ -40,8 +41,12 @@ rustls-native-certs = "0.8"
 ring = "0.17"
 regex = "1"
 jsonwebtoken = "9"
+schemars = "1.0"
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp" }
+rmcp = { version = "3.1", default-features = false }
 
 rp-core = { path = "crates/core" }
+rp-mcp = { path = "crates/mcp" }
 rp-providers = { path = "crates/providers" }
 rp-router = { path = "crates/router" }
 

@@ -45,6 +45,28 @@ port = 8080
 # issuer = "https://your-idp.example.com/"   # optional -- verified against `iss` if set
 # audience = "rusty-provider"                # optional -- verified against `aud` if set
 
+# --- MCP (optional) ----------------------------------------------------------
+# Exposes rusty_provider's own routing as MCP tools, and/or proxies other MCP
+# servers' tools through the same endpoint. Mounted inside this same app and
+# guarded by the same api_key_env/[[clients]]/[jwt] auth above -- not a
+# separate auth model to configure. See docs/MCP.md for the full walkthrough.
+
+# [mcp]
+# enabled = true
+# path = "/mcp"   # optional, this is the default
+#
+# [[mcp.upstreams]]
+# name = "filesystem"
+# transport = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#
+# [[mcp.upstreams]]
+# name = "example"
+# transport = "http"
+# url = "https://mcp.example.com/mcp"
+# bearer_token_env = "EXAMPLE_MCP_TOKEN"   # optional
+
 # --- Providers -------------------------------------------------------------
 # `kind` is one of: "openai" (any OpenAI-compatible /chat/completions API),
 # "anthropic", or "gemini". A provider is skipped at startup (with a warning)

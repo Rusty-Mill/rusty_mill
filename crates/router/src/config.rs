@@ -360,6 +360,65 @@ pub struct Config {
     pub free_tiers: Vec<FreeTierEntry>,
     #[serde(default)]
     pub jwt: Option<JwtConfig>,
+    #[serde(default)]
+    pub mcp: Option<McpConfig>,
+}
+
+/// Enables the Model Context Protocol endpoint: rusty_provider's own
+/// routing exposed as MCP tools (`chat_completion`/`list_models`/
+/// `embeddings`), merged with any `[[mcp.upstreams]]` proxied through the
+/// same endpoint under a `"{upstream}/{tool}"` name. Mounted inside
+/// `rp-server`'s existing HTTP app/port and guarded by the same
+/// `check_auth` every other route already uses -- not a separate auth
+/// model to configure.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct McpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path the MCP endpoint is mounted at.
+    #[serde(default = "default_mcp_path")]
+    pub path: String,
+    /// Other MCP servers to connect to and re-expose through this endpoint.
+    #[serde(default)]
+    pub upstreams: Vec<McpUpstreamConfig>,
+}
+
+fn default_mcp_path() -> String {
+    "/mcp".to_string()
+}
+
+/// One upstream MCP server to proxy. Its tools appear in this router's own
+/// `tools/list` as `"{name}/{tool}"`, and `tools/call` for one of them is
+/// forwarded verbatim. A connection that fails at startup is logged and
+/// skipped, not a hard failure -- same soft-fail convention as
+/// `[jwt]`/`[webhook]`/`[persistence]`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct McpUpstreamConfig {
+    /// Namespaces this upstream's tools; must be unique among
+    /// `[[mcp.upstreams]]`.
+    pub name: String,
+    #[serde(flatten)]
+    pub transport: McpUpstreamTransport,
+}
+
+/// How to reach one upstream MCP server.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "transport", rename_all = "lowercase")]
+pub enum McpUpstreamTransport {
+    /// Spawn a local subprocess and speak MCP over its stdin/stdout.
+    Stdio {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
+    /// Connect to a Streamable HTTP MCP endpoint.
+    Http {
+        url: String,
+        /// If set, the env var holding a bearer token to send with every
+        /// request to this upstream.
+        #[serde(default)]
+        bearer_token_env: Option<String>,
+    },
 }
 
 fn default_jwks_cache_secs() -> u64 {
@@ -1557,6 +1616,88 @@ mod tests {
         );
         assert_eq!(jwt.jwks_cache_secs, 60);
         assert!(jwt.hs256_secret_env.is_none());
+    }
+
+    // --- mcp -------------------------------------------------------------------------
+
+    #[test]
+    fn mcp_defaults_to_absent() {
+        let config = Config::from_toml_str("providers = {}").unwrap();
+        assert!(config.mcp.is_none());
+    }
+
+    #[test]
+    fn mcp_defaults_path_and_upstreams_when_only_enabled_is_set() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let mcp = config.mcp.unwrap();
+        assert!(mcp.enabled);
+        assert_eq!(mcp.path, "/mcp");
+        assert!(mcp.upstreams.is_empty());
+    }
+
+    #[test]
+    fn mcp_parses_stdio_and_http_upstreams() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            path = "/model-context"
+
+            [[mcp.upstreams]]
+            name = "filesystem"
+            transport = "stdio"
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+            [[mcp.upstreams]]
+            name = "example"
+            transport = "http"
+            url = "https://mcp.example.com/mcp"
+            bearer_token_env = "EXAMPLE_MCP_TOKEN"
+            "#,
+        )
+        .unwrap();
+        let mcp = config.mcp.unwrap();
+        assert_eq!(mcp.path, "/model-context");
+        assert_eq!(mcp.upstreams.len(), 2);
+
+        assert_eq!(mcp.upstreams[0].name, "filesystem");
+        match &mcp.upstreams[0].transport {
+            McpUpstreamTransport::Stdio { command, args } => {
+                assert_eq!(command, "npx");
+                assert_eq!(
+                    args,
+                    &vec![
+                        "-y".to_string(),
+                        "@modelcontextprotocol/server-filesystem".to_string(),
+                        "/tmp".to_string()
+                    ]
+                );
+            }
+            other => panic!("expected Stdio transport, got {other:?}"),
+        }
+
+        assert_eq!(mcp.upstreams[1].name, "example");
+        match &mcp.upstreams[1].transport {
+            McpUpstreamTransport::Http {
+                url,
+                bearer_token_env,
+            } => {
+                assert_eq!(url, "https://mcp.example.com/mcp");
+                assert_eq!(bearer_token_env.as_deref(), Some("EXAMPLE_MCP_TOKEN"));
+            }
+            other => panic!("expected Http transport, got {other:?}"),
+        }
     }
 
     // --- persistence backend -----------------------------------------------------

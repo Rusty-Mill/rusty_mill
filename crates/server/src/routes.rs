@@ -70,6 +70,23 @@ pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Respons
     Some(json_error(401, "missing or invalid API key"))
 }
 
+/// Guards the MCP endpoint (`[mcp]`) with the exact same `check_auth` every
+/// other route already goes through -- deliberately not rusty_mcp's own
+/// OAuth 2.1 resource-server auth, since this endpoint is mounted inside
+/// this same already-authenticated app rather than run as a separate
+/// listener.
+pub async fn mcp_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(response) = check_auth(&state, &headers).await {
+        return response;
+    }
+    next.run(request).await
+}
+
 /// Who a `/v1/admin/*` request is authorized as, once `check_admin_auth`
 /// succeeds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +294,8 @@ mod tests {
             admin_key: None,
             max_body_bytes: 20 * 1024 * 1024,
             jwt: None,
+            mcp: None,
+            mcp_path: "/mcp".to_string(),
         }
     }
 
