@@ -477,6 +477,46 @@ Losing the replica a caller happened to be talking to is the ordinary case here 
 outage, which is why the client [retries transient failures](#riding-out-a-transient-failure)
 instead of surfacing them.
 
+### When a replica is deployed over
+
+Everything above is about a replica that *dies*. A replica being deployed over is the same
+situation with one difference — it knows it is going away, and can act on that. Treating a
+rolling deploy as a crash would fail every run in flight and take a lease TTL to admit it.
+
+```rust
+let (server, router) = AcpServer::builder().agent(my_agent).build()?.into_shared_router();
+
+// On SIGTERM:
+server.stop_accepting();                  // POST /runs answers 503 + Retry-After
+                                          // ...tell your load balancer here...
+let abandoned = server.drain(Duration::from_secs(60)).await;
+```
+
+The two steps are separate because a deployment wants to stop taking work, tell its load
+balancer, and *then* wait — and the waiting is the long part. `shutdown(deadline)` does both if
+there is nothing to do in between.
+
+Draining refuses **new runs only**. Reads, cancellations, and resuming a run that is already
+`awaiting` all keep working: an `awaiting` run belongs to a client that is about to answer, and
+rejecting the answer would strand a run this replica is still holding. A draining replica also
+stops adopting abandoned runs it comes across, since reaping one means doing that work *here*.
+
+A run still going at the deadline is reported and has its **lease released** — not failed. This
+replica is leaving and is in no position to judge a run that might have been a second from
+finishing. Releasing hands the decision to whoever picks it up: a `recoverable` agent gets a
+replacement started at once, anything else is failed by the next replica to read it. Both already
+happen when a lease lapses; releasing is what makes them happen *now* rather than up to
+`lease_ttl` later.
+
+One limitation worth knowing: a replacement started this way spends a recovery attempt, exactly
+as a crash-caused one does. A long-running recoverable run caught by several drains in one rolling
+deploy can exhaust `max_recovery_attempts` for reasons that have nothing to do with the agent.
+Distinguishing the two needs a field on the recovery record that does not exist yet.
+
+Sequencing with axum's own graceful shutdown matters. `stop_accepting` first, so requests arriving
+during the drain are refused rather than started; axum's shutdown second, to stop accepting
+connections; `drain` last, since the run tasks are not tied to the connections that started them.
+
 ### Recovering a lost run, instead of just failing it
 
 Failing an abandoned run is always correct but unambitious — the work is lost and the

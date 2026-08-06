@@ -94,9 +94,17 @@ mod run;
 pub mod store;
 mod telemetry;
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
 use axum::{http::HeaderMap, Router};
+use tokio::sync::watch;
 use tracing::Instrument;
 
 use crate::types::{
@@ -151,6 +159,73 @@ pub const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 /// the fleet forever.
 pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
+/// How long [`AcpServer::shutdown`] waits for runs in flight by default.
+///
+/// Generous, because the cost of the two failure modes is not symmetric. Too
+/// short and a deploy discards work that was seconds from finishing; too long
+/// and the deploy takes longer, which an orchestrator's own termination grace
+/// period bounds anyway.
+pub const DEFAULT_DRAIN_DEADLINE: Duration = Duration::from_secs(60);
+
+/// The runs this replica is executing, and whether it will take any more.
+///
+/// Leases exist because a replica can *die* without warning, and nothing can be
+/// done about that from inside the dying process. A replica being deployed over
+/// is a different situation wearing the same clothes: it knows it is going
+/// away, and it has time to act. Tracking what is in flight is what lets it use
+/// that knowledge instead of throwing it away and letting every rolling deploy
+/// look like a crash.
+#[derive(Debug)]
+struct InFlight {
+    /// Whether new runs still start here.
+    accepting: AtomicBool,
+    /// Runs currently executing, so the ones that outlast a drain can be found
+    /// and have their leases released.
+    running: Mutex<HashSet<RunId>>,
+    /// The size of `running`, published so a drain can await zero rather than
+    /// poll for it — a polled drain would either add latency to every deploy or
+    /// burn CPU waiting.
+    idle: watch::Sender<usize>,
+}
+
+impl InFlight {
+    fn new() -> Self {
+        Self {
+            accepting: AtomicBool::new(true),
+            running: Mutex::new(HashSet::new()),
+            idle: watch::channel(0).0,
+        }
+    }
+
+    fn enter(&self, run_id: RunId) {
+        let mut running = self.running.lock().expect("in-flight set poisoned");
+        running.insert(run_id);
+        self.idle.send_replace(running.len());
+    }
+
+    fn leave(&self, run_id: RunId) {
+        let mut running = self.running.lock().expect("in-flight set poisoned");
+        running.remove(&run_id);
+        self.idle.send_replace(running.len());
+    }
+
+    fn snapshot(&self) -> Vec<RunId> {
+        self.running.lock().expect("in-flight set poisoned").iter().copied().collect()
+    }
+
+    fn len(&self) -> usize {
+        *self.idle.borrow()
+    }
+
+    /// Resolve once nothing is executing here.
+    async fn idle(&self) {
+        // `wait_for` tests the current value before waiting, so a replica that
+        // is already idle returns immediately rather than blocking on a change
+        // that will never come.
+        let _ = self.idle.subscribe().wait_for(|running| *running == 0).await;
+    }
+}
+
 /// A configured ACP server: a set of agents plus the store backing their runs.
 ///
 /// Build one with [`AcpServer::builder`], then call
@@ -165,6 +240,7 @@ pub struct AcpServer {
     lease_ttl: Duration,
     sync_timeout: Option<Duration>,
     max_recovery_attempts: u32,
+    in_flight: InFlight,
 }
 
 impl std::fmt::Debug for dyn Agent {
@@ -214,6 +290,109 @@ impl AcpServer {
     /// How many times a run may be started before recovery gives up.
     pub fn max_recovery_attempts(&self) -> u32 {
         self.max_recovery_attempts
+    }
+
+    /// Whether this replica is still starting new runs.
+    ///
+    /// False from [`stop_accepting`](AcpServer::stop_accepting) onwards. Worth
+    /// exposing because it is what a readiness probe should report: a draining
+    /// replica is still serving reads, cancellations and the runs it already
+    /// has, and should keep receiving that traffic — it just must not be sent
+    /// any more work.
+    pub fn is_accepting(&self) -> bool {
+        self.in_flight.accepting.load(Ordering::SeqCst)
+    }
+
+    /// How many runs this replica is executing right now.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Stop starting new runs here.
+    ///
+    /// Takes effect before it returns: `POST /runs` answers 503 with a
+    /// `Retry-After` from the next request on, and this replica stops adopting
+    /// abandoned runs it comes across. Idempotent, and not reversible — a
+    /// replica that has begun going away does not come back.
+    ///
+    /// Kept separate from [`drain`](AcpServer::drain) deliberately. A
+    /// deployment wants to stop taking work, tell its load balancer, and *then*
+    /// wait — and the waiting is the long part. Folding the two together would
+    /// mean the balancer only found out once the drain was over, having spent
+    /// the whole drain sending requests that were refused.
+    pub fn stop_accepting(&self) {
+        if !self.in_flight.accepting.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        tracing::info!(
+            replica = %self.replica_id,
+            in_flight = self.in_flight.len(),
+            "no longer accepting new runs"
+        );
+    }
+
+    /// Wait for the runs in flight to finish, for up to `deadline`.
+    ///
+    /// Returns the runs that were still going when the deadline passed; an
+    /// empty result means the replica drained cleanly and can exit having
+    /// finished everything it was given.
+    ///
+    /// **A run that outlasts the deadline has its lease released rather than
+    /// being failed here.** Failing it would end a run that was seconds from
+    /// finishing, and this replica is in no position to judge — it is leaving.
+    /// Releasing hands the decision to whoever picks the run up: a recoverable
+    /// agent gets a replacement started immediately, and everything else is
+    /// failed by the next replica to read it. Both already work; the release is
+    /// what makes them happen *now* instead of after the lease would have
+    /// lapsed on its own.
+    ///
+    /// Call [`stop_accepting`](AcpServer::stop_accepting) first, or new runs
+    /// will keep arriving and the drain may never finish.
+    pub async fn drain(&self, deadline: Duration) -> Vec<RunId> {
+        if tokio::time::timeout(deadline, self.in_flight.idle()).await.is_ok() {
+            tracing::info!(replica = %self.replica_id, "drained cleanly");
+            return Vec::new();
+        }
+
+        let stragglers = self.in_flight.snapshot();
+        tracing::warn!(
+            replica = %self.replica_id,
+            count = stragglers.len(),
+            ?deadline,
+            "drain deadline passed with runs still going; releasing their leases"
+        );
+        for run_id in &stragglers {
+            if let Err(error) = self.store.release_lease(*run_id).await {
+                // Warn, unlike the release on a run's normal completion. There
+                // the lease was a formality on an already-terminal run; here it
+                // is the signal that this run needs a new owner, and losing it
+                // costs a client the whole lease TTL of waiting on a run nobody
+                // is executing.
+                tracing::warn!(%run_id, %error, "failed to release a drained run's lease");
+            }
+        }
+        stragglers
+    }
+
+    /// Stop accepting new runs, then wait for the ones in flight.
+    ///
+    /// The two steps in the order a shutdown wants them. Use them separately if
+    /// there is something to do in between — telling a load balancer, most
+    /// obviously.
+    ///
+    /// ```no_run
+    /// # use std::time::Duration;
+    /// # use rusty_acp::server::{AcpServer, DEFAULT_DRAIN_DEADLINE};
+    /// # async fn demo(server: std::sync::Arc<AcpServer>) {
+    /// let abandoned = server.shutdown(DEFAULT_DRAIN_DEADLINE).await;
+    /// if !abandoned.is_empty() {
+    ///     eprintln!("{} runs handed back to the fleet", abandoned.len());
+    /// }
+    /// # }
+    /// ```
+    pub async fn shutdown(&self, deadline: Duration) -> Vec<RunId> {
+        self.stop_accepting();
+        self.drain(deadline).await
     }
 
     /// Manifests of every registered agent, in registration order.
@@ -378,8 +557,15 @@ impl AcpServer {
 
         let server = Arc::clone(self);
         let base_url = base_url.to_string();
+
+        // Registered here rather than inside the task. A shutdown landing
+        // between the spawn and the task's first poll would otherwise see an
+        // idle replica and drain straight past a run that is about to start.
+        self.in_flight.enter(run_id);
         tokio::spawn(async move {
+            let tracking = Arc::clone(&server);
             execute(server, agent, ctx, handle, session_id, base_url).await;
+            tracking.in_flight.leave(run_id);
         });
 
         Ok((run_id, client_stream))
@@ -528,6 +714,16 @@ async fn renew_lease_until_dropped(
 pub(crate) async fn reap_if_abandoned(server: &Arc<AcpServer>, run: Run) -> Result<Run, Error> {
     let store = &server.store;
     if run.status.is_terminal() || store.lease_owner(run.run_id).await?.is_some() {
+        return Ok(run);
+    }
+
+    // A replica on its way out does not adopt someone else's abandoned run.
+    // Reaping means either failing the run or starting a replacement *here*,
+    // and taking on work during a drain is the one thing a drain exists to
+    // stop. Leaving it alone costs nothing: the run stays unowned, and the next
+    // replica to read it does the same check with a different answer.
+    if !server.is_accepting() {
+        tracing::debug!(run_id = %run.run_id, "draining; leaving an abandoned run for another replica");
         return Ok(run);
     }
 
@@ -985,6 +1181,7 @@ impl AcpServerBuilder {
             max_recovery_attempts: self
                 .max_recovery_attempts
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
+            in_flight: InFlight::new(),
         })
     }
 }
