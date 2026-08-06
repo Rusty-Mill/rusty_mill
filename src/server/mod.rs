@@ -42,6 +42,7 @@
 //! ```
 mod engine;
 mod executor;
+mod rest;
 mod router;
 mod store;
 
@@ -90,12 +91,18 @@ impl AgentServer {
     }
 
     /// Builds the `axum::Router` serving this agent: `POST /` for
-    /// JSON-RPC calls and `GET /.well-known/agent-card.json` for
-    /// discovery. Mount it yourself (e.g. behind TLS termination, or
-    /// nested under a path) or call [`AgentServer::serve`] for a
-    /// zero-setup default.
+    /// JSON-RPC calls, the HTTP+JSON/REST routes from spec Section 11.3
+    /// (`POST /message:send`, `GET /tasks/{id}`, ...), and
+    /// `GET /.well-known/agent-card.json` for discovery - all on one
+    /// port. Declare both bindings in your `AgentCard` if you want
+    /// clients to be able to discover and choose between them (see
+    /// [`crate::types::AgentInterface::json_rpc`] and
+    /// [`crate::types::AgentInterface::http_json`]). Mount it yourself
+    /// (e.g. behind TLS termination, or nested under a path) or call
+    /// [`AgentServer::serve`] for a zero-setup default.
     pub fn into_router(self) -> Router {
-        router::build_router(Arc::new(self.engine))
+        let engine = Arc::new(self.engine);
+        router::build_router(engine.clone()).merge(rest::build_rest_router(engine))
     }
 
     /// Binds `addr` and serves this agent until the process is

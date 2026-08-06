@@ -306,3 +306,235 @@ async fn version_header_mismatch_is_rejected() {
         other => panic!("expected VersionNotSupported, got {other:?}"),
     }
 }
+
+// --- HTTP+JSON/REST binding (spec Section 11) ---
+//
+// `AgentServer::into_router` mounts the REST binding on the same port as
+// JSON-RPC, so `spawn_test_server`'s server already serves it; these tests
+// talk to it directly with a bare `reqwest::Client` rather than
+// `A2aClient` (which only speaks JSON-RPC).
+
+#[tokio::test]
+async fn rest_send_message_and_get_task_round_trip() {
+    let base_url = spawn_test_server().await;
+    let http = reqwest::Client::new();
+
+    let send_resp = http
+        .post(format!("{base_url}/message:send"))
+        .header("A2A-Version", "1.0")
+        .json(&serde_json::json!({
+            "message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "please compute"}]}
+        }))
+        .send()
+        .await
+        .expect("POST /message:send");
+
+    assert_eq!(send_resp.status(), 200);
+    assert_eq!(
+        send_resp.headers().get("content-type").unwrap(),
+        "application/a2a+json"
+    );
+    let body: serde_json::Value = send_resp.json().await.expect("response body");
+    let task = &body["task"];
+    assert_eq!(task["status"]["state"], "TASK_STATE_COMPLETED");
+    let task_id = task["id"].as_str().expect("task id").to_string();
+
+    let get_resp = http
+        .get(format!("{base_url}/tasks/{task_id}"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET /tasks/{id}");
+    assert_eq!(get_resp.status(), 200);
+    let fetched: serde_json::Value = get_resp.json().await.expect("response body");
+    assert_eq!(fetched["id"], task_id);
+    assert_eq!(fetched["status"]["state"], "TASK_STATE_COMPLETED");
+    assert_eq!(fetched["artifacts"][0]["parts"][0]["text"], "42");
+}
+
+#[tokio::test]
+async fn rest_streaming_message_yields_raw_stream_response_events() {
+    let base_url = spawn_test_server().await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .post(format!("{base_url}/message:stream"))
+        .header("A2A-Version", "1.0")
+        .json(&serde_json::json!({
+            "message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "please compute"}]}
+        }))
+        .send()
+        .await
+        .expect("POST /message:stream");
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers().get("content-type").unwrap(), "text/event-stream");
+
+    use eventsource_stream::Eventsource;
+    let mut events = resp.bytes_stream().eventsource();
+    let mut saw_working = false;
+    let mut saw_completed = false;
+    while let Some(event) = events.next().await {
+        let event = event.expect("sse event");
+        // REST streaming carries the bare `StreamResponse` object, with no
+        // `{"jsonrpc":"2.0", "id":..., "result": ...}` envelope around it.
+        let value: serde_json::Value = serde_json::from_str(&event.data).expect("event json");
+        assert!(
+            value.get("jsonrpc").is_none(),
+            "REST SSE must not be JSON-RPC-wrapped"
+        );
+        if let Some(state) = value["statusUpdate"]["status"]["state"].as_str() {
+            match state {
+                "TASK_STATE_WORKING" => saw_working = true,
+                "TASK_STATE_COMPLETED" => saw_completed = true,
+                other => panic!("unexpected state {other}"),
+            }
+        }
+    }
+    assert!(saw_working && saw_completed);
+}
+
+#[tokio::test]
+async fn rest_error_uses_google_rpc_status_shape_and_real_http_code() {
+    let base_url = spawn_test_server().await;
+    let http = reqwest::Client::new();
+
+    let resp = http
+        .get(format!("{base_url}/tasks/does-not-exist"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET /tasks/{id}");
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.expect("response body");
+    assert_eq!(body["error"]["code"], 404);
+    assert_eq!(body["error"]["status"], "NOT_FOUND");
+    assert_eq!(body["error"]["details"][0]["reason"], "TASK_NOT_FOUND");
+    assert_eq!(body["error"]["details"][0]["domain"], "a2a-protocol.org");
+}
+
+#[tokio::test]
+async fn rest_cancel_task_action_suffix_routing() {
+    let base_url = spawn_test_server().await;
+    let http = reqwest::Client::new();
+
+    // A task that blocks in `Working` until canceled (see `TestAgent`).
+    let send_resp: serde_json::Value = http
+        .post(format!("{base_url}/message:send"))
+        .header("A2A-Version", "1.0")
+        .json(&serde_json::json!({
+            "message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "please wait forever"}]},
+            "configuration": {"returnImmediately": true}
+        }))
+        .send()
+        .await
+        .expect("POST /message:send")
+        .json()
+        .await
+        .expect("response body");
+    let task_id = send_resp["task"]["id"].as_str().expect("task id").to_string();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // `/tasks/{id}:cancel` - the colon-suffixed path that motivated this
+    // module's routing workaround.
+    let cancel_resp = http
+        .post(format!("{base_url}/tasks/{task_id}:cancel"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("POST /tasks/{id}:cancel");
+    assert_eq!(cancel_resp.status(), 200);
+    let canceled: serde_json::Value = cancel_resp.json().await.expect("response body");
+    assert_eq!(canceled["status"]["state"], "TASK_STATE_CANCELED");
+}
+
+#[tokio::test]
+async fn rest_push_notification_config_crud() {
+    let base_url = spawn_test_server().await;
+    let http = reqwest::Client::new();
+
+    let send_resp: serde_json::Value = http
+        .post(format!("{base_url}/message:send"))
+        .header("A2A-Version", "1.0")
+        .json(&serde_json::json!({
+            "message": {"messageId": "m1", "role": "ROLE_USER", "parts": [{"text": "please compute"}]}
+        }))
+        .send()
+        .await
+        .expect("POST /message:send")
+        .json()
+        .await
+        .expect("response body");
+    let task_id = send_resp["task"]["id"].as_str().expect("task id").to_string();
+
+    let created: serde_json::Value = http
+        .post(format!("{base_url}/tasks/{task_id}/pushNotificationConfigs"))
+        .header("A2A-Version", "1.0")
+        .json(&serde_json::json!({"url": "https://example.com/webhook"}))
+        .send()
+        .await
+        .expect("POST .../pushNotificationConfigs")
+        .json()
+        .await
+        .expect("response body");
+    let config_id = created["id"].as_str().expect("config id").to_string();
+    assert_eq!(created["url"], "https://example.com/webhook");
+
+    let listed: serde_json::Value = http
+        .get(format!("{base_url}/tasks/{task_id}/pushNotificationConfigs"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET .../pushNotificationConfigs")
+        .json()
+        .await
+        .expect("response body");
+    assert_eq!(listed["configs"].as_array().unwrap().len(), 1);
+
+    let delete_resp = http
+        .delete(format!(
+            "{base_url}/tasks/{task_id}/pushNotificationConfigs/{config_id}"
+        ))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("DELETE .../pushNotificationConfigs/{configId}");
+    assert_eq!(delete_resp.status(), 204);
+
+    let get_after_delete = http
+        .get(format!(
+            "{base_url}/tasks/{task_id}/pushNotificationConfigs/{config_id}"
+        ))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET .../pushNotificationConfigs/{configId}");
+    assert_eq!(get_after_delete.status(), 404);
+}
+
+#[tokio::test]
+async fn rest_and_jsonrpc_bindings_share_the_same_task_store() {
+    let base_url = spawn_test_server().await;
+    let (client, _) = A2aClient::discover(&base_url).await.expect("discover");
+    let http = reqwest::Client::new();
+
+    // Create via JSON-RPC (through `A2aClient`)...
+    let result = client
+        .send_message(Message::user_text("please compute"), None)
+        .await
+        .expect("send_message");
+    let task_id = result.as_task().expect("expected a task").id.clone();
+
+    // ...fetch the same task via REST.
+    let resp = http
+        .get(format!("{base_url}/tasks/{task_id}"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET /tasks/{id}");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("response body");
+    assert_eq!(body["id"], task_id);
+}

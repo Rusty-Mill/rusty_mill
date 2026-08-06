@@ -223,15 +223,15 @@ async fn long_report(events: &EventSink, text: &str) {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let addr = ([127, 0, 0, 1], 8081);
-    let interface = AgentInterface::json_rpc("http://127.0.0.1:8081");
 
     let card = AgentCard::new(
         "Mock Multi-Skill Agent",
         "A mock A2A agent exercising multiple skills, structured/chunked artifacts, \
          direct-message replies, rejected tasks, and interrupted (auth-required) tasks.",
         env!("CARGO_PKG_VERSION"),
-        interface,
+        AgentInterface::json_rpc("http://127.0.0.1:8081"),
     )
+    .with_interface(AgentInterface::http_json("http://127.0.0.1:8081"))
     .with_streaming(true)
     .with_skill(
         AgentSkill::new(
