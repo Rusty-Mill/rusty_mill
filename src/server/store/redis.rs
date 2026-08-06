@@ -195,6 +195,15 @@ impl Store for RedisStore {
         Ok(())
     }
 
+    async fn check_health(&self) -> StoreResult<()> {
+        let mut connection = self.connection.clone();
+        redis::cmd("PING")
+            .query_async::<String>(&mut connection)
+            .await
+            .map(|_| ())
+            .map_err(|err| redis_error("ping", err))
+    }
+
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
         let mut connection = self.connection.clone();
         let raw: Option<String> = connection

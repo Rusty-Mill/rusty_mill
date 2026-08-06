@@ -159,6 +159,54 @@ pub const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 /// the fleet forever.
 pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
+/// How long a readiness answer is reused before the store is asked again.
+///
+/// A load balancer probes on a schedule, from every replica, forever. Without a
+/// cache that becomes a store round trip per probe per replica — load the store
+/// pays most heavily exactly when it is already the thing struggling, which is
+/// the one moment readiness has to keep working.
+///
+/// Short enough that a store coming back is noticed within a probe interval,
+/// which is what the cache costs: recovery is seen up to this late.
+///
+/// Public because it is not configurable and an operator choosing a probe
+/// interval has to know it — a probe faster than this reads a cached answer,
+/// which is the intent, but only if you know that is what is happening.
+pub const READINESS_CACHE: Duration = Duration::from_secs(1);
+
+/// Whether this replica should be sent new work, and why not if not.
+///
+/// Distinct from liveness. `GET /ping` answers "this process is up", which is
+/// what ACP specifies and what a restart-on-failure supervisor wants. This
+/// answers "send me traffic", which is a different question with different
+/// right answers — a draining replica is emphatically alive and must keep
+/// serving what it already has.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    /// Send work.
+    Ready,
+    /// Alive, still serving in-flight runs, but on its way out.
+    Draining,
+    /// The store cannot be reached, so any run started here would fail.
+    StoreUnreachable(String),
+}
+
+impl Readiness {
+    /// Whether new work should be routed here.
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Readiness::Ready)
+    }
+
+    /// A short machine-readable reason, or `None` when ready.
+    pub fn reason(&self) -> Option<&'static str> {
+        match self {
+            Readiness::Ready => None,
+            Readiness::Draining => Some("draining"),
+            Readiness::StoreUnreachable(_) => Some("store_unreachable"),
+        }
+    }
+}
+
 /// How long [`AcpServer::shutdown`] waits for runs in flight by default.
 ///
 /// Generous, because the cost of the two failure modes is not symmetric. Too
@@ -342,6 +390,8 @@ pub struct AcpServer {
     sync_timeout: Option<Duration>,
     max_recovery_attempts: u32,
     in_flight: Arc<InFlight>,
+    /// The last readiness answer and when it was given.
+    readiness: Mutex<Option<(tokio::time::Instant, Readiness)>>,
 }
 
 impl std::fmt::Debug for dyn Agent {
@@ -430,6 +480,50 @@ impl AcpServer {
     /// the replica that has none to spare.
     pub(crate) fn admit(&self) -> Option<Slot> {
         self.in_flight.admit()
+    }
+
+    /// Whether this replica should be sent new work.
+    ///
+    /// Answers the question a load balancer's readiness probe asks, which is
+    /// not the one `GET /ping` answers. A draining replica is alive and must
+    /// keep serving the runs it already has; it just must not be given more.
+    ///
+    /// **Being at capacity is deliberately not unready.** A full replica is
+    /// healthy and empties as its runs finish. Reporting it unready would pull
+    /// it out of rotation under load — pushing its share onto replicas that are
+    /// also full, which report unready in turn, until a busy fleet has removed
+    /// itself from service. A 429 sheds one request; an unready replica sheds
+    /// all of them, and the difference is a bad afternoon versus an outage.
+    ///
+    /// The store check is cached for [`READINESS_CACHE`], so probing this in a
+    /// tight loop does not become load on the store.
+    pub async fn readiness(&self) -> Readiness {
+        if !self.is_accepting() {
+            // Not cached: this is a local flag, and a drain should be visible
+            // to the next probe rather than up to a cache-interval later.
+            return Readiness::Draining;
+        }
+
+        if let Some(cached) = self.cached_readiness() {
+            return cached;
+        }
+
+        let readiness = match self.store.check_health().await {
+            Ok(()) => Readiness::Ready,
+            Err(error) => {
+                tracing::warn!(%error, "readiness: the store is unreachable");
+                Readiness::StoreUnreachable(error.to_string())
+            }
+        };
+        *self.readiness.lock().expect("readiness cache poisoned") =
+            Some((tokio::time::Instant::now(), readiness.clone()));
+        readiness
+    }
+
+    fn cached_readiness(&self) -> Option<Readiness> {
+        let cached = self.readiness.lock().expect("readiness cache poisoned");
+        let (asked, readiness) = cached.as_ref()?;
+        (asked.elapsed() < READINESS_CACHE).then(|| readiness.clone())
     }
 
     /// Stop starting new runs here.
@@ -1346,6 +1440,7 @@ impl AcpServerBuilder {
                 .max_recovery_attempts
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
             in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
+            readiness: Mutex::new(None),
         })
     }
 }

@@ -86,6 +86,10 @@ impl Store for MeteredStore {
         timed!("put_run", self.inner.put_run(run))
     }
 
+    async fn check_health(&self) -> StoreResult<()> {
+        timed!("check_health", self.inner.check_health())
+    }
+
     async fn get_run(&self, run_id: RunId) -> StoreResult<Option<Run>> {
         timed!("get_run", self.inner.get_run(run_id))
     }
