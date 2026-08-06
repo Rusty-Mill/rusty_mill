@@ -32,6 +32,12 @@ async-stream = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"], optional = true }
 tracing = "0.1"
 
+# signing feature (Agent Card JWS signing/verification)
+p256 = { version = "0.14", features = ["ecdsa"], optional = true }
+ed25519-dalek = { version = "3", optional = true }
+getrandom = { version = "0.4", optional = true }
+signature = { version = "3", optional = true }
+
 [features]
 default = []
 client = [
@@ -53,7 +59,8 @@ server = [
   "dep:futures-core",
   "tokio/rt-multi-thread",
 ]
-full = ["client", "server"]
+signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
+full = ["client", "server", "signing"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -77,3 +84,4 @@ required-features = ["client"]
 name = "integration"
 path = "tests/integration.rs"
 required-features = ["full"]
+
