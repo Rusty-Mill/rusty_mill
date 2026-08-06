@@ -11,6 +11,7 @@
 //! request path that can time out under load.
 
 use std::convert::Infallible;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +19,8 @@ use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, Router};
 use agentgateway_mcp::Federation;
+use agentgateway_proxy::HostProxy;
+use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use http::{HeaderMap, Request, StatusCode, header};
 use rmcp::transport::streamable_http_server::{
@@ -51,6 +54,8 @@ enum BackendState {
         service: McpService,
         metrics: Option<McpMetricsLayer>,
     },
+    /// One or more `host` upstreams, proxied over HTTP.
+    Host(HostProxy),
     /// A backend we parsed but cannot serve. The reason is returned to the
     /// client rather than logged and forgotten, so a misconfiguration is
     /// visible from the outside instead of looking like a routing miss.
@@ -157,6 +162,30 @@ impl Gateway {
                         metrics,
                     }
                 }
+                Some(BackendTarget::Host(_)) => {
+                    // A route mixing `host` with a kind we cannot resolve would
+                    // silently drop that share of its traffic onto the hosts,
+                    // sending it somewhere the operator did not ask for.
+                    match route
+                        .backends
+                        .iter()
+                        .find(|b| !matches!(b.target, BackendTarget::Host(_)))
+                    {
+                        Some(other) => BackendState::Unsupported(format!(
+                            "route mixes `host` with `{}`, which is not served by this build",
+                            kind_name(&other.target)
+                        )),
+                        None => {
+                            let proxy = HostProxy::new(&route.backends, &route.policies, &at)?;
+                            tracing::info!(
+                                route = %at,
+                                endpoints = proxy.endpoint_count(),
+                                "host backend ready"
+                            );
+                            BackendState::Host(proxy)
+                        }
+                    }
+                }
                 Some(other) => BackendState::Unsupported(format!(
                     "backend kind `{}` is not served by this build",
                     kind_name(other)
@@ -184,6 +213,7 @@ impl Gateway {
     pub async fn handle(
         &self,
         port: u16,
+        peer: Option<IpAddr>,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response, Infallible> {
         let Some(selection) = self.router.select(port, &request) else {
@@ -219,7 +249,7 @@ impl Gateway {
             return Ok(with_cors(reject(&rejection), cors_headers));
         }
 
-        let call = self.dispatch(state, request);
+        let call = self.dispatch(state, &selection, peer, request);
 
         let response = match state.timeout {
             Some(budget) => match tokio::time::timeout(budget, call).await {
@@ -245,6 +275,8 @@ impl Gateway {
     async fn dispatch(
         &self,
         state: &RouteState,
+        selection: &agentgateway_core::Selection<'_>,
+        peer: Option<IpAddr>,
         request: Request<hyper::body::Incoming>,
     ) -> Response {
         match &state.backend {
@@ -269,6 +301,10 @@ impl Gateway {
                     }
                 }
             },
+            BackendState::Host(proxy) => proxy
+                .proxy(request, selection.matched_prefix.as_deref(), peer)
+                .await
+                .map(Body::new),
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
     }

@@ -101,7 +101,7 @@ async fn accept_loop(
         let stream = tokio::select! {
             _ = shutdown.cancelled() => break,
             accepted = listener.accept() => match accepted {
-                Ok((stream, _peer)) => stream,
+                Ok((stream, peer)) => (stream, peer),
                 Err(err) => {
                     // A failed accept is usually per-connection (fd limits,
                     // a client that vanished); tearing down the listener
@@ -111,6 +111,11 @@ async fn accept_loop(
                 }
             },
         };
+
+        let (stream, peer) = stream;
+        // The client address, for the forwarded-for chain a proxied backend
+        // appends to.
+        let peer = Some(peer.ip());
 
         let gateway = Arc::clone(&gateway);
         let shutdown = shutdown.clone();
@@ -122,7 +127,7 @@ async fn accept_loop(
             let service = TowerToHyperService::new(limits.layer(tower::service_fn(
                 move |request| {
                     let gateway = Arc::clone(&gateway);
-                    async move { gateway.handle(port, request).await }
+                    async move { gateway.handle(port, peer, request).await }
                 },
             )));
 
