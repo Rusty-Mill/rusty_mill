@@ -36,7 +36,7 @@ category of product.
 
 ```bash
 cargo build --release          # core + CLI
-cargo test  --workspace        # 58 tests
+cargo test  --workspace        # 78 tests
 cargo build --release -p inventory-tauri
 ```
 
@@ -116,8 +116,8 @@ confirm an install works without guessing at the shortcut.
 - **Freeze on parse failure** — a tool changing its storage format cannot
   delete what was already indexed from it, and the source repairs itself once
   it is readable again.
-- **Encrypted at rest** with SQLCipher, key in the OS keychain, fail-closed if
-  the key cannot be read.
+- **Encrypted at rest** with AES-256-GCM (pure Rust, no OpenSSL), key in the
+  OS keychain, fail-closed if the key cannot be read.
 
 ### The encryption boundary
 

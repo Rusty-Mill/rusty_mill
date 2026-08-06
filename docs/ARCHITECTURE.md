@@ -239,19 +239,42 @@ indexing: deleting a transcript does not delete what was indexed from it.
 
 ### Encryption and the key
 
-SQLCipher with a per-machine 256-bit key held in the OS keychain and never
-written into the file it unlocks.
+AES-256-GCM, pure Rust (`aes-gcm`), a per-machine 256-bit key held in the OS
+keychain and never written into the file it unlocks. Earlier versions used
+SQLCipher; that meant linking OpenSSL, and building OpenSSL from source means
+Perl — a second, unrelated language toolchain just to open a database, which
+is exactly the kind of thing "needs nothing installed" (see above) rules out.
+`db.rs` now runs plain, unmodified SQLite (`rusqlite`'s `bundled` feature,
+a C compiler and nothing else) against a private working copy, and seals
+that whole file with AES-GCM instead of encrypting it page by page.
+
+Concretely: `db::open` decrypts the on-disk file, in full, into a `TempDir`
+SQLite never touches directly outside that copy; `Inventory::checkpoint`
+folds the WAL into it and reseals it over the original with a fresh random
+nonce. This trades continuous, per-transaction durability (SQLCipher's page
+cipher meant every commit was durable on disk) for a dependency-free build:
+a crash between two checkpoints loses whatever changed since the last one,
+and leaves the stale plaintext copy in the OS temp directory rather than
+nowhere. `checkpoint` is cheap to call often — it compares
+`Connection::total_changes()` against the value as of the last seal and does
+nothing when they match — so every long-running caller (the desktop app's
+background loop, `inv watch`) calls it on a short interval rather than
+relying on `Drop`, which a killed process, `std::process::exit`, or Tauri's
+`app.exit()` never runs.
 
 The important behaviour is the distinction between **no key yet** (normal first
 run — mint one) and **keychain unreadable** (fatal). Collapsing them would let
 a transient keychain error look like a fresh install and rebuild an index that
 was never actually lost. `Error::KeyUnavailable` exists to make that
 non-recoverable by construction, and a wrong key produces `KeyMismatch` rather
-than a confusing "file is not a database" much later.
+than a confusing "file is not a database" much later. A file sealed by the old
+SQLCipher scheme decrypts as neither — it fails the container's magic-header
+check outright — and gets `Error::LegacyIndexFormat`, the same "rebuild it,
+nothing is lost" story as a missing key.
 
-Plaintext indexes are converted by exporting to a staging file, reopening and
-verifying it, and only then renaming the original to `.plaintext.bak`. An
-interruption at any point leaves a working index behind.
+Plaintext indexes are converted by sealing a copy of the raw bytes, decrypting
+it back and comparing byte-for-byte, and only then renaming the original to
+`.plaintext.bak`. An interruption at any point leaves a working index behind.
 
 `db::shannon_entropy` exists so `inv doctor` can report the same number the
 product's security page invites you to verify.
