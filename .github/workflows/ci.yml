@@ -37,6 +37,49 @@ jobs:
             echo "src/ unchanged; no version bump required"
           fi
 
+  # `CHANGELOG.md` and `RELEASE_NOTES.md` record the same releases in two
+  # formats, and nothing held them to each other. Both drifted, in opposite
+  # directions: `RELEASE_NOTES.md` was missing `v0.10.1` entirely, and *both*
+  # carried an entry for a `0.8.0` that no commit ever declared — rusty_tls#57
+  # bumped the version twice in one merge, so `main` went `0.7.0` straight to
+  # `0.9.0`. Neither is visible when reading either file on its own; both fell
+  # out immediately from diffing the two version lists, which is the whole of
+  # what this job automates (rusty_tls#64).
+  changelog-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The two release documents must list the same versions
+        run: |
+          changelog=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+                        | tr -d '#[] ' | sort -V)
+          notes=$(grep -oE '^## v[0-9]+\.[0-9]+\.[0-9]+' RELEASE_NOTES.md \
+                        | sed 's/^## v//' | sort -V)
+
+          n_changelog=$(printf '%s' "$changelog" | grep -c . || true)
+          n_notes=$(printf '%s' "$notes" | grep -c . || true)
+          echo "CHANGELOG.md:     $n_changelog versions"
+          echo "RELEASE_NOTES.md: $n_notes versions"
+
+          # Assert both lists are non-empty *before* comparing them. Change
+          # either file's header format and both greps match nothing, and a
+          # diff of two empty lists exits 0 — a green check for a comparison
+          # that compared nothing. That is the same vacuous-pass shape as the
+          # zero-tests guard in `handrolled-engine` below, and the reason this
+          # check cannot be allowed to pass by finding no input.
+          if [ "$n_changelog" -eq 0 ] || [ "$n_notes" -eq 0 ]; then
+            echo "::error::parsed zero versions out of one of the two files — has a heading format changed? This check must not pass vacuously."
+            exit 1
+          fi
+
+          if ! diff <(printf '%s\n' "$changelog") <(printf '%s\n' "$notes"); then
+            echo "::error::CHANGELOG.md and RELEASE_NOTES.md list different versions. Above, '<' is in CHANGELOG.md only and '>' is in RELEASE_NOTES.md only. Every released version needs an entry in both; a version in neither may be one that was never released."
+            exit 1
+          fi
+
+          echo "both files list the same $n_changelog versions"
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -179,6 +222,7 @@ jobs:
                    handrolled_client \
                    handrolled_interop \
                    handrolled_socket_interop \
+                   handrolled_ticket \
                    handrolled_server; do
             n=$(cargo test --features handrolled-engine --test "$t" -- --list \
                   | grep -c ': test$')

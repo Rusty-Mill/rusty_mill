@@ -5,6 +5,32 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 
+### Added
+- **CI checks that `CHANGELOG.md` and `RELEASE_NOTES.md` list the same
+  versions.** A new `changelog-parity` job. The two files record the same
+  releases in two formats and nothing held them to each other; both had drifted,
+  in opposite directions, and neither drift is visible when reading either file
+  alone.
+
+  **The check refuses to pass vacuously.** It asserts both version lists are
+  non-empty before comparing them, because a heading-format change makes both
+  greps match nothing and a `diff` of two empty lists exits `0` — a green check
+  for a comparison that compared nothing. That is the same shape as the
+  zero-tests guard the `handrolled-engine` job already carries, and it is worth
+  the four extra lines: this repo has now been bitten by a vacuously-passing
+  check often enough that a new one arriving without the guard would be the
+  notable event. Verified by breaking one heading format, then both.
+
+### Fixed
+- **`handrolled_ticket` was absent from the "prove the gated tests actually
+  ran" list**, which is the guard against a cfg typo compiling a suite down to
+  zero tests while CI stays green. It has been missing since the suite arrived
+  with the `ticket` module in `0.9.0` — so its fourteen tests were the ones
+  least protected by the mechanism written to protect exactly them, in the
+  release that introduced stateless resumption. The block's own comment says
+  every new suite belongs in the list; nothing enforced it, which is the same
+  gap in miniature as the one `changelog-parity` closes.
+
 ### Changed
 - **The `[0.8.0]` entry is folded into `[0.9.0]`, in this file and in
   `RELEASE_NOTES.md`.** There was never a 0.8.0: rusty_tls#57 carried two
