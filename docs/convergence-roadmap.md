@@ -32,7 +32,7 @@ Phase 3  Fs second wave (D11: renameat2, atomic write, memfd)
 Phase 4  Track P completion (getdents64, pidfd_open upstream)
 Phase 5  Net surface (D16)
 Phase 6  Security surface (D15)
-Phase 7  PTY surface (D13) — blocked on a named consumer
+Phase 7  PTY surface (D13) — landed 2026-07-23 (both Linux + Windows)
 Phase 8  Tun surface (D14)
 Phase 9  Windowing + Registry/Config (nexus-only, converge last)
 ─────────────────────────────────────────────────────────────
@@ -772,8 +772,15 @@ rather than a measurement, and `platform-bsd`'s own `lib.rs` says so.
 
 ## Phase 7 — PTY surface (D13)
 
-**Blocked on a named consumer** — this is the one item on this roadmap
-that isn't ready to schedule. shh and rusty_term both have working
+**Status: landed, both halves, 2026-07-23** — see the two "Landed"
+entries below for the full record. The paragraph immediately below
+predates that and is kept as history, per this document's own "mark
+items done in place, don't delete the history" rule — do not read it
+as current status.
+
+**Blocked on a named consumer** (historical, superseded below) — this
+was the one item on this roadmap that wasn't ready to schedule. shh and
+rusty_term both have working
 donor code (openpty+TIOCSCTTY vs ConPTY), but neither is *itself* the
 forcing consumer in the §3 sense: shh doesn't need to give up its own
 pty.rs to unblock anything, and rusty_term's PTY hosting is scoped
