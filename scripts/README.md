@@ -17,7 +17,19 @@ commit is not its job.
 ## Requirements
 
 `gh`, authenticated with a token carrying `repo` scope (contents: write).
-Check with `gh auth status`.
+
+**Do not check that with `gh auth status`** — it exits `0` even when it prints
+"The token in `GH_TOKEN` is invalid", so it is useless as a gate. Make a real
+request instead:
+
+```bash
+gh api repos/baileyrd/rusty_tls --jq .full_name; echo "exit=$?"
+```
+
+Both scripts do exactly this before doing anything else, for the same reason.
+A probe also catches what `auth status` structurally cannot: scopes too narrow
+for the operation, and a network path that intercepts `api.github.com` and
+answers `403` on GitHub's behalf.
 
 PowerShell 5.1 or later. Both run on `pwsh` for Linux and macOS as well as
 Windows PowerShell; nothing in them is platform-specific.

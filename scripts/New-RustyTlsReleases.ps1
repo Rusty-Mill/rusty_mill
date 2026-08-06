@@ -145,7 +145,7 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
 # 403 on its behalf.
 $probe = gh api "repos/$Repo" --jq '.full_name' 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw "Cannot reach $Repo through gh. Check `gh auth status`, that the token carries ``repo`` scope, and that nothing is intercepting api.github.com. gh said: $probe"
+    throw "Cannot reach $Repo through gh. Check that the token is valid and carries ``repo`` scope, and that nothing is intercepting api.github.com. (``gh auth status`` is worth reading but not trusting -- its exit code is 0 even for an invalid token.) gh said: $probe"
 }
 Write-Verbose "Authenticated; $probe is readable."
 
