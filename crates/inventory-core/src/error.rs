@@ -23,6 +23,13 @@ pub enum Error {
     #[error("{0} is not a file this version knows how to read")]
     UnknownFormat(PathBuf),
 
+    /// A version of this app encrypted this file differently (SQLCipher, up
+    /// to and including 1.0.2) and it can no longer be decrypted — no
+    /// OpenSSL is linked any more. Same recovery story as a lost key: the
+    /// index is a derived artifact, not the source of truth.
+    #[error("{path} was encrypted by an older version of Inventory and cannot be read by this one.\nMove it aside and re-index — your tools' own history is untouched and will be read again.")]
+    LegacyIndexFormat { path: PathBuf },
+
     #[error("no conversation with id {0}")]
     NoSuchConversation(i64),
 

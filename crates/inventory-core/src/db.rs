@@ -1,18 +1,48 @@
 //! The single encrypted file everything lives in.
+//!
+//! There is no page-level cipher here: SQLite itself never sees an encrypted
+//! byte. `open` decrypts the on-disk file, in full, into a private SQLite
+//! file that lives only in a per-process temp directory; the caller works
+//! against that plaintext copy and calls `seal_to` (via
+//! `Inventory::checkpoint`, see `index.rs`) to fold it back into a single
+//! AES-256-GCM-sealed file. That trades continuous, per-transaction
+//! durability for a build with nothing to install: no C compiler, no
+//! OpenSSL, no Perl, anywhere in the dependency graph — pure Rust crypto
+//! (`aes-gcm`) over a plain, unmodified SQLite (`rusqlite`'s `bundled`
+//! feature, `cc` only).
 
 use crate::keychain::KeyProvider;
 use crate::{Error, Result};
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
 use rusqlite::Connection;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: i32 = 2;
 
+/// Marks the sealed container format, so a stray SQLite file — or an index
+/// written by a version of this app that used SQLCipher — is never mistaken
+/// for one of ours.
+const MAGIC: &[u8; 8] = b"INVSEAL1";
+const NONCE_LEN: usize = 12;
+
+/// A live connection over a private, unencrypted working copy, plus what
+/// `Inventory` needs to keep resealing it.
+#[derive(Debug)]
+pub struct Opened {
+    pub conn: Connection,
+    pub key: [u8; 32],
+    pub plain_path: PathBuf,
+    pub tempdir: tempfile::TempDir,
+}
+
 /// Open (creating if needed) the encrypted index at `path`.
 ///
-/// SQLCipher takes the key before any other statement runs. We then touch a
-/// real page to force a decrypt, which is what turns a wrong key into a clear
-/// error instead of a confusing "file is not a database" much later.
-pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Connection> {
+/// Nothing is ever written to `path` here — see `seal_to` for that. A fresh
+/// index starts as an empty working copy; an existing one is decrypted in
+/// full into it.
+pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Opened> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -35,57 +65,124 @@ pub fn open(path: &Path, key: &dyn KeyProvider) -> Result<Connection> {
         )));
     }
 
-    let key_hex = key.get_or_create()?;
+    let key_bytes = parse_key(&key.get_or_create()?)?;
 
-    let conn = Connection::open(path)?;
-    apply_key(&conn, &key_hex)?;
+    let tempdir = tempfile::Builder::new()
+        .prefix("inventory-index")
+        .tempdir()?;
+    let plain_path = tempdir.path().join("index.sqlite3");
 
-    // Force a decrypt of page 1.
-    if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-        r.get::<_, i64>(0)
-    }) {
-        return Err(if existed {
-            Error::KeyMismatch(format!(
-                "{} exists but the key from {} does not open it: {e}",
-                path.display(),
-                key.describe()
-            ))
-        } else {
-            Error::Sqlite(e)
-        });
+    if existed {
+        let sealed = std::fs::read(path)?;
+        let plaintext = unseal(&sealed, &key_bytes, path)?;
+        std::fs::write(&plain_path, plaintext)?;
     }
 
+    let conn = Connection::open(&plain_path)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&conn)?;
-    Ok(conn)
+
+    Ok(Opened {
+        conn,
+        key: key_bytes,
+        plain_path,
+        tempdir,
+    })
 }
 
-fn apply_key(conn: &Connection, key_hex: &str) -> Result<()> {
-    // Raw-key form: SQLCipher takes the 32 bytes verbatim rather than running
-    // a KDF over an ASCII passphrase. The key is already full-entropy random.
-    let quoted = if key_hex.len() == 64 && key_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        format!("\"x'{key_hex}'\"")
-    } else {
-        format!("'{}'", key_hex.replace('\'', "''"))
-    };
-    conn.execute_batch(&format!("PRAGMA key = {quoted};"))?;
+/// A 64-character hex string, the only shape `KeyProvider` ever hands back.
+fn parse_key(hex: &str) -> Result<[u8; 32]> {
+    if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(Error::KeyUnavailable(
+            "the stored index key is not a 256-bit hex value".into(),
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    for (byte, chunk) in bytes.iter_mut().zip(hex.as_bytes().chunks_exact(2)) {
+        // `chunk` is two ASCII hex digits; `hex` was just validated above.
+        *byte = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
+    }
+    Ok(bytes)
+}
+
+/// Decrypt a sealed blob read from `path` (used only for error messages).
+fn unseal(sealed: &[u8], key: &[u8; 32], path: &Path) -> Result<Vec<u8>> {
+    if sealed.len() < MAGIC.len() + NONCE_LEN || &sealed[..MAGIC.len()] != MAGIC {
+        return Err(Error::LegacyIndexFormat {
+            path: path.to_path_buf(),
+        });
+    }
+    let nonce = Nonce::from_slice(&sealed[MAGIC.len()..MAGIC.len() + NONCE_LEN]);
+    let ciphertext = &sealed[MAGIC.len() + NONCE_LEN..];
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    cipher.decrypt(nonce, ciphertext).map_err(|_| {
+        Error::KeyMismatch(format!(
+            "{} exists but the key does not open it",
+            path.display()
+        ))
+    })
+}
+
+/// Encrypt `plaintext` with a fresh random nonce and write it over `dest`.
+/// Written to a staging file and renamed into place, so an interruption
+/// mid-write never corrupts the existing sealed file.
+pub fn seal_to(dest: &Path, plaintext: &[u8], key: &[u8; 32]) -> Result<()> {
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let ciphertext = cipher
+        .encrypt(&nonce, plaintext)
+        .map_err(|e| Error::other(format!("failed to seal the index: {e}")))?;
+
+    let staging = dest.with_extension("sealing");
+    {
+        let mut f = std::fs::File::create(&staging)?;
+        f.write_all(MAGIC)?;
+        f.write_all(&nonce)?;
+        f.write_all(&ciphertext)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&staging, dest)?;
     Ok(())
 }
 
-/// Is this file encrypted? Used by the conversion path and by `inv doctor`.
-/// A plaintext SQLite file starts with the ASCII header `SQLite format 3\0`;
-/// an encrypted one starts with random bytes.
+/// Checkpoint `conn`'s WAL into its main file, then seal that file over
+/// `dest`. The only correct way to persist a live connection: reading
+/// `plain_path` directly, without checkpointing first, can silently miss
+/// whatever is still sitting in the WAL.
+pub fn seal(conn: &Connection, plain_path: &Path, dest: &Path, key: &[u8; 32]) -> Result<()> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let plaintext = std::fs::read(plain_path)?;
+    seal_to(dest, &plaintext, key)
+}
+
+/// Does this file look like one of our sealed indexes? Reported in `Stats`
+/// and by `inv doctor`; only reads the header, never the whole file.
 pub fn looks_encrypted(path: &Path) -> Result<bool> {
+    read_header::<{ MAGIC.len() }>(path).map(|h| h.as_ref() == Some(MAGIC))
+}
+
+/// Is this an unencrypted SQLite file left over from before encryption
+/// existed? Gates the one-time migration path in `Inventory::open_at`.
+pub fn is_plaintext_sqlite(path: &Path) -> Result<bool> {
+    const SQLITE_HEADER: [u8; 16] = *b"SQLite format 3\0";
+    read_header::<16>(path).map(|h| h == Some(SQLITE_HEADER))
+}
+
+/// First `N` bytes of `path`, or `None` if it doesn't exist or is shorter
+/// than `N`.
+fn read_header<const N: usize>(path: &Path) -> Result<Option<[u8; N]>> {
     if !path.exists() {
-        return Ok(false);
+        return Ok(None);
     }
-    let bytes = std::fs::read(path)?;
-    if bytes.len() < 16 {
-        return Ok(false);
+    let mut f = std::fs::File::open(path)?;
+    let mut header = [0u8; N];
+    match f.read_exact(&mut header) {
+        Ok(()) => Ok(Some(header)),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    Ok(&bytes[..16] != b"SQLite format 3\0")
 }
 
 /// Shannon entropy of the file in bits per byte. The security page invites
@@ -110,48 +207,34 @@ pub fn shannon_entropy(path: &Path) -> Result<f64> {
     Ok(h)
 }
 
-/// Convert a plaintext index to an encrypted one.
+/// Convert a plaintext index to a sealed one.
 ///
 /// "Existing indexes are converted automatically, without touching the
 /// original until the new one is proven." The original is only renamed to
-/// `.plaintext.bak` after the replacement has been reopened and verified, so
-/// an interruption at any point leaves a working index behind.
+/// `.plaintext.bak` after the replacement has been decrypted back and
+/// checked byte-for-byte, so an interruption at any point leaves a working
+/// index behind.
 pub fn convert_plaintext_to_encrypted(
     path: &Path,
     key: &dyn KeyProvider,
 ) -> Result<Option<PathBuf>> {
-    if !path.exists() || looks_encrypted(path)? {
+    if !path.exists() || !is_plaintext_sqlite(path)? {
         return Ok(None);
     }
-    let key_hex = key.get_or_create()?;
+    let key_bytes = parse_key(&key.get_or_create()?)?;
+    let plaintext = std::fs::read(path)?;
+
     let staging = path.with_extension("converting");
-    let _ = std::fs::remove_file(&staging);
+    seal_to(&staging, &plaintext, &key_bytes)?;
 
-    {
-        let conn = Connection::open(path)?;
-        let expected: i64 = conn
-            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
-            .unwrap_or(0);
-
-        conn.execute(
-            "ATTACH DATABASE ?1 AS encrypted KEY ?2",
-            rusqlite::params![staging.to_string_lossy(), format!("x'{key_hex}'")],
-        )?;
-        conn.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))?;
-        conn.execute_batch("DETACH DATABASE encrypted")?;
-        drop(conn);
-
-        // Prove the new file before the old one is disturbed.
-        let check = Connection::open(&staging)?;
-        apply_key(&check, &key_hex)?;
-        let got: i64 = check
-            .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
-            .map_err(|e| Error::other(format!("converted index failed verification: {e}")))?;
-        if got < expected {
-            return Err(Error::other(format!(
-                "converted index is missing objects ({got} of {expected}); original left untouched"
-            )));
-        }
+    // Prove the new file before the old one is disturbed.
+    let sealed = std::fs::read(&staging)?;
+    let roundtrip = unseal(&sealed, &key_bytes, &staging)
+        .map_err(|e| Error::other(format!("converted index failed verification: {e}")))?;
+    if roundtrip != plaintext {
+        return Err(Error::other(
+            "converted index does not match the original; original left untouched",
+        ));
     }
 
     let backup = path.with_extension("plaintext.bak");
@@ -305,12 +388,15 @@ mod tests {
         let key = StaticKey::new("a".repeat(64));
 
         {
-            let conn = open(&path, &key).unwrap();
-            conn.execute(
-                "INSERT INTO settings(key,value) VALUES ('hello','world')",
-                [],
-            )
-            .unwrap();
+            let opened = open(&path, &key).unwrap();
+            opened
+                .conn
+                .execute(
+                    "INSERT INTO settings(key,value) VALUES ('hello','world')",
+                    [],
+                )
+                .unwrap();
+            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
         }
 
         assert!(
@@ -322,9 +408,9 @@ mod tests {
             "encrypted file should look random"
         );
 
-        let conn = open(&path, &key).unwrap();
+        let opened = open(&path, &key).unwrap();
         assert_eq!(
-            get_setting(&conn, "hello").unwrap().as_deref(),
+            get_setting(&opened.conn, "hello").unwrap().as_deref(),
             Some("world")
         );
     }
@@ -334,7 +420,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inventory.sqlite3");
         {
-            let _ = open(&path, &StaticKey::new("a".repeat(64))).unwrap();
+            let opened = open(&path, &StaticKey::new("a".repeat(64))).unwrap();
+            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
         }
         let err = open(&path, &StaticKey::new("b".repeat(64))).unwrap_err();
         assert!(matches!(err, Error::KeyMismatch(_)), "got {err:?}");
@@ -348,7 +435,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inventory.sqlite3");
         {
-            let _ = open(&path, &StaticKey::new("d".repeat(64))).unwrap();
+            let opened = open(&path, &StaticKey::new("d".repeat(64))).unwrap();
+            seal(&opened.conn, &opened.plain_path, &path, &opened.key).unwrap();
         }
 
         // A provider holding nothing — the keychain came back empty.
@@ -383,7 +471,27 @@ mod tests {
 
         assert!(backup.exists(), "original should be preserved");
         assert!(looks_encrypted(&path).unwrap());
-        let conn = open(&path, &key).unwrap();
-        assert_eq!(get_setting(&conn, "kept").unwrap().as_deref(), Some("yes"));
+        let opened = open(&path, &key).unwrap();
+        assert_eq!(
+            get_setting(&opened.conn, "kept").unwrap().as_deref(),
+            Some("yes")
+        );
+    }
+
+    /// A version of this app that used SQLCipher wrote pages we can no
+    /// longer decrypt — no OpenSSL is linked any more. That must fail
+    /// clearly, not be silently treated as a fresh index.
+    #[test]
+    fn a_legacy_sqlcipher_style_file_is_a_clear_error_not_a_fresh_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory.sqlite3");
+        // SQLCipher's on-disk format is indistinguishable from random bytes.
+        std::fs::write(&path, vec![0x42u8; 4096]).unwrap();
+
+        let key = StaticKey::new("e".repeat(64));
+        match open(&path, &key) {
+            Err(Error::LegacyIndexFormat { .. }) => {}
+            other => panic!("expected LegacyIndexFormat, got {other:?}"),
+        }
     }
 }
