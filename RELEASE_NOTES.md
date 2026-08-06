@@ -24,6 +24,22 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #114 — Add MCP support: expose rusty_provider as an MCP server and gateway
+**2026-08-06** · [#114](https://github.com/baileyrd/rusty_provider/pull/114) · [docs/MCP.md](docs/MCP.md)
+
+- **Added:** `[mcp]` config section, opt-in. Two directions at once, built
+  on [`rusty_mcp`](https://github.com/baileyrd/rusty_mcp): rusty_provider's
+  own routing exposed as MCP tools (`chat_completion`/`list_models`/
+  `embeddings`), plus a gateway proxying configured `[[mcp.upstreams]]`
+  (stdio subprocess or Streamable HTTP) under `"{upstream}/{tool}"` names,
+  merged into one `tools/list`. Mounted inside the existing app/port,
+  guarded by the same `server.api_key_env`/`[[clients]]`/`[jwt]` auth every
+  other route already uses, not a separate auth model. `MCP_STDIO=1` serves
+  the same handler over stdio for desktop clients. New dependencies
+  `rusty-mcp` (git) and `rmcp`.
+
+---
+
 ## PR #111 — rp-cli: cover [jwt].hs256_secret_env in keys check / config check
 **2026-08-06** · [#111](https://github.com/baileyrd/rusty_provider/pull/111)
 
