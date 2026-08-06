@@ -362,8 +362,8 @@ binds:
         "lint should flag extAuthz: {findings:?}"
     );
     assert!(
-        findings.iter().any(|f| f.contains("`ai` backend")),
-        "lint should flag the ai backend: {findings:?}"
+        !findings.iter().any(|f| f.contains("`ai` backend")),
+        "the ai backend is served now and must not be reported as inert: {findings:?}"
     );
 }
 

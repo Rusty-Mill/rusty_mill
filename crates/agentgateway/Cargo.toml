@@ -20,6 +20,7 @@ workspace = true
 agentgateway-auth = { workspace = true }
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
+agentgateway-llm = { workspace = true }
 agentgateway-mcp = { workspace = true }
 agentgateway-proxy = { workspace = true }
 agentgateway-tls = { workspace = true }
