@@ -520,3 +520,31 @@ fn an_index_written_with_one_key_will_not_open_with_another() {
         Ok(_) => panic!("a wrong key opened the index"),
     }
 }
+
+/// A regression test for a real bug: `open_at` used to reseal the file
+/// unconditionally on every open, including a pure read. That races a
+/// concurrently running writer — the desktop app, say — checkpointing
+/// between this open's read and its own forced reseal, and clobbers
+/// whatever the writer just committed. A read-only open must leave the
+/// on-disk bytes untouched.
+#[test]
+fn a_read_only_reopen_does_not_touch_the_sealed_file() {
+    let fx = Fixture::new();
+    {
+        let inv = fx.open();
+        inv.set_scratchpad_enabled(true).unwrap();
+    }
+    let before = std::fs::read(fx.index_path()).unwrap();
+
+    {
+        let inv = fx.open();
+        // A real read, so this cannot be optimised away as unused.
+        assert!(inv.scratchpad_enabled().unwrap());
+    }
+    let after = std::fs::read(fx.index_path()).unwrap();
+
+    assert_eq!(
+        before, after,
+        "a read-only open reencrypted the index; it should have left the sealed bytes alone"
+    );
+}
