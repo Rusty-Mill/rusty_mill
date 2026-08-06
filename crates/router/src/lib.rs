@@ -15,7 +15,7 @@ mod webhook;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cache::{ResponseCache, SemanticCache};
 use client_budget::{ClientBudgetSetting, SpendState};
@@ -704,6 +704,44 @@ fn unresolved_route_providers(config: &Config) -> Vec<(String, String, String)> 
         }
     }
     problems
+}
+
+/// Extra attempts against the *same* provider/model candidate, on a
+/// [`ProviderError::is_transient`] error, before falling through to the
+/// next candidate in the chain. `1` means up to 2 total tries per
+/// candidate.
+const SAME_PROVIDER_RETRIES: u32 = 1;
+
+/// Fixed delay between same-provider retries. Short and unconditional
+/// (not exponential, not honoring a provider's `Retry-After`) on purpose:
+/// this budget only exists for a momentary blip, not a real backoff
+/// strategy -- an error that needs more than a brief pause is exactly what
+/// `is_transient` excludes, since the chain moving on to the next
+/// candidate is the better response to that.
+const SAME_PROVIDER_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Calls `attempt` up to `1 + SAME_PROVIDER_RETRIES` times, retrying (with
+/// [`SAME_PROVIDER_RETRY_BACKOFF`] between tries) only while the error is
+/// [`ProviderError::is_transient`]. `attempt` is called fresh each time so
+/// this works uniformly across `Provider::chat`/`chat_stream`/
+/// `embeddings`, whose return futures all borrow the same call-site
+/// arguments.
+async fn retry_same_provider<T, F, Fut>(mut attempt: F) -> Result<T, ProviderError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, ProviderError>>,
+{
+    let mut result = attempt().await;
+    let mut retries = 0;
+    while let Err(e) = &result {
+        if retries >= SAME_PROVIDER_RETRIES || !e.is_transient() {
+            break;
+        }
+        retries += 1;
+        tokio::time::sleep(SAME_PROVIDER_RETRY_BACKOFF).await;
+        result = attempt().await;
+    }
+    result
 }
 
 impl Router {
@@ -1892,8 +1930,7 @@ impl Router {
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
-            match provider
-                .chat(req_to_send, model_name, api_key_override)
+            match retry_same_provider(|| provider.chat(req_to_send, model_name, api_key_override))
                 .await
             {
                 Ok(mut resp) => {
@@ -2016,9 +2053,10 @@ impl Router {
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
-            match provider
-                .chat_stream(req_to_send, model_name, api_key_override)
-                .await
+            match retry_same_provider(|| {
+                provider.chat_stream(req_to_send, model_name, api_key_override)
+            })
+            .await
             {
                 Ok(stream) => {
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2098,7 +2136,7 @@ impl Router {
                 continue;
             }
 
-            match provider.embeddings(req, model_name, None).await {
+            match retry_same_provider(|| provider.embeddings(req, model_name, None)).await {
                 Ok(resp) => {
                     self.metrics
                         .record_attempt(provider_name, model_name, "success");
@@ -2250,6 +2288,15 @@ mod tests {
         Succeed,
         FailRetryable,
         FailFatal,
+        /// Fails with a transient error on the first call, succeeds on
+        /// every call after -- proves a same-provider retry can actually
+        /// rescue a candidate, not just delay an inevitable fall-through.
+        FailOnceThenSucceed,
+        /// Retryable (the chain should move on) but not transient (a
+        /// same-provider retry shouldn't be attempted) -- e.g. an
+        /// unsupported-feature mismatch, a structural property of this
+        /// candidate that retrying it again can't change.
+        FailRetryableNonTransient,
     }
 
     /// A `Provider` with scripted, network-free behavior and a call
@@ -2264,16 +2311,33 @@ mod tests {
     impl MockProvider {
         fn canned_error(&self) -> ProviderError {
             match self.behavior {
-                MockBehavior::FailRetryable => ProviderError::Upstream {
-                    status: 503,
-                    message: "mock retryable failure".to_string(),
-                },
+                MockBehavior::FailRetryable | MockBehavior::FailOnceThenSucceed => {
+                    ProviderError::Upstream {
+                        status: 503,
+                        message: "mock retryable failure".to_string(),
+                    }
+                }
                 MockBehavior::FailFatal => {
                     ProviderError::InvalidRequest("mock fatal failure".to_string())
+                }
+                MockBehavior::FailRetryableNonTransient => {
+                    ProviderError::UnsupportedFeature("mock unsupported feature".to_string())
                 }
                 MockBehavior::Succeed => {
                     unreachable!("canned_error only called for failure behaviors")
                 }
+            }
+        }
+
+        /// `true` once this call should succeed: always for `Succeed`, or
+        /// from the second call onward for `FailOnceThenSucceed`.
+        fn should_succeed(&self, call_num: usize) -> bool {
+            match self.behavior {
+                MockBehavior::Succeed => true,
+                MockBehavior::FailOnceThenSucceed => call_num > 1,
+                MockBehavior::FailRetryable
+                | MockBehavior::FailFatal
+                | MockBehavior::FailRetryableNonTransient => false,
             }
         }
     }
@@ -2290,9 +2354,9 @@ mod tests {
             model: &str,
             _api_key_override: Option<&str>,
         ) -> Result<ChatResponse, ProviderError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            match self.behavior {
-                MockBehavior::Succeed => Ok(ChatResponse {
+            let call_num = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.should_succeed(call_num) {
+                Ok(ChatResponse {
                     id: "test-id".to_string(),
                     object: "chat.completion",
                     created: 0,
@@ -2311,8 +2375,9 @@ mod tests {
                         cache_creation_tokens: None,
                     }),
                     cost_usd: None,
-                }),
-                _ => Err(self.canned_error()),
+                })
+            } else {
+                Err(self.canned_error())
             }
         }
 
@@ -6476,7 +6541,7 @@ mod tests {
         assert_eq!(resp.model, "openai/text-embedding-3-small");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn embeddings_falls_back_to_the_next_candidate_on_a_retryable_error() {
         // Anthropic has no embeddings API -- UnsupportedFeature is
         // retryable, so a chain naming it alongside a real embeddings
@@ -6510,7 +6575,11 @@ mod tests {
             .expect("should fall through to openai");
 
         assert_eq!(resp.model, "openai/text-embedding-3-small");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 same-provider retry on the transient error, before falling through"
+        );
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
@@ -6740,7 +6809,7 @@ mod tests {
         assert!(metrics.contains(r#"model="m1""#));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -6768,11 +6837,97 @@ mod tests {
             .expect("should fall through to openai");
 
         assert_eq!(resp.model, "openai/m2");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 same-provider retry on the transient error, before falling through"
+        );
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_retries_the_same_provider_and_succeeds_without_falling_through() {
+        // The retry actually rescues the candidate -- not just delays an
+        // inevitable fall-through to the next one, which the call-count
+        // assertions elsewhere in this module can't tell apart from this.
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let flaky = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::FailOnceThenSucceed,
+            calls: calls_a.clone(),
+        });
+        let never_needed = Arc::new(MockProvider {
+            name: "openai".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_b.clone(),
+        });
+        let router = test_router(
+            vec![("anthropic", flaky), ("openai", never_needed)],
+            vec![("smart", vec!["anthropic/m1", "openai/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let resp = router
+            .dispatch(&test_request("smart"))
+            .await
+            .expect("the same-provider retry should rescue anthropic");
+
+        assert_eq!(
+            resp.model, "anthropic/m1",
+            "the retry should succeed on anthropic itself, not fall through to openai"
+        );
+        assert_eq!(calls_a.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            calls_b.load(Ordering::SeqCst),
+            0,
+            "openai should never be reached once anthropic's retry succeeds"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_does_not_retry_a_retryable_but_non_transient_error() {
+        // UnsupportedFeature is retryable (the chain should move on to a
+        // candidate that might support it) but not transient -- retrying
+        // the *same* candidate again can't change a structural mismatch,
+        // so it should fall through on the first attempt, not a second.
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let unsupported = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::FailRetryableNonTransient,
+            calls: calls_a.clone(),
+        });
+        let succeeding = Arc::new(MockProvider {
+            name: "openai".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_b.clone(),
+        });
+        let router = test_router(
+            vec![("anthropic", unsupported), ("openai", succeeding)],
+            vec![("smart", vec!["anthropic/m1", "openai/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let resp = router
+            .dispatch(&test_request("smart"))
+            .await
+            .expect("should fall through to openai");
+
+        assert_eq!(resp.model, "openai/m2");
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            1,
+            "a non-transient retryable error should fall through immediately, no same-provider retry"
+        );
+        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn dispatch_falls_back_across_an_ad_hoc_models_list_with_no_configured_route() {
         // No `[[routes]]` alias at all -- the chain comes entirely from
         // `model` + `req.models`, proving the ad-hoc list is honored even
@@ -6805,7 +6960,11 @@ mod tests {
             .expect("should fall through to openai");
 
         assert_eq!(resp.model, "openai/m2");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 same-provider retry on the transient error, before falling through"
+        );
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 
@@ -7056,7 +7215,7 @@ mod tests {
         assert!(matches!(err, RouterError::InvalidModel(m) if m == "smart"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_exhausts_a_longer_chain_trying_every_candidate_before_failing() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -7101,16 +7260,17 @@ mod tests {
             err,
             RouterError::Provider(ProviderError::Upstream { .. })
         ));
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
-        assert_eq!(calls_b.load(Ordering::SeqCst), 1);
+        let retried = "1 initial attempt + 1 same-provider retry on the transient error, before falling through";
+        assert_eq!(calls_a.load(Ordering::SeqCst), 2, "{retried}");
+        assert_eq!(calls_b.load(Ordering::SeqCst), 2, "{retried}");
         assert_eq!(
             calls_c.load(Ordering::SeqCst),
-            1,
-            "every candidate in the chain must be tried before giving up"
+            2,
+            "every candidate in the chain must be tried (with its own same-provider retry) before giving up"
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_final_error_reflects_the_last_candidate_even_when_its_kind_differs() {
         // "a" is configured and fails retryably; "b" isn't registered at
         // all. The chain still runs to exhaustion and returns whichever
@@ -7133,10 +7293,14 @@ mod tests {
         let err = router.dispatch(&test_request("smart")).await.unwrap_err();
 
         assert!(matches!(err, RouterError::ProviderNotConfigured(p) if p == "b"));
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 same-provider retry on the transient error, before falling through"
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_stops_on_a_fatal_error_without_trying_remaining_candidates() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -7172,8 +7336,8 @@ mod tests {
         ));
         assert_eq!(
             calls_a.load(Ordering::SeqCst),
-            1,
-            "a is tried and falls back"
+            2,
+            "a is tried, retried once on the transient error, and falls back"
         );
         assert_eq!(
             calls_b.load(Ordering::SeqCst),
@@ -7187,7 +7351,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn dispatch_stream_falls_back_to_next_candidate_on_retryable_error() {
         let calls_a = Arc::new(AtomicUsize::new(0));
         let calls_b = Arc::new(AtomicUsize::new(0));
@@ -7218,7 +7382,11 @@ mod tests {
         let chunk = stream.next().await.unwrap().unwrap();
 
         assert_eq!(chunk.model, "openai/m2");
-        assert_eq!(calls_a.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            2,
+            "1 initial attempt + 1 same-provider retry on the transient error, before falling through"
+        );
         assert_eq!(calls_b.load(Ordering::SeqCst), 1);
     }
 

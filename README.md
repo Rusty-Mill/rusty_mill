@@ -19,7 +19,11 @@ SDK/client at it.
 - `crates/router` (`rp-router`) — TOML config loading and the `Router`
   that resolves a model string to a provider (or a named fallback chain)
   and dispatches, retrying the next candidate on rate limits, timeouts,
-  and 5xx errors.
+  and 5xx errors. A momentary blip (timeout, network error, `5xx`) gets
+  one same-provider retry with a short fixed backoff before the chain
+  moves on — a rate limit or a structural mismatch (unsupported content/
+  feature) moves on immediately instead, since retrying the same
+  candidate can't fix either.
 - `crates/server` (`rp-server`) — the axum HTTP server exposing the
   OpenAI-compatible API.
 - `crates/mcp` (`rp-mcp`) — MCP (Model Context Protocol) support, built on
