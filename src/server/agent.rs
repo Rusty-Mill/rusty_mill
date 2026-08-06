@@ -104,8 +104,14 @@ pub struct RunContext {
     handle: Arc<RunHandle>,
     resume_rx: Mutex<mpsc::Receiver<AwaitResume>>,
     /// This replica's permission to be running this agent. Given up while the
-    /// run is parked awaiting a client, and dropped when the run ends.
-    slot: super::Slot,
+    /// run is parked awaiting a client.
+    ///
+    /// Shared with the task that spawned this run, and deliberately not owned
+    /// here: the slot's release is what wakes a drain, and this context is
+    /// dropped when the agent's body returns — several store writes before the
+    /// run is recorded as finished. Owning it would have a drain return while
+    /// the run it waited for was still being written down (#54).
+    slot: Arc<super::Slot>,
     /// How long [`await_request`](RunContext::await_request) will wait.
     await_timeout: Option<Duration>,
 }
@@ -121,7 +127,7 @@ impl RunContext {
         base_url: String,
         handle: Arc<RunHandle>,
         resume_rx: mpsc::Receiver<AwaitResume>,
-        slot: super::Slot,
+        slot: Arc<super::Slot>,
         await_timeout: Option<Duration>,
     ) -> Self {
         Self {

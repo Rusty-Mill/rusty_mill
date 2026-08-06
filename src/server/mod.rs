@@ -429,7 +429,15 @@ impl InFlight {
 }
 
 /// One unit of this replica's execution capacity, held while a run is actually
-/// running an agent body.
+/// running — from admission until its outcome is recorded, not merely until
+/// the agent's body returns.
+///
+/// That distinction is the whole of #54. The slot is shared between the run's
+/// [`RunContext`] and the task executing it, so releasing it is the *last*
+/// thing that happens rather than something the agent's own future does on its
+/// way out. A drain waits on this capacity, and a drain that returns before the
+/// run's terminal write has landed has not waited for anything a caller can
+/// read.
 ///
 /// Released while the run is parked awaiting a client answer, and taken again
 /// when the answer arrives. That asymmetry is the point of the type: an
@@ -470,6 +478,11 @@ impl Drop for Slot {
     /// A dropped slot belongs to a run that is ending, not one that is waiting
     /// — `InFlight::leave` clears it from both sets. Marking it parked here
     /// would have a drain report a conversation that has already finished.
+    ///
+    /// Runs when the last reference goes, which is the spawning task's, after
+    /// it has left the in-flight set. A run parked when it ended — cancelled
+    /// mid-conversation — already gave the capacity back, and `held` is what
+    /// stops this returning it twice.
     fn drop(&mut self) {
         if self.held.swap(false, Ordering::SeqCst) {
             self.capacity.release();
@@ -920,6 +933,10 @@ impl AcpServer {
                 .await?;
         }
 
+        // Shared with the task below rather than handed over. See the drop at
+        // the end of that task for why the run, not the agent body, is what
+        // this slot's lifetime has to follow.
+        let slot = Arc::new(slot);
         let ctx = RunContext::new(
             agent_name,
             run_id,
@@ -929,7 +946,7 @@ impl AcpServer {
             base_url.to_string(),
             Arc::clone(&handle),
             resume_rx,
-            slot,
+            Arc::clone(&slot),
             self.await_timeout,
         );
 
@@ -943,7 +960,21 @@ impl AcpServer {
         tokio::spawn(async move {
             let tracking = Arc::clone(&server);
             execute(server, agent, ctx, handle, session_id, base_url).await;
+
+            // Out of the set first, then the count — the same write-before-
+            // signal rule as the terminal event. Releasing the slot is what
+            // wakes a drain, and a drain woken by it reads the set in its very
+            // next statement; dropping the count first has it report a run
+            // that has already finished.
             tracking.in_flight.leave(run_id);
+
+            // Explicit, and last. `ctx` dropped its reference when the agent's
+            // body returned, so this is the one that releases the capacity —
+            // which is the point: `execute` has by now written the run's output
+            // to the session and recorded its outcome, so a drain released here
+            // is released against a run that is genuinely finished rather than
+            // one still four store writes from it.
+            drop(slot);
         });
 
         Ok((run_id, client_stream))

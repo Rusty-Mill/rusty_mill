@@ -655,6 +655,12 @@ drained.unfinished   // ran out of deadline — consider a longer one
 drained.parked       // clients were mid-conversation
 ```
 
+**A drain waits for the run, not for the agent.** When it returns, every run it waited for has had
+its output appended to its session and its outcome recorded — so draining and then reading the
+store, which is the only way to use this, shows finished runs as finished. The distinction is not
+academic: a run's outcome is written *after* its agent body returns, and a drain released at the
+earlier moment reported runs as unfinished that had in fact completed.
+
 Be clear about what that costs. **A parked conversation cannot survive its replica.** An agent that
 paused to ask a question is suspended part-way through its own function, and that position lives in
 this process — no other replica can resume from it. A `recoverable` agent gets a replacement
