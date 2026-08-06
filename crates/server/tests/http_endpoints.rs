@@ -72,6 +72,11 @@ async fn spawn_app(config_toml: &str) -> String {
         .map(|c| c.path.clone())
         .unwrap_or_else(|| "/mcp".to_string());
 
+    let concurrency_limiter = config
+        .server
+        .max_concurrent_requests
+        .map(|max| Arc::new(tokio::sync::Semaphore::new(max)));
+
     let state = AppState {
         router,
         api_key,
@@ -84,6 +89,7 @@ async fn spawn_app(config_toml: &str) -> String {
         jwt,
         mcp,
         mcp_path,
+        concurrency_limiter,
     };
 
     let app = build_app(state);
@@ -2729,4 +2735,92 @@ async fn mcp_endpoint_serves_native_tools_to_a_real_mcp_client() {
     assert_eq!(names, vec!["chat_completion", "embeddings", "list_models"]);
 
     let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn max_concurrent_requests_sheds_a_second_request_with_503_while_the_first_is_in_flight() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(std::time::Duration::from_millis(400))
+                .set_body_json(json!({
+                    "id": "chatcmpl-slow",
+                    "object": "chat.completion",
+                    "created": 1700000000,
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "hello"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+
+        [server]
+        max_concurrent_requests = 1
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let body = json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let first = {
+        let base_url = base_url.clone();
+        let body = body.clone();
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{base_url}/v1/chat/completions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        })
+    };
+
+    // Give the first request time to reach the mock and start waiting on
+    // its delayed response -- i.e. to have already acquired the single
+    // permit -- before firing the second.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let second = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 503);
+
+    let first = first.await.unwrap();
+    assert_eq!(first.status(), 200);
+}
+
+#[tokio::test]
+async fn max_concurrent_requests_unset_never_sheds() {
+    let base_url = spawn_app("providers = {}").await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
 }

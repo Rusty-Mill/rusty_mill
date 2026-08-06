@@ -682,6 +682,30 @@ fn resolve_persistence_target(config: &PersistenceConfig) -> Option<PersistenceT
     }
 }
 
+/// Every `([[routes]] alias, provider name, chain entry)` where the chain
+/// entry's provider half has no matching `[[providers]]` entry at all --
+/// what `Router::from_config` warns about at startup. A malformed entry
+/// (no `/`) isn't included here: that's `RouterError::InvalidModel` at
+/// dispatch time, a different problem this check doesn't duplicate.
+fn unresolved_route_providers(config: &Config) -> Vec<(String, String, String)> {
+    let mut problems = Vec::new();
+    for route in &config.routes {
+        for entry in &route.chain {
+            let Some((provider_name, _model)) = entry.split_once('/') else {
+                continue;
+            };
+            if !config.providers.contains_key(provider_name) {
+                problems.push((
+                    route.alias.clone(),
+                    provider_name.to_string(),
+                    entry.clone(),
+                ));
+            }
+        }
+    }
+    problems
+}
+
 impl Router {
     pub async fn from_config(config: &Config) -> Self {
         let metrics = Metrics::new();
@@ -714,6 +738,23 @@ impl Router {
             metrics.set_provider_configured(name, true);
             providers.insert(name.clone(), provider);
             provider_kinds.insert(name.clone(), cfg.kind);
+        }
+
+        // A route alias whose chain names a provider with no matching
+        // `[[providers]]` entry at all isn't a request-time crash --
+        // `resolve_chain`/`dispatch` just skip that entry and fall through
+        // to the next one, only erroring if every entry in the chain is
+        // unresolvable -- but it's still very likely a config typo an
+        // operator wants to know about immediately, not discover implicitly
+        // through degraded fallback behavior. Same "warn, don't fail"
+        // pattern as an unresolvable `api_key_env` above.
+        for (alias, provider_name, chain_entry) in unresolved_route_providers(config) {
+            tracing::warn!(
+                alias = %alias,
+                provider = %provider_name,
+                chain_entry = %chain_entry,
+                "route alias references a provider with no matching [[providers]] entry"
+            );
         }
 
         let routes = config
@@ -3470,6 +3511,70 @@ mod tests {
             router.resolve_target_model(&req),
             "anthropic/claude-opus-4-8"
         );
+    }
+
+    // --- unresolved_route_providers -----------------------------------------
+
+    #[test]
+    fn unresolved_route_providers_is_empty_when_every_chain_entry_is_registered() {
+        let config = Config::from_toml_str(
+            r#"
+            [providers.anthropic]
+            kind = "anthropic"
+            base_url = "http://127.0.0.1:1"
+            api_key_env = "UNRESOLVED_ROUTE_TEST_A"
+
+            [[routes]]
+            alias = "smart"
+            chain = ["anthropic/claude-sonnet-5"]
+            "#,
+        )
+        .unwrap();
+        assert!(unresolved_route_providers(&config).is_empty());
+    }
+
+    #[test]
+    fn unresolved_route_providers_flags_a_chain_entry_naming_an_unconfigured_provider() {
+        let config = Config::from_toml_str(
+            r#"
+            [providers.anthropic]
+            kind = "anthropic"
+            base_url = "http://127.0.0.1:1"
+            api_key_env = "UNRESOLVED_ROUTE_TEST_B"
+
+            [[routes]]
+            alias = "smart"
+            chain = ["anthropic/claude-sonnet-5", "typo-provider/some-model"]
+            "#,
+        )
+        .unwrap();
+        let problems = unresolved_route_providers(&config);
+        assert_eq!(
+            problems,
+            vec![(
+                "smart".to_string(),
+                "typo-provider".to_string(),
+                "typo-provider/some-model".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn unresolved_route_providers_ignores_a_malformed_entry_with_no_slash() {
+        // `RouterError::InvalidModel` at dispatch time already covers this
+        // case -- this check is only about *unconfigured provider names*,
+        // not malformed "provider/model" strings.
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[routes]]
+            alias = "smart"
+            chain = ["not-a-valid-model"]
+            "#,
+        )
+        .unwrap();
+        assert!(unresolved_route_providers(&config).is_empty());
     }
 
     // --- resolve_chain -----------------------------------------------------
