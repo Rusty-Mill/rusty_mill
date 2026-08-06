@@ -113,5 +113,10 @@ name = "security_and_push_notifications"
 path = "tests/security_and_push_notifications.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "history_length_and_extensions"
+path = "tests/history_length_and_extensions.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
