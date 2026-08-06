@@ -245,8 +245,12 @@ call, not the call itself.
 
 **Status of the four subsystems' deeper scoping**: all four — 1
 (pgid/session table), 2 (signal delivery), 3 (real Stop/Cont), and 4
-(pty line discipline) — now have their own implementation-depth
-document, linked at their respective open questions above. None of the
-five documents in this family (this one plus the four it spawned) has
-decided to build anything; each still ends on an owner's call and a
-missing named consumer.
+(pty line discipline) — have their own implementation-depth document,
+linked at their respective open questions above.
+
+**Decided 2026-08-06**: parked indefinitely — see
+`docs/decision-request-msys-parity.md`'s own Outcome section for the
+full record. None of the four subsystems gets built speculatively; all
+five documents in this family stay as durable design material, the
+same posture `CredentialVault`/`Sandbox`'s privsep half already have,
+revisited only if a real consumer appears.

@@ -5,6 +5,16 @@ way: *no named consumer, gated on an owner call.* This one exists to
 make that call easy to actually make — a one-page summary plus an
 explicit ask, not new research.
 
+## Outcome
+
+**Decided 2026-08-06 — option 1, park indefinitely.** All five
+documents in this family stay as a durable design record; no
+subsystem gets built speculatively. Same fate `CredentialVault` and
+`Sandbox`'s privsep half already have in this codebase — donor-shape
+material with no live gap and no consumer, kept for whoever eventually
+needs it rather than discarded. Revisit only if a real consumer
+appears; nothing here expires or needs re-litigating before then.
+
 ## The five documents this decision covers
 
 - `docs/design-discussion-msys-parity.md` — the original four-subsystem
