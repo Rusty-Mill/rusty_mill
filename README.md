@@ -438,6 +438,20 @@ multi-replica suite, so the choice is about what happens to a run *after* it fin
 | Queries | By run id only | Ordinary SQL: which runs failed today, which agent is busiest, what a session contained |
 | Setup | None | Tables are created on connect |
 
+The default `InMemoryStore` bounds both halves of what it holds: `max_runs` runs (evicting the
+oldest **terminal** ones; active runs are never evicted) and `max_sessions` sessions (evicting the
+least recently *used*, along with its state document). Both default to 1024.
+
+```rust
+AcpServer::builder().max_runs(4096).max_sessions(4096)
+```
+
+An evicted session is indistinguishable from one that never existed, so an agent's conversation
+silently starts over — the same thing `RedisStore`'s TTL does, and logged at `warn` for exactly
+that reason. A session in active use is by definition recently touched, but it is not *pinned*: a
+long run with more than `max_sessions` fresh sessions started during it can still lose its
+history. Raise the limit if sessions churn faster than runs complete.
+
 ```rust
 use rusty_acp::server::store::PostgresStore;
 

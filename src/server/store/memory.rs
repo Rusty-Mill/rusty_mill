@@ -2,7 +2,10 @@
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex, RwLock,
+    },
     time::{Duration, Instant},
 };
 
@@ -12,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::{
     server::store::{
         message_url, state_url, Notification, NotificationStream, RecoveryRecord, SessionRecord,
-        Store, StoreResult, DEFAULT_MAX_RUNS,
+        Store, StoreResult, DEFAULT_MAX_RUNS, DEFAULT_MAX_SESSIONS,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -39,11 +42,35 @@ struct RunEntry {
 ///
 /// Runs are retained up to `max_runs`; past that, the oldest **terminal** runs
 /// are evicted first. Active runs are never evicted.
+///
+/// Sessions are retained up to `max_sessions`, evicting the least recently used
+/// — read or appended to — along with its state document. Evicting by age
+/// instead would drop the long conversation that is still going in favour of
+/// the one nobody has opened since.
+///
+/// An evicted session is indistinguishable from one that never existed, which
+/// means an agent's conversation silently starts over. That is what
+/// [`RedisStore`](super::RedisStore)'s TTL already does, so the behaviour is at
+/// least consistent across backends; the eviction is logged at `warn` so an
+/// operator whose limit is too low learns it from a log rather than from an
+/// agent behaving oddly. A tombstone would say more, but tombstones are
+/// unbounded unless they are also bounded, which is the same problem one layer
+/// down.
+///
+/// A session in active use is by definition recently touched, so a run's own
+/// session is near the back of the queue while it runs. It is not *pinned*
+/// though: a long run with more than `max_sessions` fresh sessions started
+/// during it can still lose its history. Raise the limit if sessions churn
+/// faster than runs complete.
 #[derive(Debug)]
 pub struct InMemoryStore {
     runs: RwLock<HashMap<RunId, RunEntry>>,
     order: Mutex<VecDeque<RunId>>,
-    sessions: RwLock<HashMap<SessionId, SessionRecord>>,
+    sessions: RwLock<HashMap<SessionId, SessionEntry>>,
+    /// Counts every session touch, so the least recently used is the one with
+    /// the smallest stamp. A counter rather than a clock: it cannot go
+    /// backwards, and eviction only needs the order.
+    session_clock: AtomicU64,
     /// State documents, held apart from the records so `SessionRecord` keeps
     /// carrying a *link* to state rather than the state itself.
     session_states: RwLock<HashMap<SessionId, serde_json::Value>>,
@@ -52,6 +79,17 @@ pub struct InMemoryStore {
     /// Recovery records, present only for runs whose agent opted in.
     recovery: RwLock<HashMap<RunId, RecoveryRecord>>,
     max_runs: usize,
+    max_sessions: usize,
+}
+
+/// A session, and when it was last used.
+#[derive(Debug)]
+struct SessionEntry {
+    record: SessionRecord,
+    /// An atomic so a *read* can mark the session used without taking the
+    /// map's write lock. Reads count as use — otherwise the session an agent
+    /// keeps reading its history from looks idle and is evicted under it.
+    touched: AtomicU64,
 }
 
 impl Default for InMemoryStore {
@@ -61,22 +99,86 @@ impl Default for InMemoryStore {
 }
 
 impl InMemoryStore {
-    /// A store retaining at most `max_runs` runs.
+    /// A store retaining at most `max_runs` runs, and
+    /// [`DEFAULT_MAX_SESSIONS`] sessions.
     pub fn new(max_runs: usize) -> Self {
+        Self::with_limits(max_runs, DEFAULT_MAX_SESSIONS)
+    }
+
+    /// A store with both bounds set.
+    pub fn with_limits(max_runs: usize, max_sessions: usize) -> Self {
         Self {
             runs: RwLock::new(HashMap::new()),
             order: Mutex::new(VecDeque::new()),
             sessions: RwLock::new(HashMap::new()),
+            session_clock: AtomicU64::new(0),
             session_states: RwLock::new(HashMap::new()),
             leases: RwLock::new(HashMap::new()),
             recovery: RwLock::new(HashMap::new()),
             max_runs: max_runs.max(1),
+            max_sessions: max_sessions.max(1),
         }
     }
 
     /// How many runs are currently retained.
     pub fn run_count(&self) -> usize {
         self.runs.read().expect("run map poisoned").len()
+    }
+
+    /// How many sessions are currently retained.
+    pub fn session_count(&self) -> usize {
+        self.sessions.read().expect("session map poisoned").len()
+    }
+
+    /// Mark a session as just used.
+    fn touch(&self, entry: &SessionEntry) {
+        entry.touched.store(self.session_clock.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Drop least-recently-used sessions until the map is within its bound,
+    /// returning what was dropped.
+    ///
+    /// The caller releases the session lock before clearing the matching state
+    /// documents. Taking the state lock here would invert the order
+    /// `put_session_state` uses, and an inverted lock order is a deadlock
+    /// waiting for the right interleaving.
+    fn evict_sessions(&self, sessions: &mut HashMap<SessionId, SessionEntry>) -> Vec<SessionId> {
+        let mut evicted = Vec::new();
+        while sessions.len() > self.max_sessions {
+            let Some(oldest) = sessions
+                .iter()
+                .min_by_key(|(_, entry)| entry.touched.load(Ordering::Relaxed))
+                .map(|(id, _)| *id)
+            else {
+                break;
+            };
+            sessions.remove(&oldest);
+            evicted.push(oldest);
+        }
+        evicted
+    }
+
+    /// Forget the state documents of sessions that have been evicted.
+    ///
+    /// Not optional: state is usually the larger half of a session, so a bound
+    /// that dropped only the record would leave most of the memory behind and
+    /// report itself bounded.
+    fn forget_session_states(&self, evicted: &[SessionId]) {
+        if evicted.is_empty() {
+            return;
+        }
+        let mut states = self.session_states.write().expect("session state map poisoned");
+        for session_id in evicted {
+            states.remove(session_id);
+            // Warn, because the consequence is silent: the next request for
+            // this session gets a fresh one, and an agent's conversation starts
+            // over with nothing to say it did.
+            tracing::warn!(
+                %session_id,
+                max_sessions = self.max_sessions,
+                "evicted the least recently used session; its history and state are gone"
+            );
+        }
     }
 
     /// Get the sender for a run's channel, creating the entry if needed.
@@ -208,12 +310,26 @@ impl Store for InMemoryStore {
     }
 
     async fn get_session(&self, session_id: SessionId) -> StoreResult<Option<SessionRecord>> {
-        Ok(self.sessions.read().expect("session map poisoned").get(&session_id).cloned())
+        let sessions = self.sessions.read().expect("session map poisoned");
+        Ok(sessions.get(&session_id).map(|entry| {
+            self.touch(entry);
+            entry.record.clone()
+        }))
     }
 
     async fn ensure_session(&self, session: Session) -> StoreResult<SessionRecord> {
-        let mut sessions = self.sessions.write().expect("session map poisoned");
-        Ok(sessions.entry(session.id).or_insert_with(|| SessionRecord::new(session)).clone())
+        let (record, evicted) = {
+            let mut sessions = self.sessions.write().expect("session map poisoned");
+            let entry = sessions.entry(session.id).or_insert_with(|| SessionEntry {
+                record: SessionRecord::new(session),
+                touched: AtomicU64::new(0),
+            });
+            self.touch(entry);
+            let record = entry.record.clone();
+            (record, self.evict_sessions(&mut sessions))
+        };
+        self.forget_session_states(&evicted);
+        Ok(record)
     }
 
     async fn append_session_messages(
@@ -222,17 +338,23 @@ impl Store for InMemoryStore {
         base_url: &str,
         messages: Vec<Message>,
     ) -> StoreResult<()> {
-        // Holding the write lock across the whole append keeps index and URL
-        // in step even when two runs append concurrently.
-        let mut sessions = self.sessions.write().expect("session map poisoned");
-        let record = sessions
-            .entry(session_id)
-            .or_insert_with(|| SessionRecord::new(Session::with_id(session_id)));
-        for message in messages {
-            let index = record.messages.len();
-            record.messages.push(message);
-            record.session.history.push(message_url(base_url, session_id, index));
-        }
+        let evicted = {
+            // Holding the write lock across the whole append keeps index and
+            // URL in step even when two runs append concurrently.
+            let mut sessions = self.sessions.write().expect("session map poisoned");
+            let entry = sessions.entry(session_id).or_insert_with(|| SessionEntry {
+                record: SessionRecord::new(Session::with_id(session_id)),
+                touched: AtomicU64::new(0),
+            });
+            self.touch(entry);
+            for message in messages {
+                let index = entry.record.messages.len();
+                entry.record.messages.push(message);
+                entry.record.session.history.push(message_url(base_url, session_id, index));
+            }
+            self.evict_sessions(&mut sessions)
+        };
+        self.forget_session_states(&evicted);
         Ok(())
     }
 
@@ -298,6 +420,11 @@ impl Store for InMemoryStore {
         &self,
         session_id: SessionId,
     ) -> StoreResult<Option<serde_json::Value>> {
+        // Reading state is using the session, so it counts against eviction the
+        // same way reading history does.
+        if let Some(entry) = self.sessions.read().expect("session map poisoned").get(&session_id) {
+            self.touch(entry);
+        }
         Ok(self
             .session_states
             .read()
@@ -313,12 +440,18 @@ impl Store for InMemoryStore {
         state: serde_json::Value,
     ) -> StoreResult<()> {
         self.session_states.write().expect("session state map poisoned").insert(session_id, state);
-        // Point the session at the document rather than inlining it.
-        let mut sessions = self.sessions.write().expect("session map poisoned");
-        let record = sessions
-            .entry(session_id)
-            .or_insert_with(|| SessionRecord::new(Session::with_id(session_id)));
-        record.session.state = Some(state_url(base_url, session_id));
+        let evicted = {
+            // Point the session at the document rather than inlining it.
+            let mut sessions = self.sessions.write().expect("session map poisoned");
+            let entry = sessions.entry(session_id).or_insert_with(|| SessionEntry {
+                record: SessionRecord::new(Session::with_id(session_id)),
+                touched: AtomicU64::new(0),
+            });
+            self.touch(entry);
+            entry.record.session.state = Some(state_url(base_url, session_id));
+            self.evict_sessions(&mut sessions)
+        };
+        self.forget_session_states(&evicted);
         Ok(())
     }
 }
