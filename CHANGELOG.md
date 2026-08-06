@@ -41,16 +41,6 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   check often enough that a new one arriving without the guard would be the
   notable event. Verified by breaking one heading format, then both.
 
-### Fixed
-- **`handrolled_ticket` was absent from the "prove the gated tests actually
-  ran" list**, which is the guard against a cfg typo compiling a suite down to
-  zero tests while CI stays green. It has been missing since the suite arrived
-  with the `ticket` module in `0.9.0` — so its fourteen tests were the ones
-  least protected by the mechanism written to protect exactly them, in the
-  release that introduced stateless resumption. The block's own comment says
-  every new suite belongs in the list; nothing enforced it, which is the same
-  gap in miniature as the one `changelog-parity` closes.
-
 ### Changed
 - **The `[0.8.0]` entry is folded into `[0.9.0]`, in this file and in
   `RELEASE_NOTES.md`.** There was never a 0.8.0: rusty_tls#57 carried two
@@ -123,6 +113,37 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   No code change, and none is implied — the client still offers exactly `0x0304`
   and still cannot be downgraded, because it still cannot speak anything to be
   downgraded to. Documentation only, so no version bump.
+
+### Fixed
+- **Both scripts under `scripts/` gated on `gh auth status`, which exits `0`
+  even when it prints "The token in `GH_TOKEN` is invalid."** Measured, not
+  assumed. An exit code reporting success while the body reports failure makes
+  the check decorative, and in `New-RustyTlsReleases.ps1` that check guarded
+  every call below it.
+
+  Both now probe with a real authenticated request instead. That also covers
+  what `auth status` cannot know: a token whose scopes are too narrow, and a
+  network path that intercepts `api.github.com` and answers `403` on its
+  behalf — which is exactly what this repo's own build environment does, and
+  is how the bug was found.
+
+  `Cut-RustyTlsTags.ps1` was already protected by accident: it made the same
+  mistake but followed it with an API probe that does return non-zero. The
+  redundant `auth status` check is gone from both, rather than left to imply a
+  guarantee it never provided.
+
+  **This is the same shape as the ANSI-colour incident this repo has already
+  recorded once** — a check believed because of an exit code that was not the
+  exit code of the thing being checked. There, colour codes hid a failure from
+  a grep. Here, `gh` reports `0` for a state it has just described as broken.
+- **`handrolled_ticket` was absent from the "prove the gated tests actually
+  ran" list**, which is the guard against a cfg typo compiling a suite down to
+  zero tests while CI stays green. It has been missing since the suite arrived
+  with the `ticket` module in `0.9.0` — so its fourteen tests were the ones
+  least protected by the mechanism written to protect exactly them, in the
+  release that introduced stateless resumption. The block's own comment says
+  every new suite belongs in the list; nothing enforced it, which is the same
+  gap in miniature as the one `changelog-parity` closes.
 
 ## [0.10.1] - 2026-08-05
 

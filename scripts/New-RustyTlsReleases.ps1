@@ -103,10 +103,20 @@ if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     throw 'gh CLI not found on PATH. Install it from https://cli.github.com and run: gh auth login'
 }
 
-gh auth status 2>&1 | Out-Null
+# Do NOT gate this on `gh auth status`, which exits 0 even when it prints
+# "The token in GH_TOKEN is invalid." -- measured, not assumed. An exit code
+# that reports success while the body reports failure makes the check
+# decorative, and this one guards every call below it.
+#
+# The only trustworthy test is a real authenticated request, so make one. This
+# also catches the cases `auth status` cannot know about: a token whose scopes
+# are too narrow, and a network path that intercepts api.github.com and answers
+# 403 on its behalf.
+$probe = gh api "repos/$Repo" --jq '.full_name' 2>&1
 if ($LASTEXITCODE -ne 0) {
-    throw 'gh is installed but not authenticated. Run: gh auth login'
+    throw "Cannot reach $Repo through gh. Check `gh auth status`, that the token carries ``repo`` scope, and that nothing is intercepting api.github.com. gh said: $probe"
 }
+Write-Verbose "Authenticated; $probe is readable."
 
 if (-not (Test-Path -LiteralPath $ChangelogPath)) {
     throw "Changelog not found at '$ChangelogPath'. Run this from the repo root, or pass -ChangelogPath."
