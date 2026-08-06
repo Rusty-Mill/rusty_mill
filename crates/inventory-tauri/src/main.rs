@@ -27,6 +27,15 @@ fn stringify(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
+/// Reseal the on-disk index after a command that may have changed it.
+/// `checkpoint` is a no-op when nothing changed, so calling it liberally
+/// costs nothing on the read-only commands that never do.
+fn checkpoint(inv: &Inventory) {
+    if let Err(e) = inv.checkpoint() {
+        eprintln!("failed to seal the index: {e}");
+    }
+}
+
 // --- commands ---------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -129,6 +138,7 @@ struct CapturePayload {
 fn capture(state: tauri::State<'_, AppState>, text: String) -> CmdResult<CapturePayload> {
     let inv = state.inventory.lock().map_err(stringify)?;
     let result = inv.capture(&text).map_err(stringify)?;
+    checkpoint(&inv);
     Ok(CapturePayload {
         hits: result.related.hits,
         semantic_available: result.related.semantic_available,
@@ -144,13 +154,17 @@ fn clips(state: tauri::State<'_, AppState>, limit: usize) -> CmdResult<Vec<inven
 #[tauri::command]
 fn set_scratchpad(state: tauri::State<'_, AppState>, enabled: bool) -> CmdResult<()> {
     let inv = state.inventory.lock().map_err(stringify)?;
-    inv.set_scratchpad_enabled(enabled).map_err(stringify)
+    inv.set_scratchpad_enabled(enabled).map_err(stringify)?;
+    checkpoint(&inv);
+    Ok(())
 }
 
 #[tauri::command]
 fn clear_clips(state: tauri::State<'_, AppState>) -> CmdResult<usize> {
     let inv = state.inventory.lock().map_err(stringify)?;
-    inv.clear_clips().map_err(stringify)
+    let n = inv.clear_clips().map_err(stringify)?;
+    checkpoint(&inv);
+    Ok(n)
 }
 
 #[tauri::command]
@@ -227,7 +241,9 @@ fn retention_options(state: tauri::State<'_, AppState>) -> CmdResult<Vec<Retenti
 fn set_retention(state: tauri::State<'_, AppState>, window: String) -> CmdResult<usize> {
     let retention: Retention = window.parse().map_err(stringify)?;
     let inv = state.inventory.lock().map_err(stringify)?;
-    inv.set_retention(retention).map_err(stringify)
+    let n = inv.set_retention(retention).map_err(stringify)?;
+    checkpoint(&inv);
+    Ok(n)
 }
 
 #[derive(Serialize)]
@@ -242,6 +258,7 @@ struct IndexPayload {
 fn index_now(state: tauri::State<'_, AppState>, full: bool) -> CmdResult<IndexPayload> {
     let mut inv = state.inventory.lock().map_err(stringify)?;
     let report = inv.index(full).map_err(stringify)?;
+    checkpoint(&inv);
     Ok(IndexPayload {
         added: report.total_added(),
         updated: report.total_updated(),
@@ -355,11 +372,26 @@ fn background_index_loop(app: tauri::AppHandle) {
             return false;
         };
         match inv.index(false) {
-            Ok(_) => true,
+            Ok(_) => {
+                checkpoint(&inv);
+                true
+            }
             Err(e) => {
                 eprintln!("index failed: {e}");
                 false
             }
+        }
+    };
+
+    // Seals whatever changed off the indexing path too — quick capture,
+    // clipboard scratchpad, settings — none of which run on this thread.
+    let checkpoint_once = |app: &tauri::AppHandle| {
+        let Some(state) = app.try_state::<AppState>() else {
+            return;
+        };
+        let locked = state.inventory.lock();
+        if let Ok(inv) = locked {
+            checkpoint(&inv);
         }
     };
 
@@ -376,6 +408,8 @@ fn background_index_loop(app: tauri::AppHandle) {
             // The panel re-runs its current query on this, so a conversation
             // finished seconds ago is already in the results.
             let _ = app.emit("index-complete", ());
+        } else {
+            checkpoint_once(&app);
         }
     }
 }
@@ -491,6 +525,19 @@ fn main() {
             std::thread::spawn(move || background_index_loop(handle));
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("failed to start Inventory");
+        .build(tauri::generate_context!())
+        .expect("failed to start Inventory")
+        .run(|app_handle, event| {
+            // `app.exit()` (the tray's Quit item) and the normal window-close
+            // path both fire this before the process actually exits — the
+            // one place a final seal reliably runs, since `Drop` does not
+            // survive `app.exit()`'s call into `std::process::exit`.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Ok(inv) = state.inventory.lock() {
+                        checkpoint(&inv);
+                    }
+                }
+            }
+        });
 }

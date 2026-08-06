@@ -304,6 +304,7 @@ fn cmd_watch(cli: &Cli, interval: u64, grace: i64) -> Result<()> {
     // index just consumed — so the first tick reports what changed *since*,
     // not the whole disk over again.
     let first = inv.index(false)?;
+    inv.checkpoint()?;
     println!(
         "{}",
         paint(
@@ -344,6 +345,7 @@ fn cmd_watch(cli: &Cli, interval: u64, grace: i64) -> Result<()> {
             .map(|s| s.display_name())
             .collect();
         let report = inv.index(false)?;
+        inv.checkpoint()?;
         println!(
             "{} {}",
             paint(
