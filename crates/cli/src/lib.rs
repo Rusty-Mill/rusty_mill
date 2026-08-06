@@ -118,6 +118,11 @@ pub fn key_env_reports(
             &web_search.api_key_env,
         );
     }
+    if let Some(jwt) = &config.jwt {
+        if let Some(env_var) = &jwt.hs256_secret_env {
+            push("jwt.hs256_secret_env".to_string(), env_var);
+        }
+    }
 
     rows
 }
@@ -231,6 +236,38 @@ mod tests {
     #[test]
     fn key_env_reports_omits_sections_that_are_not_configured() {
         let config = Config::from_toml_str("providers = {}").unwrap();
+        let rows = key_env_reports(&config, |_| None);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn key_env_reports_includes_jwt_hs256_secret_env_when_configured() {
+        let toml = r#"
+            providers = {}
+
+            [jwt]
+            hs256_secret_env = "JWT_SECRET"
+        "#;
+        let config = Config::from_toml_str(toml).unwrap();
+        let rows = key_env_reports(&config, |var| {
+            (var == "JWT_SECRET").then(|| "s3cret".to_string())
+        });
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "jwt.hs256_secret_env");
+        assert!(rows[0].set);
+    }
+
+    #[test]
+    fn key_env_reports_omits_jwt_row_when_only_jwks_url_is_set() {
+        // jwks_url has no *_env field of its own (it's a plain URL, not a
+        // secret) -- only hs256_secret_env belongs in this report.
+        let toml = r#"
+            providers = {}
+
+            [jwt]
+            jwks_url = "https://example.com/jwks.json"
+        "#;
+        let config = Config::from_toml_str(toml).unwrap();
         let rows = key_env_reports(&config, |_| None);
         assert!(rows.is_empty());
     }

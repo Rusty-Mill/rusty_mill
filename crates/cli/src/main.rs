@@ -102,6 +102,17 @@ fn cmd_config_check(args: &[String]) -> i32 {
             "disabled (server.admin_key_env not set)"
         }
     );
+    println!(
+        "jwt auth: {}",
+        match &config.jwt {
+            Some(jwt) if jwt.hs256_secret_env.is_some() => "configured (hs256)".to_string(),
+            Some(jwt) if jwt.jwks_url.is_some() => "configured (jwks)".to_string(),
+            Some(_) => {
+                "configured but neither hs256_secret_env nor jwks_url is set -- disabled at startup with a warning".to_string()
+            }
+            None => "not configured".to_string(),
+        }
+    );
 
     if !broken.is_empty() {
         eprintln!(
