@@ -66,6 +66,34 @@ impl ProviderError {
         }
     }
 
+    /// Whether this error is worth a bounded retry against the *same*
+    /// provider/model candidate, with a short backoff, before falling
+    /// through to the next candidate in the chain -- a strict subset of
+    /// [`Self::is_retryable`]. A momentary network blip or `5xx` can
+    /// plausibly succeed on an immediate retry; a rate limit, an
+    /// unsupported-content/feature mismatch, or an auth/request error
+    /// cannot -- those either need a real backoff longer than a same-
+    /// provider retry budget affords (`RateLimited`) or are a structural
+    /// property of this candidate that retrying it again won't change
+    /// (`UnsupportedContent`/`UnsupportedFeature`, still `is_retryable` so
+    /// the chain still moves on to a candidate that might support it, just
+    /// not worth retrying *this* one for).
+    pub fn is_transient(&self) -> bool {
+        match self {
+            ProviderError::Timeout => true,
+            ProviderError::Network(_) => true,
+            ProviderError::Upstream { status, .. } => *status >= 500,
+            ProviderError::RateLimited { .. }
+            | ProviderError::Auth(_)
+            | ProviderError::InvalidRequest(_)
+            | ProviderError::ModelNotFound(_)
+            | ProviderError::Decode(_)
+            | ProviderError::UnsupportedContent(_)
+            | ProviderError::UnsupportedFeature(_)
+            | ProviderError::Other(_) => false,
+        }
+    }
+
     /// Best-effort HTTP status to use if this error must be surfaced to a
     /// client directly (e.g. every provider in a chain was exhausted).
     pub fn status_code(&self) -> u16 {
@@ -173,6 +201,56 @@ mod tests {
             ProviderError::Other("unclassified".to_string()).status_code(),
             500
         );
+    }
+
+    #[test]
+    fn timeout_and_network_and_5xx_upstream_are_transient() {
+        for err in [
+            ProviderError::Timeout,
+            ProviderError::Network("connection reset".to_string()),
+            ProviderError::Upstream {
+                status: 503,
+                message: "x".to_string(),
+            },
+        ] {
+            assert!(err.is_transient(), "{err:?} should be transient");
+        }
+    }
+
+    #[test]
+    fn rate_limited_and_429_upstream_and_unsupported_are_retryable_but_not_transient() {
+        // Retryable (a fallback chain should move on to the next candidate)
+        // but NOT transient (retrying the *same* candidate again is either
+        // pointless -- a structural mismatch -- or needs a real backoff a
+        // same-provider retry budget doesn't afford -- a rate limit).
+        for err in [
+            ProviderError::RateLimited {
+                retry_after_secs: Some(5),
+            },
+            ProviderError::Upstream {
+                status: 429,
+                message: "x".to_string(),
+            },
+            ProviderError::UnsupportedContent("no audio input support".to_string()),
+            ProviderError::UnsupportedFeature("no schema-less JSON mode".to_string()),
+        ] {
+            assert!(err.is_retryable(), "{err:?} should be retryable");
+            assert!(!err.is_transient(), "{err:?} should not be transient");
+        }
+    }
+
+    #[test]
+    fn non_retryable_errors_are_never_transient() {
+        for err in [
+            ProviderError::Auth("bad key".to_string()),
+            ProviderError::InvalidRequest("bad body".to_string()),
+            ProviderError::ModelNotFound("gpt-9".to_string()),
+            ProviderError::Decode("invalid json".to_string()),
+            ProviderError::Other("unclassified".to_string()),
+        ] {
+            assert!(!err.is_retryable());
+            assert!(!err.is_transient());
+        }
     }
 
     #[test]
