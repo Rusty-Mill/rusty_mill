@@ -14,7 +14,8 @@ serde.workspace = true
 serde_json.workspace = true
 time.workspace = true
 tracing.workspace = true
-rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl", "backup", "functions"] }
+rusqlite = { workspace = true, features = ["bundled"] }
+aes-gcm = "0.10"
 directories = "5"
 walkdir = "2"
 sha2 = "0.10"
@@ -38,5 +39,4 @@ keyring = { version = "3", features = ["sync-secret-service"] }
 
 [dev-dependencies]
 tempfile = "3"
-rusqlite = { workspace = true, features = ["bundled-sqlcipher-vendored-openssl"] }
 serde_json = { workspace = true }

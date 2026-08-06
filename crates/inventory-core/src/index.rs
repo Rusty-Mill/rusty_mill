@@ -9,7 +9,7 @@ use crate::sources::{self, ScanContext};
 use crate::vectors::{IvfIndex, VectorCache, VectorSet};
 use crate::{Error, Result};
 use rusqlite::Connection;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 const SETTING_RETENTION: &str = "retention";
@@ -23,6 +23,15 @@ const RETRAIN_GROWTH_FACTOR: f64 = 1.5;
 pub struct Inventory {
     conn: Connection,
     path: PathBuf,
+    /// The private, unencrypted working copy `conn` is actually open
+    /// against. Lives only inside `_tempdir`.
+    plain_path: PathBuf,
+    /// Deletes the working copy when the last handle to it goes away.
+    _tempdir: tempfile::TempDir,
+    key: [u8; 32],
+    /// `conn.total_changes()` as of the last successful seal, so
+    /// `checkpoint` can skip resealing when nothing has changed.
+    sealed_at: Cell<u64>,
     embedder: Box<dyn Embedder>,
     /// Vectors held in memory so a search does not re-read and re-decode every
     /// embedding blob on each keystroke. Dropped whenever embeddings change,
@@ -106,17 +115,42 @@ impl Inventory {
     pub fn open_at(path: &Path, key: &dyn KeyProvider) -> Result<Self> {
         // An index left over from before encryption is converted first, and
         // only replaced once the converted copy has been proven.
-        if path.exists() && !db::looks_encrypted(path)? {
+        if path.exists() && db::is_plaintext_sqlite(path)? {
             db::convert_plaintext_to_encrypted(path, key)?;
         }
-        let conn = db::open(path, key)?;
-        let embedder = load_embedder(&conn);
-        Ok(Inventory {
-            conn,
+        let opened = db::open(path, key)?;
+        let embedder = load_embedder(&opened.conn);
+        let inv = Inventory {
+            conn: opened.conn,
             path: path.to_path_buf(),
+            plain_path: opened.plain_path,
+            _tempdir: opened.tempdir,
+            key: opened.key,
+            // `u64::MAX` never equals a real `total_changes()` value, so the
+            // first `checkpoint()` always seals — that's what materializes
+            // the on-disk file for a brand-new index.
+            sealed_at: Cell::new(u64::MAX),
             embedder,
             cache: RefCell::new(None),
-        })
+        };
+        inv.checkpoint()?;
+        Ok(inv)
+    }
+
+    /// Reseal the on-disk index if anything has changed since the last
+    /// seal. Cheap and safe to call often — a no-op when nothing changed.
+    /// The only way writes made through this `Inventory` become durable, so
+    /// every long-running caller (the desktop app's background loop, `inv
+    /// watch`) must call it on its own schedule rather than relying on
+    /// `Drop`, which a killed process or `std::process::exit` never runs.
+    pub fn checkpoint(&self) -> Result<bool> {
+        let changes = self.conn.total_changes();
+        if changes == self.sealed_at.get() {
+            return Ok(false);
+        }
+        db::seal(&self.conn, &self.plain_path, &self.path, &self.key)?;
+        self.sealed_at.set(changes);
+        Ok(true)
     }
 
     pub fn path(&self) -> &Path {
@@ -736,6 +770,19 @@ impl Inventory {
             SETTING_SCRATCHPAD,
             if on { "on" } else { "off" },
         )
+    }
+}
+
+/// Best-effort final seal. This is a safety net, not the durability
+/// mechanism — see `checkpoint`'s doc comment. It only helps on the normal
+/// return path (every CLI command except `inv watch`); it never runs after
+/// `std::process::exit`, a killed process, or `app.exit()` skipping Rust's
+/// unwind.
+impl Drop for Inventory {
+    fn drop(&mut self) {
+        if let Err(e) = self.checkpoint() {
+            tracing::error!("failed to seal the index on exit: {e}");
+        }
     }
 }
 
