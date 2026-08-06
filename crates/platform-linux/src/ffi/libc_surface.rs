@@ -217,3 +217,18 @@ pub use libc::getuid;
 pub use libc::{
     grantpt, posix_openpt, ptsname_r, size_t, unlockpt, O_NOCTTY, POSIX_SPAWN_SETSID, TIOCSWINSZ,
 };
+
+// `platform::fs::AnonymousFile` (D11, landed independently per
+// `docs/decision-request-fork-execve.md`'s option 3). `memfd_create` has
+// carried a real libc wrapper since long before this repo's MSRV floor
+// (unlike `renameat2`/`getrandom`/Landlock above) — an ordinary admission,
+// not an escape hatch, and not track-p-gated (the same "one implementation
+// for both configurations" treatment `fsync`/the Net surface get): no
+// consumer has ever asked rusty_libc for a raw-syscall form of this one.
+// `MFD_CLOEXEC` matches every fd this crate creates (RFC v2's
+// CLOEXEC-by-default discipline — `openat` above ORs it into every open
+// unconditionally).
+pub use libc::{memfd_create, MFD_CLOEXEC};
+// `lseek`/`SEEK_SET`: test-only, for `memfd_create`'s own conformance
+// tests (rewind after a raw `write` to read back what was just written).
+pub use libc::{lseek, SEEK_SET};

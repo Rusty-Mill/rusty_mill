@@ -157,6 +157,25 @@ convenience.
   `try_clone_shares_the_read_position` unit test
   (`platform-mock/src/fs.rs`) pins the same property directly, needing
   no OS fixture at all.
+- `AnonymousFile::create_memfd` (D11, landed independently per
+  `docs/decision-request-fork-execve.md`'s option 3 — not part of the
+  larger parked fork/execve decision, just cited by it): a fresh,
+  memory-backed `File` with no filesystem namespace entry at all,
+  unlinked from the moment it exists. Linux: `memfd_create(2)` with
+  `MFD_CLOEXEC`. `name` is a debugging label only, not a path — two
+  calls with the same `name` produce two fully independent files
+  (`platform-linux/src/sys/fdio.rs::memfd_tests::two_memfds_are_independent`,
+  `platform-mock`'s own
+  `anonymous_file_round_trips_and_is_independent_of_any_dir`). Live
+  ground truth, not just a successful syscall return: Linux's own test
+  suite confirms via `/proc/self/fd/<n>` that the kernel reports the
+  fd as `(deleted)` immediately (`memfd_create_is_genuinely_unlinked`)
+  — the same "check real OS state, not just `Ok(())`" discipline the
+  PTY surface's own tests use. Deliberately **not** a `Dir` method:
+  `memfd_create` takes no path and touches no directory capability at
+  all, so putting it on `Dir` would mean an always-unused `&self`
+  receiver on every call — a separate, small trait instead, mirroring
+  `platform::security::Csprng`'s own shape.
 
 ## Deliberately unspecified
 

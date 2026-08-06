@@ -72,6 +72,31 @@ pub fn openat(dirfd: RawFd, rel: &OsStr, flags: i32, mode: u32) -> Result<OwnedF
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// `memfd_create(2)` — an anonymous, memory-backed file with no
+/// filesystem namespace entry at all, unlinked from the moment it's
+/// created. `name` is a debugging label only (visible in
+/// `/proc/self/fd/<n>`), not a path — no directory fd, no `AT_FDCWD`,
+/// nothing to resolve. Not track-p-gated: `memfd_create` has had a
+/// real libc wrapper since long before this crate existed, so there is
+/// exactly one implementation, the same treatment `fsync` gets.
+pub fn memfd_create(name: &str) -> Result<OwnedFd> {
+    let c_name = CString::new(name).map_err(|_| {
+        PlatformError::new(ErrorKind::InvalidInput, OsCode::None, "memfd_create")
+            .with_path(OsStr::new(name))
+    })?;
+    // SAFETY: `c_name` is a valid NUL-terminated string that outlives
+    // the call; `MFD_CLOEXEC` matches every fd this crate creates
+    // (RFC v2's CLOEXEC-by-default discipline — `openat` above ORs it
+    // into every open unconditionally).
+    let fd = unsafe { c::memfd_create(c_name.as_ptr(), c::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(os_err("memfd_create", OsStr::new(name)));
+    }
+    // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
+    // descriptor; wrapping it exactly once transfers ownership.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 /// `openat(dirfd, rel, flags, mode)` — Track P: raw `SYS_openat`.
 #[cfg(feature = "track-p")]
 pub fn openat(dirfd: RawFd, rel: &OsStr, flags: i32, mode: u32) -> Result<OwnedFd> {
@@ -643,4 +668,78 @@ pub fn read_dir(dirfd: OwnedFd) -> Result<Vec<(OsString, FileType)>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod memfd_tests {
+    use super::*;
+
+    #[test]
+    fn memfd_create_gives_a_real_readable_writable_fd() {
+        let fd = memfd_create("rustils-test").expect("memfd_create should succeed");
+        // SAFETY: `fd` was just returned by memfd_create above, open for
+        // read+write (memfd_create's own default), and not used elsewhere
+        // in this test.
+        let n = unsafe { c::write(fd.as_raw_fd(), b"hello".as_ptr().cast(), 5) };
+        assert_eq!(n, 5, "write into a fresh memfd should succeed in full");
+
+        // SAFETY: `fd` is still open; lseek is a plain libc call with no
+        // pointer arguments.
+        unsafe { c::lseek(fd.as_raw_fd(), 0, c::SEEK_SET) };
+        let mut buf = [0u8; 5];
+        // SAFETY: `buf` is a valid 5-byte writable region for the
+        // duration of the call.
+        let n = unsafe { c::read(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        assert_eq!(n, 5);
+        assert_eq!(&buf, b"hello", "read back exactly what was written");
+    }
+
+    #[test]
+    fn memfd_create_is_genuinely_unlinked() {
+        let fd = memfd_create("rustils-unlinked-check").expect("memfd_create should succeed");
+        // Real Linux ground truth, not just a successful syscall return:
+        // /proc/self/fd/<n> for a memfd resolves to "/memfd:<name>
+        // (deleted)" — the kernel's own way of saying this fd has never
+        // had, and can never regain, a directory entry. The same
+        // discipline the PTY surface's own tests use against
+        // /proc/<pid>/stat rather than trusting a bare Ok(()) (see
+        // docs/behavior/pty.md).
+        let link = std::fs::read_link(format!("/proc/self/fd/{}", fd.as_raw_fd()))
+            .expect("the memfd should have a /proc/self/fd entry to read");
+        let link = link.to_string_lossy();
+        assert!(
+            link.contains("(deleted)"),
+            "a memfd's /proc/self/fd link should always show (deleted): got {link:?}"
+        );
+        assert!(
+            link.contains("rustils-unlinked-check"),
+            "the debug label should appear in the /proc link: got {link:?}"
+        );
+    }
+
+    #[test]
+    fn two_memfds_are_independent() {
+        let fd_a = memfd_create("a").expect("memfd_create a");
+        let fd_b = memfd_create("b").expect("memfd_create b");
+        // SAFETY: `fd_a` is freshly created and open for writing.
+        unsafe { c::write(fd_a.as_raw_fd(), b"AAAAA".as_ptr().cast(), 5) };
+        // SAFETY: `fd_b` is freshly created and open for writing.
+        unsafe { c::write(fd_b.as_raw_fd(), b"BBBBB".as_ptr().cast(), 5) };
+
+        for fd in [&fd_a, &fd_b] {
+            // SAFETY: each `fd` in this loop is still open; lseek takes
+            // no pointers.
+            unsafe { c::lseek(fd.as_raw_fd(), 0, c::SEEK_SET) };
+        }
+        let mut buf_a = [0u8; 5];
+        let mut buf_b = [0u8; 5];
+        // SAFETY: `buf_a` is a valid 5-byte writable region for the
+        // duration of this call.
+        unsafe { c::read(fd_a.as_raw_fd(), buf_a.as_mut_ptr().cast(), 5) };
+        // SAFETY: `buf_b` is a valid 5-byte writable region for the
+        // duration of this call.
+        unsafe { c::read(fd_b.as_raw_fd(), buf_b.as_mut_ptr().cast(), 5) };
+        assert_eq!(&buf_a, b"AAAAA");
+        assert_eq!(&buf_b, b"BBBBB");
+    }
 }

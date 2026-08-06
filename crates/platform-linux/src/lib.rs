@@ -26,7 +26,7 @@ mod signals;
 mod term;
 mod tun;
 
-pub use fs::{LinuxDir, LinuxFile};
+pub use fs::{LinuxAnonymousFile, LinuxDir, LinuxFile};
 pub use net::{
     LinuxNet, LinuxTcpListener, LinuxTcpStream, LinuxUdpSocket, LinuxUnixListener, LinuxUnixStream,
 };

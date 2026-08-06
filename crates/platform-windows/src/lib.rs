@@ -56,7 +56,7 @@ pub mod util;
 pub use winargv;
 
 #[cfg(windows)]
-pub use fs::{WindowsDir, WindowsFile};
+pub use fs::{WindowsAnonymousFile, WindowsDir, WindowsFile};
 #[cfg(windows)]
 pub use net::{
     WindowsNet, WindowsTcpListener, WindowsTcpStream, WindowsUdpSocket, WindowsUnixListener,

@@ -384,3 +384,31 @@ pub trait Dir {
         self.rename(&tmp_name, rel)
     }
 }
+
+/// A source of anonymous, memory-backed files with no filesystem
+/// namespace entry at all (`memfd_create` — D11, landed independently
+/// per `docs/decision-request-fork-execve.md`'s option 3: the
+/// thread-free here-doc mechanism D4 cites as the invariant that would
+/// make a raw `clone(SIGCHLD)` fork sound, useful on its own regardless
+/// of whether that larger question is ever resolved toward raw).
+///
+/// Deliberately **not** a [`Dir`] method: every other operation in this
+/// module is `rel`-relative, resolved against a directory capability
+/// (RFC v2 §5.3's whole point). `memfd_create` takes no path and
+/// touches no directory at all — there is no `rel` to resolve, so
+/// putting it on `Dir` would mean an unused capability receiver on
+/// every call, misrepresenting the capability-rooted discipline the
+/// rest of this trait exists to enforce. A separate, small trait
+/// (mirroring [`crate::security::Csprng`]'s own shape: one method, no
+/// capability it doesn't need) keeps that boundary honest.
+pub trait AnonymousFile {
+    /// Create a fresh anonymous file, unlinked from any directory from
+    /// the moment it exists — readable/writable like an ordinary
+    /// [`File`], but never visible in any directory listing
+    /// ([`Dir::read_dir`]) and never outliving every open handle to it
+    /// (no [`Dir::remove_file`] needed or possible). `name` is a
+    /// debugging label only (Linux: visible in `/proc/self/fd/<n>`),
+    /// not a path — it names nothing a second call or another process
+    /// could look up, and need not be unique.
+    fn create_memfd(&self, name: &str) -> Result<Box<dyn File>>;
+}

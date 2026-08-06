@@ -287,6 +287,22 @@ several stress cases: wide size-column alignment, `setuid` rendering,
 a zero-permission directory, a dangling symlink, and a real `nlink: 3`
 from an actual subdirectory.
 
+**Landed (`AnonymousFile::create_memfd`) 2026-08-06** — D11's
+`memfd_create`, previously cited only as D4's fork-vs-malloc-lock
+rationale and never surfaced as an API, landed on its own: option 3 of
+`docs/decision-request-fork-execve.md`, independent of that document's
+still-unresolved larger question. Linux: plain `libc::memfd_create` +
+`MFD_CLOEXEC` — no `track-p` gate, `memfd_create` has had a real libc
+wrapper long before this workspace's MSRV floor. Windows:
+`Unsupported`, no numbered divergence — `CreateFileMappingW`'s
+anonymous mapping is a fixed-size shared-memory mapping, not a
+growable byte-stream `File`, so this is a missing-donor-shape gap
+(`WindowsTun`'s own precedent), not an OS limitation. Live-verified,
+not just a successful-syscall assertion: `sys::fdio`'s own tests
+confirm via `/proc/self/fd/<n>` that the kernel reports the fd
+`(deleted)` immediately. See `docs/behavior/fs.md` and
+`docs/extraction-map.md`'s D11 entry for the full contract.
+
 ## Phase 4 — Track P completion
 
 **Landed 2026-07-19, both parts.**
@@ -967,6 +983,16 @@ here-doc mechanism that makes a raw `clone(SIGCHLD)` fork sound
 (single-threaded at every fork point), the exact invariant `posix_spawn`
 exists to avoid needing. Do not start this without the owner's explicit
 go-ahead; recorded in `docs/architecture.md`'s "Open item" section.
+
+**Dug into 2026-08-06** — see `docs/decision-request-fork-execve.md`:
+checked against rusty_libc's real current source rather than the
+framing above at face value, and found "adopting rusty_libc's
+fork+execve" describes donor material that doesn't exist yet (no
+`fork`/`execve`/`clone` anywhere in that crate) — a two-repo project,
+not a rustils-side flag flip. **Option 3 landed the same day**
+(Phase 3's own entry, above): `memfd_create` itself, independent of
+this larger question, which remains genuinely open pending an owner
+call between options 1 and 2.
 
 ---
 

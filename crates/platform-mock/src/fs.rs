@@ -6,7 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::fs::{
-    AccessMode, Dir, DirEntry, File, FileId, FileType, Metadata, Mode, OpenOptions, UnixMode,
+    AccessMode, AnonymousFile, Dir, DirEntry, File, FileId, FileType, Metadata, Mode, OpenOptions,
+    UnixMode,
 };
 
 #[derive(Debug, Default)]
@@ -406,6 +407,29 @@ impl MockDir {
     }
 }
 
+/// [`AnonymousFile`] over a fresh, freestanding [`Node::File`] — not
+/// attached to any [`MockDir`] tree, matching the real backends' own
+/// "no directory capability involved at all" contract: unlike every
+/// [`MockFile`] [`MockDir::open`] hands out, one from here has no
+/// parent entries map any [`MockDir::read_dir`] could ever enumerate
+/// it through, and dropping every handle to it (there is no
+/// `remove_file` call that could reach it) is the only way it goes
+/// away — the same unlinked-from-birth lifetime a real `memfd_create`
+/// fd has.
+#[derive(Debug, Default)]
+pub struct MockAnonymousFile;
+
+impl AnonymousFile for MockAnonymousFile {
+    fn create_memfd(&self, _name: &str) -> Result<Box<dyn File>> {
+        Ok(Box::new(MockFile {
+            node: Arc::new(Mutex::new(Node::File(Vec::new()))),
+            pos: Arc::new(Mutex::new(0)),
+            readable: true,
+            writable: true,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +692,23 @@ mod tests {
             .collect();
         assert_eq!(names, vec![OsStr::new("f.txt").to_os_string()]);
         assert_eq!(root.metadata(OsStr::new("f.txt")).unwrap().len, 1);
+    }
+
+    #[test]
+    fn anonymous_file_round_trips_and_is_independent_of_any_dir() {
+        let anon = MockAnonymousFile;
+        let mut f = anon.create_memfd("scratch").expect("create_memfd");
+        let n = f.write(b"hello").expect("write");
+        assert_eq!(n, 5);
+        let mut buf = [0u8; 5];
+        let n = f.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], b"hello");
+
+        // Two independent calls never alias: unlike `MockDir::open`ing
+        // the same `rel` twice (which resolves to the same underlying
+        // node), `create_memfd` has no name/path to collide on at all.
+        let mut other = anon.create_memfd("scratch").expect("create_memfd");
+        let n = other.read(&mut buf).expect("read from the other instance");
+        assert_eq!(n, 0, "a second create_memfd call must start empty");
     }
 }
