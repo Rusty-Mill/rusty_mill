@@ -22,7 +22,7 @@ mod sync;
 pub mod term;
 pub mod tun;
 
-pub use fs::MockDir;
+pub use fs::{MockAnonymousFile, MockDir};
 pub use net::MockNet;
 pub use process::MockSpawner;
 pub use pty::{MockPty, MockPtyMaster};

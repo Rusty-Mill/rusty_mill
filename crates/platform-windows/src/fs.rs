@@ -8,7 +8,8 @@ use std::path::Path;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::fs::{
-    AccessMode, Dir, DirEntry, File, FileId, FileType, Metadata, Mode, OpenOptions, UnixMode,
+    AccessMode, AnonymousFile, Dir, DirEntry, File, FileId, FileType, Metadata, Mode, OpenOptions,
+    UnixMode,
 };
 
 use crate::ffi::nt_surface as nt;
@@ -351,5 +352,28 @@ impl Dir for WindowsDir {
 
     fn rename_no_replace(&self, from: &OsStr, to: &OsStr) -> Result<()> {
         fileio::rename(&self.handle, from, to, false)
+    }
+}
+
+/// [`AnonymousFile`] — `Unsupported` unconditionally. Windows's nearest
+/// analog, an anonymous `CreateFileMappingW(INVALID_HANDLE_VALUE, ...)`
+/// mapping, is a fixed-size shared-memory *mapping*
+/// (`docs/design-discussion-msys-pgid-table.md` uses exactly this
+/// primitive, for an unrelated purpose), not a byte-stream `File` that
+/// can grow, `read`/`write` sequentially, and be handed to
+/// `Dir::write_atomic`'s temp-file-shaped consumers the way a real
+/// `memfd_create` fd can — no donor evidence for a shape that actually
+/// fits this trait, matching [`crate::WindowsTun`]'s own posture for a
+/// missing donor rather than forcing a mismatched primitive to answer.
+#[derive(Debug, Default)]
+pub struct WindowsAnonymousFile;
+
+impl AnonymousFile for WindowsAnonymousFile {
+    fn create_memfd(&self, _name: &str) -> Result<Box<dyn File>> {
+        Err(PlatformError::new(
+            ErrorKind::Unsupported,
+            OsCode::None,
+            "create_memfd",
+        ))
     }
 }

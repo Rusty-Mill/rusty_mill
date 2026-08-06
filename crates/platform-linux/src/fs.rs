@@ -6,7 +6,7 @@ use std::path::Path;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 use platform::fs::{
-    AccessMode, Dir, DirEntry, File, FileId, Metadata, Mode, OpenOptions, UnixMode,
+    AccessMode, AnonymousFile, Dir, DirEntry, File, FileId, Metadata, Mode, OpenOptions, UnixMode,
 };
 
 use crate::ffi::libc_surface as c;
@@ -246,5 +246,43 @@ impl Dir for LinuxDir {
 
     fn rename_no_replace(&self, from: &OsStr, to: &OsStr) -> Result<()> {
         fdio::rename_no_replace(self.fd.as_raw_fd(), from, to)
+    }
+}
+
+/// [`AnonymousFile`] over `memfd_create` — a unit struct, like
+/// [`crate::LinuxCsprng`]: no capability, no state, nothing a `Dir`
+/// would give it that it needs.
+#[derive(Debug, Default)]
+pub struct LinuxAnonymousFile;
+
+impl AnonymousFile for LinuxAnonymousFile {
+    fn create_memfd(&self, name: &str) -> Result<Box<dyn File>> {
+        Ok(Box::new(LinuxFile::from(fdio::memfd_create(name)?)))
+    }
+}
+
+#[cfg(test)]
+mod anonymous_file_tests {
+    use super::*;
+
+    #[test]
+    fn create_memfd_is_usable_through_the_public_file_trait() {
+        // Content round-tripping is already verified at the raw-fd
+        // level by `sys::fdio::memfd_tests` (seek-and-read-back, plus
+        // the /proc "(deleted)" liveness check). This test's own job is
+        // narrower: prove the public wiring — `LinuxAnonymousFile` →
+        // `fdio::memfd_create` → `LinuxFile::from(OwnedFd)` → the
+        // type-erased `Box<dyn File>` this trait hands back — actually
+        // works end to end, not just each piece in isolation.
+        let anon = LinuxAnonymousFile;
+        let mut f = anon
+            .create_memfd("rustils-fs-level-test")
+            .expect("create_memfd should succeed");
+        let n = f.write(b"payload").expect("write");
+        assert_eq!(n, 7);
+        f.sync_all().expect("sync_all should be a no-op success");
+        let cloned = f.try_clone().expect("try_clone");
+        drop(f);
+        drop(cloned);
     }
 }

@@ -20,6 +20,33 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.24.0
+
+- **Added `platform::fs::AnonymousFile::create_memfd`** — `memfd_create`,
+  an anonymous, memory-backed `File` with no filesystem namespace entry
+  at all. D11's own material (cited since the extraction map opened as
+  the load-bearing invariant for a raw `clone(SIGCHLD)` fork to be
+  sound) but never surfaced as an API — landed independently while
+  digging into the still-parked, still-undecided fork/execve vs
+  `posix_spawn` question (`docs/decision-request-fork-execve.md`'s
+  option 3), not as part of resolving it. Deliberately a new, separate
+  trait rather than a `Dir` method: `memfd_create` takes no path and
+  touches no directory capability, so forcing it onto `Dir` would mean
+  an always-unused `&self` receiver on every call. Linux: plain
+  `libc::memfd_create` + `MFD_CLOEXEC`, no `track-p` gate needed — the
+  libc wrapper predates this workspace's MSRV floor. Windows:
+  `Unsupported`, no numbered divergence (a missing-donor-shape gap,
+  `WindowsTun`'s own precedent — `CreateFileMappingW`'s anonymous
+  mapping is a fixed-size shared-memory mapping, not a growable
+  byte-stream `File`). `platform-mock`'s own `MockAnonymousFile` gives
+  a real, non-`Unsupported` implementation (an in-memory buffer, the
+  same shape `MockFile` already has) since nothing about this
+  capability needs faking the way `Csprng`/`Sandbox` do. See
+  `docs/behavior/fs.md` for the full contract.
+
+  `y`, not `z`: a new public trait on `platform`, new public structs
+  on each backend.
+
 ### 0.23.0
 
 - **Added `platform::term::{ConsoleState, ConsoleAcquisition}`** — the

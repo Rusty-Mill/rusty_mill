@@ -7,6 +7,19 @@ posix_spawn" and `docs/architecture.md` has carried as its one "Open
 item recorded" since the roadmap opened — dug into for the first time
 here, rather than left as a two-sentence pointer.
 
+## Outcome (partial)
+
+**Option 3 decided and landed, 2026-08-06** — `memfd_create` wired
+into `platform::fs` as `AnonymousFile::create_memfd`
+(`docs/extraction-map.md`'s D11 entry, `docs/behavior/fs.md`'s own
+section), independent of everything else in this document. **Options 1
+vs. 2 — stay on `posix_spawn` indefinitely, or commission the
+rusty_libc fork/exec work first — remain genuinely open.** This
+document's own findings (the two-repo shape, PTY's own precedent for
+declining raw fork) are unchanged and still need an owner call between
+them; landing `memfd_create` doesn't resolve or presuppose either
+direction.
+
 ## Where this stands today
 
 - Layer 1 Linux spawn is entirely `posix_spawn`
@@ -123,7 +136,7 @@ statement:
    dependency, D11's own text already names it as a `Dir`-adjacent
    primitive — without committing either way on the larger fork/execve
    question. Decouples the one piece that's genuinely ready from the
-   one that isn't.
+   one that isn't. **Chosen — see Outcome above.**
 
 ## Open questions for the owner, not decided here
 
@@ -143,6 +156,7 @@ statement:
 
 ## What this document does not decide
 
-Whether to go raw, stay on `posix_spawn`, or land `memfd_create` on
-its own. Same posture as every decision-request in this codebase:
-input to an owner's call, not the call itself.
+Whether to go raw or stay on `posix_spawn` — options 1 vs. 2 remain an
+open owner call, unaffected by option 3 already landing. Same posture
+as every decision-request in this codebase for the part still
+undecided: input to an owner's call, not the call itself.

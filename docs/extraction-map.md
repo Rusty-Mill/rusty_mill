@@ -361,6 +361,27 @@ peek-without-reap remains unlanded — no consumer has forced it yet.
 > (aside from the unduplicated `total N` header) across several stress
 > cases. See `docs/behavior/fs.md` and the convergence roadmap's Phase
 > 3 entry for the full contract and backend notes.
+>
+> **Landed (`memfd_create` slice, independent of the fork/execve
+> question) 2026-08-06** — `platform::fs::AnonymousFile::create_memfd`,
+> option 3 of `docs/decision-request-fork-execve.md`. This is the same
+> `memfd_create` D4 cites as the load-bearing invariant for a raw
+> `clone(SIGCHLD)` fork to be sound, landed on its own regardless of
+> whether that larger, still-parked decision ever resolves toward raw
+> — `rusty_libc/src/fd.rs` already had the wrapper (found while digging
+> into the fork/execve decision), but this backend uses the plain
+> `libc` crate instead (`memfd_create` has had a real libc wrapper
+> since long before this workspace's MSRV floor, so no `track-p`
+> gate, no rusty_libc dependency, matching `fsync`'s own "one
+> implementation for both configurations" treatment). Deliberately not
+> a `Dir` method — `memfd_create` takes no path and touches no
+> directory capability, so a new, small, `Csprng`-shaped trait instead.
+> Windows: `Unsupported`, no numbered divergence (matching
+> `WindowsTun`'s own precedent — `CreateFileMappingW`'s anonymous
+> mapping is a fixed-size shared-memory *mapping*, not a growable
+> byte-stream `File`, so this is "no donor evidence for a shape that
+> fits," not a hard OS limitation). See `docs/behavior/fs.md` for the
+> full contract.
 
 ### D12 — Small process/events donors (each waits for its consumer)
 
