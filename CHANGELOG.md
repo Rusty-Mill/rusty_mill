@@ -6,7 +6,7 @@ All notable changes to this project are recorded here. The format follows
 Neither crate is published to crates.io — consume `rusty-mcp` by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.1" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.5.0" }
 ```
 
 Being `0.x`, the API may still break in a minor release. Breaking changes will
@@ -16,7 +16,42 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-06
+
+Finishes the pagination work 0.4.0 started. All four list methods now page on
+one cursor.
+
+> **Upgrading does not paginate your tools by itself.** `#[tool_handler]` and
+> `#[prompt_handler]` keep compiling and keep returning every entry in one
+> response. You get pagination by swapping them for the macros below, which is
+> a deliberate edit, not a side effect of the version bump.
+
 ### Added
+
+- `routers::forward_tool_methods!` and `routers::forward_prompt_methods!`,
+  paginating on the same cursor as resources.
+
+  **They replace `#[tool_handler]` and `#[prompt_handler]` rather than
+  composing with them**, for two separate reasons, both found by trying:
+
+  - `#[prompt_handler]` scans the impl for `list_prompts` and *replaces its
+    body* with the generated one, so a hand-written override is silently
+    discarded.
+  - `#[tool_handler]` guards on `has_method("list_tools")`, which looks like an
+    override would work — but attribute macros expand before `macro_rules!`
+    invocations inside the item, so it only ever sees an unexpanded macro call
+    and emits its own. That one is at least `E0201`.
+
+  `forward_tool_methods!` generates `call_tool`, `list_tools` and `get_tool`;
+  `forward_prompt_methods!` generates `get_prompt` and `list_prompts`. Both
+  take an optional page size. You write `get_info` yourself, which
+  `server_info` already makes a one-liner.
+
+- `pagination`, holding the one cursor implementation the four paginated lists
+  share. Previously private to `resources`. Each sequence carries a tag byte,
+  so a cursor minted by `tools/list` is rejected by the others — there is a
+  test asserting that for every pair, and another asserting the tags stay
+  distinct.
 
 - An exemption marker for `scripts/check-versions.sh` ([#28]):
 
@@ -35,14 +70,10 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   something vaguer. All three passages are restored to showing the real
   snippet.
 
-  Nothing is inferred beyond those rules. `--list-exemptions` prints every one
-  with its file and line, so exempting something cannot be quiet.
-
-  `--self-test` asserts both directions on throwaway fixtures — unmarked stale
-  tags rejected, marked ones accepted, same-line and fenced markers honoured,
-  the exemption ending at the closing fence, and exempting *everything* still
-  failing rather than silently guarding nothing. It runs in CI. This check had
-  never been observed to reject anything before now.
+  `--list-exemptions` prints every one with its file and line, so exempting
+  something cannot be quiet. `--self-test` asserts both directions on
+  throwaway fixtures and runs in CI; this check had never been observed to
+  reject anything before now.
 
 ### Fixed
 
@@ -56,39 +87,14 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   Leaving it was worse than not having noticed. Between 0.4.0 and now, one
   third of the list surface paged and nothing said which third.
 
-### Added
-
-- `routers::forward_tool_methods!` and `routers::forward_prompt_methods!`,
-  paginating on the same cursor as resources.
-
-  **They replace `#[tool_handler]` and `#[prompt_handler]` rather than
-  composing with them**, for two separate reasons, both found by trying:
-
-  - `#[prompt_handler]` scans the impl for `list_prompts` and *replaces its
-    body* with the generated one, so a hand-written override is silently
-    discarded.
-  - `#[tool_handler]` guards on `has_method("list_tools")`, which looks like an
-    override would work — but attribute macros expand before `macro_rules!`
-    invocations inside the item, so it only ever sees an unexpanded macro call
-    and emits its own. That one is at least `E0201`.
-
-  So `forward_tool_methods!` generates `call_tool`, `list_tools` and
-  `get_tool`; `forward_prompt_methods!` generates `get_prompt` and
-  `list_prompts`. Both take an optional page size.
-
-- `pagination`, holding the one cursor implementation the four paginated lists
-  share. Previously private to `resources`. Each sequence carries a tag byte,
-  so a cursor minted by `tools/list` is rejected by the others — there is a
-  test asserting that for every pair.
-
 ### Changed
 
-- **Breaking:** a server using `#[tool_handler]` or `#[prompt_handler]` keeps
-  working and keeps the old non-paginating behaviour. Moving to the new macros
-  means dropping the attribute and writing `get_info` yourself, which
-  `server_info` already makes a one-liner.
 - `resources::DEFAULT_PAGE_SIZE` is now a re-export from `pagination`. Same
-  value, same path.
+  value, same path, no action needed.
+
+Nothing was removed or reshaped, so this is additive despite the minor bump —
+the same reasoning as 0.2.0 for `mrtr` and 0.3.0 for `otel`. The new surface is
+two public modules.
 
 [#26]: https://github.com/baileyrd/rusty_mcp/issues/26
 [#28]: https://github.com/baileyrd/rusty_mcp/issues/28
@@ -490,6 +496,7 @@ easy to get wrong:
 [#5]: https://github.com/baileyrd/rusty_mcp/pull/5
 [#6]: https://github.com/baileyrd/rusty_mcp/pull/6
 [#8]: https://github.com/baileyrd/rusty_mcp/pull/8
+[0.5.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.5.0
 [0.4.1]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.4.0
 [0.3.0]: https://github.com/baileyrd/rusty_mcp/releases/tag/v0.3.0
