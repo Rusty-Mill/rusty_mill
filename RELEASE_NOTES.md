@@ -23,6 +23,33 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.10.1
+**2026-08-05**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Changed:** 0-RTT is declined rather than deferred. #58 was filed,
+  considered, and closed as `not planned`; ADR-0003 is amended to record that,
+  so its "Created" bullet does not go stale a second time.
+- **Changed:** three doc comments in `src/` described #58 as live work. One said
+  outright that it "tracks" 0-RTT, which stopped being true the moment the issue
+  closed. Reworded to describe it as the record of a decision instead.
+
+**The decision gate is unchanged.** 0-RTT stays out until a named consumer asks
+*and* an anti-replay design lands in its own ADR. What changed is that no open
+issue implies an intent nobody holds. The reason is the absence of a consumer,
+not the difficulty: ADR-0002 makes this engine permanently non-default, 0-RTT's
+whole value is latency, and a non-default experiment gains close to nothing from
+a saved round trip. Reopening #58 is the way back in, and its closing comment
+records what a revival would already have to hand — including that stateless
+resumption and single-use tickets conflict, and that anti-replay cannot be
+tested against a correct peer, because a correct peer never replays.
+
+**No behaviour change, and no upgrade notes.** `early_data` is still refused on
+both halves and no `max_early_data_size` is advertised. A `z` bump, because doc
+comments change no public item's shape — which is what this repo reserves `z`
+for.
+
 ## v0.10.0
 **2026-08-05**
 
@@ -54,14 +81,25 @@ thirty-six years.
   sealed layout version went 1 → 2. Tickets issued by v0.9.0 are ignored rather
   than refused, so clients holding one fall back to a full handshake.
 
-**This closes #43.** 0-RTT stays out of scope as #58, which needs its
-anti-replay ADR before any code.
+**This closes #43.** 0-RTT stays out of scope — filed as #58 at the time of
+this release, and closed as `not planned` the same day. See v0.10.1.
 
 ## v0.9.0
 **2026-08-04**
 
 **Built and tested against:** unchanged from v0.2.x.
 
+**Both halves of resumption, in one entry.** This was split across v0.8.0 and
+v0.9.0 until 2026-08-06. There was never a v0.8.0: #57 carried both version
+bumps in one merge, so `main` went 0.7.0 straight to 0.9.0 and no commit ever
+declared 0.8.0. Folded here rather than left naming a version with no commit,
+no tag, and no release.
+
+- **Added:** a handshake actually resumes (#43, client side) — two-phase
+  ClientHello encoding (`handshake::BinderHello`), a `pre_shared_key` offer via
+  `ClientConfig::resumption`, and the resumed route through the key schedule.
+- **Added:** `Connection::resumed()`, and `Session::peer_certificates` so a
+  resumed connection still reports the chain its peer was validated on.
 - **Added:** the server half resumes (#43) — `ServerConfig::tickets` makes this
   server issue NewSessionTickets and accept them back as a `pre_shared_key`.
 - **Added:** `handrolled::ticket` — `TicketKey`, `TicketKeys`, `TicketContents`.
@@ -72,43 +110,19 @@ anti-replay ADR before any code.
 - **Changed:** `Incoming::Ticket(Box<Session>)` is now
   `Incoming::Tickets(Vec<Session>)`. A server routinely sends several tickets in
   one record and the old variant kept only the last.
-- **Security:** a recognised identity with a bad binder aborts rather than
-  falling back; `early_data` and a misplaced `pre_shared_key` are refused;
-  tickets are ignored when they do not open, have expired, belong to another
-  suite, or were issued under a different certificate chain.
+- **Security:** `early_data` is refused rather than ignored on both halves; an
+  unoffered `pre_shared_key`, a bad `selected_identity`, a suite/PSK hash
+  mismatch, a misplaced `pre_shared_key`, and a CertificateRequest in a resumed
+  handshake are all refused. A recognised identity with a bad binder aborts
+  rather than falling back, and tickets are ignored when they do not open, have
+  expired, belong to another suite, or were issued under a different certificate
+  chain.
 
 **Measured, not assumed.** Twenty-five mutations across both halves, each
 asserted to have applied before its result was believed, and each killed by a
 named test. Four survived their first run — a reusable ticket nonce, a droppable
 cipher-suite binding, removable sealing associated data, and a deletable
 PSK-hash check — and are why three tests and one behaviour change exist.
-
-### Upgrade notes
-
-- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is the
-  previous behaviour exactly.
-- **`Incoming::Ticket` is gone; match `Incoming::Tickets(sessions)`** and take
-  what you want from the `Vec`, which is never empty.
-
-**Known limitations:** resumption and client authentication do not combine — with
-`client_auth` configured, a `pre_shared_key` offer gets a full handshake,
-because these tickets carry no client identity. And `obfuscated_ticket_age` is
-still unchecked by this server; it exists for 0-RTT anti-replay, which ADR-0003
-puts out of scope.
-
-## v0.8.0
-**2026-08-04**
-
-**Built and tested against:** unchanged from v0.2.x.
-
-- **Added:** a handshake actually resumes (#43, client side) — two-phase
-  ClientHello encoding (`handshake::BinderHello`), a `pre_shared_key` offer via
-  `ClientConfig::resumption`, and the resumed route through the key schedule.
-- **Added:** `Connection::resumed()`, and `Session::peer_certificates` so a
-  resumed connection still reports the chain its peer was validated on.
-- **Security:** `early_data` is refused rather than ignored; an unoffered
-  `pre_shared_key`, a bad `selected_identity`, a suite/PSK hash mismatch, and a
-  CertificateRequest in a resumed handshake are all refused.
 
 **What this verifies that nothing before it did.** The PSK derivation from
 v0.6.0 and the binder derivation from v0.7.0 were tested for shape, not value —
@@ -122,13 +136,18 @@ point, all independently. Each was mutated; each now fails.
 - **`ClientConfig` gained a required `resumption` field.** There is no
   `Default` for it, so every construction needs updating; `resumption: None`
   is exactly the old behaviour.
+- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is the
+  previous behaviour exactly.
+- **`Incoming::Ticket` is gone; match `Incoming::Tickets(sessions)`** and take
+  what you want from the `Vec`, which is never empty.
 
-**Known limitations:** the **server half still does not resume** — no
-`pre_shared_key` parsing, no binder verification, no NewSessionTicket issuance —
-so **#43 remains open**. And `obfuscated_ticket_age` is pinned by arithmetic
-rather than by a peer: `rustls` accepts a 1-RTT resumption whatever the age
-says, measured by a mutation that zeroes `age_add` and survives every interop
-test here.
+**Known limitations:** resumption and client authentication do not combine — with
+`client_auth` configured, a `pre_shared_key` offer gets a full handshake,
+because these tickets carry no client identity. And `obfuscated_ticket_age` is
+pinned by arithmetic rather than by a peer, and unchecked by this server:
+`rustls` accepts a 1-RTT resumption whatever the age says, measured by a
+mutation that zeroes `age_add` and survives every interop test here. It exists
+for 0-RTT anti-replay, which ADR-0003 puts out of scope.
 
 ## v0.7.0
 **2026-08-03**

@@ -6,6 +6,34 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 
 ### Changed
+- **The `[0.8.0]` entry is folded into `[0.9.0]`, in this file and in
+  `RELEASE_NOTES.md`.** There was never a 0.8.0: rusty_tls#57 carried two
+  version bumps in one merge, so `main` went `0.7.0` straight to `0.9.0` and no
+  commit ever declared `0.8.0`. Both files nonetheless carried an entry for it,
+  which came to light while cutting the version tags — 0.8.0 was the one release
+  with notes but no commit to point them at.
+
+  The folded entry says so in its own text rather than only here, because the
+  next person to wonder where 0.8.0 went will be reading `[0.9.0]`, not this
+  section. No claim was dropped in the merge beyond one that had already gone
+  stale: the 0.8.0 entry's "the server half still does not resume, #43 stays
+  open", which `0.9.0` is precisely the version that stopped being true.
+
+  Documentation only, so no version bump.
+- **`RELEASE_NOTES.md` was missing `v0.10.1` entirely**, and four sentences
+  across both files still described rusty_tls#58 as tracking live work. Both
+  found by checking the two files against each other rather than reading either
+  one alone: every version in `CHANGELOG.md` should have a `RELEASE_NOTES.md`
+  entry, and `0.10.1` did not. That is now asserted rather than assumed.
+
+  The `#58` sentences are the same staleness `0.10.1` fixed in `src/` doc
+  comments, in the three places that pass did not reach — two in this file, one
+  in `RELEASE_NOTES.md`, each reading as though an open issue were holding the
+  work. Reworded to say when the issue was filed and that it closed the same
+  day, so a historical entry stays historically true without implying an intent
+  nobody holds. The `src/` comments were already correct and are untouched.
+
+  Documentation only, so no version bump.
 - **ADR-0004 (kTLS offload) accepted, and rusty_tls#14 closed as
   `not planned`.** D1, D2 and D3 were reserved for a person; all three are
   accepted as proposed. D3 is the operative one — **not yet**, on the consumer
@@ -105,7 +133,8 @@ Built and tested against the same sibling revs as 0.2.x–0.9.0. Neither moved.
   - **This is a sanity bound, not anti-replay**, and the docs say so at length.
     A resumed handshake runs a fresh key exchange, so replaying one gets an
     attacker a connection it cannot read. The field exists for 0-RTT, which
-    ADR-0003 puts out of scope and rusty_tls#58 tracks.
+    ADR-0003 puts out of scope — filed as rusty_tls#58 at the time of this
+    release and closed as `not planned` the same day; see `[0.10.1]`.
 
 ### Changed
 - **`Tickets` gained a required `max_age_skew_ms` field.** `None` is the
@@ -128,7 +157,8 @@ now pins that specific value rather than a round number.
 
 **This closes rusty_tls#43.** Every item in ADR-0003's scope list is built, and
 both gaps `0.9.0` left open are closed. What remains out of scope is 0-RTT,
-which is rusty_tls#58 and needs its anti-replay ADR first.
+which needs its anti-replay ADR first — filed as rusty_tls#58 at the time of
+this release and closed as `not planned` the same day; see `[0.10.1]`.
 
 ### Fixed
 - **ADR-0003 claimed a follow-up issue that did not exist.** Its "Consequences →
@@ -144,13 +174,40 @@ which is rusty_tls#58 and needs its anti-replay ADR first.
 
 ## [0.9.0] - 2026-08-04
 
-Built and tested against the same sibling revs as 0.2.x–0.8.0. Neither moved.
+Built and tested against the same sibling revs as 0.2.x–0.7.0. Neither moved.
 
-`y` under §2: a new public module, and `Incoming` changed shape.
+`y` under §2: a new public module, `Incoming` changed shape, and `handshake`
+and `client` both gained public surface.
+
+**This entry covers both halves of resumption, and used to be two.** An earlier
+version of this file split them across `[0.8.0]` and `[0.9.0]`, but `0.8.0` was
+never a state of `main`: rusty_tls#57 carried both version bumps in one merge,
+so `main` went `0.7.0` straight to `0.9.0` and no commit ever declared `0.8.0`.
+The entries are folded here rather than left describing a version that has no
+commit, no tag, and no release. Recorded rather than quietly fixed, because a
+changelog naming a version that never existed is the same failure mode this
+repo keeps meeting — a document asserting something with nothing to check it.
 
 ### Added
-- **The server half resumes** (rusty_tls#43). With `ServerConfig::tickets` set,
-  this server issues NewSessionTickets and accepts them back as a
+- **A handshake actually resumes** (rusty_tls#43, client side). This is the
+  measurement the previous three versions were missing.
+  - `handshake::BinderHello` encodes a ClientHello in two phases: build it with
+    zeroed binder placeholders, hash the truncated prefix, splice the real
+    binders in. `ClientHello::encode` is unchanged, and the bytes a binder
+    covers are a *literal prefix* of the message that is sent rather than a
+    second serialisation that has to be kept in agreement with the first.
+  - `handshake::PresharedKeyOffer` parses the offer from the other direction,
+    and `truncated` enforces "`pre_shared_key` is the last extension" by
+    re-encoding the binder block and requiring it to be the tail of the message
+    — so anything at all after the offer is refused rather than left uncovered.
+  - `ClientConfig::resumption` takes a `Resumption { session, age_ms }` and
+    offers it as a `pre_shared_key`. `Connection::resumed()` reports whether
+    the server accepted it.
+  - `Session` now carries `peer_certificates` from the handshake it came out
+    of, so `Connection::peer_certificates()` on a resumed connection answers
+    with the chain the peer was actually validated on instead of nothing.
+- **The server half resumes too** (rusty_tls#43). With `ServerConfig::tickets`
+  set, this server issues NewSessionTickets and accepts them back as a
   `pre_shared_key`.
   - A new `handrolled::ticket` module: `TicketKey`, `TicketKeys`, and
     `TicketContents`. Resumption here is **stateless** — a ticket is a sealed
@@ -169,31 +226,42 @@ Built and tested against the same sibling revs as 0.2.x–0.8.0. Neither moved.
     nothing in this module reads a clock.
 
 ### Changed
+- **`ClientConfig` gained a required `resumption` field.** There is no
+  `Default`, so this is a breaking change for every caller — `resumption: None`
+  restores the previous behaviour exactly.
+- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is
+  exactly the previous behaviour.
 - **`Incoming::Ticket(Box<Session>)` is now `Incoming::Tickets(Vec<Session>)`.**
   A server routinely sends several tickets in one record — `rustls` sends two by
   default — and the old variant silently kept whichever arrived last. Measured
   by mutation: a change that discarded all but the last survived every test in
   the repo until the two-ticket assertion existed.
-- **`ServerConfig` gained a required `tickets` field.** `tickets: None` is
-  exactly the previous behaviour.
 
 ### Security
+- **`early_data` is refused, not ignored, on both halves** (ADR-0003). A server
+  that sends the extension in EncryptedExtensions gets
+  `ClientError::UnexpectedEarlyData`; an `early_data` extension in a ClientHello
+  is refused with `illegal_parameter`, whether or not this server would have
+  resumed at all. This client never offers early data, so accepting the
+  extension would be agreeing to a replay property nothing here implements.
 - **A recognised identity with a bad binder aborts the handshake** (§4.2.11),
   with `decrypt_error`. It is not a fallback: once the server has chosen which
   key the client claims to hold, the binder is the only proof it holds it, and
   falling back would let the handshake complete having checked nothing.
-- **`early_data` in a ClientHello is refused**, with `illegal_parameter`, whether
-  or not this server would have resumed at all.
 - **`pre_shared_key` anywhere but last is refused**, with `illegal_parameter`.
   Everything after the offer falls outside what the binders prove.
 - **Tickets are ignored, not honoured, when they do not open, have expired,
   belong to another cipher suite, or were issued under a different certificate
   chain.** Each of those has a test, and each is a mutation that survived
   without one.
-- **Client-side `pre_shared_key` refusals now have tests.** An unoffered PSK, a
-  `selected_identity` past the end of the offer, and a suite whose hash is not
-  the PSK's are each refused — reached with a synthetic hostile ServerHello,
-  because no correct server produces any of them and no interop test can.
+- **A `pre_shared_key` in a ServerHello that was never offered is refused**, as
+  is a `selected_identity` past the end of the offer, and a selected cipher
+  suite whose hash is not the PSK's. Each is reached with a synthetic hostile
+  ServerHello, because no correct server produces any of them and no interop
+  test can.
+- **A CertificateRequest in a resumed handshake is refused** (§4.4.2). Signing
+  over a transcript in a handshake where the server proved nothing about its own
+  identity is not something to do on request.
 
 **Measured, not assumed.** Twenty-five mutations across both halves, each
 asserted to have applied before its result was believed, and each killed by a
@@ -202,62 +270,6 @@ behaviour change exist: the ticket nonce could be reused, the cipher-suite
 binding could be dropped, the sealing associated data could be removed, and the
 client's PSK-hash check could be deleted — none of which any test in the repo
 noticed at the time.
-
-**Known limitations, stated rather than implied:**
-- **Resumption and client authentication do not combine.** With
-  `ServerConfig::client_auth` set, a `pre_shared_key` offer is answered with a
-  full handshake, because these tickets carry no client identity and a resumed
-  connection would otherwise report no client certificate while `required` went
-  unenforced. A gap, not a preference.
-- **A resumed connection's peer was verified on the earlier connection**, not on
-  this one. `Session::peer_certificates` carries the chain forward so the answer
-  does not silently become "none", and `Connection::resumed()` is how an
-  application tells the two apart.
-- **`obfuscated_ticket_age` is still pinned by arithmetic rather than by a
-  peer**, and this server does not check it. It exists for 0-RTT anti-replay,
-  which ADR-0003 puts out of scope.
-
-## [0.8.0] - 2026-08-04
-
-Built and tested against the same sibling revs as 0.2.x–0.7.0. Neither moved.
-
-`y` under §2: `handshake` and `client` both gained public surface.
-
-### Added
-- **A handshake actually resumes** (rusty_tls#43, client side). This is the
-  measurement the last three versions were missing.
-  - `handshake::BinderHello` encodes a ClientHello in two phases: build it with
-    zeroed binder placeholders, hash the truncated prefix, splice the real
-    binders in. `ClientHello::encode` is unchanged, and the bytes a binder
-    covers are a *literal prefix* of the message that is sent rather than a
-    second serialisation that has to be kept in agreement with the first.
-  - `handshake::PresharedKeyOffer` parses the offer from the other direction,
-    and `truncated` enforces "`pre_shared_key` is the last extension" by
-    re-encoding the binder block and requiring it to be the tail of the message
-    — so anything at all after the offer is refused rather than left uncovered.
-  - `ClientConfig::resumption` takes a `Resumption { session, age_ms }` and
-    offers it as a `pre_shared_key`. `Connection::resumed()` reports whether
-    the server accepted it.
-  - `Session` now carries `peer_certificates` from the handshake it came out
-    of, so `Connection::peer_certificates()` on a resumed connection answers
-    with the chain the peer was actually validated on instead of nothing.
-
-### Changed
-- **`ClientConfig` gained a required `resumption` field.** There is no
-  `Default`, so this is a breaking change for every caller — `resumption: None`
-  restores the previous behaviour exactly.
-
-### Security
-- **`early_data` is refused, not ignored** (ADR-0003). A server that sends the
-  extension in EncryptedExtensions gets `ClientError::UnexpectedEarlyData`.
-  This client never offers early data, so accepting the extension would be
-  agreeing to a replay property nothing here implements.
-- **A `pre_shared_key` in a ServerHello that was never offered is refused**, as
-  is a `selected_identity` past the end of the offer, and a selected cipher
-  suite whose hash is not the PSK's.
-- **A CertificateRequest in a resumed handshake is refused** (§4.4.2). Signing
-  over a transcript in a handshake where the server proved nothing about its own
-  identity is not something to do on request.
 
 **What this finally verifies.** The key material from 0.6.0 and 0.7.0 was tested
 for shape and not for value — the issue measured that a `"res binder"` →
@@ -271,16 +283,22 @@ coincidence — without it, the positive test would pass even if `rustls` ignore
 binders entirely.
 
 **Known limitations, stated rather than implied:**
-- **The server half still does not resume.** It parses no `pre_shared_key`,
-  verifies no binder, and issues no NewSessionTicket. **#43 stays open** for
-  that and for the ticket-sealing key ADR-0003 flags as being as sensitive as
-  the certificate's private key.
-- **`obfuscated_ticket_age` is pinned by arithmetic, not by a peer.** A server
-  uses it for 0-RTT anti-replay and for nothing else, so `rustls` accepts a
-  1-RTT resumption whatever it says — measured: the mutation zeroing `age_add`
-  survives every interop test here.
+- **Resumption and client authentication do not combine.** With
+  `ServerConfig::client_auth` set, a `pre_shared_key` offer is answered with a
+  full handshake, because these tickets carry no client identity and a resumed
+  connection would otherwise report no client certificate while `required` went
+  unenforced. A gap, not a preference.
+- **A resumed connection's peer was verified on the earlier connection**, not on
+  this one. `Session::peer_certificates` carries the chain forward so the answer
+  does not silently become "none", and `Connection::resumed()` is how an
+  application tells the two apart.
+- **`obfuscated_ticket_age` is pinned by arithmetic rather than by a peer**, and
+  this server does not check it. A server uses it for 0-RTT anti-replay and for
+  nothing else, so `rustls` accepts a 1-RTT resumption whatever it says —
+  measured: the mutation zeroing `age_add` survives every interop test here.
   `the_offer_carries_the_obfuscated_ticket_age` checks the formula directly and
-  is a regression guard rather than an interop result.
+  is a regression guard rather than an interop result. 0-RTT is out of scope per
+  ADR-0003.
 - **Only one identity is ever offered**, so `selected_identity` is only ever
   accepted as `0`.
 
