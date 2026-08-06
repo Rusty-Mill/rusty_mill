@@ -1,0 +1,34 @@
+# Two MCP servers behind one endpoint.
+#
+# Their tools are exposed as `everything_*` and `fetch_*`, so the two can both
+# export a tool of the same name without colliding. `Mcp-Session-Id` is in
+# exposeHeaders because a browser client cannot read it otherwise -- and
+# without it, it cannot make a second request.
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - name: mcp
+            matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              cors:
+                allowOrigins: ["*"]
+                allowHeaders: [mcp-protocol-version, content-type, cache-control]
+                exposeHeaders: ["Mcp-Session-Id"]
+              mcpAuthorization:
+                # Deny wins over allow, and an empty allow list means
+                # "everything not denied".
+                denyTools: ["_delete$"]
+            backends:
+              - mcp:
+                  targets:
+                    - name: everything
+                      stdio:
+                        cmd: npx
+                        args: ["@modelcontextprotocol/server-everything"]
+                    - name: fetch
+                      stdio:
+                        cmd: uvx
+                        args: ["mcp-server-fetch"]

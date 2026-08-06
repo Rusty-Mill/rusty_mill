@@ -1,0 +1,20 @@
+[package]
+name = "agentgateway-core"
+version = "0.1.0"
+description = "Route matching and policy evaluation for rusty_agent_gateway"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentgateway-config = { workspace = true }
+http = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

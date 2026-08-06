@@ -1,0 +1,30 @@
+[package]
+name = "agentgateway-mcp"
+version = "0.1.0"
+description = "MCP federation for rusty_agent_gateway"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentgateway-config = { workspace = true }
+rmcp = { workspace = true, features = [
+    "client",
+    "server",
+    "transport-child-process",
+    "transport-streamable-http-client",
+    "transport-streamable-http-client-reqwest",
+    "transport-streamable-http-server",
+] }
+tokio = { workspace = true, features = ["rt", "macros", "process", "sync"] }
+serde_json = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+process-wrap = { version = "9", features = ["tokio1"] }
