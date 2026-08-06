@@ -189,10 +189,19 @@ plausibly blocking on a condvar until a matching `Cont` arrives,
 entirely in its own userspace, no cross-process thread suspension at
 all. This sidesteps subsystem 3's own flagged hazard (`SuspendThread`
 on a thread mid-lock is a real, unfixable deadlock class) at the cost
-of requiring the target's *cooperation* to actually stop — weaker than
-Cygwin's external, uncooperative suspend, but sound in a way
-`SuspendThread` is not. Worth its own explicit owner call, separate
-from whether this whole slice happens at all.
+of requiring the target's *cooperation* to actually stop. Worth its own
+explicit owner call, separate from whether this whole slice happens at
+all — taken further in `docs/design-discussion-msys-stop-cont.md`.
+
+**Correction** (that document's own finding): Cygwin's real `SIGSTOP`
+handler suspends *sibling threads in the same process*, from a thread
+already running inside the target — cooperative in exactly the sense
+this section proposes, not an outside process reaching in. The real
+design fork isn't "notify vs. Cygwin's external approach"; it's
+"notify only" vs. "notify, then actually suspend siblings the same way
+Cygwin does" — both in-process, both requiring the target to have
+opted in by running this crate's listener at all. See the linked
+document for the full mechanism and its own open hazards.
 
 ## Rough size, if it happens
 

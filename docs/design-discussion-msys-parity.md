@@ -197,7 +197,12 @@ semantics against *any* pid.
    in this codebase to safety-adjacent claims) accept shipping a
    primitive with a known, unfixable deadlock class, or does `Stop`/
    `Cont` stay `Unsupported` on Windows permanently (a registered
-   divergence, not a gap to close)?
+   divergence, not a gap to close)? **Scoped to implementation depth**:
+   `docs/design-discussion-msys-stop-cont.md` found the real mechanism
+   is in-process/cooperative, not the external-suspend framing this
+   question implies — narrowing but not resolving the question, and
+   surfacing a second one (documented-but-racy thread enumeration vs.
+   undocumented-but-atomic `NtSuspendProcess`) along the way.
 5. **Does a from-scratch pty line discipline replace ConPTY, or layer
    on top of it?** `platform::pty` (D13) is ConPTY-based and already
    landed with real consumers implied (`docs/design-discussion-pty.md`).
