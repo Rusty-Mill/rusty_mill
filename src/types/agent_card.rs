@@ -16,7 +16,8 @@ pub struct AgentInterface {
     pub url: String,
     /// The protocol binding at this URL. The core officially-supported
     /// values are `"JSONRPC"`, `"GRPC"` and `"HTTP+JSON"`; this crate
-    /// currently implements the `JSONRPC` binding.
+    /// implements the first and third (see [`AgentInterface::json_rpc`],
+    /// [`AgentInterface::http_json`]).
     #[serde(rename = "protocolBinding")]
     pub protocol_binding: String,
     /// Opaque routing identifier for multi-tenant deployments. When set,
@@ -32,11 +33,27 @@ pub struct AgentInterface {
 
 impl AgentInterface {
     pub const JSONRPC: &'static str = "JSONRPC";
+    pub const HTTP_JSON: &'static str = "HTTP+JSON";
 
     pub fn json_rpc(url: impl Into<String>) -> Self {
         AgentInterface {
             url: url.into(),
             protocol_binding: Self::JSONRPC.to_string(),
+            tenant: None,
+            protocol_version: crate::PROTOCOL_VERSION.to_string(),
+        }
+    }
+
+    /// An interface using the HTTP+JSON/REST binding (spec Section 11).
+    /// `url` may be the same origin as a `json_rpc` interface served by
+    /// the same [`crate::server::AgentServer`] - both bindings are
+    /// available on every route [`AgentServer::into_router`] builds.
+    ///
+    /// [`AgentServer::into_router`]: crate::server::AgentServer::into_router
+    pub fn http_json(url: impl Into<String>) -> Self {
+        AgentInterface {
+            url: url.into(),
+            protocol_binding: Self::HTTP_JSON.to_string(),
             tenant: None,
             protocol_version: crate::PROTOCOL_VERSION.to_string(),
         }
@@ -205,6 +222,14 @@ impl AgentCard {
 
     pub fn with_skill(mut self, skill: AgentSkill) -> Self {
         self.skills.push(skill);
+        self
+    }
+
+    /// Declares an additional supported interface (e.g. an
+    /// [`AgentInterface::http_json`] alongside the [`AgentInterface::json_rpc`]
+    /// passed to [`AgentCard::new`]), in preference order after the first.
+    pub fn with_interface(mut self, interface: AgentInterface) -> Self {
+        self.supported_interfaces.push(interface);
         self
     }
 

@@ -157,6 +157,37 @@ impl A2aError {
         }
     }
 
+    /// The canonical gRPC status code name for this error, per spec
+    /// Section 5.4's "gRPC Status" column for the nine A2A-specific
+    /// errors. For the remaining variants, the spec only gives examples
+    /// (Section 3.3.2) rather than a normative mapping; this crate follows
+    /// those examples (`UNAUTHENTICATED` for auth, `PERMISSION_DENIED` for
+    /// authz, `INVALID_ARGUMENT` for validation, `INTERNAL` for system
+    /// errors) and picks `UNIMPLEMENTED` for an unrecognized method name,
+    /// matching gRPC's own convention for that case. Used both by the
+    /// REST binding's `google.rpc.Status.status` field and by the gRPC
+    /// binding's `tonic::Status` mapping.
+    pub fn grpc_status_name(&self) -> &'static str {
+        match self {
+            A2aError::TaskNotFound(_) => "NOT_FOUND",
+            A2aError::TaskNotCancelable(_) => "FAILED_PRECONDITION",
+            A2aError::PushNotificationNotSupported => "FAILED_PRECONDITION",
+            A2aError::UnsupportedOperation(_) => "FAILED_PRECONDITION",
+            A2aError::ContentTypeNotSupported(_) => "INVALID_ARGUMENT",
+            A2aError::InvalidAgentResponse(_) => "INTERNAL",
+            A2aError::ExtendedAgentCardNotConfigured => "FAILED_PRECONDITION",
+            A2aError::ExtensionSupportRequired(_) => "FAILED_PRECONDITION",
+            A2aError::VersionNotSupported(_) => "FAILED_PRECONDITION",
+            A2aError::Unauthenticated(_) => "UNAUTHENTICATED",
+            A2aError::PermissionDenied(_) => "PERMISSION_DENIED",
+            A2aError::ParseError => "INVALID_ARGUMENT",
+            A2aError::InvalidRequest(_) => "INVALID_ARGUMENT",
+            A2aError::MethodNotFound(_) => "UNIMPLEMENTED",
+            A2aError::InvalidParams(_) => "INVALID_ARGUMENT",
+            A2aError::Internal(_) => "INTERNAL",
+        }
+    }
+
     /// The message sent over the wire in the JSON-RPC/HTTP error object.
     ///
     /// For the five standard JSON-RPC codes (`-32700`..`-32603`) this is

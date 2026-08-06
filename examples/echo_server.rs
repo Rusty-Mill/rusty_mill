@@ -37,14 +37,16 @@ impl AgentExecutor for EchoAgent {
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let addr = ([127, 0, 0, 1], 8080);
-    let interface = AgentInterface::json_rpc("http://127.0.0.1:8080");
 
     let card = AgentCard::new(
         "Echo Agent",
         "Echoes back whatever text you send it, as a demonstration of the rusty_a2a crate.",
         env!("CARGO_PKG_VERSION"),
-        interface,
+        AgentInterface::json_rpc("http://127.0.0.1:8080"),
     )
+    // Both bindings are served on the same port by `AgentServer`; this
+    // just makes the second one discoverable via the Agent Card too.
+    .with_interface(AgentInterface::http_json("http://127.0.0.1:8080"))
     .with_streaming(true)
     .with_skill(
         AgentSkill::new("echo", "Echo", "Repeats back the text of your message.").with_tags(["demo", "echo"]),
