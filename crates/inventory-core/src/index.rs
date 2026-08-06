@@ -113,23 +113,36 @@ impl Inventory {
     }
 
     pub fn open_at(path: &Path, key: &dyn KeyProvider) -> Result<Self> {
+        let existed = path.exists();
         // An index left over from before encryption is converted first, and
         // only replaced once the converted copy has been proven.
-        if path.exists() && db::is_plaintext_sqlite(path)? {
+        if existed && db::is_plaintext_sqlite(path)? {
             db::convert_plaintext_to_encrypted(path, key)?;
         }
         let opened = db::open(path, key)?;
         let embedder = load_embedder(&opened.conn);
+        // For an index that already exists on disk, the connection we just
+        // opened is a faithful decrypt of it, so there is nothing to reseal
+        // yet: seed `sealed_at` with the live `total_changes()` so the
+        // mandatory `checkpoint()` below is a no-op. Forcing a reseal here
+        // unconditionally would make every read-only open (`inv stats`, `inv
+        // doctor`) race a concurrently running writer (the desktop app) and
+        // could silently clobber a write made between that writer's last
+        // checkpoint and this open. A brand-new index has no on-disk file
+        // yet, so `u64::MAX` — which can never equal a real change count —
+        // forces exactly one seal, the one that creates it.
+        let sealed_at = if existed {
+            opened.conn.total_changes()
+        } else {
+            u64::MAX
+        };
         let inv = Inventory {
             conn: opened.conn,
             path: path.to_path_buf(),
             plain_path: opened.plain_path,
             _tempdir: opened.tempdir,
             key: opened.key,
-            // `u64::MAX` never equals a real `total_changes()` value, so the
-            // first `checkpoint()` always seals — that's what materializes
-            // the on-disk file for a brand-new index.
-            sealed_at: Cell::new(u64::MAX),
+            sealed_at: Cell::new(sealed_at),
             embedder,
             cache: RefCell::new(None),
         };
