@@ -102,7 +102,8 @@ let echo = agent_fn(
 ```
 
 Because the result is a plain `axum::Router`, ordinary tower middleware — auth, CORS, tracing,
-rate limiting — layers on top as usual.
+rate limiting — layers on top as usual. [Authentication](#authentication) has two ACP-specific
+traps in it and gets its own section below.
 
 ## Call an agent
 
@@ -327,6 +328,46 @@ With the `well-known` feature, the server also publishes its manifests as YAML a
 knowing the ACP endpoints. The content is built from the same manifests `GET /agents` serves,
 so the two cannot drift.
 
+Being reachable without credentials is the point, so it needs exempting from anything you layer
+in front of the server — see [Authentication](#authentication).
+
+### Authentication
+
+The crate takes no position on the scheme — building one in would mean picking one for
+everybody — and the router is a plain `axum::Router`, so a tower layer is all it takes.
+`cargo run --example authenticated_server` is a worked bearer-token setup, server and client.
+
+What is not generic is **which endpoints must stay open**:
+
+- **`/ping`** is the health check, probed by a load balancer that has no credentials. Behind a
+  token, every replica reads as unhealthy — an outage, caused by an exemption list.
+- **`/.well-known/agent.yml`** is *open discovery*. Being readable by an unauthenticated crawler
+  is the whole purpose. A token in front of it does not secure it; it deletes it.
+
+`GET /agents` is not on that list even though it serves the same manifests. The well-known
+document is the public advertisement, `/agents` is the API — which is why ACP defines both.
+
+The second trap is **session URLs**. A session's history is a list of dereferenceable URLs that
+the client *follows*, one authenticated request per entry, and `fetch_session_history` will
+follow them across servers. Put credentials on the `reqwest::Client` and they travel with
+whatever it fetches:
+
+```rust
+let http = reqwest::Client::builder().default_headers(headers).build()?;
+let client = AcpClient::with_http_client("http://localhost:8000", http)?;
+```
+
+A scheme scoped to the *caller* rather than the *resource* — one-time nonces, per-replica
+secrets, tokens audience-bound to a single host — breaks as soon as a session's URLs point at a
+server the follower cannot authenticate to, which is the ordinary case once sessions are shared
+across replicas. Whatever guards those URLs has to be satisfiable by whoever follows them.
+
+One smaller detail: ACP defines three error codes — `server_error`, `invalid_input`,
+`not_found` — and none of them means "unauthenticated". Return ordinary HTTP 401 rather than
+dressing it up as an ACP error, and the client reports `AcpError::Http { status: 401 }` instead
+of an `AcpError::Protocol` carrying a code that lies. It is also not retried, which is correct:
+a 401 is a verdict, not a blip.
+
 ## Running several replicas
 
 Runs live in process memory by default, which is right for a single agent host.
@@ -539,6 +580,8 @@ cargo run --example echo_server      # two agents: one plain, one streaming
 cargo run --example awaiting_agent   # pauses mid-run to ask a question
 cargo run --example client_demo      # drives every client operation against a running server
 cargo run --example ha_server        # two replicas sharing one store
+
+cargo run --example authenticated_server --features well-known   # bearer token, both halves
 ```
 
 Each example's header comment carries the equivalent `curl` invocations.

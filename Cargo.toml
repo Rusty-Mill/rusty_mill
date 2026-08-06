@@ -108,6 +108,15 @@ required-features = ["server"]
 name = "ha_server"
 required-features = ["server"]
 
+[[example]]
+name = "authenticated_server"
+required-features = ["server", "client", "well-known"]
+# The exemption list is the point of this example, and a renamed route would
+# rot it silently. `test = true` lets it carry its own tests, so the list is
+# checked against the real router rather than restated in a separate file that
+# could drift from it.
+test = true
+
 [[bench]]
 name = "serialization"
 harness = false
