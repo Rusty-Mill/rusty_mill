@@ -662,7 +662,7 @@ ClientInfo::default()
 Neither crate is published to crates.io. Depend on it by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.1.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.2.0" }
 ```
 
 Add `features = ["jwt"]` for the JWKS-backed token validator.

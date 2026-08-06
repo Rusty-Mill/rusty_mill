@@ -10,7 +10,7 @@ repository = "https://github.com/baileyrd/rusty_mcp"
 authors = ["rusty_mcp contributors"]
 
 [workspace.dependencies]
-rusty-mcp = { path = "crates/rusty-mcp", version = "0.1.0" }
+rusty-mcp = { path = "crates/rusty-mcp", version = "0.2.0" }
 
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
