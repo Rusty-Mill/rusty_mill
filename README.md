@@ -477,6 +477,37 @@ Losing the replica a caller happened to be talking to is the ordinary case here 
 outage, which is why the client [retries transient failures](#riding-out-a-transient-failure)
 instead of surfacing them.
 
+### When a replica is full
+
+Every run is a spawned task, and by default nothing caps how many there are — a busy enough
+server accumulates them until memory runs out, with no way to shed load on the way there. Set a
+ceiling and it refuses instead:
+
+```rust
+AcpServer::builder()
+    .agent(my_agent)
+    .max_concurrent_runs(64)    // unset by default, which is unbounded
+```
+
+Over the ceiling, `POST /runs` answers **429 with a `Retry-After`** — a load an operator can see
+and a client can wait out, rather than a crash. It pairs with the client's
+[retry policy](#riding-out-a-transient-failure): 429 is one of the statuses it backs off on.
+
+**A run parked `awaiting` a client answer does not count.** It is a suspended future waiting on a
+human who may never come back, and holding capacity for it would let idle conversations starve
+work that is ready to run. The slot is given up when the run parks and taken back when the answer
+arrives — unchecked, so a burst of answers can briefly exceed the ceiling. That is deliberate: the
+ceiling bounds what a replica *takes on*, and stranding a conversation mid-sentence to defend a
+number would be the wrong trade.
+
+Recovery replacements are admitted over the ceiling for the same reason. Refusing one would not
+defer the work, it would lose the run — recovery has nobody to retry it, unlike a client meeting
+a 429.
+
+This is not a rate limit. Requests per second is a tower middleware concern; this is how many
+agent invocations are alive at once, which only the server can know. With the `metrics` feature,
+`acp_runs_executing` and `acp_runs_rejected_total` are what you tune the number against.
+
 ### When a replica is deployed over
 
 Everything above is about a replica that *dies*. A replica being deployed over is the same
@@ -738,11 +769,19 @@ atomic load per call. Same bargain as the router: the crate does not pick your s
 | `acp_runs_total` | counter | `agent`, `status` |
 | `acp_run_duration_seconds` | histogram | `agent`, `status` |
 | `acp_runs_in_flight` | gauge | `agent` |
+| `acp_runs_executing` | gauge | — |
+| `acp_runs_rejected_total` | counter | — |
 | `acp_lease_renew_failures_total` | counter | — |
 | `acp_runs_reaped_total` | counter | `agent` |
 | `acp_recovery_claims_total` | counter | `outcome` (`won`/`lost`) |
 | `acp_recoveries_started_total` | counter | `agent` |
 | `acp_recovery_exhausted_total` | counter | `agent` |
+
+`acp_runs_executing` and `acp_runs_rejected_total` are what you set
+[`max_concurrent_runs`](#when-a-replica-is-full) against. Neither is labelled by agent, and
+that is deliberate: a submission is refused before the agent is looked up, so the name need only
+be *syntactically* valid — it need not be one this server hosts. Labelling it would let anyone
+mint unbounded time series by submitting fresh names.
 
 The lease and recovery counters are the ones worth a dashboard. Individually those events are
 already logged; what a log cannot answer is *"is this happening more than it used to"*, which is
