@@ -305,6 +305,11 @@ impl AcpClient {
     }
 
     /// Build a client from an existing [`reqwest::Client`].
+    ///
+    /// Construct it through [`rusty_acp::reqwest`](crate::reqwest) rather than
+    /// your own dependency, so the two cannot resolve to different copies of
+    /// the crate and leave you with a type error between two identically named
+    /// types.
     pub fn with_http_client(base_url: impl Into<String>, http: Client) -> Result<Self> {
         Self::builder(base_url).http_client(http).build()
     }
@@ -779,6 +784,25 @@ pub struct AcpClientBuilder {
 
 impl AcpClientBuilder {
     /// Use an existing HTTP client, e.g. one carrying auth headers.
+    ///
+    /// ```
+    /// use rusty_acp::client::AcpClient;
+    /// use rusty_acp::reqwest;
+    ///
+    /// # fn build() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut headers = reqwest::header::HeaderMap::new();
+    /// headers.insert("authorization", "Bearer hunter2".parse()?);
+    ///
+    /// let client = AcpClient::builder("http://localhost:8000")
+    ///     .http_client(reqwest::Client::builder().default_headers(headers).build()?)
+    ///     .build()?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// Built through [`rusty_acp::reqwest`](crate::reqwest), so the client
+    /// handed over is guaranteed to be the type this expects.
     pub fn http_client(mut self, http: Client) -> Self {
         self.http = Some(http);
         self

@@ -45,6 +45,12 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{from_fn_with_state, Next};
 use axum::response::{IntoResponse, Response};
 use rusty_acp::client::AcpClient;
+// Through the crate rather than as a dependency of its own. An example gets the
+// right `reqwest` for free from the dev-dependencies and so cannot demonstrate
+// the mistake it would otherwise be modelling: a caller whose own `reqwest`
+// resolves to a different copy hands `with_http_client` a type that merely
+// shares its name.
+use rusty_acp::reqwest;
 use rusty_acp::server::{agent_fn, AcpServer, RunContext};
 use rusty_acp::types::{AgentManifest, AgentName, Message, RunCreateRequest, SessionId};
 
