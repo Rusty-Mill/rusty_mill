@@ -92,3 +92,19 @@ binds:
                 weight: 3
               - host: "10.0.0.2:8080"
                 weight: 1
+
+          # An OpenAI-compatible endpoint over Anthropic. A client POSTs an
+          # ordinary chat-completions request; `model` here overrides whatever
+          # it asked for, and backendAuth.key is the *provider* credential.
+          - name: llm
+            matches:
+              - path:
+                  pathPrefix: /v1
+            policies:
+              backendAuth:
+                key: sk-ant-replace-me
+            backends:
+              - ai:
+                  provider:
+                    anthropic:
+                      model: claude-sonnet-4

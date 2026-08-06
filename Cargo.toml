@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/agentgateway-config",
     "crates/agentgateway-auth",
+    "crates/agentgateway-llm",
     "crates/agentgateway-mcp",
     "crates/agentgateway-proxy",
     "crates/agentgateway-tls",
@@ -21,6 +22,7 @@ authors = ["rusty_agent_gateway contributors"]
 agentgateway-config = { path = "crates/agentgateway-config", version = "0.1.0" }
 agentgateway-auth = { path = "crates/agentgateway-auth", version = "0.1.0" }
 agentgateway-core = { path = "crates/agentgateway-core", version = "0.1.0" }
+agentgateway-llm = { path = "crates/agentgateway-llm", version = "0.1.0" }
 agentgateway-mcp = { path = "crates/agentgateway-mcp", version = "0.1.0" }
 agentgateway-proxy = { path = "crates/agentgateway-proxy", version = "0.1.0" }
 agentgateway-tls = { path = "crates/agentgateway-tls", version = "0.1.0" }

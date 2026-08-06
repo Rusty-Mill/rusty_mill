@@ -62,6 +62,7 @@ tool's own name.
 | `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
+| `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
 | `agentgateway` | The binary: data plane assembly, sockets, graceful shutdown. |
 
 Three decisions are worth knowing up front, because they shape everything else.
@@ -122,6 +123,8 @@ Implemented and tested:
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
 - `retry` with backoff, and `localRateLimit` token buckets — see
   [Retries and rate limits](#retries-and-rate-limits)
+- `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
+  included — see [The LLM gateway](#the-llm-gateway)
 - TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
@@ -245,6 +248,77 @@ answers, so `backendRequestTimeout` genuinely bounds the wait here.
 A route mixing `host` with a backend kind this build cannot serve is refused
 rather than served: silently dropping the unsupported share onto the hosts
 would send traffic somewhere the operator never asked for.
+
+## The LLM gateway
+
+```yaml
+- name: llm
+  matches:
+    - path:
+        pathPrefix: /v1
+  policies:
+    backendAuth:
+      key: sk-ant-...          # the provider credential, not the caller's
+  backends:
+    - ai:
+        provider:
+          anthropic:
+            model: claude-sonnet-4   # overrides whatever the caller asked for
+```
+
+A client POSTs an ordinary OpenAI chat-completions request and gets an OpenAI
+response back, whichever provider actually served it. Switching provider is a
+configuration edit rather than a client change — which is the entire point.
+
+### Only Anthropic is translated
+
+For an OpenAI-compatible provider the body is forwarded essentially unchanged:
+only `model` is overridden and the credential swapped. That is deliberate. A
+typed round-trip would silently drop every field this gateway has not heard of
+— tool definitions, `response_format`, `logprobs`, whatever ships next — and a
+gateway that quietly deletes half a request is worse than one that refuses it.
+`hostOverride` points the same path at any OpenAI-compatible endpoint,
+self-hosted or otherwise.
+
+Anthropic gets a real translation, because three differences bite:
+
+- **`max_tokens` is optional for OpenAI and required by Anthropic**, so a valid
+  request would be rejected. Translation supplies a default (4096) rather than
+  passing the absence through.
+- **The system prompt is a message for OpenAI and a top-level field for
+  Anthropic.** Left in the message list it is either rejected or, worse,
+  silently treated as a user turn. Several system messages are joined rather
+  than dropped.
+- **Finish reasons use different vocabularies** — `end_turn` is what OpenAI
+  calls `stop`. A client switching providers should not have to learn both.
+
+### Streaming
+
+Streams are re-framed, not buffered: an LLM response is the one thing a client
+most wants incrementally, and collecting it would turn a token-by-token answer
+into a long silence followed by a wall of text.
+
+OpenAI frames pass through byte-identically. Anthropic's event stream is
+translated by a small state machine, because the two are not a per-event
+mapping: Anthropic sends the id, model and *prompt* tokens once in
+`message_start` and the *completion* tokens in `message_delta`, while OpenAI
+repeats id and model on every chunk, announces the assistant role exactly once,
+and terminates with a literal `data: [DONE]` that is not a chunk at all.
+
+Token usage is reported as a structured log line rather than a metric —
+per-request counts keyed by model are unbounded label cardinality, and a client
+inventing model names should not be able to take a metrics backend down.
+
+### Errors are passed through
+
+A provider's status and body are returned as they arrived. "invalid api key" is
+the useful part, and a gateway that rewrites it as "bad gateway" costs an
+afternoon. Errors the gateway itself generates use OpenAI's error envelope, so
+a client's existing handling works.
+
+`backendAuth: passthrough` is ignored here: a provider API key is not the
+caller's bearer token, and forwarding one as the other would send a user's
+credential to OpenAI.
 
 ## TLS
 
@@ -487,7 +561,7 @@ once, which needs a direct `rustls` dependency pinned to the same 0.23.
 cargo test --workspace
 ```
 
-155 tests. The config tests are anchored on YAML taken verbatim from
+197 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -502,6 +576,10 @@ signed by an untrusted key and an `alg: none` token.
 The timeout tests drive a genuinely slow subprocess rather than a stubbed
 future, which is how the `requestTimeout`/`backendRequestTimeout` distinction
 above was found rather than assumed.
+
+The LLM tests stand up a mock provider that records the body it actually
+received, so the assertions are about whether the provider got the shape its
+API requires rather than merely whether the gateway answered.
 
 The proxy tests stand up a real upstream that echoes back the request line and
 headers it saw, so the assertions are about what actually arrived rather than

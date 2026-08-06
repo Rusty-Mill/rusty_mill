@@ -18,6 +18,7 @@ use std::time::Duration;
 use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
+use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Federation;
 use agentgateway_proxy::{HostProxy, Scheme};
 use agentgateway_tls::{TlsBinds, TlsTerminator};
@@ -59,6 +60,8 @@ enum BackendState {
     },
     /// One or more `host` upstreams, proxied over HTTP.
     Host(HostProxy),
+    /// An LLM provider behind an OpenAI-compatible API.
+    Ai(LlmBackend),
     /// A backend we parsed but cannot serve. The reason is returned to the
     /// client rather than logged and forgotten, so a misconfiguration is
     /// visible from the outside instead of looking like a routing miss.
@@ -193,6 +196,15 @@ impl Gateway {
                             BackendState::Host(proxy)
                         }
                     }
+                }
+                Some(BackendTarget::Ai(ai)) => {
+                    let backend = LlmBackend::new(ai, &route.policies, &at)?;
+                    tracing::info!(
+                        route = %at,
+                        provider = backend.provider().name(),
+                        "LLM backend ready"
+                    );
+                    BackendState::Ai(backend)
                 }
                 Some(other) => BackendState::Unsupported(format!(
                     "backend kind `{}` is not served by this build",
@@ -339,6 +351,7 @@ impl Gateway {
                 .proxy(request, selection.matched_prefix.as_deref(), peer, scheme)
                 .await
                 .map(Body::new),
+            BackendState::Ai(backend) => backend.handle(request).await.map(Body::new),
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
     }

@@ -60,9 +60,6 @@ impl BackendTarget {
 impl Backend {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
         match &self.target {
-            BackendTarget::Ai(_) => findings.push(format!(
-                "{at}: `ai` backend parsed but the LLM gateway is not implemented yet"
-            )),
             BackendTarget::Dynamic(_) => findings.push(format!(
                 "{at}: `dynamic` backend parsed but dynamic resolution is not implemented yet"
             )),
@@ -70,7 +67,7 @@ impl Backend {
                 "{at}: `service` backend parsed but service discovery is not implemented yet; \
                  use `host` for a literal address"
             )),
-            BackendTarget::Host(_) | BackendTarget::Mcp(_) => {}
+            BackendTarget::Host(_) | BackendTarget::Mcp(_) | BackendTarget::Ai(_) => {}
         }
     }
 }
