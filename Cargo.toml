@@ -64,6 +64,11 @@ path = "examples/echo_server.rs"
 required-features = ["server"]
 
 [[example]]
+name = "mock_server"
+path = "examples/mock_server.rs"
+required-features = ["server"]
+
+[[example]]
 name = "send_message"
 path = "examples/send_message.rs"
 required-features = ["client"]

@@ -107,6 +107,19 @@ while let Some(event) = stream.next().await {
 # }
 ```
 
+### A richer mock agent
+
+`examples/mock_server.rs` is a more complete mock than `echo_server`: five skills routed by keyword, structured data artifacts, a URL artifact, a chunked/appended artifact (streamed piece by piece), a bare-`Message` reply with no task, a `Rejected` task, and an `AuthRequired` interrupted task.
+
+```sh
+cargo run --example mock_server --features server   # listens on :8081
+
+A2A_AGENT_URL=http://127.0.0.1:8081 cargo run --example send_message --features client -- "what's the weather in Kyoto?"
+A2A_AGENT_URL=http://127.0.0.1:8081 cargo run --example send_message --features client -- "write me a long report on rust"
+```
+
+See the file's header comment for the full list of trigger phrases.
+
 ## What an `AgentExecutor` looks like
 
 `AgentExecutor::execute` is called once per inbound message. It gets a `RequestContext` (the message, the task it continues if any, and a `CancellationToken` signaled on `CancelTask`) and an `EventSink` to report progress with:
