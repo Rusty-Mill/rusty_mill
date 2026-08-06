@@ -168,7 +168,13 @@ semantics against *any* pid.
    `SIGTERM` to an arbitrary cooperating rustils child without ever
    needing `fg`/`bg`. Bundling all four into one landing (like Sandbox's
    confinement+privsep question 5) risks blocking whichever slice has a
-   real consumer on whichever doesn't.
+   real consumer on whichever doesn't. **Scoped to implementation depth**:
+   `docs/design-discussion-msys-signals.md` takes subsystem (2) further —
+   named-pipe naming, wire format, security ACL, failure modes, and a
+   real scope reduction it finds along the way (this narrower slice needs
+   none of subsystem (1)'s shared table at all, since point-to-point
+   delivery only needs the target's pid, which a `Child`/`GroupHandle`
+   already has).
 3. **Where does the shared table live, and what's its failure mode?**
    Cygwin's shared pinfo segment is scoped per-installation (keyed by
    an install-path hash baked into every pipe/mutex name — visible in
