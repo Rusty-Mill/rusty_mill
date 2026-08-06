@@ -30,6 +30,7 @@ use crate::types::{
     StreamResponse, SubscribeToTaskRequest, TaskPushNotificationConfig,
 };
 
+use super::auth::extract_credentials;
 use super::engine::Engine;
 
 pub(crate) fn build_router(engine: Arc<Engine>) -> Router {
@@ -75,6 +76,22 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
 
     if let Err(version_err) = check_version(&headers) {
         return jsonrpc_error_response(envelope.id, version_err);
+    }
+
+    let credentials = extract_credentials(
+        &engine.card().security_schemes,
+        |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        },
+        None,
+    );
+    if envelope.method.as_str() != methods::GET_EXTENDED_AGENT_CARD {
+        if let Err(auth_err) = engine.authenticate(&credentials).await {
+            return jsonrpc_error_response(envelope.id, auth_err);
+        }
     }
 
     let params = envelope.params.unwrap_or(Value::Null);
@@ -159,7 +176,7 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
-        methods::GET_EXTENDED_AGENT_CARD => match engine.get_extended_agent_card() {
+        methods::GET_EXTENDED_AGENT_CARD => match engine.get_extended_agent_card(&credentials).await {
             Ok(card) => jsonrpc_ok(envelope.id, &card),
             Err(e) => jsonrpc_error_response(envelope.id, e),
         },

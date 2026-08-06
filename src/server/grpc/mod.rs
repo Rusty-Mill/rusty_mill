@@ -23,6 +23,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
+use super::auth::{extract_credentials, Credentials};
 use super::engine::Engine;
 use convert::*;
 use pb::a2a_service_server::A2aService;
@@ -39,6 +40,35 @@ impl GrpcService {
     pub(crate) fn new(engine: Arc<Engine>) -> Self {
         GrpcService { engine }
     }
+
+    /// Extracts credentials for `AgentCard.securitySchemes` from `request`'s
+    /// gRPC metadata (which, per gRPC convention, only has ASCII-lowercase
+    /// keys - so a scheme's declared header/key `name` is lowercased
+    /// before lookup).
+    fn credentials<T>(&self, request: &Request<T>) -> Credentials {
+        let metadata = request.metadata();
+        extract_credentials(
+            &self.engine.card().security_schemes,
+            |name| {
+                metadata
+                    .get(name.to_ascii_lowercase())
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            },
+            None,
+        )
+    }
+
+    /// Enforces `AgentCard.securityRequirements` (spec Section 4.5)
+    /// against `request`'s metadata.
+    async fn authenticate<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        let credentials = self.credentials(request);
+        self.engine
+            .authenticate(&credentials)
+            .await
+            .map(|_| ())
+            .map_err(a2a_error_to_status)
+    }
 }
 
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<pb::StreamResponse, Status>> + Send>>;
@@ -49,6 +79,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SendMessageRequest>,
     ) -> Result<Response<pb::SendMessageResponse>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_send_message_request_to_ours(request.into_inner())?;
         let result = self.engine.send_message(req).await.map_err(a2a_error_to_status)?;
         Ok(Response::new(our_send_result_to_pb(result)))
@@ -60,6 +91,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SendMessageRequest>,
     ) -> Result<Response<Self::SendStreamingMessageStream>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_send_message_request_to_ours(request.into_inner())?;
         let stream = self
             .engine
@@ -71,6 +103,7 @@ impl A2aService for GrpcService {
     }
 
     async fn get_task(&self, request: Request<pb::GetTaskRequest>) -> Result<Response<pb::Task>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_get_task_request_to_ours(request.into_inner());
         let task = self.engine.get_task(req).await.map_err(a2a_error_to_status)?;
         Ok(Response::new(our_task_to_pb(task)))
@@ -80,6 +113,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::ListTasksRequest>,
     ) -> Result<Response<pb::ListTasksResponse>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_list_tasks_request_to_ours(request.into_inner());
         let res = self.engine.list_tasks(req).await.map_err(a2a_error_to_status)?;
         Ok(Response::new(our_list_tasks_response_to_pb(res)))
@@ -89,6 +123,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::CancelTaskRequest>,
     ) -> Result<Response<pb::Task>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_cancel_task_request_to_ours(request.into_inner());
         let task = self.engine.cancel_task(req).await.map_err(a2a_error_to_status)?;
         Ok(Response::new(our_task_to_pb(task)))
@@ -100,6 +135,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SubscribeToTaskRequest>,
     ) -> Result<Response<Self::SubscribeToTaskStream>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_subscribe_to_task_request_to_ours(request.into_inner());
         let stream = self
             .engine
@@ -114,6 +150,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::TaskPushNotificationConfig>,
     ) -> Result<Response<pb::TaskPushNotificationConfig>, Status> {
+        self.authenticate(&request).await?;
         let config = pb_push_config_to_ours(request.into_inner());
         let created = self
             .engine
@@ -127,6 +164,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::GetTaskPushNotificationConfigRequest>,
     ) -> Result<Response<pb::TaskPushNotificationConfig>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_get_push_notification_config_request_to_ours(request.into_inner());
         let config = self
             .engine
@@ -140,6 +178,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::ListTaskPushNotificationConfigsRequest>,
     ) -> Result<Response<pb::ListTaskPushNotificationConfigsResponse>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_list_push_notification_configs_request_to_ours(request.into_inner());
         let res = self
             .engine
@@ -153,11 +192,13 @@ impl A2aService for GrpcService {
 
     async fn get_extended_agent_card(
         &self,
-        _request: Request<pb::GetExtendedAgentCardRequest>,
+        request: Request<pb::GetExtendedAgentCardRequest>,
     ) -> Result<Response<pb::AgentCard>, Status> {
+        let credentials = self.credentials(&request);
         let card = self
             .engine
-            .get_extended_agent_card()
+            .get_extended_agent_card(&credentials)
+            .await
             .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_agent_card_to_pb(card)))
     }
@@ -166,6 +207,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::DeleteTaskPushNotificationConfigRequest>,
     ) -> Result<Response<()>, Status> {
+        self.authenticate(&request).await?;
         let req = pb_delete_push_notification_config_request_to_ours(request.into_inner());
         self.engine
             .delete_push_notification_config(req)

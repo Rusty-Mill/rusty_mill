@@ -40,14 +40,17 @@
 //! server.serve(([127, 0, 0, 1], 8080)).await
 //! # }
 //! ```
+pub mod auth;
 mod engine;
 mod executor;
 #[cfg(feature = "grpc")]
 pub mod grpc;
+mod push;
 mod rest;
 mod router;
 mod store;
 
+pub use auth::{AuthContext, AuthVerifier, Credentials};
 pub use executor::{AgentExecutor, EventSink, RequestContext};
 pub use store::{InMemoryTaskStore, TaskStore};
 
@@ -92,6 +95,17 @@ impl AgentServer {
     /// regardless.
     pub fn with_extended_card(mut self, card: AgentCard) -> Self {
         self.engine.set_extended_card(card);
+        self
+    }
+
+    /// Registers an [`AuthVerifier`] to enforce this agent's
+    /// `securitySchemes`/`securityRequirements` (spec Section 4.5) - see
+    /// the [`auth`] module docs. Without one, declared security
+    /// requirements are enforced by rejecting every request (fail
+    /// closed); with none declared at all, the agent remains public
+    /// either way.
+    pub fn with_auth_verifier(mut self, verifier: Arc<dyn AuthVerifier>) -> Self {
+        self.engine.set_auth_verifier(verifier);
         self
     }
 

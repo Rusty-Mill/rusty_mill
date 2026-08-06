@@ -63,6 +63,7 @@ server = [
   "dep:async-stream",
   "dep:futures-util",
   "dep:futures-core",
+  "dep:reqwest",
   "tokio/rt-multi-thread",
 ]
 signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
@@ -106,6 +107,11 @@ required-features = ["full"]
 name = "grpc_integration"
 path = "tests/grpc_integration.rs"
 required-features = ["grpc"]
+
+[[test]]
+name = "security_and_push_notifications"
+path = "tests/security_and_push_notifications.rs"
+required-features = ["client", "server"]
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
