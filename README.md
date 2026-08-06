@@ -119,6 +119,8 @@ Implemented and tested:
   (`allowTools` / `denyTools`)
 - `host` backends: HTTP reverse proxying with weighted load balancing,
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
+- `retry` with backoff, and `localRateLimit` token buckets — see
+  [Retries and rate limits](#retries-and-rate-limits)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
@@ -238,6 +240,70 @@ answers, so `backendRequestTimeout` genuinely bounds the wait here.
 A route mixing `host` with a backend kind this build cannot serve is refused
 rather than served: silently dropping the unsupported share onto the hosts
 would send traffic somewhere the operator never asked for.
+
+## Retries and rate limits
+
+```yaml
+policies:
+  retry:
+    attempts: 2          # retries *after* the first try, so three tries total
+    backoff: 100ms       # doubles each attempt, capped at 30s
+    codes: [502, 503]
+  localRateLimit:
+    - maxTokens: 100     # burst
+      tokensPerFill: 100
+      fillInterval: 60s
+    - maxTokens: 5       # sustained
+      tokensPerFill: 5
+      fillInterval: 1s
+```
+
+### What is safe to retry
+
+A **connect** failure never reached the upstream, so replaying it cannot
+duplicate work. Any other transport error is ambiguous — the request may have
+arrived and been processed, with only the response lost on the way back — so it
+is **not** retried. Replaying that would silently double a payment or a write.
+A timeout is ambiguous for the same reason and is not retried either.
+
+A **status code** is different: the upstream answered, so it certainly saw the
+request. Retrying is the operator's explicit choice by listing the code, which
+is why nothing is retried on status unless `codes` names it. Each attempt takes
+the next endpoint in the ring, since retrying the instance that just failed is
+the least likely way to succeed.
+
+### Why a body has to be buffered
+
+A retry replays the request, and a streaming body can only be read once. A body
+is buffered only when its size is **known in advance** and fits in 64 KiB — so
+the body is never partially consumed to find out how big it is, which would
+leave a stream that can be neither replayed nor forwarded. Requests with a
+`Content-Length` inside the limit get retries; chunked or oversized ones are
+streamed straight through and simply do not.
+
+### Rate limits
+
+Several limits on one route must *all* permit a request, which is how burst and
+sustained rates are expressed together. They share one lock: checking them in
+turn would spend a token from the burst bucket before discovering the sustained
+one refuses, billing a request that was never served.
+
+Refill is lazy — no background task ticks every bucket in the process — and
+credits whole elapsed intervals only, because advancing to *now* on each check
+would discard the remainder every time and refill slower than configured.
+Buckets start full, so a gateway that has just restarted does not spend its
+first interval refusing traffic.
+
+Over the limit is `429` with `Retry-After`, reporting the *longest* wait across
+the limits that refused: coming back when only the shorter one has refilled
+would just be refused again. `Retry-After` is never `0`, which would invite an
+immediate retry.
+
+Rate limiting runs **before** authentication, so a flood is refused before it
+costs a signature verification and possibly a JWKS fetch. It runs after the
+CORS preflight branch for the same reason authentication does — a browser
+reports a refused preflight as an opaque CORS error, hiding the 429 the caller
+needs to see.
 
 ## Timeouts
 
@@ -362,7 +428,7 @@ Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 cargo test --workspace
 ```
 
-111 tests. The config tests are anchored on YAML taken verbatim from
+143 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -380,7 +446,13 @@ above was found rather than assumed.
 
 The proxy tests stand up a real upstream that echoes back the request line and
 headers it saw, so the assertions are about what actually arrived rather than
-what the gateway believed it sent.
+what the gateway believed it sent. The retry tests script that upstream — "fail
+twice, then succeed" — and count hits, which is how "did not retry" is told
+apart from "retried and got the same answer".
+
+The rate limiter takes time as a parameter rather than reading a clock, so its
+tests drive time instead of sleeping. A rate limiter tested with `sleep` is one
+tested at a single resolution, on one machine, when CI was not busy.
 
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp

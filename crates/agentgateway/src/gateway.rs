@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
-use agentgateway_core::{CorsDecision, CorsMatcher, Router};
+use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
 use agentgateway_mcp::Federation;
 use agentgateway_proxy::HostProxy;
 use axum::body::Body;
@@ -42,6 +42,7 @@ pub struct Gateway {
 /// Per-route serving state.
 struct RouteState {
     cors: Option<CorsMatcher>,
+    rate_limit: Option<RateLimiter>,
     jwt: Option<JwtAuthenticator>,
     /// Budget for producing a response on this route.
     timeout: Option<Duration>,
@@ -83,6 +84,7 @@ impl Gateway {
         let mut routes = Vec::with_capacity(router.route_count());
         routes.resize_with(router.route_count(), || RouteState {
             cors: None,
+            rate_limit: None,
             jwt: None,
             timeout: None,
             backend: BackendState::Unsupported("route has no backend".into()),
@@ -95,6 +97,7 @@ impl Gateway {
                 .unwrap_or_else(|| format!("route #{}", route.id));
 
             let cors = route.policies.cors.as_ref().map(CorsMatcher::new);
+            let rate_limit = RateLimiter::new(&route.policies.local_rate_limit, &at)?;
 
             // Built here, not per request: a `file:` JWKS that is missing or
             // malformed should stop the gateway booting rather than turn every
@@ -195,6 +198,7 @@ impl Gateway {
 
             routes[route.id] = RouteState {
                 cors,
+                rate_limit,
                 jwt,
                 timeout,
                 backend,
@@ -237,6 +241,24 @@ impl Gateway {
             Some(CorsDecision::Simple(headers)) => Some(headers),
             Some(CorsDecision::NotCors) | None => None,
         };
+
+        // Rate limiting runs before authentication, so a flood is refused
+        // before it costs a signature verification and possibly a JWKS fetch.
+        // It runs after the preflight branch for the same reason auth does: a
+        // browser reports a refused preflight as an opaque CORS error, so
+        // rate limiting one hides the 429 the caller needs to see.
+        if let Some(limiter) = &state.rate_limit
+            && let Err(retry_after) = limiter.check()
+        {
+            let mut response = status(
+                StatusCode::TOO_MANY_REQUESTS,
+                "the rate limit for this route has been exceeded",
+            );
+            if let Ok(value) = http::HeaderValue::try_from(retry_after.seconds().to_string()) {
+                response.headers_mut().insert(header::RETRY_AFTER, value);
+            }
+            return Ok(with_cors(response, cors_headers));
+        }
 
         // Authentication runs after the preflight branch above and before the
         // backend. The ordering is load-bearing: browsers do not send

@@ -7,10 +7,12 @@
 
 mod cors;
 mod hostname;
+mod ratelimit;
 mod router;
 
 pub use cors::{CorsDecision, CorsMatcher};
 pub use hostname::HostnamePattern;
+pub use ratelimit::{RateLimitError, RateLimiter, RetryAfter};
 pub use router::{
     CompiledBind, CompiledListener, CompiledRoute, RouteMatcher, Router, RouterError, Selection,
 };
