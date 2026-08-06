@@ -36,7 +36,9 @@ Phase 7  PTY surface (D13) — landed 2026-07-23 (both Linux + Windows)
 Phase 8  Tun surface (D14)
 Phase 9  Windowing + Registry/Config (nexus-only, converge last)
 ─────────────────────────────────────────────────────────────
-parked   fork/execve vs posix_spawn — owner design decision
+decided  fork/execve vs posix_spawn — DECIDED 2026-08-06: stays on
+         posix_spawn indefinitely (docs/decision-request-fork-execve.md,
+         docs/architecture.md's "Decided" section)
 parked   MSYS2/Cygwin-level Windows job control & signal parity —
          DECIDED 2026-08-06: parked indefinitely, no consumer built
          against. All four subsystems scoped to implementation depth
@@ -972,27 +974,33 @@ architecture.md's own assessment:
 
 ---
 
-## Parked: fork/execve vs posix_spawn
+## Decided: fork/execve vs posix_spawn
 
 Independent of every phase above — a design decision, not a sequencing
-question. The architecture diagram the owner confirmed shows raw
-`fork`/`execve` on Layer 1 Linux; current code uses `posix_spawn`
-(outsources async-signal-safety to glibc). If resolved toward raw:
-`memfd_create` (D11) is the prerequisite — it's the thread-free
-here-doc mechanism that makes a raw `clone(SIGCHLD)` fork sound
-(single-threaded at every fork point), the exact invariant `posix_spawn`
-exists to avoid needing. Do not start this without the owner's explicit
-go-ahead; recorded in `docs/architecture.md`'s "Open item" section.
+question. `docs/architecture.md` used to show raw `fork`/`execve` on
+Layer 1 Linux as the target picture, disagreeing with current code's
+`posix_spawn` (which outsources async-signal-safety to glibc);
+recorded there as an open item and left for an owner call.
 
 **Dug into 2026-08-06** — see `docs/decision-request-fork-execve.md`:
 checked against rusty_libc's real current source rather than the
-framing above at face value, and found "adopting rusty_libc's
+original framing at face value, and found "adopting rusty_libc's
 fork+execve" describes donor material that doesn't exist yet (no
 `fork`/`execve`/`clone` anywhere in that crate) — a two-repo project,
-not a rustils-side flag flip. **Option 3 landed the same day**
-(Phase 3's own entry, above): `memfd_create` itself, independent of
-this larger question, which remains genuinely open pending an owner
-call between options 1 and 2.
+not a rustils-side flag flip. Option 3 (`memfd_create` alone, D11's
+own prerequisite for a raw fork) landed the same day (Phase 3's own
+entry, above), independent of the larger question.
+
+**Decided the same day: option 1 — stay on `posix_spawn`
+indefinitely.** `docs/architecture.md`'s target picture updated to
+match (its own "Decided" section has the full reasoning): `posix_spawn`
+already removes the async-signal-safe critical region by construction,
+PTY hosting (D13) already independently chose the identical answer
+under real pressure, and going raw would mean commissioning a new
+hazard class in rusty_libc with no named consumer forcing it. This
+item is now closed, not parked — revisit only if a real consumer or a
+recovered rationale beyond Track P's own general "no glibc" aspiration
+ever surfaces.
 
 ---
 

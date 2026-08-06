@@ -7,18 +7,30 @@ posix_spawn" and `docs/architecture.md` has carried as its one "Open
 item recorded" since the roadmap opened — dug into for the first time
 here, rather than left as a two-sentence pointer.
 
-## Outcome (partial)
+## Outcome
 
 **Option 3 decided and landed, 2026-08-06** — `memfd_create` wired
 into `platform::fs` as `AnonymousFile::create_memfd`
 (`docs/extraction-map.md`'s D11 entry, `docs/behavior/fs.md`'s own
-section), independent of everything else in this document. **Options 1
-vs. 2 — stay on `posix_spawn` indefinitely, or commission the
-rusty_libc fork/exec work first — remain genuinely open.** This
-document's own findings (the two-repo shape, PTY's own precedent for
-declining raw fork) are unchanged and still need an owner call between
-them; landing `memfd_create` doesn't resolve or presuppose either
-direction.
+section), independent of everything else in this document.
+
+**Options 1 vs. 2 decided the same day: option 1 — stay on
+`posix_spawn` indefinitely.** `docs/architecture.md`'s target picture
+(the one active disagreement this document opened against) is updated
+to match; `docs/convergence-roadmap.md`'s own parked entry is closed,
+not just annotated. Reasoning, weighted in the order it was actually
+weighed: `posix_spawn` already delivers the safety property that
+matters (every allocation in the parent, before the call — the
+async-signal-safe critical region gone by construction, not managed);
+PTY hosting (D13) already made this identical call once, independently,
+under real pressure, and landed on the same answer
+(`POSIX_SPAWN_SETSID` over `fork`+`TIOCSCTTY`); and this document's own
+finding — that "adopting rusty_libc's fork+execve" describes donor
+material that doesn't exist, making option 2 a two-repo commitment to a
+new hazard class — tipped it decisively, with no named consumer
+forcing that cost. Revisit only if a real consumer or a recovered
+rationale beyond Track P's own general "no glibc in the spawn path"
+aspiration ever surfaces; nothing here expires on its own.
 
 ## Where this stands today
 
@@ -125,12 +137,13 @@ statement:
    acknowledged disagreement — the diagram becomes descriptive of the
    decision made, not aspirational. Lowest cost; already the
    safer-by-construction choice PTY's own design pass independently
-   arrived at when it faced the same question.
+   arrived at when it faced the same question. **Chosen — see Outcome
+   above.**
 2. **Commission the rusty_libc work first**, as its own gated project
    in that repo (fork/clone/execve wrappers, the async-signal-safety
    story rewritten from scratch), *then* revisit adopting it here —
    matching the two-repo shape this document found, not the one-repo
-   shape the roadmap's current wording implies.
+   shape the roadmap's current wording implies. **Not chosen.**
 3. **Land the small, independent win regardless**: wire `memfd_create`
    into `platform::fs` now — it's already sitting in the pinned
    dependency, D11's own text already names it as a `Dir`-adjacent
@@ -154,9 +167,7 @@ statement:
    real dependency on the fork/execve question beyond historical
    association in D11's own text?
 
-## What this document does not decide
+## What this document decided
 
-Whether to go raw or stay on `posix_spawn` — options 1 vs. 2 remain an
-open owner call, unaffected by option 3 already landing. Same posture
-as every decision-request in this codebase for the part still
-undecided: input to an owner's call, not the call itself.
+All three options are resolved — see Outcome above. Nothing in this
+family is still pending an owner call as of 2026-08-06.
