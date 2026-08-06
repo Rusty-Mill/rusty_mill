@@ -433,7 +433,7 @@ multi-replica suite, so the choice is about what happens to a run *after* it fin
 
 | | `RedisStore` | `PostgresStore` |
 | --- | --- | --- |
-| Expiry | A key TTL, 24h by default — the HA guide's model | None. `sweep()` deletes finished runs past a configured retention, and only when you call it |
+| Expiry | A key TTL, 24h by default — the HA guide's model | None. `sweep()` deletes finished runs and idle sessions past a configured retention, and only when you call it |
 | History | Gone when the TTL lapses | Kept until you decide otherwise |
 | Queries | By run id only | Ordinary SQL: which runs failed today, which agent is busiest, what a session contained |
 | Setup | None | Tables are created on connect |
@@ -462,8 +462,25 @@ Retention is **off by default**, since unbounded history is usually the reason t
 Postgres in the first place. Turn it on with `PostgresStoreConfig::retention` and call
 `sweep()` from a job you control — nothing deletes anything on its own.
 
-Sessions are never swept. They outlive the runs that fed them, and a conversation is not
-garbage because its last turn is old.
+`sweep()` collects sessions on the same window, and returns both counts:
+
+```rust
+let swept = store.sweep().await?;
+swept.runs       // finished runs, with their events, leases and recovery records
+swept.sessions   // conversations, with their history and state documents
+```
+
+A session is stale when nothing has **written** to it since the cutoff — adopted it, appended to
+it, or stored its state. Not when it was last *read*: turning a read into a write would put a row
+lock in front of every run loading its own history, and a conversation being read but never added
+to is one nobody is continuing. This differs from `InMemoryStore`, where a read does count as use,
+because that store has to choose a victim among live sessions under a count bound, while this one
+only has to answer whether a session is old.
+
+A session with a run still in flight is never collected, however far past the window it sits, so a
+sweep cannot take a conversation out from under the run about to append to it. Everything else that
+goes leaves nothing behind — the same silent restart as a Redis TTL or an in-memory eviction, and
+logged at `warn` for the same reason.
 
 ### How it works
 

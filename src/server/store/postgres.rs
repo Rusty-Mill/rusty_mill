@@ -40,20 +40,50 @@ const MAX_INLINE_PAYLOAD: usize = 7000;
 /// form spends 32, plus one for the separator.
 const MAX_CHANNEL_PREFIX: usize = 30;
 
+/// What one [`sweep`](PostgresStore::sweep) removed.
+///
+/// Two numbers rather than one because they answer different questions. Runs
+/// removed tracks the volume a retention window is holding back; sessions
+/// removed is the one to watch, since a swept session is indistinguishable from
+/// one that never existed and an agent that then writes to it silently starts
+/// the conversation over.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Swept {
+    /// Finished runs removed, with their events, leases, recovery records and
+    /// signals.
+    pub runs: u64,
+    /// Sessions removed, with their message history and state documents.
+    pub sessions: u64,
+}
+
+impl Swept {
+    /// Whether the sweep found nothing to do.
+    pub fn is_empty(&self) -> bool {
+        self.runs == 0 && self.sessions == 0
+    }
+}
+
 /// How a [`PostgresStore`] names its tables, and how long it keeps things.
 #[derive(Debug, Clone)]
 pub struct PostgresStoreConfig {
     /// Prefix for every table and channel, so several deployments can share one
     /// database.
     pub table_prefix: String,
-    /// How long a finished run is kept before [`PostgresStore::sweep`] will
-    /// remove it.
+    /// How long a finished run, or an untouched session, is kept before
+    /// [`PostgresStore::sweep`] will remove it.
     ///
     /// `None` — the default — keeps everything forever. Postgres has no
     /// equivalent of a Redis TTL, so retention is a decision rather than
     /// something the store does for free, and unbounded history is usually the
     /// reason to pick this backend over Redis. Sweeping is never automatic:
     /// call [`PostgresStore::sweep`] from a job you control.
+    ///
+    /// One window for both, deliberately. A second knob would have to be
+    /// justified by a deployment that wants its conversations kept on a
+    /// different schedule from its runs, and until one turns up the extra
+    /// setting is only another thing to get wrong. Both are measured from last
+    /// write, so a session outlives the runs that fed it for exactly as long as
+    /// a run outlives its own completion.
     pub retention: Option<Duration>,
     /// Maximum pooled connections.
     pub max_connections: u32,
@@ -236,18 +266,39 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// Delete runs that finished longer ago than the configured retention, and
-    /// the events, leases, recovery records and signals belonging to them.
+    /// Delete runs that finished longer ago than the configured retention —
+    /// with the events, leases, recovery records and signals belonging to them
+    /// — and sessions nothing has written to since the cutoff, with their
+    /// message history and state documents.
     ///
-    /// Returns the number of runs removed. A no-op when no retention is
-    /// configured — deleting nothing is the right default for a backend chosen
-    /// because Redis forgets too soon.
+    /// A no-op when no retention is configured, which is the default: deleting
+    /// nothing is right for a backend usually chosen because Redis forgets too
+    /// soon.
     ///
-    /// Sessions are left alone: they outlive the runs that contributed to them,
-    /// and a conversation is not garbage because its last turn is old.
-    pub async fn sweep(&self) -> StoreResult<u64> {
+    /// # What makes a session stale
+    ///
+    /// **Last written to**, meaning adopted by a run, appended to, or having
+    /// its state stored. Not last *read*: making a read a write would put a row
+    /// lock on the sessions row in the path of every run that loads its own
+    /// history, and turn a query that a read replica could serve into one it
+    /// cannot. The cost is that a conversation being read but never added to
+    /// ages out — which is the right answer anyway, since nobody is continuing
+    /// it.
+    ///
+    /// This differs from [`InMemoryStore`](super::InMemoryStore), where a read
+    /// does count as use. That store evicts under a *count* bound and has to
+    /// choose a victim among live sessions, so it needs the finer signal; here
+    /// the question is only whether a session is old.
+    ///
+    /// A session with a run still in flight is never collected, however old,
+    /// so a sweep cannot take a conversation out from under a run that is about
+    /// to append to it.
+    ///
+    /// An age-based rule was rejected: it would drop the long conversation
+    /// still in progress in favour of the one nobody has opened in a year.
+    pub async fn sweep(&self) -> StoreResult<Swept> {
         let Some(retention) = self.config.retention else {
-            return Ok(0);
+            return Ok(Swept::default());
         };
         let cutoff = chrono::Utc::now()
             - chrono::Duration::from_std(retention).unwrap_or(chrono::Duration::zero());
@@ -284,7 +335,58 @@ impl PostgresStore {
         .await
         .map_err(|err| pg_error("sweep expired runs", err))?;
 
-        Ok(deleted.try_get::<i64, _>("removed").unwrap_or(0) as u64)
+        let sessions = self.table("sessions");
+        // `NOT EXISTS` against non-terminal runs is what keeps a live
+        // conversation. It stays correct as the runs table is swept around it,
+        // because only terminal runs are ever swept — a run that would protect
+        // a session is never one of the rows this statement's sibling removed.
+        let collected = sqlx::query(&format!(
+            "WITH stale AS (
+                 DELETE FROM {sessions}
+                 WHERE updated_at < $1
+                   AND NOT EXISTS (
+                       SELECT 1 FROM {runs}
+                       WHERE run->>'session_id' = {sessions}.session_id::text
+                         AND run->>'status' NOT IN ('completed', 'failed', 'cancelled')
+                   )
+                 RETURNING session_id
+             ),
+             cleaned_messages AS (
+                 DELETE FROM {messages} WHERE session_id IN (SELECT session_id FROM stale)
+             ),
+             cleaned_state AS (
+                 DELETE FROM {state} WHERE session_id IN (SELECT session_id FROM stale)
+             )
+             SELECT count(*) AS removed FROM stale",
+            sessions = sessions,
+            runs = runs,
+            messages = self.table("session_messages"),
+            state = self.table("session_state"),
+        ))
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|err| pg_error("sweep expired sessions", err))?;
+
+        let swept = Swept {
+            runs: deleted.try_get::<i64, _>("removed").unwrap_or(0) as u64,
+            sessions: collected.try_get::<i64, _>("removed").unwrap_or(0) as u64,
+        };
+
+        if swept.sessions > 0 {
+            // Warned rather than logged at debug, and separately from the runs.
+            // A collected session leaves nothing behind that says it existed,
+            // so an agent handed that session id afterwards starts a fresh
+            // conversation without any error to notice — the same silent
+            // restart the in-memory store's eviction has, and worth the same
+            // line in the log.
+            tracing::warn!(
+                sessions = swept.sessions,
+                ?retention,
+                "swept sessions past retention; their history and state are gone"
+            );
+        }
+        Ok(swept)
     }
 }
 
@@ -545,9 +647,16 @@ impl Store for PostgresStore {
     async fn ensure_session(&self, session: Session) -> StoreResult<SessionRecord> {
         // Whichever replica gets there first seeds the session; the rest read
         // what is already stored.
+        //
+        // The conflict branch touches `updated_at` and nothing else. This is a
+        // run adopting the session, which is the moment `sweep` has to stop
+        // treating it as idle — otherwise a conversation quiet for longer than
+        // the retention window could be collected between the run picking it up
+        // and the run appending its output, and the history would come back
+        // empty with nothing raised.
         sqlx::query(&format!(
             "INSERT INTO {} (session_id, state_url, prefix_history) VALUES ($1, $2, $3)
-             ON CONFLICT (session_id) DO NOTHING",
+             ON CONFLICT (session_id) DO UPDATE SET updated_at = now()",
             self.table("sessions")
         ))
         .bind(*session.id.as_uuid())
