@@ -17,6 +17,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+agentgateway-auth = { workspace = true }
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
 agentgateway-mcp = { workspace = true }
@@ -51,4 +52,9 @@ rmcp = { workspace = true, features = [
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
+base64 = "0.22"
+rsa = "0.9"
+rand = "0.8"
+tempfile = "3"
