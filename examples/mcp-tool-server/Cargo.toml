@@ -1,4 +1,13 @@
 [package]
 name = "mcp-tool-server"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "Serves Rust ADK tools over MCP, so ADK agents in any language can call them"
+
+[dependencies]
+rusty-adk = { path = "../../crates/rusty-adk" }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["full"] }

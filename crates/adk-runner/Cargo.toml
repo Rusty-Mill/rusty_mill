@@ -1,4 +1,25 @@
 [package]
 name = "adk-runner"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The ADK runtime event loop: orchestrates agents, commits state, and streams events"
+
+[dependencies]
+adk-core.workspace = true
+adk-agents.workspace = true
+adk-graph.workspace = true
+async-stream.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-test.workspace = true
+adk-sessions.workspace = true
+adk-models.workspace = true
+adk-tools.workspace = true

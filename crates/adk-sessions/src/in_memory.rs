@@ -146,12 +146,7 @@ impl SessionService for InMemorySessionService {
             .collect())
     }
 
-    async fn delete_session(
-        &self,
-        app_name: &str,
-        user_id: &str,
-        session_id: &str,
-    ) -> Result<()> {
+    async fn delete_session(&self, app_name: &str, user_id: &str, session_id: &str) -> Result<()> {
         let mut store = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let key = (
             app_name.to_string(),
@@ -225,11 +220,15 @@ impl SessionService for InMemorySessionService {
     }
 }
 
+/// Identifies one artifact: app, user, scope (session id, or empty when the
+/// artifact is user-scoped), and filename.
+type ArtifactKey = (String, String, String, String);
+
 /// An [`ArtifactService`] backed by process memory, versioning each filename.
 #[derive(Default)]
 pub struct InMemoryArtifactService {
-    /// Keyed by (app, user, session-or-empty, filename) to a version list.
-    artifacts: Mutex<BTreeMap<(String, String, String, String), Vec<Part>>>,
+    /// Each key's versions, oldest first; the index is the version number.
+    artifacts: Mutex<BTreeMap<ArtifactKey, Vec<Part>>>,
 }
 
 impl InMemoryArtifactService {
@@ -305,9 +304,7 @@ impl ArtifactService for InMemoryArtifactService {
         let mut keys: Vec<String> = store
             .keys()
             .filter(|(app, user, scope, _)| {
-                app == app_name
-                    && user == user_id
-                    && (scope.is_empty() || scope == session_id)
+                app == app_name && user == user_id && (scope.is_empty() || scope == session_id)
             })
             .map(|(_, _, _, filename)| filename.clone())
             .collect();

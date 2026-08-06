@@ -9,9 +9,17 @@ use std::sync::Arc;
 use crate::context::ToolContext;
 use crate::tool::{ConfirmationPolicy, Tool};
 
+/// The future a tool closure returns, borrowing its [`ToolContext`].
+pub type ToolFuture<'a> = BoxFuture<'a, Result<Value>>;
+
+/// The callable a [`FunctionTool`] wraps, before being shared.
+pub trait ToolCallable: for<'a> Fn(Args, &'a ToolContext) -> ToolFuture<'a> + Send + Sync {}
+
+impl<T> ToolCallable for T where T: for<'a> Fn(Args, &'a ToolContext) -> ToolFuture<'a> + Send + Sync
+{}
+
 /// The closure shape a [`FunctionTool`] wraps.
-pub type ToolFn =
-    Arc<dyn for<'a> Fn(Args, &'a ToolContext) -> BoxFuture<'a, Result<Value>> + Send + Sync>;
+pub type ToolFn = Arc<dyn ToolCallable>;
 
 /// A [`Tool`] built from a closure, with a hand-written declaration.
 ///

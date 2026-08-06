@@ -37,9 +37,7 @@ pub use in_memory::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adk_core::{
-        ArtifactService, Blob, Content, Event, MemoryService, Part, SessionService,
-    };
+    use adk_core::{ArtifactService, Blob, Content, Event, MemoryService, Part, SessionService};
     use serde_json::json;
 
     #[tokio::test]
@@ -53,7 +51,11 @@ mod tests {
 
         let fetched = svc.get_session("app", "u1", "s1").await.unwrap().unwrap();
         assert_eq!(fetched.id, "s1");
-        assert!(svc.get_session("app", "u1", "nope").await.unwrap().is_none());
+        assert!(svc
+            .get_session("app", "u1", "nope")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -117,7 +119,10 @@ mod tests {
         svc.append_event(&mut first, event).await.unwrap();
 
         let other_user = svc.create_session("app", "u2", None, None).await.unwrap();
-        assert_eq!(other_user.state.get("app:discount").unwrap(), &json!("SUMMER"));
+        assert_eq!(
+            other_user.state.get("app:discount").unwrap(),
+            &json!("SUMMER")
+        );
 
         // A different app is isolated.
         let other_app = svc.create_session("other", "u1", None, None).await.unwrap();
@@ -233,21 +238,22 @@ mod tests {
             .await
             .unwrap()
             .is_none());
-        assert!(svc.delete_artifact("app", "u1", "s1", "absent").await.is_err());
+        assert!(svc
+            .delete_artifact("app", "u1", "s1", "absent")
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn memory_search_ranks_by_term_overlap() {
         let svc = InMemoryMemoryService::new();
         let mut session = adk_core::Session::new("s1", "app", "u1");
-        session
-            .events
-            .push(Event::new("inv", "user").with_content(Content::user_text(
-                "I love hiking in the Alps",
-            )));
-        session
-            .events
-            .push(Event::new("inv", "user").with_content(Content::user_text("My cat is called Milo")));
+        session.events.push(
+            Event::new("inv", "user").with_content(Content::user_text("I love hiking in the Alps")),
+        );
+        session.events.push(
+            Event::new("inv", "user").with_content(Content::user_text("My cat is called Milo")),
+        );
         svc.add_session_to_memory(&session).await.unwrap();
 
         let hits = svc.search_memory("app", "u1", "hiking Alps").await.unwrap();
@@ -255,8 +261,16 @@ mod tests {
         assert!(hits[0].content.text().contains("Alps"));
         assert_eq!(hits[0].score, Some(1.0));
 
-        assert!(svc.search_memory("app", "u1", "quantum").await.unwrap().is_empty());
+        assert!(svc
+            .search_memory("app", "u1", "quantum")
+            .await
+            .unwrap()
+            .is_empty());
         // Another user's memory is not reachable.
-        assert!(svc.search_memory("app", "u2", "hiking").await.unwrap().is_empty());
+        assert!(svc
+            .search_memory("app", "u2", "hiking")
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

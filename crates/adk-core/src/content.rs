@@ -192,7 +192,10 @@ impl Content {
 
     /// All function calls carried by this content, in order.
     pub fn function_calls(&self) -> Vec<&FunctionCall> {
-        self.parts.iter().filter_map(Part::as_function_call).collect()
+        self.parts
+            .iter()
+            .filter_map(Part::as_function_call)
+            .collect()
     }
 
     /// All function responses carried by this content, in order.

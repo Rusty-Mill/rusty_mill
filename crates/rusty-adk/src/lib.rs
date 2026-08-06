@@ -1,1 +1,234 @@
+//! A Rust implementation of the [Agent Development Kit (ADK) 2.0][adk]
+//! architecture.
+//!
+//! ADK 2.0 ships SDKs for Python, Go, TypeScript, Java, and Kotlin, but not
+//! Rust. This crate is a faithful port of its architecture: the same data
+//! model, the same graph execution engine, the same tool and callback
+//! contracts — expressed idiomatically in Rust.
+//!
+//! This is the facade. It re-exports the workspace crates so an application
+//! needs one dependency:
+//!
+//! | Crate | What it holds |
+//! |---|---|
+//! | [`core`] | `Event` (with 2.0's `node_info` / `output`), `State`, `Session`, `InvocationContext` |
+//! | [`tools`] | The `Tool` trait, `ToolContext`, toolsets |
+//! | [`graph`] | The 2.0 workflow graph engine: nodes, routes, joins, interrupts |
+//! | [`agents`] | `LlmAgent`, the workflow agents, callbacks |
+//! | [`models`] | The `Model` trait, `MockModel`, Gemini and Anthropic connectors |
+//! | [`sessions`] | In-memory session, artifact, and memory services |
+//! | [`runner`] | The runtime event loop |
+//! | [`mcp`] | MCP transports, for interoperating with ADK agents in other languages |
+//!
+//! # Getting started
+//!
+//! ```
+//! # tokio_test::block_on(async {
+//! use rusty_adk::prelude::*;
+//! use std::sync::Arc;
+//!
+//! // A tool: the doc comment is what the model reads to decide when to call it.
+//! /// Retrieves the current weather for a city.
+//! #[adk_tool(crate = ::rusty_adk::tools)]
+//! async fn get_weather(city: String) -> Result<serde_json::Value> {
+//!     Ok(rusty_adk::tools::success(serde_json::json!({
+//!         "report": format!("It is sunny in {city}."),
+//!     })))
+//! }
+//!
+//! // An agent that can call it. MockModel scripts the exchange so this runs
+//! // offline; swap in GeminiModel or AnthropicModel for a live one.
+//! let model = MockModel::new()
+//!     .push_call_json("get_weather", serde_json::json!({"city": "Paris"}))
+//!     .push_text("It is sunny in Paris.");
+//!
+//! let agent = LlmAgent::builder("weather_agent")
+//!     .model(Arc::new(model))
+//!     .instruction("Answer weather questions using the get_weather tool.")
+//!     .tool(get_weather_tool())
+//!     .build()?;
+//!
+//! // The runner owns the session and commits state as events flow.
+//! let services = Services::new(Arc::new(InMemorySessionService::new()));
+//! let runner = Runner::new("weather_app", agent.shared(), services);
+//! let session = runner.create_session("user-1", None).await?;
+//!
+//! let answer = runner
+//!     .run_to_completion(&session.user_id, &session.id, Content::user_text("Weather in Paris?"), None)
+//!     .await?;
+//!
+//! assert_eq!(answer.as_deref(), Some("It is sunny in Paris."));
+//! # Ok::<(), AdkError>(())
+//! # }).unwrap();
+//! ```
+//!
+//! # Interoperating with other ADK SDKs
+//!
+//! ADK defines no language-neutral wire protocol for tools, so a Rust tool
+//! reaches a Python, Go, TypeScript, Java, or Kotlin agent over **MCP**. Serve
+//! tools with [`mcp::McpServer`] and register them from the other side with
+//! that SDK's `McpToolset`. See the `mcp-tool-server` example.
+//!
+//! [adk]: https://adk.dev/2.0/
 
+#![deny(missing_docs)]
+#![warn(clippy::all)]
+
+pub use adk_agents as agents;
+pub use adk_core as core;
+pub use adk_graph as graph;
+pub use adk_models as models;
+pub use adk_runner as runner;
+pub use adk_sessions as sessions;
+pub use adk_tools as tools;
+
+#[cfg(feature = "mcp")]
+pub use adk_mcp as mcp;
+
+#[cfg(feature = "macros")]
+pub use adk_macros::adk_tool;
+
+/// Everything needed to build an agent, in one import.
+///
+/// ```
+/// use rusty_adk::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::agents::{
+        Agent, AgentNode, Callbacks, IncludeContents, LlmAgent, LoopAgent, ParallelAgent,
+        SequentialAgent, SharedAgent,
+    };
+    pub use crate::core::{
+        AdkError, Args, Content, Event, EventActions, FunctionCall, FunctionDeclaration,
+        FunctionResponse, InvocationContext, NodeInfo, Part, Result, Role, RunConfig, Schema,
+        SchemaType, Services, Session, SessionService, State, StreamingMode,
+    };
+    pub use crate::graph::{
+        chain, concat, constant_node, Edge, EdgeBuilder, FunctionNode, Graph, JoinNode, Node,
+        NodeConfig, NodeContext, NodeOutcome, ResumeRequest, Route, RouterNode, START,
+    };
+    pub use crate::models::{
+        GenerateContentConfig, LlmRequest, LlmResponse, MockModel, Model, ModelRegistry,
+    };
+    pub use crate::runner::Runner;
+    pub use crate::sessions::{
+        InMemoryArtifactService, InMemoryMemoryService, InMemorySessionService,
+    };
+    pub use crate::tools::{
+        invoke_tool, FunctionTool, SharedTool, StaticToolset, Tool, ToolContext, ToolSource,
+        Toolset,
+    };
+
+    #[cfg(feature = "macros")]
+    pub use crate::adk_tool;
+
+    #[cfg(feature = "models")]
+    pub use crate::models::{AnthropicModel, GeminiModel};
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::prelude::*;
+    use futures::StreamExt;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    /// Retrieves the current weather for a city.
+    // Inside this crate the facade is `crate`, not `::rusty_adk`.
+    #[adk_tool(crate = crate::tools)]
+    async fn get_weather(city: String) -> Result<serde_json::Value> {
+        Ok(crate::tools::success(json!({
+            "report": format!("It is sunny in {city}."),
+        })))
+    }
+
+    #[tokio::test]
+    async fn an_agent_a_tool_and_the_runner_work_together() {
+        let model = MockModel::new()
+            .push_call_json("get_weather", json!({"city": "Paris"}))
+            .push_text("It is sunny in Paris.");
+
+        let agent = LlmAgent::builder("weather_agent")
+            .model(Arc::new(model))
+            .instruction("Answer weather questions using the get_weather tool.")
+            .tool(get_weather_tool())
+            .output_key("last_answer")
+            .build()
+            .unwrap();
+
+        let services = Services::new(Arc::new(InMemorySessionService::new()));
+        let runner = Runner::new("weather_app", agent.shared(), services);
+        let session = runner.create_session("u1", None).await.unwrap();
+
+        let answer = runner
+            .run_to_completion(
+                "u1",
+                &session.id,
+                Content::user_text("Weather in Paris?"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer.as_deref(), Some("It is sunny in Paris."));
+
+        let saved = runner.session("u1", &session.id).await.unwrap().unwrap();
+        assert_eq!(
+            saved.state.get("last_answer").unwrap(),
+            "It is sunny in Paris."
+        );
+    }
+
+    #[tokio::test]
+    async fn a_graph_routes_between_agents() {
+        let triage = RouterNode::new("triage", NodeConfig::default(), |_ctx| {
+            Box::pin(async { Ok((json!("a refund request"), vec!["BILLING".to_string()])) })
+        })
+        .shared();
+
+        let billing = AgentNode::new(
+            LlmAgent::builder("billing")
+                .model(Arc::new(MockModel::new().push_text("Refund issued.")))
+                .build()
+                .unwrap()
+                .shared(),
+        )
+        .shared();
+
+        let technical = AgentNode::new(
+            LlmAgent::builder("technical")
+                .model(Arc::new(MockModel::new().push_text("Ticket opened.")))
+                .build()
+                .unwrap()
+                .shared(),
+        )
+        .shared();
+
+        let graph = Graph::new(
+            vec![triage, billing, technical],
+            EdgeBuilder::new()
+                .start("triage")
+                .add_route("triage", "billing", Route::string("BILLING"))
+                .add_route("triage", "technical", Route::string("TECHNICAL"))
+                .build(),
+        )
+        .unwrap();
+
+        let services = Services::new(Arc::new(InMemorySessionService::new()));
+        let ctx = InvocationContext::new(
+            Session::new("s", "app", "u"),
+            services,
+            RunConfig::default(),
+        );
+
+        let events: Vec<Event> = graph
+            .run(ctx, None)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|e| e.unwrap())
+            .collect();
+
+        assert!(events.iter().any(|e| e.author == "billing"));
+        assert!(!events.iter().any(|e| e.author == "technical"));
+    }
+}

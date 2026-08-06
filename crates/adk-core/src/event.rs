@@ -339,11 +339,7 @@ impl Event {
     }
 
     /// Records an error on this event.
-    pub fn with_error(
-        mut self,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn with_error(mut self, code: impl Into<String>, message: impl Into<String>) -> Self {
         self.error_code = Some(code.into());
         self.error_message = Some(message.into());
         self
@@ -431,7 +427,9 @@ mod tests {
 
     #[test]
     fn plain_text_event_is_final() {
-        assert!(Event::new("inv", "agent").with_text("done").is_final_response());
+        assert!(Event::new("inv", "agent")
+            .with_text("done")
+            .is_final_response());
     }
 
     #[test]
@@ -464,7 +462,10 @@ mod tests {
 
     #[test]
     fn partial_chunk_is_not_final() {
-        assert!(!Event::new("inv", "agent").with_text("Par").as_partial().is_final_response());
+        assert!(!Event::new("inv", "agent")
+            .with_text("Par")
+            .as_partial()
+            .is_final_response());
     }
 
     #[test]
