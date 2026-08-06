@@ -8,7 +8,7 @@ use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Response,
@@ -32,20 +32,51 @@ use crate::{
     },
 };
 
-/// An [`Error`] rendered as an HTTP response with the conventional status code.
-pub(crate) struct ApiError(pub Error);
+/// How long a client is asked to wait when this replica is draining.
+///
+/// Chosen to sit inside the client's default retry ceiling. Since #17 a
+/// `Retry-After` longer than `RetryPolicy::max_backoff` is obeyed by *giving
+/// up* rather than by knocking sooner, so a larger number here would turn a
+/// deliberately retryable rejection into a hard failure for a default client.
+const DRAINING_RETRY_AFTER_SECS: u64 = 5;
+
+/// What a request can fail with before it reaches an agent.
+pub(crate) enum ApiError {
+    /// An [`Error`] rendered with the status code ACP conventionally pairs
+    /// with its code.
+    Acp(Error),
+    /// This replica is going away and is no longer starting runs.
+    Draining,
+}
 
 impl From<Error> for ApiError {
     fn from(value: Error) -> Self {
-        ApiError(value)
+        ApiError::Acp(value)
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = StatusCode::from_u16(self.0.code.http_status())
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        (status, Json(self.0)).into_response()
+        match self {
+            ApiError::Acp(error) => {
+                let status = StatusCode::from_u16(error.code.http_status())
+                    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                (status, Json(error)).into_response()
+            }
+            // A plain 503 rather than an ACP error object, for the same reason
+            // the authentication example returns a plain 401: ACP defines three
+            // error codes and none of them means "not here, try another
+            // replica". Dressing this up as `server_error` would also cost the
+            // client the status — `check_status` prefers a well-formed ACP
+            // error, and `AcpError::Protocol` is not transient, so the retry
+            // the 503 exists to invite would never happen.
+            ApiError::Draining => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::RETRY_AFTER, DRAINING_RETRY_AFTER_SECS.to_string())],
+                "this replica is draining and is not starting new runs",
+            )
+                .into_response(),
+        }
     }
 }
 
@@ -80,7 +111,9 @@ pub(crate) fn router(server: Arc<AcpServer>) -> Router {
 async fn well_known_agents(State(server): State<Arc<AcpServer>>) -> ApiResult<Response> {
     let body = serde_norway::to_string(&AgentsListResponse { agents: server.manifests() })
         .map_err(|err| {
-            ApiError(Error::server_error(format!("failed to serialize agent manifests: {err}")))
+            ApiError::Acp(Error::server_error(format!(
+                "failed to serialize agent manifests: {err}"
+            )))
         })?;
     Ok((
         StatusCode::OK,
@@ -177,6 +210,11 @@ async fn create_run(
     headers: HeaderMap,
     Json(request): Json<RunCreateRequest>,
 ) -> ApiResult<RunResponse> {
+    // Checked before anything else: a replica that is going away should refuse
+    // at the door rather than validate, resolve a session and then refuse.
+    if !server.is_accepting() {
+        return Err(ApiError::Draining);
+    }
     request.validate().map_err(ApiError::from)?;
     let base_url = server.resolve_base_url(&headers);
     let mode = request.mode();
@@ -525,7 +563,7 @@ async fn get_session_state(
     store.require_session(session_id).await.map_err(ApiError::from)?;
     let state = store.get_session_state(session_id).await.map_err(ApiError::from)?;
     state.map(Json).ok_or_else(|| {
-        ApiError(Error::not_found(format!("session {session_id} has no stored state")))
+        ApiError::Acp(Error::not_found(format!("session {session_id} has no stored state")))
     })
 }
 
