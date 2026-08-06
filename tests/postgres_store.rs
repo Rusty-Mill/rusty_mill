@@ -245,7 +245,11 @@ async fn sweep_removes_only_what_retention_allows() {
     store
         .put_recovery_record(
             finished.run_id,
-            Some(&RecoveryRecord { input: vec![Message::user("hi")], attempt: 1 }),
+            Some(&RecoveryRecord {
+                input: vec![Message::user("hi")],
+                attempt: 1,
+                handed_off: false,
+            }),
         )
         .await
         .unwrap();
