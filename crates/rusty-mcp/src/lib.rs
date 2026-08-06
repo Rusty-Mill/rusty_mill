@@ -64,6 +64,7 @@ pub mod cli;
 pub mod completion;
 pub mod config;
 pub mod error;
+pub mod limits;
 pub mod mrtr;
 #[cfg(feature = "otel")]
 pub mod otel;

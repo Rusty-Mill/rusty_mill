@@ -23,6 +23,7 @@ use crate::{
     auth::{AuthConfig, ProtectedResourceMetadata, RequireAuthLayer},
     config::{HttpConfig, ServerConfig, Transport},
     error::ServeError,
+    limits::LimitsLayer,
     shutdown,
 };
 
@@ -107,6 +108,7 @@ where
     let metrics = http.metrics.clone();
     #[cfg(not(feature = "otel"))]
     let metrics: MetricsLayer = None;
+    let limits = http.limits.clone();
 
     let mut router = if http.legacy_sessions {
         let service = StreamableHttpService::new(
@@ -117,7 +119,13 @@ where
             Arc::new(LocalSessionManager::default()),
             transport_config,
         );
-        mount_guarded(&http.path, service, auth.as_ref(), metrics.as_ref())
+        mount_guarded(
+            &http.path,
+            service,
+            auth.as_ref(),
+            metrics.as_ref(),
+            limits.as_ref(),
+        )
     } else {
         let service = StreamableHttpService::new(
             {
@@ -127,7 +135,13 @@ where
             Arc::new(NeverSessionManager::default()),
             transport_config,
         );
-        mount_guarded(&http.path, service, auth.as_ref(), metrics.as_ref())
+        mount_guarded(
+            &http.path,
+            service,
+            auth.as_ref(),
+            metrics.as_ref(),
+            limits.as_ref(),
+        )
     };
 
     // The metadata document must stay reachable *without* a token: it is how a
@@ -182,15 +196,20 @@ type MetricsLayer = Option<std::convert::Infallible>;
 
 /// Mount the MCP service at `path`, wrapped in the layers that are configured.
 ///
-/// Order matters: metrics go **outside** authorization, so a request rejected
-/// with a `401` is still counted. Mounted inside the guard, the metrics layer
-/// would only ever see requests that already got past it — and a flood of
-/// rejected tokens would look like no traffic at all.
+/// Order is outside-in: **limits, metrics, authorization, handler** — cheapest
+/// rejection first.
+///
+/// - Limits outermost, so a shed request costs a semaphore try-acquire and
+///   nothing else. Inside the guard it would pay for a signature check before
+///   being told there was no capacity for it anyway.
+/// - Metrics outside authorization, so a request rejected with a `401` is still
+///   counted. Inside, a flood of bad tokens would look like no traffic at all.
 fn mount_guarded<T>(
     path: &str,
     service: T,
     auth: Option<&Arc<AuthConfig>>,
     metrics: Option<&<MetricsLayer as IntoInner>::Inner>,
+    limits: Option<&LimitsLayer>,
 ) -> Router
 where
     T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
@@ -215,9 +234,10 @@ where
                 path,
                 RequireAuthLayer::from_shared(Arc::clone(auth)).layer(service),
                 metrics,
+                limits,
             )
         }
-        None => mount_metered(path, service, metrics),
+        None => mount_metered(path, service, metrics, limits),
     }
 }
 
@@ -235,6 +255,7 @@ fn mount_metered<T>(
     path: &str,
     service: T,
     metrics: Option<&<MetricsLayer as IntoInner>::Inner>,
+    limits: Option<&LimitsLayer>,
 ) -> Router
 where
     T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
@@ -250,12 +271,47 @@ where
         Some(layer) => {
             use tower_layer::Layer as _;
             tracing::info!("recording request metrics");
-            mount(path, layer.layer(service))
+            mount_limited(path, layer.layer(service), limits)
         }
         // Without the feature this arm is uninhabited, so the match is
         // exhaustive on `None` alone.
         #[cfg(not(feature = "otel"))]
         Some(never) => match *never {},
+        None => mount_limited(path, service, limits),
+    }
+}
+
+/// Mount `service`, wrapped in the limits layer when one is configured.
+///
+/// Outermost of the three. A shed request costs a semaphore try-acquire and
+/// nothing else — no token validation, no JWKS lookup, no handler. Putting this
+/// inside the auth layer would mean paying for a signature check on every
+/// request in a flood before deciding there was no capacity for it anyway.
+///
+/// The trade is that shed requests are invisible to the metrics layer, since
+/// they never reach it. That is the right way round: the `503` rate is what a
+/// load balancer already sees, whereas a rejected token is only visible here.
+fn mount_limited<T>(path: &str, service: T, limits: Option<&LimitsLayer>) -> Router
+where
+    T: tower_service::Service<axum::extract::Request, Error = std::convert::Infallible>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    T::Response: axum::response::IntoResponse,
+    T::Future: Send + 'static,
+{
+    use tower_layer::Layer as _;
+
+    match limits {
+        Some(layer) => {
+            tracing::info!(
+                max_concurrent = ?layer.max_concurrent(),
+                timeout = ?layer.timeout(),
+                "limiting inbound requests"
+            );
+            mount(path, layer.layer(service))
+        }
         None => mount(path, service),
     }
 }

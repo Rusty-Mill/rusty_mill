@@ -9,8 +9,12 @@ use std::{net::SocketAddr, time::Duration};
 
 use clap::{Parser, ValueEnum};
 
-use crate::config::{
-    DEFAULT_BIND, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_PATH, HttpConfig, ServerConfig, Transport,
+use crate::{
+    config::{
+        DEFAULT_BIND, DEFAULT_MAX_REQUEST_BODY_BYTES, DEFAULT_PATH, HttpConfig, ServerConfig,
+        Transport,
+    },
+    limits::LimitsLayer,
 };
 
 /// Which transport to serve on.
@@ -74,6 +78,20 @@ pub struct Cli {
     #[arg(long, default_value_t = 15, env = "MCP_SSE_KEEP_ALIVE_SECS")]
     pub sse_keep_alive_secs: u64,
 
+    /// Maximum requests in flight; `0` means unlimited (HTTP only).
+    ///
+    /// Over the limit, requests are shed with `503` rather than queued.
+    #[arg(long, default_value_t = 0, env = "MCP_MAX_CONCURRENT")]
+    pub max_concurrent: usize,
+
+    /// Give up on a request after this many seconds; `0` disables it (HTTP
+    /// only).
+    ///
+    /// Bounds time to produce a response, not time to stream one, so a
+    /// long-lived `subscriptions/listen` is unaffected.
+    #[arg(long, default_value_t = 0, env = "MCP_REQUEST_TIMEOUT_SECS")]
+    pub request_timeout_secs: u64,
+
     /// Log filter directive. `RUST_LOG` overrides this when set.
     #[arg(long, default_value = "info", env = "MCP_LOG")]
     pub log: String,
@@ -101,6 +119,17 @@ impl Cli {
                 // set in code too — see `otel::OtelGuard::instruments`.
                 #[cfg(feature = "otel")]
                 metrics: None,
+                limits: (self.max_concurrent > 0 || self.request_timeout_secs > 0).then(|| {
+                    let mut limits = LimitsLayer::new();
+                    if self.max_concurrent > 0 {
+                        limits = limits.with_max_concurrent(self.max_concurrent);
+                    }
+                    if self.request_timeout_secs > 0 {
+                        limits =
+                            limits.with_timeout(Duration::from_secs(self.request_timeout_secs));
+                    }
+                    limits
+                }),
             }),
         };
 
