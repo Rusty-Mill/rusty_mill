@@ -484,6 +484,18 @@ A request can also constrain and order the resolved fallback chain with a
   healthy. This is a deterministic ranking, not weighted-random load
   balancing across "healthy" candidates — every request still tries the
   sorted chain in order with fallback, the same as any other `sort` value.
+- `sort: "quality"` sorts descending by an operator-declared
+  `quality_score` on `[[pricing]]` — an arbitrary scale you define
+  yourself (nothing here measures model quality), unranked entries sort
+  last, same convention as `"price"`.
+- `sort: "random"` isn't a ranking at all — it shuffles the resolved chain,
+  for simple load distribution across candidates with no meaningful
+  ordering between them (e.g. same price, no observed latency yet).
+- `sort: "free_tier_remaining"` sorts descending by remaining budget from
+  [Free tiers](#free-tiers) — a "provider/model" with a `[[free_tiers]]`
+  entry and headroom left sorts first, one that's exhausted (`0` left)
+  sorts after every candidate with headroom, and one with no
+  `[[free_tiers]]` entry at all sorts last of all.
 
 ### Logprobs
 
@@ -583,7 +595,8 @@ with a `[[pricing]]` entry:
         "prompt": 3.0,
         "completion": 15.0,
         "cache_read": 0.3,
-        "cache_write": 3.75
+        "cache_write": 3.75,
+        "quality_score": 0.9
       },
       "supported_params": ["temperature", "top_p", "max_tokens", "..."]
     }
@@ -597,7 +610,9 @@ models with different context windows and pricing) and a `"{provider}/*"`
 wildcard omit all three. `pricing` mirrors the entry's
 `prompt_per_million`/`completion_per_million`/`cache_read_per_million`/
 `cache_write_per_million` (cache rates already defaulted to `prompt` when
-left unset in config, same as `cost_usd` computation uses).
+left unset in config, same as `cost_usd` computation uses), plus
+`quality_score` when the entry sets one (omitted, not `null`, when unset —
+see `sort: "quality"` above).
 `context_length` is purely informational — not enforced against actual
 request size. `supported_params` lists which `ChatRequest` fields that
 model's provider adapter gives an actual effect to (native support or,

@@ -254,6 +254,11 @@ cache_write_per_million = 3.75
 # surfaced at GET /v1/models for clients picking a model by capacity, not
 # enforced against actual request size.
 context_length = 200000
+# Optional: an arbitrary operator-declared score (any scale you like,
+# higher is better) consulted only by `"provider": {"sort": "quality"}`.
+# Nothing here measures model quality itself -- this is entirely your own
+# judgment call, the same self-declared trust model as `zdr`/`no_training`.
+quality_score = 0.9
 
 [[pricing]]
 model = "openai/gpt-4o"

@@ -155,6 +155,11 @@ struct PriceRates {
     cache_read_ppm: f64,
     cache_write_ppm: f64,
     context_length: Option<u32>,
+    /// Operator-declared score for `provider.sort: "quality"`. `None`
+    /// means this "provider/model" always sorts last under that sort,
+    /// same unranked-last convention as an unpriced entry under
+    /// `sort: "price"`.
+    quality_score: Option<f64>,
 }
 
 impl From<&PricingEntry> for PriceRates {
@@ -165,6 +170,7 @@ impl From<&PricingEntry> for PriceRates {
             cache_read_ppm: p.cache_read_per_million.unwrap_or(p.prompt_per_million),
             cache_write_ppm: p.cache_write_per_million.unwrap_or(p.prompt_per_million),
             context_length: p.context_length,
+            quality_score: p.quality_score,
         }
     }
 }
@@ -473,6 +479,34 @@ fn ewma_lookup(
         .get(&format!("{provider}/{model}"))
         .copied()
         .unwrap_or(missing)
+}
+
+/// Shuffles `chain` in place for `provider.sort: "random"` -- simple
+/// load-balancing across candidates with no meaningful ranking between
+/// them, not a security-sensitive use, so a minimal splitmix64-seeded
+/// Fisher-Yates is enough; pulling in the `rand` crate for one shuffle
+/// isn't worth a new workspace dependency. Seeded from the wall clock (and
+/// the chain's own length, so two calls in the same nanosecond with
+/// different chain lengths still diverge), reseeded fresh on every call --
+/// this is not meant to be reproducible or statistically rigorous, only to
+/// avoid always trying candidates in the same fixed order.
+fn shuffle_chain(chain: &mut [(String, String)]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (chain.len() as u64).wrapping_mul(0x9E3779B97F4A7C15);
+
+    for i in (1..chain.len()).rev() {
+        // splitmix64: https://prng.di.unimi.it/splitmix64.c
+        seed = seed.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^= z >> 31;
+        let j = (z % (i as u64 + 1)) as usize;
+        chain.swap(i, j);
+    }
 }
 
 /// Compute a response's estimated USD cost (if `pricing` has an entry for
@@ -795,6 +829,7 @@ impl Router {
                         completion: rates.completion_ppm,
                         cache_read: rates.cache_read_ppm,
                         cache_write: rates.cache_write_ppm,
+                        quality_score: rates.quality_score,
                     }),
                     supported_params: Some(
                         supported_params(kind)
@@ -1229,6 +1264,41 @@ impl Router {
                     0.0,
                 ))
             }),
+            // Descending: higher operator-declared quality_score is
+            // better, and an entry with none configured (f64::MIN) sorts
+            // last -- same unranked-last convention as sort: "price".
+            Some("quality") => chain.sort_by(|a, b| {
+                let quality_of = |entry: &(String, String)| {
+                    self.pricing
+                        .get(&format!("{}/{}", entry.0, entry.1))
+                        .and_then(|rates| rates.quality_score)
+                        .unwrap_or(f64::MIN)
+                };
+                quality_of(b).total_cmp(&quality_of(a))
+            }),
+            // Not a ranking at all -- shuffles the chain for simple
+            // load-balancing across candidates that are otherwise equally
+            // good (e.g. same price, no observed latency yet). No crypto
+            // guarantees needed here, so this uses a tiny in-crate PRNG
+            // rather than pulling in a `rand` dependency for one shuffle.
+            Some("random") => shuffle_chain(&mut chain),
+            // Descending: more remaining free-tier budget is better. An
+            // entry with a [[free_tiers]] setting but 0 remaining sorts
+            // after every entry that still has headroom; an entry with no
+            // [[free_tiers]] entry at all (f64::MIN) sorts last of all --
+            // same unranked-last convention as sort: "price".
+            Some("free_tier_remaining") => {
+                let status = self.free_tier_status();
+                chain.sort_by(|a, b| {
+                    let remaining_of = |entry: &(String, String)| {
+                        status
+                            .get(&format!("{}/{}", entry.0, entry.1))
+                            .map(|s| s.tokens_remaining as f64)
+                            .unwrap_or(f64::MIN)
+                    };
+                    remaining_of(b).total_cmp(&remaining_of(a))
+                });
+            }
             _ => {}
         }
 
@@ -1828,6 +1898,7 @@ mod tests {
                                 cache_read_ppm: p,
                                 cache_write_ppm: p,
                                 context_length: None,
+                                quality_score: None,
                             },
                         )
                     })
@@ -2740,6 +2811,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: Some(200_000),
+                quality_score: None,
             },
         )]));
 
@@ -4492,6 +4564,180 @@ mod tests {
         assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
     }
 
+    // --- quality sort -----------------------------------------------------
+
+    fn router_with_quality_pricing(entries: Vec<(&str, f64)>) -> Router {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let pricing = entries
+            .into_iter()
+            .map(|(model, score)| {
+                (
+                    model.to_string(),
+                    PriceRates {
+                        prompt_ppm: 1.0,
+                        completion_ppm: 1.0,
+                        cache_read_ppm: 1.0,
+                        cache_write_ppm: 1.0,
+                        context_length: None,
+                        quality_score: Some(score),
+                    },
+                )
+            })
+            .collect();
+        Router {
+            pricing: Arc::new(pricing),
+            ..router
+        }
+    }
+
+    #[test]
+    fn apply_preferences_sorts_descending_by_quality_score() {
+        let router = router_with_quality_pricing(vec![("anthropic/m1", 0.6), ("openai/m2", 0.9)]);
+        let prefs = ProviderPreferences {
+            sort: Some("quality".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("openai", "m2"), ("anthropic", "m1")]));
+    }
+
+    #[test]
+    fn apply_preferences_unscored_quality_sorts_last() {
+        let router = router_with_quality_pricing(vec![("anthropic/m1", 0.8)]);
+        // "openai/m2" has no [[pricing]] entry at all -- despite being
+        // first in the chain, it must sort after the scored entry rather
+        // than being treated as tied or preferred.
+        let prefs = ProviderPreferences {
+            sort: Some("quality".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("openai", "m2"), ("anthropic", "m1")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
+    // --- random sort -----------------------------------------------------
+
+    #[test]
+    fn apply_preferences_random_sort_preserves_the_candidate_set() {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let prefs = ProviderPreferences {
+            sort: Some("random".to_string()),
+            ..Default::default()
+        };
+        let mut result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2"), ("gemini", "m3")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        result.sort();
+        let mut expected = chain(&[("anthropic", "m1"), ("openai", "m2"), ("gemini", "m3")]);
+        expected.sort();
+        assert_eq!(
+            result, expected,
+            "random must reorder, never add/drop/duplicate candidates"
+        );
+    }
+
+    #[test]
+    fn apply_preferences_random_sort_does_not_panic_on_zero_or_one_candidates() {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let prefs = ProviderPreferences {
+            sort: Some("random".to_string()),
+            ..Default::default()
+        };
+        let single = router
+            .apply_preferences("smart", chain(&[("anthropic", "m1")]), Some(&prefs))
+            .unwrap();
+        assert_eq!(single, chain(&[("anthropic", "m1")]));
+    }
+
+    // --- free_tier_remaining sort ------------------------------------------
+
+    fn router_with_free_tier_budgets(entries: Vec<(&str, u64, u64)>) -> Router {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let mut settings = HashMap::new();
+        let mut usage = HashMap::new();
+        for (model, budget, used) in entries {
+            settings.insert(
+                model.to_string(),
+                FreeTierSetting {
+                    monthly_free_tokens: budget,
+                    period: BudgetPeriod::Total,
+                },
+            );
+            if used > 0 {
+                usage.insert(
+                    model.to_string(),
+                    TokenState {
+                        period_key: 0,
+                        tokens_used: used,
+                    },
+                );
+            }
+        }
+        Router {
+            free_tier_settings: Arc::new(settings),
+            free_tier_usage: Arc::new(Mutex::new(usage)),
+            ..router
+        }
+    }
+
+    #[test]
+    fn apply_preferences_sorts_descending_by_free_tier_remaining() {
+        // anthropic/m1: 1000 budget, 900 used -> 100 remaining.
+        // openai/m2: 1000 budget, 100 used -> 900 remaining.
+        let router = router_with_free_tier_budgets(vec![
+            ("anthropic/m1", 1000, 900),
+            ("openai/m2", 1000, 100),
+        ]);
+        let prefs = ProviderPreferences {
+            sort: Some("free_tier_remaining".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("openai", "m2"), ("anthropic", "m1")]));
+    }
+
+    #[test]
+    fn apply_preferences_unconfigured_free_tier_sorts_after_an_exhausted_one() {
+        // "anthropic/m1" is configured but fully exhausted (0 remaining);
+        // "openai/m2" has no [[free_tiers]] entry at all. Exhausted-but-
+        // tracked must still outrank never-tracked.
+        let router = router_with_free_tier_budgets(vec![("anthropic/m1", 1000, 1000)]);
+        let prefs = ProviderPreferences {
+            sort: Some("free_tier_remaining".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("openai", "m2"), ("anthropic", "m1")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
     #[tokio::test]
     async fn dispatch_records_uptime_of_one_on_success() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -4625,6 +4871,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(100),
+                quality_score: None,
             },
         );
         assert!(maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing).is_none());
@@ -4655,6 +4902,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(200_000),
+                quality_score: None,
             },
         );
         assert!(maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing).is_none());
@@ -4682,6 +4930,7 @@ mod tests {
                 // Budget after reserving max_tokens is small relative to
                 // the ~2000-estimated-token middle messages.
                 context_length: Some(300),
+                quality_score: None,
             },
         );
         let truncated = maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing)
@@ -4711,6 +4960,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(300),
+                quality_score: None,
             },
         )]));
         let mut req = test_request("anthropic/claude-sonnet-5");
@@ -4938,6 +5188,7 @@ mod tests {
             cache_read_ppm: prompt_ppm,
             cache_write_ppm: prompt_ppm,
             context_length: None,
+            quality_score: None,
         }
     }
 
@@ -5066,6 +5317,7 @@ mod tests {
             cache_read_per_million: None,
             cache_write_per_million: None,
             context_length: None,
+            quality_score: None,
         };
         let rates = PriceRates::from(&entry);
         assert_eq!(rates.cache_read_ppm, 3.0);
@@ -5081,6 +5333,7 @@ mod tests {
             cache_read_per_million: Some(0.3),
             cache_write_per_million: Some(3.75),
             context_length: None,
+            quality_score: None,
         };
         let rates = PriceRates::from(&entry);
         assert_eq!(rates.cache_read_ppm, 0.3);
@@ -5116,6 +5369,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: None,
+                quality_score: None,
             },
         );
 
@@ -5145,6 +5399,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: None,
+                quality_score: None,
             },
         );
 

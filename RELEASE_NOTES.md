@@ -44,6 +44,11 @@ entries are tracked by PR rather than by release.
   reporting-only, self-declared way `zdr`/`no_training` already work.
   Reset cadence reuses `[[clients]].budget_period`'s calendar math
   (`"total"`/`"daily"`/`"weekly"`/`"monthly"`, default `"monthly"`).
+- **Added:** Three new `provider.sort` strategies — `"quality"` (descending
+  by a new operator-declared `[[pricing]].quality_score`), `"random"`
+  (shuffles the chain for simple load distribution, no new dependency —
+  a tiny in-crate splitmix64 PRNG), and `"free_tier_remaining"` (descending
+  by headroom against the `[[free_tiers]]` budgets above).
 
 ---
 

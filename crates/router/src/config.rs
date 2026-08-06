@@ -158,6 +158,13 @@ pub struct PricingEntry {
     /// as it would without this field set.
     #[serde(default)]
     pub context_length: Option<u32>,
+    /// Operator-declared quality score for `provider.sort: "quality"` --
+    /// an arbitrary scale (higher is better), not derived from anything
+    /// this router measures itself. Unset means this "provider/model" is
+    /// never preferred by that sort (it always sorts last), the same
+    /// unranked-last convention `sort: "price"` gives an unpriced entry.
+    #[serde(default)]
+    pub quality_score: Option<f64>,
 }
 
 /// An operator-declared monthly free-token budget for one "provider/model"
