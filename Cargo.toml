@@ -38,6 +38,12 @@ ed25519-dalek = { version = "3", optional = true }
 getrandom = { version = "0.4", optional = true }
 signature = { version = "3", optional = true }
 
+# grpc feature
+tonic = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+
 [features]
 default = []
 client = [
@@ -60,7 +66,18 @@ server = [
   "tokio/rt-multi-thread",
 ]
 signing = ["dep:p256", "dep:ed25519-dalek", "dep:getrandom", "dep:signature"]
-full = ["client", "server", "signing"]
+grpc = [
+  "dep:tonic",
+  "dep:prost",
+  "dep:prost-types",
+  "dep:tonic-prost",
+  "dep:tonic-prost-build",
+  "dep:tokio",
+  "dep:futures-core",
+  "dep:futures-util",
+  "tokio/rt-multi-thread",
+]
+full = ["client", "server", "signing", "grpc"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -85,3 +102,10 @@ name = "integration"
 path = "tests/integration.rs"
 required-features = ["full"]
 
+[[test]]
+name = "grpc_integration"
+path = "tests/grpc_integration.rs"
+required-features = ["grpc"]
+
+[build-dependencies]
+tonic-prost-build = { version = "0.14", optional = true }
