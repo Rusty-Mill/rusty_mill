@@ -8,7 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use rp_core::{ChatRequest, EmbeddingsRequest, ModelInfo, RateLimitStatus};
-use rp_router::{BudgetPeriod, ClientConfig, ClientRole, ProviderStats, UsageStats};
+use rp_router::{
+    BudgetPeriod, ClientConfig, ClientRole, FreeTierStatus, ProviderStats, UsageStats,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -659,6 +661,33 @@ pub async fn usage_stats(State(state): State<AppState>, headers: HeaderMap) -> R
         .await
         .into_iter()
         .map(|(model, stats)| UsageEntry { model, stats })
+        .collect();
+
+    Json(json!({ "object": "list", "data": data })).into_response()
+}
+
+#[derive(Serialize)]
+struct FreeTierEntry {
+    model: String,
+    #[serde(flatten)]
+    status: FreeTierStatus,
+}
+
+/// Operator-declared free-token budgets (`[[free_tiers]]`) vs. this
+/// process's tracked usage against them -- see the README's "Free tiers"
+/// section. JSON-only per ADR-0002; empty `data` when no `[[free_tiers]]`
+/// entries are configured, same "nothing to report" shape every other
+/// list endpoint here uses.
+pub async fn free_tiers(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = check_auth(&state, &headers) {
+        return resp;
+    }
+
+    let data: Vec<FreeTierEntry> = state
+        .router
+        .free_tier_status()
+        .into_iter()
+        .map(|(model, status)| FreeTierEntry { model, status })
         .collect();
 
     Json(json!({ "object": "list", "data": data })).into_response()

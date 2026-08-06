@@ -28,7 +28,7 @@ fallback logic is written once and never branches on provider identity.
 
 ## Structure
 
-A 4-crate Cargo workspace, layered so each crate only depends on the ones
+A 5-crate Cargo workspace, layered so each crate only depends on the ones
 before it:
 
 - `rp-core` — the shared request/response types (OpenAI chat-completions
@@ -49,6 +49,11 @@ before it:
   extraction/auth, and translating `Router` results to HTTP responses.
   Deliberately thin — almost no policy logic lives here, so the same
   `Router` could in principle be driven by a different transport.
+- `rp-cli` — a small, synchronous, read-only operator tool (`config
+  check`/`providers list`/`keys check`) built on `rp-router::Config`
+  directly, so it can never drift from the schema `rp-server` actually
+  loads. Not part of the request-serving path at all, and not built into
+  the Docker image.
 
 This is a modular monolith by design, not a stepping stone to
 microservices — one process, one deploy artifact. The crate boundaries
@@ -91,13 +96,16 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and their tr
 
 - **Not a model host.** No inference, no weights — pure routing and
   protocol translation in front of upstream provider APIs.
-- **Not a full LLM gateway UI/analytics product.** No dashboard; the only
-  operator surfaces are the admin HTTP API, `GET /v1/usage`, and
-  `GET /metrics` (Prometheus).
+- **Not a GUI/desktop product.** No Electron app, no PWA, no web
+  dashboard — every operator surface is JSON-in/JSON-out: the admin HTTP
+  API, `GET /v1/usage`, `GET /v1/free-tiers`, and `GET /metrics`
+  (Prometheus). See [ADR-0002](./docs/adr/0002-reporting-surface-is-json-only.md)
+  for why this stays JSON-only rather than growing an HTML dashboard.
 - **Not multi-tenant SaaS.** `[[clients]]` are config-defined, not
-  self-serve; there's no signup flow, billing integration, or per-tenant
-  database — everything lives in one process's config and one shared
-  (optionally persistent) usage store.
+  self-serve; there's no signup flow or billing integration. Persistence
+  (SQLite/Postgres) lets multiple *trusted* processes share one usage/spend
+  store, but that's operator-run shared infrastructure, not a hosted
+  product with per-tenant isolation.
 - **Not a semantic/fuzzy cache.** `[cache]` (opt-in) is exact-match only —
   a hash of the entire request — with a TTL and fixed-capacity eviction;
   there's no embedding-based or near-duplicate matching, and streaming

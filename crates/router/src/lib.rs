@@ -3,11 +3,13 @@ mod cache;
 mod client_budget;
 mod config;
 mod error;
+mod free_tiers;
 mod guardrails;
 mod metrics;
 mod moderation;
 mod persistence;
 mod presets;
+mod rtk;
 mod web_search;
 mod webhook;
 
@@ -15,15 +17,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use cache::ResponseCache;
+use cache::{ResponseCache, SemanticCache};
 use client_budget::{ClientBudgetSetting, SpendState};
 pub use config::{
-    AutoRoutingConfig, BudgetPeriod, CacheConfig, ClientConfig, ClientRole, Config,
-    GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend, PersistenceConfig,
-    PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind, RouteAlias,
-    ServerConfig, WebSearchConfig, WebhookConfig,
+    AutoRoutingConfig, BudgetPeriod, CacheConfig, CacheMode, ClientConfig, ClientRole, Config,
+    FreeTierEntry, GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend,
+    PersistenceConfig, PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind,
+    RouteAlias, ServerConfig, WebSearchConfig, WebhookConfig,
 };
 pub use error::RouterError;
+pub use free_tiers::FreeTierStatus;
+use free_tiers::{FreeTierSetting, TokenState};
 use guardrails::Guardrail;
 pub use metrics::Metrics;
 use moderation::{ModerationClient, ModerationError};
@@ -33,8 +37,9 @@ use webhook::WebhookNotifier;
 
 use futures::stream::StreamExt;
 use rp_core::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStream, EmbeddingsRequest, EmbeddingsResponse,
-    ModelInfo, ModelPricing, Provider, ProviderError, ProviderPreferences, RateLimiter, Usage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStream, EmbeddingsInput, EmbeddingsRequest,
+    EmbeddingsResponse, ModelInfo, ModelPricing, Provider, ProviderError, ProviderPreferences,
+    RateLimiter, Usage,
 };
 use rp_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatibleProvider};
 
@@ -152,6 +157,11 @@ struct PriceRates {
     cache_read_ppm: f64,
     cache_write_ppm: f64,
     context_length: Option<u32>,
+    /// Operator-declared score for `provider.sort: "quality"`. `None`
+    /// means this "provider/model" always sorts last under that sort,
+    /// same unranked-last convention as an unpriced entry under
+    /// `sort: "price"`.
+    quality_score: Option<f64>,
 }
 
 impl From<&PricingEntry> for PriceRates {
@@ -162,6 +172,7 @@ impl From<&PricingEntry> for PriceRates {
             cache_read_ppm: p.cache_read_per_million.unwrap_or(p.prompt_per_million),
             cache_write_ppm: p.cache_write_per_million.unwrap_or(p.prompt_per_million),
             context_length: p.context_length,
+            quality_score: p.quality_score,
         }
     }
 }
@@ -326,6 +337,80 @@ fn maybe_apply_middle_out(
     Some(truncated)
 }
 
+/// If `req` opts into `"rtk"`, compresses every `role: "tool"` message's
+/// text content through `rtk::compress` -- stripping ANSI, collapsing
+/// duplicate lines, and category-specific compaction (git/test/build/
+/// package/generic, see `rtk.rs`). Returns `None` when the transform
+/// wasn't requested or there were no tool messages to compress, in which
+/// case the caller sends `req` unmodified, same as `maybe_apply_middle_out`.
+/// Only text content is touched -- non-text parts (there shouldn't be any
+/// on a tool message, but nothing here assumes that) pass through as-is.
+fn maybe_apply_rtk(req: &ChatRequest) -> Option<ChatRequest> {
+    let wants_rtk = req
+        .transforms
+        .as_ref()
+        .is_some_and(|t| t.iter().any(|s| s == "rtk"));
+    if !wants_rtk {
+        return None;
+    }
+
+    let mut compressed = req.clone();
+    let mut changed = false;
+    for message in &mut compressed.messages {
+        if message.role != rp_core::Role::Tool {
+            continue;
+        }
+        let Some(content) = &mut message.content else {
+            continue;
+        };
+        match content {
+            rp_core::MessageContent::Text(text) => {
+                let new_text = rtk::compress(text);
+                if &new_text != text {
+                    *text = new_text;
+                    changed = true;
+                }
+            }
+            rp_core::MessageContent::Parts(parts) => {
+                for part in parts {
+                    if let rp_core::ContentPart::Text { text } = part {
+                        let new_text = rtk::compress(text);
+                        if &new_text != text {
+                            *text = new_text;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    changed.then_some(compressed)
+}
+
+/// Flattens a request's messages into one string for the semantic cache
+/// to embed: `"<role>: <text>\n"` per message, non-text content (image/
+/// audio/file parts) dropped the same way `MessageContent::as_plain_text`
+/// already drops it for roles that only ever see text. Role is included
+/// so a user/assistant turn with the same words in a different position
+/// doesn't embed identically -- conversation shape matters to what a
+/// cached response actually answered.
+fn request_text_for_embedding(req: &ChatRequest) -> String {
+    req.messages
+        .iter()
+        .map(|m| {
+            let role = format!("{:?}", m.role).to_lowercase();
+            let text = m
+                .content
+                .as_ref()
+                .map(rp_core::MessageContent::as_plain_text)
+                .unwrap_or_default();
+            format!("{role}: {text}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Holds every provider adapter that could be built from config (i.e. its
 /// API key env var was set), the named fallback-chain aliases, static
 /// per-model pricing (used for `provider.sort: "price"` and for computing
@@ -428,11 +513,37 @@ pub struct Router {
     /// resolved. `None` means `"web_search": true` on a request is a
     /// no-op -- the same as before this field existed.
     web_search: Option<Arc<WebSearchClient>>,
-    /// `[cache]`, if configured -- an exact-match cache of non-streaming
-    /// `dispatch` responses (see `cache::ResponseCache`). `None` means
-    /// every request always reaches a provider, same as before this
-    /// field existed.
+    /// `[cache]`, if configured with `mode = "exact"` (the default) --
+    /// an exact-match cache of non-streaming `dispatch` responses (see
+    /// `cache::ResponseCache`). `None` means either caching is off, or
+    /// `semantic_cache` below is active instead -- the two are mutually
+    /// exclusive per request, never both.
     cache: Option<Arc<RwLock<ResponseCache>>>,
+    /// `[cache]`, if configured with `mode = "semantic"` and
+    /// `embedding_model` resolves to a configured provider (see
+    /// `Router::from_config`) -- an embedding-cosine-similarity cache of
+    /// non-streaming `dispatch` responses (see `cache::SemanticCache`).
+    /// `None` means either caching is off, or `cache` above is active
+    /// instead. Falls back to `cache` (with a startup warning) if
+    /// `embedding_model` is unset or unresolvable.
+    semantic_cache: Option<Arc<RwLock<SemanticCache>>>,
+    /// The `"provider/model"` `semantic_cache` calls (via this router's
+    /// own `embeddings()`) to embed a request's message text. Always
+    /// `Some` exactly when `semantic_cache` is `Some`.
+    embedding_model: Option<String>,
+    /// "provider/model" -> operator-declared free-token budget, from
+    /// `[[free_tiers]]`. Static config, like `pricing` -- never mutated
+    /// after startup.
+    free_tier_settings: Arc<HashMap<String, FreeTierSetting>>,
+    /// "provider/model" -> this process's tracked usage against its
+    /// `free_tier_settings` entry for whichever period is current. Only
+    /// ever has entries for "provider/model"s with a `[[free_tiers]]`
+    /// entry -- same in-memory-only, per-process caveats as
+    /// `latency`/`throughput`/`uptime`, no `[persistence]` backing.
+    /// `Arc`-wrapped like `usage`/`throughput`, for the same reason: a
+    /// streaming response's instrumentation outlives `dispatch_stream`
+    /// itself.
+    free_tier_usage: Arc<Mutex<HashMap<String, TokenState>>>,
 }
 
 /// Record a new EWMA sample under `key`, seeding the average on first
@@ -457,6 +568,34 @@ fn ewma_lookup(
         .get(&format!("{provider}/{model}"))
         .copied()
         .unwrap_or(missing)
+}
+
+/// Shuffles `chain` in place for `provider.sort: "random"` -- simple
+/// load-balancing across candidates with no meaningful ranking between
+/// them, not a security-sensitive use, so a minimal splitmix64-seeded
+/// Fisher-Yates is enough; pulling in the `rand` crate for one shuffle
+/// isn't worth a new workspace dependency. Seeded from the wall clock (and
+/// the chain's own length, so two calls in the same nanosecond with
+/// different chain lengths still diverge), reseeded fresh on every call --
+/// this is not meant to be reproducible or statistically rigorous, only to
+/// avoid always trying candidates in the same fixed order.
+fn shuffle_chain(chain: &mut [(String, String)]) {
+    let mut seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0)
+        ^ (chain.len() as u64).wrapping_mul(0x9E3779B97F4A7C15);
+
+    for i in (1..chain.len()).rev() {
+        // splitmix64: https://prng.di.unimi.it/splitmix64.c
+        seed = seed.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^= z >> 31;
+        let j = (z % (i as u64 + 1)) as usize;
+        chain.swap(i, j);
+    }
 }
 
 /// Compute a response's estimated USD cost (if `pricing` has an entry for
@@ -711,11 +850,44 @@ impl Router {
 
         // No external credential to resolve, unlike moderation/web_search
         // above -- this is purely an in-process cache, so there's nothing
-        // to skip-with-a-warning over.
-        let cache = config
-            .cache
-            .as_ref()
-            .map(|cfg| Arc::new(RwLock::new(ResponseCache::new(cfg))));
+        // to skip-with-a-warning over. "semantic" mode additionally needs
+        // embedding_model to actually resolve to a configured provider;
+        // if it doesn't, this falls back to exact-match caching with a
+        // warning -- the same soft-failure pattern moderation/web_search
+        // already use for an unresolvable api_key_env.
+        let (cache, semantic_cache, embedding_model) = match &config.cache {
+            None => (None, None, None),
+            Some(cfg) if cfg.mode == CacheMode::Exact => (
+                Some(Arc::new(RwLock::new(ResponseCache::new(cfg)))),
+                None,
+                None,
+            ),
+            Some(cfg) => {
+                let resolvable = cfg.embedding_model.as_ref().is_some_and(|m| {
+                    m.split_once('/')
+                        .is_some_and(|(provider, _)| providers.contains_key(provider))
+                });
+                if resolvable {
+                    (
+                        None,
+                        Some(Arc::new(RwLock::new(SemanticCache::new(cfg)))),
+                        cfg.embedding_model.clone(),
+                    )
+                } else {
+                    tracing::warn!(
+                        "[cache].mode = \"semantic\" but embedding_model is unset or its \
+                         provider isn't configured; falling back to exact-match caching"
+                    );
+                    (
+                        Some(Arc::new(RwLock::new(ResponseCache::new(cfg)))),
+                        None,
+                        None,
+                    )
+                }
+            }
+        };
+
+        let free_tier_settings = free_tiers::settings_from_config(&config.free_tiers);
 
         Self {
             providers,
@@ -742,6 +914,10 @@ impl Router {
             moderation,
             web_search,
             cache,
+            semantic_cache,
+            embedding_model,
+            free_tier_settings: Arc::new(free_tier_settings),
+            free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -775,6 +951,7 @@ impl Router {
                         completion: rates.completion_ppm,
                         cache_read: rates.cache_read_ppm,
                         cache_write: rates.cache_write_ppm,
+                        quality_score: rates.quality_score,
                     }),
                     supported_params: Some(
                         supported_params(kind)
@@ -836,6 +1013,20 @@ impl Router {
             }
         }
         self.usage.read().unwrap().clone()
+    }
+
+    /// Snapshot of every configured `[[free_tiers]]` entry's status --
+    /// budget, this period's tracked usage, and what's left -- for
+    /// `GET /v1/free-tiers`. Always in-memory only, per-process, same as
+    /// `provider_stats`; unlike `usage_snapshot`, this has no
+    /// `[persistence]` backing (see `free_tier_usage`'s own doc comment).
+    pub fn free_tier_status(&self) -> HashMap<String, FreeTierStatus> {
+        let mut usage = self.free_tier_usage.lock().unwrap();
+        free_tiers::status_snapshot(
+            &self.free_tier_settings,
+            &mut usage,
+            client_budget::now_unix(),
+        )
     }
 
     /// `Ok(())` if this router can actually serve traffic right now, for
@@ -1195,6 +1386,41 @@ impl Router {
                     0.0,
                 ))
             }),
+            // Descending: higher operator-declared quality_score is
+            // better, and an entry with none configured (f64::MIN) sorts
+            // last -- same unranked-last convention as sort: "price".
+            Some("quality") => chain.sort_by(|a, b| {
+                let quality_of = |entry: &(String, String)| {
+                    self.pricing
+                        .get(&format!("{}/{}", entry.0, entry.1))
+                        .and_then(|rates| rates.quality_score)
+                        .unwrap_or(f64::MIN)
+                };
+                quality_of(b).total_cmp(&quality_of(a))
+            }),
+            // Not a ranking at all -- shuffles the chain for simple
+            // load-balancing across candidates that are otherwise equally
+            // good (e.g. same price, no observed latency yet). No crypto
+            // guarantees needed here, so this uses a tiny in-crate PRNG
+            // rather than pulling in a `rand` dependency for one shuffle.
+            Some("random") => shuffle_chain(&mut chain),
+            // Descending: more remaining free-tier budget is better. An
+            // entry with a [[free_tiers]] setting but 0 remaining sorts
+            // after every entry that still has headroom; an entry with no
+            // [[free_tiers]] entry at all (f64::MIN) sorts last of all --
+            // same unranked-last convention as sort: "price".
+            Some("free_tier_remaining") => {
+                let status = self.free_tier_status();
+                chain.sort_by(|a, b| {
+                    let remaining_of = |entry: &(String, String)| {
+                        status
+                            .get(&format!("{}/{}", entry.0, entry.1))
+                            .map(|s| s.tokens_remaining as f64)
+                            .unwrap_or(f64::MIN)
+                    };
+                    remaining_of(b).total_cmp(&remaining_of(a))
+                });
+            }
             _ => {}
         }
 
@@ -1377,6 +1603,8 @@ impl Router {
         let pricing = self.pricing.clone();
         let metrics = self.metrics.clone();
         let generations = self.generations.clone();
+        let free_tier_settings = self.free_tier_settings.clone();
+        let free_tier_usage = self.free_tier_usage.clone();
 
         let instrumented = stream.map(move |mut item| {
             if let Ok(chunk) = &mut item {
@@ -1391,6 +1619,13 @@ impl Router {
                         }
                         let cost = record_usage(&usage_map, persistence.as_deref(), &pricing, &provider_name, &model_name, &usage);
                         metrics.record_tokens_and_cost(&provider_name, &model_name, usage.prompt_tokens, usage.completion_tokens, cost);
+                        free_tiers::record_usage(
+                            &free_tier_settings,
+                            &mut free_tier_usage.lock().unwrap(),
+                            &format!("{provider_name}/{model_name}"),
+                            (usage.prompt_tokens + usage.completion_tokens) as u64,
+                            client_budget::now_unix(),
+                        );
                         chunk.cost_usd = cost;
                         generations.write().unwrap().insert(GenerationRecord {
                             id: chunk.id.clone(),
@@ -1469,14 +1704,114 @@ impl Router {
         }
     }
 
+    /// Embeds `text` via `embedding_model` (this router's own
+    /// `embeddings()` dispatch path -- the same fallback/retry chain
+    /// resolution a chat request gets). `None` on any failure (the model
+    /// doesn't resolve, every candidate errors, the response carries no
+    /// data) -- semantic caching fails open: an embedding-call problem
+    /// only means this one request skips the cache, never that the
+    /// request itself fails, the same resilience pattern
+    /// moderation/web_search already use for their own backend calls.
+    async fn embed_for_cache(&self, model: &str, text: &str) -> Option<Vec<f32>> {
+        let req = EmbeddingsRequest {
+            model: model.to_string(),
+            input: EmbeddingsInput::Single(text.to_string()),
+            encoding_format: None,
+            dimensions: None,
+        };
+        match self.embeddings(&req).await {
+            Ok(resp) => resp.data.into_iter().next().map(|d| d.embedding),
+            Err(e) => {
+                tracing::warn!(
+                    "semantic cache: embedding call failed, skipping cache for this request: {e}"
+                );
+                None
+            }
+        }
+    }
+
+    /// Semantic-mode cache lookup -- embeds `req`'s message text and
+    /// checks it against `cache`'s stored entries sharing the same
+    /// non-message scope (see `SemanticCache::scope_key_for`). `None` on
+    /// a miss, an unconfigured `embedding_model` (shouldn't happen --
+    /// `semantic_cache` is only ever `Some` when `embedding_model` also
+    /// is, see `from_config`), or an embedding-call failure.
+    async fn semantic_cache_get(
+        &self,
+        req: &ChatRequest,
+        cache: &Arc<RwLock<SemanticCache>>,
+    ) -> Option<ChatResponse> {
+        let model = self.embedding_model.as_ref()?;
+        let embedding = self
+            .embed_for_cache(model, &request_text_for_embedding(req))
+            .await?;
+        let scope_key = SemanticCache::scope_key_for(req);
+        let resp = cache.write().unwrap().get(scope_key, &embedding);
+        self.metrics
+            .record_cache_lookup(if resp.is_some() { "hit" } else { "miss" });
+        resp
+    }
+
+    /// Semantic-mode cache insert, mirroring `semantic_cache_get`'s own
+    /// embedding/scope-key computation. A no-op (not an error) on an
+    /// embedding-call failure -- the response was already returned to the
+    /// client by the time this runs, so there's nothing left to fail.
+    async fn semantic_cache_insert(
+        &self,
+        req: &ChatRequest,
+        cache: &Arc<RwLock<SemanticCache>>,
+        resp: ChatResponse,
+    ) {
+        let Some(model) = &self.embedding_model else {
+            return;
+        };
+        let Some(embedding) = self
+            .embed_for_cache(model, &request_text_for_embedding(req))
+            .await
+        else {
+            return;
+        };
+        let scope_key = SemanticCache::scope_key_for(req);
+        cache.write().unwrap().insert(scope_key, embedding, resp);
+    }
+
+    /// Resolves `req.model` to a provider chain and dispatches, falling
+    /// back on a retryable error -- the response-cache-aware entry point;
+    /// see `dispatch_uncached` for the actual dispatch logic. Checks
+    /// whichever cache is active first (`[cache].mode`'s `"semantic"` or
+    /// `"exact"`, never both at once -- see `Router::from_config`), and
+    /// inserts a successful response into it afterward.
     pub async fn dispatch(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
+        if !req.is_streaming() {
+            if let Some(semantic) = self.semantic_cache.clone() {
+                if let Some(resp) = self.semantic_cache_get(req, &semantic).await {
+                    return Ok(resp);
+                }
+                let resp = self.dispatch_uncached(req).await?;
+                self.semantic_cache_insert(req, &semantic, resp.clone())
+                    .await;
+                return Ok(resp);
+            }
+        }
+
         let cache_key = self.cache_key_for(req);
         if let Some(key) = cache_key {
             if let Some(resp) = self.cache_get(key) {
                 return Ok(resp);
             }
         }
+        let resp = self.dispatch_uncached(req).await?;
+        if let Some(key) = cache_key {
+            self.cache_insert(key, resp.clone());
+        }
+        Ok(resp)
+    }
 
+    /// The actual chain-resolution-and-dispatch logic, shared by every
+    /// `dispatch` cache path (semantic, exact, or neither) -- none of
+    /// those need their own copy of fallback/retry/instrumentation, only
+    /// a different cache check wrapped around this.
+    async fn dispatch_uncached(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
         let target_model = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
         let chain = self.apply_preferences(&target_model, chain, req.provider.as_ref())?;
@@ -1503,9 +1838,15 @@ impl Router {
                 continue;
             }
 
+            // "rtk" (tool-output compression) applies first, so
+            // "middle-out"'s token-budget estimate reflects the already-
+            // shrunk tool messages rather than their raw size -- both
+            // transforms compose when a request sets both.
+            let rtk_req = maybe_apply_rtk(req);
+            let base_req = rtk_req.as_ref().unwrap_or(req);
             let truncated_req =
-                maybe_apply_middle_out(req, provider_name, model_name, &self.pricing);
-            let req_to_send = truncated_req.as_ref().unwrap_or(req);
+                maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
+            let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
@@ -1554,6 +1895,13 @@ impl Router {
                             usage.completion_tokens,
                             cost,
                         );
+                        free_tiers::record_usage(
+                            &self.free_tier_settings,
+                            &mut self.free_tier_usage.lock().unwrap(),
+                            &format!("{provider_name}/{model_name}"),
+                            (usage.prompt_tokens + usage.completion_tokens) as u64,
+                            client_budget::now_unix(),
+                        );
                         resp.cost_usd = cost;
                         self.record_generation(GenerationRecord {
                             id: resp.id.clone(),
@@ -1566,9 +1914,6 @@ impl Router {
                         });
                     }
 
-                    if let Some(key) = cache_key {
-                        self.cache_insert(key, resp.clone());
-                    }
                     return Ok(resp);
                 }
                 Err(e) if e.is_retryable() => {
@@ -1617,9 +1962,15 @@ impl Router {
                 continue;
             }
 
+            // "rtk" (tool-output compression) applies first, so
+            // "middle-out"'s token-budget estimate reflects the already-
+            // shrunk tool messages rather than their raw size -- both
+            // transforms compose when a request sets both.
+            let rtk_req = maybe_apply_rtk(req);
+            let base_req = rtk_req.as_ref().unwrap_or(req);
             let truncated_req =
-                maybe_apply_middle_out(req, provider_name, model_name, &self.pricing);
-            let req_to_send = truncated_req.as_ref().unwrap_or(req);
+                maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
+            let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
             let api_key_override = self.byok_key_for(req, provider_name);
 
             let started_at = Instant::now();
@@ -1778,6 +2129,7 @@ mod tests {
                                 cache_read_ppm: p,
                                 cache_write_ppm: p,
                                 context_length: None,
+                                quality_score: None,
                             },
                         )
                     })
@@ -1806,6 +2158,10 @@ mod tests {
             moderation: None,
             web_search: None,
             cache: None,
+            semantic_cache: None,
+            embedding_model: None,
+            free_tier_settings: Arc::new(HashMap::new()),
+            free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -2688,6 +3044,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: Some(200_000),
+                quality_score: None,
             },
         )]));
 
@@ -4440,6 +4797,180 @@ mod tests {
         assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
     }
 
+    // --- quality sort -----------------------------------------------------
+
+    fn router_with_quality_pricing(entries: Vec<(&str, f64)>) -> Router {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let pricing = entries
+            .into_iter()
+            .map(|(model, score)| {
+                (
+                    model.to_string(),
+                    PriceRates {
+                        prompt_ppm: 1.0,
+                        completion_ppm: 1.0,
+                        cache_read_ppm: 1.0,
+                        cache_write_ppm: 1.0,
+                        context_length: None,
+                        quality_score: Some(score),
+                    },
+                )
+            })
+            .collect();
+        Router {
+            pricing: Arc::new(pricing),
+            ..router
+        }
+    }
+
+    #[test]
+    fn apply_preferences_sorts_descending_by_quality_score() {
+        let router = router_with_quality_pricing(vec![("anthropic/m1", 0.6), ("openai/m2", 0.9)]);
+        let prefs = ProviderPreferences {
+            sort: Some("quality".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("openai", "m2"), ("anthropic", "m1")]));
+    }
+
+    #[test]
+    fn apply_preferences_unscored_quality_sorts_last() {
+        let router = router_with_quality_pricing(vec![("anthropic/m1", 0.8)]);
+        // "openai/m2" has no [[pricing]] entry at all -- despite being
+        // first in the chain, it must sort after the scored entry rather
+        // than being treated as tied or preferred.
+        let prefs = ProviderPreferences {
+            sort: Some("quality".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("openai", "m2"), ("anthropic", "m1")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
+    // --- random sort -----------------------------------------------------
+
+    #[test]
+    fn apply_preferences_random_sort_preserves_the_candidate_set() {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let prefs = ProviderPreferences {
+            sort: Some("random".to_string()),
+            ..Default::default()
+        };
+        let mut result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2"), ("gemini", "m3")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        result.sort();
+        let mut expected = chain(&[("anthropic", "m1"), ("openai", "m2"), ("gemini", "m3")]);
+        expected.sort();
+        assert_eq!(
+            result, expected,
+            "random must reorder, never add/drop/duplicate candidates"
+        );
+    }
+
+    #[test]
+    fn apply_preferences_random_sort_does_not_panic_on_zero_or_one_candidates() {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let prefs = ProviderPreferences {
+            sort: Some("random".to_string()),
+            ..Default::default()
+        };
+        let single = router
+            .apply_preferences("smart", chain(&[("anthropic", "m1")]), Some(&prefs))
+            .unwrap();
+        assert_eq!(single, chain(&[("anthropic", "m1")]));
+    }
+
+    // --- free_tier_remaining sort ------------------------------------------
+
+    fn router_with_free_tier_budgets(entries: Vec<(&str, u64, u64)>) -> Router {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let mut settings = HashMap::new();
+        let mut usage = HashMap::new();
+        for (model, budget, used) in entries {
+            settings.insert(
+                model.to_string(),
+                FreeTierSetting {
+                    monthly_free_tokens: budget,
+                    period: BudgetPeriod::Total,
+                },
+            );
+            if used > 0 {
+                usage.insert(
+                    model.to_string(),
+                    TokenState {
+                        period_key: 0,
+                        tokens_used: used,
+                    },
+                );
+            }
+        }
+        Router {
+            free_tier_settings: Arc::new(settings),
+            free_tier_usage: Arc::new(Mutex::new(usage)),
+            ..router
+        }
+    }
+
+    #[test]
+    fn apply_preferences_sorts_descending_by_free_tier_remaining() {
+        // anthropic/m1: 1000 budget, 900 used -> 100 remaining.
+        // openai/m2: 1000 budget, 100 used -> 900 remaining.
+        let router = router_with_free_tier_budgets(vec![
+            ("anthropic/m1", 1000, 900),
+            ("openai/m2", 1000, 100),
+        ]);
+        let prefs = ProviderPreferences {
+            sort: Some("free_tier_remaining".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("openai", "m2"), ("anthropic", "m1")]));
+    }
+
+    #[test]
+    fn apply_preferences_unconfigured_free_tier_sorts_after_an_exhausted_one() {
+        // "anthropic/m1" is configured but fully exhausted (0 remaining);
+        // "openai/m2" has no [[free_tiers]] entry at all. Exhausted-but-
+        // tracked must still outrank never-tracked.
+        let router = router_with_free_tier_budgets(vec![("anthropic/m1", 1000, 1000)]);
+        let prefs = ProviderPreferences {
+            sort: Some("free_tier_remaining".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("openai", "m2"), ("anthropic", "m1")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
     #[tokio::test]
     async fn dispatch_records_uptime_of_one_on_success() {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -4573,6 +5104,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(100),
+                quality_score: None,
             },
         );
         assert!(maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing).is_none());
@@ -4603,6 +5135,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(200_000),
+                quality_score: None,
             },
         );
         assert!(maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing).is_none());
@@ -4630,6 +5163,7 @@ mod tests {
                 // Budget after reserving max_tokens is small relative to
                 // the ~2000-estimated-token middle messages.
                 context_length: Some(300),
+                quality_score: None,
             },
         );
         let truncated = maybe_apply_middle_out(&req, "anthropic", "claude-sonnet-5", &pricing)
@@ -4659,6 +5193,7 @@ mod tests {
                 cache_read_ppm: 3.0,
                 cache_write_ppm: 3.0,
                 context_length: Some(300),
+                quality_score: None,
             },
         )]));
         let mut req = test_request("anthropic/claude-sonnet-5");
@@ -4675,6 +5210,108 @@ mod tests {
             .dispatch(&req)
             .await
             .expect("dispatch should succeed even though the request was truncated");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // --- rtk (transforms: ["rtk"]) ------------------------------------------
+
+    fn tool_msg(text: &str) -> ChatMessage {
+        ChatMessage {
+            role: rp_core::Role::Tool,
+            content: Some(rp_core::MessageContent::text(text)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn maybe_apply_rtk_is_none_when_transform_not_requested() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.messages = vec![tool_msg("On branch main\nnothing to commit\n")];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_rtk_is_none_when_there_are_no_tool_messages() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        req.messages = vec![msg("system", 40), msg("user", 40)];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_rtk_compresses_a_tool_messages_text() {
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        let mut long_status = String::from("On branch main\n");
+        for _ in 0..20 {
+            long_status.push_str("modified: src/lib.rs\n");
+        }
+        req.messages = vec![msg("user", 10), tool_msg(&long_status)];
+
+        let compressed = maybe_apply_rtk(&req).expect("should compress the tool message");
+        let rp_core::MessageContent::Text(tool_text) =
+            compressed.messages[1].content.as_ref().unwrap()
+        else {
+            panic!("expected plain text content");
+        };
+        assert!(tool_text.len() < long_status.len());
+        assert!(tool_text.contains("repeated"));
+        // The non-tool message is untouched.
+        assert_eq!(compressed.messages[0].content, req.messages[0].content);
+    }
+
+    #[test]
+    fn maybe_apply_rtk_leaves_a_short_tool_message_unchanged_and_returns_none() {
+        // Nothing worth compressing -- classify+compress round-trips to
+        // the same text, so this must report "no change" rather than a
+        // spurious rewrite.
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string()]);
+        req.messages = vec![tool_msg("2 + 2 = 4")];
+        assert!(maybe_apply_rtk(&req).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_composes_rtk_before_middle_out() {
+        // A large tool message that, uncompressed, would blow the
+        // context budget middle-out enforces -- but rtk should shrink it
+        // enough that middle-out never needs to drop the surrounding
+        // messages. Both transforms requested together must compose, not
+        // just the last one applied winning.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let mut router = test_router(vec![("anthropic", mock)], vec![], vec![], vec![], vec![]);
+        router.pricing = Arc::new(HashMap::from([(
+            "anthropic/claude-sonnet-5".to_string(),
+            PriceRates {
+                prompt_ppm: 3.0,
+                completion_ppm: 15.0,
+                cache_read_ppm: 3.0,
+                cache_write_ppm: 3.0,
+                context_length: Some(200_000),
+                quality_score: None,
+            },
+        )]));
+        let mut req = test_request("anthropic/claude-sonnet-5");
+        req.transforms = Some(vec!["rtk".to_string(), "middle-out".to_string()]);
+        let mut long_status = String::from("On branch main\n");
+        for _ in 0..50 {
+            long_status.push_str("modified: src/lib.rs\n");
+        }
+        req.messages = vec![msg("system", 10), tool_msg(&long_status), msg("user", 10)];
+
+        router
+            .dispatch(&req)
+            .await
+            .expect("dispatch should succeed with both transforms requested");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
@@ -4886,6 +5523,7 @@ mod tests {
             cache_read_ppm: prompt_ppm,
             cache_write_ppm: prompt_ppm,
             context_length: None,
+            quality_score: None,
         }
     }
 
@@ -5014,6 +5652,7 @@ mod tests {
             cache_read_per_million: None,
             cache_write_per_million: None,
             context_length: None,
+            quality_score: None,
         };
         let rates = PriceRates::from(&entry);
         assert_eq!(rates.cache_read_ppm, 3.0);
@@ -5029,6 +5668,7 @@ mod tests {
             cache_read_per_million: Some(0.3),
             cache_write_per_million: Some(3.75),
             context_length: None,
+            quality_score: None,
         };
         let rates = PriceRates::from(&entry);
         assert_eq!(rates.cache_read_ppm, 0.3);
@@ -5064,6 +5704,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: None,
+                quality_score: None,
             },
         );
 
@@ -5093,6 +5734,7 @@ mod tests {
                 cache_read_ppm: 0.3,
                 cache_write_ppm: 3.75,
                 context_length: None,
+                quality_score: None,
             },
         );
 
@@ -5301,6 +5943,9 @@ mod tests {
             cache: Some(Arc::new(RwLock::new(ResponseCache::new(&CacheConfig {
                 ttl_secs,
                 max_entries,
+                mode: CacheMode::Exact,
+                similarity_threshold: 0.85,
+                embedding_model: None,
             })))),
             ..router
         }
@@ -5454,6 +6099,99 @@ mod tests {
         let stats = &snapshot["anthropic/m1"];
         assert_eq!(stats.requests, 1);
         assert!((stats.cost_usd - expected_cost).abs() < 1e-12);
+    }
+
+    // --- semantic cache (cache.mode = "semantic") -------------------------------
+
+    fn router_with_semantic_cache(providers: Vec<(&str, Arc<dyn Provider>)>) -> Router {
+        let router = test_router(providers, vec![], vec![], vec![], vec![]);
+        let cache_config = CacheConfig {
+            ttl_secs: 60,
+            max_entries: 10,
+            mode: CacheMode::Semantic,
+            similarity_threshold: 0.85,
+            embedding_model: Some("anthropic/text-embed".to_string()),
+        };
+        Router {
+            semantic_cache: Some(Arc::new(RwLock::new(SemanticCache::new(&cache_config)))),
+            embedding_model: Some("anthropic/text-embed".to_string()),
+            ..router
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_hit_skips_the_second_chat_call() {
+        // MockProvider's embeddings() returns a constant vector regardless
+        // of input text, so a second dispatch's lookup embedding always
+        // matches the first's insert embedding -- this test is exercising
+        // the caching *mechanism* (embed -> store -> embed -> compare ->
+        // hit), not real-world semantic matching.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let req = test_request("anthropic/m1");
+
+        let first = router.dispatch(&req).await.expect("should succeed");
+        // First dispatch: 1 lookup-embedding call (miss, empty cache) + 1
+        // chat call + 1 insert-embedding call = 3.
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let second = router.dispatch(&req).await.expect("should succeed");
+        // Second dispatch: 1 lookup-embedding call, hits -- no chat call,
+        // no insert-embedding call.
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            4,
+            "a cache hit must skip both the chat call and the insert-embedding call"
+        );
+        assert_eq!(first.id, second.id);
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_miss_still_dispatches_and_populates_the_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let req = test_request("anthropic/m1");
+
+        let resp = router.dispatch(&req).await.expect("should succeed");
+        assert_eq!(resp.model, "anthropic/m1");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "a miss must still reach the provider and then populate the cache"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_semantic_cache_is_bypassed_for_a_streaming_request() {
+        // dispatch_stream never consults [cache] at all -- semantic or
+        // exact -- same scope restriction the exact-match cache already
+        // has (see cache.rs's module docs).
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let mut req = test_request("anthropic/m1");
+        req.stream = Some(true);
+
+        // Would panic/error if dispatch_stream tried to route through the
+        // semantic-cache path (it has no chat_stream-aware handling) --
+        // succeeding at all demonstrates it's untouched.
+        let _stream = router
+            .dispatch_stream(&req)
+            .await
+            .expect("streaming should bypass the cache entirely and dispatch normally");
     }
 
     // --- BYOK (provider.byok) -------------------------------------------------

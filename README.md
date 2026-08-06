@@ -60,6 +60,35 @@ orchestrator's liveness/readiness probes at [`/health` and
 also baked into the image for Compose/Fly/Railway-style deployments that
 check container health directly rather than via an external prober.
 
+### Operator CLI
+
+`rp-cli` is a small, synchronous, read-only companion binary for checking
+a config before you deploy it — it never makes a network call and never
+prints a resolved secret's value, only whether its env var is set:
+
+```sh
+cargo run -p rp-cli -- config check --path config.toml
+cargo run -p rp-cli -- providers list --path config.toml
+cargo run -p rp-cli -- keys check --path config.toml
+```
+
+- **`config check`** — parses `config.toml` (the exact same `Config` type
+  and TOML schema `rp-server` loads at startup, so there's nothing for
+  this to drift out of sync with), then reports provider/route/client
+  counts, which providers will actually activate vs. get skipped (and
+  why), any invalid `[[guardrails]]` regex, and whether persistence/the
+  admin API are configured.
+- **`providers list`** — every `[providers.*]` entry with its resolved
+  status (`active` or `skipped (X not set)`).
+- **`keys check`** — every `*_env` field this config references (provider/
+  client keys, `server.api_key_env`/`admin_key_env`, and any configured
+  `[persistence]`/`[webhook]`/`[moderation]`/`[web_search]` credential),
+  each marked `set`/`NOT SET` — never the actual value.
+
+`--path` defaults to `config.toml` in the current directory. Not built
+into the Docker image described above (`rp-server` only) — run it from a
+checkout, or `cargo install --path crates/cli` for a standalone binary.
+
 ## API
 
 ### `POST /v1/chat/completions`
@@ -359,6 +388,42 @@ candidate but sent unmodified to another. Without a `context_length` on
 record for the candidate, or without `transforms` set at all, the request
 goes out unmodified — same as today.
 
+`transforms: ["rtk"]` opts into a different kind of compression, aimed at
+tool-call-heavy coding-agent sessions rather than raw message count:
+
+```jsonc
+{
+  "model": "smart",
+  "transforms": ["rtk"],
+  "messages": [
+    {"role": "user", "content": "run the tests"},
+    {"role": "assistant", "tool_calls": ["..."]},
+    {"role": "tool", "tool_call_id": "...", "content": "running 500 tests\ntest a::b ... ok\n... (huge)"}
+  ]
+}
+```
+
+Every `role: "tool"` message's text is stripped of ANSI escape codes and
+run through a built-in filter, chosen by sniffing the content (not the
+originating command, which this router never sees): `git` (status/diff
+output — collapses long runs of repeated file-status lines), `test`
+(cargo/pytest/jest-shaped output — collapses consecutive passing-test
+lines while always keeping failures and the summary line), `build`
+(compiler output — collapses repeated `Compiling`-style lines while always
+keeping `warning:`/`error:` lines), `package` (npm/pip-shaped install
+output — keeps only summary lines like `added N packages`), and a generic
+fallback (deduplicates repeated lines, then keeps the first/last 40 lines
+of anything still very long). Every category leaves short/already-compact
+output untouched. System/user/assistant messages are never touched — only
+`role: "tool"` content.
+
+`"rtk"` and `"middle-out"` compose when both are set: `"rtk"` runs first
+(so tool messages are already shrunk before `"middle-out"`'s token-budget
+estimate runs against them), then `"middle-out"` drops whole messages if
+the request is still over budget after that. This is a fixed built-in
+5-category catalog, not OmniRoute's TOML-configurable, 49-filter one — see
+`crates/router/src/rtk.rs` if you need a category it doesn't cover yet.
+
 ### Sampling parameters
 
 Beyond `temperature`, `top_p`, `max_tokens`, and `stop`, a request can set a
@@ -484,6 +549,18 @@ A request can also constrain and order the resolved fallback chain with a
   healthy. This is a deterministic ranking, not weighted-random load
   balancing across "healthy" candidates — every request still tries the
   sorted chain in order with fallback, the same as any other `sort` value.
+- `sort: "quality"` sorts descending by an operator-declared
+  `quality_score` on `[[pricing]]` — an arbitrary scale you define
+  yourself (nothing here measures model quality), unranked entries sort
+  last, same convention as `"price"`.
+- `sort: "random"` isn't a ranking at all — it shuffles the resolved chain,
+  for simple load distribution across candidates with no meaningful
+  ordering between them (e.g. same price, no observed latency yet).
+- `sort: "free_tier_remaining"` sorts descending by remaining budget from
+  [Free tiers](#free-tiers) — a "provider/model" with a `[[free_tiers]]`
+  entry and headroom left sorts first, one that's exhausted (`0` left)
+  sorts after every candidate with headroom, and one with no
+  `[[free_tiers]]` entry at all sorts last of all.
 
 ### Logprobs
 
@@ -583,7 +660,8 @@ with a `[[pricing]]` entry:
         "prompt": 3.0,
         "completion": 15.0,
         "cache_read": 0.3,
-        "cache_write": 3.75
+        "cache_write": 3.75,
+        "quality_score": 0.9
       },
       "supported_params": ["temperature", "top_p", "max_tokens", "..."]
     }
@@ -597,7 +675,9 @@ models with different context windows and pricing) and a `"{provider}/*"`
 wildcard omit all three. `pricing` mirrors the entry's
 `prompt_per_million`/`completion_per_million`/`cache_read_per_million`/
 `cache_write_per_million` (cache rates already defaulted to `prompt` when
-left unset in config, same as `cost_usd` computation uses).
+left unset in config, same as `cost_usd` computation uses), plus
+`quality_score` when the entry sets one (omitted, not `null`, when unset —
+see `sort: "quality"` above).
 `context_length` is purely informational — not enforced against actual
 request size. `supported_params` lists which `ChatRequest` fields that
 model's provider adapter gives an actual effect to (native support or,
@@ -907,6 +987,66 @@ unset sends no `Authorization` header at all. Delivery is fire-and-forget
 triggered the event, and a delivery failure is only logged, never
 surfaced to the client.
 
+## Free tiers
+
+`[[clients]].budget_usd` caps what a *caller* spends; `[[free_tiers]]`
+tracks a different thing — how much of a *provider's* free allowance
+you've used, per "provider/model":
+
+```toml
+[[free_tiers]]
+model = "groq/llama-3.3-70b-versatile"
+monthly_free_tokens = 117000000
+# period = "monthly"   # optional, this is the default -- "total" / "daily" / "weekly" / "monthly"
+```
+
+This is self-declared, like `[providers.*]`'s `zdr`/`no_training` flags —
+you tell it what you believe the provider's free tier grants, and it never
+verifies that number against the provider's own systems. It's the honest,
+scoped-down version of what a free-tier *aggregator* product would try to
+do for you automatically: aggregating other providers' quotas on your
+behalf raises real ToS problems (several providers' terms restrict
+proxy/resale use of a free-tier key), so this router only ever reports
+against numbers you configured yourself, for your own account.
+
+**`GET /v1/free-tiers`** reports every configured entry's budget, this
+period's tracked prompt+completion token usage, and what's left:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "model": "groq/llama-3.3-70b-versatile",
+      "monthly_free_tokens": 117000000,
+      "tokens_used": 250000,
+      "tokens_remaining": 116750000,
+      "period": "monthly"
+    }
+  ]
+}
+```
+
+Tracked usage is the same `prompt_tokens + completion_tokens` this router
+already counts for [`GET /v1/usage`](#get-v1usage) — a request to a
+"provider/model" with no `[[free_tiers]]` entry is simply never counted
+here, the same way an unpriced model never counts against `cost_usd`.
+`tokens_remaining` saturates at `0` rather than going negative once usage
+exceeds the configured budget — this endpoint is reporting-only, unlike
+`[[clients]].budget_usd`; nothing here blocks a request or returns `402`,
+since a *provider's* free-tier exhaustion is something that provider's own
+API would reject on its own, not something this router can pre-empt
+without a live reading of your actual remaining quota (which no provider
+here exposes).
+
+`period` uses the same reset cadence as `[[clients]].budget_period` —
+`"total"` (never resets), `"daily"`/`"weekly"`/`"monthly"` (UTC calendar
+boundaries, or a fixed 7-day cadence from the Unix epoch for `"weekly"`).
+Tracking is in-memory only, per-process — it resets on restart and isn't
+shared across processes, with no `[persistence]` backing (unlike
+`GET /v1/usage`), so a load-balanced deployment's `/v1/free-tiers` reflects
+only the process answering that particular request.
+
 ## Guardrails
 
 `[[guardrails]]` entries check every request's message text — before
@@ -1206,6 +1346,43 @@ that never actually happened. Every lookup increments the
 `rusty_provider_cache_lookups_total` Prometheus counter, labeled `hit` or
 `miss`. `[cache]` absent leaves caching fully off, with no overhead.
 
+### Semantic mode
+
+`[cache].mode = "semantic"` swaps exact-match for embedding-cosine-
+similarity matching on message content, while keeping every other field
+exact-match — so a differently-worded-but-equivalent request can still
+hit:
+
+```toml
+[cache]
+mode = "semantic"
+similarity_threshold = 0.85   # optional, this is the default
+embedding_model = "openai/text-embedding-3-small"
+```
+
+`embedding_model` is a `"provider/model"` string, exactly like `model`
+elsewhere — this router embeds the request's messages by calling it
+through its own [`POST /v1/embeddings`](#post-v1embeddings) dispatch path
+(fallback/retry included, since `embedding_model` can itself be a
+`[[routes]]` alias). `similarity_threshold` (0.0-1.0, higher is stricter)
+is the minimum cosine similarity for a lookup to count as a hit.
+`model`, every sampling parameter, `tools`, and `provider` preferences
+still have to match *exactly* — "semantic" only ever fuzzes the message
+text, nothing else. An embedding-call failure (network error, the
+provider down) fails open: that one request just skips the cache in both
+directions rather than failing, the same resilience pattern
+[Moderation](#moderation)'s own backend failures already get. A request
+with `"stream": true` still bypasses caching entirely in either mode,
+same as exact.
+
+Without `embedding_model` set, or if it names a provider this process
+didn't actually configure, `"semantic"` mode falls back to `"exact"` at
+startup with a warning — same soft-failure pattern a misconfigured
+provider or moderation backend already gets, rather than refusing to
+start the router. `mode` defaults to `"exact"`, so an existing `[cache]`
+section with no `mode` set keeps its current exact-match behavior
+unchanged.
+
 ## Admin API
 
 Setting `server.admin_key_env` unlocks a small admin API for inspecting
@@ -1428,6 +1605,14 @@ config file itself. `[[pricing]]` entries are optional and only affect
 requests that opt into `"provider": {"sort": "price"}`; a provider's `zdr`
 flag is optional and only affects requests that opt into
 `"provider": {"zdr": true}`.
+
+`config.example.toml` also ships a commented-out block of curated presets
+for more OpenAI-wire-compatible backends beyond the six enabled by
+default — see [docs/PROVIDERS.md](docs/PROVIDERS.md) for the fuller
+reference table (what each one is, free-tier/ToS notes). Adding one is a
+config change only: `kind = "openai"` already covers any backend speaking
+OpenAI's `/chat/completions` shape, the same way Groq/Together/Fireworks
+already share one adapter.
 
 ## Using with local agent tools (Hermes, OpenClaw, etc.)
 

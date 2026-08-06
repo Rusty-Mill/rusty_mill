@@ -7,11 +7,6 @@ license.workspace = true
 [dependencies]
 rp-core.workspace = true
 rp-providers.workspace = true
-rusty-db = { workspace = true }
-rusty_request = { workspace = true }
-rusty_tokio = { workspace = true }
-rusty_json = { workspace = true }
-rusty_std = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

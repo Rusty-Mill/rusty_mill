@@ -158,6 +158,37 @@ pub struct PricingEntry {
     /// as it would without this field set.
     #[serde(default)]
     pub context_length: Option<u32>,
+    /// Operator-declared quality score for `provider.sort: "quality"` --
+    /// an arbitrary scale (higher is better), not derived from anything
+    /// this router measures itself. Unset means this "provider/model" is
+    /// never preferred by that sort (it always sorts last), the same
+    /// unranked-last convention `sort: "price"` gives an unpriced entry.
+    #[serde(default)]
+    pub quality_score: Option<f64>,
+}
+
+/// An operator-declared monthly free-token budget for one "provider/model"
+/// entry, for `GET /v1/free-tiers`. Self-declared, like `zdr`/`no_training`
+/// on `[providers.*]` — this router never verifies it against the
+/// provider's own actual quota, it just tracks this process's usage
+/// against whatever number you put here.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FreeTierEntry {
+    /// "provider/model", matching a `[[routes]]` chain entry or a
+    /// `[[pricing]]` model string.
+    pub model: String,
+    /// How many prompt+completion tokens you believe this provider/model
+    /// grants for free, per `period`.
+    pub monthly_free_tokens: u64,
+    /// How the tracked-usage-vs-budget window resets. Defaults to
+    /// `"monthly"`, matching the field name above; set explicitly if your
+    /// provider's own free tier actually resets on a different cadence.
+    #[serde(default = "default_free_tier_period")]
+    pub period: BudgetPeriod,
+}
+
+fn default_free_tier_period() -> BudgetPeriod {
+    BudgetPeriod::Monthly
 }
 
 /// A named inbound caller, identified by its own API key, with its own
@@ -325,6 +356,8 @@ pub struct Config {
     pub web_search: Option<WebSearchConfig>,
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    #[serde(default)]
+    pub free_tiers: Vec<FreeTierEntry>,
 }
 
 /// Configures `model: "auto"` -- a heuristic (not ML) complexity-based
@@ -542,10 +575,30 @@ fn default_cache_max_entries() -> usize {
     1000
 }
 
-/// An opt-in, in-memory, exact-match cache of `Router::dispatch`
-/// responses (non-streaming only -- see `Router::cache_key_for`), keyed
-/// by a hash of the entire request. Absent means caching is off
-/// entirely, same convention as every other optional subsystem here.
+fn default_similarity_threshold() -> f64 {
+    0.85
+}
+
+/// Which matching strategy `[cache]` uses. `Exact` (the default, and the
+/// only mode before this field existed) is a hash of the entire request --
+/// any difference at all is a miss. `Semantic` fuzzes only the message
+/// text: every other field (model, sampling params, tools, `provider`
+/// prefs) still has to match exactly, but message content is compared by
+/// embedding-cosine-similarity against `similarity_threshold` instead of
+/// byte-for-byte, so a differently-worded-but-equivalent request can still
+/// hit.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CacheMode {
+    #[default]
+    Exact,
+    Semantic,
+}
+
+/// An opt-in, in-memory cache of `Router::dispatch` responses
+/// (non-streaming only -- see `Router::cache_key_for`). Absent means
+/// caching is off entirely, same convention as every other optional
+/// subsystem here.
 #[derive(Debug, Deserialize, Clone)]
 pub struct CacheConfig {
     /// How long a cached response stays eligible to be served, in
@@ -559,6 +612,26 @@ pub struct CacheConfig {
     /// /v1/generation?id=` lookups.
     #[serde(default = "default_cache_max_entries")]
     pub max_entries: usize,
+    /// `"exact"` (default) or `"semantic"` -- see `CacheMode`.
+    #[serde(default)]
+    pub mode: CacheMode,
+    /// Minimum cosine similarity (0.0-1.0) for a semantic-mode lookup to
+    /// count as a hit. Ignored in `"exact"` mode. Higher is stricter
+    /// (fewer, more confident hits); lower risks answering a genuinely
+    /// different question with a cached response from a similar-sounding
+    /// one.
+    #[serde(default = "default_similarity_threshold")]
+    pub similarity_threshold: f64,
+    /// The `"provider/model"` this router calls (via its own
+    /// `/v1/embeddings` dispatch path) to embed a request's message text
+    /// for semantic-mode comparison. Required for `"semantic"` mode to
+    /// actually activate -- left unset (or pointing at a provider/model
+    /// with no embeddings support), semantic mode falls back to `"exact"`
+    /// at startup with a warning, the same soft-failure pattern a
+    /// misconfigured provider or moderation backend already gets. Ignored
+    /// in `"exact"` mode.
+    #[serde(default)]
+    pub embedding_model: Option<String>,
 }
 
 impl Config {

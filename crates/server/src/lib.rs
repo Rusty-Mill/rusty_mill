@@ -20,6 +20,7 @@ pub fn build_app(state: AppState) -> AxumRouter {
         .route("/ready", get(routes::ready))
         .route("/v1/models", get(routes::list_models))
         .route("/v1/usage", get(routes::usage_stats))
+        .route("/v1/free-tiers", get(routes::free_tiers))
         .route("/v1/providers/stats", get(routes::provider_stats))
         .route("/v1/generation", get(routes::generation))
         .route("/metrics", get(routes::metrics))

@@ -24,6 +24,49 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #100 — Parity-loop: close additive capability gaps vs. OmniRoute/agentgateway
+**2026-08-06** · [#100](https://github.com/baileyrd/rusty_provider/pull/100)
+
+- **Changed:** `ARCHITECTURE.md`'s non-goals softened from "no dashboard" /
+  "not multi-tenant SaaS" to "no UI" — a JSON-only reporting surface is in
+  scope, an HTML/Electron/PWA dashboard is not. See
+  [ADR-0002](docs/adr/0002-reporting-surface-is-json-only.md).
+- **Added:** `docs/PROVIDERS.md` — a curated reference table of ~20 more
+  OpenAI-wire-compatible backends (Mistral, Cerebras, SambaNova, DeepSeek,
+  OpenRouter, Hugging Face, NVIDIA NIM, Novita, DeepInfra, Nebius, Moonshot,
+  Zhipu, DashScope/Qwen, xAI, Perplexity, Cohere, Hyperbolic, Featherless,
+  01.AI, Cloudflare Workers AI), plus matching commented-out presets in
+  `config.example.toml`. All config-only — `kind = "openai"` already covers
+  any of them, same as Groq/Together/Fireworks today.
+- **Added:** `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-
+  declared free-token budgets per "provider/model", tracked against this
+  router's own usage and reported (budget/used/remaining) the same
+  reporting-only, self-declared way `zdr`/`no_training` already work.
+  Reset cadence reuses `[[clients]].budget_period`'s calendar math
+  (`"total"`/`"daily"`/`"weekly"`/`"monthly"`, default `"monthly"`).
+- **Added:** Three new `provider.sort` strategies — `"quality"` (descending
+  by a new operator-declared `[[pricing]].quality_score`), `"random"`
+  (shuffles the chain for simple load distribution, no new dependency —
+  a tiny in-crate splitmix64 PRNG), and `"free_tier_remaining"` (descending
+  by headroom against the `[[free_tiers]]` budgets above).
+- **Added:** `transforms: ["rtk"]` — tool-output compression alongside the
+  existing `"middle-out"`. A built-in, content-sniffed 5-category filter
+  catalog (git/test/build/package/generic) compacts `role: "tool"` message
+  text before dispatch; composes with `"middle-out"` when both are set.
+- **Added:** `rp-cli` — a new 5th workspace crate, a synchronous read-only
+  operator CLI (`config check`/`providers list`/`keys check`) built
+  directly on `rp-router::Config`, so it can never drift from the schema
+  the real server loads. Not built into the Docker image.
+- **Added:** `[cache].mode = "semantic"` — opt-in alongside the existing
+  exact-match caching, embedding-cosine-similarity matching on message
+  text only (every other field still has to match exactly). Embeds via
+  this router's own `/v1/embeddings` dispatch path
+  (`[cache].embedding_model`); falls back to exact-match at startup with
+  a warning if that model doesn't resolve. Fails open on an embedding-
+  call failure, same as Moderation's own backend-failure handling.
+
+---
+
 ## PR #98 — Update ARCHITECTURE.md's stale caching claims
 **2026-07-22** · [#98](https://github.com/baileyrd/rusty_provider/pull/98)
 

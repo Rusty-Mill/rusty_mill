@@ -693,6 +693,12 @@ pub struct ModelPricing {
     pub completion: f64,
     pub cache_read: f64,
     pub cache_write: f64,
+    /// Operator-declared score for `provider.sort: "quality"`, mirroring
+    /// this entry's `[[pricing]].quality_score`. Absent (not `null`) when
+    /// unset in config, same "nothing configured" convention every other
+    /// optional field on this type already uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_score: Option<f64>,
 }
 
 /// `POST /v1/embeddings` request body -- OpenAI's own shape, so an
