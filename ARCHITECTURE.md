@@ -65,7 +65,8 @@ run independently), not for independent deployment or scaling.
 A `POST /v1/chat/completions` request, in order:
 
 1. `rp-server::routes::chat_completions` authenticates the caller
-   (bearer token against `[[clients]]` or `server.api_key_env`) and
+   (bearer token against `[[clients]]`, `server.api_key_env`, or, if
+   `[jwt]` is configured, a verified JWT -- see `rp-server::jwt`) and
    checks its inbound rate-limit bucket.
 2. `Router::apply_preset` — if `preset` is set, merges in that preset's
    saved model/provider-prefs/system-prompt/sampling-params.

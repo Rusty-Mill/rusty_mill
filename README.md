@@ -832,6 +832,56 @@ process itself is fine, it just can't serve traffic right now, most
 likely because `[persistence]`'s database is down); a failing `/health`
 means the process itself needs restarting.
 
+## JWT/OIDC authentication
+
+`[jwt]` is an additional way to satisfy authentication, alongside (never
+instead of) `server.api_key_env` and `[[clients]]` keys — a presented
+bearer token that doesn't match a known static key is tried as a JWT
+before being rejected:
+
+```toml
+[jwt]
+# Simplest setup: a shared secret, no network call ever needed.
+hs256_secret_env = "JWT_SECRET"
+
+# Or, real OIDC provider integration (Auth0, Okta, Keycloak, ...):
+# jwks_url = "https://your-idp.example.com/.well-known/jwks.json"
+# jwks_cache_secs = 300   # optional, this is the default
+
+issuer = "https://your-idp.example.com/"   # optional -- verified against `iss` if set
+audience = "rusty-provider"                # optional -- verified against `aud` if set
+```
+
+If both `hs256_secret_env` (resolved) and `jwks_url` are set, HS256 wins
+(no network call needed). `jwks_url` fetches an RS256 JWKS document,
+caching keys by `kid` for `jwks_cache_secs` — a token whose `kid` isn't in
+the current cache triggers an immediate re-fetch rather than waiting out
+the rest of the TTL, so key rotation doesn't require a restart. Neither
+mode resolving (`hs256_secret_env` unset/unresolvable and no `jwks_url`)
+disables JWT auth entirely at startup with a warning, the same
+soft-failure pattern a misconfigured provider or moderation backend
+already gets.
+
+This is an **authentication** check, not a best-effort content check like
+[Moderation](#moderation) or [Web search](#web-search) — it fails
+**closed**: an expired token, a bad signature, a wrong issuer/audience, or
+an unreachable JWKS endpoint all mean "not authenticated," never "let it
+through anyway." The algorithm used to validate a token is always chosen
+by *this router's own configured mode* (`HS256` or `RS256`), never by
+trusting the token's own `alg` header — closing the classic JWT
+algorithm-confusion hole.
+
+A request with `[jwt]` configured but no `server.api_key_env`/
+`[[clients]]` at all still requires *some* credential — `[jwt]` alone is
+enough to turn authentication on, the same as either of those would be by
+themselves. A JWT-authenticated caller gets the same access a valid
+`server.api_key_env` token would; this version doesn't map JWT claims to a
+`[[clients]]` identity, so there's no per-subject budget/spend tracking
+and rate limiting falls back to the same source-IP bucket an unmatched
+caller gets (see [Rate limiting](#rate-limiting) below) rather than a
+dedicated per-subject one. `/v1/admin/*` is unaffected by `[jwt]` entirely
+— it stays `server.admin_key_env`/admin-role `[[clients]]` only.
+
 ## Rate limiting
 
 Both directions are entirely opt-in — with no `[[clients]]`,

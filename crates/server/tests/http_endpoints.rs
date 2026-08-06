@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use rp_core::RateLimiter;
 use rp_router::{Config, Router as ProviderRouter};
 use rp_server::build_app;
+use rp_server::jwt::JwtVerifier;
 use rp_server::state::AppState;
 use serde_json::{json, Value};
 use wiremock::matchers::{body_string_contains, header, method, path};
@@ -51,6 +52,14 @@ async fn spawn_app(config_toml: &str) -> String {
         }
     }
 
+    let jwt = config.jwt.as_ref().and_then(|cfg| {
+        let hs256_secret = cfg
+            .hs256_secret_env
+            .as_ref()
+            .and_then(|var| std::env::var(var).ok());
+        JwtVerifier::new(cfg, hs256_secret).map(Arc::new)
+    });
+
     let state = AppState {
         router,
         api_key,
@@ -60,6 +69,7 @@ async fn spawn_app(config_toml: &str) -> String {
         clients: Arc::new(RwLock::new(config.clients.clone())),
         admin_key,
         max_body_bytes: config.server.max_body_bytes,
+        jwt,
     };
 
     let app = build_app(state);
@@ -235,6 +245,129 @@ async fn protected_endpoint_rejects_missing_or_wrong_key_and_accepts_correct_one
         .await
         .unwrap();
     assert_eq!(correct_key.status(), 200);
+}
+
+fn hs256_jwt(secret: &str, claims: &Value) -> String {
+    jsonwebtoken::encode(
+        &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+        claims,
+        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .unwrap()
+}
+
+fn future_exp() -> i64 {
+    (std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+#[tokio::test]
+async fn protected_endpoint_accepts_a_valid_jwt_when_no_static_key_is_configured() {
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+
+    let no_auth = client
+        .get(format!("{base_url}/v1/models"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        no_auth.status(),
+        401,
+        "[jwt] alone must still require *some* credential, not leave auth fully open"
+    );
+
+    let token = hs256_jwt("jwt-s3cret", &json!({"sub": "alice", "exp": future_exp()}));
+    let with_jwt = client
+        .get(format!("{base_url}/v1/models"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_jwt.status(), 200);
+}
+
+#[tokio::test]
+async fn protected_endpoint_rejects_an_expired_or_wrongly_signed_jwt() {
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+
+    let expired = hs256_jwt("jwt-s3cret", &json!({"sub": "alice", "exp": 1}));
+    let expired_resp = client
+        .get(format!("{base_url}/v1/models"))
+        .bearer_auth(&expired)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(expired_resp.status(), 401);
+
+    let wrong_secret = hs256_jwt(
+        "not-the-secret",
+        &json!({"sub": "alice", "exp": future_exp()}),
+    );
+    let wrong_secret_resp = client
+        .get(format!("{base_url}/v1/models"))
+        .bearer_auth(&wrong_secret)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_secret_resp.status(), 401);
+}
+
+#[tokio::test]
+async fn protected_endpoint_still_accepts_the_static_key_when_jwt_is_also_configured() {
+    // [jwt] is additive, never a replacement for server.api_key_env /
+    // [[clients]] -- a caller with the plain static key must keep working
+    // exactly as before.
+    let key_var = unique_env_var("SERVER_API_KEY");
+    std::env::set_var(&key_var, "s3cret");
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        api_key_env = "{key_var}"
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/v1/models"))
+        .bearer_auth("s3cret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
 }
 
 #[tokio::test]

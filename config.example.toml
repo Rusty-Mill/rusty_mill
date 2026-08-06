@@ -25,6 +25,26 @@ port = 8080
 # routes didn't exist).
 # admin_key_env = "RUSTY_PROVIDER_ADMIN_KEY"
 
+# --- JWT/OIDC auth (optional) ------------------------------------------------
+# An additional way to authenticate, alongside (never instead of) api_key_env/
+# [[clients]] above -- a bearer token that doesn't match a known static key is
+# tried as a JWT before being rejected. Fails closed: an expired/malformed/
+# wrong-issuer token or an unreachable JWKS endpoint all mean "not
+# authenticated," never "let it through anyway." See the README's "JWT/OIDC
+# authentication" section for the full contract.
+
+# [jwt]
+# Simplest setup -- a shared secret, no network call ever needed:
+# hs256_secret_env = "JWT_SECRET"
+#
+# Or real OIDC provider integration (Auth0, Okta, Keycloak, ...) instead --
+# if both this and hs256_secret_env resolve, HS256 wins:
+# jwks_url = "https://your-idp.example.com/.well-known/jwks.json"
+# jwks_cache_secs = 300   # optional, this is the default
+#
+# issuer = "https://your-idp.example.com/"   # optional -- verified against `iss` if set
+# audience = "rusty-provider"                # optional -- verified against `aud` if set
+
 # --- Providers -------------------------------------------------------------
 # `kind` is one of: "openai" (any OpenAI-compatible /chat/completions API),
 # "anthropic", or "gemini". A provider is skipped at startup (with a warning)

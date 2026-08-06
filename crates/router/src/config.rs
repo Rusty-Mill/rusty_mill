@@ -358,6 +358,56 @@ pub struct Config {
     pub cache: Option<CacheConfig>,
     #[serde(default)]
     pub free_tiers: Vec<FreeTierEntry>,
+    #[serde(default)]
+    pub jwt: Option<JwtConfig>,
+}
+
+fn default_jwks_cache_secs() -> u64 {
+    300
+}
+
+/// Enables JWT/OIDC bearer-token auth as an additional way to satisfy
+/// `check_auth`, alongside (never instead of) the existing static
+/// `server.api_key_env` / `[[clients]].api_key_env` tokens -- a presented
+/// bearer token that doesn't match a known static key is tried as a JWT
+/// before being rejected. The actual verification logic (JWKS fetching/
+/// caching, signature checking) lives in `rp-server`, not here -- this is
+/// only the config schema, same layering as everything else in this file.
+///
+/// At least one of `jwks_url` / `hs256_secret_env` must resolve for JWT
+/// auth to actually activate; otherwise it's disabled at startup with a
+/// warning, the same soft-failure pattern a misconfigured provider or
+/// moderation backend already gets.
+#[derive(Debug, Deserialize, Clone)]
+pub struct JwtConfig {
+    /// JWKS endpoint URL for RS256 verification (real OIDC provider
+    /// integration -- Auth0, Okta, Keycloak, etc.), keyed by each key's
+    /// `kid` for key rotation. Fetched lazily and cached for
+    /// `jwks_cache_secs`.
+    #[serde(default)]
+    pub jwks_url: Option<String>,
+    /// Name of the environment variable holding a shared HS256 signing
+    /// secret (not the secret itself) -- a simpler setup than JWKS for a
+    /// self-issued-token deployment with no OIDC provider involved. If
+    /// both this and `jwks_url` are set, HS256 takes precedence (no
+    /// network call needed).
+    #[serde(default)]
+    pub hs256_secret_env: Option<String>,
+    /// Expected `iss` claim. Verified against the token, not just
+    /// informational -- a mismatch fails verification. Unset means any
+    /// issuer is accepted.
+    #[serde(default)]
+    pub issuer: Option<String>,
+    /// Expected `aud` claim, same verified-not-informational rule as
+    /// `issuer`. Unset means any audience is accepted.
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// How long a fetched JWKS document is cached before being re-fetched,
+    /// in seconds. Ignored in HS256 mode (nothing to fetch). A token whose
+    /// `kid` isn't in the current cache triggers an immediate re-fetch
+    /// (handles key rotation) rather than waiting out the rest of this TTL.
+    #[serde(default = "default_jwks_cache_secs")]
+    pub jwks_cache_secs: u64,
 }
 
 /// Configures `model: "auto"` -- a heuristic (not ML) complexity-based
@@ -1457,6 +1507,56 @@ mod tests {
         let cache = config.cache.unwrap();
         assert_eq!(cache.ttl_secs, 60);
         assert_eq!(cache.max_entries, 50);
+    }
+
+    // --- jwt -----------------------------------------------------------------------
+
+    #[test]
+    fn jwt_defaults_to_absent() {
+        let config = Config::from_toml_str("providers = {}").unwrap();
+        assert!(config.jwt.is_none());
+    }
+
+    #[test]
+    fn jwt_parses_hs256_mode() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [jwt]
+            hs256_secret_env = "JWT_SECRET"
+            issuer = "https://issuer.example.com"
+            audience = "rusty-provider"
+            "#,
+        )
+        .unwrap();
+        let jwt = config.jwt.unwrap();
+        assert_eq!(jwt.hs256_secret_env.as_deref(), Some("JWT_SECRET"));
+        assert_eq!(jwt.issuer.as_deref(), Some("https://issuer.example.com"));
+        assert_eq!(jwt.audience.as_deref(), Some("rusty-provider"));
+        assert!(jwt.jwks_url.is_none());
+        assert_eq!(jwt.jwks_cache_secs, 300);
+    }
+
+    #[test]
+    fn jwt_parses_jwks_mode_with_explicit_cache_secs() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [jwt]
+            jwks_url = "https://issuer.example.com/.well-known/jwks.json"
+            jwks_cache_secs = 60
+            "#,
+        )
+        .unwrap();
+        let jwt = config.jwt.unwrap();
+        assert_eq!(
+            jwt.jwks_url.as_deref(),
+            Some("https://issuer.example.com/.well-known/jwks.json")
+        );
+        assert_eq!(jwt.jwks_cache_secs, 60);
+        assert!(jwt.hs256_secret_env.is_none());
     }
 
     // --- persistence backend -----------------------------------------------------

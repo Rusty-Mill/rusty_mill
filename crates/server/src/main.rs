@@ -67,6 +67,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(clients = ?config.clients.iter().map(|c| &c.name).collect::<Vec<_>>(), "named clients ready");
     }
 
+    // Same soft-failure pattern as moderation/web_search: [jwt] present
+    // but neither mode actually resolvable (hs256_secret_env unset, no
+    // jwks_url) disables JWT auth with a warning rather than refusing to
+    // start.
+    let jwt = config.jwt.as_ref().and_then(|cfg| {
+        let hs256_secret = cfg
+            .hs256_secret_env
+            .as_ref()
+            .and_then(|var| std::env::var(var).ok());
+        match rp_server::jwt::JwtVerifier::new(cfg, hs256_secret) {
+            Some(verifier) => {
+                tracing::info!("JWT auth enabled");
+                Some(Arc::new(verifier))
+            }
+            None => {
+                tracing::warn!(
+                    "[jwt] is configured but neither hs256_secret_env nor jwks_url resolved to something usable; JWT auth stays disabled"
+                );
+                None
+            }
+        }
+    });
+
     let state = AppState {
         router,
         api_key,
@@ -76,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
         clients: Arc::new(RwLock::new(config.clients.clone())),
         admin_key,
         max_body_bytes: config.server.max_body_bytes,
+        jwt,
     };
 
     let app = build_app(state);

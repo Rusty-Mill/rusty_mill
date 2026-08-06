@@ -17,6 +17,9 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   check`/`providers list`/`keys check`).
 - `[cache].mode = "semantic"` — embedding-cosine-similarity response
   caching, opt-in alongside the existing exact-match mode.
+- `[jwt]` — JWT/OIDC bearer-token authentication (HS256 shared-secret or
+  JWKS/RS256), additive alongside `server.api_key_env`/`[[clients]]`.
+  Fails closed on any verification failure.
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002).
