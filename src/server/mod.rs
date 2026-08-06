@@ -168,7 +168,11 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 ///
 /// Short enough that a store coming back is noticed within a probe interval,
 /// which is what the cache costs: recovery is seen up to this late.
-const READINESS_CACHE: Duration = Duration::from_secs(1);
+///
+/// Public because it is not configurable and an operator choosing a probe
+/// interval has to know it — a probe faster than this reads a cached answer,
+/// which is the intent, but only if you know that is what is happening.
+pub const READINESS_CACHE: Duration = Duration::from_secs(1);
 
 /// Whether this replica should be sent new work, and why not if not.
 ///
