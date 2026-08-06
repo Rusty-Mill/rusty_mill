@@ -1,0 +1,74 @@
+[package]
+name = "rusty_a2a"
+version = "0.1.0"
+edition = "2021"
+description = "A reusable Rust implementation of the Agent2Agent (A2A) protocol (https://a2a-protocol.org)"
+license = "Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_a2a"
+keywords = ["a2a", "agent", "protocol", "agent2agent"]
+categories = ["network-programming", "asynchronous"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "1"
+base64 = "0.22"
+
+# client feature
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"], optional = true }
+futures-core = { version = "0.3", optional = true }
+futures-util = { version = "0.3", optional = true }
+eventsource-stream = { version = "0.2", optional = true }
+
+# server feature
+axum = { version = "0.7", features = ["json"], optional = true }
+async-trait = { version = "0.1", optional = true }
+tokio-stream = { version = "0.1", features = ["sync"], optional = true }
+tokio-util = { version = "0.7", optional = true }
+async-stream = { version = "0.3", optional = true }
+
+tokio = { version = "1", features = ["rt", "macros", "sync", "time", "net"], optional = true }
+tracing = "0.1"
+
+[features]
+default = []
+client = [
+  "dep:reqwest",
+  "dep:futures-core",
+  "dep:futures-util",
+  "dep:eventsource-stream",
+  "dep:tokio",
+  "tokio/rt",
+]
+server = [
+  "dep:axum",
+  "dep:tokio",
+  "dep:async-trait",
+  "dep:tokio-stream",
+  "dep:tokio-util",
+  "dep:async-stream",
+  "dep:futures-util",
+  "dep:futures-core",
+  "tokio/rt-multi-thread",
+]
+full = ["client", "server"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+
+[[example]]
+name = "echo_server"
+path = "examples/echo_server.rs"
+required-features = ["server"]
+
+[[example]]
+name = "send_message"
+path = "examples/send_message.rs"
+required-features = ["client"]
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+required-features = ["full"]
