@@ -13,13 +13,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentgateway_config::{McpBackend, McpAuthorization};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -52,6 +53,13 @@ pub struct Federation {
 struct Inner {
     namer: ToolNamer,
     authorization: Authorization,
+    /// Budget for a single upstream call.
+    ///
+    /// This is the timeout that actually bounds a tool call. A route's
+    /// `requestTimeout` cannot: the Streamable HTTP transport returns its SSE
+    /// response headers immediately and streams the result afterwards, so by
+    /// the time a tool starts running the response has already been produced.
+    backend_timeout: Option<Duration>,
     targets: Vec<Target>,
     degraded: Vec<String>,
     /// Federated name to target name. Only consulted in passthrough mode,
@@ -76,6 +84,7 @@ impl Federation {
     pub async fn connect(
         backend: &McpBackend,
         authorization: Option<&McpAuthorization>,
+        backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
         let authorization = match authorization {
@@ -111,6 +120,7 @@ impl Federation {
             inner: Arc::new(Inner {
                 namer,
                 authorization,
+                backend_timeout,
                 targets,
                 degraded,
                 index: RwLock::new(HashMap::new()),
@@ -137,26 +147,34 @@ impl Federation {
         self.inner.targets.iter().map(|t| t.name.as_str())
     }
 
+    /// Every federated tool name known at startup.
+    ///
+    /// Used to bound metric label cardinality: anything outside this set is
+    /// labelled `other`, so a client cannot mint unbounded time series by
+    /// calling names that do not exist.
+    pub fn tool_names(&self) -> Vec<String> {
+        self.inner
+            .index
+            .try_read()
+            .map(|index| index.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
     /// Rebuild the federated-name index, returning any collision warnings.
     async fn refresh_index(&self) -> Vec<String> {
         let mut index = HashMap::new();
         let mut per_target: Vec<(String, Vec<String>)> = Vec::new();
 
         for target in &self.inner.targets {
-            match target.tools().await {
-                Ok(tools) => {
-                    let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-                    for name in &names {
-                        index.insert(
-                            self.inner.namer.qualify(&target.name, name),
-                            target.name.clone(),
-                        );
-                    }
-                    per_target.push((target.name.clone(), names));
+            if let Some(tools) = self.list_with_timeout(target).await {
+                let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+                for name in &names {
+                    index.insert(
+                        self.inner.namer.qualify(&target.name, name),
+                        target.name.clone(),
+                    );
                 }
-                Err(err) => {
-                    tracing::warn!(target = %target.name, %err, "listing tools failed");
-                }
+                per_target.push((target.name.clone(), names));
             }
         }
 
@@ -167,6 +185,36 @@ impl Federation {
                 .iter()
                 .map(|(name, tools)| (name.as_str(), tools.as_slice())),
         )
+    }
+
+    /// List a target's tools, giving up if it exceeds the backend budget.
+    ///
+    /// A target that hangs would otherwise hold up every `tools/list`, turning
+    /// one sick server into a broken catalogue for all of them.
+    async fn list_with_timeout(&self, target: &Target) -> Option<Vec<Tool>> {
+        let listing = target.tools();
+        let result = match self.inner.backend_timeout {
+            Some(budget) => match tokio::time::timeout(budget, listing).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        target = %target.name,
+                        timeout_ms = budget.as_millis() as u64,
+                        "listing tools exceeded the backend budget"
+                    );
+                    return None;
+                }
+            },
+            None => listing.await,
+        };
+
+        match result {
+            Ok(tools) => Some(tools),
+            Err(err) => {
+                tracing::warn!(target = %target.name, %err, "listing tools failed");
+                None
+            }
+        }
     }
 
     fn target(&self, name: &str) -> Option<&Target> {
@@ -206,13 +254,10 @@ impl ServerHandler for Federation {
         let mut index = HashMap::new();
 
         for target in &self.inner.targets {
-            let upstream = match target.tools().await {
-                Ok(tools) => tools,
-                Err(err) => {
-                    // One unhealthy target must not blank the whole catalogue.
-                    tracing::warn!(target = %target.name, %err, "listing tools failed");
-                    continue;
-                }
+            let upstream = match self.list_with_timeout(target).await {
+                Some(tools) => tools,
+                // One unhealthy target must not blank the whole catalogue.
+                None => continue,
             };
 
             for mut tool in upstream {
@@ -269,7 +314,33 @@ impl ServerHandler for Federation {
         let mut params = request;
         params.name = tool.into();
 
-        match target.call(params).await {
+        let call = target.call(params);
+        let result = match self.inner.backend_timeout {
+            Some(budget) => match tokio::time::timeout(budget, call).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        target = %target.name,
+                        tool = %federated,
+                        timeout_ms = budget.as_millis() as u64,
+                        "tool call exceeded the backend budget"
+                    );
+                    // An error the caller can read, not a protocol error: the
+                    // request was well-formed and the model deserves to be
+                    // told the tool timed out rather than shown an opaque
+                    // internal failure.
+                    return Ok(CallToolResponse::Complete(CallToolResult::error(vec![
+                        ContentBlock::text(format!(
+                            "`{federated}` timed out after {}ms",
+                            budget.as_millis()
+                        )),
+                    ])));
+                }
+            },
+            None => call.await,
+        };
+
+        match result {
             Ok(result) => Ok(CallToolResponse::Complete(result)),
             Err(err) => {
                 tracing::warn!(target = %target.name, tool = %federated, %err, "tool call failed");

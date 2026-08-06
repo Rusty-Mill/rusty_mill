@@ -119,6 +119,13 @@ Implemented and tested:
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
+- `timeout`: both `requestTimeout` and `backendRequestTimeout` — see
+  [Timeouts](#timeouts), because they bound different things and only one of
+  them bounds a tool call
+- OpenTelemetry: OTLP traces and metrics, with MCP request metrics labelled by
+  method and tool name
+- Process-wide load shedding: a concurrency bound answered with `503` and
+  `Retry-After`
 - Graceful shutdown on SIGINT/SIGTERM
 
 Parses but is **not** enforced — reported by `--check` and at startup:
@@ -128,8 +135,8 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 - `mcpAuthorization.rules` (upstream's policy-expression form; the
   `allowTools`/`denyTools` lists are ours and *are* enforced)
 - TLS termination (`HTTPS`/`TLS` listener protocols)
-- `timeout`, `retry`, `localRateLimit`, header modifiers, and `urlRewrite` are
-  modelled but not yet applied
+- `retry`, `localRateLimit`, header modifiers and `urlRewrite` are modelled but
+  not yet applied
 - `host` and `service` backends do not proxy yet — an MCP route is the only
   fully served backend kind in v0
 
@@ -178,6 +185,72 @@ stops the gateway booting instead of turning every request into a runtime error
 that reads like a client problem. Rotating that file needs a restart — which is
 what the `url:` form is for.
 
+## Timeouts
+
+The two budgets in a `timeout` policy bound genuinely different things, and the
+difference is not cosmetic:
+
+```yaml
+policies:
+  timeout:
+    requestTimeout: 30s          # time to *produce* a response
+    backendRequestTimeout: 10s   # time for an upstream call to finish
+```
+
+Measured against a tool that sleeps five seconds, `time_starttransfer` is ~1ms
+and `time_total` is ~5s: the Streamable HTTP transport sends its SSE response
+headers immediately and streams the JSON-RPC result afterwards. So by the time
+a tool starts running, `requestTimeout` has already been satisfied — **it
+cannot cut a tool call off, and a route that sets only `requestTimeout` has no
+bound on how long a tool may run.**
+
+That is deliberate rather than a defect: bounding the whole stream would sever
+every long-lived subscription. `backendRequestTimeout` is the budget that
+bounds a tool call, applied around the upstream request inside the federation.
+A call that exceeds it comes back as a tool error naming the tool and the
+budget — a result the model can read, not an opaque protocol failure. It also
+bounds `tools/list`, so one hung target cannot hold up the whole catalogue.
+
+There are tests pinning both halves, including one asserting that
+`requestTimeout` does *not* kill a long stream, so nobody "fixes" it into
+something that severs live subscriptions.
+
+## Observability
+
+```yaml
+config:
+  tracing:
+    endpoint: http://localhost:4317
+    serviceName: rusty-agent-gateway
+    sampleRatio: 1.0
+  limits:
+    maxConcurrentRequests: 256
+    requestTimeout: 30s
+```
+
+With `tracing` set, spans and metrics go to an OTLP collector. Sampling is
+parent-based: a caller that already sampled the trace is followed, because
+deciding independently is how traces end up half-recorded with gaps exactly
+where a service made its own choice.
+
+MCP request metrics are labelled from the `Mcp-Method` and `Mcp-Name` headers,
+so no request body is parsed. The tool-name label is bounded by the names each
+route actually federates — anything else is labelled `other`. Without that
+bound, a client could mint unbounded time series by calling names that do not
+exist, which is how a metrics backend gets taken down from the outside.
+
+`maxConcurrentRequests` sheds with `503` and `Retry-After` rather than queueing:
+a queue in front of an overloaded gateway turns a capacity problem into a
+latency problem, where every client waits longer, times out and retries — which
+is how a brief spike becomes a sustained outage. It counts requests until a
+response is *produced*, so as above it bounds handshakes, authentication and
+JWKS fetches rather than streaming tool calls. That is the load worth shedding:
+an unauthenticated flood costs a token validation each.
+
+Both limits are off unless configured. There is no concurrency number right for
+everyone, and a default would be a silent regression for a gateway already
+serving more than it.
+
 ## On `rusty_mcp`
 
 [`baileyrd/rusty_mcp`][rusty_mcp] was evaluated for reuse here. It is a
@@ -213,9 +286,18 @@ ordering that matters. If `rusty_mcp` grows a `JwtValidator::from_jwks`
 constructor, that module should collapse into it — duplicated crypto is
 duplicated risk, and this is the one place this repo carries any.
 
-**Still worth pulling in:** `otel` (OTLP spans and metrics) and `limits`
-(concurrency and timeout shedding), which map onto the observability and
-`localRateLimit` gaps.
+**Also reused: `otel` and `limits`.** `otel::init` stands up the OTLP pipeline
+and installs the subscriber; `OtelGuard` is held until after the accept loops
+stop, because spans are batched and whatever is still buffered dies with the
+process otherwise. `McpMetricsLayer` supplies the MCP request metrics described
+above. `LimitsLayer` supplies the concurrency bound, mounted outside routing and
+authentication so a shed request costs a semaphore try-acquire rather than a
+route lookup, a token validation and a JWKS fetch.
+
+One correction worth recording: `limits` is concurrency and timeout shedding,
+**not** a token bucket, so it does not cover `localRateLimit`
+(`maxTokens`/`tokensPerFill`/`fillInterval`). That policy remains unimplemented
+and needs its own bucket.
 
 Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 `unwrap_used = warn`) is adopted verbatim in this workspace.
@@ -226,7 +308,7 @@ Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 cargo test --workspace
 ```
 
-71 tests. The config tests are anchored on YAML taken verbatim from
+78 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -237,6 +319,10 @@ target rather than merely reaching one.
 The JWT tests generate an RSA keypair at test time and sign real tokens, so
 signatures are genuinely verified rather than stubbed — including a forged token
 signed by an untrusted key and an `alg: none` token.
+
+The timeout tests drive a genuinely slow subprocess rather than a stubbed
+future, which is how the `requestTimeout`/`backendRequestTimeout` distinction
+above was found rather than assumed.
 
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp

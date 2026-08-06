@@ -120,7 +120,7 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config).await.expect("gateway should build");
+    let gateway = Gateway::build(&config, None).await.expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");

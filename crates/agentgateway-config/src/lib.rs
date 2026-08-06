@@ -172,6 +172,70 @@ pub struct GlobalConfig {
     /// Logging configuration, as an `RUST_LOG`-style filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
+
+    /// OpenTelemetry export. An extension to upstream's schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracing: Option<TracingConfig>,
+
+    /// Process-wide load shedding. An extension to upstream's schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<LimitsConfig>,
+}
+
+/// OpenTelemetry export settings.
+///
+/// Off unless present: an OTLP exporter pointed at nothing retries in the
+/// background forever, which is a strange default to inflict on someone who
+/// only wanted a gateway.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TracingConfig {
+    /// OTLP/gRPC endpoint. Falls back to `OTEL_EXPORTER_OTLP_ENDPOINT`, then
+    /// to the OpenTelemetry default of `http://localhost:4317`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+
+    /// `service.name` on every span. The first thing anyone filters by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+
+    /// `service.version`, if releases should be distinguishable in traces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_version: Option<String>,
+
+    /// Fraction of root traces to record, 0.0 to 1.0. Defaults to all.
+    ///
+    /// Only root traces: a caller that already sampled the trace is followed,
+    /// because deciding independently is how traces end up half-recorded with
+    /// gaps exactly where a service made its own choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_ratio: Option<f64>,
+
+    /// Whether to export metrics alongside spans. Defaults to true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<bool>,
+}
+
+/// Process-wide load shedding.
+///
+/// Both settings are off unless given. There is no value that is right for
+/// everyone — a default of 100 concurrent requests would be a silent
+/// regression for a gateway serving more than that today.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LimitsConfig {
+    /// Requests in flight before the gateway sheds with `503`.
+    ///
+    /// Shedding, not queueing: a queue in front of an overloaded gateway turns
+    /// a capacity problem into a latency problem, where every client waits
+    /// longer, times out and retries — which is how a brief spike becomes a
+    /// sustained outage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_requests: Option<usize>,
+
+    /// Default budget for producing a response, when a route sets none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout: Option<DurationString>,
 }
 
 /// Logging configuration.

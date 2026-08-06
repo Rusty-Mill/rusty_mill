@@ -1,39 +1,34 @@
 //! The data plane.
 //!
 //! A [`Gateway`] pairs a compiled [`Router`] with the per-route state that
-//! serving actually needs — a live MCP federation, a compiled CORS policy, an
-//! upstream authority — held in side tables indexed by
+//! serving actually needs — a live MCP federation, a compiled CORS policy, a
+//! JWT authenticator, a timeout — held in side tables indexed by
 //! [`agentgateway_core::CompiledRoute::id`].
 //!
 //! Building those is async and can fail (an MCP target has to be dialled and
-//! handshaked), which is why it happens once at startup rather than per
-//! request. A request path that could spawn a subprocess is a request path
-//! that can time out under load.
+//! handshaked, a JWKS file read), which is why it happens once at startup
+//! rather than per request. A request path that could spawn a subprocess is a
+//! request path that can time out under load.
 
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, Router};
 use agentgateway_mcp::Federation;
-use bytes::Bytes;
-use http::{Request, Response, StatusCode, header};
-use http_body_util::{BodyExt as _, Full, combinators::BoxBody};
+use axum::response::{IntoResponse, Response};
+use http::{HeaderMap, Request, StatusCode, header};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
+use rusty_mcp::otel::metrics::{Instruments, McpMetricsLayer};
+use tower_layer::Layer as _;
 use tower_service::Service as _;
 
 /// A federated MCP endpoint, ready to serve.
 type McpService = StreamableHttpService<Federation, LocalSessionManager>;
-
-/// The response body every backend produces.
-///
-/// This is the type `StreamableHttpService` hands back, and boxing everything
-/// to match it keeps MCP's streaming responses streaming: collecting them into
-/// a single buffer would defeat the point of an SSE transport.
-pub type GatewayBody = BoxBody<Bytes, Infallible>;
 
 /// The compiled data plane.
 pub struct Gateway {
@@ -45,12 +40,17 @@ pub struct Gateway {
 struct RouteState {
     cors: Option<CorsMatcher>,
     jwt: Option<JwtAuthenticator>,
+    /// Budget for producing a response on this route.
+    timeout: Option<Duration>,
     backend: BackendState,
 }
 
 enum BackendState {
-    /// A federated MCP server.
-    Mcp(McpService),
+    /// A federated MCP server, optionally instrumented.
+    Mcp {
+        service: McpService,
+        metrics: Option<McpMetricsLayer>,
+    },
     /// A backend we parsed but cannot serve. The reason is returned to the
     /// client rather than logged and forgotten, so a misconfiguration is
     /// visible from the outside instead of looking like a routing miss.
@@ -59,12 +59,27 @@ enum BackendState {
 
 impl Gateway {
     /// Build the data plane, connecting every MCP backend.
-    pub async fn build(config: &Config) -> anyhow::Result<Self> {
+    ///
+    /// `instruments` is `None` when OpenTelemetry metrics are off, in which
+    /// case no metrics layer is mounted at all rather than one recording into
+    /// a void.
+    pub async fn build(
+        config: &Config,
+        instruments: Option<Arc<Instruments>>,
+    ) -> anyhow::Result<Self> {
         let router = Router::build(config)?;
+        let default_timeout = config
+            .config
+            .as_ref()
+            .and_then(|c| c.limits.as_ref())
+            .and_then(|l| l.request_timeout)
+            .map(Duration::from);
+
         let mut routes = Vec::with_capacity(router.route_count());
         routes.resize_with(router.route_count(), || RouteState {
             cors: None,
             jwt: None,
+            timeout: None,
             backend: BackendState::Unsupported("route has no backend".into()),
         });
 
@@ -84,11 +99,32 @@ impl Gateway {
                 None => None,
             };
 
+            // A route's own budget wins over the process-wide default.
+            let timeout = route
+                .policies
+                .timeout
+                .as_ref()
+                .and_then(|t| t.request_timeout)
+                .map(Duration::from)
+                .or(default_timeout);
+
+            // The budget that actually bounds a tool call. `requestTimeout`
+            // cannot: the Streamable HTTP transport sends its SSE response
+            // headers immediately and streams the result afterwards, so a tool
+            // only starts running once the response has been produced.
+            let backend_timeout = route
+                .policies
+                .timeout
+                .as_ref()
+                .and_then(|t| t.backend_request_timeout)
+                .map(Duration::from);
+
             let backend = match route.backends.first().map(|b| &b.target) {
                 Some(BackendTarget::Mcp(mcp)) => {
                     let federation = Federation::connect(
                         mcp,
                         route.policies.mcp_authorization.as_ref(),
+                        backend_timeout,
                         &at,
                     )
                     .await?;
@@ -102,12 +138,24 @@ impl Gateway {
                         "MCP backend ready"
                     );
 
+                    // Label cardinality is bounded by the tools this route
+                    // actually federates. Without that list, every unknown name
+                    // a client invents would mint a new time series -- which is
+                    // how a metrics backend gets taken down from the outside.
+                    let metrics = instruments.as_ref().map(|instruments| {
+                        McpMetricsLayer::new(Arc::clone(instruments))
+                            .with_known_names(federation.tool_names())
+                    });
+
                     let federation = Arc::new(federation);
-                    BackendState::Mcp(StreamableHttpService::new(
-                        move || Ok(Federation::clone(&federation)),
-                        Arc::new(LocalSessionManager::default()),
-                        StreamableHttpServerConfig::default(),
-                    ))
+                    BackendState::Mcp {
+                        service: StreamableHttpService::new(
+                            move || Ok(Federation::clone(&federation)),
+                            Arc::new(LocalSessionManager::default()),
+                            StreamableHttpServerConfig::default(),
+                        ),
+                        metrics,
+                    }
                 }
                 Some(other) => BackendState::Unsupported(format!(
                     "backend kind `{}` is not served by this build",
@@ -119,6 +167,7 @@ impl Gateway {
             routes[route.id] = RouteState {
                 cors,
                 jwt,
+                timeout,
                 backend,
             };
         }
@@ -136,7 +185,7 @@ impl Gateway {
         &self,
         port: u16,
         request: Request<hyper::body::Incoming>,
-    ) -> Result<Response<GatewayBody>, Infallible> {
+    ) -> Result<Response, Infallible> {
         let Some(selection) = self.router.select(port, &request) else {
             return Ok(status(
                 StatusCode::NOT_FOUND,
@@ -167,41 +216,80 @@ impl Gateway {
         if let Some(jwt) = &state.jwt
             && let Err(rejection) = jwt.authenticate(request.headers()).await
         {
-            let mut response = reject(&rejection);
-            if let Some(headers) = cors_headers {
-                response.headers_mut().extend(headers);
-            }
-            return Ok(response);
+            return Ok(with_cors(reject(&rejection), cors_headers));
         }
 
-        let mut response = match &state.backend {
-            BackendState::Mcp(service) => {
-                // `call` takes &mut self, but the service is cheap to clone and
-                // clones share the session manager -- which is what makes an
-                // Mcp-Session-Id issued on one request usable on the next.
-                let mut service = service.clone();
-                match service.call(request).await {
-                    Ok(response) => response,
-                    Err(never) => match never {},
+        let call = self.dispatch(state, request);
+
+        let response = match state.timeout {
+            Some(budget) => match tokio::time::timeout(budget, call).await {
+                Ok(response) => response,
+                Err(_) => {
+                    tracing::warn!(
+                        route = ?selection.route.name,
+                        timeout_ms = budget.as_millis() as u64,
+                        "request exceeded its budget"
+                    );
+                    status(
+                        StatusCode::GATEWAY_TIMEOUT,
+                        "the request exceeded its timeout budget",
+                    )
                 }
-            }
-            BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
+            },
+            None => call.await,
         };
 
-        if let Some(headers) = cors_headers {
-            response.headers_mut().extend(headers);
+        Ok(with_cors(response, cors_headers))
+    }
+
+    async fn dispatch(
+        &self,
+        state: &RouteState,
+        request: Request<hyper::body::Incoming>,
+    ) -> Response {
+        match &state.backend {
+            // `call` takes &mut self, but the service is cheap to clone and
+            // clones share the session manager -- which is what makes an
+            // Mcp-Session-Id issued on one request usable on the next.
+            BackendState::Mcp { service, metrics } => match metrics {
+                // Layering per request is just a struct wrap; the instruments
+                // behind it are shared, which is what makes the counts add up.
+                Some(metrics) => {
+                    let mut service = metrics.layer(service.clone());
+                    match service.call(request).await {
+                        Ok(response) => response,
+                        Err(never) => match never {},
+                    }
+                }
+                None => {
+                    let mut service = service.clone();
+                    match service.call(request).await {
+                        Ok(response) => response.into_response(),
+                        Err(never) => match never {},
+                    }
+                }
+            },
+            BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
-        Ok(response)
     }
 }
 
+fn with_cors(mut response: Response, headers: Option<HeaderMap>) -> Response {
+    if let Some(headers) = headers {
+        response.headers_mut().extend(headers);
+    }
+    response
+}
+
 /// Turn an authentication failure into a response.
-fn reject(rejection: &AuthRejection) -> Response<GatewayBody> {
+fn reject(rejection: &AuthRejection) -> Response {
     let mut response = status(rejection.status, &rejection.description);
     if let Some(challenge) = rejection.challenge()
         && let Ok(value) = http::HeaderValue::try_from(challenge)
     {
-        response.headers_mut().insert(header::WWW_AUTHENTICATE, value);
+        response
+            .headers_mut()
+            .insert(header::WWW_AUTHENTICATE, value);
     } else if rejection.status == StatusCode::UNAUTHORIZED {
         // A 401 without a challenge is a protocol violation, and a client that
         // gets one has no way to learn it should authenticate.
@@ -223,20 +311,11 @@ fn kind_name(target: &BackendTarget) -> &'static str {
     }
 }
 
-fn status(code: StatusCode, message: &str) -> Response<GatewayBody> {
-    fn body(message: &str) -> GatewayBody {
-        Full::new(Bytes::from(message.to_string()))
-            .map_err(|never| match never {})
-            .boxed()
-    }
-
-    Response::builder()
-        .status(code)
-        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-        .body(body(message))
-        .unwrap_or_else(|_| {
-            let mut fallback = Response::new(body(""));
-            *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
-            fallback
-        })
+fn status(code: StatusCode, message: &str) -> Response {
+    (
+        code,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        message.to_string(),
+    )
+        .into_response()
 }

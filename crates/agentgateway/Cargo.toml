@@ -26,13 +26,17 @@ rmcp = { workspace = true, features = [
     "server",
     "transport-streamable-http-server",
 ] }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.1", default-features = false, features = ["otel"] }
+axum = { workspace = true, features = ["json"] }
+tower-layer = "0.3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 tokio-util = { workspace = true }
 tower-service = "0.3"
 http = { workspace = true }
 http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server", "service"] }
+tower = { workspace = true, features = ["util"] }
 bytes = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
