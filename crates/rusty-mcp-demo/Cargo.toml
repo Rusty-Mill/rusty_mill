@@ -1,6 +1,6 @@
 [package]
 name = "rusty-mcp-demo"
-version = "0.4.0"
+version = "0.4.1"
 description = "Example MCP server built on the rusty-mcp scaffold"
 publish = false
 edition.workspace = true

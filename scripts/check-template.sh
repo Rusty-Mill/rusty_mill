@@ -22,8 +22,28 @@ name="template-check"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+# The template's manifest must NOT be named `Cargo.toml` in the repository.
+#
+# Cargo scans a git checkout for manifests when resolving a git dependency, and
+# it does that independently of the workspace `exclude` list. A `Cargo.toml`
+# holding `name = "{{project-name}}"` therefore prints
+#
+#     error: invalid character `{` in package name
+#
+# on every build of every project that depends on this crate by git. The build
+# still succeeds, which is exactly why it went unnoticed: it is pure noise in
+# someone else's terminal. `cargo generate` renders Liquid in *filenames*, so
+# `{{ 'Cargo' }}.toml` reaches the generated project as `Cargo.toml` while
+# staying invisible to cargo here.
+if [ -e "$repo/template/Cargo.toml" ]; then
+    echo "error: template/Cargo.toml exists, and cargo will try to parse it" >&2
+    echo "       rename it back to \"template/{{ 'Cargo' }}.toml\"" >&2
+    exit 1
+fi
+
 project="$work/$name"
 cp -R "$repo/template" "$project"
+mv "$project/{{ 'Cargo' }}.toml" "$project/Cargo.toml"
 
 # `cargo generate` is not installed in CI, so substitute the placeholders the
 # same way it would. Keep this list in step with `template/cargo-generate.toml`.
@@ -49,7 +69,7 @@ sed -i \
 
 if ! grep -q 'rusty-mcp = { path =' "$project/Cargo.toml"; then
     echo "error: the rusty-mcp dependency was not rewritten to a path" >&2
-    echo "       the git+tag line in template/Cargo.toml must have changed shape" >&2
+    echo "       the git+tag line in the template manifest must have changed shape" >&2
     exit 1
 fi
 
