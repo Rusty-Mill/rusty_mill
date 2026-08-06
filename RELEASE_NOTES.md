@@ -38,6 +38,12 @@ entries are tracked by PR rather than by release.
   01.AI, Cloudflare Workers AI), plus matching commented-out presets in
   `config.example.toml`. All config-only — `kind = "openai"` already covers
   any of them, same as Groq/Together/Fireworks today.
+- **Added:** `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-
+  declared free-token budgets per "provider/model", tracked against this
+  router's own usage and reported (budget/used/remaining) the same
+  reporting-only, self-declared way `zdr`/`no_training` already work.
+  Reset cadence reuses `[[clients]].budget_period`'s calendar math
+  (`"total"`/`"daily"`/`"weekly"`/`"monthly"`, default `"monthly"`).
 
 ---
 

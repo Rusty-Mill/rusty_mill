@@ -3,6 +3,7 @@ mod cache;
 mod client_budget;
 mod config;
 mod error;
+mod free_tiers;
 mod guardrails;
 mod metrics;
 mod moderation;
@@ -18,12 +19,14 @@ use std::time::Instant;
 use cache::ResponseCache;
 use client_budget::{ClientBudgetSetting, SpendState};
 pub use config::{
-    AutoRoutingConfig, BudgetPeriod, CacheConfig, ClientConfig, ClientRole, Config,
+    AutoRoutingConfig, BudgetPeriod, CacheConfig, ClientConfig, ClientRole, Config, FreeTierEntry,
     GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend, PersistenceConfig,
     PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind, RouteAlias,
     ServerConfig, WebSearchConfig, WebhookConfig,
 };
 pub use error::RouterError;
+pub use free_tiers::FreeTierStatus;
+use free_tiers::{FreeTierSetting, TokenState};
 use guardrails::Guardrail;
 pub use metrics::Metrics;
 use moderation::{ModerationClient, ModerationError};
@@ -433,6 +436,19 @@ pub struct Router {
     /// every request always reaches a provider, same as before this
     /// field existed.
     cache: Option<Arc<RwLock<ResponseCache>>>,
+    /// "provider/model" -> operator-declared free-token budget, from
+    /// `[[free_tiers]]`. Static config, like `pricing` -- never mutated
+    /// after startup.
+    free_tier_settings: Arc<HashMap<String, FreeTierSetting>>,
+    /// "provider/model" -> this process's tracked usage against its
+    /// `free_tier_settings` entry for whichever period is current. Only
+    /// ever has entries for "provider/model"s with a `[[free_tiers]]`
+    /// entry -- same in-memory-only, per-process caveats as
+    /// `latency`/`throughput`/`uptime`, no `[persistence]` backing.
+    /// `Arc`-wrapped like `usage`/`throughput`, for the same reason: a
+    /// streaming response's instrumentation outlives `dispatch_stream`
+    /// itself.
+    free_tier_usage: Arc<Mutex<HashMap<String, TokenState>>>,
 }
 
 /// Record a new EWMA sample under `key`, seeding the average on first
@@ -717,6 +733,8 @@ impl Router {
             .as_ref()
             .map(|cfg| Arc::new(RwLock::new(ResponseCache::new(cfg))));
 
+        let free_tier_settings = free_tiers::settings_from_config(&config.free_tiers);
+
         Self {
             providers,
             provider_kinds,
@@ -742,6 +760,8 @@ impl Router {
             moderation,
             web_search,
             cache,
+            free_tier_settings: Arc::new(free_tier_settings),
+            free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -836,6 +856,20 @@ impl Router {
             }
         }
         self.usage.read().unwrap().clone()
+    }
+
+    /// Snapshot of every configured `[[free_tiers]]` entry's status --
+    /// budget, this period's tracked usage, and what's left -- for
+    /// `GET /v1/free-tiers`. Always in-memory only, per-process, same as
+    /// `provider_stats`; unlike `usage_snapshot`, this has no
+    /// `[persistence]` backing (see `free_tier_usage`'s own doc comment).
+    pub fn free_tier_status(&self) -> HashMap<String, FreeTierStatus> {
+        let mut usage = self.free_tier_usage.lock().unwrap();
+        free_tiers::status_snapshot(
+            &self.free_tier_settings,
+            &mut usage,
+            client_budget::now_unix(),
+        )
     }
 
     /// `Ok(())` if this router can actually serve traffic right now, for
@@ -1377,6 +1411,8 @@ impl Router {
         let pricing = self.pricing.clone();
         let metrics = self.metrics.clone();
         let generations = self.generations.clone();
+        let free_tier_settings = self.free_tier_settings.clone();
+        let free_tier_usage = self.free_tier_usage.clone();
 
         let instrumented = stream.map(move |mut item| {
             if let Ok(chunk) = &mut item {
@@ -1391,6 +1427,13 @@ impl Router {
                         }
                         let cost = record_usage(&usage_map, persistence.as_deref(), &pricing, &provider_name, &model_name, &usage);
                         metrics.record_tokens_and_cost(&provider_name, &model_name, usage.prompt_tokens, usage.completion_tokens, cost);
+                        free_tiers::record_usage(
+                            &free_tier_settings,
+                            &mut free_tier_usage.lock().unwrap(),
+                            &format!("{provider_name}/{model_name}"),
+                            (usage.prompt_tokens + usage.completion_tokens) as u64,
+                            client_budget::now_unix(),
+                        );
                         chunk.cost_usd = cost;
                         generations.write().unwrap().insert(GenerationRecord {
                             id: chunk.id.clone(),
@@ -1553,6 +1596,13 @@ impl Router {
                             usage.prompt_tokens,
                             usage.completion_tokens,
                             cost,
+                        );
+                        free_tiers::record_usage(
+                            &self.free_tier_settings,
+                            &mut self.free_tier_usage.lock().unwrap(),
+                            &format!("{provider_name}/{model_name}"),
+                            (usage.prompt_tokens + usage.completion_tokens) as u64,
+                            client_budget::now_unix(),
                         );
                         resp.cost_usd = cost;
                         self.record_generation(GenerationRecord {
@@ -1806,6 +1856,8 @@ mod tests {
             moderation: None,
             web_search: None,
             cache: None,
+            free_tier_settings: Arc::new(HashMap::new()),
+            free_tier_usage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 

@@ -907,6 +907,66 @@ unset sends no `Authorization` header at all. Delivery is fire-and-forget
 triggered the event, and a delivery failure is only logged, never
 surfaced to the client.
 
+## Free tiers
+
+`[[clients]].budget_usd` caps what a *caller* spends; `[[free_tiers]]`
+tracks a different thing — how much of a *provider's* free allowance
+you've used, per "provider/model":
+
+```toml
+[[free_tiers]]
+model = "groq/llama-3.3-70b-versatile"
+monthly_free_tokens = 117000000
+# period = "monthly"   # optional, this is the default -- "total" / "daily" / "weekly" / "monthly"
+```
+
+This is self-declared, like `[providers.*]`'s `zdr`/`no_training` flags —
+you tell it what you believe the provider's free tier grants, and it never
+verifies that number against the provider's own systems. It's the honest,
+scoped-down version of what a free-tier *aggregator* product would try to
+do for you automatically: aggregating other providers' quotas on your
+behalf raises real ToS problems (several providers' terms restrict
+proxy/resale use of a free-tier key), so this router only ever reports
+against numbers you configured yourself, for your own account.
+
+**`GET /v1/free-tiers`** reports every configured entry's budget, this
+period's tracked prompt+completion token usage, and what's left:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "model": "groq/llama-3.3-70b-versatile",
+      "monthly_free_tokens": 117000000,
+      "tokens_used": 250000,
+      "tokens_remaining": 116750000,
+      "period": "monthly"
+    }
+  ]
+}
+```
+
+Tracked usage is the same `prompt_tokens + completion_tokens` this router
+already counts for [`GET /v1/usage`](#get-v1usage) — a request to a
+"provider/model" with no `[[free_tiers]]` entry is simply never counted
+here, the same way an unpriced model never counts against `cost_usd`.
+`tokens_remaining` saturates at `0` rather than going negative once usage
+exceeds the configured budget — this endpoint is reporting-only, unlike
+`[[clients]].budget_usd`; nothing here blocks a request or returns `402`,
+since a *provider's* free-tier exhaustion is something that provider's own
+API would reject on its own, not something this router can pre-empt
+without a live reading of your actual remaining quota (which no provider
+here exposes).
+
+`period` uses the same reset cadence as `[[clients]].budget_period` —
+`"total"` (never resets), `"daily"`/`"weekly"`/`"monthly"` (UTC calendar
+boundaries, or a fixed 7-day cadence from the Unix epoch for `"weekly"`).
+Tracking is in-memory only, per-process — it resets on restart and isn't
+shared across processes, with no `[persistence]` backing (unlike
+`GET /v1/usage`), so a load-balanced deployment's `/v1/free-tiers` reflects
+only the process answering that particular request.
+
 ## Guardrails
 
 `[[guardrails]]` entries check every request's message text — before

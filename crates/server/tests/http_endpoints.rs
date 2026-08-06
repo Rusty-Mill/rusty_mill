@@ -250,6 +250,108 @@ async fn usage_stats_endpoint_returns_empty_list_before_any_requests() {
 }
 
 #[tokio::test]
+async fn free_tiers_endpoint_returns_empty_list_when_unconfigured() {
+    let base_url = spawn_app("providers = {}").await;
+
+    let resp = reqwest::get(format!("{base_url}/v1/free-tiers"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["object"], "list");
+    assert_eq!(body["data"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn free_tiers_endpoint_reports_configured_budget_before_any_requests() {
+    let base_url = spawn_app(
+        r#"
+        providers = {}
+
+        [[free_tiers]]
+        model = "groq/llama-3.3-70b-versatile"
+        monthly_free_tokens = 117000000
+        "#,
+    )
+    .await;
+
+    let resp = reqwest::get(format!("{base_url}/v1/free-tiers"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: Value = resp.json().await.unwrap();
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0]["model"], "groq/llama-3.3-70b-versatile");
+    assert_eq!(data[0]["monthly_free_tokens"], 117000000);
+    assert_eq!(data[0]["tokens_used"], 0);
+    assert_eq!(data[0]["tokens_remaining"], 117000000);
+    assert_eq!(data[0]["period"], "monthly");
+}
+
+#[tokio::test]
+async fn free_tiers_endpoint_tracks_usage_after_a_dispatch() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "llama-3.3-70b-versatile",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 5, "total_tokens": 25}
+        })))
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("GROQ_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.groq]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+
+        [[free_tiers]]
+        model = "groq/llama-3.3-70b-versatile"
+        monthly_free_tokens = 1000
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let chat_resp = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "groq/llama-3.3-70b-versatile",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(chat_resp.status(), 200);
+
+    let resp = reqwest::get(format!("{base_url}/v1/free-tiers"))
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1);
+    // prompt_tokens (20) + completion_tokens (5) = 25 tracked against the
+    // configured 1000-token budget.
+    assert_eq!(data[0]["tokens_used"], 25);
+    assert_eq!(data[0]["tokens_remaining"], 975);
+}
+
+#[tokio::test]
 async fn provider_stats_endpoint_returns_empty_list_before_any_requests() {
     let base_url = spawn_app("providers = {}").await;
 

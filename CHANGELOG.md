@@ -7,6 +7,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Added
 - `docs/PROVIDERS.md` + curated commented-out provider presets in
   `config.example.toml` (~20 more OpenAI-wire-compatible backends).
+- `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-declared,
+  self-tracked free-token budget reporting per "provider/model".
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002).

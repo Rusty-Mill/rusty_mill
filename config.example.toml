@@ -270,6 +270,23 @@ model = "groq/llama-3.3-70b-versatile"
 prompt_per_million = 0.59
 completion_per_million = 0.79
 
+# --- Free tiers (optional) ----------------------------------------------------
+# Operator-declared free-token budgets, surfaced at GET /v1/free-tiers --
+# self-declared like `zdr`/`no_training` above, never verified against the
+# provider's own systems. Tracks this router's own prompt+completion token
+# usage against each entry, reset on the configured `period` (same
+# "total"/"daily"/"weekly"/"monthly" options as `[[clients]].budget_period`,
+# defaulting to "monthly"). Reporting-only -- unlike a client budget, this
+# never blocks a request; see the README's "Free tiers" section.
+
+# [[free_tiers]]
+# model = "groq/llama-3.3-70b-versatile"
+# monthly_free_tokens = 117000000
+#
+# [[free_tiers]]
+# model = "gemini/gemini-2.0-flash"
+# monthly_free_tokens = 60000000
+
 # --- Clients (optional) -------------------------------------------------------
 # Named inbound callers, each with their own API key and rate limit,
 # independent of (and in addition to) `server.api_key_env`. Presenting a

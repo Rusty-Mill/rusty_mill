@@ -160,6 +160,30 @@ pub struct PricingEntry {
     pub context_length: Option<u32>,
 }
 
+/// An operator-declared monthly free-token budget for one "provider/model"
+/// entry, for `GET /v1/free-tiers`. Self-declared, like `zdr`/`no_training`
+/// on `[providers.*]` — this router never verifies it against the
+/// provider's own actual quota, it just tracks this process's usage
+/// against whatever number you put here.
+#[derive(Debug, Deserialize, Clone)]
+pub struct FreeTierEntry {
+    /// "provider/model", matching a `[[routes]]` chain entry or a
+    /// `[[pricing]]` model string.
+    pub model: String,
+    /// How many prompt+completion tokens you believe this provider/model
+    /// grants for free, per `period`.
+    pub monthly_free_tokens: u64,
+    /// How the tracked-usage-vs-budget window resets. Defaults to
+    /// `"monthly"`, matching the field name above; set explicitly if your
+    /// provider's own free tier actually resets on a different cadence.
+    #[serde(default = "default_free_tier_period")]
+    pub period: BudgetPeriod,
+}
+
+fn default_free_tier_period() -> BudgetPeriod {
+    BudgetPeriod::Monthly
+}
+
 /// A named inbound caller, identified by its own API key, with its own
 /// rate limit — independent of (and in addition to) `server.api_key_env`.
 /// Presenting this key both authenticates the request and buckets it
@@ -325,6 +349,8 @@ pub struct Config {
     pub web_search: Option<WebSearchConfig>,
     #[serde(default)]
     pub cache: Option<CacheConfig>,
+    #[serde(default)]
+    pub free_tiers: Vec<FreeTierEntry>,
 }
 
 /// Configures `model: "auto"` -- a heuristic (not ML) complexity-based
