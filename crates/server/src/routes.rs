@@ -596,6 +596,30 @@ mod tests {
         assert!(check_admin_auth(&state, &bearer_headers("client-key")).is_ok());
     }
 
+    // --- audit_identity_fields -------------------------------------------
+
+    #[test]
+    fn audit_identity_fields_reports_global_with_no_organization() {
+        assert_eq!(
+            audit_identity_fields(&AdminIdentity::Global),
+            ("global", "")
+        );
+    }
+
+    #[test]
+    fn audit_identity_fields_reports_scoped_with_its_organization() {
+        let identity = AdminIdentity::Scoped {
+            organization: Some("acme-corp".to_string()),
+        };
+        assert_eq!(audit_identity_fields(&identity), ("scoped", "acme-corp"));
+    }
+
+    #[test]
+    fn audit_identity_fields_reports_scoped_with_no_organization_as_empty() {
+        let identity = AdminIdentity::Scoped { organization: None };
+        assert_eq!(audit_identity_fields(&identity), ("scoped", ""));
+    }
+
     #[tokio::test]
     async fn check_admin_auth_passes_with_the_correct_token() {
         let state = AppState {
@@ -965,12 +989,44 @@ pub async fn admin_reset_client_spend(
     }
 
     if state.router.reset_client_spend(&name) {
+        admin_audit_log(&identity, "reset_client_spend", &name);
         Json(json!({ "status": "ok" })).into_response()
     } else {
         json_error(
             404,
             &format!("no client named \"{name}\" with a configured budget"),
         )
+    }
+}
+
+/// Structured audit line for an admin-API mutation -- otherwise there's no
+/// way to answer "who changed this client's budget, and when" after the
+/// fact beyond whatever's in general application logs (if even that).
+/// `identity` distinguishes the global admin token from a scoped
+/// admin-role client's own key (see [`AdminIdentity`]); `target` is the
+/// client name being acted on. One line per successful mutation, emitted
+/// only after the action has actually taken effect -- a rejected/no-op
+/// request (404, 409, validation error) isn't logged here, since nothing
+/// changed for it to record.
+fn admin_audit_log(identity: &AdminIdentity, action: &str, target: &str) {
+    let (identity_label, organization) = audit_identity_fields(identity);
+    tracing::info!(
+        identity = identity_label,
+        organization,
+        action,
+        target,
+        "admin action"
+    );
+}
+
+/// The `(identity, organization)` fields `admin_audit_log` attaches to its
+/// event -- split out from the `tracing::info!` call itself so the
+/// per-identity-variant logic is unit-testable without a tracing
+/// subscriber to capture against.
+fn audit_identity_fields(identity: &AdminIdentity) -> (&'static str, &str) {
+    match identity {
+        AdminIdentity::Global => ("global", ""),
+        AdminIdentity::Scoped { organization } => ("scoped", organization.as_deref().unwrap_or("")),
     }
 }
 
@@ -1096,6 +1152,7 @@ pub async fn admin_create_client(
         req.budget_usd
             .map(|budget_usd| (budget_usd, req.budget_period)),
     );
+    admin_audit_log(&identity, "create_client", &req.name);
 
     (
         StatusCode::CREATED,
@@ -1217,6 +1274,7 @@ pub async fn admin_update_client(
             .budget_usd
             .map(|budget_usd| (budget_usd, updated.budget_period)),
     );
+    admin_audit_log(&identity, "update_client", &name);
 
     Json(ClientProvisionResponse {
         name: updated.name,
@@ -1257,6 +1315,7 @@ pub async fn admin_delete_client(
         .unwrap()
         .retain(|_, (n, _)| n != &name);
     state.router.remove_client(&name);
+    admin_audit_log(&identity, "delete_client", &name);
 
     Json(json!({ "status": "ok" })).into_response()
 }
