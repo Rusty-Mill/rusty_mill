@@ -24,7 +24,7 @@ use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
 use super::auth::{extract_credentials, Credentials};
-use super::engine::Engine;
+use super::engine::{parse_extensions_header, Engine};
 use convert::*;
 use pb::a2a_service_server::A2aService;
 
@@ -59,9 +59,25 @@ impl GrpcService {
         )
     }
 
-    /// Enforces `AgentCard.securityRequirements` (spec Section 4.5)
-    /// against `request`'s metadata.
+    /// Enforces `AgentCard.capabilities.extensions[].required` (spec
+    /// Section 3.2.6 / 5.6) against `request`'s `a2a-extensions` metadata
+    /// entry.
+    fn check_required_extensions<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        let declared = parse_extensions_header(
+            request
+                .metadata()
+                .get("a2a-extensions")
+                .and_then(|v| v.to_str().ok()),
+        );
+        self.engine
+            .check_required_extensions(&declared)
+            .map_err(a2a_error_to_status)
+    }
+
+    /// Enforces required extensions, then `AgentCard.securityRequirements`
+    /// (spec Section 4.5), against `request`'s metadata.
     async fn authenticate<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        self.check_required_extensions(request)?;
         let credentials = self.credentials(request);
         self.engine
             .authenticate(&credentials)
@@ -194,6 +210,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::GetExtendedAgentCardRequest>,
     ) -> Result<Response<pb::AgentCard>, Status> {
+        self.check_required_extensions(&request)?;
         let credentials = self.credentials(&request);
         let card = self
             .engine

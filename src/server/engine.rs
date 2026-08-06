@@ -2,7 +2,7 @@
 //! A2A operations (spec Section 3.1) against an [`AgentExecutor`] and a
 //! [`TaskStore`], independent of the JSON-RPC framing used to expose them.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -69,6 +69,20 @@ impl Engine {
 
     pub fn card(&self) -> &AgentCard {
         &self.card
+    }
+
+    /// Enforces `AgentCard.capabilities.extensions[].required` (spec
+    /// Section 3.2.6 / 5.6): rejects a request that doesn't declare
+    /// support (via `declared`, the request's parsed `A2A-Extensions`
+    /// service parameter) for every extension this agent marks
+    /// `required`.
+    pub(crate) fn check_required_extensions(&self, declared: &HashSet<String>) -> Result<()> {
+        for ext in &self.card.capabilities.extensions {
+            if ext.required && !declared.contains(&ext.uri) {
+                return Err(A2aError::ExtensionSupportRequired(ext.uri.clone()));
+            }
+        }
+        Ok(())
     }
 
     /// Enforces `AgentCard.securityRequirements` (spec Section 4.5)
@@ -263,13 +277,18 @@ impl Engine {
             .as_ref()
             .map(|c| c.return_immediately)
             .unwrap_or(false);
+        let history_length = req.configuration.as_ref().and_then(|c| c.history_length);
+        let finish = |mut task: Task| {
+            apply_history_length(&mut task, history_length);
+            Ok(SendMessageResult::Task { task })
+        };
         let (started, mut rx) = self.start_execution(&req).await?;
         loop {
             match rx.recv().await {
                 Ok(StreamResponse::Message { message }) => return Ok(SendMessageResult::Message { message }),
                 Ok(StreamResponse::Task { task }) => {
                     if !wait_for_final {
-                        return Ok(SendMessageResult::Task { task });
+                        return finish(task);
                     }
                 }
                 Ok(StreamResponse::StatusUpdate { status_update }) => {
@@ -278,9 +297,7 @@ impl Engine {
                         // to the store again, so a fresh read is safe and
                         // gives the caller the full task (history,
                         // artifacts, ...).
-                        return Ok(SendMessageResult::Task {
-                            task: self.snapshot_task(&started).await,
-                        });
+                        return finish(self.snapshot_task(&started).await);
                     }
                     if !wait_for_final {
                         // Non-blocking: return *this* snapshot rather than
@@ -290,20 +307,20 @@ impl Engine {
                         let mut task =
                             Task::new(&started.task_id, &started.context_id, status_update.status.state);
                         task.status = status_update.status;
-                        return Ok(SendMessageResult::Task { task });
+                        return finish(task);
                     }
                 }
                 Ok(StreamResponse::ArtifactUpdate { artifact_update }) => {
                     if !wait_for_final {
                         let mut task = Task::new(&started.task_id, &started.context_id, TaskState::Working);
                         task.artifacts.push(artifact_update.artifact);
-                        return Ok(SendMessageResult::Task { task });
+                        return finish(task);
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
                     return match self.store.get(&started.task_id).await {
-                        Some(task) => Ok(SendMessageResult::Task { task }),
+                        Some(task) => finish(task),
                         None => Err(A2aError::InvalidAgentResponse(
                             "agent finished without producing a message or task update".to_string(),
                         )),
@@ -552,6 +569,19 @@ impl Engine {
             })
             .collect()
     }
+}
+
+/// Parses the `A2A-Extensions` service parameter (spec Section 3.2.6): a
+/// comma-separated list of extension URIs the caller declares support
+/// for. `None`/empty input yields an empty set.
+pub(crate) fn parse_extensions_header(value: Option<&str>) -> HashSet<String> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
