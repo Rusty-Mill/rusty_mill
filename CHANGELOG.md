@@ -56,6 +56,18 @@ README.
 
 ## [0.4.0] — 2026-08-06
 
+> **Superseded by [0.4.1]. Use that instead.**
+>
+> Depending on the `v0.4.0` tag makes cargo print this on every build of your
+> project:
+>
+> ```
+> error: invalid character `{` in package name: `{{project-name}}`
+> ```
+>
+> The build still succeeds and the library itself is unaffected, but the noise
+> is unavoidable from your side. 0.4.1 fixes it and changes nothing else.
+
 The first release driven by filed issues rather than ad-hoc requests: every
 entry below closes one, and two of them changed shape once the code was
 examined. Those deviations are recorded here rather than quietly dropped.
