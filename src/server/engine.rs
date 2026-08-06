@@ -18,11 +18,13 @@ use crate::types::{
     AgentCard, CancelTaskRequest, DeleteTaskPushNotificationConfigRequest,
     GetTaskPushNotificationConfigRequest, GetTaskRequest, ListTaskPushNotificationConfigsRequest,
     ListTaskPushNotificationConfigsResponse, ListTasksRequest, ListTasksResponse, Message, Role,
-    SendMessageRequest, SendMessageResult, StreamResponse, SubscribeToTaskRequest, Task,
+    SecurityRequirement, SendMessageRequest, SendMessageResult, StreamResponse, SubscribeToTaskRequest, Task,
     TaskArtifactUpdateEvent, TaskPushNotificationConfig, TaskState, TaskStatus, TaskStatusUpdateEvent,
 };
 
+use super::auth::{authenticate_against, AuthContext, AuthVerifier, Credentials};
 use super::executor::{AgentExecutor, EventSink, RequestContext};
+use super::push::PushNotifier;
 use super::store::TaskStore;
 
 /// Ids assigned to a `SendMessage` invocation before its outcome (task or
@@ -39,6 +41,8 @@ pub struct Engine {
     store: Arc<dyn TaskStore>,
     buses: Arc<Mutex<HashMap<String, broadcast::Sender<StreamResponse>>>>,
     cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    auth_verifier: Option<Arc<dyn AuthVerifier>>,
+    push_notifier: PushNotifier,
 }
 
 impl Engine {
@@ -50,6 +54,8 @@ impl Engine {
             store,
             buses: Arc::new(Mutex::new(HashMap::new())),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
+            auth_verifier: None,
+            push_notifier: PushNotifier::new(),
         }
     }
 
@@ -57,8 +63,44 @@ impl Engine {
         self.extended_card = Some(card);
     }
 
+    pub(crate) fn set_auth_verifier(&mut self, verifier: Arc<dyn AuthVerifier>) {
+        self.auth_verifier = Some(verifier);
+    }
+
     pub fn card(&self) -> &AgentCard {
         &self.card
+    }
+
+    /// Enforces `AgentCard.securityRequirements` (spec Section 4.5)
+    /// against `credentials` extracted from an incoming request. An empty
+    /// requirement list means the agent is public and this always
+    /// succeeds with `Ok(None)` - no [`AuthVerifier`] is required or
+    /// consulted in that case. A non-empty list without a configured
+    /// verifier fails closed: declaring requirements is a statement of
+    /// intent, and silently accepting every request would defeat it.
+    pub(crate) async fn authenticate(&self, credentials: &Credentials) -> Result<Option<AuthContext>> {
+        self.authenticate_requirements(&self.card.security_requirements, credentials)
+            .await
+    }
+
+    async fn authenticate_requirements(
+        &self,
+        requirements: &[SecurityRequirement],
+        credentials: &Credentials,
+    ) -> Result<Option<AuthContext>> {
+        if requirements.is_empty() {
+            return Ok(None);
+        }
+        let verifier = self.auth_verifier.as_deref().ok_or_else(|| {
+            A2aError::Internal(
+                "this agent declares securityRequirements but no AuthVerifier is configured \
+                 (see AgentServer::with_auth_verifier)"
+                    .to_string(),
+            )
+        })?;
+        authenticate_against(requirements, verifier, credentials)
+            .await
+            .map(Some)
     }
 
     fn require_streaming(&self) -> Result<()> {
@@ -135,6 +177,7 @@ impl Engine {
 
         let executor = self.executor.clone();
         let store = self.store.clone();
+        let push = self.push_notifier.clone();
         let buses = self.buses.clone();
         let cancel_tokens = self.cancel_tokens.clone();
         let seed_message = req.message.clone();
@@ -146,7 +189,7 @@ impl Engine {
 
             let mut saw_closing_event = false;
             while let Some(evt) = rx.recv().await {
-                apply_event(&store, &bg_task_id, &bg_context_id, &seed_message, &evt).await;
+                apply_event(&store, &push, &bg_task_id, &bg_context_id, &seed_message, &evt).await;
                 let closing = evt.closes_stream();
                 let _ = bus.send(evt);
                 if closing {
@@ -173,7 +216,15 @@ impl Engine {
                         metadata: None,
                     }
                     .into();
-                    apply_event(&store, &bg_task_id, &bg_context_id, &seed_message, &failure).await;
+                    apply_event(
+                        &store,
+                        &push,
+                        &bg_task_id,
+                        &bg_context_id,
+                        &seed_message,
+                        &failure,
+                    )
+                    .await;
                     let _ = bus.send(failure);
                 } else {
                     tracing::warn!(
@@ -361,7 +412,15 @@ impl Engine {
 
         let bus = self.buses.lock().await.get(&req.id).cloned();
         while let Ok(evt) = rx.try_recv() {
-            apply_event(&self.store, &req.id, &context_id, &seed, &evt).await;
+            apply_event(
+                &self.store,
+                &self.push_notifier,
+                &req.id,
+                &context_id,
+                &seed,
+                &evt,
+            )
+            .await;
             if let Some(b) = &bus {
                 let _ = b.send(evt);
             }
@@ -373,6 +432,7 @@ impl Engine {
         if !updated.status.state.is_terminal() {
             updated.status = TaskStatus::new(TaskState::Canceled);
             self.store.put(updated.clone()).await;
+            notify_push_configs(&self.store, &self.push_notifier, &updated).await;
             if let Some(b) = &bus {
                 let _ = b.send(
                     TaskStatusUpdateEvent {
@@ -446,17 +506,51 @@ impl Engine {
         }
     }
 
-    /// `GetExtendedAgentCard` (spec Section 3.1.11).
-    pub fn get_extended_agent_card(&self) -> Result<AgentCard> {
+    /// `GetExtendedAgentCard` (spec Section 3.1.11): unlike every other
+    /// operation, this one is authenticated even when
+    /// `AgentCard.securityRequirements` is empty, since the spec
+    /// describes it as being "for the authenticated agent" - if an
+    /// [`AuthVerifier`] is configured, this uses `securityRequirements`
+    /// when declared, or else falls back to treating each entry in
+    /// `securitySchemes` as its own single-scheme alternative (any one
+    /// successfully verified scheme is sufficient). With no verifier
+    /// configured, or no schemes declared at all to fall back to, this
+    /// method can't enforce anything and just checks the capability flag,
+    /// same as before this crate had any auth enforcement.
+    pub async fn get_extended_agent_card(&self, credentials: &Credentials) -> Result<AgentCard> {
         match self.card.capabilities.extended_agent_card {
-            Some(true) => self
-                .extended_card
-                .clone()
-                .ok_or(A2aError::ExtendedAgentCardNotConfigured),
-            _ => Err(A2aError::UnsupportedOperation(
-                "extended agent card is not supported by this agent".to_string(),
-            )),
+            Some(true) => {}
+            _ => {
+                return Err(A2aError::UnsupportedOperation(
+                    "extended agent card is not supported by this agent".to_string(),
+                ))
+            }
         }
+        if let Some(verifier) = self.auth_verifier.as_deref() {
+            let requirements = self.extended_card_security_requirements();
+            if !requirements.is_empty() {
+                authenticate_against(&requirements, verifier, credentials).await?;
+            }
+        }
+        self.extended_card
+            .clone()
+            .ok_or(A2aError::ExtendedAgentCardNotConfigured)
+    }
+
+    /// `AgentCard.securityRequirements` if declared, else one
+    /// single-scheme alternative per entry in `securitySchemes` - see
+    /// [`Engine::get_extended_agent_card`].
+    fn extended_card_security_requirements(&self) -> Vec<SecurityRequirement> {
+        if !self.card.security_requirements.is_empty() {
+            return self.card.security_requirements.clone();
+        }
+        self.card
+            .security_schemes
+            .keys()
+            .map(|name| SecurityRequirement {
+                schemes: HashMap::from([(name.clone(), crate::types::StringList { list: Vec::new() })]),
+            })
+            .collect()
     }
 }
 
@@ -476,6 +570,7 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
 
 async fn apply_event(
     store: &Arc<dyn TaskStore>,
+    push: &PushNotifier,
     task_id: &str,
     context_id: &str,
     seed_message: &Message,
@@ -495,7 +590,8 @@ async fn apply_event(
             if let Some(msg) = &status_update.status.message {
                 task.history.push(msg.clone());
             }
-            store.put(task).await;
+            store.put(task.clone()).await;
+            notify_push_configs(store, push, &task).await;
         }
         StreamResponse::ArtifactUpdate { artifact_update } => {
             let mut task = match store.get(task_id).await {
@@ -507,9 +603,21 @@ async fn apply_event(
                 }
             };
             merge_artifact(&mut task, artifact_update);
-            store.put(task).await;
+            store.put(task.clone()).await;
+            notify_push_configs(store, push, &task).await;
         }
         StreamResponse::Task { .. } | StreamResponse::Message { .. } => {}
+    }
+}
+
+/// Fires off push notification delivery (spec Section 4.3) to every
+/// config registered for `task.id`, one background task per config so a
+/// slow/unreachable webhook can never delay task processing.
+async fn notify_push_configs(store: &Arc<dyn TaskStore>, push: &PushNotifier, task: &Task) {
+    for config in store.list_push_configs(&task.id).await {
+        let push = push.clone();
+        let task = task.clone();
+        tokio::spawn(async move { push.notify(&config, &task).await });
     }
 }
 

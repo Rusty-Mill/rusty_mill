@@ -22,11 +22,12 @@
 //! on the JSON body (`POST`) or query string (`GET`) of every operation -
 //! the same scope the JSON-RPC binding has.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -43,6 +44,7 @@ use crate::types::{
     StreamResponse, SubscribeToTaskRequest, TaskPushNotificationConfig,
 };
 
+use super::auth::extract_credentials;
 use super::engine::Engine;
 
 const A2A_JSON: &str = "application/a2a+json";
@@ -97,6 +99,32 @@ fn rest_ok<T: serde::Serialize>(value: &T) -> Response {
     a2a_json(StatusCode::OK, value)
 }
 
+/// Extracts credentials for `AgentCard.securitySchemes` from `headers`
+/// (and `query`, where the route has a meaningful query string) and
+/// enforces `AgentCard.securityRequirements` (spec Section 4.5) against
+/// them, returning an error [`Response`] ready to `return` on failure.
+async fn require_auth(
+    engine: &Engine,
+    headers: &HeaderMap,
+    query: &HashMap<String, String>,
+) -> Result<(), Response> {
+    let credentials = extract_credentials(
+        &engine.card().security_schemes,
+        |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        },
+        Some(query),
+    );
+    engine
+        .authenticate(&credentials)
+        .await
+        .map(|_| ())
+        .map_err(rest_error)
+}
+
 /// SSE for the REST binding carries the raw `StreamResponse` object
 /// directly in `data:` (no JSON-RPC envelope), per spec Section 11.7.
 fn sse_response(stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>>) -> Response {
@@ -110,8 +138,12 @@ fn sse_response(stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>>) -> R
 async fn message_action(
     State(engine): State<Arc<Engine>>,
     Path(action): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<SendMessageRequest>,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+        return resp;
+    }
     match action.as_str() {
         "message:send" => match engine.send_message(req).await {
             Ok(result) => rest_ok(&result),
@@ -135,8 +167,13 @@ struct GetTaskQuery {
 async fn get_task(
     State(engine): State<Arc<Engine>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<GetTaskQuery>,
+    Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
+        return resp;
+    }
     let req = GetTaskRequest {
         tenant: None,
         id,
@@ -149,7 +186,15 @@ async fn get_task(
 }
 
 /// `GET /tasks` (spec Section 11.3.2).
-async fn list_tasks(State(engine): State<Arc<Engine>>, Query(req): Query<ListTasksRequest>) -> Response {
+async fn list_tasks(
+    State(engine): State<Arc<Engine>>,
+    headers: HeaderMap,
+    Query(req): Query<ListTasksRequest>,
+    Query(raw_query): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
+        return resp;
+    }
     match engine.list_tasks(req).await {
         Ok(res) => rest_ok(&res),
         Err(e) => rest_error(e),
@@ -159,7 +204,14 @@ async fn list_tasks(State(engine): State<Arc<Engine>>, Query(req): Query<ListTas
 /// Handles both `POST /tasks/{id}:cancel` and `POST /tasks/{id}:subscribe`
 /// (spec Section 11.3.2), dispatching on the suffix after the last `:` in
 /// the path segment.
-async fn task_action(State(engine): State<Arc<Engine>>, Path(id_and_action): Path<String>) -> Response {
+async fn task_action(
+    State(engine): State<Arc<Engine>>,
+    Path(id_and_action): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+        return resp;
+    }
     let Some((id, action)) = id_and_action.rsplit_once(':') else {
         return rest_error(A2aError::InvalidRequest(format!(
             "expected \"{{id}}:cancel\" or \"{{id}}:subscribe\", got \"{id_and_action}\""
@@ -198,8 +250,12 @@ async fn task_action(State(engine): State<Arc<Engine>>, Path(id_and_action): Pat
 async fn create_push_notification_config(
     State(engine): State<Arc<Engine>>,
     Path(task_id): Path<String>,
+    headers: HeaderMap,
     Json(mut config): Json<TaskPushNotificationConfig>,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+        return resp;
+    }
     config.task_id = Some(task_id);
     match engine.create_push_notification_config(config).await {
         Ok(cfg) => rest_ok(&cfg),
@@ -212,7 +268,12 @@ async fn create_push_notification_config(
 async fn get_push_notification_config(
     State(engine): State<Arc<Engine>>,
     Path((task_id, config_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
+        return resp;
+    }
     let req = GetTaskPushNotificationConfigRequest {
         tenant: None,
         task_id,
@@ -236,8 +297,13 @@ struct PageQuery {
 async fn list_push_notification_configs(
     State(engine): State<Arc<Engine>>,
     Path(task_id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<PageQuery>,
+    Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
+        return resp;
+    }
     let req = ListTaskPushNotificationConfigsRequest {
         tenant: None,
         task_id,
@@ -255,7 +321,11 @@ async fn list_push_notification_configs(
 async fn delete_push_notification_config(
     State(engine): State<Arc<Engine>>,
     Path((task_id, config_id)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+        return resp;
+    }
     let req = DeleteTaskPushNotificationConfigRequest {
         tenant: None,
         task_id,
@@ -268,8 +338,18 @@ async fn delete_push_notification_config(
 }
 
 /// `GET /extendedAgentCard` (spec Section 11.3.4).
-async fn get_extended_agent_card(State(engine): State<Arc<Engine>>) -> Response {
-    match engine.get_extended_agent_card() {
+async fn get_extended_agent_card(State(engine): State<Arc<Engine>>, headers: HeaderMap) -> Response {
+    let credentials = extract_credentials(
+        &engine.card().security_schemes,
+        |name| {
+            headers
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string)
+        },
+        None,
+    );
+    match engine.get_extended_agent_card(&credentials).await {
         Ok(card) => rest_ok(&card),
         Err(e) => rest_error(e),
     }
