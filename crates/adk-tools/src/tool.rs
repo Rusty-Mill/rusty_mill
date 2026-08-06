@@ -7,9 +7,16 @@ use std::sync::Arc;
 
 use crate::context::ToolContext;
 
+/// Decides, from a call's arguments, whether it needs approval and what to ask.
+///
+/// Returning `None` lets the call proceed silently.
+pub type ConfirmationPredicate = Box<dyn Fn(&Args) -> Option<String> + Send + Sync>;
+
 /// When a tool call needs explicit user approval before it runs.
+#[derive(Default)]
 pub enum ConfirmationPolicy {
     /// Never ask.
+    #[default]
     Never,
     /// Always ask, with this prompt.
     Always(String),
@@ -17,7 +24,7 @@ pub enum ConfirmationPolicy {
     ///
     /// This is the conditional form ADK supports — approve small refunds
     /// silently, escalate large ones.
-    Conditional(Box<dyn Fn(&Args) -> Option<String> + Send + Sync>),
+    Conditional(ConfirmationPredicate),
 }
 
 impl ConfirmationPolicy {
@@ -28,12 +35,6 @@ impl ConfirmationPolicy {
             ConfirmationPolicy::Always(hint) => Some(hint.clone()),
             ConfirmationPolicy::Conditional(predicate) => predicate(args),
         }
-    }
-}
-
-impl Default for ConfirmationPolicy {
-    fn default() -> Self {
-        ConfirmationPolicy::Never
     }
 }
 

@@ -55,8 +55,8 @@ pub mod tool;
 pub mod toolset;
 
 pub use context::ToolContext;
-pub use function::{FunctionTool, ToolFn};
-pub use tool::{invoke_tool, ConfirmationPolicy, SharedTool, Tool};
+pub use function::{FunctionTool, ToolCallable, ToolFn, ToolFuture};
+pub use tool::{invoke_tool, ConfirmationPolicy, ConfirmationPredicate, SharedTool, Tool};
 pub use toolset::{resolve_tools, StaticToolset, ToolSource, Toolset};
 
 /// Builds a successful tool result with a `status` field, as ADK recommends.

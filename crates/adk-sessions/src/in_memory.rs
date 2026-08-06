@@ -225,11 +225,15 @@ impl SessionService for InMemorySessionService {
     }
 }
 
+/// Identifies one artifact: app, user, scope (session id, or empty when the
+/// artifact is user-scoped), and filename.
+type ArtifactKey = (String, String, String, String);
+
 /// An [`ArtifactService`] backed by process memory, versioning each filename.
 #[derive(Default)]
 pub struct InMemoryArtifactService {
-    /// Keyed by (app, user, session-or-empty, filename) to a version list.
-    artifacts: Mutex<BTreeMap<(String, String, String, String), Vec<Part>>>,
+    /// Each key's versions, oldest first; the index is the version number.
+    artifacts: Mutex<BTreeMap<ArtifactKey, Vec<Part>>>,
 }
 
 impl InMemoryArtifactService {

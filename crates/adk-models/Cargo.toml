@@ -1,4 +1,31 @@
 [package]
 name = "adk-models"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model abstraction and provider connectors for the Rust ADK"
+
+[features]
+default = ["gemini", "anthropic"]
+# Shared HTTP plumbing for the live provider connectors.
+http = ["dep:reqwest"]
+# Google Gemini via the Generative Language API.
+gemini = ["http"]
+# Anthropic Claude via the Messages API.
+anthropic = ["http"]
+
+[dependencies]
+adk-core.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-test.workspace = true
