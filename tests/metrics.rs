@@ -353,7 +353,6 @@ fn refusals_are_counted_without_a_caller_controlled_label() {
             snapshot(snapshotter)
         });
 
-        let recorded = recorded;
         let rejected = find(&recorded, "acp_runs_rejected_total");
         assert_eq!(rejected.len(), 1, "one series, whatever names were submitted: {rejected:?}");
         assert_eq!(counter_value(rejected[0]), 2);
