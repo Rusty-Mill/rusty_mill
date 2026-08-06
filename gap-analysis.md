@@ -59,3 +59,43 @@ free tiers on the operator's behalf.
 Total: 8 issues, all additive (no `breaking-change` label needed), no new
 third-party dependencies anticipated beyond what's already in the workspace
 (the `rtk` transform and `rp-cli` are pure Rust/std + existing crates).
+
+## Additional reference: agentgateway.dev
+
+Cross-checked against [agentgateway](https://agentgateway.dev/) — also
+Rust-based, a closer architectural peer than OmniRoute (unified gateway for
+HTTP/gRPC/MCP/A2A traffic, not just OpenAI-shaped chat completions).
+
+**Already covered, no new gap:** model/cost/latency-aware routing
+(`provider.sort`), token budgets (`[[clients]].budget_usd`), per-request
+cost calculation (`cost_usd`), team/user cost attribution
+(`organization`/`workspace` on `[[clients]]`, `GET /v1/admin/organizations`
+— agentgateway's "virtual scoped keys" equivalent), prompt
+redaction/blocking (`[[guardrails]]` — regex-based, not agentgateway's
+NER-style "PII-shield," but same slot), OpenTelemetry-adjacent observability
+(`GET /metrics` Prometheus, per-provider stats).
+
+**Identified but not filed as parity-gap issues** — both cross the skill's
+own stop-and-ask line (new protocol surface / new third-party dependency).
+User declined both for this run (2026-08-06): stays chat-completions-only,
+static-key auth. Left here for a future, separately-scoped run to pick up:
+
+- **MCP (Model Context Protocol) gateway support.** agentgateway proxies MCP
+  tool calls with per-identity tool scoping; rusty_provider only speaks
+  OpenAI-shaped chat completions today. This is a second protocol surface,
+  not an additive endpoint — new dependency, new request/response shapes,
+  real design surface (transport: stdio vs. SSE vs. streamable-HTTP; how
+  tool scoping composes with existing `[[clients]]` auth).
+- **JWT/OIDC authentication.** Today's auth is a static bearer token
+  (`server.api_key_env` / `[[clients]].api_key_env`) checked by string
+  equality — no token verification library, no IdP/JWKS fetching. Adding
+  JWT/OIDC as an alternative auth mode needs a new dependency
+  (`jsonwebtoken` + JWKS fetching) and a decision on how it composes with
+  existing client/budget/rate-limit identity.
+
+One additional gap **was** filed since it's additive and dependency-free
+(the router can already call an embeddings provider itself):
+
+| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Semantic response cache | fn (existing, new mode) | spec | n/a | agentgateway.dev "semantic caching" | no | M | Opt-in alongside the existing exact-match `[cache]`: embed the request via the already-configured embeddings provider, cosine-similarity match against cached entries above a configurable threshold. No new dependency — reuses the router's own `/v1/embeddings` dispatch path. |
