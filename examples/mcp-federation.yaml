@@ -57,6 +57,21 @@ binds:
               - path:
                   pathPrefix: /api
             policies:
+              # Two retries after the first try. Only the listed codes are
+              # retried; a transport error is retried only when it is a connect
+              # failure, which is the one that cannot have been processed.
+              retry:
+                attempts: 2
+                backoff: 100ms
+                codes: [502, 503]
+              # Burst plus sustained: a request must satisfy both.
+              localRateLimit:
+                - maxTokens: 100
+                  tokensPerFill: 100
+                  fillInterval: 60s
+                - maxTokens: 5
+                  tokensPerFill: 5
+                  fillInterval: 1s
               urlRewrite:
                 path:
                   prefix: /v1

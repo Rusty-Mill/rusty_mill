@@ -73,7 +73,7 @@ pub struct Policies {
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 4] = [
+        let unimplemented: [(&str, bool); 5] = [
             ("extAuthz", self.ext_authz.is_some()),
             ("a2a", self.a2a.is_some()),
             ("ai", self.ai.is_some()),
@@ -82,6 +82,12 @@ impl Policies {
                 self.mcp_authorization
                     .as_ref()
                     .is_some_and(|a| !a.rules.is_empty()),
+            ),
+            (
+                "localRateLimit[type=tokens]",
+                self.local_rate_limit
+                    .iter()
+                    .any(|limit| limit.kind == RateLimitKind::Tokens),
             ),
         ];
         for (name, present) in unimplemented {
