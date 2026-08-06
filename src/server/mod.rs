@@ -175,6 +175,44 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// which is the intent, but only if you know that is what is happening.
 pub const READINESS_CACHE: Duration = Duration::from_secs(1);
 
+/// What a drain could not finish, split by why.
+///
+/// The two are different situations and an operator reading a shutdown log
+/// wants to tell them apart: unfinished runs mean the deadline was too short
+/// for the work, parked ones mean clients were mid-conversation.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Drained {
+    /// Runs still executing an agent body when the deadline passed.
+    pub unfinished: Vec<RunId>,
+    /// Runs parked awaiting a client answer.
+    ///
+    /// **These cannot survive this replica.** An agent that has paused to ask a
+    /// question is suspended part-way through its own function, and that
+    /// position lives in this process — no other replica can resume from it.
+    /// A `recoverable` agent gets a replacement started from its input, which
+    /// re-asks the question; anything else is failed. What the drain can do,
+    /// and does, is make that happen *now* rather than after the lease lapses,
+    /// and without waiting on a client who may never answer.
+    pub parked: Vec<RunId>,
+}
+
+impl Drained {
+    /// Whether the replica finished everything it was holding.
+    pub fn is_empty(&self) -> bool {
+        self.unfinished.is_empty() && self.parked.is_empty()
+    }
+
+    /// How many runs were handed back, of either kind.
+    pub fn len(&self) -> usize {
+        self.unfinished.len() + self.parked.len()
+    }
+
+    /// Every run handed back, unfinished first.
+    pub fn run_ids(&self) -> impl Iterator<Item = RunId> + '_ {
+        self.unfinished.iter().chain(&self.parked).copied()
+    }
+}
+
 /// Whether this replica should be sent new work, and why not if not.
 ///
 /// Distinct from liveness. `GET /ping` answers "this process is up", which is
@@ -240,12 +278,20 @@ pub(crate) struct InFlight {
     /// is still this replica's to finish, but is costing it a suspended future
     /// and nothing more.
     executing: Mutex<usize>,
-    /// Runs currently executing, so the ones that outlast a drain can be found
+    /// Runs this replica owns, so the ones a drain leaves behind can be found
     /// and have their leases released.
     running: Mutex<HashSet<RunId>>,
-    /// The size of `running`, published so a drain can await zero rather than
-    /// poll for it — a polled drain would either add latency to every deploy or
-    /// burn CPU waiting.
+    /// The subset of `running` parked awaiting a client answer.
+    ///
+    /// Tracked separately because a drain must treat them differently: they are
+    /// not going to finish, however long it waits.
+    parked: Mutex<HashSet<RunId>>,
+    /// The count of runs holding an execution slot, published so a drain can
+    /// await zero rather than poll for it — a polled drain would either add
+    /// latency to every deploy or burn CPU waiting.
+    ///
+    /// The *executing* count rather than the size of `running`, which is the
+    /// whole of the fix for a drain that used to wait on parked conversations.
     idle: watch::Sender<usize>,
 }
 
@@ -256,8 +302,18 @@ impl InFlight {
             limit,
             executing: Mutex::new(0),
             running: Mutex::new(HashSet::new()),
+            parked: Mutex::new(HashSet::new()),
             idle: watch::channel(0).0,
         }
+    }
+
+    /// Record the executing count and publish it, under the lock that owns it.
+    ///
+    /// One place, so the gauge, the admission check and the drain can never
+    /// disagree about how many runs are actually running.
+    fn publish(&self, executing: &usize) {
+        telemetry::runs_executing(*executing);
+        self.idle.send_replace(*executing);
     }
 
     /// Take a slot for a new run, if this replica has one to give.
@@ -273,7 +329,7 @@ impl InFlight {
             return None;
         }
         *executing += 1;
-        telemetry::runs_executing(*executing);
+        self.publish(&executing);
         Some(Slot { capacity: Arc::clone(self), held: AtomicBool::new(true) })
     }
 
@@ -286,7 +342,7 @@ impl InFlight {
     fn take(self: &Arc<Self>) -> Slot {
         let mut executing = self.executing.lock().expect("capacity counter poisoned");
         *executing += 1;
-        telemetry::runs_executing(*executing);
+        self.publish(&executing);
         drop(executing);
         Slot { capacity: Arc::clone(self), held: AtomicBool::new(true) }
     }
@@ -294,13 +350,23 @@ impl InFlight {
     fn release(&self) {
         let mut executing = self.executing.lock().expect("capacity counter poisoned");
         *executing = executing.saturating_sub(1);
-        telemetry::runs_executing(*executing);
+        self.publish(&executing);
     }
 
     fn reacquire(&self) {
         let mut executing = self.executing.lock().expect("capacity counter poisoned");
         *executing += 1;
-        telemetry::runs_executing(*executing);
+        self.publish(&executing);
+    }
+
+    /// This run is now waiting on a client rather than running.
+    fn park(&self, run_id: RunId) {
+        self.parked.lock().expect("parked set poisoned").insert(run_id);
+    }
+
+    /// The client answered; it is running again.
+    fn unpark(&self, run_id: RunId) {
+        self.parked.lock().expect("parked set poisoned").remove(&run_id);
     }
 
     fn executing(&self) -> usize {
@@ -308,31 +374,40 @@ impl InFlight {
     }
 
     fn enter(&self, run_id: RunId) {
-        let mut running = self.running.lock().expect("in-flight set poisoned");
-        running.insert(run_id);
-        self.idle.send_replace(running.len());
+        self.running.lock().expect("in-flight set poisoned").insert(run_id);
     }
 
     fn leave(&self, run_id: RunId) {
-        let mut running = self.running.lock().expect("in-flight set poisoned");
-        running.remove(&run_id);
-        self.idle.send_replace(running.len());
+        self.running.lock().expect("in-flight set poisoned").remove(&run_id);
+        // Also here, not only in `unpark`: a run cancelled while parked never
+        // unparks, and leaving it in the set would have a drain report a
+        // conversation that has already ended.
+        self.parked.lock().expect("parked set poisoned").remove(&run_id);
     }
 
-    fn snapshot(&self) -> Vec<RunId> {
-        self.running.lock().expect("in-flight set poisoned").iter().copied().collect()
+    /// What this replica is holding, split by whether it can still finish.
+    fn snapshot(&self) -> (Vec<RunId>, Vec<RunId>) {
+        let running = self.running.lock().expect("in-flight set poisoned");
+        let parked = self.parked.lock().expect("parked set poisoned");
+        let unfinished = running.difference(&parked).copied().collect();
+        (unfinished, parked.iter().copied().collect())
     }
 
     fn len(&self) -> usize {
-        *self.idle.borrow()
+        self.running.lock().expect("in-flight set poisoned").len()
     }
 
-    /// Resolve once nothing is executing here.
+    /// Resolve once no run is executing an agent body here.
+    ///
+    /// Deliberately *not* "once nothing is left": a run parked awaiting a
+    /// client is not going to finish however long this waits, so counting it
+    /// would make every drain sit out its whole deadline for a conversation
+    /// that is doing nothing.
     async fn idle(&self) {
         // `wait_for` tests the current value before waiting, so a replica that
         // is already idle returns immediately rather than blocking on a change
         // that will never come.
-        let _ = self.idle.subscribe().wait_for(|running| *running == 0).await;
+        let _ = self.idle.subscribe().wait_for(|executing| *executing == 0).await;
     }
 }
 
@@ -356,23 +431,32 @@ pub(crate) struct Slot {
 
 impl Slot {
     /// Give the slot up while the run waits for a client.
-    pub(crate) fn park(&self) {
+    pub(crate) fn park(&self, run_id: RunId) {
         if self.held.swap(false, Ordering::SeqCst) {
+            self.capacity.park(run_id);
             self.capacity.release();
         }
     }
 
     /// Take it back now the client has answered.
-    pub(crate) fn unpark(&self) {
+    pub(crate) fn unpark(&self, run_id: RunId) {
         if !self.held.swap(true, Ordering::SeqCst) {
+            self.capacity.unpark(run_id);
             self.capacity.reacquire();
         }
     }
 }
 
 impl Drop for Slot {
+    /// Return the capacity, without recording a park.
+    ///
+    /// A dropped slot belongs to a run that is ending, not one that is waiting
+    /// — `InFlight::leave` clears it from both sets. Marking it parked here
+    /// would have a drain report a conversation that has already finished.
     fn drop(&mut self) {
-        self.park();
+        if self.held.swap(false, Ordering::SeqCst) {
+            self.capacity.release();
+        }
     }
 }
 
@@ -567,20 +651,31 @@ impl AcpServer {
     ///
     /// Call [`stop_accepting`](AcpServer::stop_accepting) first, or new runs
     /// will keep arriving and the drain may never finish.
-    pub async fn drain(&self, deadline: Duration) -> Vec<RunId> {
-        if tokio::time::timeout(deadline, self.in_flight.idle()).await.is_ok() {
+    pub async fn drain(&self, deadline: Duration) -> Drained {
+        let finished = tokio::time::timeout(deadline, self.in_flight.idle()).await.is_ok();
+        let (unfinished, parked) = self.in_flight.snapshot();
+
+        if finished && parked.is_empty() {
             tracing::info!(replica = %self.replica_id, "drained cleanly");
-            return Vec::new();
+            return Drained::default();
+        }
+        if !finished {
+            tracing::warn!(
+                replica = %self.replica_id,
+                count = unfinished.len(),
+                ?deadline,
+                "drain deadline passed with runs still executing"
+            );
+        }
+        if !parked.is_empty() {
+            tracing::info!(
+                replica = %self.replica_id,
+                count = parked.len(),
+                "handing back conversations parked awaiting a client"
+            );
         }
 
-        let stragglers = self.in_flight.snapshot();
-        tracing::warn!(
-            replica = %self.replica_id,
-            count = stragglers.len(),
-            ?deadline,
-            "drain deadline passed with runs still going; releasing their leases"
-        );
-        for run_id in &stragglers {
+        for run_id in unfinished.iter().chain(&parked) {
             if let Err(error) = self.store.release_lease(*run_id).await {
                 // Warn, unlike the release on a run's normal completion. There
                 // the lease was a formality on an already-terminal run; here it
@@ -590,7 +685,7 @@ impl AcpServer {
                 tracing::warn!(%run_id, %error, "failed to release a drained run's lease");
             }
         }
-        stragglers
+        Drained { unfinished, parked }
     }
 
     /// Stop accepting new runs, then wait for the ones in flight.
@@ -603,13 +698,17 @@ impl AcpServer {
     /// # use std::time::Duration;
     /// # use rusty_acp::server::{AcpServer, DEFAULT_DRAIN_DEADLINE};
     /// # async fn demo(server: std::sync::Arc<AcpServer>) {
-    /// let abandoned = server.shutdown(DEFAULT_DRAIN_DEADLINE).await;
-    /// if !abandoned.is_empty() {
-    ///     eprintln!("{} runs handed back to the fleet", abandoned.len());
+    /// let drained = server.shutdown(DEFAULT_DRAIN_DEADLINE).await;
+    /// if !drained.is_empty() {
+    ///     eprintln!(
+    ///         "{} unfinished, {} parked mid-conversation",
+    ///         drained.unfinished.len(),
+    ///         drained.parked.len(),
+    ///     );
     /// }
     /// # }
     /// ```
-    pub async fn shutdown(&self, deadline: Duration) -> Vec<RunId> {
+    pub async fn shutdown(&self, deadline: Duration) -> Drained {
         self.stop_accepting();
         self.drain(deadline).await
     }
