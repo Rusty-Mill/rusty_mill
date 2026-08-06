@@ -78,7 +78,7 @@ pub use redis::{RedisStore, RedisStoreConfig};
 
 #[cfg(feature = "postgres-store")]
 #[cfg_attr(docsrs, doc(cfg(feature = "postgres-store")))]
-pub use postgres::{PostgresStore, PostgresStoreConfig};
+pub use postgres::{PostgresStore, PostgresStoreConfig, Swept};
 
 /// Default number of runs an [`InMemoryStore`] retains before evicting
 /// terminal ones.
