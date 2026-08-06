@@ -180,6 +180,20 @@ pub struct RecoveryRecord {
     /// Which attempt this run is. The first is 1; each replacement increments,
     /// so a run that keeps killing its replica eventually stops being replaced.
     pub attempt: u32,
+    /// Whether this run's replica gave it up deliberately rather than dying.
+    ///
+    /// Set by a draining replica before it releases the lease, and consumed by
+    /// whoever replaces the run: a hand-off does not spend an attempt, because
+    /// the ceiling exists to stop a run that *poisons* whatever executes it,
+    /// and a drained run is unlucky rather than poisonous. Without this a
+    /// rolling deploy across three replicas exhausts the default budget in
+    /// three hops, and fails a run for something the agent did not do.
+    ///
+    /// Defaulted so records written before this existed still decode — and so
+    /// the safe answer is the default, since a replica that actually died had
+    /// no chance to set it.
+    #[serde(default)]
+    pub handed_off: bool,
 }
 
 /// A session together with the messages a store holds for it.

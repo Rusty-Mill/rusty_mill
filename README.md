@@ -661,10 +661,11 @@ this process — no other replica can resume from it. A `recoverable` agent gets
 started from its input, which re-asks the question; anything else is failed. What the drain buys is
 that this happens promptly and legibly, not that the conversation lives.
 
-One limitation worth knowing: a replacement started this way spends a recovery attempt, exactly
-as a crash-caused one does. A long-running recoverable run caught by several drains in one rolling
-deploy can exhaust `max_recovery_attempts` for reasons that have nothing to do with the agent.
-Distinguishing the two needs a field on the recovery record that does not exist yet.
+A replacement started this way does **not** spend a recovery attempt. The ceiling exists to stop a
+run that poisons whatever executes it, and a run whose replica walked away deliberately has
+demonstrated nothing of the sort — without the distinction, a rolling deploy across three replicas
+would exhaust the default budget in three hops and fail the run for something the agent did not do.
+A replacement's own record starts clean, so one that then dies for real is charged normally.
 
 Sequencing with axum's own graceful shutdown matters. `stop_accepting` first, so requests arriving
 during the drain are refused rather than started; axum's shutdown second, to stop accepting

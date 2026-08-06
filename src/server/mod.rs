@@ -699,6 +699,13 @@ impl AcpServer {
         }
 
         for run_id in unfinished.iter().chain(&parked) {
+            // Marked *before* the lease is released, not after. Releasing is
+            // what lets another replica claim the run, and it can do so
+            // immediately — the same write-before-signal rule the cancellation
+            // path learned in #27. Marked after, a fast reaper reads the old
+            // record and charges the agent for a deploy.
+            self.mark_handed_off(*run_id).await;
+
             if let Err(error) = self.store.release_lease(*run_id).await {
                 // Warn, unlike the release on a run's normal completion. There
                 // the lease was a formality on an already-terminal run; here it
@@ -709,6 +716,31 @@ impl AcpServer {
             }
         }
         Drained { unfinished, parked }
+    }
+
+    /// Record that this run is being given up deliberately.
+    ///
+    /// Only touches runs that have a recovery record — everything else is
+    /// failed by whoever picks it up, and failing spends no attempts. A failure
+    /// here is logged rather than propagated: the worst outcome is that the
+    /// replacement costs an attempt it should not have, which is the behaviour
+    /// this replaced and is far better than a shutdown that stalls.
+    async fn mark_handed_off(&self, run_id: RunId) {
+        let record = match self.store.recovery_record(run_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%run_id, %error, "failed to read a recovery record while draining");
+                return;
+            }
+        };
+        if record.handed_off {
+            return;
+        }
+        let marked = RecoveryRecord { handed_off: true, ..record };
+        if let Err(error) = self.store.put_recovery_record(run_id, Some(&marked)).await {
+            tracing::warn!(%run_id, %error, "failed to mark a run as handed off while draining");
+        }
     }
 
     /// Stop accepting new runs, then wait for the ones in flight.
@@ -852,7 +884,7 @@ impl AcpServer {
             self.store
                 .put_recovery_record(
                     run_id,
-                    Some(&RecoveryRecord { input: input.clone(), attempt }),
+                    Some(&RecoveryRecord { input: input.clone(), attempt, handed_off: false }),
                 )
                 .await?;
         }
@@ -952,7 +984,11 @@ impl AcpServer {
                     input: record.input.clone(),
                     session,
                     history,
-                    attempt: record.attempt + 1,
+                    // A hand-off does not spend an attempt. The ceiling is
+                    // there to stop a run that poisons whatever executes it,
+                    // and a run whose replica walked away deliberately has
+                    // demonstrated nothing of the sort.
+                    attempt: if record.handed_off { record.attempt } else { record.attempt + 1 },
                     record_input_in_session: false,
                     replaces: Some(abandoned.run_id),
                 },

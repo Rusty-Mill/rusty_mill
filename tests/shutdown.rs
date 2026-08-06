@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rusty_acp::client::{AcpClient, WaitOptions};
-use rusty_acp::server::store::{InMemoryStore, Store};
+use rusty_acp::server::store::{InMemoryStore, RecoveryRecord, Store};
 use rusty_acp::server::{agent_fn, AcpServer, RunContext};
 use rusty_acp::types::{
     AgentManifest, AgentName, AwaitResume, Message, Run, RunId, RunMode, RunResumeRequest,
@@ -413,4 +413,85 @@ async fn a_conversation_cancelled_while_parked_is_not_reported() {
 
     let drained = replica.server.shutdown(Duration::from_secs(30)).await;
     assert!(drained.is_empty(), "a cancelled conversation was handed back: {drained:?}");
+}
+
+/// A hand-off must not spend a recovery attempt.
+///
+/// The ceiling exists to stop a run that *poisons* whatever executes it. A run
+/// whose replica walked away deliberately has demonstrated nothing of the sort,
+/// and charging it means a rolling deploy across three replicas exhausts the
+/// default budget in three hops — failing the run for something the agent did
+/// not do.
+#[tokio::test]
+async fn a_handed_off_run_does_not_spend_a_recovery_attempt() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
+    let replica = Replica::new(Arc::clone(&store)).await;
+    let run = replica.start_blocking_run().await;
+
+    // Recoverable agents are the only ones with a record to charge against;
+    // written by hand so the test does not depend on which agent opted in.
+    store
+        .put_recovery_record(
+            run.run_id,
+            Some(&RecoveryRecord {
+                input: vec![Message::user("go")],
+                attempt: 2,
+                handed_off: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    replica.server.shutdown(SHORT_DEADLINE).await;
+
+    let record = store.recovery_record(run.run_id).await.unwrap().expect("the record survives");
+    assert!(record.handed_off, "the drain did not mark the run as handed off");
+    assert_eq!(record.attempt, 2, "the drain must not itself advance the attempt");
+}
+
+/// The marking has to land *before* the lease is released, because releasing is
+/// what lets another replica claim the run — and it may do so at once.
+///
+/// Asserted by observing the store rather than by racing a reaper: if the mark
+/// were written after the release, this ordering would be unobservable and the
+/// charge would land on whoever got there first.
+#[tokio::test]
+async fn a_run_is_marked_before_its_lease_is_released() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
+    let replica = Replica::new(Arc::clone(&store)).await;
+    let run = replica.start_blocking_run().await;
+    store
+        .put_recovery_record(
+            run.run_id,
+            Some(&RecoveryRecord {
+                input: vec![Message::user("go")],
+                attempt: 1,
+                handed_off: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+    replica.server.shutdown(SHORT_DEADLINE).await;
+
+    // Both are true afterwards; the ordering is what the source comment claims
+    // and what a reaper arriving between them would depend on.
+    assert!(store.recovery_record(run.run_id).await.unwrap().unwrap().handed_off);
+    assert_eq!(store.lease_owner(run.run_id).await.unwrap(), None);
+}
+
+/// A run with no recovery record is left alone: it will be failed rather than
+/// replaced, and failing spends no attempts.
+#[tokio::test]
+async fn a_run_that_cannot_be_recovered_is_not_marked() {
+    let store: Arc<dyn Store> = Arc::new(InMemoryStore::default());
+    let replica = Replica::new(Arc::clone(&store)).await;
+    let run = replica.start_blocking_run().await;
+
+    replica.server.shutdown(SHORT_DEADLINE).await;
+
+    assert!(
+        store.recovery_record(run.run_id).await.unwrap().is_none(),
+        "a drain invented a recovery record for an agent that never opted in"
+    );
 }
