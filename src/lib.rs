@@ -12,22 +12,23 @@
 //! - [`server`] (feature `server`): an [`axum`]-based server harness for
 //!   implementing an A2A agent: implement [`server::AgentExecutor`] and get
 //!   agent-card discovery, task lifecycle management, and streaming for
-//!   free.
+//!   free, over both the JSON-RPC and HTTP+JSON/REST protocol bindings at
+//!   once.
 //! - [`signing`] (feature `signing`): Agent Card JWS signing and
 //!   verification (spec Section 8.4).
 //!
 //! # Scope
 //!
 //! The A2A specification defines three interoperable protocol bindings:
-//! JSON-RPC 2.0, gRPC, and HTTP+JSON/REST (spec Sections 9-11). This crate
-//! implements the **JSON-RPC 2.0 binding**, which the spec calls "a simple,
-//! HTTP-based interface" - the most common choice for pure-Rust
-//! implementations, since it needs no protobuf toolchain. An agent
-//! declaring only a `JSONRPC` interface in its `AgentCard` is fully
-//! spec-compliant (Section 5.1 only requires functional equivalence
-//! *among* the protocols an agent chooses to support). The canonical
-//! `a2a.proto` is vendored under `spec/a2a.proto` for anyone who wants to
-//! layer a gRPC or REST binding on top using the same [`types`].
+//! JSON-RPC 2.0, gRPC, and HTTP+JSON/REST (spec Sections 9-11). This
+//! crate's server implements the **JSON-RPC 2.0** and **HTTP+JSON/REST**
+//! bindings (both served from the same [`server::AgentServer`], on the
+//! same port); its client only speaks JSON-RPC so far. gRPC is not yet
+//! implemented. Per spec Section 5.1, an agent only needs to support the
+//! protocols it declares in its `AgentCard`, so any subset is
+//! spec-compliant. The canonical `a2a.proto` is vendored under
+//! `spec/a2a.proto` for anyone who wants to layer a gRPC binding on top
+//! using the same [`types`].
 #[cfg(feature = "client")]
 pub mod client;
 mod codec;
