@@ -15,10 +15,12 @@ use std::{net::SocketAddr, time::Duration};
 
 use rmcp::{
     ClientLifecycleMode, ClientServiceExt, ServerHandler,
+    handler::server::router::tool::ToolRouter,
     model::{
         ClientInfo, PaginatedRequestParams, ProtocolVersion, Reference, Resource, ResourceTemplate,
         ServerCapabilities, ServerInfo,
     },
+    tool, tool_router,
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -32,6 +34,8 @@ use rusty_mcp::{
 const RESOURCE_COUNT: usize = 25;
 /// How many it serves per page.
 const PAGE_SIZE: usize = 10;
+/// Tools per page. Six tools at two a page is three pages.
+const TOOL_PAGE_SIZE: usize = 2;
 
 /// A server whose registries are rebuilt from scratch for every request.
 ///
@@ -41,6 +45,36 @@ const PAGE_SIZE: usize = 10;
 struct PagedServer {
     resources: ResourceRegistry,
     completions: CompletionRegistry,
+    tool_router: ToolRouter<Self>,
+}
+
+/// Six tools, named so that registration order and name order disagree.
+#[tool_router(router = tool_router)]
+impl PagedServer {
+    #[tool(description = "f")]
+    async fn zulu(&self) -> String {
+        "z".into()
+    }
+    #[tool(description = "e")]
+    async fn yankee(&self) -> String {
+        "y".into()
+    }
+    #[tool(description = "d")]
+    async fn xray(&self) -> String {
+        "x".into()
+    }
+    #[tool(description = "c")]
+    async fn charlie(&self) -> String {
+        "c".into()
+    }
+    #[tool(description = "b")]
+    async fn bravo(&self) -> String {
+        "b".into()
+    }
+    #[tool(description = "a")]
+    async fn alpha(&self) -> String {
+        "a".into()
+    }
 }
 
 impl PagedServer {
@@ -71,6 +105,7 @@ impl PagedServer {
         Self {
             resources,
             completions,
+            tool_router: Self::tool_router(),
         }
     }
 }
@@ -81,6 +116,7 @@ impl ServerHandler for PagedServer {
             "paged-server",
             "0.1.0",
             ServerCapabilities::builder()
+                .enable_tools()
                 .enable_resources()
                 .enable_prompts()
                 .enable_completions()
@@ -90,6 +126,7 @@ impl ServerHandler for PagedServer {
 
     rusty_mcp::forward_resource_methods!(resources);
     rusty_mcp::forward_completion_methods!(completions);
+    rusty_mcp::forward_tool_methods!(tool_router, TOOL_PAGE_SIZE);
 }
 
 async fn free_port() -> SocketAddr {
@@ -289,6 +326,95 @@ async fn templates_paginate_independently_of_resources() {
         "one template fits in one page"
     );
     assert!(templates.ttl_ms.is_some());
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tools_paginate_across_separate_requests() {
+    // `rmcp`'s `#[tool_handler]` returns every tool in one response and never
+    // sets a cursor, which is why `forward_tool_methods!` replaces it. This is
+    // the same walk the resources test does, over the tool sequence.
+    let url = spawn_server().await;
+    let client = connect(&url).await;
+
+    let mut names = Vec::new();
+    let mut pages = 0;
+    let mut cursor = None;
+
+    loop {
+        let page = client
+            .list_tools(Some(
+                PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("tools/list over http");
+
+        pages += 1;
+        names.extend(page.tools.iter().map(|t| t.name.to_string()));
+        assert!(page.ttl_ms.is_some(), "page {pages} has no ttlMs");
+        assert!(page.cache_scope.is_some(), "page {pages} has no cacheScope");
+
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    assert_eq!(pages, 3, "six tools at two a page");
+    assert_eq!(
+        names,
+        ["alpha", "bravo", "charlie", "xray", "yankee", "zulu"],
+        "every tool exactly once, in key order"
+    );
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn calling_a_tool_still_works_without_the_attribute_macro() {
+    // `forward_tool_methods!` generates `call_tool` and `get_tool` as well as
+    // the paginated list. Dropping `#[tool_handler]` must not cost dispatch.
+    let url = spawn_server().await;
+    let client = connect(&url).await;
+
+    let result = client
+        .call_tool(rmcp::model::CallToolRequestParams::new("alpha"))
+        .await
+        .expect("tools/call");
+
+    let text = result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .expect("text");
+    assert_eq!(text, "a");
+
+    client.cancel().await.expect("cancel");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tools_cursor_is_rejected_by_the_other_sequences() {
+    // Four independent lists share one cursor format; the sequence tag is what
+    // stops a cursor from one seeking into another.
+    let url = spawn_server().await;
+    let client = connect(&url).await;
+
+    let cursor = client
+        .list_tools(None)
+        .await
+        .expect("tools/list")
+        .next_cursor
+        .expect("more to come");
+
+    let err = client
+        .list_resources(Some(
+            PaginatedRequestParams::default().with_cursor(Some(cursor)),
+        ))
+        .await
+        .expect_err("a tools cursor must not work on resources");
+    assert!(err.to_string().contains("cursor"), "got {err}");
 
     client.cancel().await.expect("cancel");
 }

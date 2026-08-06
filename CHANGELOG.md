@@ -16,6 +16,54 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tools/list` and `prompts/list` accepted a pagination cursor and ignored
+  it** ([#26]). 0.4.0 fixed this for resources and deferred the rest with a
+  note to check whether `rmcp`'s routers paginate. They do not: both generated
+  methods take a `PaginatedRequestParams`, discard it, return `list_all()` and
+  set `next_cursor: None`. Same consequence as before — a client that pages
+  sees a full first page with no cursor and concludes it has everything.
+
+  Leaving it was worse than not having noticed. Between 0.4.0 and now, one
+  third of the list surface paged and nothing said which third.
+
+### Added
+
+- `routers::forward_tool_methods!` and `routers::forward_prompt_methods!`,
+  paginating on the same cursor as resources.
+
+  **They replace `#[tool_handler]` and `#[prompt_handler]` rather than
+  composing with them**, for two separate reasons, both found by trying:
+
+  - `#[prompt_handler]` scans the impl for `list_prompts` and *replaces its
+    body* with the generated one, so a hand-written override is silently
+    discarded.
+  - `#[tool_handler]` guards on `has_method("list_tools")`, which looks like an
+    override would work — but attribute macros expand before `macro_rules!`
+    invocations inside the item, so it only ever sees an unexpanded macro call
+    and emits its own. That one is at least `E0201`.
+
+  So `forward_tool_methods!` generates `call_tool`, `list_tools` and
+  `get_tool`; `forward_prompt_methods!` generates `get_prompt` and
+  `list_prompts`. Both take an optional page size.
+
+- `pagination`, holding the one cursor implementation the four paginated lists
+  share. Previously private to `resources`. Each sequence carries a tag byte,
+  so a cursor minted by `tools/list` is rejected by the others — there is a
+  test asserting that for every pair.
+
+### Changed
+
+- **Breaking:** a server using `#[tool_handler]` or `#[prompt_handler]` keeps
+  working and keeps the old non-paginating behaviour. Moving to the new macros
+  means dropping the attribute and writing `get_info` yourself, which
+  `server_info` already makes a one-liner.
+- `resources::DEFAULT_PAGE_SIZE` is now a re-export from `pagination`. Same
+  value, same path.
+
+[#26]: https://github.com/baileyrd/rusty_mcp/issues/26
+
 ## [0.4.1] — 2026-08-06
 
 ### Fixed

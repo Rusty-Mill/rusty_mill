@@ -40,6 +40,13 @@ use rmcp::model::{
     Resource, ResourceContents, ResourceTemplate,
 };
 
+#[cfg(test)]
+use crate::pagination::encode_cursor;
+use crate::pagination::{CursorKind, page};
+
+#[doc(inline)]
+pub use crate::pagination::DEFAULT_PAGE_SIZE;
+
 /// Future returned by a resource reader.
 pub type ReadFuture =
     Pin<Box<dyn Future<Output = Result<Vec<ResourceContents>, ErrorData>> + Send>>;
@@ -126,12 +133,6 @@ struct Building {
     cache_scope: Option<CacheScope>,
     page_size: Option<usize>,
 }
-
-/// Entries returned per page when nothing else is configured.
-///
-/// Matches the cap the spec puts on completion results, for no deeper reason
-/// than that a hundred of anything is a reasonable thing to put in one response.
-pub const DEFAULT_PAGE_SIZE: usize = 100;
 
 impl ResourceRegistry {
     /// An empty registry.
@@ -379,96 +380,6 @@ where
     Fut: Future<Output = Result<Vec<ResourceContents>, ErrorData>> + Send + 'static,
 {
     Arc::new(move |req| Box::pin(reader(req)))
-}
-
-/// Which sequence a cursor belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CursorKind {
-    Resource,
-    Template,
-}
-
-impl CursorKind {
-    /// A one-byte tag, so a cursor issued for one sequence is rejected rather
-    /// than quietly indexing into the other.
-    fn tag(self) -> u8 {
-        match self {
-            Self::Resource => b'r',
-            Self::Template => b't',
-        }
-    }
-}
-
-/// Cursor format version, so a cursor held across a deploy is refused rather
-/// than reinterpreted under a new encoding.
-const CURSOR_VERSION: u8 = b'1';
-
-fn encode_cursor(kind: CursorKind, key: &str) -> String {
-    use base64::Engine as _;
-
-    let mut payload = vec![CURSOR_VERSION, kind.tag()];
-    payload.extend_from_slice(key.as_bytes());
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
-}
-
-fn decode_cursor(kind: CursorKind, cursor: &str) -> Result<String, ErrorData> {
-    use base64::Engine as _;
-
-    // Deliberately one message for every failure. Which byte was wrong is of no
-    // use to a caller and only helps someone probing the encoding.
-    let invalid =
-        || ErrorData::invalid_params("the pagination cursor is not one this server issued", None);
-
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor)
-        .map_err(|_| invalid())?;
-
-    let [version, tag, key @ ..] = bytes.as_slice() else {
-        return Err(invalid());
-    };
-    if *version != CURSOR_VERSION || *tag != kind.tag() {
-        return Err(invalid());
-    }
-
-    String::from_utf8(key.to_vec()).map_err(|_| invalid())
-}
-
-/// One page of `items`, ordered by `key`, resuming after `cursor`.
-///
-/// The cursor carries a **key**, not an index. That is the whole trick: a
-/// fabricated cursor names some position in the key space rather than an offset
-/// into a slice, so there is no such thing as an out-of-range read to guard
-/// against, and an entry deleted between requests cannot shift the entries
-/// after it onto a page they were already served on.
-fn page<'a, T>(
-    items: &'a [T],
-    key: impl Fn(&'a T) -> &'a str,
-    kind: CursorKind,
-    cursor: Option<&str>,
-    page_size: usize,
-) -> Result<(Vec<&'a T>, Option<String>), ErrorData> {
-    let after = cursor.map(|c| decode_cursor(kind, c)).transpose()?;
-
-    let mut ordered: Vec<(&str, &T)> = items.iter().map(|item| (key(item), item)).collect();
-    ordered.sort_by(|a, b| a.0.cmp(b.0));
-
-    // Strictly after: the cursor names the last entry already served.
-    let start = match &after {
-        Some(after) => ordered.partition_point(|(k, _)| *k <= after.as_str()),
-        None => 0,
-    };
-
-    let remaining = &ordered[start..];
-    let taken = remaining.len().min(page_size);
-
-    // A cursor only when something is actually left. Emitting one on the last
-    // page costs the client a whole extra round trip to learn nothing.
-    let next = (remaining.len() > taken).then(|| encode_cursor(kind, remaining[taken - 1].0));
-
-    Ok((
-        remaining[..taken].iter().map(|(_, item)| *item).collect(),
-        next,
-    ))
 }
 
 /// An RFC 6570 level-1 URI template, compiled for matching.

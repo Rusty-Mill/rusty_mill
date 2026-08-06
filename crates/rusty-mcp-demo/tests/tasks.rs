@@ -237,8 +237,23 @@ async fn an_unknown_task_id_is_an_error() {
 async fn tasks_list_still_reports_every_tool() {
     let client = connect(true).await;
 
-    let tools = client.list_tools(None).await.expect("tools/list");
-    let mut names: Vec<_> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+    // The name says "every tool", so it has to walk the pages — the demo lists
+    // three at a time, and reading page one would quietly check a third of them.
+    let mut names = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = client
+            .list_tools(Some(
+                rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("tools/list");
+        names.extend(page.tools.iter().map(|t| t.name.to_string()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
     names.sort();
     assert_eq!(
         names,

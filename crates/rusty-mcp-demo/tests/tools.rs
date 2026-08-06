@@ -81,8 +81,24 @@ fn structured(result: &rmcp::model::CallToolResult) -> serde_json::Value {
 async fn lists_tools_from_every_router() {
     let client = connect().await;
 
-    let tools = client.list_tools(None).await.expect("tools/list");
-    let mut names: Vec<_> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+    // Walked, not read off page one: the demo lists three tools at a time.
+    let mut all = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = client
+            .list_tools(Some(
+                rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("tools/list");
+        all.extend(page.tools);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    let mut names: Vec<_> = all.iter().map(|t| t.name.to_string()).collect();
     names.sort();
 
     // Every router contributes, merged by the `+` chain in
@@ -102,7 +118,7 @@ async fn lists_tools_from_every_router() {
 
     // Every tool carries a description and an input schema; without these the
     // model has nothing to select on.
-    for tool in &tools.tools {
+    for tool in &all {
         assert!(
             tool.description.as_ref().is_some_and(|d| !d.is_empty()),
             "tool {} is missing a description",
@@ -220,11 +236,22 @@ async fn add_overflow_is_rejected_rather_than_panicking() {
     );
 
     // The server survived the bad call and still answers.
-    let tools = client
-        .list_tools(None)
-        .await
-        .expect("tools/list after error");
-    assert_eq!(tools.tools.len(), 7);
+    let mut count = 0;
+    let mut cursor = None;
+    loop {
+        let page = client
+            .list_tools(Some(
+                rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("tools/list after error");
+        count += page.tools.len();
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(count, 7);
 
     client.cancel().await.expect("cancel");
 }

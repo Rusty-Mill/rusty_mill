@@ -215,22 +215,44 @@ async fn an_unknown_table_reports_bad_parameters() {
 async fn lists_prompts_with_descriptions() {
     let client = connect().await;
 
-    let list = client.list_prompts(None).await.expect("prompts/list");
-    let mut names: Vec<_> = list.prompts.iter().map(|p| p.name.clone()).collect();
+    // `prompts/list` pages — the demo sets a page size of 1 precisely so this
+    // is exercised — so the full set has to be walked, not read off page one.
+    let mut prompts = Vec::new();
+    let mut cursor = None;
+    loop {
+        let page = client
+            .list_prompts(Some(
+                rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("prompts/list");
+        // Every page, not just the first: a client caching page two needs the
+        // hint as much as one caching page one.
+        assert!(
+            page.ttl_ms.is_some(),
+            "prompts/list page carries cache hints"
+        );
+        prompts.extend(page.prompts);
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    let mut names: Vec<_> = prompts.iter().map(|p| p.name.clone()).collect();
     names.sort();
     assert_eq!(
         names,
         ["explain-error", "summarize"].map(String::from).to_vec()
     );
 
-    for prompt in &list.prompts {
+    for prompt in &prompts {
         assert!(
             prompt.description.as_ref().is_some_and(|d| !d.is_empty()),
             "prompt {} needs a description",
             prompt.name
         );
     }
-    assert!(list.ttl_ms.is_some(), "prompts/list carries cache hints");
 
     client.cancel().await.expect("cancel");
 }
@@ -287,8 +309,24 @@ async fn tools_still_work_alongside_resources_and_prompts() {
     // registry and task support at once; this checks nothing shadowed anything.
     let client = connect().await;
 
-    let tools = client.list_tools(None).await.expect("tools/list");
-    assert_eq!(tools.tools.len(), 7);
+    // Walked rather than read off the first page: the demo pages tools three
+    // at a time, so a single call would only ever see three of them.
+    let mut count = 0;
+    let mut cursor = None;
+    loop {
+        let page = client
+            .list_tools(Some(
+                rmcp::model::PaginatedRequestParams::default().with_cursor(cursor.clone()),
+            ))
+            .await
+            .expect("tools/list");
+        count += page.tools.len();
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(count, 7);
 
     client.cancel().await.expect("cancel");
 }
