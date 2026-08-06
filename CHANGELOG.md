@@ -6,6 +6,26 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ## [Unreleased]
 
 ### Added
+- **The release tooling is in the repo, under `scripts/`.**
+  `Cut-RustyTlsTags.ps1` creates the annotated version tags;
+  `New-RustyTlsReleases.ps1` creates the GitHub releases for them, with bodies
+  read out of this file. Both drive `gh`, both support `-WhatIf`, and both are
+  mostly verification — a pin is checked by fetching `Cargo.toml` *at that
+  commit* rather than trusted, and a release with no changelog section is
+  refused rather than published empty.
+
+  They existed as loose files while the eleven tags were cut and were about to
+  be thrown away with the machine that ran them. The verification logic is the
+  part worth keeping: it encodes `docs/versioning.md` rules 2 and 3 as
+  something executable, including why `gh release create` is never used (it
+  makes a *lightweight* tag, and rule 3 requires annotated).
+
+  `Cut-RustyTlsTags.ps1`'s pin table was brought up to date before committing —
+  it listed only the tags that were missing at the time, and its `v0.8.0` note
+  still described the decision as unmade. It now lists all eleven versions and
+  records that rusty_tls#64 settled 0.8.0. Every pin was re-verified against
+  the repo: each declares its version, each is an ancestor of `main`, and each
+  matches the tag already published.
 - **CI checks that `CHANGELOG.md` and `RELEASE_NOTES.md` list the same
   versions.** A new `changelog-parity` job. The two files record the same
   releases in two formats and nothing held them to each other; both had drifted,
