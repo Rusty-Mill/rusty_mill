@@ -60,6 +60,7 @@ tool's own name.
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
 | `agentgateway-auth` | The `jwtAuth` policy, over [`rusty_mcp`][rusty_mcp]'s JWKS validator. |
 | `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates. |
+| `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway` | The binary: data plane assembly, sockets, graceful shutdown. |
 
 Three decisions are worth knowing up front, because they shape everything else.
@@ -116,6 +117,8 @@ Implemented and tested:
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federation, tool
   name qualification, per-target `filters`, route-level `mcpAuthorization`
   (`allowTools` / `denyTools`)
+- `host` backends: HTTP reverse proxying with weighted load balancing,
+  `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
@@ -137,8 +140,7 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 - TLS termination (`HTTPS`/`TLS` listener protocols)
 - `retry`, `localRateLimit`, header modifiers and `urlRewrite` are modelled but
   not yet applied
-- `host` and `service` backends do not proxy yet — an MCP route is the only
-  fully served backend kind in v0
+- `service` backends need service discovery; use `host` with a literal address
 
 Not supported at all:
 
@@ -184,6 +186,58 @@ A `file:` JWKS is read once at startup, so a missing, malformed or empty key set
 stops the gateway booting instead of turning every request into a runtime error
 that reads like a client problem. Rotating that file needs a restart — which is
 what the `url:` form is for.
+
+## Proxying
+
+A `host` backend forwards bytes rather than terminating a protocol, which makes
+it where the policies that only make sense for a proxy finally do something:
+
+```yaml
+- name: api
+  matches:
+    - path:
+        pathPrefix: /api
+  policies:
+    urlRewrite:
+      path:
+        prefix: /v1          # /api/things -> /v1/things
+    requestHeaderModifier:
+      set: {x-gateway: rusty}
+    backendAuth:
+      key: backend-secret
+  backends:
+    - host: "10.0.0.1:8080"
+      weight: 3
+    - host: "10.0.0.2:8080"
+      weight: 1
+```
+
+Weighted selection is deterministic round-robin over a weighted ring, not
+random choice: randomness only reaches the configured ratio in expectation, so
+a low-traffic route can sit lopsided for a long time. Weight `0` drains a
+backend without deleting its configuration; every weight being `0` is a startup
+error, since the route could never send traffic anywhere.
+
+Hop-by-hop headers are stripped in both directions — **including the headers
+the `Connection` header names**, which is the half that is easy to miss:
+`Connection: x-custom` makes `x-custom` hop-by-hop for that message, and a
+proxy that only removes the fixed RFC list happily forwards it.
+
+The client address is appended to `X-Forwarded-For` rather than replacing it,
+because overwriting the chain erases every proxy before us. The upstream's
+`Host` is rewritten to name the upstream, or a name-based virtual host serves
+the wrong site. `backendAuth: key` replaces the client's own `Authorization`
+rather than adding to it, so a client cannot smuggle its credential to a
+backend that should see only ours.
+
+An unreachable upstream is a `502`, not a `500`: the gateway is fine, the
+upstream is not, and conflating the two sends people to debug the wrong
+process. Unlike MCP, a proxied response is not produced until the upstream
+answers, so `backendRequestTimeout` genuinely bounds the wait here.
+
+A route mixing `host` with a backend kind this build cannot serve is refused
+rather than served: silently dropping the unsupported share onto the hosts
+would send traffic somewhere the operator never asked for.
 
 ## Timeouts
 
@@ -308,7 +362,7 @@ Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 cargo test --workspace
 ```
 
-78 tests. The config tests are anchored on YAML taken verbatim from
+111 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -323,6 +377,10 @@ signed by an untrusted key and an `alg: none` token.
 The timeout tests drive a genuinely slow subprocess rather than a stubbed
 future, which is how the `requestTimeout`/`backendRequestTimeout` distinction
 above was found rather than assumed.
+
+The proxy tests stand up a real upstream that echoes back the request line and
+headers it saw, so the assertions are about what actually arrived rather than
+what the gateway believed it sent.
 
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp

@@ -10,6 +10,7 @@ dependencies = [
  "agentgateway-config",
  "agentgateway-core",
  "agentgateway-mcp",
+ "agentgateway-proxy",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -86,6 +87,22 @@ dependencies = [
  "regex",
  "rmcp",
  "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "agentgateway-proxy"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "bytes",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "thiserror",
  "tokio",
  "tracing",

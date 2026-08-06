@@ -21,6 +21,7 @@ agentgateway-auth = { workspace = true }
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
 agentgateway-mcp = { workspace = true }
+agentgateway-proxy = { workspace = true }
 
 rmcp = { workspace = true, features = [
     "server",
@@ -62,3 +63,4 @@ base64 = "0.22"
 rsa = "0.9"
 rand = "0.8"
 tempfile = "3"
+axum = { workspace = true, features = ["json", "tokio", "http1"] }

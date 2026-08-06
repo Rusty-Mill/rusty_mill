@@ -49,3 +49,22 @@ binds:
                       stdio:
                         cmd: uvx
                         args: ["mcp-server-fetch"]
+
+          # A plain HTTP backend on the same gateway. Weighted round-robin;
+          # weight 0 would drain a backend without deleting it.
+          - name: api
+            matches:
+              - path:
+                  pathPrefix: /api
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /v1
+              requestHeaderModifier:
+                set:
+                  x-gateway: rusty-agent-gateway
+            backends:
+              - host: "10.0.0.1:8080"
+                weight: 3
+              - host: "10.0.0.2:8080"
+                weight: 1
