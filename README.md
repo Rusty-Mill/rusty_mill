@@ -5,25 +5,27 @@ A Rust implementation of the [Agent2Agent (A2A) protocol](https://a2a-protocol.o
 It provides:
 
 - **`rusty_a2a::types`** — the complete A2A data model (`Task`, `Message`, `Part`, `Artifact`, `AgentCard`, security schemes, ...), transliterated field-for-field from the protocol's normative [`a2a.proto`](spec/a2a.proto), with `camelCase` JSON wire encoding exactly as the spec mandates.
-- **`rusty_a2a::client`** (feature `client`) — an async client for calling any A2A agent: task lifecycle, SSE streaming, push notification configuration, Agent Card discovery.
-- **`rusty_a2a::server`** (feature `server`) — an [`axum`](https://docs.rs/axum)-based harness for building an A2A agent: implement one trait (`AgentExecutor`) and get task state management, streaming, and Agent Card discovery for free.
+- **`rusty_a2a::client`** (feature `client`) — an async client for calling any A2A agent over JSON-RPC: task lifecycle, SSE streaming, push notification configuration, Agent Card discovery.
+- **`rusty_a2a::server`** (feature `server`) — an [`axum`](https://docs.rs/axum)-based harness for building an A2A agent: implement one trait (`AgentExecutor`) and get task state management, streaming, and Agent Card discovery for free, over the JSON-RPC and HTTP+JSON/REST bindings at once. Add the `grpc` feature to serve the same agent state over gRPC too.
+- **`rusty_a2a::signing`** (feature `signing`) — sign and verify an `AgentCard` with a JWS (RFC 7515) over its JSON Canonicalization Scheme representation (RFC 8785), per spec Section 8.4.
 
 ## Scope
 
-The A2A spec defines three interoperable protocol bindings: **JSON-RPC 2.0**, **gRPC**, and **HTTP+JSON/REST**. This crate implements the **JSON-RPC 2.0 binding** — the spec's own description of it, "a simple, HTTP-based interface," is also why it's the natural fit for a dependency-light, pure-Rust implementation with no protobuf toolchain required. Per spec Section 5.1, an agent only needs to support the protocols it chooses to support; declaring a single `JSONRPC` interface in your Agent Card is fully compliant.
+The A2A spec defines three interoperable protocol bindings: **JSON-RPC 2.0**, **gRPC**, and **HTTP+JSON/REST** — this crate implements all three. The server (feature `server`) serves JSON-RPC and HTTP+JSON/REST from the same `axum::Router`/port; add the `grpc` feature and call `AgentServer::build()` to get an `AgentServices` handle that also serves gRPC (via `tonic`), sharing the same task store and executor across all bindings. The client (feature `client`) only speaks JSON-RPC so far. Per spec Section 5.1, an agent only needs to support the protocols it chooses to support; declaring a single `JSONRPC` interface in your Agent Card is fully compliant.
 
-The canonical `a2a.proto` is vendored at [`spec/a2a.proto`](spec/a2a.proto) for reference (and for anyone who wants to layer a gRPC binding on top with `tonic-build`, reusing `rusty_a2a::types` for the JSON-facing pieces).
+The canonical `a2a.proto` is vendored at [`spec/a2a.proto`](spec/a2a.proto), along with the `google/api/*.proto` files it imports under `spec/googleapis/`; `build.rs` compiles it via `tonic-prost-build` when the `grpc` feature is enabled (requires a `protoc` binary on `PATH`).
 
 Implemented:
 
 - Full data model: `Task`, `TaskStatus`, `TaskState`, `Message`, `Role`, `Part` (text/bytes/url/data), `Artifact`, streaming events, `AgentCard` and all its nested types (security schemes, OAuth flows, extensions, skills), push notification config.
-- All 11 A2A operations: `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask`, the four push-notification-config CRUD methods, `GetExtendedAgentCard`.
+- All 11 A2A operations, over all three protocol bindings: `SendMessage`, `SendStreamingMessage`, `GetTask`, `ListTasks`, `CancelTask`, `SubscribeToTask`, the four push-notification-config CRUD methods, `GetExtendedAgentCard`.
 - Agent Card discovery at `/.well-known/agent-card.json`.
 - `A2A-Version` / `A2A-Extensions` service parameters.
-- The full A2A error model, mapped to JSON-RPC codes (`-32001`..`-32009`) and `google.rpc.ErrorInfo`-style error details.
-- Blocking, non-blocking (`returnImmediately`), and streaming (SSE) message sends, backed by a cooperative-cancellation task executor model.
+- The full A2A error model, mapped to JSON-RPC codes (`-32001`..`-32009`), `google.rpc.Status`-shaped REST error bodies with real HTTP status codes, and gRPC status codes — all three derived from one source of truth (`A2aError::grpc_status_name()`).
+- Blocking, non-blocking (`returnImmediately`), and streaming (SSE / gRPC server-streaming) message sends, backed by a cooperative-cancellation task executor model.
+- Agent Card JWS signing/verification (ES256 and EdDSA).
 
-Not implemented (contributions welcome): the gRPC and HTTP+JSON/REST protocol bindings, and Agent Card JWS signing/verification.
+Not implemented (contributions welcome): the client (`rusty_a2a::client`) only speaks JSON-RPC — REST and gRPC clients aren't provided, though the `grpc` feature does expose a raw generated `tonic` client (`rusty_a2a::server::grpc::pb::a2a_service_client`) for anyone who wants one.
 
 ## Quick start
 
@@ -139,7 +141,7 @@ cargo test --features full
 cargo clippy --features full --all-targets
 ```
 
-`tests/integration.rs` spins up a real `AgentServer` on a local port and drives it with a real `A2aClient`, covering the full task lifecycle, streaming, non-blocking sends, cancellation, and push notification config CRUD.
+`tests/integration.rs` spins up a real `AgentServer` on a local port and drives it with a real `A2aClient` and a bare `reqwest::Client`, covering the full task lifecycle, streaming, non-blocking sends, cancellation, push notification config CRUD, and the REST binding's routing/error shape, over both bindings sharing one task store. `tests/grpc_integration.rs` does the same against `AgentServices::serve_grpc` with a real generated `tonic` client. Building/testing with the `grpc` feature (including `full`) requires a `protoc` binary on `PATH`.
 
 ## License
 

@@ -1,4 +1,4 @@
-//! Exposes an [`Engine`](super::engine::Engine) over gRPC (spec Section
+//! Exposes an `Engine` over gRPC (spec Section
 //! 10), implementing the `A2AService` service generated from the vendored
 //! `spec/a2a.proto` by `build.rs` (via `tonic-prost-build`; requires a
 //! `protoc` binary on `PATH` to build this crate with the `grpc` feature
@@ -27,9 +27,9 @@ use super::engine::Engine;
 use convert::*;
 use pb::a2a_service_server::A2aService;
 
-/// The `A2AService` gRPC service implementation, wrapping an
-/// [`Engine`](super::engine::Engine) shared with the other protocol
-/// bindings. Build one via [`AgentServices::grpc_service`](super::AgentServices::grpc_service)
+/// The `A2AService` gRPC service implementation, wrapping an `Engine`
+/// shared with the other protocol bindings. Build one via
+/// [`AgentServices::grpc_service`](super::AgentServices::grpc_service)
 /// rather than directly.
 pub struct GrpcService {
     engine: Arc<Engine>,
