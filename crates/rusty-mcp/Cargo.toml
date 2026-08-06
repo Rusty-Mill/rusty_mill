@@ -43,6 +43,10 @@ tower-layer = "0.3"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"], optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"], optional = true }
 percent-encoding = "2"
+opentelemetry = { version = "0.32", optional = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
 base64 = "0.22"
@@ -67,3 +71,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] 
 default = []
 # A JWKS-backed JWT validator for the authorization layer.
 jwt = ["dep:jsonwebtoken", "dep:reqwest", "tokio/sync"]
+# Export spans to an OpenTelemetry collector over OTLP.
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]

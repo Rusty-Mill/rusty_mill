@@ -64,6 +64,8 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod mrtr;
+#[cfg(feature = "otel")]
+pub mod otel;
 pub mod resources;
 pub mod runtime;
 pub mod shutdown;

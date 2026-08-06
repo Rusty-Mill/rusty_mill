@@ -16,7 +16,21 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- `otel` feature: OTLP span export to an OpenTelemetry collector, and
+  `TraceContext::attach_parent`, which makes this server's spans genuine
+  children of the caller's. 0.2.0 shipped trace-context correlation without an
+  exporter; this closes that gap.
+
+  `otel::init` installs a subscriber feeding the pipeline; `otel::pipeline`
+  returns the tracer for processes that already build their own. `OtelGuard`
+  flushes on shutdown — batched spans are lost otherwise — and
+  `OtelGuard::shutdown_hook` wires that into
+  `ServerConfig::with_shutdown_hook`.
+
+  Sampling is parent-based, so a caller's decision is honoured rather than
+  re-made; export failures are logged and dropped, never surfaced to a caller.
 
 ## [0.2.0] — 2026-08-05
 

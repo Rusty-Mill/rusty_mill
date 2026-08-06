@@ -59,6 +59,7 @@ Inside the scaffold:
 | `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
 | `subscriptions` | Change notifications over `subscriptions/listen` (see [Change notifications](#change-notifications)) |
 | `mrtr` | Asking the client for input mid-call (see [Asking the user](#asking-the-user)) |
+| `otel` | OTLP span export (see [Exporting spans](#exporting-spans)) |
 | `tasks` | Tasks extension for long-running tools (see [Long-running tools](#long-running-tools)) |
 
 ## Writing tools
@@ -610,10 +611,50 @@ request can be followed from the client, through this server, to whatever it
 calls next. Propagating onward is `tc.child(new_span_id)` then
 `child.apply_to(&mut params)`.
 
-Note this correlates logs; it does not itself emit spans to a collector.
-`tracing` cannot adopt a remote parent on its own, so the ids are recorded as
-fields — a `tracing-opentelemetry` layer can build the real parent link from the
-same values, without this crate picking an exporter for you.
+On its own this correlates logs. For spans in a trace viewer, enable the `otel`
+feature — see below.
+
+### Exporting spans
+
+The `otel` feature adds a real OTLP pipeline and the one thing `tracing` cannot
+do alone — adopting a **remote parent**, so this server's spans become children
+of the caller's rather than a separate trace:
+
+```toml
+rusty-mcp = { git = "...", tag = "v0.2.0", features = ["otel"] }
+```
+
+```rust
+use rusty_mcp::otel::{self, OtelConfig};
+
+let guard = otel::init(
+    OtelConfig::new("my-mcp-server").with_endpoint("http://localhost:4317"),
+    "info",
+)?;
+
+// In a handler: `span()` records the ids; `attach_parent` makes the edge real.
+let span = tc.span("tools/call");
+tc.attach_parent(&span);
+```
+
+Three things that decide whether this works in practice:
+
+- **Flush before exiting.** Spans are batched, so whatever is buffered is lost
+  if the process just exits. This is the most common way to end up staring at
+  an empty collector while insisting the code is instrumented. Wire
+  `guard.shutdown_hook()` into `ServerConfig::with_shutdown_hook` and it happens
+  on SIGTERM.
+- **Sampling follows the caller.** The sampler is parent-based: if the caller
+  sampled, so do we. Deciding independently is how traces end up half-recorded,
+  with gaps exactly where a service made its own choice. `with_sample_ratio`
+  only applies to traces that *start* here.
+- **A collector being down must not matter.** Telemetry is not load-bearing;
+  export failures are logged and dropped, never surfaced to a caller. There's a
+  test pointing the exporter at a closed port.
+
+If your process already builds a subscriber, use `otel::pipeline()` for the
+tracer and add the layer yourself — `otel::init()` installs a global subscriber
+and only the first call in a process wins.
 
 ### Two behaviours worth knowing
 
