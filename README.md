@@ -825,7 +825,7 @@ do alone — adopting a **remote parent**, so this server's spans become childre
 of the caller's rather than a separate trace:
 
 ```toml
-rusty-mcp = { git = "...", tag = "v0.3.0", features = ["otel"] }
+rusty-mcp = { git = "...", tag = "v0.4.0", features = ["otel"] }
 ```
 
 ```rust
@@ -972,7 +972,7 @@ ClientInfo::default()
 Neither crate is published to crates.io. Depend on it by git tag:
 
 ```toml
-rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.3.0" }
+rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.0" }
 ```
 
 Add `features = ["jwt"]` for the JWKS-backed token validator.
