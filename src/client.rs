@@ -645,6 +645,81 @@ impl AcpClient {
         self.poll_until(run_id, options, |run| run.status.is_terminal()).await
     }
 
+    /// The request that asks a run's log for a live, resumable stream.
+    ///
+    /// One place rather than two: [`attach`](AcpClient::attach) makes it to
+    /// start a stream and [`ResumeState::reconnect`] makes it to pick one back
+    /// up, and the two must agree about the headers or resumption works from
+    /// one entry point and not the other.
+    fn events_request(&self, run_id: RunId, after: Option<u64>) -> RequestBuilder {
+        let mut request = self
+            .request(Method::GET, &format!("/runs/{run_id}/events"))
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        if let Some(after) = after {
+            request = request.header("last-event-id", after.to_string());
+        }
+        request
+    }
+
+    /// Stream the events of a run this client did not start.
+    ///
+    /// The run has to exist; everything already in its log is replayed, then
+    /// the stream continues live and ends after the terminal event — exactly
+    /// what [`stream_run`](AcpClient::stream_run) yields, for a run somebody
+    /// else submitted. Attaching to a run that has already finished replays the
+    /// whole log and closes, which is the useful answer rather than an error.
+    ///
+    /// **More robust than `stream_run`, and worth knowing why.** The run id is
+    /// known here before the first byte arrives, where `stream_run` learns it
+    /// from the first `run.*` event. Resumption needs that id, so a connection
+    /// that drops before any event arrives can be resumed by this method and
+    /// cannot be by that one.
+    ///
+    /// ```no_run
+    /// # use futures_util::StreamExt;
+    /// # use rusty_acp::client::AcpClient;
+    /// # use rusty_acp::types::{Message, RunId};
+    /// # async fn demo(client: AcpClient) -> Result<(), rusty_acp::AcpError> {
+    /// let started = client.run_async("writer", [Message::user("hello")]).await?;
+    ///
+    /// let mut events = client.attach(started.run_id).await?;
+    /// while let Some(event) = events.next().await {
+    ///     println!("{:?}", event?);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn attach(
+        &self,
+        run_id: RunId,
+    ) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
+        self.attach_stream(run_id, None).await
+    }
+
+    /// Stream a run's events from after the one indexed `last_seen`.
+    ///
+    /// For a caller that has already read part of the log — with
+    /// [`list_run_events`](AcpClient::list_run_events), or from an earlier
+    /// stream — and wants the rest without re-reading what it has. The index is
+    /// the SSE `id` the server tags each event with, and the semantics are the
+    /// same: *everything after this*, not *everything from this*.
+    pub async fn attach_after(
+        &self,
+        run_id: RunId,
+        last_seen: u64,
+    ) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
+        self.attach_stream(run_id, Some(last_seen)).await
+    }
+
+    async fn attach_stream(
+        &self,
+        run_id: RunId,
+        after: Option<u64>,
+    ) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
+        let response = send_checked(self, self.events_request(run_id, after)).await?;
+        Ok(resumable_stream(self.clone(), response, Some(run_id), after))
+    }
+
     /// Fetch the full event log of a run.
     pub async fn list_run_events(&self, run_id: RunId) -> Result<Vec<Event>> {
         let response: RunEventsListResponse = json(
@@ -857,13 +932,7 @@ impl ResumeState {
         self.attempts += 1;
         tokio::time::sleep(backoff).await;
 
-        let mut request = self
-            .client
-            .request(Method::GET, &format!("/runs/{run_id}/events"))
-            .header(reqwest::header::ACCEPT, "text/event-stream");
-        if let Some(last) = self.last_index {
-            request = request.header("last-event-id", last.to_string());
-        }
+        let request = self.client.events_request(run_id, self.last_index);
 
         // A reconnection that cannot be made is the very case resumption exists
         // for, so a transient failure costs an attempt rather than the stream.
@@ -904,17 +973,32 @@ fn event_stream(
     client: AcpClient,
     response: Response,
 ) -> Result<impl Stream<Item = Result<Event>> + Send + Unpin> {
+    // Nothing known up front: a run started by this request announces its id in
+    // its first `run.*` event, and until then there is nothing to resume to.
+    Ok(resumable_stream(client, response, None, None))
+}
+
+/// The same stream, told what it is watching.
+///
+/// `run_id` and `last_index` are what resumption needs. `attach` has both
+/// before the response arrives; a freshly submitted run has neither.
+fn resumable_stream(
+    client: AcpClient,
+    response: Response,
+    run_id: Option<RunId>,
+    last_index: Option<u64>,
+) -> impl Stream<Item = Result<Event>> + Send + Unpin {
     let state = ResumeState {
         client,
-        run_id: None,
-        last_index: None,
+        run_id,
+        last_index,
         attempts: 0,
         last_error: None,
         inner: Some(sse_messages(response)),
         done: false,
     };
 
-    Ok(Box::pin(futures_util::stream::unfold(state, |mut state| async move {
+    Box::pin(futures_util::stream::unfold(state, |mut state| async move {
         if state.done {
             return None;
         }
@@ -965,7 +1049,7 @@ fn event_stream(
                 Some(Err(_)) | None => state.inner = None,
             }
         }
-    })))
+    }))
 }
 
 /// Collect a run event stream into its final [`Run`] snapshot.

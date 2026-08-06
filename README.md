@@ -146,6 +146,31 @@ while let Some(event) = stream.next().await {
 The stream ends **after** the terminal event, so the final `run.*` snapshot is never lost to the
 cut-off. `client::collect_run` drains a stream straight into that final `Run`.
 
+#### Watching a run you did not start
+
+`stream` and `stream_run` submit a run and stream it. To watch one that is already going —
+started with `run_async`, or by somebody else entirely — attach to its log:
+
+```rust
+let started = client.run_async("writer", [Message::user("hello")]).await?;
+
+let mut events = client.attach(started.run_id).await?;
+while let Some(event) = events.next().await {
+    println!("{:?}", event?);
+}
+
+// Or from after what you have already read:
+let rest = client.attach_after(run_id, 41).await?;
+```
+
+Everything already in the log is replayed, then the stream continues live and ends after the
+terminal event — the same sequence `stream_run` yields. Attaching to a run that has already
+finished replays the whole log and closes, which is the useful answer rather than an error.
+
+Attaching is in one respect *more* robust than `stream_run`: the run id is known before the first
+byte arrives, where `stream_run` learns it from the first `run.*` event. Resumption needs that id,
+so a connection dropping before any event arrives can be recovered here and cannot be there.
+
 #### Surviving a dropped connection
 
 A streaming run routinely outlives the connection carrying it — proxies time idle connections
@@ -645,7 +670,7 @@ Every endpoint and schema in the ACP v0.2.0 [OpenAPI document][openapi] is imple
 | `GET /runs/{run_id}` | ✅ | `get_run`, `wait_for_run` |
 | `POST /runs/{run_id}` (resume) | ✅ | `resume_run`, `stream_resume` |
 | `POST /runs/{run_id}/cancel` | ✅ | `cancel_run`, `cancel_and_wait` |
-| `GET /runs/{run_id}/events` | ✅ | `list_run_events` |
+| `GET /runs/{run_id}/events` | ✅ | `list_run_events`, `attach`, `attach_after` |
 | `GET /session/{session_id}` | ✅ | `get_session`, `fetch_session_history` |
 
 Plus resource endpoints backing the links ACP puts in a session — `GET /session/{id}/messages/{i}`
