@@ -23,6 +23,33 @@ grouped under the version that shipped them.
 
 ---
 
+## v0.10.1
+**2026-08-05**
+
+**Built and tested against:** unchanged from v0.2.x.
+
+- **Changed:** 0-RTT is declined rather than deferred. #58 was filed,
+  considered, and closed as `not planned`; ADR-0003 is amended to record that,
+  so its "Created" bullet does not go stale a second time.
+- **Changed:** three doc comments in `src/` described #58 as live work. One said
+  outright that it "tracks" 0-RTT, which stopped being true the moment the issue
+  closed. Reworded to describe it as the record of a decision instead.
+
+**The decision gate is unchanged.** 0-RTT stays out until a named consumer asks
+*and* an anti-replay design lands in its own ADR. What changed is that no open
+issue implies an intent nobody holds. The reason is the absence of a consumer,
+not the difficulty: ADR-0002 makes this engine permanently non-default, 0-RTT's
+whole value is latency, and a non-default experiment gains close to nothing from
+a saved round trip. Reopening #58 is the way back in, and its closing comment
+records what a revival would already have to hand — including that stateless
+resumption and single-use tickets conflict, and that anti-replay cannot be
+tested against a correct peer, because a correct peer never replays.
+
+**No behaviour change, and no upgrade notes.** `early_data` is still refused on
+both halves and no `max_early_data_size` is advertised. A `z` bump, because doc
+comments change no public item's shape — which is what this repo reserves `z`
+for.
+
 ## v0.10.0
 **2026-08-05**
 
@@ -54,8 +81,8 @@ thirty-six years.
   sealed layout version went 1 → 2. Tickets issued by v0.9.0 are ignored rather
   than refused, so clients holding one fall back to a full handshake.
 
-**This closes #43.** 0-RTT stays out of scope as #58, which needs its
-anti-replay ADR before any code.
+**This closes #43.** 0-RTT stays out of scope — filed as #58 at the time of
+this release, and closed as `not planned` the same day. See v0.10.1.
 
 ## v0.9.0
 **2026-08-04**

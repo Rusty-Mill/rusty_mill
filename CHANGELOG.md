@@ -20,6 +20,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   open", which `0.9.0` is precisely the version that stopped being true.
 
   Documentation only, so no version bump.
+- **`RELEASE_NOTES.md` was missing `v0.10.1` entirely**, and four sentences
+  across both files still described rusty_tls#58 as tracking live work. Both
+  found by checking the two files against each other rather than reading either
+  one alone: every version in `CHANGELOG.md` should have a `RELEASE_NOTES.md`
+  entry, and `0.10.1` did not. That is now asserted rather than assumed.
+
+  The `#58` sentences are the same staleness `0.10.1` fixed in `src/` doc
+  comments, in the three places that pass did not reach — two in this file, one
+  in `RELEASE_NOTES.md`, each reading as though an open issue were holding the
+  work. Reworded to say when the issue was filed and that it closed the same
+  day, so a historical entry stays historically true without implying an intent
+  nobody holds. The `src/` comments were already correct and are untouched.
+
+  Documentation only, so no version bump.
 - **ADR-0004 (kTLS offload) accepted, and rusty_tls#14 closed as
   `not planned`.** D1, D2 and D3 were reserved for a person; all three are
   accepted as proposed. D3 is the operative one — **not yet**, on the consumer
@@ -119,7 +133,8 @@ Built and tested against the same sibling revs as 0.2.x–0.9.0. Neither moved.
   - **This is a sanity bound, not anti-replay**, and the docs say so at length.
     A resumed handshake runs a fresh key exchange, so replaying one gets an
     attacker a connection it cannot read. The field exists for 0-RTT, which
-    ADR-0003 puts out of scope and rusty_tls#58 tracks.
+    ADR-0003 puts out of scope — filed as rusty_tls#58 at the time of this
+    release and closed as `not planned` the same day; see `[0.10.1]`.
 
 ### Changed
 - **`Tickets` gained a required `max_age_skew_ms` field.** `None` is the
@@ -142,7 +157,8 @@ now pins that specific value rather than a round number.
 
 **This closes rusty_tls#43.** Every item in ADR-0003's scope list is built, and
 both gaps `0.9.0` left open are closed. What remains out of scope is 0-RTT,
-which is rusty_tls#58 and needs its anti-replay ADR first.
+which needs its anti-replay ADR first — filed as rusty_tls#58 at the time of
+this release and closed as `not planned` the same day; see `[0.10.1]`.
 
 ### Fixed
 - **ADR-0003 claimed a follow-up issue that did not exist.** Its "Consequences →
