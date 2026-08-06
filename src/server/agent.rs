@@ -1,6 +1,6 @@
 //! The [`Agent`] trait and the [`RunContext`] handed to it for each run.
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use chrono::Utc;
 use tokio::sync::{mpsc, Mutex};
@@ -106,6 +106,8 @@ pub struct RunContext {
     /// This replica's permission to be running this agent. Given up while the
     /// run is parked awaiting a client, and dropped when the run ends.
     slot: super::Slot,
+    /// How long [`await_request`](RunContext::await_request) will wait.
+    await_timeout: Option<Duration>,
 }
 
 impl RunContext {
@@ -120,6 +122,7 @@ impl RunContext {
         handle: Arc<RunHandle>,
         resume_rx: mpsc::Receiver<AwaitResume>,
         slot: super::Slot,
+        await_timeout: Option<Duration>,
     ) -> Self {
         Self {
             agent_name,
@@ -131,6 +134,7 @@ impl RunContext {
             handle,
             resume_rx: Mutex::new(resume_rx),
             slot,
+            await_timeout,
         }
     }
 
@@ -332,6 +336,20 @@ impl RunContext {
         self.slot.park(self.run_id);
         let mut resume_rx = self.resume_rx.lock().await;
         let cancel = self.handle.cancel_token();
+
+        // A deadline the client never has to know about: it exists so a
+        // conversation nobody answers stops costing a task, a run entry and a
+        // lease renewal every few seconds, forever.
+        //
+        // A future that never resolves when unbounded, rather than duplicating
+        // the whole `select!` for the two cases.
+        let expiry = async {
+            match self.await_timeout {
+                Some(timeout) => tokio::time::sleep(timeout).await,
+                None => std::future::pending().await,
+            }
+        };
+
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -344,6 +362,20 @@ impl RunContext {
                     Ok(resume)
                 }
                 None => Err(Error::server_error("run can no longer be resumed")),
+            },
+            () = expiry => {
+                // Named in the message: a bare `server_error` here sends
+                // whoever reads the log hunting for a bug in their agent, when
+                // what happened is that nobody answered.
+                let waited = self.await_timeout.unwrap_or_default();
+                tracing::info!(
+                    run_id = %self.run_id,
+                    ?waited,
+                    "failing a run nobody answered"
+                );
+                Err(Error::server_error(format!(
+                    "timed out after {waited:?} awaiting client input"
+                )))
             }
         }
     }

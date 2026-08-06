@@ -518,6 +518,34 @@ Losing the replica a caller happened to be talking to is the ordinary case here 
 outage, which is why the client [retries transient failures](#riding-out-a-transient-failure)
 instead of surfacing them.
 
+### Bounding how long a run waits for an answer
+
+A run parked `awaiting` a client is cheap but not free: it holds a task, a run entry the default
+store will never evict, and a lease its replica keeps renewing every few seconds. Nothing else
+reclaims it — a non-terminal run with a live lease is indistinguishable from one that is working.
+
+So conversations are bounded by default, at an hour:
+
+```rust
+AcpServer::builder()
+    .await_timeout(Duration::from_secs(600))   // shorter
+    .without_await_timeout()                   // or open-ended
+```
+
+Past the deadline the run is **failed**, with a message saying so rather than a bare
+`server_error` — the difference between an operator finding the cause and hunting for a bug in
+their agent. Failing it is what releases the lease and stops the renewals.
+
+An hour is deliberately generous: a human-in-the-loop agent waiting on an actual human may
+legitimately park for a long time, and being wrong that way costs a failed run the client can
+resubmit, where being wrong the other way costs unbounded growth. Switching it off is right for
+genuinely open-ended conversations with trusted clients; on a public address it means anyone who
+can submit a run can leave one parked forever.
+
+Distinct from `sync_timeout`, which bounds how long a *request* waits rather than how long a *run*
+may be parked. A `sync` call against a run that parks returns after `sync_timeout` with the run
+still `awaiting`; this is what eventually ends the run itself.
+
 ### When a replica is full
 
 Every run is a spawned task, and by default nothing caps how many there are — a busy enough

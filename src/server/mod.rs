@@ -246,6 +246,23 @@ impl Readiness {
     }
 }
 
+/// How long a run may sit `awaiting` a client answer before it is failed.
+///
+/// A parked run is not free. It holds a task, an entry the default store will
+/// never evict because active runs are never evicted, and a lease its replica
+/// keeps renewing — a store write every `lease_ttl / 3`, forever, for a
+/// conversation nobody is having. Reachable by anyone who can submit a run:
+/// ask a question, never answer, repeat.
+///
+/// An hour is deliberately generous. A human-in-the-loop agent waiting on an
+/// actual human may legitimately park for a long time, and the cost of cutting
+/// one of those off early is a failed run the client can resubmit — against the
+/// cost of being wrong the other way, which is unbounded growth. Set it to
+/// taste, or switch it off with
+/// [`without_await_timeout`](AcpServerBuilder::without_await_timeout) if your
+/// conversations really are open-ended.
+pub const DEFAULT_AWAIT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// How long [`AcpServer::shutdown`] waits for runs in flight by default.
 ///
 /// Generous, because the cost of the two failure modes is not symmetric. Too
@@ -474,6 +491,7 @@ pub struct AcpServer {
     lease_ttl: Duration,
     sync_timeout: Option<Duration>,
     max_recovery_attempts: u32,
+    await_timeout: Option<Duration>,
     in_flight: Arc<InFlight>,
     /// The last readiness answer and when it was given.
     readiness: Mutex<Option<(tokio::time::Instant, Readiness)>>,
@@ -526,6 +544,11 @@ impl AcpServer {
     /// How many times a run may be started before recovery gives up.
     pub fn max_recovery_attempts(&self) -> u32 {
         self.max_recovery_attempts
+    }
+
+    /// How long a run may sit `awaiting` before it is failed, if bounded.
+    pub fn await_timeout(&self) -> Option<Duration> {
+        self.await_timeout
     }
 
     /// How many runs may execute here at once, if a ceiling was set.
@@ -875,6 +898,7 @@ impl AcpServer {
             Arc::clone(&handle),
             resume_rx,
             slot,
+            self.await_timeout,
         );
 
         let server = Arc::clone(self);
@@ -1339,6 +1363,7 @@ pub struct AcpServerBuilder {
     sync_timeout: Option<Option<Duration>>,
     max_recovery_attempts: Option<u32>,
     max_concurrent_runs: Option<usize>,
+    await_timeout: Option<Option<Duration>>,
 }
 
 impl std::fmt::Debug for AcpServerBuilder {
@@ -1394,6 +1419,32 @@ impl AcpServerBuilder {
     /// balancer rather than at whichever replica happened to serve the request.
     pub fn base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
+        self
+    }
+
+    /// How long a run may sit `awaiting` a client answer before it is failed.
+    ///
+    /// Defaults to [`DEFAULT_AWAIT_TIMEOUT`]. A parked conversation costs a
+    /// task, a run entry and a lease renewal every few seconds for as long as
+    /// it lasts, and nothing else reclaims it — the run is non-terminal with a
+    /// live lease, which is indistinguishable from one that is working.
+    ///
+    /// Distinct from [`sync_timeout`](AcpServerBuilder::sync_timeout), which
+    /// bounds how long a *request* waits rather than how long a *run* may be
+    /// parked. A `sync` call against a run that parks returns after
+    /// `sync_timeout`; the run stays `awaiting` until this elapses.
+    pub fn await_timeout(mut self, await_timeout: Duration) -> Self {
+        self.await_timeout = Some(Some(await_timeout));
+        self
+    }
+
+    /// Let a run stay `awaiting` for as long as it likes.
+    ///
+    /// Right when conversations are genuinely open-ended and the clients are
+    /// trusted. On a public address it means anyone who can submit a run can
+    /// leave one parked forever, and nothing will reclaim it.
+    pub fn without_await_timeout(mut self) -> Self {
+        self.await_timeout = Some(None);
         self
     }
 
@@ -1557,6 +1608,7 @@ impl AcpServerBuilder {
             max_recovery_attempts: self
                 .max_recovery_attempts
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
+            await_timeout: self.await_timeout.unwrap_or(Some(DEFAULT_AWAIT_TIMEOUT)),
             in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
             readiness: Mutex::new(None),
         })
