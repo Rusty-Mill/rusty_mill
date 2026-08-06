@@ -96,6 +96,7 @@ struct RegistryInner {
     templates: Vec<TemplateEntry>,
     ttl_ms: Option<u64>,
     cache_scope: CacheScope,
+    page_size: usize,
 }
 
 impl std::fmt::Debug for ResourceRegistry {
@@ -105,6 +106,7 @@ impl std::fmt::Debug for ResourceRegistry {
             .field("templates", &self.inner.templates.len())
             .field("ttl_ms", &self.inner.ttl_ms)
             .field("cache_scope", &self.inner.cache_scope)
+            .field("page_size", &self.inner.page_size)
             .finish()
     }
 }
@@ -122,7 +124,14 @@ struct Building {
     templates: Vec<TemplateEntry>,
     ttl_ms: Option<u64>,
     cache_scope: Option<CacheScope>,
+    page_size: Option<usize>,
 }
+
+/// Entries returned per page when nothing else is configured.
+///
+/// Matches the cap the spec puts on completion results, for no deeper reason
+/// than that a hundred of anything is a reasonable thing to put in one response.
+pub const DEFAULT_PAGE_SIZE: usize = 100;
 
 impl ResourceRegistry {
     /// An empty registry.
@@ -142,6 +151,7 @@ impl ResourceRegistry {
                 // user-specific, and a shared cache serving one user's data to
                 // another is a worse failure than a cache miss.
                 cache_scope: b.cache_scope.unwrap_or(CacheScope::Private),
+                page_size: b.page_size.unwrap_or(DEFAULT_PAGE_SIZE),
             }),
         }
     }
@@ -155,6 +165,7 @@ impl ResourceRegistry {
             templates: Vec::new(),
             ttl_ms: shared.ttl_ms,
             cache_scope: shared.cache_scope,
+            page_size: shared.page_size,
         });
 
         Building {
@@ -162,6 +173,7 @@ impl ResourceRegistry {
             templates: inner.templates,
             ttl_ms: inner.ttl_ms,
             cache_scope: Some(inner.cache_scope),
+            page_size: Some(inner.page_size),
         }
     }
 
@@ -231,6 +243,16 @@ impl ResourceRegistry {
         Self::from_building(b)
     }
 
+    /// How many entries a single list page carries.
+    ///
+    /// Defaults to [`DEFAULT_PAGE_SIZE`]. Clamped to at least 1, since a page
+    /// size of zero would hand back an endless run of empty pages.
+    pub fn with_page_size(self, page_size: usize) -> Self {
+        let mut b = self.into_building();
+        b.page_size = Some(page_size.max(1));
+        Self::from_building(b)
+    }
+
     /// Every registered concrete resource.
     pub fn resources(&self) -> Vec<Resource> {
         self.inner
@@ -240,27 +262,68 @@ impl ResourceRegistry {
             .collect()
     }
 
-    /// Serve `resources/list`.
-    pub fn list(&self) -> ListResourcesResult {
-        let mut result = ListResourcesResult::with_all_items(self.resources());
-        result.cache_scope = Some(self.inner.cache_scope);
-        result.ttl_ms = self.inner.ttl_ms;
-        result
-    }
-
-    /// Serve `resources/templates/list`.
-    pub fn list_templates(&self) -> ListResourceTemplatesResult {
-        let templates = self
-            .inner
+    /// Every registered URI template.
+    ///
+    /// Useful for checking that a [`crate::completion::CompletionRegistry`]
+    /// does not point at a template that was never registered.
+    pub fn template_uris(&self) -> Vec<&str> {
+        self.inner
             .templates
             .iter()
-            .map(|t| t.template.clone())
-            .collect();
+            .map(|t| t.template.uri_template.as_str())
+            .collect()
+    }
 
-        let mut result = ListResourceTemplatesResult::with_all_items(templates);
+    /// Serve `resources/list`, starting after `cursor`.
+    ///
+    /// Pages are ordered by URI rather than by registration order. That is what
+    /// makes the cursor survive the list changing between requests: it names a
+    /// position in a total order, so an entry added or removed behind the cursor
+    /// cannot shift the page boundary or cause an entry to be served twice.
+    ///
+    /// An unreadable cursor is [`ErrorData::invalid_params`] rather than a
+    /// silently empty page — a client that has lost its place should be told.
+    pub fn list(&self, cursor: Option<&str>) -> Result<ListResourcesResult, ErrorData> {
+        let (items, next) = page(
+            &self.inner.entries,
+            |e| e.resource.uri.as_str(),
+            CursorKind::Resource,
+            cursor,
+            self.inner.page_size,
+        )?;
+
+        let mut result = ListResourcesResult::with_all_items(
+            items.into_iter().map(|e| e.resource.clone()).collect(),
+        );
+        result.next_cursor = next;
         result.cache_scope = Some(self.inner.cache_scope);
         result.ttl_ms = self.inner.ttl_ms;
-        result
+        Ok(result)
+    }
+
+    /// Serve `resources/templates/list`, starting after `cursor`.
+    ///
+    /// Ordered and cursored exactly as [`ResourceRegistry::list`], but over a
+    /// separate sequence — a cursor minted by one is rejected by the other.
+    pub fn list_templates(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<ListResourceTemplatesResult, ErrorData> {
+        let (items, next) = page(
+            &self.inner.templates,
+            |t| t.template.uri_template.as_str(),
+            CursorKind::Template,
+            cursor,
+            self.inner.page_size,
+        )?;
+
+        let mut result = ListResourceTemplatesResult::with_all_items(
+            items.into_iter().map(|t| t.template.clone()).collect(),
+        );
+        result.next_cursor = next;
+        result.cache_scope = Some(self.inner.cache_scope);
+        result.ttl_ms = self.inner.ttl_ms;
+        Ok(result)
     }
 
     /// Serve `resources/read`.
@@ -316,6 +379,96 @@ where
     Fut: Future<Output = Result<Vec<ResourceContents>, ErrorData>> + Send + 'static,
 {
     Arc::new(move |req| Box::pin(reader(req)))
+}
+
+/// Which sequence a cursor belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorKind {
+    Resource,
+    Template,
+}
+
+impl CursorKind {
+    /// A one-byte tag, so a cursor issued for one sequence is rejected rather
+    /// than quietly indexing into the other.
+    fn tag(self) -> u8 {
+        match self {
+            Self::Resource => b'r',
+            Self::Template => b't',
+        }
+    }
+}
+
+/// Cursor format version, so a cursor held across a deploy is refused rather
+/// than reinterpreted under a new encoding.
+const CURSOR_VERSION: u8 = b'1';
+
+fn encode_cursor(kind: CursorKind, key: &str) -> String {
+    use base64::Engine as _;
+
+    let mut payload = vec![CURSOR_VERSION, kind.tag()];
+    payload.extend_from_slice(key.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+}
+
+fn decode_cursor(kind: CursorKind, cursor: &str) -> Result<String, ErrorData> {
+    use base64::Engine as _;
+
+    // Deliberately one message for every failure. Which byte was wrong is of no
+    // use to a caller and only helps someone probing the encoding.
+    let invalid =
+        || ErrorData::invalid_params("the pagination cursor is not one this server issued", None);
+
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| invalid())?;
+
+    let [version, tag, key @ ..] = bytes.as_slice() else {
+        return Err(invalid());
+    };
+    if *version != CURSOR_VERSION || *tag != kind.tag() {
+        return Err(invalid());
+    }
+
+    String::from_utf8(key.to_vec()).map_err(|_| invalid())
+}
+
+/// One page of `items`, ordered by `key`, resuming after `cursor`.
+///
+/// The cursor carries a **key**, not an index. That is the whole trick: a
+/// fabricated cursor names some position in the key space rather than an offset
+/// into a slice, so there is no such thing as an out-of-range read to guard
+/// against, and an entry deleted between requests cannot shift the entries
+/// after it onto a page they were already served on.
+fn page<'a, T>(
+    items: &'a [T],
+    key: impl Fn(&'a T) -> &'a str,
+    kind: CursorKind,
+    cursor: Option<&str>,
+    page_size: usize,
+) -> Result<(Vec<&'a T>, Option<String>), ErrorData> {
+    let after = cursor.map(|c| decode_cursor(kind, c)).transpose()?;
+
+    let mut ordered: Vec<(&str, &T)> = items.iter().map(|item| (key(item), item)).collect();
+    ordered.sort_by(|a, b| a.0.cmp(b.0));
+
+    // Strictly after: the cursor names the last entry already served.
+    let start = match &after {
+        Some(after) => ordered.partition_point(|(k, _)| *k <= after.as_str()),
+        None => 0,
+    };
+
+    let remaining = &ordered[start..];
+    let taken = remaining.len().min(page_size);
+
+    // A cursor only when something is actually left. Emitting one on the last
+    // page costs the client a whole extra round trip to learn nothing.
+    let next = (remaining.len() > taken).then(|| encode_cursor(kind, remaining[taken - 1].0));
+
+    Ok((
+        remaining[..taken].iter().map(|(_, item)| *item).collect(),
+        next,
+    ))
 }
 
 /// An RFC 6570 level-1 URI template, compiled for matching.
@@ -426,24 +579,26 @@ macro_rules! forward_resource_methods {
     ($field:ident) => {
         async fn list_resources(
             &self,
-            _request: ::core::option::Option<$crate::__private::PaginatedRequestParams>,
+            request: ::core::option::Option<$crate::__private::PaginatedRequestParams>,
             _context: $crate::__private::RequestContext<$crate::__private::RoleServer>,
         ) -> ::core::result::Result<
             $crate::__private::ListResourcesResult,
             $crate::__private::ErrorData,
         > {
-            ::core::result::Result::Ok(self.$field.list())
+            let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+            self.$field.list(cursor)
         }
 
         async fn list_resource_templates(
             &self,
-            _request: ::core::option::Option<$crate::__private::PaginatedRequestParams>,
+            request: ::core::option::Option<$crate::__private::PaginatedRequestParams>,
             _context: $crate::__private::RequestContext<$crate::__private::RoleServer>,
         ) -> ::core::result::Result<
             $crate::__private::ListResourceTemplatesResult,
             $crate::__private::ErrorData,
         > {
-            ::core::result::Result::Ok(self.$field.list_templates())
+            let cursor = request.as_ref().and_then(|r| r.cursor.as_deref());
+            self.$field.list_templates(cursor)
         }
 
         async fn read_resource(
@@ -580,14 +735,209 @@ mod tests {
                 |_req| async move { Ok(vec![]) },
             );
 
-        let list = registry.list();
+        let list = registry.list(None).expect("lists");
         assert_eq!(list.resources.len(), 1);
         assert!(list.ttl_ms.is_some());
         assert!(list.cache_scope.is_some());
+        assert!(list.next_cursor.is_none(), "one page holds everything");
 
-        let templates = registry.list_templates();
+        let templates = registry.list_templates(None).expect("lists");
         assert_eq!(templates.resource_templates.len(), 1);
         assert!(templates.ttl_ms.is_some());
+    }
+
+    /// A registry with `count` resources named so that URI order and
+    /// registration order disagree — otherwise a paginator that ignores its
+    /// ordering would still pass.
+    fn many(count: usize, page_size: usize) -> ResourceRegistry {
+        (0..count)
+            .rev()
+            .fold(ResourceRegistry::new(), |registry, i| {
+                registry.with_text(Resource::new(format!("mem://r{i:03}"), "r"), "x")
+            })
+            .with_page_size(page_size)
+    }
+
+    /// Walk every page, returning the URIs in the order they were served.
+    fn drain(registry: &ResourceRegistry) -> Vec<String> {
+        let mut uris = Vec::new();
+        let mut cursor = None;
+
+        loop {
+            let page = registry.list(cursor.as_deref()).expect("lists");
+            uris.extend(page.resources.iter().map(|r| r.uri.clone()));
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => return uris,
+            }
+        }
+    }
+
+    #[test]
+    fn paging_yields_every_entry_exactly_once() {
+        let registry = many(25, 10);
+        let uris = drain(&registry);
+
+        assert_eq!(uris.len(), 25);
+
+        let unique: std::collections::BTreeSet<_> = uris.iter().collect();
+        assert_eq!(unique.len(), 25, "no entry served twice");
+
+        let mut sorted = uris.clone();
+        sorted.sort();
+        assert_eq!(uris, sorted, "pages come out in URI order");
+    }
+
+    #[test]
+    fn each_page_is_full_until_the_last_and_the_last_has_no_cursor() {
+        let registry = many(25, 10);
+
+        let first = registry.list(None).expect("lists");
+        assert_eq!(first.resources.len(), 10);
+        let cursor = first.next_cursor.expect("more to come");
+
+        let second = registry.list(Some(&cursor)).expect("lists");
+        assert_eq!(second.resources.len(), 10);
+        let cursor = second.next_cursor.expect("more to come");
+
+        let third = registry.list(Some(&cursor)).expect("lists");
+        assert_eq!(third.resources.len(), 5);
+        assert!(third.next_cursor.is_none(), "the last page ends the walk");
+    }
+
+    #[test]
+    fn an_exact_multiple_does_not_emit_a_trailing_empty_page() {
+        // 20 entries at 10 a page. Emitting a cursor on the second page would
+        // cost the client a whole round trip to be told there is nothing left.
+        let registry = many(20, 10);
+
+        let first = registry.list(None).expect("lists");
+        let cursor = first.next_cursor.expect("more to come");
+        let second = registry.list(Some(&cursor)).expect("lists");
+
+        assert_eq!(second.resources.len(), 10);
+        assert!(second.next_cursor.is_none());
+    }
+
+    #[test]
+    fn every_page_carries_cache_hints() {
+        // Not just the first: a client that caches page two needs the hint too.
+        let registry = many(25, 10);
+        let mut cursor = None;
+        let mut pages = 0;
+
+        loop {
+            let page = registry.list(cursor.as_deref()).expect("lists");
+            pages += 1;
+            assert!(page.ttl_ms.is_some(), "page {pages} has no ttl");
+            assert!(page.cache_scope.is_some(), "page {pages} has no scope");
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+    }
+
+    #[test]
+    fn a_malformed_cursor_is_invalid_params() {
+        let registry = many(25, 10);
+
+        for cursor in ["not base64!!", "", "AAAA"] {
+            let err = registry.list(Some(cursor)).expect_err("should reject");
+            assert_eq!(
+                err.code,
+                rmcp::model::ErrorCode::INVALID_PARAMS,
+                "cursor {cursor:?} should be -32602"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cursor_from_one_sequence_is_rejected_by_the_other() {
+        let registry = many(25, 10);
+        let cursor = registry
+            .list(None)
+            .expect("lists")
+            .next_cursor
+            .expect("more to come");
+
+        // Same registry, different sequence. Without the kind tag this would
+        // silently seek into the templates by a resource URI.
+        let err = registry
+            .list_templates(Some(&cursor))
+            .expect_err("should reject");
+        assert_eq!(err.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn removing_the_entry_a_cursor_names_does_not_disturb_the_next_page() {
+        // The reason the cursor holds a key and not an index. Take a cursor,
+        // then rebuild the registry without the entry it names.
+        let registry = many(25, 10);
+        let cursor = registry
+            .list(None)
+            .expect("lists")
+            .next_cursor
+            .expect("more to come");
+
+        let mut rebuilt = ResourceRegistry::new().with_page_size(10);
+        for i in 0..25 {
+            if i == 9 {
+                // `mem://r009` is exactly what the cursor points at.
+                continue;
+            }
+            rebuilt = rebuilt.with_text(Resource::new(format!("mem://r{i:03}"), "r"), "x");
+        }
+
+        let page = rebuilt.list(Some(&cursor)).expect("lists");
+        assert_eq!(
+            page.resources.first().map(|r| r.uri.as_str()),
+            Some("mem://r010"),
+            "the walk resumes where it left off even though the anchor is gone"
+        );
+    }
+
+    #[test]
+    fn a_cursor_past_the_end_is_an_empty_final_page() {
+        // Not an error: a cursor beyond the last key is indistinguishable from
+        // one whose successors were all deleted, and that is a normal end.
+        let registry = many(5, 10);
+        let cursor = encode_cursor(CursorKind::Resource, "mem://zzz");
+
+        let page = registry.list(Some(&cursor)).expect("lists");
+        assert!(page.resources.is_empty());
+        assert!(page.next_cursor.is_none());
+    }
+
+    #[test]
+    fn a_page_size_of_zero_is_clamped() {
+        // Zero would page forever, one empty page at a time.
+        let registry = many(3, 0);
+        assert_eq!(drain(&registry).len(), 3);
+    }
+
+    #[test]
+    fn templates_paginate_too() {
+        let mut registry = ResourceRegistry::new().with_page_size(2);
+        for i in 0..5 {
+            registry = registry.with_template(
+                ResourceTemplate::new(format!("db://t{i}/{{x}}"), "t"),
+                |_req| async move { Ok(vec![]) },
+            );
+        }
+
+        let mut seen = 0;
+        let mut cursor = None;
+        loop {
+            let page = registry.list_templates(cursor.as_deref()).expect("lists");
+            seen += page.resource_templates.len();
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen, 5);
     }
 
     #[tokio::test]

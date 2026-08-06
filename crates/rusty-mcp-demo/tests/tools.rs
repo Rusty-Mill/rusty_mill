@@ -8,6 +8,8 @@ use rmcp::{
 };
 
 // The binary's modules, compiled into the test.
+#[path = "../src/completions.rs"]
+mod completions;
 #[path = "../src/prompts.rs"]
 mod prompts;
 #[path = "../src/resources.rs"]

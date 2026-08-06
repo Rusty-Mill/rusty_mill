@@ -27,6 +27,8 @@ rmcp = { workspace = true, features = [
     "elicitation",
 ] }
 axum = { workspace = true, features = ["json"] }
+# Pagination cursors are base64 so clients treat them as opaque.
+base64 = "0.22"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 tokio-util = { workspace = true }
 clap = { workspace = true }
@@ -49,7 +51,6 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.33", optional = true }
 
 [dev-dependencies]
-base64 = "0.22"
 rand = "0.8"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls"] }
 rmcp = { workspace = true, features = [

@@ -16,6 +16,59 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
+### Added
+
+- `completion::CompletionRegistry`, serving `completion/complete` ([#14]).
+  `rmcp` ships the wire types but no router, the same gap `ResourceRegistry`
+  fills for resources. Registration takes either a fixed list of candidates or
+  a closure computing them per request; the closure sees the arguments already
+  filled in, which is what makes a dependent completion — a `column` narrowing
+  to the chosen `table` — possible.
+
+  Prefix matching (case-insensitive), sorting, the spec's 100-value cap and the
+  `hasMore` flag are applied by the registry. `total` reports the count before
+  the cap, which is the only way a client can tell it is seeing part of a list.
+
+  `forward_completion_methods!` generates the handler method. An unregistered
+  reference or argument completes to an empty list rather than erroring — a
+  client asks speculatively, and "nothing to suggest" is the ordinary answer.
+
+- `CompletionRegistry::dangling` and `ResourceRegistry::template_uris`, for
+  catching a completion registered against a prompt or template that does not
+  exist. That failure is otherwise silent: the registration is accepted and the
+  client is answered with an empty list forever.
+
+### Fixed
+
+- **List results accepted a pagination cursor and ignored it** ([#15]).
+  `ResourceRegistry` returned every entry in one response regardless of what
+  the client asked for, and never set `next_cursor`. A client that pages saw a
+  full first page with no cursor and concluded it had everything, so a large
+  registry silently truncated from the client's point of view. Invisible at
+  demo scale, which is how it survived twelve releases.
+
+  `list` and `list_templates` now take a cursor and page at
+  `DEFAULT_PAGE_SIZE` (100), overridable with `with_page_size`. Cache hints are
+  emitted on every page, not just the first.
+
+  The cursor holds a **key, not an index**, and pages are ordered by URI. A
+  fabricated cursor therefore names a position in the key space rather than an
+  offset into a slice — there is no out-of-range read to guard against — and an
+  entry added or deleted between requests cannot shift a page boundary or cause
+  an entry to be served twice. A cursor that does not decode, or that was
+  minted for the other sequence, is `-32602` rather than an empty page.
+
+### Changed
+
+- **Breaking:** `ResourceRegistry::list` and `list_templates` take
+  `Option<&str>` and return `Result`. Servers using
+  `forward_resource_methods!` need no change; a hand-written handler calling
+  these directly passes `None` to keep the old behaviour, minus the truncation.
+- `base64` moves from a dev-dependency to a dependency, for cursor encoding.
+
+[#14]: https://github.com/baileyrd/rusty_mcp/issues/14
+[#15]: https://github.com/baileyrd/rusty_mcp/issues/15
+
 ## [0.3.0] — 2026-08-06
 
 ### Added
