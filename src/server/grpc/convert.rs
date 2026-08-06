@@ -1,0 +1,675 @@
+//! Field-by-field conversions between the generated `pb::*` (prost) types
+//! and this crate's own `crate::types::*`, plus the [`A2aError`] ->
+//! [`tonic::Status`] mapping.
+//!
+//! Proto3 non-`optional` string/enum fields have no wire-level way to
+//! distinguish "unset" from "explicitly set to the zero value" - a plain
+//! `string` decodes to `""` either way, a plain `enum` to variant `0`. For
+//! fields the A2A data model treats as logically optional (e.g.
+//! `Message.context_id`, `ListTasksRequest.status`), this module treats
+//! that zero value as "unset": empty string -> `None`, enum `0`
+//! (`*_UNSPECIFIED`) -> `None`. This matches every other binding in this
+//! crate (JSON omits the field either way) and is the only sensible
+//! reading available.
+
+use chrono::{DateTime, TimeZone, Utc};
+use serde_json::{Map, Value};
+use tonic::{Code, Status};
+
+use crate::error::A2aError;
+use crate::types as ours;
+
+use super::pb;
+
+pub fn a2a_error_to_status(err: A2aError) -> Status {
+    let code = match err.grpc_status_name() {
+        "NOT_FOUND" => Code::NotFound,
+        "FAILED_PRECONDITION" => Code::FailedPrecondition,
+        "INVALID_ARGUMENT" => Code::InvalidArgument,
+        "INTERNAL" => Code::Internal,
+        "UNAUTHENTICATED" => Code::Unauthenticated,
+        "PERMISSION_DENIED" => Code::PermissionDenied,
+        "UNIMPLEMENTED" => Code::Unimplemented,
+        _ => Code::Unknown,
+    };
+    Status::new(code, err.standard_message())
+}
+
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+// --- google.protobuf.Struct/Value <-> serde_json ---
+
+fn struct_to_json(s: prost_types::Struct) -> Map<String, Value> {
+    s.fields
+        .into_iter()
+        .map(|(k, v)| (k, prost_value_to_json(v)))
+        .collect()
+}
+
+fn json_to_struct(m: Map<String, Value>) -> prost_types::Struct {
+    prost_types::Struct {
+        fields: m.into_iter().map(|(k, v)| (k, json_to_prost_value(v))).collect(),
+    }
+}
+
+fn prost_value_to_json(v: prost_types::Value) -> Value {
+    use prost_types::value::Kind;
+    match v.kind {
+        None | Some(Kind::NullValue(_)) => Value::Null,
+        Some(Kind::NumberValue(n)) => serde_json::Number::from_f64(n)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Some(Kind::StringValue(s)) => Value::String(s),
+        Some(Kind::BoolValue(b)) => Value::Bool(b),
+        Some(Kind::StructValue(s)) => Value::Object(struct_to_json(s)),
+        Some(Kind::ListValue(l)) => Value::Array(l.values.into_iter().map(prost_value_to_json).collect()),
+    }
+}
+
+fn json_to_prost_value(v: Value) -> prost_types::Value {
+    use prost_types::value::Kind;
+    let kind = match v {
+        Value::Null => Kind::NullValue(0),
+        Value::Bool(b) => Kind::BoolValue(b),
+        Value::Number(n) => Kind::NumberValue(n.as_f64().unwrap_or(0.0)),
+        Value::String(s) => Kind::StringValue(s),
+        Value::Array(a) => Kind::ListValue(prost_types::ListValue {
+            values: a.into_iter().map(json_to_prost_value).collect(),
+        }),
+        Value::Object(o) => Kind::StructValue(json_to_struct(o)),
+    };
+    prost_types::Value { kind: Some(kind) }
+}
+
+// --- google.protobuf.Timestamp <-> chrono ---
+
+fn timestamp_to_chrono(ts: prost_types::Timestamp) -> Option<DateTime<Utc>> {
+    Utc.timestamp_opt(ts.seconds, ts.nanos.max(0) as u32).single()
+}
+
+fn chrono_to_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
+    prost_types::Timestamp {
+        seconds: dt.timestamp(),
+        nanos: dt.timestamp_subsec_nanos() as i32,
+    }
+}
+
+// --- enums ---
+
+fn pb_task_state_to_ours(state: i32) -> ours::TaskState {
+    match pb::TaskState::try_from(state).unwrap_or(pb::TaskState::Unspecified) {
+        pb::TaskState::Unspecified => ours::TaskState::Unspecified,
+        pb::TaskState::Submitted => ours::TaskState::Submitted,
+        pb::TaskState::Working => ours::TaskState::Working,
+        pb::TaskState::Completed => ours::TaskState::Completed,
+        pb::TaskState::Failed => ours::TaskState::Failed,
+        pb::TaskState::Canceled => ours::TaskState::Canceled,
+        pb::TaskState::InputRequired => ours::TaskState::InputRequired,
+        pb::TaskState::Rejected => ours::TaskState::Rejected,
+        pb::TaskState::AuthRequired => ours::TaskState::AuthRequired,
+    }
+}
+
+fn our_task_state_to_pb(state: ours::TaskState) -> pb::TaskState {
+    match state {
+        ours::TaskState::Unspecified => pb::TaskState::Unspecified,
+        ours::TaskState::Submitted => pb::TaskState::Submitted,
+        ours::TaskState::Working => pb::TaskState::Working,
+        ours::TaskState::Completed => pb::TaskState::Completed,
+        ours::TaskState::Failed => pb::TaskState::Failed,
+        ours::TaskState::Canceled => pb::TaskState::Canceled,
+        ours::TaskState::InputRequired => pb::TaskState::InputRequired,
+        ours::TaskState::Rejected => pb::TaskState::Rejected,
+        ours::TaskState::AuthRequired => pb::TaskState::AuthRequired,
+    }
+}
+
+fn pb_role_to_ours(role: i32) -> ours::Role {
+    match pb::Role::try_from(role).unwrap_or(pb::Role::Unspecified) {
+        pb::Role::Unspecified => ours::Role::Unspecified,
+        pb::Role::User => ours::Role::User,
+        pb::Role::Agent => ours::Role::Agent,
+    }
+}
+
+fn our_role_to_pb(role: ours::Role) -> pb::Role {
+    match role {
+        ours::Role::Unspecified => pb::Role::Unspecified,
+        ours::Role::User => pb::Role::User,
+        ours::Role::Agent => pb::Role::Agent,
+    }
+}
+
+// --- Part / Message ---
+
+fn pb_part_to_ours(p: pb::Part) -> Result<ours::Part, Status> {
+    use pb::part::Content as PC;
+    let content = match p.content {
+        Some(PC::Text(t)) => ours::PartContent::Text { text: t },
+        Some(PC::Raw(b)) => ours::PartContent::Raw { raw: b },
+        Some(PC::Url(u)) => ours::PartContent::Url { url: u },
+        Some(PC::Data(v)) => ours::PartContent::Data {
+            data: prost_value_to_json(v),
+        },
+        None => return Err(Status::invalid_argument("Part.content is required")),
+    };
+    Ok(ours::Part {
+        content,
+        metadata: p.metadata.map(struct_to_json),
+        filename: non_empty(p.filename),
+        media_type: non_empty(p.media_type),
+    })
+}
+
+fn our_part_to_pb(p: ours::Part) -> pb::Part {
+    let content = Some(match p.content {
+        ours::PartContent::Text { text } => pb::part::Content::Text(text),
+        ours::PartContent::Raw { raw } => pb::part::Content::Raw(raw),
+        ours::PartContent::Url { url } => pb::part::Content::Url(url),
+        ours::PartContent::Data { data } => pb::part::Content::Data(json_to_prost_value(data)),
+    });
+    pb::Part {
+        metadata: p.metadata.map(json_to_struct),
+        filename: p.filename.unwrap_or_default(),
+        media_type: p.media_type.unwrap_or_default(),
+        content,
+    }
+}
+
+fn pb_message_to_ours(m: pb::Message) -> Result<ours::Message, Status> {
+    Ok(ours::Message {
+        message_id: m.message_id,
+        context_id: non_empty(m.context_id),
+        task_id: non_empty(m.task_id),
+        role: pb_role_to_ours(m.role),
+        parts: m
+            .parts
+            .into_iter()
+            .map(pb_part_to_ours)
+            .collect::<Result<_, _>>()?,
+        metadata: m.metadata.map(struct_to_json),
+        extensions: m.extensions,
+        reference_task_ids: m.reference_task_ids,
+    })
+}
+
+fn our_message_to_pb(m: ours::Message) -> pb::Message {
+    pb::Message {
+        message_id: m.message_id,
+        context_id: m.context_id.unwrap_or_default(),
+        task_id: m.task_id.unwrap_or_default(),
+        role: our_role_to_pb(m.role) as i32,
+        parts: m.parts.into_iter().map(our_part_to_pb).collect(),
+        metadata: m.metadata.map(json_to_struct),
+        extensions: m.extensions,
+        reference_task_ids: m.reference_task_ids,
+    }
+}
+
+// --- TaskStatus / Task / Artifact / events ---
+
+fn our_task_status_to_pb(s: ours::TaskStatus) -> pb::TaskStatus {
+    pb::TaskStatus {
+        state: our_task_state_to_pb(s.state) as i32,
+        message: s.message.map(our_message_to_pb),
+        timestamp: s.timestamp.map(chrono_to_timestamp),
+    }
+}
+
+fn our_artifact_to_pb(a: ours::Artifact) -> pb::Artifact {
+    pb::Artifact {
+        artifact_id: a.artifact_id,
+        name: a.name.unwrap_or_default(),
+        description: a.description.unwrap_or_default(),
+        parts: a.parts.into_iter().map(our_part_to_pb).collect(),
+        metadata: a.metadata.map(json_to_struct),
+        extensions: a.extensions,
+    }
+}
+
+pub fn our_task_to_pb(t: ours::Task) -> pb::Task {
+    pb::Task {
+        id: t.id,
+        context_id: t.context_id.unwrap_or_default(),
+        status: Some(our_task_status_to_pb(t.status)),
+        artifacts: t.artifacts.into_iter().map(our_artifact_to_pb).collect(),
+        history: t.history.into_iter().map(our_message_to_pb).collect(),
+        metadata: t.metadata.map(json_to_struct),
+    }
+}
+
+fn our_status_update_to_pb(e: ours::TaskStatusUpdateEvent) -> pb::TaskStatusUpdateEvent {
+    pb::TaskStatusUpdateEvent {
+        task_id: e.task_id,
+        context_id: e.context_id,
+        status: Some(our_task_status_to_pb(e.status)),
+        metadata: e.metadata.map(json_to_struct),
+    }
+}
+
+fn our_artifact_update_to_pb(e: ours::TaskArtifactUpdateEvent) -> pb::TaskArtifactUpdateEvent {
+    pb::TaskArtifactUpdateEvent {
+        task_id: e.task_id,
+        context_id: e.context_id,
+        artifact: Some(our_artifact_to_pb(e.artifact)),
+        append: e.append,
+        last_chunk: e.last_chunk,
+        metadata: e.metadata.map(json_to_struct),
+    }
+}
+
+pub fn our_stream_response_to_pb(r: ours::StreamResponse) -> pb::StreamResponse {
+    use pb::stream_response::Payload;
+    let payload = Some(match r {
+        ours::StreamResponse::Task { task } => Payload::Task(our_task_to_pb(task)),
+        ours::StreamResponse::Message { message } => Payload::Message(our_message_to_pb(message)),
+        ours::StreamResponse::StatusUpdate { status_update } => {
+            Payload::StatusUpdate(our_status_update_to_pb(status_update))
+        }
+        ours::StreamResponse::ArtifactUpdate { artifact_update } => {
+            Payload::ArtifactUpdate(our_artifact_update_to_pb(artifact_update))
+        }
+    });
+    pb::StreamResponse { payload }
+}
+
+pub fn our_send_result_to_pb(r: ours::SendMessageResult) -> pb::SendMessageResponse {
+    use pb::send_message_response::Payload;
+    let payload = Some(match r {
+        ours::SendMessageResult::Task { task } => Payload::Task(our_task_to_pb(task)),
+        ours::SendMessageResult::Message { message } => Payload::Message(our_message_to_pb(message)),
+    });
+    pb::SendMessageResponse { payload }
+}
+
+// --- push notification config ---
+
+fn pb_auth_info_to_ours(a: pb::AuthenticationInfo) -> ours::AuthenticationInfo {
+    ours::AuthenticationInfo {
+        scheme: a.scheme,
+        credentials: non_empty(a.credentials),
+    }
+}
+
+fn our_auth_info_to_pb(a: ours::AuthenticationInfo) -> pb::AuthenticationInfo {
+    pb::AuthenticationInfo {
+        scheme: a.scheme,
+        credentials: a.credentials.unwrap_or_default(),
+    }
+}
+
+pub fn pb_push_config_to_ours(c: pb::TaskPushNotificationConfig) -> ours::TaskPushNotificationConfig {
+    ours::TaskPushNotificationConfig {
+        tenant: non_empty(c.tenant),
+        id: non_empty(c.id),
+        task_id: non_empty(c.task_id),
+        url: c.url,
+        token: non_empty(c.token),
+        authentication: c.authentication.map(pb_auth_info_to_ours),
+    }
+}
+
+pub fn our_push_config_to_pb(c: ours::TaskPushNotificationConfig) -> pb::TaskPushNotificationConfig {
+    pb::TaskPushNotificationConfig {
+        tenant: c.tenant.unwrap_or_default(),
+        id: c.id.unwrap_or_default(),
+        task_id: c.task_id.unwrap_or_default(),
+        url: c.url,
+        token: c.token.unwrap_or_default(),
+        authentication: c.authentication.map(our_auth_info_to_pb),
+    }
+}
+
+pub fn our_list_push_notification_configs_response_to_pb(
+    r: ours::ListTaskPushNotificationConfigsResponse,
+) -> pb::ListTaskPushNotificationConfigsResponse {
+    pb::ListTaskPushNotificationConfigsResponse {
+        configs: r.configs.into_iter().map(our_push_config_to_pb).collect(),
+        next_page_token: r.next_page_token,
+    }
+}
+
+pub fn our_list_tasks_response_to_pb(r: ours::ListTasksResponse) -> pb::ListTasksResponse {
+    pb::ListTasksResponse {
+        tasks: r.tasks.into_iter().map(our_task_to_pb).collect(),
+        next_page_token: r.next_page_token,
+        page_size: r.page_size,
+        total_size: r.total_size,
+    }
+}
+
+// --- requests (inbound only) ---
+
+fn pb_send_config_to_ours(c: pb::SendMessageConfiguration) -> ours::SendMessageConfiguration {
+    ours::SendMessageConfiguration {
+        accepted_output_modes: c.accepted_output_modes,
+        task_push_notification_config: c.task_push_notification_config.map(pb_push_config_to_ours),
+        history_length: c.history_length,
+        return_immediately: c.return_immediately,
+    }
+}
+
+pub fn pb_send_message_request_to_ours(
+    r: pb::SendMessageRequest,
+) -> Result<ours::SendMessageRequest, Status> {
+    let message = r
+        .message
+        .ok_or_else(|| Status::invalid_argument("message is required"))?;
+    Ok(ours::SendMessageRequest {
+        tenant: non_empty(r.tenant),
+        message: pb_message_to_ours(message)?,
+        configuration: r.configuration.map(pb_send_config_to_ours),
+        metadata: r.metadata.map(struct_to_json),
+    })
+}
+
+pub fn pb_get_task_request_to_ours(r: pb::GetTaskRequest) -> ours::GetTaskRequest {
+    ours::GetTaskRequest {
+        tenant: non_empty(r.tenant),
+        id: r.id,
+        history_length: r.history_length,
+    }
+}
+
+pub fn pb_list_tasks_request_to_ours(r: pb::ListTasksRequest) -> ours::ListTasksRequest {
+    ours::ListTasksRequest {
+        tenant: non_empty(r.tenant),
+        context_id: non_empty(r.context_id),
+        status: if r.status == 0 {
+            None
+        } else {
+            Some(pb_task_state_to_ours(r.status))
+        },
+        page_size: r.page_size,
+        page_token: non_empty(r.page_token),
+        history_length: r.history_length,
+        status_timestamp_after: r.status_timestamp_after.and_then(timestamp_to_chrono),
+        include_artifacts: r.include_artifacts,
+    }
+}
+
+pub fn pb_cancel_task_request_to_ours(r: pb::CancelTaskRequest) -> ours::CancelTaskRequest {
+    ours::CancelTaskRequest {
+        tenant: non_empty(r.tenant),
+        id: r.id,
+        metadata: r.metadata.map(struct_to_json),
+    }
+}
+
+pub fn pb_subscribe_to_task_request_to_ours(r: pb::SubscribeToTaskRequest) -> ours::SubscribeToTaskRequest {
+    ours::SubscribeToTaskRequest {
+        tenant: non_empty(r.tenant),
+        id: r.id,
+    }
+}
+
+pub fn pb_get_push_notification_config_request_to_ours(
+    r: pb::GetTaskPushNotificationConfigRequest,
+) -> ours::GetTaskPushNotificationConfigRequest {
+    ours::GetTaskPushNotificationConfigRequest {
+        tenant: non_empty(r.tenant),
+        task_id: r.task_id,
+        id: r.id,
+    }
+}
+
+pub fn pb_delete_push_notification_config_request_to_ours(
+    r: pb::DeleteTaskPushNotificationConfigRequest,
+) -> ours::DeleteTaskPushNotificationConfigRequest {
+    ours::DeleteTaskPushNotificationConfigRequest {
+        tenant: non_empty(r.tenant),
+        task_id: r.task_id,
+        id: r.id,
+    }
+}
+
+pub fn pb_list_push_notification_configs_request_to_ours(
+    r: pb::ListTaskPushNotificationConfigsRequest,
+) -> ours::ListTaskPushNotificationConfigsRequest {
+    ours::ListTaskPushNotificationConfigsRequest {
+        tenant: non_empty(r.tenant),
+        task_id: r.task_id,
+        page_size: if r.page_size == 0 { None } else { Some(r.page_size) },
+        page_token: non_empty(r.page_token),
+    }
+}
+
+// --- AgentCard (outbound only, for GetExtendedAgentCard) ---
+
+fn our_agent_interface_to_pb(i: ours::AgentInterface) -> pb::AgentInterface {
+    pb::AgentInterface {
+        url: i.url,
+        protocol_binding: i.protocol_binding,
+        tenant: i.tenant.unwrap_or_default(),
+        protocol_version: i.protocol_version,
+    }
+}
+
+fn our_agent_provider_to_pb(p: ours::AgentProvider) -> pb::AgentProvider {
+    pb::AgentProvider {
+        url: p.url,
+        organization: p.organization,
+    }
+}
+
+fn our_agent_extension_to_pb(e: ours::AgentExtension) -> pb::AgentExtension {
+    pb::AgentExtension {
+        uri: e.uri,
+        description: e.description,
+        required: e.required,
+        params: e.params.map(json_to_struct),
+    }
+}
+
+fn our_agent_capabilities_to_pb(c: ours::AgentCapabilities) -> pb::AgentCapabilities {
+    pb::AgentCapabilities {
+        streaming: c.streaming,
+        push_notifications: c.push_notifications,
+        extensions: c.extensions.into_iter().map(our_agent_extension_to_pb).collect(),
+        extended_agent_card: c.extended_agent_card,
+    }
+}
+
+fn our_string_list_to_pb(s: ours::StringList) -> pb::StringList {
+    pb::StringList { list: s.list }
+}
+
+fn our_security_requirement_to_pb(s: ours::SecurityRequirement) -> pb::SecurityRequirement {
+    pb::SecurityRequirement {
+        schemes: s
+            .schemes
+            .into_iter()
+            .map(|(k, v)| (k, our_string_list_to_pb(v)))
+            .collect(),
+    }
+}
+
+fn our_agent_skill_to_pb(s: ours::AgentSkill) -> pb::AgentSkill {
+    pb::AgentSkill {
+        id: s.id,
+        name: s.name,
+        description: s.description,
+        tags: s.tags,
+        examples: s.examples,
+        input_modes: s.input_modes,
+        output_modes: s.output_modes,
+        security_requirements: s
+            .security_requirements
+            .into_iter()
+            .map(our_security_requirement_to_pb)
+            .collect(),
+    }
+}
+
+fn our_agent_card_signature_to_pb(s: ours::AgentCardSignature) -> pb::AgentCardSignature {
+    pb::AgentCardSignature {
+        protected: s.protected,
+        signature: s.signature,
+        header: s.header.map(json_to_struct),
+    }
+}
+
+fn our_api_key_scheme_to_pb(s: ours::ApiKeySecurityScheme) -> pb::ApiKeySecurityScheme {
+    pb::ApiKeySecurityScheme {
+        description: s.description.unwrap_or_default(),
+        location: s.location,
+        name: s.name,
+    }
+}
+
+fn our_http_auth_scheme_to_pb(s: ours::HttpAuthSecurityScheme) -> pb::HttpAuthSecurityScheme {
+    pb::HttpAuthSecurityScheme {
+        description: s.description.unwrap_or_default(),
+        scheme: s.scheme,
+        bearer_format: s.bearer_format.unwrap_or_default(),
+    }
+}
+
+fn our_oidc_scheme_to_pb(s: ours::OpenIdConnectSecurityScheme) -> pb::OpenIdConnectSecurityScheme {
+    pb::OpenIdConnectSecurityScheme {
+        description: s.description.unwrap_or_default(),
+        open_id_connect_url: s.open_id_connect_url,
+    }
+}
+
+fn our_mtls_scheme_to_pb(s: ours::MutualTlsSecurityScheme) -> pb::MutualTlsSecurityScheme {
+    pb::MutualTlsSecurityScheme {
+        description: s.description.unwrap_or_default(),
+    }
+}
+
+fn our_auth_code_flow_to_pb(f: ours::AuthorizationCodeOAuthFlow) -> pb::AuthorizationCodeOAuthFlow {
+    pb::AuthorizationCodeOAuthFlow {
+        authorization_url: f.authorization_url,
+        token_url: f.token_url,
+        refresh_url: f.refresh_url.unwrap_or_default(),
+        scopes: f.scopes,
+        pkce_required: f.pkce_required,
+    }
+}
+
+fn our_client_creds_flow_to_pb(f: ours::ClientCredentialsOAuthFlow) -> pb::ClientCredentialsOAuthFlow {
+    pb::ClientCredentialsOAuthFlow {
+        token_url: f.token_url,
+        refresh_url: f.refresh_url.unwrap_or_default(),
+        scopes: f.scopes,
+    }
+}
+
+fn our_implicit_flow_to_pb(f: ours::ImplicitOAuthFlow) -> pb::ImplicitOAuthFlow {
+    pb::ImplicitOAuthFlow {
+        authorization_url: f.authorization_url,
+        refresh_url: f.refresh_url.unwrap_or_default(),
+        scopes: f.scopes,
+    }
+}
+
+fn our_password_flow_to_pb(f: ours::PasswordOAuthFlow) -> pb::PasswordOAuthFlow {
+    pb::PasswordOAuthFlow {
+        token_url: f.token_url,
+        refresh_url: f.refresh_url.unwrap_or_default(),
+        scopes: f.scopes,
+    }
+}
+
+fn our_device_code_flow_to_pb(f: ours::DeviceCodeOAuthFlow) -> pb::DeviceCodeOAuthFlow {
+    pb::DeviceCodeOAuthFlow {
+        device_authorization_url: f.device_authorization_url,
+        token_url: f.token_url,
+        refresh_url: f.refresh_url.unwrap_or_default(),
+        scopes: f.scopes,
+    }
+}
+
+// The proto marks the Implicit/Password flows `deprecated = true` (spec
+// recommends Authorization Code + PKCE or Device Code instead), but they
+// remain part of the wire format, so this crate still passes them through.
+#[allow(deprecated)]
+fn our_oauth_flows_to_pb(f: ours::OAuthFlows) -> pb::OAuthFlows {
+    use pb::o_auth_flows::Flow;
+    let flow = Some(match f {
+        ours::OAuthFlows::AuthorizationCode { authorization_code } => {
+            Flow::AuthorizationCode(our_auth_code_flow_to_pb(authorization_code))
+        }
+        ours::OAuthFlows::ClientCredentials { client_credentials } => {
+            Flow::ClientCredentials(our_client_creds_flow_to_pb(client_credentials))
+        }
+        ours::OAuthFlows::Implicit { implicit } => Flow::Implicit(our_implicit_flow_to_pb(implicit)),
+        ours::OAuthFlows::Password { password } => Flow::Password(our_password_flow_to_pb(password)),
+        ours::OAuthFlows::DeviceCode { device_code } => {
+            Flow::DeviceCode(our_device_code_flow_to_pb(device_code))
+        }
+    });
+    pb::OAuthFlows { flow }
+}
+
+fn our_oauth2_scheme_to_pb(s: ours::OAuth2SecurityScheme) -> pb::OAuth2SecurityScheme {
+    pb::OAuth2SecurityScheme {
+        description: s.description.unwrap_or_default(),
+        flows: Some(our_oauth_flows_to_pb(s.flows)),
+        oauth2_metadata_url: s.oauth2_metadata_url.unwrap_or_default(),
+    }
+}
+
+fn our_security_scheme_to_pb(s: ours::SecurityScheme) -> pb::SecurityScheme {
+    use pb::security_scheme::Scheme;
+    let scheme = Some(match s {
+        ours::SecurityScheme::ApiKey {
+            api_key_security_scheme,
+        } => Scheme::ApiKeySecurityScheme(our_api_key_scheme_to_pb(api_key_security_scheme)),
+        ours::SecurityScheme::HttpAuth {
+            http_auth_security_scheme,
+        } => Scheme::HttpAuthSecurityScheme(our_http_auth_scheme_to_pb(http_auth_security_scheme)),
+        ours::SecurityScheme::OAuth2 {
+            oauth2_security_scheme,
+        } => Scheme::Oauth2SecurityScheme(our_oauth2_scheme_to_pb(oauth2_security_scheme)),
+        ours::SecurityScheme::OpenIdConnect {
+            open_id_connect_security_scheme,
+        } => Scheme::OpenIdConnectSecurityScheme(our_oidc_scheme_to_pb(open_id_connect_security_scheme)),
+        ours::SecurityScheme::MutualTls { mtls_security_scheme } => {
+            Scheme::MtlsSecurityScheme(our_mtls_scheme_to_pb(mtls_security_scheme))
+        }
+    });
+    pb::SecurityScheme { scheme }
+}
+
+pub fn our_agent_card_to_pb(c: ours::AgentCard) -> pb::AgentCard {
+    pb::AgentCard {
+        name: c.name,
+        description: c.description,
+        supported_interfaces: c
+            .supported_interfaces
+            .into_iter()
+            .map(our_agent_interface_to_pb)
+            .collect(),
+        provider: c.provider.map(our_agent_provider_to_pb),
+        version: c.version,
+        documentation_url: c.documentation_url,
+        capabilities: Some(our_agent_capabilities_to_pb(c.capabilities)),
+        security_schemes: c
+            .security_schemes
+            .into_iter()
+            .map(|(k, v)| (k, our_security_scheme_to_pb(v)))
+            .collect(),
+        security_requirements: c
+            .security_requirements
+            .into_iter()
+            .map(our_security_requirement_to_pb)
+            .collect(),
+        default_input_modes: c.default_input_modes,
+        default_output_modes: c.default_output_modes,
+        skills: c.skills.into_iter().map(our_agent_skill_to_pb).collect(),
+        signatures: c
+            .signatures
+            .into_iter()
+            .map(our_agent_card_signature_to_pb)
+            .collect(),
+        icon_url: c.icon_url,
+    }
+}
