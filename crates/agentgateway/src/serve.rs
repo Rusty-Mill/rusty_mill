@@ -9,18 +9,24 @@ use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::service::TowerToHyperService;
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use rusty_mcp::limits::LimitsLayer;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
+use tower_layer::Layer as _;
 
 use crate::gateway::Gateway;
 
 /// Bind every address and serve until SIGINT or SIGTERM.
-pub async fn run(gateway: Gateway, addrs: Vec<SocketAddr>) -> anyhow::Result<()> {
+pub async fn run(
+    gateway: Gateway,
+    addrs: Vec<SocketAddr>,
+    limits: LimitsLayer,
+) -> anyhow::Result<()> {
     let shutdown = CancellationToken::new();
-    let serving = run_with_shutdown(gateway, addrs, shutdown.clone()).await?;
+    let serving = run_with_shutdown_and_limits(gateway, addrs, shutdown.clone(), limits).await?;
     signal().await;
     tracing::info!("shutting down");
     shutdown.cancel();
@@ -38,6 +44,21 @@ pub async fn run_with_shutdown(
     addrs: Vec<SocketAddr>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<impl Future<Output = ()> + Send> {
+    run_with_shutdown_and_limits(gateway, addrs, shutdown, LimitsLayer::new()).await
+}
+
+/// As [`run_with_shutdown`], with process-wide load shedding applied.
+///
+/// The limits sit outside everything else, so a shed request costs a semaphore
+/// try-acquire rather than a route lookup, a token validation and a JWKS
+/// fetch. That ordering is the reason the layer is worth having: the requests
+/// it refuses are exactly the ones there is no capacity to pay for.
+pub async fn run_with_shutdown_and_limits(
+    gateway: Gateway,
+    addrs: Vec<SocketAddr>,
+    shutdown: CancellationToken,
+    limits: LimitsLayer,
+) -> anyhow::Result<impl Future<Output = ()> + Send> {
     let gateway = Arc::new(gateway);
 
     let mut listeners = Vec::with_capacity(addrs.len());
@@ -53,8 +74,12 @@ pub async fn run_with_shutdown(
     for (port, listener) in listeners {
         let gateway = Arc::clone(&gateway);
         let shutdown = shutdown.clone();
+        // One layer, cloned per port: the permit pool is shared, which is the
+        // whole point -- a limit each port counted separately would bound
+        // nothing in a multi-bind config.
+        let limits = limits.clone();
         tasks.push(tokio::spawn(async move {
-            accept_loop(gateway, port, listener, shutdown).await;
+            accept_loop(gateway, port, listener, shutdown, limits).await;
         }));
     }
 
@@ -70,6 +95,7 @@ async fn accept_loop(
     port: u16,
     listener: TcpListener,
     shutdown: CancellationToken,
+    limits: LimitsLayer,
 ) {
     loop {
         let stream = tokio::select! {
@@ -88,11 +114,17 @@ async fn accept_loop(
 
         let gateway = Arc::clone(&gateway);
         let shutdown = shutdown.clone();
+        let limits = limits.clone();
         tokio::spawn(async move {
-            let service = service_fn(move |request| {
-                let gateway = Arc::clone(&gateway);
-                async move { gateway.handle(port, request).await }
-            });
+            // `tower::service_fn`, not hyper's: the limits layer is a tower
+            // layer, so the stack is built in tower terms and bridged to hyper
+            // once at the outside.
+            let service = TowerToHyperService::new(limits.layer(tower::service_fn(
+                move |request| {
+                    let gateway = Arc::clone(&gateway);
+                    async move { gateway.handle(port, request).await }
+                },
+            )));
 
             let builder = ConnBuilder::new(TokioExecutor::new());
             let connection =

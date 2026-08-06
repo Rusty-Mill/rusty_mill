@@ -9,5 +9,7 @@
 
 pub mod gateway;
 pub mod serve;
+pub mod telemetry;
 
 pub use gateway::Gateway;
+pub use telemetry::Telemetry;

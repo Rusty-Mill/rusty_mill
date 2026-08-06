@@ -3,7 +3,10 @@
 //! It exports two tools and echoes which server handled a call, so a test can
 //! prove a request reached the *right* target rather than merely reaching one.
 //! `MOCK_LABEL` names the instance; `MOCK_TOOLS` overrides the tool list, which
-//! is how a test sets up a name collision between two targets.
+//! is how a test sets up a name collision between two targets. `MOCK_DELAY_MS`
+//! makes tool calls slow, so the timeout and concurrency tests have something
+//! real to be slow about. The delay is on `call_tool` only, leaving startup
+//! and `tools/list` prompt.
 
 use std::sync::Arc;
 
@@ -20,6 +23,7 @@ use rmcp::{
 struct MockServer {
     label: String,
     tools: Vec<String>,
+    delay: std::time::Duration,
 }
 
 impl ServerHandler for MockServer {
@@ -68,6 +72,9 @@ impl ServerHandler for MockServer {
                 None,
             ));
         }
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         // The label is what lets a test tell which target served the call.
         let text = format!("{}:{}", self.label, request.name);
         Ok(CallToolResponse::Complete(CallToolResult::success(vec![
@@ -86,9 +93,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|t| t.to_string())
         .collect();
 
-    let service = MockServer { label, tools }
-        .serve(rmcp::transport::io::stdio())
-        .await?;
+    let delay = std::time::Duration::from_millis(
+        std::env::var("MOCK_DELAY_MS")
+            .ok()
+            .and_then(|raw| raw.parse().ok())
+            .unwrap_or(0),
+    );
+
+    let service = MockServer {
+        label,
+        tools,
+        delay,
+    }
+    .serve(rmcp::transport::io::stdio())
+    .await?;
     service.waiting().await?;
     Ok(())
 }

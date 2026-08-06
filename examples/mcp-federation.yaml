@@ -4,6 +4,18 @@
 # export a tool of the same name without colliding. `Mcp-Session-Id` is in
 # exposeHeaders because a browser client cannot read it otherwise -- and
 # without it, it cannot make a second request.
+config:
+  # Spans and metrics to an OTLP collector. Omit the whole block to stay off:
+  # an exporter pointed at nothing retries in the background forever.
+  tracing:
+    endpoint: http://localhost:4317
+    serviceName: rusty-agent-gateway
+  limits:
+    # Sheds with 503 + Retry-After rather than queueing. Counts requests until
+    # a response is produced, so this bounds handshakes and auth rather than
+    # streaming tool calls -- which is the load worth shedding.
+    maxConcurrentRequests: 256
+
 binds:
   - port: 3000
     listeners:
@@ -13,6 +25,11 @@ binds:
               - path:
                   pathPrefix: /mcp
             policies:
+              timeout:
+                # requestTimeout bounds producing a response; the MCP transport
+                # streams, so only backendRequestTimeout bounds a tool call.
+                requestTimeout: 30s
+                backendRequestTimeout: 10s
               cors:
                 allowOrigins: ["*"]
                 allowHeaders: [mcp-protocol-version, content-type, cache-control]
