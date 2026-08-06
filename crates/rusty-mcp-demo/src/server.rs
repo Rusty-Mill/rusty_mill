@@ -6,7 +6,6 @@ use rmcp::{
     ServerHandler,
     handler::server::router::{prompt::PromptRouter, tool::ToolRouter},
     model::{ServerCapabilities, ServerInfo},
-    prompt_handler, tool_handler,
 };
 use rusty_mcp::tasks::{TaskPolicy, TaskSupport};
 use rusty_mcp::{
@@ -147,8 +146,11 @@ impl Default for DemoServer {
     }
 }
 
-#[tool_handler(router = self.tool_router)]
-#[prompt_handler(router = self.prompt_router)]
+// Neither `#[tool_handler]` nor `#[prompt_handler]` is used here: their
+// generated `list` methods ignore the pagination cursor, and neither can be
+// overridden — `#[prompt_handler]` silently replaces an override, and
+// `#[tool_handler]` cannot see one written by a macro, since attribute macros
+// expand first. `forward_*_methods!` generate the whole set instead.
 impl ServerHandler for DemoServer {
     fn get_info(&self) -> ServerInfo {
         // `rusty_mcp::server_info` pins the advertised revision to 2026-07-28;
@@ -182,6 +184,10 @@ impl ServerHandler for DemoServer {
         )
     }
 
+    // Small page sizes so the demo actually pages — the real default is 100,
+    // which no demo will ever exceed.
+    rusty_mcp::forward_tool_methods!(tool_router, 3);
+    rusty_mcp::forward_prompt_methods!(prompt_router, 1);
     rusty_mcp::forward_task_methods!(tasks);
     rusty_mcp::forward_resource_methods!(resources);
     rusty_mcp::forward_completion_methods!(completions);

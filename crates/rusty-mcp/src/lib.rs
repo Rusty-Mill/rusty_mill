@@ -68,7 +68,9 @@ pub mod limits;
 pub mod mrtr;
 #[cfg(feature = "otel")]
 pub mod otel;
+pub mod pagination;
 pub mod resources;
+pub mod routers;
 pub mod runtime;
 pub mod shutdown;
 pub mod subscriptions;
@@ -140,12 +142,34 @@ where
 pub mod __private {
     pub use rmcp::{
         ErrorData,
+        handler::server::{prompt::PromptContext, tool::ToolCallContext},
         model::{
-            CancelTaskParams, CompleteRequestParams, CompleteResult, GetTaskParams, GetTaskResult,
-            ListResourceTemplatesResult, ListResourcesResult, PaginatedRequestParams,
+            CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
+            CompleteRequestParams, CompleteResult, GetPromptRequestParams, GetPromptResponse,
+            GetTaskParams, GetTaskResult, ListPromptsResult, ListResourceTemplatesResult,
+            ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
             ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
-            SubscriptionFilter, UpdateTaskParams,
+            SubscriptionFilter, Tool, UpdateTaskParams,
         },
         service::{RequestContext, RoleServer, SubscriptionContext},
     };
+
+    /// Set the 2026-07-28 cache hints, but only for peers that negotiated it.
+    ///
+    /// `rmcp`'s generated list methods gate these on the protocol version, and
+    /// the paginating replacements in [`crate::routers`] must behave
+    /// identically — an older peer handed `ttlMs` would be receiving a field
+    /// its revision does not define.
+    pub fn apply_cache_hints(
+        context: &RequestContext<RoleServer>,
+        ttl_ms: &mut Option<u64>,
+        cache_scope: &mut Option<CacheScope>,
+    ) {
+        let supported = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+
+        *ttl_ms = supported.then_some(0);
+        *cache_scope = supported.then_some(CacheScope::Public);
+    }
 }

@@ -60,6 +60,8 @@ Inside the scaffold:
 | `trace` | W3C trace context over `_meta` (see [Tracing](#tracing)) |
 | `subscriptions` | Change notifications over `subscriptions/listen` (see [Change notifications](#change-notifications)) |
 | `mrtr` | Asking the client for input mid-call (see [Asking the user](#asking-the-user)) |
+| `pagination` | The cursor every paginated list shares (see [Lists are paginated](#lists-are-paginated)) |
+| `routers` | Paginating replacements for `#[tool_handler]` / `#[prompt_handler]` |
 | `completion` | Argument completion (see [Completion](#completion)) |
 | `otel` | OTLP span and metric export (see [Exporting spans](#exporting-spans)) |
 | `limits` | Concurrency and timeout shedding (see [Limits](#limits)) |
@@ -228,12 +230,38 @@ Templates are RFC 6570 **level 1**: `{var}` placeholders only, no operators.
 
 ### Lists are paginated
 
-`resources/list` and `resources/templates/list` page at
-`DEFAULT_PAGE_SIZE` (100), overridable with `.with_page_size(n)`. The
-generated handlers thread the client's cursor through, so there is nothing to
-wire up.
+All four list methods page at `DEFAULT_PAGE_SIZE` (100). Resources take
+`.with_page_size(n)`; tools and prompts take an optional second macro argument.
 
-The cursor carries a **key, not an index**, and pages are ordered by URI rather
+```rust
+impl ServerHandler for MyServer {
+    fn get_info(&self) -> ServerInfo { /* ... */ }
+
+    rusty_mcp::forward_resource_methods!(resources);
+    rusty_mcp::forward_tool_methods!(tool_router);
+    rusty_mcp::forward_prompt_methods!(prompt_router);
+}
+```
+
+**Those last two replace `#[tool_handler]` and `#[prompt_handler]`** — they do
+not compose with them. `rmcp`'s generated `list_tools` and `list_prompts` take
+a cursor, discard it, and return everything with `next_cursor: None`, and
+neither can be overridden in place:
+
+- `#[prompt_handler]` scans for an existing `list_prompts` and **replaces its
+  body**, so a hand-written paginating version is silently discarded.
+- `#[tool_handler]` guards on `has_method("list_tools")`, which looks like an
+  override would work — but attribute macros expand *before* `macro_rules!`
+  invocations inside the item, so it only ever sees an unexpanded macro call.
+  You get `E0201: duplicate definitions`.
+
+The first failure is silent, which is why neither attribute is worth keeping.
+Write `get_info` yourself; `rusty_mcp::server_info` makes it a one-liner.
+
+One cursor implementation serves all four, and a cursor minted by one sequence
+is rejected by the others — there is a tag byte for exactly that.
+
+The cursor carries a **key, not an index**, and pages are ordered by key rather
 than by registration order. Two things follow, and both are the reason for the
 choice:
 
