@@ -144,10 +144,10 @@ impl Config {
         for (b, bind) in self.binds.iter().enumerate() {
             for (l, listener) in bind.listeners.iter().enumerate() {
                 let at = format!("binds[{b}].listeners[{l}]");
-                if listener.protocol.is_tls() {
+                if listener.protocol == Protocol::Tls {
                     findings.push(format!(
-                        "{at}: protocol {:?} parsed but TLS termination is not implemented yet",
-                        listener.protocol
+                        "{at}: protocol TLS is terminated as HTTPS by this build; opaque TLS \
+                         passthrough is not implemented"
                     ));
                 }
                 for (r, route) in listener.routes.iter().enumerate() {
@@ -259,6 +259,16 @@ pub struct Bind {
     pub listeners: Vec<Listener>,
 }
 
+/// A server certificate and its private key, as PEM file paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TlsConfig {
+    /// Path to the certificate chain, leaf first.
+    pub cert: String,
+    /// Path to the private key. PKCS#8, PKCS#1 and SEC1 are all accepted.
+    pub key: String,
+}
+
 /// A protocol-specific listener on a [`Bind`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -274,6 +284,10 @@ pub struct Listener {
     /// Wire protocol spoken on this listener.
     #[serde(default)]
     pub protocol: Protocol,
+
+    /// Certificate and key, required when `protocol` terminates TLS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
 
     /// Routes evaluated in order for requests arriving here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -14,6 +14,29 @@ use std::net::IpAddr;
 use agentgateway_config::{BackendAuth, HeaderModifier, PathRewrite, UrlRewrite};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri, header, uri::Authority, uri::PathAndQuery};
 
+/// The scheme a client used to reach the gateway.
+///
+/// A plain `&'static str` would do the job, but it makes the closures in the
+/// serve loop higher-ranked over a lifetime and the inference falls over. A
+/// `Copy` enum sidesteps that and rules out typos besides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    /// Cleartext.
+    Http,
+    /// TLS-terminated at this gateway.
+    Https,
+}
+
+impl Scheme {
+    /// The `X-Forwarded-Proto` value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scheme::Http => "http",
+            Scheme::Https => "https",
+        }
+    }
+}
+
 /// A header name or value in the configuration that HTTP cannot represent.
 #[derive(Debug, thiserror::Error)]
 #[error("{at}: `{value}` is not a valid HTTP {kind}")]
@@ -226,7 +249,12 @@ pub fn upstream_uri(
 /// Appended rather than replaced: the chain is the point, and overwriting it
 /// erases every proxy before us — which is how the original client address
 /// gets lost and every rate limit downstream starts counting the same IP.
-pub fn add_forwarded(headers: &mut HeaderMap, peer: Option<IpAddr>, host: Option<&HeaderValue>) {
+pub fn add_forwarded(
+    headers: &mut HeaderMap,
+    peer: Option<IpAddr>,
+    host: Option<&HeaderValue>,
+    scheme: Scheme,
+) {
     if let Some(peer) = peer {
         let chain = match headers.get(FORWARDED_FOR).and_then(|v| v.to_str().ok()) {
             Some(existing) => format!("{existing}, {peer}"),
@@ -246,9 +274,15 @@ pub fn add_forwarded(headers: &mut HeaderMap, peer: Option<IpAddr>, host: Option
     }
 
     if !headers.contains_key(FORWARDED_PROTO) {
-        // This build terminates cleartext only; when TLS lands this becomes
-        // the listener's scheme.
-        headers.insert(FORWARDED_PROTO, HeaderValue::from_static("http"));
+        // The scheme the *client* used, which is the listener's, not the
+        // upstream's. An upstream behind a TLS listener that generates
+        // absolute URLs from this header would otherwise emit http:// links
+        // into an https:// page and trip mixed-content blocking.
+        let scheme = match scheme {
+            Scheme::Https => HeaderValue::from_static("https"),
+            Scheme::Http => HeaderValue::from_static("http"),
+        };
+        headers.insert(FORWARDED_PROTO, scheme);
     }
 }
 
@@ -439,7 +473,12 @@ mod tests {
     #[test]
     fn forwarded_for_appends_rather_than_replacing() {
         let mut map = headers(&[("x-forwarded-for", "203.0.113.1")]);
-        add_forwarded(&mut map, Some("198.51.100.7".parse().expect("ip")), None);
+        add_forwarded(
+            &mut map,
+            Some("198.51.100.7".parse().expect("ip")),
+            None,
+            Scheme::Http,
+        );
 
         assert_eq!(
             map.get("x-forwarded-for").and_then(|v| v.to_str().ok()),
@@ -449,10 +488,22 @@ mod tests {
     }
 
     #[test]
+    fn a_tls_listener_reports_https_upstream() {
+        // An upstream generating absolute URLs from this header would emit
+        // http:// links into an https:// page otherwise.
+        let mut map = HeaderMap::new();
+        add_forwarded(&mut map, None, None, Scheme::Https);
+        assert_eq!(
+            map.get("x-forwarded-proto").and_then(|v| v.to_str().ok()),
+            Some("https")
+        );
+    }
+
+    #[test]
     fn forwarded_host_records_the_name_the_client_used() {
         let mut map = HeaderMap::new();
         let host = HeaderValue::from_static("api.example.com");
-        add_forwarded(&mut map, None, Some(&host));
+        add_forwarded(&mut map, None, Some(&host), Scheme::Http);
 
         assert_eq!(
             map.get("x-forwarded-host").and_then(|v| v.to_str().ok()),

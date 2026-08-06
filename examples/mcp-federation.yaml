@@ -17,6 +17,15 @@ config:
     maxConcurrentRequests: 256
 
 binds:
+  # A TLS listener. ALPN advertises h2 and http/1.1; one certificate per port,
+  # since SNI-based selection is not available.
+  # - port: 8443
+  #   listeners:
+  #     - protocol: HTTPS
+  #       tls:
+  #         cert: /etc/certs/tls.crt
+  #         key: /etc/certs/tls.key
+  #       routes: [...]
   - port: 3000
     listeners:
       - routes:

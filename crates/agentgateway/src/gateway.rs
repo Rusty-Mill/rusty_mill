@@ -19,7 +19,8 @@ use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
 use agentgateway_mcp::Federation;
-use agentgateway_proxy::HostProxy;
+use agentgateway_proxy::{HostProxy, Scheme};
+use agentgateway_tls::{TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use http::{HeaderMap, Request, StatusCode, header};
@@ -37,6 +38,7 @@ type McpService = StreamableHttpService<Federation, LocalSessionManager>;
 pub struct Gateway {
     router: Router,
     routes: Vec<RouteState>,
+    tls: TlsBinds,
 }
 
 /// Per-route serving state.
@@ -74,6 +76,9 @@ impl Gateway {
         instruments: Option<Arc<Instruments>>,
     ) -> anyhow::Result<Self> {
         let router = Router::build(config)?;
+        // Certificates are read here, so a missing or malformed one stops the
+        // gateway booting rather than failing every handshake later.
+        let tls = TlsBinds::build(config)?;
         let default_timeout = config
             .config
             .as_ref()
@@ -205,7 +210,12 @@ impl Gateway {
             };
         }
 
-        Ok(Gateway { router, routes })
+        Ok(Gateway { router, routes, tls })
+    }
+
+    /// The TLS terminator for `port`, if that bind terminates TLS.
+    pub fn tls(&self, port: u16) -> Option<std::sync::Arc<TlsTerminator>> {
+        self.tls.get(port)
     }
 
     /// Ports the gateway needs sockets on.
@@ -218,6 +228,7 @@ impl Gateway {
         &self,
         port: u16,
         peer: Option<IpAddr>,
+        scheme: Scheme,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response, Infallible> {
         let Some(selection) = self.router.select(port, &request) else {
@@ -271,7 +282,7 @@ impl Gateway {
             return Ok(with_cors(reject(&rejection), cors_headers));
         }
 
-        let call = self.dispatch(state, &selection, peer, request);
+        let call = self.dispatch(state, &selection, peer, scheme, request);
 
         let response = match state.timeout {
             Some(budget) => match tokio::time::timeout(budget, call).await {
@@ -299,6 +310,7 @@ impl Gateway {
         state: &RouteState,
         selection: &agentgateway_core::Selection<'_>,
         peer: Option<IpAddr>,
+        scheme: Scheme,
         request: Request<hyper::body::Incoming>,
     ) -> Response {
         match &state.backend {
@@ -324,7 +336,7 @@ impl Gateway {
                 }
             },
             BackendState::Host(proxy) => proxy
-                .proxy(request, selection.matched_prefix.as_deref(), peer)
+                .proxy(request, selection.matched_prefix.as_deref(), peer, scheme)
                 .await
                 .map(Body::new),
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),

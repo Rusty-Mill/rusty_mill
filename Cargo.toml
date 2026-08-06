@@ -5,6 +5,7 @@ members = [
     "crates/agentgateway-auth",
     "crates/agentgateway-mcp",
     "crates/agentgateway-proxy",
+    "crates/agentgateway-tls",
     "crates/agentgateway-core",
     "crates/agentgateway",
 ]
@@ -22,6 +23,7 @@ agentgateway-auth = { path = "crates/agentgateway-auth", version = "0.1.0" }
 agentgateway-core = { path = "crates/agentgateway-core", version = "0.1.0" }
 agentgateway-mcp = { path = "crates/agentgateway-mcp", version = "0.1.0" }
 agentgateway-proxy = { path = "crates/agentgateway-proxy", version = "0.1.0" }
+agentgateway-tls = { path = "crates/agentgateway-tls", version = "0.1.0" }
 
 rmcp = { version = "3.1", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

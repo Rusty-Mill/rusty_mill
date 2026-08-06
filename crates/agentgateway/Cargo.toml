@@ -22,6 +22,7 @@ agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
 agentgateway-mcp = { workspace = true }
 agentgateway-proxy = { workspace = true }
+agentgateway-tls = { workspace = true }
 
 rmcp = { workspace = true, features = [
     "server",
@@ -35,8 +36,17 @@ tokio-util = { workspace = true }
 tower-service = "0.3"
 http = { workspace = true }
 http-body-util = { workspace = true }
-hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["client-legacy", "http1", "tokio", "server", "service"] }
+# `http2` is load-bearing and must not be "tidied away": the TLS listener
+# advertises `h2` over ALPN, and a server that negotiates a protocol it cannot
+# speak closes the connection after a successful handshake -- which looks like
+# a network fault rather than a missing feature flag.
+#
+# No test can protect this. Cargo unifies features across a build and the dev
+# dependencies enable `hyper/http2` anyway, so the test binary always has it
+# while the shipped binary has only what is listed here. Verify with curl
+# against the built binary, not with `cargo test`.
+hyper = { workspace = true, features = ["http1", "http2", "server"] }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio", "server", "service"] }
 tower = { workspace = true, features = ["util"] }
 bytes = { workspace = true }
 clap = { workspace = true }
@@ -57,10 +67,11 @@ rmcp = { workspace = true, features = [
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process"] }
 tokio-util = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "http2"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 base64 = "0.22"
 rsa = "0.9"
 rand = "0.8"
 tempfile = "3"
+rcgen = "0.13"
 axum = { workspace = true, features = ["json", "tokio", "http1"] }
