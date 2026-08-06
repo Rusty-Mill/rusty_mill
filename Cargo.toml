@@ -39,6 +39,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-native-certs = "0.8"
 ring = "0.17"
 regex = "1"
+jsonwebtoken = "9"
 
 rp-core = { path = "crates/core" }
 rp-providers = { path = "crates/providers" }

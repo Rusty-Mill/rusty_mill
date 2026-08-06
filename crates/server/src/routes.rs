@@ -27,9 +27,24 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 /// Accepts either the legacy shared `server.api_key_env` token or any
 /// configured `[[clients]]` key. Auth is skipped entirely if neither is
 /// configured.
-pub fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Response> {
-    let client_keys = state.client_keys.read().unwrap();
-    if state.api_key.is_none() && client_keys.is_empty() {
+pub async fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+    // Scoped to a block, not just an explicit `drop()` -- a std::sync
+    // RwLockReadGuard held across the JWT check's `.await` below isn't
+    // just bad practice, axum's Send-future requirement on handlers means
+    // it wouldn't compile; a block guarantees the guard's lifetime ends
+    // at `}`, which the compiler can actually see, more reliably than an
+    // explicit `drop()` call does for this exact pattern.
+    let (no_auth_configured, legacy_or_client_ok) = {
+        let client_keys = state.client_keys.read().unwrap();
+        let no_auth_configured =
+            state.api_key.is_none() && client_keys.is_empty() && state.jwt.is_none();
+        let ok = bearer_token(headers).is_some_and(|token| {
+            state.api_key.as_deref() == Some(token) || client_keys.contains_key(token)
+        });
+        (no_auth_configured, ok)
+    };
+
+    if no_auth_configured {
         return None;
     }
 
@@ -37,14 +52,22 @@ pub fn check_auth(state: &AppState, headers: &HeaderMap) -> Option<Response> {
         return Some(json_error(401, "missing or invalid API key"));
     };
 
-    let legacy_ok = state.api_key.as_deref() == Some(token);
-    let client_ok = client_keys.contains_key(token);
-
-    if legacy_ok || client_ok {
-        None
-    } else {
-        Some(json_error(401, "missing or invalid API key"))
+    if legacy_or_client_ok {
+        return None;
     }
+
+    // A JWT that fails verification (bad signature, expired, wrong
+    // issuer/audience, unreachable JWKS endpoint) falls through to the
+    // same 401 below as any other bad token -- JwtVerifier::verify is
+    // fail-closed by construction (see its own doc comment), so there's
+    // no separate "JWT backend unavailable" case to special-case here.
+    if let Some(jwt) = &state.jwt {
+        if jwt.verify(token).await.is_some() {
+            return None;
+        }
+    }
+
+    Some(json_error(401, "missing or invalid API key"))
 }
 
 /// Who a `/v1/admin/*` request is authorized as, once `check_admin_auth`
@@ -253,6 +276,7 @@ mod tests {
             clients: Arc::new(std::sync::RwLock::new(vec![])),
             admin_key: None,
             max_body_bytes: 20 * 1024 * 1024,
+            jwt: None,
         }
     }
 
@@ -614,7 +638,7 @@ pub async fn ready(State(state): State<AppState>) -> Response {
 }
 
 pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -651,7 +675,7 @@ struct UsageEntry {
 }
 
 pub async fn usage_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -679,7 +703,7 @@ struct FreeTierEntry {
 /// entries are configured, same "nothing to report" shape every other
 /// list endpoint here uses.
 pub async fn free_tiers(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -701,7 +725,7 @@ struct ProviderStatsEntry {
 }
 
 pub async fn provider_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -725,7 +749,7 @@ pub async fn generation(
     headers: HeaderMap,
     Query(query): Query<GenerationQuery>,
 ) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -736,7 +760,7 @@ pub async fn generation(
 }
 
 pub async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -1199,7 +1223,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     Json(req): Json<ChatRequest>,
 ) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 
@@ -1229,7 +1253,7 @@ pub async fn embeddings(
     headers: HeaderMap,
     Json(req): Json<EmbeddingsRequest>,
 ) -> Response {
-    if let Some(resp) = check_auth(&state, &headers) {
+    if let Some(resp) = check_auth(&state, &headers).await {
         return resp;
     }
 

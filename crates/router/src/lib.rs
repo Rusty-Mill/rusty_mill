@@ -21,9 +21,9 @@ use cache::{ResponseCache, SemanticCache};
 use client_budget::{ClientBudgetSetting, SpendState};
 pub use config::{
     AutoRoutingConfig, BudgetPeriod, CacheConfig, CacheMode, ClientConfig, ClientRole, Config,
-    FreeTierEntry, GuardrailAction, GuardrailConfig, ModerationConfig, PersistenceBackend,
-    PersistenceConfig, PostgresTlsMode, PresetConfig, PricingEntry, ProviderConfig, ProviderKind,
-    RouteAlias, ServerConfig, WebSearchConfig, WebhookConfig,
+    FreeTierEntry, GuardrailAction, GuardrailConfig, JwtConfig, ModerationConfig,
+    PersistenceBackend, PersistenceConfig, PostgresTlsMode, PresetConfig, PricingEntry,
+    ProviderConfig, ProviderKind, RouteAlias, ServerConfig, WebSearchConfig, WebhookConfig,
 };
 pub use error::RouterError;
 pub use free_tiers::FreeTierStatus;

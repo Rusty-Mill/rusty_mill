@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 use rp_core::RateLimiter;
 use rp_router::{ClientConfig, Router};
 
+use crate::jwt::JwtVerifier;
+
 #[derive(Clone)]
 pub struct AppState {
     /// Owns per-client spend budget tracking (`Router::check_client_budget`/
@@ -44,4 +46,12 @@ pub struct AppState {
     /// applied as a `DefaultBodyLimit` layer over the whole router in
     /// `build_app`.
     pub max_body_bytes: usize,
+    /// JWT/OIDC verifier, if `[jwt]` was configured and at least one of
+    /// its modes (`hs256_secret_env` resolved, or `jwks_url` set)
+    /// actually activated. `None` means a presented bearer token can only
+    /// ever satisfy `api_key`/`client_keys` above, same as before this
+    /// field existed. Only consulted by `check_auth`, never
+    /// `check_admin_auth` -- `/v1/admin/*` stays `admin_key`/admin-role
+    /// clients only.
+    pub jwt: Option<Arc<JwtVerifier>>,
 }

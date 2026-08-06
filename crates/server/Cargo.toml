@@ -20,7 +20,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
 ring.workspace = true
+reqwest.workspace = true
+jsonwebtoken.workspace = true
 
 [dev-dependencies]
 wiremock.workspace = true
-reqwest.workspace = true
