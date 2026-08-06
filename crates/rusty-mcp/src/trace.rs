@@ -175,11 +175,64 @@ impl TraceContext {
         }
     }
 
+    /// Make `span` a genuine child of the caller's span.
+    ///
+    /// Requires the `otel` feature and an installed
+    /// [`tracing_opentelemetry`] layer — see [`crate::otel`]. Without one this
+    /// is inert, so calling it unconditionally is safe.
+    ///
+    /// This is what [`TraceContext::span`] alone cannot do: `tracing` has no
+    /// notion of a remote parent, so its fields correlate logs but leave the
+    /// trace as separate trees per service. Attaching the parent joins them.
+    #[cfg(feature = "otel")]
+    pub fn attach_parent(&self, span: &tracing::Span) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+
+        if let Err(err) = span.set_parent(self.otel_context()) {
+            // The usual cause is no OpenTelemetry layer on the subscriber, which
+            // is a legitimate configuration — the span simply stays a root. Log
+            // at debug rather than warn so a server running without an exporter
+            // is not noisy about it.
+            tracing::debug!(%err, "could not attach the remote parent to this span");
+        }
+    }
+
+    /// The caller's span as an OpenTelemetry [`Context`](opentelemetry::Context).
+    ///
+    /// Marked remote, which is what tells the SDK this parent came off the wire
+    /// rather than from this process.
+    #[cfg(feature = "otel")]
+    pub fn otel_context(&self) -> opentelemetry::Context {
+        use std::str::FromStr as _;
+
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt as _, TraceId, TraceState,
+        };
+
+        let trace_id = TraceId::from_hex(&self.trace_id).unwrap_or(TraceId::INVALID);
+        let span_id = SpanId::from_hex(&self.parent_span_id).unwrap_or(SpanId::INVALID);
+        let trace_state = self
+            .tracestate
+            .as_deref()
+            .and_then(|raw| TraceState::from_str(raw).ok())
+            .unwrap_or_default();
+
+        opentelemetry::Context::new().with_remote_span_context(SpanContext::new(
+            trace_id,
+            span_id,
+            opentelemetry::trace::TraceFlags::new(self.trace_flags),
+            // Remote: the parent is another service's span.
+            true,
+            trace_state,
+        ))
+    }
+
     /// An `INFO` span named `name`, carrying the trace ids as fields.
     ///
     /// Fields rather than a real parent link: `tracing` alone cannot adopt a
-    /// remote parent. This is enough to correlate logs, and a
-    /// `tracing-opentelemetry` layer can build the real link from the same ids.
+    /// remote parent. This is enough to correlate logs. For an actual parent
+    /// edge in a trace viewer, enable the `otel` feature and follow up with
+    /// [`TraceContext::attach_parent`].
     pub fn span(&self, name: &'static str) -> tracing::Span {
         tracing::info_span!(
             "mcp.request",
