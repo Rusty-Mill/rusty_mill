@@ -20,8 +20,9 @@ use agentgateway_auth::{AuthRejection, Authorization, ExtAuthz, JwtAuthenticator
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
 use agentgateway_llm::LlmBackend;
+use agentgateway_mcp::Override as McpOverride;
 use agentgateway_mcp::{Federation, TokenClaims};
-use agentgateway_proxy::{Headers, HostProxy, RequestBody, Scheme};
+use agentgateway_proxy::{Headers, HostProxy, RequestBody, Rewrite, Scheme};
 use agentgateway_tls::{TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
@@ -43,6 +44,85 @@ pub struct Gateway {
     router: Router,
     routes: Vec<RouteState>,
     tls: TlsBinds,
+}
+
+/// Resolve a route's `urlRewrite` into the parts of a single MCP target's
+/// address it replaces.
+///
+/// An MCP route terminates the protocol rather than forwarding a request line,
+/// so the path a rewrite acts on is the target's own configured path rather
+/// than anything derived from the request — the session is dialled once at
+/// startup, long before a request exists. `prefix` therefore replaces the
+/// route's matched path prefix at the head of *that* path, which is the same
+/// operation the proxy performs, on the only path this model has.
+///
+/// Empty unless there is exactly one target: with more than one, "the address"
+/// has no answer. `Config::lint` reports every case this returns nothing for.
+fn mcp_override(
+    policies: &agentgateway_config::Policies,
+    matches: &[agentgateway_core::RouteMatcher],
+    backend: &agentgateway_config::McpBackend,
+    at: &str,
+) -> anyhow::Result<McpOverride> {
+    let single = (backend.targets.len() == 1).then(|| &backend.targets[0]);
+    let Some((rewrite, target)) = policies.url_rewrite.as_ref().zip(single) else {
+        return Ok(McpOverride::default());
+    };
+    // Only an `mcp:` target has an address; a `stdio` one speaks over a pipe.
+    let agentgateway_config::McpTargetKind::Mcp(http) = &target.kind else {
+        return Ok(McpOverride::default());
+    };
+
+    let authority = match rewrite.authority.as_deref() {
+        // An authority may legally hold `user:password@`, and that is the
+        // problem: a credential in an upstream URI hides somewhere nobody
+        // thinks to look and is sent on every request. `backendAuth` is where
+        // one belongs.
+        Some(raw) if raw.contains('@') => anyhow::bail!(
+            "{at}.urlRewrite.authority: `{raw}` is not a valid authority: userinfo does not              belong in an upstream address, use `backendAuth`"
+        ),
+        Some(raw) => Some(http::uri::Authority::try_from(raw).map_err(|_| {
+            anyhow::anyhow!("{at}.urlRewrite.authority: `{raw}` is not a valid authority")
+        })?),
+        None => None,
+    };
+
+    Ok(McpOverride {
+        path: mcp_path(rewrite, matches, &http.path),
+        authority,
+    })
+}
+
+/// The replacement path, if the rewrite names one this route can resolve.
+fn mcp_path(
+    rewrite: &agentgateway_config::UrlRewrite,
+    matches: &[agentgateway_core::RouteMatcher],
+    configured: &str,
+) -> Option<String> {
+    use agentgateway_config::PathRewrite;
+
+    // `Rewrite` rather than a second implementation of the same rules: a
+    // `prefix` that trimmed slashes differently here than on the proxy path
+    // would be a difference nobody could predict from the config.
+    let compiled = Rewrite::new(rewrite, "").ok()?;
+
+    let matched_prefix = match &rewrite.path {
+        Some(PathRewrite::Prefix(_)) => {
+            // Which prefix a request matched is not knowable at startup unless
+            // the route offers exactly one.
+            let mut prefixes = matches
+                .iter()
+                .filter_map(agentgateway_core::RouteMatcher::path_prefix);
+            let only = prefixes.next()?;
+            if prefixes.next().is_some() {
+                return None;
+            }
+            Some(only)
+        }
+        _ => None,
+    };
+
+    compiled.path(configured, matched_prefix)
 }
 
 /// Per-route serving state.
@@ -171,7 +251,7 @@ impl Gateway {
                         route.policies.mcp_authorization.as_ref(),
                         route.policies.mcp_guardrails.as_ref(),
                         route.policies.request_header_modifier.as_ref(),
-                        route.policies.url_rewrite.as_ref(),
+                        mcp_override(&route.policies, &route.matches, mcp, &at)?,
                         backend_timeout,
                         &at,
                     )

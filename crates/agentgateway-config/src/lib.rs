@@ -387,18 +387,28 @@ impl Route {
 
         let at = format!("{at}.policies.urlRewrite");
 
-        if let Some(PathRewrite::Prefix(_)) = &rewrite.path {
-            findings.push(format!(
-                "{at}.path.prefix: the upstream path of an `mcp` target is its own \
-                 configuration rather than something derived from the request, so there is \
-                 no matched prefix to replace; use `full`"
-            ));
+        // A `prefix` rewrite replaces whatever the route matched. Which prefix
+        // a request matched is not knowable when the target is dialled, which
+        // happens once at startup -- unless the route offers exactly one.
+        if matches!(rewrite.path, Some(PathRewrite::Prefix(_))) {
+            let prefixes = self
+                .matches
+                .iter()
+                .filter(|m| matches!(m.path, Some(PathMatch::PathPrefix(_))))
+                .count();
+            if prefixes != 1 {
+                findings.push(format!(
+                    "{at}.path.prefix: replacing the matched prefix needs the route to match \
+                     on exactly one `pathPrefix`, and this one matches on {prefixes}; use \
+                     `full` to set the upstream path outright"
+                ));
+            }
         }
 
-        // `path.full` and `authority` both replace part of the single address
-        // the gateway dials, so they stand or fall together.
+        // All three replace part of the single address the gateway dials, so
+        // they stand or fall together on the target conditions.
         let overrides: Vec<&str> = [
-            matches!(rewrite.path, Some(PathRewrite::Full(_))).then_some("path"),
+            rewrite.path.is_some().then_some("path"),
             rewrite.authority.is_some().then_some("authority"),
         ]
         .into_iter()
