@@ -166,12 +166,18 @@ pub struct PtySpawn {
 /// Lifecycle, since ownership is split across `PtySpawn`'s three fields:
 /// `reader`, `writer`, and `control` are each independently droppable —
 /// dropping one does not drop or close the others. Dropping `control`
-/// closes the pty master, which hangs up the child (SIGHUP-equivalent on
-/// Unix, the ConPTY-equivalent on Windows) but does **not** explicitly
-/// kill it and does **not** reap it. `wait` is the only way to reap the
-/// child and obtain its exit status; it blocks and has a single owner —
-/// there is no way for more than one caller to await it. There is no
-/// `kill`/`terminate` method in this spike (see CONTRACT.md).
+/// alone drops only the `MasterPty` handle it holds; `reader` and
+/// `writer` are independently-owned clones of the master's read/write
+/// ends (`portable-pty`'s `try_clone_reader`/`take_writer`) and are
+/// **not** closed by dropping `control` by itself. Whether dropping
+/// `control` alone is sufficient to hang up the child is host- and
+/// `portable-pty`-handle-ownership-dependent and is **not verified** by
+/// this spike's tests — do not depend on it. The only guaranteed way to
+/// end a session is to drop `reader`, `writer`, and `control` together,
+/// or let the child exit on its own and call `wait` to reap it. `wait`
+/// blocks and has a single owner — there is no way for more than one
+/// caller to await it. There is no `kill`/`terminate` method in this
+/// spike (see CONTRACT.md).
 pub trait PtyControl: Send {
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
     fn wait(&mut self) -> Result<i32>;

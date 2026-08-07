@@ -16,7 +16,7 @@ Windows (MSVC), Linux, macOS. x86_64 and aarch64.
 | Filesystem ops | Open/read/write/stat/list/create/remove within a scoped root | `cap-std` |
 | File locking | Advisory exclusive/shared locks, best-effort on all hosts | `std::fs::File` (stable since 1.89) |
 | Process spawn | Spawn with explicit argv/env/cwd, inherit or capture stdout/stderr, block until exit | `std::process` |
-| Stdio / PTY | Byte-stream stdio always; interactive PTY where the capability model reports `pty: true` | `portable-pty` |
+| Stdio / PTY | Byte-stream stdio always; interactive PTY as an unconditional baseline on all three supported hosts | `portable-pty` |
 | Environment variables | Read/write current-process env as UTF-8 `HashMap<String, String>` | `std::env` |
 | Standard directories | Per-OS config/cache/data dirs for a named app, deterministic | `dirs` |
 | Errors | Structured `ContractError` — `PathEscape`/`NotFound`/`PermissionDenied`/`Unsupported` are stable categories; `Io` is the explicit fallback with the OS error retained as `source` for diagnostics only, never for callers to match on | `thiserror` |
