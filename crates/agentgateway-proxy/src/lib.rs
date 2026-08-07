@@ -24,10 +24,9 @@ use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
 
 pub use balance::{BalanceError, Endpoints};
-pub use retry::{MAX_REPLAY_BYTES, Retry};
+pub use retry::{MAX_REPLAY_BYTES, RequestBody, Retry};
 pub use transform::{HeaderError, Headers, RewriteError, Rewrite, Scheme};
 
-use retry::RequestBody;
 
 /// Failure to build a proxy from configuration.
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +131,7 @@ impl HostProxy {
     /// `X-Forwarded-Proto`.
     pub async fn proxy(
         &self,
-        request: Request<Incoming>,
+        request: Request<RequestBody>,
         matched_prefix: Option<&str>,
         peer: Option<IpAddr>,
         scheme: Scheme,
@@ -168,7 +167,7 @@ impl HostProxy {
                     return error(StatusCode::BAD_REQUEST, "could not read the request body");
                 }
             },
-            _ => RequestBody::Stream(body),
+            _ => body,
         };
 
         let attempts = match (&self.retry, &body) {

@@ -18,13 +18,16 @@ use std::time::Duration;
 use agentgateway_auth::{AuthRejection, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
+use agentgateway_a2a::{A2aGateway, Decision};
 use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Federation;
-use agentgateway_proxy::{HostProxy, Scheme};
+use agentgateway_proxy::{HostProxy, RequestBody, Scheme};
 use agentgateway_tls::{TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
+use bytes::Bytes;
 use http::{HeaderMap, Request, StatusCode, header};
+use http_body_util::BodyExt as _;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -59,7 +62,13 @@ enum BackendState {
         metrics: Option<McpMetricsLayer>,
     },
     /// One or more `host` upstreams, proxied over HTTP.
-    Host(HostProxy),
+    ///
+    /// `a2a` is present when the route carries Agent2Agent traffic, which adds
+    /// method gating and agent-card discovery in front of the same proxy.
+    Host {
+        proxy: HostProxy,
+        a2a: Option<A2aGateway>,
+    },
     /// An LLM provider behind an OpenAI-compatible API.
     Ai(LlmBackend),
     /// A backend we parsed but cannot serve. The reason is returned to the
@@ -193,7 +202,23 @@ impl Gateway {
                                 endpoints = proxy.endpoint_count(),
                                 "host backend ready"
                             );
-                            BackendState::Host(proxy)
+
+                            let a2a = match route.policies.a2a.as_ref() {
+                                Some(policy) => {
+                                    let agents: Vec<String> = route
+                                        .backends
+                                        .iter()
+                                        .filter_map(|b| match &b.target {
+                                            BackendTarget::Host(host) => Some(host.clone()),
+                                            _ => None,
+                                        })
+                                        .collect();
+                                    Some(A2aGateway::build(policy, &agents, &at).await?)
+                                }
+                                None => None,
+                            };
+
+                            BackendState::Host { proxy, a2a }
                         }
                     }
                 }
@@ -347,10 +372,64 @@ impl Gateway {
                     }
                 }
             },
-            BackendState::Host(proxy) => proxy
-                .proxy(request, selection.matched_prefix.as_deref(), peer, scheme)
-                .await
-                .map(Body::new),
+            BackendState::Host { proxy, a2a } => {
+                let (parts, body) = request.into_parts();
+                let prefix = selection.matched_prefix.as_deref();
+
+                let Some(a2a) = a2a else {
+                    let request = Request::from_parts(parts, RequestBody::Stream(body));
+                    return proxy
+                        .proxy(request, prefix, peer, scheme)
+                        .await
+                        .map(Body::new);
+                };
+
+                // Discovery is answered here rather than forwarded: the point
+                // of the merged card is that it names the gateway, and an
+                // agent's own card names the agent.
+                if a2a.is_card_request(&parts.method, parts.uri.path()) {
+                    return match a2a.card() {
+                        Some(card) => json(StatusCode::OK, Bytes::copy_from_slice(card)),
+                        None => status(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "no agent card could be assembled from the agents behind this route",
+                        ),
+                    };
+                }
+
+                // Gating needs the method, and the method is in the body, so
+                // the body has to be read. It is handed to the proxy already
+                // buffered rather than re-read.
+                let Ok(collected) = body.collect().await else {
+                    return status(StatusCode::BAD_REQUEST, "could not read the request body");
+                };
+                let bytes = collected.to_bytes();
+
+                match a2a.check(&bytes) {
+                    Decision::Refused { method, body } => {
+                        tracing::info!(method = %method, "refusing an A2A method");
+                        // 200 with a JSON-RPC error object, not an HTTP error:
+                        // that is where a JSON-RPC client looks, and an A2A
+                        // client parsing the envelope would otherwise see a
+                        // transport failure instead of the reason.
+                        return json(StatusCode::OK, Bytes::from(body));
+                    }
+                    Decision::Permitted { method } => {
+                        tracing::debug!(
+                            method = %method,
+                            task = ?agentgateway_a2a::task_id(&bytes),
+                            "forwarding an A2A call"
+                        );
+                    }
+                    Decision::NotJsonRpc => {}
+                }
+
+                let request = Request::from_parts(parts, RequestBody::Buffered(bytes));
+                proxy
+                    .proxy(request, prefix, peer, scheme)
+                    .await
+                    .map(Body::new)
+            }
             BackendState::Ai(backend) => backend.handle(request).await.map(Body::new),
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
@@ -392,6 +471,15 @@ fn kind_name(target: &BackendTarget) -> &'static str {
         BackendTarget::Ai(_) => "ai",
         BackendTarget::Dynamic(_) => "dynamic",
     }
+}
+
+fn json(code: StatusCode, body: Bytes) -> Response {
+    (
+        code,
+        [(header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 fn status(code: StatusCode, message: &str) -> Response {

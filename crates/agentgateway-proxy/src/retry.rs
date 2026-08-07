@@ -90,11 +90,16 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 ///
 /// Only a body whose length is known up front qualifies. Reading to find out
 /// would leave a partially consumed stream that can be neither replayed nor
-/// forwarded intact.
-pub fn is_replayable(body: &Incoming) -> bool {
-    body.size_hint()
-        .upper()
-        .is_some_and(|upper| upper <= MAX_REPLAY_BYTES)
+/// forwarded intact. A body that arrived already buffered -- because a policy
+/// upstream had to read it -- is replayable by construction.
+pub fn is_replayable(body: &RequestBody) -> bool {
+    match body {
+        RequestBody::Buffered(_) => true,
+        RequestBody::Stream(stream) => stream
+            .size_hint()
+            .upper()
+            .is_some_and(|upper| upper <= MAX_REPLAY_BYTES),
+    }
 }
 
 /// The body of a request on its way upstream.

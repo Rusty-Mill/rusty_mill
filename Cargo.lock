@@ -6,6 +6,7 @@ version = 4
 name = "agentgateway"
 version = "0.1.0"
 dependencies = [
+ "agentgateway-a2a",
  "agentgateway-auth",
  "agentgateway-config",
  "agentgateway-core",
@@ -38,6 +39,21 @@ dependencies = [
  "tower-service",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agentgateway-a2a"
+version = "0.1.0"
+dependencies = [
+ "agentgateway-config",
+ "http",
+ "regex",
+ "reqwest",
+ "rusty_a2a",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2494,6 +2510,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty_a2a"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_a2a?rev=b9778e1#b9778e1fbc9f57efa3b3d6687242f5e5a886ea39"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rusty_libc"
 version = "0.0.1"
 source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
@@ -3333,6 +3363,7 @@ checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
  "wasm-bindgen",
 ]
 
