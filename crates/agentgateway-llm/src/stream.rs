@@ -272,10 +272,7 @@ mod tests {
             "message_start",
             &json!({"message": {"id": "msg_1", "model": "claude-sonnet-4"}}),
         );
-        let chunks = t.event(
-            "content_block_delta",
-            &json!({"delta": {"text": "x"}}),
-        );
+        let chunks = t.event("content_block_delta", &json!({"delta": {"text": "x"}}));
         for chunk in chunks {
             assert_eq!(chunk["id"], "msg_1");
             assert_eq!(chunk["model"], "claude-sonnet-4");
@@ -298,13 +295,24 @@ mod tests {
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0]["choices"][0]["finish_reason"], "length");
-        assert_eq!(t.usage(), Usage { prompt: 4, completion: 7 });
+        assert_eq!(
+            t.usage(),
+            Usage {
+                prompt: 4,
+                completion: 7
+            }
+        );
     }
 
     #[test]
     fn events_without_an_openai_counterpart_emit_nothing() {
         let mut t = translator();
-        for event in ["ping", "content_block_start", "content_block_stop", "message_stop"] {
+        for event in [
+            "ping",
+            "content_block_start",
+            "content_block_stop",
+            "message_stop",
+        ] {
             assert!(
                 t.event(event, &json!({})).is_empty(),
                 "{event} should not produce a chunk"
@@ -318,7 +326,11 @@ mod tests {
 
         // A partial event must stay buffered rather than parse as truncated
         // JSON -- this is the whole reason the parser holds state.
-        assert!(parser.push(b"event: message_start\ndata: {\"mes").is_empty());
+        assert!(
+            parser
+                .push(b"event: message_start\ndata: {\"mes")
+                .is_empty()
+        );
 
         let events = parser.push(b"sage\": {\"id\": \"m\"}}\n\n");
         assert_eq!(events.len(), 1);
@@ -329,9 +341,7 @@ mod tests {
     #[test]
     fn several_events_in_one_chunk_all_come_out() {
         let mut parser = EventParser::default();
-        let events = parser.push(
-            b"event: a\ndata: {\"n\": 1}\n\nevent: b\ndata: {\"n\": 2}\n\n",
-        );
+        let events = parser.push(b"event: a\ndata: {\"n\": 1}\n\nevent: b\ndata: {\"n\": 2}\n\n");
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].0, "a");
         assert_eq!(events[1].1["n"], 2);

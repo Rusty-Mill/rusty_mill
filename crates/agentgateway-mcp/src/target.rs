@@ -10,7 +10,7 @@ use agentgateway_config::{McpTarget, McpTargetKind};
 use rmcp::{
     RoleClient, ServiceExt,
     service::RunningService,
-    transport::{TokioChildProcess, StreamableHttpClientTransport},
+    transport::{StreamableHttpClientTransport, TokioChildProcess},
 };
 
 use crate::gate::{GateError, TargetFilter};

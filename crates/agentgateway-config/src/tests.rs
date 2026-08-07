@@ -43,7 +43,10 @@ fn parses_the_upstream_mcp_quickstart() {
     assert_eq!(cors.expose_headers, ["Mcp-Session-Id"]);
 
     let BackendTarget::Mcp(mcp) = &route.backends[0].target else {
-        panic!("expected an mcp backend, got {:?}", route.backends[0].target);
+        panic!(
+            "expected an mcp backend, got {:?}",
+            route.backends[0].target
+        );
     };
     let target = &mcp.targets[0];
     assert_eq!(target.name, "everything");
@@ -377,6 +380,103 @@ binds:
     assert!(
         !findings.iter().any(|f| f.contains("`ai` backend")),
         "the ai backend is served now and must not be reported as inert: {findings:?}"
+    );
+}
+
+#[test]
+fn authorization_rules_parse_in_every_form_upstream_accepts() {
+    // A bare string is an allow, which is how upstream's own examples are
+    // written; the map forms carry the other two modes.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpAuthorization:
+                rules:
+                  - 'mcp.tool.name == "echo"'
+                  - allow: 'jwt.sub == "u1"'
+                  - deny: 'mcp.tool.name == "delete"'
+                  - require: 'jwt.iss == "https://auth.example.com"'
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let rules = &config.binds[0].listeners[0].routes[0]
+        .policies
+        .as_ref()
+        .expect("policies should be present")
+        .mcp_authorization
+        .as_ref()
+        .expect("policy should be present")
+        .rules;
+
+    assert_eq!(
+        rules,
+        &vec![
+            AuthorizationRule::Allow(r#"mcp.tool.name == "echo""#.into()),
+            AuthorizationRule::Allow(r#"jwt.sub == "u1""#.into()),
+            AuthorizationRule::Deny(r#"mcp.tool.name == "delete""#.into()),
+            AuthorizationRule::Require(r#"jwt.iss == "https://auth.example.com""#.into()),
+        ]
+    );
+}
+
+#[test]
+fn a_rule_naming_no_mode_is_rejected() {
+    // Rather than parsing to an empty rule that quietly does nothing.
+    let err = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpAuthorization:
+                rules:
+                  - comment: 'not a mode'
+            backends:
+              - host: "127.0.0.1:9"
+"#,
+    )
+    .expect_err("should not parse");
+    assert!(err.to_string().contains("one of"), "got: {err}");
+}
+
+#[test]
+fn rules_are_no_longer_reported_as_inert() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpAuthorization:
+                rules:
+                  - 'mcp.tool.name == "echo"'
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(
+        config.lint(),
+        Vec::<String>::new(),
+        "rules are evaluated now and must not be reported as parsed-but-inert"
     );
 }
 

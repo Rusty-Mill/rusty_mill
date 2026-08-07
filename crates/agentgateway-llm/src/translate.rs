@@ -97,7 +97,10 @@ pub fn to_anthropic(body: &Value) -> Result<Value, TranslateError> {
     let mut turns = Vec::new();
 
     for message in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or("user");
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
         let content = message.get("content").cloned().unwrap_or(Value::Null);
 
         match role {
@@ -200,7 +203,10 @@ pub fn finish_reason(stop_reason: Option<&str>) -> Value {
 pub fn anthropic_usage(body: &Value) -> Option<Usage> {
     let usage = body.get("usage")?;
     Some(Usage {
-        prompt: usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+        prompt: usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         completion: usage
             .get("output_tokens")
             .and_then(Value::as_u64)

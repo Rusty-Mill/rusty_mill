@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_config::{McpBackend, McpAuthorization};
+use agentgateway_config::{McpAuthorization, McpBackend};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -29,8 +29,17 @@ use tokio::sync::RwLock;
 use crate::{
     gate::{Authorization, GateError},
     naming::{Resolution, ToolNamer},
+    rules::{RuleError, RuleSet, ToolCall},
     target::Target,
 };
+
+/// The verified token's claims, carried on the HTTP request.
+///
+/// The gateway validates the token; `rules` needs what was in it. Passing the
+/// claims through the request extensions keeps that one-way: this crate never
+/// looks at a token, and nothing here can decide a request was authenticated.
+#[derive(Debug, Clone)]
+pub struct TokenClaims(pub serde_json::Value);
 
 /// Failure to build a federation.
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +47,10 @@ pub enum FederationError {
     /// A route policy's patterns did not compile.
     #[error(transparent)]
     Gate(#[from] GateError),
+
+    /// A route policy's CEL rules did not compile.
+    #[error(transparent)]
+    Rules(#[from] RuleError),
 
     /// Every target failed to come up, so there is nothing to serve.
     #[error("no MCP target could be reached; the federation would serve nothing")]
@@ -53,6 +66,7 @@ pub struct Federation {
 struct Inner {
     namer: ToolNamer,
     authorization: Authorization,
+    rules: RuleSet,
     /// Budget for a single upstream call.
     ///
     /// This is the timeout that actually bounds a tool call. A route's
@@ -87,9 +101,13 @@ impl Federation {
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
-        let authorization = match authorization {
-            Some(policy) => Authorization::new(policy, &format!("{at}.mcpAuthorization"))?,
-            None => Authorization::default(),
+        let at_policy = format!("{at}.mcpAuthorization");
+        let (authorization, rules) = match authorization {
+            Some(policy) => (
+                Authorization::new(policy, &at_policy)?,
+                RuleSet::new(&policy.rules, &at_policy)?,
+            ),
+            None => (Authorization::default(), RuleSet::default()),
         };
 
         let mut targets = Vec::new();
@@ -120,6 +138,7 @@ impl Federation {
             inner: Arc::new(Inner {
                 namer,
                 authorization,
+                rules,
                 backend_timeout,
                 targets,
                 degraded,
@@ -236,20 +255,32 @@ impl Federation {
     }
 }
 
+/// The verified token's claims for this request, if the route validated one.
+///
+/// `rmcp` puts the HTTP request's [`http::request::Parts`] into the request
+/// context, which is where the gateway leaves them.
+fn claims(context: &RequestContext<RoleServer>) -> Option<&serde_json::Value> {
+    context
+        .extensions
+        .get::<http::request::Parts>()?
+        .extensions
+        .get::<TokenClaims>()
+        .map(|claims| &claims.0)
+}
+
 impl ServerHandler for Federation {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(rmcp::model::Implementation::new(
-                "rusty-agent-gateway",
-                env!("CARGO_PKG_VERSION"),
-            ))
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+            rmcp::model::Implementation::new("rusty-agent-gateway", env!("CARGO_PKG_VERSION")),
+        )
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let claims = claims(&context);
         let mut tools: Vec<Tool> = Vec::new();
         let mut index = HashMap::new();
 
@@ -265,7 +296,22 @@ impl ServerHandler for Federation {
                 if !self.inner.authorization.permits(&federated) {
                     continue;
                 }
+
+                // The index is written from the caller-independent gate only.
+                // `rules` can decide differently for different callers, and an
+                // index rebuilt from one caller's view would delete the
+                // routing another caller needs. Nothing is authorized by being
+                // in it -- `call_tool` re-checks every gate.
                 index.insert(federated.clone(), target.name.clone());
+
+                if !self.inner.rules.permits(ToolCall {
+                    target: &target.name,
+                    tool: &tool.name,
+                    claims,
+                }) {
+                    continue;
+                }
+
                 tool.name = federated.into();
                 tools.push(tool);
             }
@@ -282,7 +328,7 @@ impl ServerHandler for Federation {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let federated = request.name.to_string();
 
@@ -302,6 +348,21 @@ impl ServerHandler for Federation {
                 None,
             ));
         };
+
+        // Rules are evaluated here rather than on the federated name, because
+        // they are written against the tool's own name and its target -- see
+        // the module docs on `rules`. Like every other gate this runs on the
+        // call, not only on the listing.
+        if !self.inner.rules.permits(ToolCall {
+            target: &target.name,
+            tool: &tool,
+            claims: claims(&context),
+        }) {
+            return Err(McpError::invalid_request(
+                format!("tool `{federated}` is not permitted on this route"),
+                None,
+            ));
+        }
 
         // The target's own filters gate the call too, for the same reason.
         if !target.filter.permits(&tool) {

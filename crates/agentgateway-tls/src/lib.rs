@@ -134,15 +134,12 @@ impl TlsTerminator {
         let certs = load_certs(&tls.cert, at)?;
         let key = load_key(&tls.key, at)?;
 
-        let acceptor = TlsAcceptor::new_with_alpn(
-            certs,
-            key,
-            ALPN.iter().map(|p| p.to_vec()).collect(),
-        )
-        .map_err(|source| TlsError::Acceptor {
-            at: at.to_string(),
-            source: Box::new(source),
-        })?;
+        let acceptor =
+            TlsAcceptor::new_with_alpn(certs, key, ALPN.iter().map(|p| p.to_vec()).collect())
+                .map_err(|source| TlsError::Acceptor {
+                    at: at.to_string(),
+                    source: Box::new(source),
+                })?;
 
         Ok(TlsTerminator { acceptor })
     }
@@ -241,13 +238,12 @@ fn load_key(path: &str, at: &str) -> Result<Vec<u8>, TlsError> {
     let file = open(path, at)?;
     // `private_key` accepts PKCS#8, PKCS#1 and SEC1 alike, so an operator does
     // not have to know which one their tooling emitted.
-    let key = rustls_pemfile::private_key(&mut BufReader::new(file)).map_err(|source| {
-        TlsError::Io {
+    let key =
+        rustls_pemfile::private_key(&mut BufReader::new(file)).map_err(|source| TlsError::Io {
             at: at.to_string(),
             path: path.to_string(),
             source,
-        }
-    })?;
+        })?;
 
     key.map(|key| key.secret_der().to_vec())
         .ok_or_else(|| TlsError::Empty {

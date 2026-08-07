@@ -20,7 +20,7 @@ use agentgateway_auth::{AuthRejection, Authorization, ExtAuthz, JwtAuthenticator
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
 use agentgateway_llm::LlmBackend;
-use agentgateway_mcp::Federation;
+use agentgateway_mcp::{Federation, TokenClaims};
 use agentgateway_proxy::{HostProxy, RequestBody, Scheme};
 use agentgateway_tls::{TlsBinds, TlsTerminator};
 use axum::body::Body;
@@ -325,16 +325,23 @@ impl Gateway {
         // `Authorization` on a preflight, so requiring a token there would
         // make every cross-origin call fail before the real request is ever
         // sent.
-        if let Some(jwt) = &state.jwt
-            && let Err(rejection) = jwt.authenticate(request.headers()).await
-        {
-            return Ok(with_cors(reject(&rejection), cors_headers));
+        let mut request = request;
+        if let Some(jwt) = &state.jwt {
+            match jwt.authenticate(request.headers()).await {
+                // The claims travel on the request so `mcpAuthorization.rules`
+                // can read `jwt.*`. Only a token this gateway verified is ever
+                // put here, so a rule cannot be fooled by a header a caller
+                // set itself.
+                Ok(token) => {
+                    request.extensions_mut().insert(TokenClaims(token.claims));
+                }
+                Err(rejection) => return Ok(with_cors(reject(&rejection), cors_headers)),
+            }
         }
 
         // External authorization runs last of the gates, so it is asked only
         // about requests that got past the cheap local ones -- and so an
         // authorizer can see the identity `jwtAuth` just verified.
-        let mut request = request;
         if let Some(authz) = &state.ext_authz {
             let decision = authz
                 .check(request.method(), request.uri().path(), request.headers())

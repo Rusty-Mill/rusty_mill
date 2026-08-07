@@ -59,7 +59,7 @@ tool's own name.
 | `agentgateway-config` | The configuration model. Wire-compatible with agentgateway's local config. |
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
 | `agentgateway-auth` | The `jwtAuth` and `extAuthz` policies. |
-| `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates. |
+| `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates, CEL rules. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
@@ -118,8 +118,9 @@ Implemented and tested:
   query — with percent-decoding, and Gateway API precedence
 - Hostname matching on listeners and routes, including single-label wildcards
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federation, tool
-  name qualification, per-target `filters`, route-level `mcpAuthorization`
-  (`allowTools` / `denyTools`)
+  name qualification, per-target `filters`, route-level `mcpAuthorization` —
+  both the `allowTools`/`denyTools` lists and upstream's CEL `rules`, see
+  [Tool authorization](#tool-authorization)
 - `host` backends: HTTP reverse proxying with weighted load balancing,
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
 - `retry` with backoff, and `localRateLimit` token buckets — see
@@ -148,8 +149,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 - `extAuthz.includeBody`: the authorizer sees the method, path and allow-listed
   headers, never the body
 - `service` backends (service discovery), `dynamic` backends
-- `mcpAuthorization.rules` (upstream's policy-expression form; the
-  `allowTools`/`denyTools` lists are ours and *are* enforced)
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
 - `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
@@ -245,6 +244,76 @@ unreachable authorizer and takes the fail-closed path.
 `includeHeaders: [authorization]` sees a token the gateway has already
 validated. `includeBody` parses but is not enforced — the authorizer never sees
 a request body, so a policy that depends on one will not do what it says.
+
+## Tool authorization
+
+An `mcpAuthorization` policy decides which federated tools a caller on the
+route may use. Two forms, and they compose:
+
+```yaml
+policies:
+  mcpAuthorization:
+    # Regexes over the federated name.
+    denyTools: ["_delete$"]
+    # CEL expressions over the call and the caller.
+    rules:
+      - 'mcp.tool.name == "echo"'
+      - 'jwt.sub == "test-user" && mcp.tool.name == "get-sum"'
+      - require: 'jwt.iss == "https://auth.example.com"'
+```
+
+`allowTools`/`denyTools` are name matching and nothing else. `rules` are
+upstream's CEL form, and are what you need when the answer depends on *who* is
+asking: `jwt` is the verified token's claims, so a rule can grant one tool to
+one subject and another to everyone.
+
+Every gate is enforced on `tools/call`, not only on `tools/list`. Filtering the
+catalogue alone is security theatre: nothing stops a client calling a name it
+was never shown, and a tool hidden from the listing but still callable is worse
+than one that was never hidden, because the operator believes it is gone.
+
+### A rule sees the unqualified name
+
+`mcp.tool.name` is the tool's own name on its target, and `mcp.tool.target` is
+the target — the pair *before* federation joins them. A tool federated as
+`everything_echo` is `mcp.tool.name == "echo"` with `mcp.tool.target ==
+"everything"`, so a rule written against `everything_echo` never fires.
+
+That is upstream's split, and it lets a rule name a tool without knowing what
+prefix the gateway will add. It is also the opposite of
+`allowTools`/`denyTools`, which match the federated name — which is what lets
+one route ban a tool on one target while leaving the same name on another
+alone. Both readings are right for their own form; the difference is worth
+knowing because getting it wrong makes a policy silently not apply.
+
+### Precedence
+
+1. No rules at all permits, so adding an empty `rules:` list does not take the
+   route offline.
+2. Any `deny` that holds refuses, ahead of everything else.
+3. Every `require` must hold.
+4. Any `allow` that holds permits.
+5. Otherwise: permitted only if there were no `allow` rules. A set of pure
+   `deny` rules is a deny-list, so what it does not name survives; the moment
+   one `allow` exists the set becomes an allow-list.
+
+A bare string is an `allow`, which is how upstream's examples are written.
+
+### Prefer `require` to `deny`
+
+An expression that cannot be evaluated — no `jwt` on a route without `jwtAuth`,
+a claim that is not there, a type mismatch — counts as **false**. That is
+upstream's behaviour, and it is the safe direction for `allow` and `require`,
+which fail towards refusing.
+
+It is the wrong direction for `deny`: a `deny` that errors permits the call.
+So `deny: 'jwt.role == "banned"'` on a request with no token lets the request
+through, where `require: 'jwt.role != "banned"'` refuses it. Both are
+supported, and there is a test for each pinning the difference down.
+
+An expression that does not compile is a startup failure, not a skipped rule —
+otherwise a typo in an `allow` silently serves nothing and a typo in a `deny`
+silently refuses nothing.
 
 ## Proxying
 

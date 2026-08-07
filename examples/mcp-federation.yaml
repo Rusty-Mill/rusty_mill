@@ -45,8 +45,17 @@ binds:
                 exposeHeaders: ["Mcp-Session-Id"]
               mcpAuthorization:
                 # Deny wins over allow, and an empty allow list means
-                # "everything not denied".
+                # "everything not denied". These match the *federated* name.
                 denyTools: ["_delete$"]
+                # CEL rules, for when the answer depends on who is asking.
+                # These match the tool's own name and its target, before
+                # federation joins them -- `echo`, not `everything_echo`.
+                # A bare string is an allow. Prefer `require` to `deny`: an
+                # expression that cannot be evaluated counts as false, which
+                # refuses for `require` and permits for `deny`.
+                rules:
+                  - 'mcp.tool.name == "echo"'
+                  - require: 'jwt.iss == "https://auth.example.com"'
             backends:
               - mcp:
                   targets:

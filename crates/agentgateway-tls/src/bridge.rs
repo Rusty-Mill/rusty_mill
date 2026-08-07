@@ -121,7 +121,10 @@ mod tests {
 
         let writer = tokio::spawn(async move {
             let mut client = client;
-            client.write_all(&payload).await.expect("write should succeed");
+            client
+                .write_all(&payload)
+                .await
+                .expect("write should succeed");
             client.shutdown().await.expect("shutdown should succeed");
         });
 
@@ -145,7 +148,10 @@ mod tests {
         let (mut client, server) = tokio::io::duplex(64);
         let mut bridged = ToTokio(ToRusty(server));
 
-        client.write_all(b"four").await.expect("write should succeed");
+        client
+            .write_all(b"four")
+            .await
+            .expect("write should succeed");
 
         let mut buf = [0xAAu8; 32];
         let n = bridged.read(&mut buf).await.expect("read should succeed");

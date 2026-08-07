@@ -97,19 +97,20 @@ pub struct Headers {
 impl Headers {
     /// Compile a modifier, reporting the first name or value HTTP rejects.
     pub fn new(modifier: &HeaderModifier, at: &str) -> Result<Self, HeaderError> {
-        let pair = |name: &String, value: &String| -> Result<(HeaderName, HeaderValue), HeaderError> {
-            let header = HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
-                at: at.to_string(),
-                value: name.clone(),
-                kind: "header name",
-            })?;
-            let value = HeaderValue::try_from(value.as_str()).map_err(|_| HeaderError {
-                at: at.to_string(),
-                value: value.clone(),
-                kind: "header value",
-            })?;
-            Ok((header, value))
-        };
+        let pair =
+            |name: &String, value: &String| -> Result<(HeaderName, HeaderValue), HeaderError> {
+                let header = HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
+                    at: at.to_string(),
+                    value: name.clone(),
+                    kind: "header name",
+                })?;
+                let value = HeaderValue::try_from(value.as_str()).map_err(|_| HeaderError {
+                    at: at.to_string(),
+                    value: value.clone(),
+                    kind: "header value",
+                })?;
+                Ok((header, value))
+            };
 
         let mut add = Vec::with_capacity(modifier.add.len());
         for (name, value) in &modifier.add {
@@ -121,11 +122,13 @@ impl Headers {
         }
         let mut remove = Vec::with_capacity(modifier.remove.len());
         for name in &modifier.remove {
-            remove.push(HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
-                at: at.to_string(),
-                value: name.clone(),
-                kind: "header name",
-            })?);
+            remove.push(
+                HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
+                    at: at.to_string(),
+                    value: name.clone(),
+                    kind: "header name",
+                })?,
+            );
         }
 
         Ok(Headers { add, set, remove })
@@ -170,10 +173,12 @@ impl Rewrite {
     /// Compile a rewrite policy.
     pub fn new(rewrite: &UrlRewrite, at: &str) -> Result<Self, RewriteError> {
         let authority = match &rewrite.authority {
-            Some(value) => Some(Authority::try_from(value.as_str()).map_err(|_| RewriteError {
-                at: at.to_string(),
-                value: value.clone(),
-            })?),
+            Some(value) => Some(
+                Authority::try_from(value.as_str()).map_err(|_| RewriteError {
+                    at: at.to_string(),
+                    value: value.clone(),
+                })?,
+            ),
             None => None,
         };
         Ok(Rewrite {
@@ -549,10 +554,13 @@ mod tests {
     fn the_upstream_uri_keeps_the_query_string() {
         let original: Uri = "/api/v1?debug=1&x=2".parse().expect("uri");
         let authority = Authority::try_from("backend:8080").expect("authority");
-        let built = upstream_uri(&original, &authority, Some("/internal/v1".into()))
-            .expect("should build");
+        let built =
+            upstream_uri(&original, &authority, Some("/internal/v1".into())).expect("should build");
 
-        assert_eq!(built.to_string(), "http://backend:8080/internal/v1?debug=1&x=2");
+        assert_eq!(
+            built.to_string(),
+            "http://backend:8080/internal/v1?debug=1&x=2"
+        );
     }
 
     #[test]

@@ -139,9 +139,8 @@ impl A2aGateway {
         Ok(A2aGateway {
             gate,
             serves_card: true,
-            card: merged.map(|merged| {
-                serde_json::to_vec(&merged.card).unwrap_or_else(|_| b"{}".to_vec())
-            }),
+            card: merged
+                .map(|merged| serde_json::to_vec(&merged.card).unwrap_or_else(|_| b"{}".to_vec())),
         })
     }
 
@@ -215,7 +214,11 @@ fn refusal(id: RequestId) -> Vec<u8> {
 }
 
 async fn fetch(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
-    let response = client.get(url).send().await.map_err(|err| err.to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
@@ -313,7 +316,9 @@ mod tests {
     fn the_well_known_path_is_recognised_only_for_get() {
         let gateway = gateway(&[]);
         assert!(gateway.is_card_request(&http::Method::GET, AGENT_CARD_WELL_KNOWN_PATH));
-        assert!(gateway.is_card_request(&http::Method::GET, "/agents/a/.well-known/agent-card.json"));
+        assert!(
+            gateway.is_card_request(&http::Method::GET, "/agents/a/.well-known/agent-card.json")
+        );
         assert!(
             !gateway.is_card_request(&http::Method::POST, AGENT_CARD_WELL_KNOWN_PATH),
             "a POST to that path is not a discovery request"
@@ -331,7 +336,11 @@ mod tests {
             task_id(br#"{"params":{"taskId":"task-2"}}"#),
             Some("task-2".to_string())
         );
-        assert_eq!(task_id(br#"{"params":{}}"#), None, "a missing id is not an error");
+        assert_eq!(
+            task_id(br#"{"params":{}}"#),
+            None,
+            "a missing id is not an error"
+        );
         assert_eq!(task_id(b"garbage"), None);
     }
 }

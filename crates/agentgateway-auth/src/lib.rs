@@ -117,12 +117,14 @@ impl JwtAuthenticator {
     /// malformed key set is a startup failure instead of a 503 storm later.
     pub fn new(config: &JwtAuth, at: &str) -> Result<Self, AuthError> {
         let validator: Arc<dyn TokenValidator> = match &config.jwks {
-            JwtSource::File(path) => Arc::new(
-                FileJwks::load(path, &config.issuer).map_err(|source| AuthError::Jwks {
-                    at: at.to_string(),
-                    source,
-                })?,
-            ),
+            JwtSource::File(path) => {
+                Arc::new(FileJwks::load(path, &config.issuer).map_err(|source| {
+                    AuthError::Jwks {
+                        at: at.to_string(),
+                        source,
+                    }
+                })?)
+            }
             JwtSource::Url(url) => Arc::new(
                 JwtValidator::builder(&config.issuer, url)
                     .build()
@@ -143,29 +145,33 @@ impl JwtAuthenticator {
     pub async fn authenticate(&self, headers: &HeaderMap) -> Result<VerifiedToken, AuthRejection> {
         let token = bearer(headers)?;
 
-        let verified = self.validator.validate(token).await.map_err(|err| match err {
-            TokenError::Expired => {
-                AuthRejection::unauthorized("invalid_token", "the access token has expired")
-            }
-            TokenError::Invalid(reason) => AuthRejection::unauthorized("invalid_token", reason),
-            // Never 401. The token may be perfectly good and the JWKS endpoint
-            // merely unreachable; answering 401 would tell the client to
-            // re-authorize, sending a user through a login that fixes nothing
-            // and hiding an outage as an auth problem.
-            TokenError::Unavailable(reason) => AuthRejection {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                error: None,
-                description: reason,
-            },
-            // `TokenError` is `#[non_exhaustive]`, so a future rusty_mcp
-            // release can add a variant. Deny rather than guess: a rejection
-            // this gateway did not anticipate is not one to wave through, and
-            // the log line is how we find out the mapping needs updating.
-            other => {
-                tracing::warn!(error = %other, "unrecognized token rejection; denying");
-                AuthRejection::unauthorized("invalid_token", other.to_string())
-            }
-        })?;
+        let verified = self
+            .validator
+            .validate(token)
+            .await
+            .map_err(|err| match err {
+                TokenError::Expired => {
+                    AuthRejection::unauthorized("invalid_token", "the access token has expired")
+                }
+                TokenError::Invalid(reason) => AuthRejection::unauthorized("invalid_token", reason),
+                // Never 401. The token may be perfectly good and the JWKS endpoint
+                // merely unreachable; answering 401 would tell the client to
+                // re-authorize, sending a user through a login that fixes nothing
+                // and hiding an outage as an auth problem.
+                TokenError::Unavailable(reason) => AuthRejection {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    error: None,
+                    description: reason,
+                },
+                // `TokenError` is `#[non_exhaustive]`, so a future rusty_mcp
+                // release can add a variant. Deny rather than guess: a rejection
+                // this gateway did not anticipate is not one to wave through, and
+                // the log line is how we find out the mapping needs updating.
+                other => {
+                    tracing::warn!(error = %other, "unrecognized token rejection; denying");
+                    AuthRejection::unauthorized("invalid_token", other.to_string())
+                }
+            })?;
 
         self.check_audience(&verified)?;
         Ok(verified)
@@ -217,7 +223,10 @@ fn bearer(headers: &HeaderMap) -> Result<&str, AuthRejection> {
     };
 
     let value = value.to_str().map_err(|_| {
-        AuthRejection::unauthorized("invalid_request", "the Authorization header is not valid ASCII")
+        AuthRejection::unauthorized(
+            "invalid_request",
+            "the Authorization header is not valid ASCII",
+        )
     })?;
 
     // The scheme is case-insensitive per RFC 7235.

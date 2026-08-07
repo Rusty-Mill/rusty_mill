@@ -126,21 +126,19 @@ impl LlmBackend {
 
     /// Serve one OpenAI-compatible request.
     pub async fn handle(&self, request: Request<Incoming>) -> Response<LlmBody> {
-        let collected = match http_body_util::Limited::new(
-            request.into_body(),
-            MAX_REQUEST_BYTES as usize,
-        )
-        .collect()
-        .await
-        {
-            Ok(body) => body.to_bytes(),
-            Err(_) => {
-                return error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "the request body is too large to translate",
-                );
-            }
-        };
+        let collected =
+            match http_body_util::Limited::new(request.into_body(), MAX_REQUEST_BYTES as usize)
+                .collect()
+                .await
+            {
+                Ok(body) => body.to_bytes(),
+                Err(_) => {
+                    return error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "the request body is too large to translate",
+                    );
+                }
+            };
 
         let mut body: Value = match serde_json::from_slice(&collected) {
             Ok(body) => body,
@@ -192,8 +190,8 @@ impl LlmBackend {
             }
         };
 
-        let status = StatusCode::from_u16(response.status().as_u16())
-            .unwrap_or(StatusCode::BAD_GATEWAY);
+        let status =
+            StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
 
         // An error from the provider is passed through as-is rather than
         // reshaped: the message is the useful part, and a gateway that
@@ -225,7 +223,10 @@ impl LlmBackend {
             Ok(bytes) => bytes,
             Err(err) => {
                 tracing::warn!(%err, "reading the provider response failed");
-                return error(StatusCode::BAD_GATEWAY, "the provider response was truncated");
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    "the provider response was truncated",
+                );
             }
         };
 
