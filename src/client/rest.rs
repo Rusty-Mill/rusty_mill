@@ -320,15 +320,20 @@ impl RestClient {
         Self::parse_response(builder.send().await?).await
     }
 
-    /// `SubscribeToTask` (spec Section 3.1.6 / `POST /tasks/{id}:subscribe`):
+    /// `SubscribeToTask` (spec Section 3.1.6 / `GET /tasks/{id}:subscribe`):
     /// streams updates for a task that is not (yet) in a terminal state.
+    ///
+    /// Uses the spec-literal `GET` binding. This crate's own server also
+    /// accepts `POST` on the same path, which is what this client used to
+    /// send — but another SDK's server has no reason to, so `GET` is the only
+    /// method that can be relied on across implementations.
     pub async fn subscribe_to_task(
         &self,
         id: impl Into<String>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamResponse>> + Send>>> {
         let id = id.into();
         let builder = self
-            .apply_headers(self.http.post(self.url(&format!("/tasks/{id}:subscribe"))))
+            .apply_headers(self.http.get(self.url(&format!("/tasks/{id}:subscribe"))))
             .query(&self.tenant_query());
         let resp = builder.send().await?;
         let is_event_stream = resp
