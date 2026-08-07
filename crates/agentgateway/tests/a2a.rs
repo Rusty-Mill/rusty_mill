@@ -132,6 +132,15 @@ async fn agent(
 
 /// Boot a gateway with an `a2a` route in front of `agents`.
 async fn start(policy: &str, agents: &[u16]) -> (String, CancellationToken) {
+    start_with(policy, agents, "").await
+}
+
+/// The same, with extra route policies spliced in.
+async fn start_with(
+    policy: &str,
+    agents: &[u16],
+    extra_policies: &str,
+) -> (String, CancellationToken) {
     let port = free_port().await;
     let backends: String = agents
         .iter()
@@ -146,6 +155,7 @@ binds:
       - routes:
           - name: agents
             policies:
+{extra_policies}
               a2a:
 {policy}
             backends:
@@ -397,6 +407,111 @@ async fn every_agent_card_being_unusable_is_a_503_not_a_broken_card() {
         response.status(),
         503,
         "serving a half-built card would be worse than admitting there is none"
+    );
+
+    shutdown.cancel();
+}
+
+/// The response headers the gateway returned for one request.
+async fn headers_of(response: reqwest::Response) -> Vec<(String, String)> {
+    response
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// A route whose `responseHeaderModifier` stamps every response.
+const STAMP: &str = "              responseHeaderModifier:\n                set:\n                  x-served-by: rusty\n                remove: [x-agent]";
+
+#[tokio::test]
+async fn a_response_modifier_reaches_a_proxied_a2a_response() {
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        "                allowMethods: [\"message/send\"]",
+        &[agent.port],
+        STAMP,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    let headers = headers_of(response).await;
+
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-served-by" && v == "rusty"),
+        "saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_modifier_reaches_an_a2a_refusal_the_gateway_answers_itself() {
+    // A refusal never reaches the proxy, which is where the modifier used to
+    // live -- so this is exactly the response it could not touch before.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        "                allowMethods: [\"message/send\"]",
+        &[agent.port],
+        STAMP,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    let headers = headers_of(response).await;
+
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-served-by" && v == "rusty"),
+        "a refused method is still a response on this route: {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_modifier_reaches_the_merged_agent_card() {
+    // Discovery is answered by the gateway rather than forwarded, so this is
+    // the other response the proxy never saw.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        &format!("                allowMethods: [\"message/send\"]\n{CARD_POLICY}"),
+        &[agent.port],
+        STAMP,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("{url}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+    let headers = headers_of(response).await;
+
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-served-by" && v == "rusty"),
+        "saw {headers:?}"
     );
 
     shutdown.cancel();
