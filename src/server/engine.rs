@@ -238,6 +238,17 @@ impl Engine {
         &self,
         req: &SendMessageRequest,
     ) -> Result<(Started, broadcast::Receiver<SeqEvent>)> {
+        // Spec Section 5.7: "Arrays marked as required MUST contain at
+        // least one element... implementations SHOULD validate these
+        // requirements and reject messages with missing required fields" -
+        // `Message.parts` is exactly such a field (spec Section 3.3.2 lists
+        // "missing required message parts" as an example validation
+        // failure).
+        if req.message.parts.is_empty() {
+            return Err(A2aError::InvalidParams(
+                "message.parts must contain at least one part".to_string(),
+            ));
+        }
         self.check_content_types(&req.message)?;
         let (task_id, context_id, existing_task) =
             self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
@@ -328,7 +339,22 @@ impl Engine {
         tokio::spawn(async move {
             let exec_handle = tokio::spawn(async move { executor.execute(ctx, sink).await });
 
-            let mut saw_closing_event = false;
+            // `saw_turn_outcome` tracks whether the executor ever
+            // communicated a real outcome (terminal, interrupted, or a
+            // bare message) - independent of whether the loop below
+            // breaks on it. `AUTH_REQUIRED` is a turn outcome but does
+            // NOT close a live stream (spec Section 7.6.1), so the loop
+            // keeps calling `rx.recv()` past it: if the executor keeps
+            // running after an out-of-band credential arrives, its later
+            // events still flow through here exactly as a fresh turn's
+            // would; if it already returned (the same "wait for a new
+            // client message" pattern `INPUT_REQUIRED` uses), `rx.recv()`
+            // naturally yields `None` once its `EventSink` is dropped,
+            // and the loop ends without a `break` - `saw_turn_outcome`
+            // being already `true` is what keeps that from being
+            // misread as the executor failing to reach any outcome at
+            // all.
+            let mut saw_turn_outcome = false;
             let mut first_event = true;
             while let Some(evt) = rx.recv().await {
                 lead_with_task_if_needed(&next_seq, &bus, &lead_task_snapshot, first_event, &evt);
@@ -346,15 +372,17 @@ impl Engine {
                 )
                 .await;
                 first_event = false;
+                if evt.is_turn_outcome() {
+                    saw_turn_outcome = true;
+                }
                 let closing = evt.closes_stream();
                 let _ = bus.send((seq, evt));
                 if closing {
-                    saw_closing_event = true;
                     break;
                 }
             }
 
-            if !saw_closing_event {
+            if !saw_turn_outcome {
                 let failure_message = match exec_handle.await {
                     Ok(Ok(())) => None,
                     Ok(Err(e)) => Some(e.to_string()),

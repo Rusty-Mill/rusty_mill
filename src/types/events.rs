@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use super::message::Message;
-use super::task::{Artifact, Task, TaskStatus};
+use super::task::{Artifact, Task, TaskState, TaskStatus};
 
 /// Notifies the client of a change in a task's status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,10 +89,35 @@ pub enum StreamResponse {
 }
 
 impl StreamResponse {
-    /// True if this event represents the end of the stream: a terminal or
-    /// interrupted task status, or a bare `Message` (which is not
-    /// followed by any further events).
+    /// True if this event should be the last one a live
+    /// `SendStreamingMessage`/`SubscribeToTask` stream delivers: a
+    /// terminal or `INPUT_REQUIRED` task status, or a bare `Message`
+    /// (which is not followed by any further events). `AUTH_REQUIRED` is
+    /// deliberately excluded - spec Section 7.6.1: "the agent SHOULD
+    /// maintain any active response streams with the client after
+    /// setting the TaskState to `TASK_STATE_AUTH_REQUIRED`", since
+    /// processing may continue once an out-of-band credential arrives,
+    /// with no further client message required.
     pub fn closes_stream(&self) -> bool {
+        match self {
+            StreamResponse::Message { .. } => true,
+            StreamResponse::StatusUpdate { status_update } => {
+                let state = status_update.status.state;
+                state.is_terminal() || state == TaskState::InputRequired
+            }
+            _ => false,
+        }
+    }
+
+    /// True if this event represents a legitimate final-or-interrupted
+    /// outcome of one `AgentExecutor::execute` invocation (a "turn"):
+    /// everything [`Self::closes_stream`] does, plus `AUTH_REQUIRED` too.
+    /// Unlike `closes_stream`, this doesn't mean "stop reading" - a live
+    /// stream stays open across `AUTH_REQUIRED` - it means "the executor
+    /// communicated a real outcome", which the engine uses to tell that
+    /// case apart from an executor that returned or panicked without
+    /// ever reaching one.
+    pub fn is_turn_outcome(&self) -> bool {
         match self {
             StreamResponse::Message { .. } => true,
             StreamResponse::StatusUpdate { status_update } => {
