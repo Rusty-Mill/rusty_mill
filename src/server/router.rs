@@ -149,8 +149,9 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
         }
         methods::SUBSCRIBE_TO_TASK => {
             let req: SubscribeToTaskRequest = parse_params!();
-            match engine.subscribe_to_task(req).await {
-                Ok(stream) => sse_response(envelope.id, stream),
+            let since_seq = parse_last_event_id(&headers);
+            match engine.subscribe_to_task(req, since_seq).await {
+                Ok(stream) => sse_subscribe_response(envelope.id, stream),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
@@ -204,6 +205,36 @@ fn sse_response(id: RequestId, stream: Pin<Box<dyn Stream<Item = StreamResponse>
         let result = serde_json::to_value(&item).unwrap_or(Value::Null);
         let payload = JsonRpcResponse::success(id.clone(), result);
         Event::default().json_data(payload)
+    });
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+/// Parses the standard SSE `Last-Event-ID` reconnect header (sent
+/// automatically by browser `EventSource` implementations, and settable
+/// manually by any other client) into the sequence number
+/// [`Engine::subscribe_to_task`] should replay events after.
+fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("Last-Event-ID")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Like [`sse_response`], but for `SubscribeToTask`: each event's SSE
+/// `id:` field is set to its sequence number, so a client (or a
+/// spec-compliant `EventSource`) that reconnects sends it back as
+/// `Last-Event-ID` and [`parse_last_event_id`] can resume the replay from
+/// exactly where it left off.
+fn sse_subscribe_response(
+    id: RequestId,
+    stream: Pin<Box<dyn Stream<Item = (u64, StreamResponse)> + Send>>,
+) -> Response {
+    let sse_stream = stream.map(move |(seq, item)| {
+        let result = serde_json::to_value(&item).unwrap_or(Value::Null);
+        let payload = JsonRpcResponse::success(id.clone(), result);
+        Event::default().id(seq.to_string()).json_data(payload)
     });
     Sse::new(sse_stream)
         .keep_alive(KeepAlive::default())

@@ -28,13 +28,14 @@ Implemented:
 - Push notification delivery (spec Section 4.3): a webhook POST of the current `Task`, with the config's `token` and `authentication` applied, fired on every status/artifact update - not just CRUD storage of the config.
 - `AgentCard.capabilities.extensions[].required` enforcement, across all three bindings: a request that doesn't declare the extension via `A2A-Extensions` is rejected with `ExtensionSupportRequiredError`.
 - `SendMessageConfiguration.historyLength` is applied to the task returned by `SendMessage`, matching `GetTask`/`ListTasks` (it has no effect on `SendStreamingMessage`'s live event stream, which never returns a whole `Task` to truncate).
+- `SubscribeToTask` reconnection replay: each task keeps a bounded log of its recent events, so reconnecting mid-stream catches up on what was missed instead of only seeing a point-in-time snapshot. JSON-RPC and REST support the standard SSE `Last-Event-ID` reconnect header for precise resume; gRPC has no equivalent field in the canonical request, so a gRPC resubscribe always replays the whole buffered log.
 
 Not implemented (contributions welcome):
 
 - The client (`rusty_a2a::client`) only speaks JSON-RPC — REST and gRPC clients aren't provided, though the `grpc` feature does expose a raw generated `tonic` client (`rusty_a2a::server::grpc::pb::a2a_service_client`) for anyone who wants one.
 - `mtls` security schemes are never satisfied by the built-in credential extraction (verifying a client certificate is a TLS-termination-layer concern); an `AuthVerifier` asked to satisfy an `mtls`-only requirement is simply never called for it.
 - The `tenant` field round-trips through every binding but isn't used for request routing/isolation; REST's `additional_bindings` (`/{tenant}/...`-prefixed routes) aren't implemented.
-- `SubscribeToTask` reconnection gives the caller a point-in-time snapshot, not a replay of events missed while disconnected (no `Last-Event-ID` support).
+- REST's `:subscribe` action is only wired as `POST /tasks/{id}:subscribe`; a spec-literal `GET /tasks/{id}:subscribe` isn't routed.
 
 ## Quick start
 
@@ -150,7 +151,7 @@ cargo test --features full
 cargo clippy --features full --all-targets
 ```
 
-`tests/integration.rs` spins up a real `AgentServer` on a local port and drives it with a real `A2aClient` and a bare `reqwest::Client`, covering the full task lifecycle, streaming, non-blocking sends, cancellation, push notification config CRUD, and the REST binding's routing/error shape, over both bindings sharing one task store. `tests/grpc_integration.rs` does the same against `AgentServices::serve_grpc` with a real generated `tonic` client. `tests/security_and_push_notifications.rs` covers `AuthVerifier` enforcement (accepted/rejected/misconfigured-fail-closed, across JSON-RPC and REST, plus the `GetExtendedAgentCard` auth gate) and push notification delivery to a real local webhook receiver. `tests/history_length_and_extensions.rs` covers `historyLength` truncation on `SendMessage` and required-extension enforcement across JSON-RPC and REST. Building/testing with the `grpc` feature (including `full`) requires a `protoc` binary on `PATH`.
+`tests/integration.rs` spins up a real `AgentServer` on a local port and drives it with a real `A2aClient` and a bare `reqwest::Client`, covering the full task lifecycle, streaming, non-blocking sends, cancellation, push notification config CRUD, and the REST binding's routing/error shape, over both bindings sharing one task store. `tests/grpc_integration.rs` does the same against `AgentServices::serve_grpc` with a real generated `tonic` client. `tests/security_and_push_notifications.rs` covers `AuthVerifier` enforcement (accepted/rejected/misconfigured-fail-closed, across JSON-RPC and REST, plus the `GetExtendedAgentCard` auth gate) and push notification delivery to a real local webhook receiver. `tests/history_length_and_extensions.rs` covers `historyLength` truncation on `SendMessage` and required-extension enforcement across JSON-RPC and REST. `tests/subscribe_replay.rs` and `tests/subscribe_replay_grpc.rs` drive a `Notify`-gated agent to deterministically disconnect and reconnect mid-stream, covering `Last-Event-ID` replay on JSON-RPC/REST, the idle-interrupted-task replay-then-snapshot path, and gRPC's coarser whole-buffer replay. Building/testing with the `grpc` feature (including `full`) requires a `protoc` binary on `PATH`.
 
 ## License
 

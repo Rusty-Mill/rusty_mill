@@ -2,8 +2,9 @@
 //! A2A operations (spec Section 3.1) against an [`AgentExecutor`] and a
 //! [`TaskStore`], independent of the JSON-RPC framing used to expose them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_stream::stream;
@@ -12,6 +13,22 @@ use futures_core::Stream;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// How many recent events [`subscribe_to_task`](Engine::subscribe_to_task)
+/// can replay per task on reconnect - matches the broadcast bus's own
+/// buffer size (`start_execution`), since a receiver that lags past this
+/// many *live* events already drops some regardless.
+const EVENT_LOG_CAPACITY: usize = 256;
+
+/// A task's assigned sequence number alongside its event, per the
+/// [`Engine`] docs on `event_logs`/`next_seq`.
+type SeqEvent = (u64, StreamResponse);
+
+/// Per-task buses of live [`SeqEvent`]s, keyed by task id.
+type Buses = Arc<Mutex<HashMap<String, broadcast::Sender<SeqEvent>>>>;
+
+/// Per-task bounded tails of recent [`SeqEvent`]s, keyed by task id.
+type EventLogs = Arc<Mutex<HashMap<String, VecDeque<SeqEvent>>>>;
 
 use crate::error::{A2aError, Result};
 use crate::types::{
@@ -39,10 +56,18 @@ pub struct Engine {
     extended_card: Option<AgentCard>,
     executor: Arc<dyn AgentExecutor>,
     store: Arc<dyn TaskStore>,
-    buses: Arc<Mutex<HashMap<String, broadcast::Sender<StreamResponse>>>>,
+    buses: Buses,
     cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     auth_verifier: Option<Arc<dyn AuthVerifier>>,
     push_notifier: PushNotifier,
+    /// A bounded tail of recent events per task, keyed by task id, so
+    /// [`Engine::subscribe_to_task`] can replay what a reconnecting caller
+    /// missed instead of only a point-in-time snapshot.
+    event_logs: EventLogs,
+    /// A single monotonic counter shared by every task's event log, so a
+    /// `Last-Event-ID` is always unambiguous to compare regardless of
+    /// which task it came from.
+    next_seq: Arc<AtomicU64>,
 }
 
 impl Engine {
@@ -56,6 +81,8 @@ impl Engine {
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             auth_verifier: None,
             push_notifier: PushNotifier::new(),
+            event_logs: Arc::new(Mutex::new(HashMap::new())),
+            next_seq: Arc::new(AtomicU64::new(1)),
         }
     }
 
@@ -167,12 +194,12 @@ impl Engine {
     async fn start_execution(
         &self,
         req: &SendMessageRequest,
-    ) -> Result<(Started, broadcast::Receiver<StreamResponse>)> {
+    ) -> Result<(Started, broadcast::Receiver<SeqEvent>)> {
         let (task_id, context_id, existing_task) = self.resolve_ids(&req.message).await?;
 
         let (tx, mut rx) = mpsc::unbounded_channel::<StreamResponse>();
         let sink = EventSink::new(task_id.clone(), context_id.clone(), tx);
-        let (bus, bus_rx) = broadcast::channel::<StreamResponse>(256);
+        let (bus, bus_rx) = broadcast::channel::<SeqEvent>(256);
         let cancellation = CancellationToken::new();
 
         self.buses.lock().await.insert(task_id.clone(), bus.clone());
@@ -192,6 +219,8 @@ impl Engine {
         let executor = self.executor.clone();
         let store = self.store.clone();
         let push = self.push_notifier.clone();
+        let event_logs = self.event_logs.clone();
+        let next_seq = self.next_seq.clone();
         let buses = self.buses.clone();
         let cancel_tokens = self.cancel_tokens.clone();
         let seed_message = req.message.clone();
@@ -203,9 +232,19 @@ impl Engine {
 
             let mut saw_closing_event = false;
             while let Some(evt) = rx.recv().await {
-                apply_event(&store, &push, &bg_task_id, &bg_context_id, &seed_message, &evt).await;
+                let seq = apply_event(
+                    &store,
+                    &push,
+                    &event_logs,
+                    &next_seq,
+                    &bg_task_id,
+                    &bg_context_id,
+                    &seed_message,
+                    &evt,
+                )
+                .await;
                 let closing = evt.closes_stream();
-                let _ = bus.send(evt);
+                let _ = bus.send((seq, evt));
                 if closing {
                     saw_closing_event = true;
                     break;
@@ -230,16 +269,18 @@ impl Engine {
                         metadata: None,
                     }
                     .into();
-                    apply_event(
+                    let seq = apply_event(
                         &store,
                         &push,
+                        &event_logs,
+                        &next_seq,
                         &bg_task_id,
                         &bg_context_id,
                         &seed_message,
                         &failure,
                     )
                     .await;
-                    let _ = bus.send(failure);
+                    let _ = bus.send((seq, failure));
                 } else {
                     tracing::warn!(
                         task_id = %bg_task_id,
@@ -285,13 +326,15 @@ impl Engine {
         let (started, mut rx) = self.start_execution(&req).await?;
         loop {
             match rx.recv().await {
-                Ok(StreamResponse::Message { message }) => return Ok(SendMessageResult::Message { message }),
-                Ok(StreamResponse::Task { task }) => {
+                Ok((_, StreamResponse::Message { message })) => {
+                    return Ok(SendMessageResult::Message { message })
+                }
+                Ok((_, StreamResponse::Task { task })) => {
                     if !wait_for_final {
                         return finish(task);
                     }
                 }
-                Ok(StreamResponse::StatusUpdate { status_update }) => {
+                Ok((_, StreamResponse::StatusUpdate { status_update })) => {
                     if status_update.status.state.is_final_for_blocking_send() {
                         // The task is done; the background pump won't write
                         // to the store again, so a fresh read is safe and
@@ -310,7 +353,7 @@ impl Engine {
                         return finish(task);
                     }
                 }
-                Ok(StreamResponse::ArtifactUpdate { artifact_update }) => {
+                Ok((_, StreamResponse::ArtifactUpdate { artifact_update })) => {
                     if !wait_for_final {
                         let mut task = Task::new(&started.task_id, &started.context_id, TaskState::Working);
                         task.artifacts.push(artifact_update.artifact);
@@ -342,11 +385,18 @@ impl Engine {
 
     /// `SubscribeToTask` (spec Section 3.1.6): attaches to an in-flight
     /// execution's event stream, or - if the task is idle but not
-    /// terminal - synthesizes a single current-snapshot event.
+    /// terminal - synthesizes a single current-snapshot event. In either
+    /// case, replays whatever this task's event log still has past
+    /// `since_seq` first (see the [`Engine`] docs on `event_logs`), so a
+    /// caller reconnecting mid-stream (typically via SSE's `Last-Event-ID`,
+    /// read by the bindings' handlers) catches up on what it missed
+    /// instead of only seeing where things stand *now*. `since_seq: None`
+    /// replays everything still buffered.
     pub async fn subscribe_to_task(
         &self,
         req: SubscribeToTaskRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = StreamResponse> + Send>>> {
+        since_seq: Option<u64>,
+    ) -> Result<Pin<Box<dyn Stream<Item = (u64, StreamResponse)> + Send>>> {
         self.require_streaming()?;
         let task = self
             .store
@@ -359,12 +409,39 @@ impl Engine {
                 req.id
             )));
         }
+
+        // Subscribe *before* reading the log snapshot: any event applied
+        // after this point is guaranteed to arrive live, so pairing it
+        // with a snapshot taken afterward (and deduping by seq) can never
+        // leave a gap, regardless of how the two race.
         let bus_rx = self.buses.lock().await.get(&req.id).map(|b| b.subscribe());
+        let replay: Vec<SeqEvent> = {
+            let logs = self.event_logs.lock().await;
+            logs.get(&req.id)
+                .map(|log| {
+                    log.iter()
+                        .filter(|(seq, _)| since_seq.is_none_or(|since| *seq > since))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let max_replayed = replay.last().map(|(seq, _)| *seq);
+
         match bus_rx {
-            Some(rx) => Ok(Box::pin(stream_through_close(rx))),
-            None => Ok(Box::pin(
-                async_stream::stream! { yield StreamResponse::Task { task }; },
-            )),
+            Some(rx) => Ok(Box::pin(replay_then_live(replay, rx, max_replayed))),
+            None => {
+                // Idle but not terminal (e.g. InputRequired/AuthRequired):
+                // no live tail to attach to, so replay whatever's
+                // buffered, then a final current-state snapshot.
+                let snapshot_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+                Ok(Box::pin(async_stream::stream! {
+                    for item in replay {
+                        yield item;
+                    }
+                    yield (snapshot_seq, StreamResponse::Task { task });
+                }))
+            }
         }
     }
 
@@ -429,9 +506,11 @@ impl Engine {
 
         let bus = self.buses.lock().await.get(&req.id).cloned();
         while let Ok(evt) = rx.try_recv() {
-            apply_event(
+            let seq = apply_event(
                 &self.store,
                 &self.push_notifier,
+                &self.event_logs,
+                &self.next_seq,
                 &req.id,
                 &context_id,
                 &seed,
@@ -439,7 +518,7 @@ impl Engine {
             )
             .await;
             if let Some(b) = &bus {
-                let _ = b.send(evt);
+                let _ = b.send((seq, evt));
             }
         }
 
@@ -448,19 +527,28 @@ impl Engine {
         let mut updated = self.store.get(&req.id).await.unwrap_or(task);
         if !updated.status.state.is_terminal() {
             updated.status = TaskStatus::new(TaskState::Canceled);
-            self.store.put(updated.clone()).await;
-            notify_push_configs(&self.store, &self.push_notifier, &updated).await;
-            if let Some(b) = &bus {
-                let _ = b.send(
-                    TaskStatusUpdateEvent {
-                        task_id: req.id.clone(),
-                        context_id: context_id.clone(),
-                        status: updated.status.clone(),
-                        metadata: None,
-                    }
-                    .into(),
-                );
+            let evt: StreamResponse = TaskStatusUpdateEvent {
+                task_id: req.id.clone(),
+                context_id: context_id.clone(),
+                status: updated.status.clone(),
+                metadata: None,
             }
+            .into();
+            let seq = apply_event(
+                &self.store,
+                &self.push_notifier,
+                &self.event_logs,
+                &self.next_seq,
+                &req.id,
+                &context_id,
+                &seed,
+                &evt,
+            )
+            .await;
+            if let Some(b) = &bus {
+                let _ = b.send((seq, evt));
+            }
+            updated = self.store.get(&req.id).await.unwrap_or(updated);
         }
         Ok(updated)
     }
@@ -598,14 +686,33 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
     }
 }
 
+/// Applies `evt` to the store (as before), fires push notifications, and
+/// appends it to `task_id`'s bounded event log under a freshly assigned,
+/// engine-wide monotonic sequence number - which it returns, so the
+/// caller can pair the exact same number onto the broadcast bus send
+/// (see [`Engine::subscribe_to_task`] on why that pairing has to be
+/// exact for replay to be race-free).
+#[allow(clippy::too_many_arguments)]
 async fn apply_event(
     store: &Arc<dyn TaskStore>,
     push: &PushNotifier,
+    event_logs: &EventLogs,
+    next_seq: &Arc<AtomicU64>,
     task_id: &str,
     context_id: &str,
     seed_message: &Message,
     evt: &StreamResponse,
-) {
+) -> u64 {
+    let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+    {
+        let mut logs = event_logs.lock().await;
+        let log = logs.entry(task_id.to_string()).or_default();
+        log.push_back((seq, evt.clone()));
+        if log.len() > EVENT_LOG_CAPACITY {
+            log.pop_front();
+        }
+    }
+
     match evt {
         StreamResponse::StatusUpdate { status_update } => {
             let mut task = match store.get(task_id).await {
@@ -638,6 +745,8 @@ async fn apply_event(
         }
         StreamResponse::Task { .. } | StreamResponse::Message { .. } => {}
     }
+
+    seq
 }
 
 /// Fires off push notification delivery (spec Section 4.3) to every
@@ -672,13 +781,53 @@ fn merge_artifact(task: &mut Task, update: &TaskArtifactUpdateEvent) {
 /// over any missed due to lag) until - and including - the first event
 /// that closes the stream (spec Section 11.7: a terminal/interrupted
 /// status, or a bare message).
-fn stream_through_close(mut rx: broadcast::Receiver<StreamResponse>) -> impl Stream<Item = StreamResponse> {
+fn stream_through_close(mut rx: broadcast::Receiver<SeqEvent>) -> impl Stream<Item = StreamResponse> {
     stream! {
         loop {
             match rx.recv().await {
-                Ok(evt) => {
+                Ok((_, evt)) => {
                     let closing = evt.closes_stream();
                     yield evt;
+                    if closing {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }
+}
+
+/// Yields `replay` (already-buffered events a reconnecting subscriber
+/// missed) followed by the live tail of `rx`, until - and including - the
+/// first event that closes the stream. Skips any live event whose
+/// sequence number is `<= max_replayed`: since [`Engine::subscribe_to_task`]
+/// subscribes to the bus *before* taking the `replay` snapshot, every
+/// event either lands in `replay` or arrives live (never both missed, but
+/// sometimes both) - this filter is what makes "both" safe instead of a
+/// duplicate.
+fn replay_then_live(
+    replay: Vec<SeqEvent>,
+    mut rx: broadcast::Receiver<SeqEvent>,
+    max_replayed: Option<u64>,
+) -> impl Stream<Item = (u64, StreamResponse)> {
+    stream! {
+        for (seq, evt) in &replay {
+            let closing = evt.closes_stream();
+            yield (*seq, evt.clone());
+            if closing {
+                return;
+            }
+        }
+        loop {
+            match rx.recv().await {
+                Ok((seq, evt)) => {
+                    if max_replayed.is_some_and(|max| seq <= max) {
+                        continue;
+                    }
+                    let closing = evt.closes_stream();
+                    yield (seq, evt);
                     if closing {
                         break;
                     }
