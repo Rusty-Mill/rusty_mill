@@ -158,6 +158,39 @@ async fn dashboard_serves_html_unauthenticated_even_with_a_key_configured() {
 }
 
 #[tokio::test]
+async fn dashboard_ships_the_i18n_framework_with_english_populated() {
+    // Framework-only per the scoping decision (issue #128): the switching
+    // mechanism must be present and wired up, but only `en` needs real
+    // content -- this asserts the mechanism, not translation coverage.
+    let base_url = spawn_app("providers = {}").await;
+
+    let resp = reqwest::get(format!("{base_url}/dashboard"))
+        .await
+        .expect("request should succeed");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+
+    assert!(
+        body.contains("id=\"lang\""),
+        "language switcher must be present"
+    );
+    assert!(
+        body.contains("const I18N"),
+        "translation dictionary must be present"
+    );
+    assert!(body.contains("en:"), "the en locale must be populated");
+    assert!(
+        body.contains("data-i18n=\"panel.models.title\""),
+        "static markup must be hydrated via data-i18n, not hardcoded English"
+    );
+    assert!(
+        body.contains("localStorage.getItem(LANG_KEY)")
+            || body.contains("localStorage.setItem(LANG_KEY"),
+        "the chosen language must persist across page loads"
+    );
+}
+
+#[tokio::test]
 async fn ready_endpoint_returns_200_when_no_persistence_is_configured() {
     // Without [persistence] there's nothing external to check, so
     // readiness always passes -- distinct from /health only in principle,
