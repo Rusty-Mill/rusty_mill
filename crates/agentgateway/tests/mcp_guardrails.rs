@@ -2735,3 +2735,239 @@ binds:
     stop_alpha.cancel();
     stop_beta.cancel();
 }
+
+// ---------------------------------------------------------------------------
+// `mcp.via` — collapsing a federation onto one address
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn via_dials_every_target_through_one_address() {
+    // One server answering both paths, standing in for an egress proxy. Both
+    // targets name ports nothing listens on, so `via` is the only thing that
+    // can make either reachable.
+    let (egress_port, _headers, paths, stop_egress) = http_target_at("/a").await;
+    let dead_a = free_port().await;
+    let dead_b = free_port().await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            backends:
+              - mcp:
+                  via: 127.0.0.1:{egress_port}
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: a.invalid
+                        port: {dead_a}
+                        path: /a
+                    - name: beta
+                      mcp:
+                        host: b.invalid
+                        port: {dead_b}
+                        path: /a
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    // Both land on the same path here, which is exactly what the lint warns
+    // about -- and the test wants it, because one stub server has to answer
+    // for both.
+    assert!(
+        config
+            .lint()
+            .iter()
+            .any(|f| f.contains("the same endpoint federated twice")),
+        "{:?}",
+        config.lint()
+    );
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("`via` should have made both targets reachable");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !paths.lock().expect("lock").is_empty(),
+        "the egress address should have been dialled"
+    );
+
+    shutdown.cancel();
+    stop_egress.cancel();
+}
+
+#[tokio::test]
+async fn without_via_the_configured_addresses_are_used() {
+    // The control: the same config without `via` cannot reach anything.
+    let (_egress_port, _headers, _paths, stop_egress) = http_target_at("/a").await;
+    let dead = free_port().await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {dead}
+                        path: /a
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        Gateway::build(&config, None).await.is_err(),
+        "nothing listens on the configured address"
+    );
+
+    stop_egress.cancel();
+}
+
+#[tokio::test]
+async fn via_keeps_each_targets_path() {
+    // What tells the targets apart once collapsed. `/rpc/a` and `/rpc/b` on
+    // one address are two distinct servers as far as the federation is
+    // concerned.
+    let (egress_port, _headers, paths, stop_egress) = http_target_at("/rpc").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  via: 127.0.0.1:{egress_port}
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: nowhere.invalid
+                        port: 1
+                        path: /rpc
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert_eq!(config.lint(), Vec::<String>::new());
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("the target should be reachable through the egress address");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    echo_through(port).await;
+
+    assert!(
+        paths.lock().expect("lock").iter().all(|p| p == "/rpc"),
+        "the target keeps its own path through the egress address: {:?}",
+        paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_egress.cancel();
+}
+
+#[tokio::test]
+async fn via_wins_over_a_url_rewrite_authority() {
+    // Both land in the same place. The backend's own field is the more
+    // specific of the two and the one that names targets, so it wins -- and
+    // the choice is deterministic rather than order-dependent.
+    let (egress_port, _headers, paths, stop_egress) = http_target_at("/mcp").await;
+    let dead = free_port().await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                authority: 127.0.0.1:{dead}
+            backends:
+              - mcp:
+                  via: 127.0.0.1:{egress_port}
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: nowhere.invalid
+                        port: 1
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("`via` should have won; the rewrite points at a dead port");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    echo_through(port).await;
+    assert!(!paths.lock().expect("lock").is_empty());
+
+    shutdown.cancel();
+    stop_egress.cancel();
+}
+
+#[tokio::test]
+async fn a_via_carrying_credentials_fails_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  via: "admin:hunter2@egress.local:8443"
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: 3001
+                        path: /mcp
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .err()
+        .expect("credentials in an address should be refused")
+        .to_string();
+    assert!(
+        err.contains("mcp.via") && err.contains("backendAuth"),
+        "and should name the field it came from: {err}"
+    );
+}

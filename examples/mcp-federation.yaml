@@ -124,6 +124,14 @@ binds:
                   - require: 'jwt.iss == "https://auth.example.com"'
             backends:
               - mcp:
+                  # Uncomment to dial every target through one address -- an
+                  # egress proxy or a mesh sidecar. Each target keeps its own
+                  # path, which is then the only thing telling them apart, so
+                  # `--check` reports two that would collapse onto the same
+                  # address and path. Deliberately not `urlRewrite.authority`,
+                  # which redirects a single target rather than collapsing all
+                  # of them.
+                  # via: egress.local:8443
                   targets:
                     - name: everything
                       stdio:

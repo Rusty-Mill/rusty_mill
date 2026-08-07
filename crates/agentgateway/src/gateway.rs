@@ -64,9 +64,24 @@ fn mcp_overrides(
     backend: &agentgateway_config::McpBackend,
     at: &str,
 ) -> anyhow::Result<Vec<McpOverride>> {
-    let blank = || vec![McpOverride::default(); backend.targets.len()];
+    // `via` points the whole federation at one address; `urlRewrite.authority`
+    // redirects a single target to a new one. Both land in the same place, so
+    // when a config asks for both the backend's own field wins -- it is the
+    // more specific of the two, and it is the one that names targets.
+    let via = match backend.via.as_deref() {
+        Some(raw) => Some(authority(raw, &format!("{at}.backends.mcp.via"))?),
+        None => None,
+    };
+
     let Some(rewrite) = policies.url_rewrite.as_ref() else {
-        return Ok(blank());
+        return Ok(backend
+            .targets
+            .iter()
+            .map(|_| McpOverride {
+                path: None,
+                authority: via.clone(),
+            })
+            .collect());
     };
 
     // A path rewrite generalises across targets: it transforms each target's
@@ -77,24 +92,15 @@ fn mcp_overrides(
     // all at the same server -- not a redirect but a collapse, since a
     // target's address is what distinguishes it from the others. `Config::lint`
     // reports that rather than doing it.
-    let authority = match rewrite
+    let redirect = match rewrite
         .authority
         .as_deref()
-        .filter(|_| backend.targets.len() == 1)
+        .filter(|_| backend.targets.len() == 1 && via.is_none())
     {
-        // An authority may legally hold `user:password@`, and that is the
-        // problem: a credential in an upstream URI hides somewhere nobody
-        // thinks to look and is sent on every request. `backendAuth` is where
-        // one belongs.
-        Some(raw) if raw.contains('@') => anyhow::bail!(
-            "{at}.urlRewrite.authority: `{raw}` is not a valid authority: userinfo does not \
-             belong in an upstream address, use `backendAuth`"
-        ),
-        Some(raw) => Some(http::uri::Authority::try_from(raw).map_err(|_| {
-            anyhow::anyhow!("{at}.urlRewrite.authority: `{raw}` is not a valid authority")
-        })?),
+        Some(raw) => Some(authority(raw, &format!("{at}.urlRewrite.authority"))?),
         None => None,
     };
+    let replacement = via.or(redirect);
 
     Ok(backend
         .targets
@@ -108,10 +114,26 @@ fn mcp_overrides(
             };
             McpOverride {
                 path: mcp_path(rewrite, matches, &http.path),
-                authority: authority.clone(),
+                authority: replacement.clone(),
             }
         })
         .collect())
+}
+
+/// Parse a replacement authority, refusing one that carries a credential.
+///
+/// An authority may legally hold `user:password@`, and that is the problem: a
+/// credential in an upstream URI hides somewhere nobody thinks to look and is
+/// sent on every request. `backendAuth` is where one belongs.
+fn authority(raw: &str, at: &str) -> anyhow::Result<http::uri::Authority> {
+    if raw.contains('@') {
+        anyhow::bail!(
+            "{at}: `{raw}` is not a valid authority: userinfo does not belong in an upstream \
+             address, use `backendAuth`"
+        );
+    }
+    http::uri::Authority::try_from(raw)
+        .map_err(|_| anyhow::anyhow!("{at}: `{raw}` is not a valid authority"))
 }
 
 /// The replacement path, if the rewrite names one this route can resolve.

@@ -93,6 +93,21 @@ pub struct McpBackend {
     /// How to disambiguate tool names drawn from several targets.
     #[serde(default)]
     pub name_mode: NameMode,
+
+    /// Dial every target through this address, keeping each one's own path.
+    ///
+    /// Deliberately not `urlRewrite.authority`, which redirects a *single*
+    /// target to a new address. This does something different in kind: it
+    /// points the whole federation at one host, so what tells the targets
+    /// apart afterwards is only their paths. That is what an egress proxy or a
+    /// mesh sidecar wants, and it is not something anyone should reach by
+    /// accident, so it is spelled separately and lives on the backend that
+    /// owns the targets rather than on a route policy.
+    ///
+    /// An address naming no port keeps each target's own, which is the same
+    /// rule `urlRewrite.authority` follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// How federated tool names are qualified.
