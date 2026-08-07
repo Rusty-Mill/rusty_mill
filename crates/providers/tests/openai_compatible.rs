@@ -175,6 +175,46 @@ async fn chat_stream_parses_delta_chunks_and_stops_at_done() {
 }
 
 #[tokio::test]
+async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
+    // Relies on serde's default "unknown fields are ignored" behavior for
+    // WireChunk/WireChunkChoice/WireDelta, unlike anthropic.rs's explicit
+    // `_ => None` dispatch on an unrecognized event `"type"` -- there's no
+    // discriminator field here to dispatch on, so this is what actually
+    // proves a future/undocumented API field (e.g. from a less-standard
+    // OpenAI-compatible backend) doesn't break parsing.
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\",\"future_delta_field\":true},\"finish_reason\":null,\"future_choice_field\":1,\"logprobs\":null}],\"future_top_level_field\":{\"nested\":true},\"system_fingerprint\":\"fp_abc\"}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7,\"future_usage_field\":9}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new("openai", server.uri(), "test-key");
+    let mut req = common::simple_request("gpt-4o-mini");
+    req.stream = Some(true);
+
+    let mut stream = provider
+        .chat_stream(&req, "gpt-4o-mini", None)
+        .await
+        .expect("chat_stream should succeed");
+    let mut chunks = Vec::new();
+    while let Some(item) = stream.next().await {
+        chunks.push(item.expect("chunk should parse despite unrecognized extra fields"));
+    }
+
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("Hi"));
+    assert_eq!(chunks[1].choices[0].finish_reason.as_deref(), Some("stop"));
+    assert_eq!(chunks[1].usage.as_ref().unwrap().completion_tokens, 2);
+}
+
+#[tokio::test]
 async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
     let server = MockServer::start().await;
     let sse_body = concat!(

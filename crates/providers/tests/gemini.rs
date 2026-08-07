@@ -583,6 +583,42 @@ async fn chat_stream_handles_a_candidate_with_no_parts_gracefully() {
 }
 
 #[tokio::test]
+async fn chat_stream_ignores_unrecognized_extra_fields_in_a_frame() {
+    // Relies on serde's default "unknown fields are ignored" behavior for
+    // WireResponse/WireCandidate/WirePart, unlike anthropic.rs's explicit
+    // `_ => None` dispatch on an unrecognized event `"type"` -- there's no
+    // discriminator field here to dispatch on, so this is what actually
+    // proves a future/undocumented API field doesn't break parsing.
+    let server = MockServer::start().await;
+    let sse_body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\",\"futurePartField\":true}],\"futureContentField\":\"x\"},\"futureCandidateField\":1,\"safetyRatings\":[{\"category\":\"HARM_CATEGORY_UNSPECIFIED\",\"probability\":\"NEGLIGIBLE\"}]}],\"futureTopLevelField\":{\"nested\":true},\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"totalTokenCount\":7,\"futureUsageField\":9}}\n\n";
+
+    Mock::given(method("POST"))
+        .and(path(
+            "/v1beta/models/gemini-2.0-flash:streamGenerateContent",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let provider = GeminiProvider::new(server.uri(), "test-key");
+    let mut req = common::simple_request("gemini-2.0-flash");
+    req.stream = Some(true);
+
+    let mut stream = provider
+        .chat_stream(&req, "gemini-2.0-flash", None)
+        .await
+        .expect("chat_stream should succeed");
+    let mut chunks = Vec::new();
+    while let Some(item) = stream.next().await {
+        chunks.push(item.expect("chunk should parse despite unrecognized extra fields"));
+    }
+
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].choices[0].delta.content.as_deref(), Some("Hi"));
+    assert_eq!(chunks[0].usage.as_ref().unwrap().completion_tokens, 2);
+}
+
+#[tokio::test]
 async fn chat_stream_yields_a_decode_error_for_malformed_event_json() {
     let server = MockServer::start().await;
     let sse_body = concat!(
