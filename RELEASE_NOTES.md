@@ -24,6 +24,34 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #133 — Add rp-cli setup: static config-file rewriting for third-party CLI tools
+**2026-08-07** · [#133](https://github.com/baileyrd/rusty_provider/pull/133)
+
+- **Added:** `rp-cli setup` (`list`/`show`/`apply`) rewrites a known
+  third-party CLI coding tool's own config file to point its endpoint at
+  a running rusty_provider instance -- currently
+  [opencode](https://opencode.ai) and [Crush](https://charm.land/crush),
+  both verified against their current documented config schemas. The
+  target list is data (`crates/cli/cli_targets.toml`), extensible via
+  `--targets <path>`, not hardcoded per-tool Rust. `setup show` is a dry
+  run; `setup apply` requires `--yes` and always backs up the previous
+  file to `<path>.bak` first, merging into whatever's already there
+  rather than overwriting it. Never writes a literal API key -- a field
+  that needs one gets the target tool's own env-var-reference syntax
+  (opencode's `{env:VAR}`, Crush's `$VAR`) naming whatever variable
+  `--api-key-env` names.
+- **Changed:** `ARCHITECTURE.md`'s non-goal narrows from "no MITM-based
+  third-party CLI config injection" to "no traffic interception" -- see
+  [ADR-0004](./docs/adr/0004-cli-target-config-rewriting.md). A MITM
+  proxy (TLS interception, trust-store changes) is still explicitly out
+  of scope and would need its own ADR.
+- 22 new tests in `rp-cli` covering the JSON/TOML path-set engine
+  (merge-preserves-unrelated-keys, refuses-to-clobber-non-object,
+  idempotent rerun, backup-on-apply, `--api-key-env` gating); full
+  workspace suite passing.
+
+---
+
 ## PR #131 — Add reconnect-with-backoff for dropped MCP gateway upstreams
 **2026-08-07** · [#131](https://github.com/baileyrd/rusty_provider/pull/131)
 
