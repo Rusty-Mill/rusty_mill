@@ -19,7 +19,7 @@ use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
 use super::auth::{extract_credentials, Credentials};
-use super::engine::{parse_extensions_header, Engine};
+use super::engine::{check_version, parse_extensions_header, Engine};
 use crate::grpc_convert::*;
 use pb::a2a_service_server::A2aService;
 
@@ -55,6 +55,19 @@ impl GrpcService {
         )
     }
 
+    /// Validates `request`'s `a2a-version` metadata entry (spec Section
+    /// 3.2.6 / 3.6.2), the lowercased gRPC-metadata equivalent of the
+    /// `A2A-Version` header the JSON-RPC/REST bindings read.
+    fn check_version<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        check_version(
+            request
+                .metadata()
+                .get("a2a-version")
+                .and_then(|v| v.to_str().ok()),
+        )
+        .map_err(a2a_error_to_status)
+    }
+
     /// Enforces `AgentCard.capabilities.extensions[].required` (spec
     /// Section 3.2.6 / 5.6) against `request`'s `a2a-extensions` metadata
     /// entry.
@@ -70,9 +83,11 @@ impl GrpcService {
             .map_err(a2a_error_to_status)
     }
 
-    /// Enforces required extensions, then `AgentCard.securityRequirements`
-    /// (spec Section 4.5), against `request`'s metadata.
+    /// Validates the protocol version, enforces required extensions, then
+    /// `AgentCard.securityRequirements` (spec Section 4.5), against
+    /// `request`'s metadata.
     async fn authenticate<T>(&self, request: &Request<T>) -> Result<(), Status> {
+        self.check_version(request)?;
         self.check_required_extensions(request)?;
         let credentials = self.credentials(request);
         self.engine
@@ -211,6 +226,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::GetExtendedAgentCardRequest>,
     ) -> Result<Response<pb::AgentCard>, Status> {
+        self.check_version(&request)?;
         self.check_required_extensions(&request)?;
         let credentials = self.credentials(&request);
         let card = self

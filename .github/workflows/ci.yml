@@ -137,3 +137,6 @@ jobs:
           cargo test --features client,server --test content_type_validation -- --list
           cargo test --features client,grpc,signing,server --test client_jws_verification -- --list
           cargo test --features client,server --test terminal_task_rejection -- --list
+          cargo test --features client,server --test list_tasks_ordering -- --list
+          cargo test --features client,grpc,server --test version_negotiation -- --list
+          cargo test --features client,grpc,server --test grpc_error_details -- --list

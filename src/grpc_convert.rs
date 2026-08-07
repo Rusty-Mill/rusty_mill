@@ -24,11 +24,25 @@
 use chrono::{DateTime, TimeZone, Utc};
 use serde_json::{Map, Value};
 use tonic::{Code, Status};
+use tonic_types::{ErrorDetails, StatusExt};
 
 use crate::error::A2aError;
 use crate::pb;
 use crate::types as ours;
 
+/// The domain JSON-RPC/REST already send in their own `google.rpc.ErrorInfo`
+/// (`JsonRpcErrorObject`/`rest::rest_error`); reused here so a `reason`
+/// round-trips identically regardless of which binding a client used.
+const ERROR_DOMAIN: &str = "a2a-protocol.org";
+
+/// Maps `err` to a `tonic::Status`, attaching a `google.rpc.ErrorInfo`
+/// detail (spec Section 10.6: "implementations MUST include a
+/// `google.rpc.ErrorInfo` message in the `status.details` array") whenever
+/// `err` has one of the nine A2A-specific `reason`s - mirroring
+/// `JsonRpcErrorObject::from`/`rest::rest_error`, the JSON-RPC/REST
+/// equivalents. Errors with no A2A-specific reason (auth/validation/
+/// internal failures, where the gRPC `Code` alone is already precise) get a
+/// bare `Status`, same as before.
 pub fn a2a_error_to_status(err: A2aError) -> Status {
     let code = match err.grpc_status_name() {
         "NOT_FOUND" => Code::NotFound,
@@ -40,7 +54,15 @@ pub fn a2a_error_to_status(err: A2aError) -> Status {
         "UNIMPLEMENTED" => Code::Unimplemented,
         _ => Code::Unknown,
     };
-    Status::new(code, err.standard_message())
+    let message = err.standard_message();
+    match err.reason() {
+        Some(reason) => {
+            let details =
+                ErrorDetails::with_error_info(reason, ERROR_DOMAIN, std::collections::HashMap::new());
+            Status::with_error_details(code, message, details)
+        }
+        None => Status::new(code, message),
+    }
 }
 
 fn non_empty(s: String) -> Option<String> {

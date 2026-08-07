@@ -10,7 +10,9 @@ use rusty_a2a::error::Result;
 use rusty_a2a::server::grpc::pb;
 use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
 use rusty_a2a::types::{AgentCard, AgentInterface, Artifact, Message, Part, TaskState};
+use tonic::service::interceptor::InterceptedService;
 use tonic::transport::Channel;
+use tonic::{Request, Status};
 
 struct TestAgent;
 
@@ -55,10 +57,27 @@ async fn spawn_test_server() -> (String, u16) {
     (format!("http://127.0.0.1:{port}"), port)
 }
 
-async fn connect(url: String) -> pb::a2a_service_client::A2aServiceClient<Channel> {
-    pb::a2a_service_client::A2aServiceClient::connect(url)
+type VersionedClient = pb::a2a_service_client::A2aServiceClient<
+    InterceptedService<Channel, fn(Request<()>) -> std::result::Result<Request<()>, Status>>,
+>;
+
+/// Every request through this client carries `a2a-version: 1.0` gRPC
+/// metadata - matching what `client::GrpcClient` always sends, and what
+/// this crate's gRPC binding now enforces (spec Section 3.2.6/3.6.2). A
+/// bare generated `tonic` client (like every test in this file drives)
+/// sends no metadata at all unless told to.
+fn add_version_metadata(mut req: Request<()>) -> std::result::Result<Request<()>, Status> {
+    req.metadata_mut().insert("a2a-version", "1.0".parse().unwrap());
+    Ok(req)
+}
+
+async fn connect(url: String) -> VersionedClient {
+    let channel = Channel::from_shared(url)
+        .expect("valid uri")
+        .connect()
         .await
-        .expect("connect")
+        .expect("connect");
+    pb::a2a_service_client::A2aServiceClient::with_interceptor(channel, add_version_metadata as fn(_) -> _)
 }
 
 fn user_message(text: &str) -> pb::Message {

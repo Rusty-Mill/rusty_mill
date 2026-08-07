@@ -129,7 +129,16 @@ impl TaskStore for InMemoryTaskStore {
             })
             .cloned()
             .collect();
-        matching.sort_by(|a, b| a.id.cmp(&b.id));
+        // Spec Section 3.1.4: "sorted by their status timestamp time in
+        // descending order (most recently updated tasks first)". `id` is
+        // just a tie-breaker for deterministic pagination when two tasks
+        // share a timestamp.
+        matching.sort_by(|a, b| {
+            b.status
+                .timestamp
+                .cmp(&a.status.timestamp)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         let total = matching.len() as i64;
 
         let page_size = filter.page_size.unwrap_or(50).clamp(1, 100) as usize;

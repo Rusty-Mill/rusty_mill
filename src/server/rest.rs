@@ -57,7 +57,7 @@ use crate::types::{
 };
 
 use super::auth::extract_credentials;
-use super::engine::{parse_extensions_header, Engine};
+use super::engine::{check_version, parse_extensions_header, Engine};
 
 const A2A_JSON: &str = "application/a2a+json";
 
@@ -128,7 +128,8 @@ fn rest_ok<T: serde::Serialize>(value: &T) -> Response {
     a2a_json(StatusCode::OK, value)
 }
 
-/// Enforces `AgentCard.capabilities.extensions[].required` (spec Section
+/// Validates the `A2A-Version` header (spec Section 3.2.6 / 3.6.2), then
+/// enforces `AgentCard.capabilities.extensions[].required` (spec Section
 /// 3.2.6 / 5.6) from the `A2A-Extensions` header, then extracts
 /// credentials for `AgentCard.securitySchemes` from `headers` (and
 /// `query`, where the route has a meaningful query string) and enforces
@@ -139,6 +140,8 @@ async fn require_auth(
     headers: &HeaderMap,
     query: &HashMap<String, String>,
 ) -> Result<(), Response> {
+    check_version(headers.get("A2A-Version").and_then(|v| v.to_str().ok())).map_err(rest_error)?;
+
     let declared_extensions =
         parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
     engine
@@ -638,6 +641,9 @@ async fn get_extended_agent_card_tenant(
 }
 
 async fn get_extended_agent_card_impl(engine: Arc<Engine>, headers: HeaderMap) -> Response {
+    if let Err(e) = check_version(headers.get("A2A-Version").and_then(|v| v.to_str().ok())) {
+        return rest_error(e);
+    }
     let declared_extensions =
         parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
     if let Err(e) = engine.check_required_extensions(&declared_extensions) {
