@@ -25,6 +25,7 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "prost",
+ "prost-types",
  "rand 0.8.7",
  "rcgen",
  "reqwest",

@@ -15,6 +15,8 @@ use tokio_util::sync::CancellationToken;
 use super::*;
 use wire::{HeaderMutation, Pass};
 
+use crate::rules::Subject;
+
 /// What a scripted processor should answer.
 #[derive(Clone)]
 enum Script {
@@ -212,6 +214,20 @@ fn call(method: &'static str) -> CallContext<'static> {
         method,
         headers: &EMPTY,
         claims: None,
+        subject: None,
+        target: None,
+    }
+}
+
+/// A call context that names what it is about.
+fn about<'a>(method: &'a str, subject: Subject<'a>, target: &'a str) -> CallContext<'a> {
+    static EMPTY: std::sync::LazyLock<HeaderMap> = std::sync::LazyLock::new(HeaderMap::new);
+    CallContext {
+        method,
+        headers: &EMPTY,
+        claims: None,
+        subject: Some(subject),
+        target: Some(target),
     }
 }
 
@@ -509,6 +525,8 @@ async fn headers_are_forwarded_and_the_deny_list_wins() {
                 method: "tools/call",
                 headers: &headers,
                 claims: None,
+                subject: None,
+                target: None,
             },
             &["alpha".into()],
             Some(b"{}"),
@@ -546,6 +564,8 @@ async fn an_empty_allow_list_forwards_everything() {
                 method: "tools/call",
                 headers: &headers,
                 claims: None,
+                subject: None,
+                target: None,
             },
             &["alpha".into()],
             Some(b"{}"),
@@ -617,6 +637,8 @@ async fn metadata_expressions_reach_the_processor() {
                 method: "tools/call",
                 headers: &headers,
                 claims: Some(&claims),
+                subject: None,
+                target: None,
             },
             &["alpha".into()],
             Some(b"{}"),
@@ -881,4 +903,180 @@ async fn header_changes_from_several_processors_accumulate() {
     );
     stop_a.cancel();
     stop_b.cancel();
+}
+
+/// The string value of a metadata key the processor was sent, if any.
+fn metadata_text(seen: &Seen, key: &str) -> Option<String> {
+    match seen.metadata[0].as_ref()?.fields.get(key)?.kind.clone()? {
+        prost_types::value::Kind::StringValue(s) => Some(s),
+        other => panic!("{key} should be a string, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn metadata_can_name_the_prompt_a_call_is_about() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("prompts/get", Phase::Request)]);
+    config.metadata = [
+        ("prompt".to_string(), "mcp.prompt.name".to_string()),
+        ("target".to_string(), "mcp.prompt.target".to_string()),
+    ]
+    .into();
+
+    chain(vec![config])
+        .check_request(
+            about("prompts/get", Subject::Prompt("summarize"), "alpha"),
+            &["alpha".into()],
+            Some(b"{}"),
+        )
+        .await;
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(metadata_text(&seen, "prompt").as_deref(), Some("summarize"));
+    assert_eq!(metadata_text(&seen, "target").as_deref(), Some("alpha"));
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn metadata_can_name_the_resource_a_call_is_about() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("resources/read", Phase::Request)]);
+    config.metadata = [("uri".to_string(), "mcp.resource.name".to_string())].into();
+
+    chain(vec![config])
+        .check_request(
+            about(
+                "resources/read",
+                Subject::Resource("memo:insights"),
+                "alpha",
+            ),
+            &["alpha".into()],
+            Some(b"{}"),
+        )
+        .await;
+
+    assert_eq!(
+        metadata_text(&seen.lock().expect("lock"), "uri").as_deref(),
+        Some("memo:insights"),
+        "the unmuxed URI, matching what the request body carries"
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn only_the_subjects_own_key_is_bound_in_metadata() {
+    // The same rule `mcpAuthorization.rules` follows, and for the same reason:
+    // `mcp.tool.name` on a prompt call must not quietly resolve to the prompt.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("prompts/get", Phase::Request)]);
+    config.metadata = [
+        ("as_tool".to_string(), "mcp.tool.name".to_string()),
+        ("as_prompt".to_string(), "mcp.prompt.name".to_string()),
+    ]
+    .into();
+
+    chain(vec![config])
+        .check_request(
+            about("prompts/get", Subject::Prompt("summarize"), "alpha"),
+            &["alpha".into()],
+            Some(b"{}"),
+        )
+        .await;
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(
+        metadata_text(&seen, "as_prompt").as_deref(),
+        Some("summarize")
+    );
+    let fields = &seen.metadata[0].as_ref().expect("metadata").fields;
+    assert!(
+        !fields.contains_key("as_tool"),
+        "a tool expression on a prompt call cannot evaluate, so its key is dropped"
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn a_listing_has_no_subject_to_name() {
+    // `prompts/list` fans out across every target. There is no single prompt
+    // it is about, so `mcp` is unbound and the key is dropped rather than
+    // given something invented.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("prompts/list", Phase::Request)]);
+    config.metadata = [
+        ("prompt".to_string(), "mcp.prompt.name".to_string()),
+        ("method".to_string(), "request.method".to_string()),
+    ]
+    .into();
+
+    let outcome = chain(vec![config])
+        .check_request(call("prompts/list"), &["alpha".into(), "beta".into()], None)
+        .await;
+
+    assert_eq!(outcome.outcome, Outcome::Pass);
+    let seen = seen.lock().expect("lock");
+    let fields = &seen.metadata[0].as_ref().expect("metadata").fields;
+    assert!(!fields.contains_key("prompt"));
+    assert_eq!(
+        metadata_text(&seen, "method").as_deref(),
+        Some("prompts/list"),
+        "the request context is still there"
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn metadata_mixes_the_subject_with_the_caller() {
+    // The combination that makes this worth having: a processor told both who
+    // is asking and what they are asking for, without parsing the body.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("resources/read", Phase::Request)]);
+    config.metadata = [(
+        "who_wants_what".to_string(),
+        r#"jwt.sub + " -> " + mcp.resource.name"#.to_string(),
+    )]
+    .into();
+
+    let claims = serde_json::json!({"sub": "u-1"});
+    let headers = HeaderMap::new();
+    chain(vec![config])
+        .check_request(
+            CallContext {
+                method: "resources/read",
+                headers: &headers,
+                claims: Some(&claims),
+                subject: Some(Subject::Resource("memo:insights")),
+                target: Some("alpha"),
+            },
+            &["alpha".into()],
+            Some(b"{}"),
+        )
+        .await;
+
+    assert_eq!(
+        metadata_text(&seen.lock().expect("lock"), "who_wants_what").as_deref(),
+        Some("u-1 -> memo:insights")
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn the_response_phase_gets_the_subject_too() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let mut config = processor_config(&host, &[("prompts/get", Phase::Response)]);
+    config.metadata = [("prompt".to_string(), "mcp.prompt.name".to_string())].into();
+
+    chain(vec![config])
+        .check_response(
+            about("prompts/get", Subject::Prompt("summarize"), "alpha"),
+            &["alpha".into()],
+            b"{}",
+        )
+        .await;
+
+    assert_eq!(
+        metadata_text(&seen.lock().expect("lock"), "prompt").as_deref(),
+        Some("summarize")
+    );
+    stop.cancel();
 }

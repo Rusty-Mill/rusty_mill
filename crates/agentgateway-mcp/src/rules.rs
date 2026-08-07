@@ -128,7 +128,7 @@ pub enum Subject<'a> {
 
 impl<'a> Subject<'a> {
     /// The CEL key this subject binds under.
-    fn key(&self) -> &'static str {
+    pub(crate) fn key(&self) -> &'static str {
         match self {
             Subject::Tool(_) => "tool",
             Subject::Prompt(_) => "prompt",
@@ -137,7 +137,7 @@ impl<'a> Subject<'a> {
     }
 
     /// The name or URI itself.
-    fn name(&self) -> &'a str {
+    pub(crate) fn name(&self) -> &'a str {
         match self {
             Subject::Tool(name) | Subject::Prompt(name) | Subject::Resource(name) => name,
         }

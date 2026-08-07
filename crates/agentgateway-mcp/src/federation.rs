@@ -366,6 +366,9 @@ impl ServerHandler for Federation {
                         method: TOOLS_LIST,
                         headers: request_headers(&context),
                         claims,
+                        // A fanout has no single subject to name.
+                        subject: None,
+                        target: None,
                     },
                     &backends,
                     None,
@@ -432,7 +435,7 @@ impl ServerHandler for Federation {
             tools,
             ..Default::default()
         };
-        self.guard_response(TOOLS_LIST, &backends, &listing, &context)
+        self.guard_response(TOOLS_LIST, &backends, &listing, None, &context)
             .await
     }
 
@@ -501,6 +504,8 @@ impl ServerHandler for Federation {
                         method: TOOLS_CALL,
                         headers: request_headers(&context),
                         claims: claims(&context),
+                        subject: Some(Subject::Tool(&tool)),
+                        target: Some(&target.name),
                     },
                     &backends,
                     Some(&encoded),
@@ -573,7 +578,13 @@ impl ServerHandler for Federation {
         };
 
         let result = match self
-            .guard_response(TOOLS_CALL, &backends, &result, &context)
+            .guard_response(
+                TOOLS_CALL,
+                &backends,
+                &result,
+                Some((Subject::Tool(&tool), &target.name)),
+                &context,
+            )
             .await
         {
             Ok(result) => result,
@@ -598,7 +609,7 @@ impl ServerHandler for Federation {
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
         let headers = self
-            .guard_request(PROMPTS_LIST, &backends, None, &context)
+            .guard_request(PROMPTS_LIST, &backends, None, None, &context)
             .await?;
 
         let mut prompts: Vec<Prompt> = Vec::new();
@@ -640,7 +651,7 @@ impl ServerHandler for Federation {
             prompts,
             ..Default::default()
         };
-        self.guard_response(PROMPTS_LIST, &backends, &listing, &context)
+        self.guard_response(PROMPTS_LIST, &backends, &listing, None, &context)
             .await
     }
 
@@ -663,13 +674,23 @@ impl ServerHandler for Federation {
         self.permit(&target.name, Subject::Prompt(&name), &federated, &context)?;
 
         let mut params = request;
-        params.name = name;
+        params.name = name.clone();
 
         let backends = vec![target.name.clone()];
         let headers = self
-            .guard_request_json(PROMPTS_GET, &backends, &params, &context)
+            .guard_request_json(
+                PROMPTS_GET,
+                &backends,
+                &params,
+                Some((Subject::Prompt(&params.name), &target.name)),
+                &context,
+            )
             .await?;
         let (params, headers) = (headers.body.unwrap_or(params), headers.headers);
+        // What was actually fetched, which a request-phase rewrite may have
+        // changed. The response phase should describe the result it is looking
+        // at, not the name the client happened to ask for.
+        let fetched = params.name.clone();
 
         let result = self
             .with_timeout(target.get_prompt(params, &headers), target, "prompts/get")
@@ -679,7 +700,13 @@ impl ServerHandler for Federation {
             })?;
 
         let result = self
-            .guard_response(PROMPTS_GET, &backends, &result, &context)
+            .guard_response(
+                PROMPTS_GET,
+                &backends,
+                &result,
+                Some((Subject::Prompt(&fetched), &target.name)),
+                &context,
+            )
             .await?;
 
         Ok(GetPromptResponse::Complete(result))
@@ -700,7 +727,7 @@ impl ServerHandler for Federation {
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
         let headers = self
-            .guard_request(RESOURCES_LIST, &backends, None, &context)
+            .guard_request(RESOURCES_LIST, &backends, None, None, &context)
             .await?;
 
         let mut resources: Vec<Resource> = Vec::new();
@@ -737,7 +764,7 @@ impl ServerHandler for Federation {
             resources,
             ..Default::default()
         };
-        self.guard_response(RESOURCES_LIST, &backends, &listing, &context)
+        self.guard_response(RESOURCES_LIST, &backends, &listing, None, &context)
             .await
     }
 
@@ -756,7 +783,7 @@ impl ServerHandler for Federation {
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
         let headers = self
-            .guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, &context)
+            .guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, None, &context)
             .await?;
 
         let mut templates: Vec<ResourceTemplate> = Vec::new();
@@ -798,8 +825,14 @@ impl ServerHandler for Federation {
             resource_templates: templates,
             ..Default::default()
         };
-        self.guard_response(RESOURCES_TEMPLATES_LIST, &backends, &listing, &context)
-            .await
+        self.guard_response(
+            RESOURCES_TEMPLATES_LIST,
+            &backends,
+            &listing,
+            None,
+            &context,
+        )
+        .await
     }
 
     async fn read_resource(
@@ -819,17 +852,26 @@ impl ServerHandler for Federation {
         self.permit(&target.name, Subject::Resource(&uri), &federated, &context)?;
 
         let mut params = request;
-        params.uri = uri;
+        params.uri = uri.clone();
 
         let backends = vec![target.name.clone()];
         let headers = self
-            .guard_request_json(RESOURCES_READ, &backends, &params, &context)
+            .guard_request_json(
+                RESOURCES_READ,
+                &backends,
+                &params,
+                Some((Subject::Resource(&params.uri), &target.name)),
+                &context,
+            )
             .await?;
         let (mut params, headers) = (headers.body.unwrap_or(params), headers.headers);
 
         // The upstream knows its own URI, never the federated one. A guardrail
         // that rewrote the params could have put the federated form back.
         params.uri = strip_prefix(&self.inner.namer, &target.name, params.uri);
+        // What was actually read, which a request-phase rewrite may have
+        // changed.
+        let read = params.uri.clone();
 
         let mut result = self
             .with_timeout(
@@ -856,7 +898,13 @@ impl ServerHandler for Federation {
         }
 
         let result = self
-            .guard_response(RESOURCES_READ, &backends, &result, &context)
+            .guard_response(
+                RESOURCES_READ,
+                &backends,
+                &result,
+                Some((Subject::Resource(&read), &target.name)),
+                &context,
+            )
             .await?;
 
         Ok(ReadResourceResponse::Complete(result))
@@ -974,6 +1022,7 @@ impl Federation {
         method: &str,
         backends: &[String],
         params: Option<&[u8]>,
+        about: Option<(Subject<'_>, &str)>,
         context: &RequestContext<RoleServer>,
     ) -> Result<HeaderOverride, McpError> {
         if !self.inner.guardrails.runs_request(method) {
@@ -988,6 +1037,8 @@ impl Federation {
                     method,
                     headers: request_headers(context),
                     claims: claims(context),
+                    subject: about.map(|(subject, _)| subject),
+                    target: about.map(|(_, target)| target),
                 },
                 backends,
                 params,
@@ -1010,6 +1061,7 @@ impl Federation {
         method: &str,
         backends: &[String],
         params: &T,
+        about: Option<(Subject<'_>, &str)>,
         context: &RequestContext<RoleServer>,
     ) -> Result<Guarded<T>, McpError>
     where
@@ -1031,6 +1083,8 @@ impl Federation {
                     method,
                     headers: request_headers(context),
                     claims: claims(context),
+                    subject: about.map(|(subject, _)| subject),
+                    target: about.map(|(_, target)| target),
                 },
                 backends,
                 Some(&encoded),
@@ -1073,6 +1127,7 @@ impl Federation {
         method: &str,
         backends: &[String],
         value: &T,
+        about: Option<(Subject<'_>, &str)>,
         context: &RequestContext<RoleServer>,
     ) -> Result<T, McpError>
     where
@@ -1091,6 +1146,8 @@ impl Federation {
                     method,
                     headers: request_headers(context),
                     claims: claims(context),
+                    subject: about.map(|(subject, _)| subject),
+                    target: about.map(|(_, target)| target),
                 },
                 backends,
                 &encoded,

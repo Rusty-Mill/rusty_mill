@@ -491,11 +491,50 @@ opposite of `extAuthz.includeHeaders`. `disallowed` always wins, and both match
 case-insensitively.
 
 `metadata` is a map of CEL expressions evaluated per call and sent as
-`metadata_context`. The context is `jwt` — the verified token's claims — and
-`request`, carrying `method` and `headers`. An expression that cannot be
-evaluated is dropped rather than failing the call: metadata is context for the
-processor, not a decision, and a missing claim should not take a guardrail
-offline. One that does not *compile* is a startup failure.
+`metadata_context`, which is how a processor gets context the protocol does not
+carry. Three things are in scope:
+
+- `jwt` — the verified token's claims
+- `request` — `method` and `headers`
+- `mcp` — the subject the call is about, in the same shape
+  `mcpAuthorization.rules` uses
+
+```yaml
+metadata:
+  tenant: 'request.headers["x-tenant"]'
+  prompt: 'mcp.prompt.name'
+  resource: 'mcp.resource.name'
+  who_wants_what: 'jwt.sub + " -> " + mcp.resource.name'
+```
+
+`mcp` is **ours, not upstream's**. Upstream evaluates these expressions against
+the HTTP request alone and reserves the MCP context for RBAC. Adding it is
+additive — no expression that worked before changes meaning, and
+`metadata_context` is an opaque struct on the wire — and it is what lets a
+processor be handed the prompt or resource it is being asked about without
+parsing `mcp_request` itself.
+
+The same one-subject-at-a-time rule applies as in `rules`: exactly one of
+`mcp.tool`, `mcp.prompt`, `mcp.resource` exists per call, and it holds the
+**unmuxed** identifier — `summarize`, `memo:insights`. A key whose expression
+cannot be evaluated is dropped rather than failing the call, so this is safe,
+but it has a consequence worth seeing:
+
+```
+tools/call     → {method, target, tool}        # target: 'mcp.tool.target'
+prompts/get    → {method, prompt}              # `target` vanished
+resources/read → {method, resource}
+prompts/list   → {method}                      # a fanout has no one subject
+```
+
+A `target` key written as `mcp.tool.target` silently disappears on prompt and
+resource calls. Write it per kind, or read `service_names`, which is on every
+message regardless.
+
+An expression that cannot be evaluated is dropped rather than failing the call:
+metadata is context for the processor, not a decision, and a missing claim
+should not take a guardrail offline. One that does not *compile* is a startup
+failure.
 
 ### `headerMutation`
 
