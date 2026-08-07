@@ -20,6 +20,48 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.2
+
+- **Track W slice 3: `sys::console` and `sys::handle` (D-15).** The last two
+  families on the migration list. `sys::handle`: `duplicate`
+  (`handle::duplicate`) and `OwnedWinHandle::drop` (`handle::close`).
+  `sys::console`: `std_handle` (`handle::get_std_handle`), the
+  `GetConsoleMode`/`SetConsoleMode` pair (`console::get_mode`/`set_mode`),
+  the viewport query (`console::window_size`), `poll_readable`
+  (`console::wait_readable`), `read_chunk` (`console::read`, with the same
+  length clamp slice 1 needed), `alloc`/`free`/`attach`, the
+  std-slot repoint in `reopen_std_handles` (`handle::set_std_handle`), and
+  `has_console`'s throwaway close.
+
+  The mode pair is factored into two-armed `get_mode`/`set_mode` helpers so
+  the ten public functions built on it keep a single body each — `is_tty`,
+  `enter_raw`, `restore`, `is_raw` and `set_echo` are all now expressed in
+  terms of those two rather than raw calls. `std_handle`'s track-w arm
+  folds the donor's `Ok(None)`/`Err` split back to the exact `NULL`/
+  `INVALID_HANDLE_VALUE` values the raw call produces, so callers are
+  unaffected.
+
+  **One boundary swap, and it is the interesting part:**
+  `rusty_win32::console::window_size` returns `(cols, rows)`; this crate's
+  `window_size` returns `(rows, cols)`, following `winsize`'s
+  `ws_row`/`ws_col` ordering since `platform::term` is a portable surface.
+  Both are `(u16, u16)`, so nothing in the type system catches getting it
+  backwards and the failure would be silent. Swapped at the boundary with
+  a comment rather than "fixed" in either crate — neither ordering is
+  wrong. See `docs/learning/005-…`.
+
+  **`reopen` (the `CONIN$`/`CONOUT$` open) stays on windows-sys**, and
+  unlike `CreateProcessW` in slice 2 this is *declined for now*, not closed
+  permanently. `rusty_win32::fs::open_file` matches on disposition, share
+  mode and security attributes but passes `FILE_ATTRIBUTE_NORMAL` where
+  this passes `0`. That is very probably inert for an `OPEN_EXISTING` open
+  of a console pseudo-device — and "very probably" is not good enough for
+  the `has_console` probe, whose previous incarnation shipped a
+  false negative that surfaced only as a downstream `ERROR_ACCESS_DENIED`
+  on CI. Revisit if the donor grows an explicit console-device open.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.1
 
 - **Track W slice 2: `sys::proc`'s spawn/wait/job families (D-15).** Nine

@@ -101,6 +101,23 @@ impl From<OwnedHandle> for OwnedWinHandle {
 /// `false` (a clone is not automatically handed to a future child just
 /// because it was requested), `sys::proc`'s spawn-time wiring wants
 /// `true`.
+///
+/// Track W (D-15): `rusty_win32::handle::duplicate`. Same call, same
+/// `DUPLICATE_SAME_ACCESS` / current-process-to-current-process shape,
+/// same `inheritable` meaning — the donor's wrapper takes the boolean
+/// directly where this arm converts it to the `BOOL` itself.
+#[cfg(feature = "track-w")]
+pub fn duplicate(handle: &OwnedWinHandle, inheritable: bool) -> Result<OwnedWinHandle> {
+    // SAFETY: `handle.as_raw()` is a valid open handle for the life of
+    // `handle` — `duplicate`'s whole safety contract, and the reason it
+    // takes `&OwnedWinHandle` rather than a raw value.
+    let dup = unsafe { rusty_win32::handle::duplicate(handle.as_raw(), inheritable) }
+        .map_err(|e| errmap::trackw_err("DuplicateHandle", e))?;
+    OwnedWinHandle::from_raw(dup)
+        .ok_or_else(|| errmap::last_win32_err("DuplicateHandle", OsStr::new("")))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn duplicate(handle: &OwnedWinHandle, inheritable: bool) -> Result<OwnedWinHandle> {
     let mut dup: w::HANDLE = std::ptr::null_mut();
     // SAFETY: `handle.as_raw()` is a valid open handle for the life of
@@ -125,6 +142,21 @@ pub fn duplicate(handle: &OwnedWinHandle, inheritable: bool) -> Result<OwnedWinH
 }
 
 impl Drop for OwnedWinHandle {
+    /// Track W (D-15): `rusty_win32::handle::close`. Its `Result` is
+    /// discarded for the same reason the windows-sys arm ignores
+    /// `CloseHandle`'s `BOOL` — a destructor has nowhere to report to, and
+    /// this type's own construction invariant is what makes the close
+    /// correct in the first place.
+    #[cfg(feature = "track-w")]
+    fn drop(&mut self) {
+        // SAFETY: `self.0` was validated non-invalid at construction, is
+        // owned uniquely by this value, and is closed exactly once here —
+        // `close`'s "not used again after this call" obligation is
+        // discharged by this being the drop glue.
+        let _ = unsafe { rusty_win32::handle::close(self.0) };
+    }
+
+    #[cfg(not(feature = "track-w"))]
     fn drop(&mut self) {
         // SAFETY: `self.0` was validated non-invalid at construction, is
         // owned uniquely by this value, and is closed exactly once here.
