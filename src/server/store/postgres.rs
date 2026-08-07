@@ -1036,19 +1036,63 @@ impl Store for PostgresStore {
 }
 
 impl PostgresStore {
+    /// The event at exactly `index`, or `None` if the log no longer holds it.
+    ///
+    /// The exactness is the whole point. This used to seek — `events_from(index)`
+    /// and take the first — which is the same query and the same cost right up
+    /// until the log is trimmed past `index`, at which point it returns the
+    /// earliest *surviving* event and the caller labels it with the index that
+    /// was asked for.
+    ///
+    /// That window is real here and nowhere else. A `NOTIFY` payload is capped
+    /// at 8000 bytes and an event carrying a base64 artifact is not, so this
+    /// backend publishes an index and has each subscriber read the row —
+    /// leaving a gap between the publish and the read that
+    /// [`trim_events`](Self::trim_events), which runs inside every append, is
+    /// free to close. Redis and the in-memory store both carry the event
+    /// itself through their channel and never look it up, so neither can get
+    /// this wrong.
+    ///
+    /// Returning `None` is the right answer for a trimmed event, and a cheap
+    /// one: delivery is best-effort and the log is the durable record, so a
+    /// subscriber that misses one is exactly the case the `410` and
+    /// `Acp-Events-From` exist for. Handing back the wrong event under the
+    /// right index is not — the index becomes the client's `Last-Event-ID`, so
+    /// it would resume from a place it never reached, with nothing anywhere
+    /// reporting an error.
+    ///
+    /// The alternative was to keep the seek and guard it with
+    /// `earliest_event(run_id) <= index`, which is a second round-trip on the
+    /// hot path for something this query answers by itself.
+    async fn event_at(&self, run_id: RunId, index: u64) -> Option<Notification> {
+        let row = sqlx::query(&format!(
+            "SELECT event FROM {} WHERE run_id = $1 AND idx = $2",
+            self.table("events")
+        ))
+        .bind(*run_id.as_uuid())
+        .bind(index as i64)
+        .fetch_optional(&self.pool)
+        .await;
+
+        match row {
+            Ok(Some(row)) => {
+                let raw: serde_json::Value = row.try_get("event").ok()?;
+                decode(raw).ok().map(|event| Notification::event_at(index, event))
+            }
+            // Trimmed, or not appended yet. Both are a dropped notification.
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, %run_id, index, "failed to read a notified event");
+                None
+            }
+        }
+    }
+
     /// Turn a notification pointer back into the notification it stands for.
     async fn resolve(&self, run_id: RunId, pointer: Pointer) -> Option<Notification> {
         match pointer {
             Pointer::Inline { notification } => Some(*notification),
-            Pointer::Event { index } => match self.events_from(run_id, index).await {
-                Ok(events) => {
-                    events.into_iter().next().map(|event| Notification::event_at(index, event))
-                }
-                Err(error) => {
-                    tracing::warn!(%error, %run_id, index, "failed to read a notified event");
-                    None
-                }
-            },
+            Pointer::Event { index } => self.event_at(run_id, index).await,
             Pointer::Signal { id } => {
                 let row = sqlx::query(&format!(
                     "SELECT notification FROM {} WHERE id = $1",

@@ -939,7 +939,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-293 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+295 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
