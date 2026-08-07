@@ -130,8 +130,8 @@ this section and fails on drift.*
 |---|---|---|---|
 | Scoped fs ops (write/read/stat/list/remove) | supported | supported | supported |
 | Scoped-root escape -> `PathEscape` | supported | supported | supported |
-| Scoped-root escape via symlink | normalized | normalized | normalized |
-| Symlink creation (probed, not assumed) | supported | supported | supported |
+| Scoped-root escape via symlink | varies | normalized | normalized |
+| Symlink creation (probed, not assumed) | varies | supported | supported |
 | Process spawn + stdout/stderr/exit capture | supported | supported | supported |
 | Process env isolation (`inherit_env: false`) | supported | supported | supported |
 | Process explicit working directory | supported | supported | normalized |
@@ -139,7 +139,12 @@ this section and fails on drift.*
 | Standard dirs resolve + absolute | supported | supported | supported |
 | Standard dirs config/cache/data are distinct | unsupported | supported | unsupported |
 | Interactive PTY (explicit command, stream, resize, wait) | supported | supported | supported |
-| Capability detection matches the host | normalized | supported | supported |
+| Capability detection matches the host | supported | supported | supported |
+
+### Conditions for `varies` rows
+
+- **Scoped-root escape via symlink** — reachable only where symlink creation is, so on Windows it inherits that OS's privilege gate; cap-std blocks the escape wherever the shape exists
+- **Symlink creation (probed, not assumed)** — on Windows, available with Developer Mode or SeCreateSymbolicLinkPrivilege and otherwise unavailable; unconditional on Linux and macOS
 
 ### Evidence
 
@@ -147,8 +152,8 @@ this section and fails on drift.*
 
 - `fs_scoped_ops` — supported: write/read/stat/create_dir/read_dir/remove all behave identically
 - `fs_escape_lexical` — supported: 5 escape shapes classified `PathEscape`; interior `a/../b` still resolves
-- `fs_escape_symlink` — normalized: blocked by cap-std, surfaced as `PermissionDenied` (not `PathEscape`)
-- `fs_symlink_create` — supported: symlink created and resolved; Capabilities::symlinks = true
+- `fs_escape_symlink` — varies: blocked by cap-std, surfaced as `PermissionDenied` (not `PathEscape`)
+- `fs_symlink_create` — varies: symlink created and resolved; Capabilities::symlinks = true
 - `proc_spawn_capture` — supported: stdout, stderr, and exit status 7 all captured separately
 - `proc_env_isolation` — supported: inherit_env true passes parent env; false yields an empty env
 - `proc_cwd` — supported: child cwd matches the requested path byte-for-byte
@@ -156,7 +161,7 @@ this section and fails on drift.*
 - `dirs_resolve` — supported: config/cache/data all resolve to absolute, app-suffixed, stable paths
 - `dirs_distinct` — unsupported: collides on this host: config==data
 - `pty_interactive` — supported: explicit command spawned; marker streamed; resize ok; wait() reaped exit 11
-- `capabilities_honest` — normalized: detection matches the host (symlinks = true) and corrects the conservative baseline, which claims false
+- `capabilities_honest` — supported: detection matches the host (symlinks = true); corrects the conservative baseline, which claims false
 
 **Linux**
 
