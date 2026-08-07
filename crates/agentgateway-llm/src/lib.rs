@@ -26,9 +26,10 @@ pub mod translate;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::{AiBackend, BackendAuth, Policies};
+use agentgateway_core::Headers;
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use http::{HeaderValue, Request, Response, StatusCode, header};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use serde_json::Value;
@@ -50,6 +51,9 @@ pub enum LlmError {
     /// The provider is not served by this build.
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// A route's `requestHeaderModifier` named something HTTP cannot represent.
+    #[error(transparent)]
+    HeaderModifier(#[from] agentgateway_core::HeaderError),
 }
 
 /// The body an LLM response carries.
@@ -62,6 +66,12 @@ pub struct LlmBackend {
     model: Option<String>,
     /// Credential presented to the provider.
     key: Option<String>,
+    /// The route's `requestHeaderModifier`, applied to the provider request.
+    ///
+    /// The request that leaves here is built by this crate rather than
+    /// forwarded, so nothing else would ever apply it: an `ai` route's
+    /// modifier used to parse and do nothing.
+    request_headers: Option<Headers>,
     client: reqwest::Client,
 }
 
@@ -80,6 +90,14 @@ impl LlmBackend {
     pub fn new(backend: &AiBackend, policies: &Policies, at: &str) -> Result<Self, LlmError> {
         let provider = Provider::new(&backend.provider, at)?;
         let model = provider.forced_model().map(str::to_string);
+
+        let request_headers = match policies.request_header_modifier.as_ref() {
+            Some(modifier) => Some(Headers::new(
+                modifier,
+                &format!("{at}.requestHeaderModifier"),
+            )?),
+            None => None,
+        };
 
         // `passthrough` is meaningless here: a provider API key is not the
         // caller's bearer token, and forwarding one as the other would send a
@@ -115,6 +133,7 @@ impl LlmBackend {
             provider,
             model,
             key,
+            request_headers,
             client,
         })
     }
@@ -170,14 +189,32 @@ impl LlmBackend {
             }
         };
 
-        let mut upstream = self
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        for (name, value) in self.provider.auth_headers(self.key.as_deref()) {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::try_from(name),
+                HeaderValue::try_from(value.as_str()),
+            ) {
+                headers.insert(name, value);
+            }
+        }
+        // After the provider's own headers, matching the `host` proxy: a route
+        // that names a header means it, even one the provider set. Removing
+        // `authorization` here is how you stop a key reaching the provider,
+        // which is worth being able to say.
+        if let Some(modifier) = &self.request_headers {
+            modifier.apply(&mut headers);
+        }
+
+        let upstream = self
             .client
             .post(self.provider.endpoint())
-            .header(header::CONTENT_TYPE, "application/json")
+            .headers(headers)
             .json(&upstream_body);
-        for (name, value) in self.provider.auth_headers(self.key.as_deref()) {
-            upstream = upstream.header(name, value);
-        }
 
         let response = match upstream.send().await {
             Ok(response) => response,

@@ -196,6 +196,13 @@ binds:
             policies:
               backendAuth:
                 key: sk-ant-replace-me
+              # Applied to the request the gateway builds for the provider,
+              # after the provider's own headers -- so a route can replace or
+              # take back a header the gateway put there, `authorization`
+              # included.
+              requestHeaderModifier:
+                set:
+                  x-gateway: rusty-agent-gateway
             backends:
               - ai:
                   provider:
@@ -214,6 +221,11 @@ binds:
                 denyMethods: ["^tasks/cancel$"]
                 agentCard:
                   url: "https://gateway.example.com/a2a"
+              # Reaches the agent even on a call the `a2a` policy had to buffer
+              # to read the JSON-RPC method out of the body.
+              requestHeaderModifier:
+                set:
+                  x-gateway: rusty-agent-gateway
             backends:
               - host: "agent-a:9000"
               - host: "agent-b:9000"

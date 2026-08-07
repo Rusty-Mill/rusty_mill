@@ -61,6 +61,8 @@ fn agent_card(name: &str, url: &str, skills: &[&str], streaming: bool) -> Value 
 struct Agent {
     port: u16,
     calls: Arc<Mutex<Vec<Value>>>,
+    /// Headers the agent saw on the last forwarded call.
+    seen_headers: Arc<Mutex<Vec<(String, String)>>>,
     hits: Arc<AtomicUsize>,
 }
 
@@ -75,13 +77,16 @@ async fn agent(
 
     let port = free_port().await;
     let calls = Arc::new(Mutex::new(Vec::new()));
+    let seen_headers = Arc::new(Mutex::new(Vec::new()));
     let hits = Arc::new(AtomicUsize::new(0));
 
     let recorder = Arc::clone(&calls);
+    let header_recorder = Arc::clone(&seen_headers);
     let counter = Arc::clone(&hits);
 
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
+        let header_recorder = Arc::clone(&header_recorder);
         let counter = Arc::clone(&counter);
         async move {
             let path = request.uri().path().to_string();
@@ -102,6 +107,18 @@ async fn agent(
             }
 
             counter.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut seen) = header_recorder.lock() {
+                *seen = request
+                    .headers()
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.as_str().to_string(),
+                            v.to_str().unwrap_or_default().to_string(),
+                        )
+                    })
+                    .collect();
+            }
             let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
                 .await
                 .unwrap_or_default();
@@ -127,7 +144,12 @@ async fn agent(
         let _ = axum::serve(listener, app).await;
     });
 
-    Agent { port, calls, hits }
+    Agent {
+        port,
+        calls,
+        seen_headers,
+        hits,
+    }
 }
 
 /// Boot a gateway with an `a2a` route in front of `agents`.
@@ -512,6 +534,79 @@ async fn a_response_modifier_reaches_the_merged_agent_card() {
             .iter()
             .any(|(k, v)| k == "x-served-by" && v == "rusty"),
         "saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+/// A `requestHeaderModifier` that touches all three operations.
+const TAG: &str = "              requestHeaderModifier:\n                set:\n                  x-tenant: acme\n                add:\n                  x-scope: agents\n                remove: [x-drop-me]";
+
+#[tokio::test]
+async fn a_request_modifier_reaches_a_proxied_a2a_agent() {
+    // An `a2a` route dispatches through the same `host` proxy that has always
+    // applied this, but nothing asserted it, and "already works" is exactly
+    // the claim worth testing rather than assuming.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        "                allowMethods: [\"message/send\"]",
+        &[agent.port],
+        TAG,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(&url)
+        .header("x-drop-me", "please")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = agent.seen_headers.lock().expect("lock");
+    assert!(
+        seen.iter().any(|(k, v)| k == "x-tenant" && v == "acme"),
+        "saw {seen:?}"
+    );
+    assert!(
+        seen.iter().any(|(k, v)| k == "x-scope" && v == "agents"),
+        "saw {seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|(k, _)| k == "x-drop-me"),
+        "`remove` must drop a header the caller sent: {seen:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_modifier_applies_to_a_call_the_a2a_policy_had_to_buffer() {
+    // Gating reads the method out of the body, so an `a2a` route hands the
+    // proxy an already-buffered request rather than a stream. The modifier has
+    // to survive that second path too.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[agent.port],
+        TAG,
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(agent.hits.load(Ordering::Relaxed), 1);
+
+    let seen = agent.seen_headers.lock().expect("lock");
+    assert!(
+        seen.iter().any(|(k, v)| k == "x-tenant" && v == "acme"),
+        "saw {seen:?}"
     );
 
     shutdown.cancel();
