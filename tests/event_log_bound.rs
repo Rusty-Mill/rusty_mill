@@ -224,3 +224,97 @@ async fn resuming_from_a_retained_index_still_works() {
         response.status()
     );
 }
+
+/// A run's terminal event is not charged for the output it carries.
+///
+/// The snapshot on a `run.*` event holds everything the run produced, and that
+/// payload already lives on the run itself, outside the log. Charging it here
+/// counted the same bytes twice — and the effect was worse than the double
+/// count, since the run that produced the most output was the one whose
+/// terminal event blew the whole budget.
+#[tokio::test]
+async fn a_run_snapshot_is_not_sized_by_its_output() {
+    let mut run = Run::new(AgentName::new("probe").unwrap(), None);
+    let empty = Event::for_run(run.clone()).unwrap().approximate_size();
+
+    run.output = vec![Message::new(
+        rusty_acp::types::Role::Agent,
+        (0..60).map(|_| MessagePart::text("y".repeat(2048))),
+    )];
+    let laden = Event::for_run(run).unwrap().approximate_size();
+
+    assert_eq!(empty, laden, "a run event grew with its output: {empty} against {laden} bytes");
+}
+
+/// The whole of the defect, end to end: a run whose output exceeds the limit
+/// keeps a usable tail rather than collapsing to one event.
+#[tokio::test]
+async fn a_large_run_keeps_a_usable_tail() {
+    let (store, run_id) = store_with(16 * 1024).await;
+
+    for _ in 0..60 {
+        store.append_event(run_id, &sized_event(2048)).await.unwrap();
+    }
+    let before = store.events(run_id).await.unwrap().len();
+
+    // The terminal event, carrying every part the run emitted.
+    let mut run = Run::new(AgentName::new("probe").unwrap(), None);
+    run.status = rusty_acp::types::RunStatus::Completed;
+    run.output = vec![Message::new(
+        rusty_acp::types::Role::Agent,
+        (0..60).map(|_| MessagePart::text("y".repeat(2048))),
+    )];
+    store.append_event(run_id, &Event::for_run(run).unwrap()).await.unwrap();
+
+    let after = store.events(run_id).await.unwrap().len();
+    assert!(
+        after > 1,
+        "the terminal event evicted the log it belongs to: {before} events before it, {after} after"
+    );
+    assert!(after >= before, "appending one small event dropped {} others", before + 1 - after);
+}
+
+/// A genuinely oversized *artifact* is still retained alone.
+///
+/// That case and the one above look identical from the outside — one event over
+/// the whole limit — and only one of them was an accounting error. Asserted so
+/// a fix for the other cannot quietly undo it.
+#[tokio::test]
+async fn an_oversized_artifact_still_stands_alone() {
+    let (store, run_id) = store_with(16 * 1024).await;
+
+    for _ in 0..4 {
+        store.append_event(run_id, &sized_event(2048)).await.unwrap();
+    }
+    store.append_event(run_id, &sized_event(64 * 1024)).await.unwrap();
+
+    let retained = store.events(run_id).await.unwrap();
+    assert_eq!(retained.len(), 1, "an oversized artifact should displace the rest");
+}
+
+/// The terminal event survives even a heavily trimmed log, without needing an
+/// exemption of its own.
+///
+/// #66 asked whether it should be pinned explicitly, since it is the one event
+/// a late attacher most needs. It does not: nothing is appended after a run
+/// reaches a terminal state, so it is always the newest and the rule that keeps
+/// the newest already covers it. Asserted rather than reasoned, because the
+/// argument depends on an ordering that a future change could break silently.
+#[tokio::test]
+async fn the_terminal_event_survives_a_heavy_trim() {
+    let (store, run_id) = store_with(8 * 1024).await;
+
+    for _ in 0..200 {
+        store.append_event(run_id, &sized_event(2048)).await.unwrap();
+    }
+
+    let mut run = Run::new(AgentName::new("probe").unwrap(), None);
+    run.status = rusty_acp::types::RunStatus::Completed;
+    store.append_event(run_id, &Event::for_run(run).unwrap()).await.unwrap();
+
+    let retained = store.events(run_id).await.unwrap();
+    assert!(
+        retained.last().is_some_and(Event::is_terminal),
+        "a late attacher would not find out how the run ended"
+    );
+}

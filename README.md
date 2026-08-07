@@ -480,7 +480,14 @@ Past the cap the oldest events are dropped — but the log is not a cache. It *i
 and what `Last-Event-ID` replays from, so a client resuming from an event that is gone gets **410
 Gone** naming the earliest index still held, rather than a shorter prefix that reads as complete.
 That is the one thing a bound on this must not do quietly. The event just emitted is always kept,
-so a live tail keeps working even for an agent whose single artifact exceeds the whole limit.
+so a live tail keeps working even for an agent whose single artifact exceeds the whole limit — and
+since nothing is appended after a run reaches a terminal state, that rule is also what guarantees a
+late attacher still finds out how the run ended.
+
+A `run.*` event is **not** charged for the output it carries. That payload already lives on the run
+itself, outside the log, so counting it here would count the same bytes twice — and the effect was
+worse than the double count: the run that produced the most output was the one whose terminal event
+blew the entire budget and evicted everything else. The bound is on what the log uniquely holds.
 
 An evicted session is indistinguishable from one that never existed, so an agent's conversation
 silently starts over — the same thing `RedisStore`'s TTL does, and logged at `warn` for exactly
