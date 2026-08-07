@@ -116,7 +116,7 @@ pub use agent::{agent_fn, Agent, FnAgent, MessageWriter, RunContext};
 pub use run::RunHandle;
 pub use store::{
     InMemoryStore, Notification, RecoveryRecord, SessionRecord, Store, DEFAULT_MAX_RUNS,
-    DEFAULT_MAX_SESSIONS,
+    DEFAULT_MAX_RUN_EVENT_BYTES, DEFAULT_MAX_SESSIONS,
 };
 
 #[cfg(feature = "redis-store")]
@@ -1513,6 +1513,7 @@ pub struct AcpServerBuilder {
     max_recovery_attempts: Option<u32>,
     max_concurrent_runs: Option<usize>,
     max_request_bytes: Option<usize>,
+    max_run_event_bytes: Option<usize>,
     await_timeout: Option<Option<Duration>>,
 }
 
@@ -1671,6 +1672,23 @@ impl AcpServerBuilder {
     /// eviction is logged at `warn` for exactly that reason.
     ///
     /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
+    pub fn max_run_event_bytes(mut self, max_run_event_bytes: usize) -> Self {
+        self.max_run_event_bytes = Some(max_run_event_bytes);
+        self
+    }
+
+    /// Cap how much of a single run's event log the default [`InMemoryStore`]
+    /// keeps. Defaults to [`DEFAULT_MAX_RUN_EVENT_BYTES`].
+    ///
+    /// The bound the run and session counts do not reach: a streaming agent
+    /// emits one event per token and a non-terminal run is never evicted, so
+    /// one long stream is otherwise unbounded on its own.
+    ///
+    /// Past the cap the oldest events are dropped. A client that then tries to
+    /// resume from before what is left is refused with 410 rather than handed a
+    /// log with a hole in it.
+    ///
+    /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
     pub fn max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = Some(max_sessions);
         self
@@ -1771,10 +1789,15 @@ impl AcpServerBuilder {
         }
 
         let store = self.store.unwrap_or_else(|| {
-            Arc::new(InMemoryStore::with_limits(
-                self.max_runs.unwrap_or(DEFAULT_MAX_RUNS),
-                self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS),
-            ))
+            Arc::new(
+                InMemoryStore::with_limits(
+                    self.max_runs.unwrap_or(DEFAULT_MAX_RUNS),
+                    self.max_sessions.unwrap_or(DEFAULT_MAX_SESSIONS),
+                )
+                .with_max_run_event_bytes(
+                    self.max_run_event_bytes.unwrap_or(DEFAULT_MAX_RUN_EVENT_BYTES),
+                ),
+            )
         });
 
         Ok(AcpServer {

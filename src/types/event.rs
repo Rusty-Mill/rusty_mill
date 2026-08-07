@@ -133,6 +133,52 @@ impl Event {
         Event::Generic { generic: payload }
     }
 
+    /// Roughly how many bytes this event occupies, for stores that bound a
+    /// run's log by size.
+    ///
+    /// An estimate, not an accounting. Serialising each event to measure it
+    /// exactly would put a full JSON encode on every append — the hot path for
+    /// a streaming agent — to inform a limit that is a rough ceiling anyway.
+    /// What this has to get right is the ratio between a one-word text part and
+    /// a base64 artifact, which is the difference the bound exists to notice,
+    /// and summing the payloads does that.
+    ///
+    /// Counted as the payload plus a fixed allowance for the envelope, so a
+    /// flood of tiny events is bounded rather than treated as free.
+    pub fn approximate_size(&self) -> usize {
+        /// Enough to cover the `type` discriminator, the JSON punctuation and
+        /// the `Vec`'s own slot, so empty events are not free.
+        const ENVELOPE: usize = 128;
+
+        let payload = match self {
+            Event::MessagePart { part } => part.approximate_size(),
+            Event::MessageCreated { message } | Event::MessageCompleted { message } => {
+                message.parts.iter().map(MessagePart::approximate_size).sum()
+            }
+            // A run snapshot's own size is dominated by its output, which is a
+            // message list like any other.
+            Event::RunCreated { run }
+            | Event::RunInProgress { run }
+            | Event::RunAwaiting { run }
+            | Event::RunCompleted { run }
+            | Event::RunFailed { run }
+            | Event::RunCancelled { run } => run
+                .output
+                .iter()
+                .flat_map(|message| message.parts.iter())
+                .map(MessagePart::approximate_size)
+                .sum(),
+            // Serialised, because an agent-defined payload has no structure to
+            // walk and is the one case that can be arbitrarily large without
+            // going through a message part.
+            Event::Generic { generic } => {
+                serde_json::to_string(generic).map(|json| json.len()).unwrap_or(0)
+            }
+            Event::Error { error } => error.message.len(),
+        };
+        ENVELOPE + payload
+    }
+
     /// Convenience constructor for a `run.*` event matching the run's status.
     ///
     /// Returns `None` for [`crate::types::RunStatus::Cancelling`], which has no

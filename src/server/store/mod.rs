@@ -94,6 +94,23 @@ pub const DEFAULT_MAX_RUNS: usize = 1024;
 /// actually has.
 pub const DEFAULT_MAX_SESSIONS: usize = 1024;
 
+/// How much of a single run's event log an [`InMemoryStore`] keeps.
+///
+/// The third dimension, and the one the run and session counts do not reach: a
+/// streaming agent emitting token by token produces one event per token, and a
+/// non-terminal run is never evicted, so one long stream grew without any bound
+/// applying to it.
+///
+/// Measured in bytes rather than events because one 5 MB artifact part and
+/// fifty thousand words are the same problem counted differently, and only the
+/// byte figure is the one that exhausts a host.
+///
+/// 4 MiB is a long conversation — hundreds of thousands of words of plain text
+/// — and still bounds a thousand concurrent runs to something a small host
+/// survives. An agent streaming more than this into one run is producing
+/// output no client is going to replay in full.
+pub const DEFAULT_MAX_RUN_EVENT_BYTES: usize = 4 * 1024 * 1024;
+
 /// Result of a store operation.
 ///
 /// Backends report failures as [`Error`] so they surface to clients as ordinary
@@ -271,6 +288,23 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
         let events = self.events(run_id).await?;
         Ok(events.into_iter().skip(from as usize).collect())
+    }
+
+    /// The index of the earliest event this backend still holds for a run.
+    ///
+    /// Non-zero when a backend has dropped the front of a log to stay within a
+    /// bound. A client resuming from before this cannot be served: the events
+    /// between are gone, and handing it the rest would be a log with a hole in
+    /// it that reads as complete. The server checks this and refuses rather
+    /// than replaying short.
+    ///
+    /// **Defaults to `0`**, which is right for every backend that does not trim
+    /// a live run's log. Redis and Postgres both expire or sweep a run whole,
+    /// so their logs are complete for as long as they exist at all — an absent
+    /// run is a different answer, and one their reads already give.
+    async fn earliest_event(&self, run_id: RunId) -> StoreResult<u64> {
+        let _ = run_id;
+        Ok(0)
     }
 
     /// Publish a notification on a run's channel.
