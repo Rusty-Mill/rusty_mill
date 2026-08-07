@@ -143,6 +143,22 @@ impl RestClient {
         Ok((client, card))
     }
 
+    /// Like [`RestClient::discover`], but additionally verifies the fetched
+    /// `AgentCard` against `trusted_keys` (spec Section 8.4) before
+    /// returning it, failing closed - an unsigned card, a card signed only
+    /// by an untrusted key, or a tampered card are all rejected with
+    /// [`ClientError::AgentCardSignatureInvalid`].
+    #[cfg(feature = "signing")]
+    pub async fn discover_and_verify<'a>(
+        base_url: &str,
+        trusted_keys: impl IntoIterator<Item = &'a crate::signing::VerifyingKey>,
+    ) -> Result<(Self, AgentCard)> {
+        let card = A2aClient::fetch_agent_card(base_url).await?;
+        super::verify_any_signature(&card, trusted_keys)?;
+        let client = Self::from_agent_card(&card)?;
+        Ok((client, card))
+    }
+
     pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
         self.bearer_token = Some(token.into());
         self

@@ -68,9 +68,50 @@ pub enum ClientError {
     Grpc(#[from] tonic::Status),
     #[error("unexpected response (HTTP {status}): {body}")]
     UnexpectedResponse { status: u16, body: String },
+    #[cfg(feature = "signing")]
+    #[error("agent card signature verification failed: {0}")]
+    AgentCardSignatureInvalid(String),
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// Verifies that at least one of `card.signatures` (spec Section 8.4)
+/// validates against at least one of `trusted_keys`, recomputing the card's
+/// canonical JCS payload for each attempt.
+///
+/// There is no default trust root for Agent Card signatures - the caller
+/// must supply the key(s) they trust, e.g. pinned out-of-band or fetched
+/// from a JWKS endpoint they already trust. A card can carry multiple
+/// coexisting signatures (for key rotation, distinguished by `kid`), so
+/// every (signature, key) pair is tried and success requires only one
+/// match.
+#[cfg(feature = "signing")]
+fn verify_any_signature<'a>(
+    card: &AgentCard,
+    trusted_keys: impl IntoIterator<Item = &'a crate::signing::VerifyingKey>,
+) -> Result<()> {
+    let keys: Vec<&crate::signing::VerifyingKey> = trusted_keys.into_iter().collect();
+    if card.signatures.is_empty() {
+        return Err(ClientError::AgentCardSignatureInvalid(
+            "agent card has no signatures".to_string(),
+        ));
+    }
+    if keys.is_empty() {
+        return Err(ClientError::AgentCardSignatureInvalid(
+            "no trusted keys provided".to_string(),
+        ));
+    }
+    for signature in &card.signatures {
+        for key in &keys {
+            if crate::signing::verify_agent_card_signature(card, signature, key).is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    Err(ClientError::AgentCardSignatureInvalid(
+        "no signature verified against any trusted key".to_string(),
+    ))
+}
 
 /// A client for one A2A agent interface, speaking the JSON-RPC 2.0
 /// protocol binding.
@@ -126,6 +167,22 @@ impl A2aClient {
     /// required).
     pub async fn discover(base_url: &str) -> Result<(Self, AgentCard)> {
         let card = Self::fetch_agent_card(base_url).await?;
+        let client = Self::from_agent_card(&card)?;
+        Ok((client, card))
+    }
+
+    /// Like [`A2aClient::discover`], but additionally verifies the fetched
+    /// `AgentCard` against `trusted_keys` (spec Section 8.4) before
+    /// returning it, failing closed - an unsigned card, a card signed only
+    /// by an untrusted key, or a tampered card are all rejected with
+    /// [`ClientError::AgentCardSignatureInvalid`].
+    #[cfg(feature = "signing")]
+    pub async fn discover_and_verify<'a>(
+        base_url: &str,
+        trusted_keys: impl IntoIterator<Item = &'a crate::signing::VerifyingKey>,
+    ) -> Result<(Self, AgentCard)> {
+        let card = Self::fetch_agent_card(base_url).await?;
+        verify_any_signature(&card, trusted_keys)?;
         let client = Self::from_agent_card(&card)?;
         Ok((client, card))
     }
