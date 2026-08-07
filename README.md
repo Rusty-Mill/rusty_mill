@@ -819,6 +819,14 @@ implementation.
 honouring `Last-Event-ID`. That is an extension too — the OpenAPI document describes only the
 JSON list, which remains what a client gets by default.
 
+The JSON list carries one more extension: an **`Acp-Events-From`** header naming the index its
+first event sits at. A server bounding how much of a run's log it keeps drops the oldest events,
+and without this a short list is indistinguishable from a short run. A header rather than a field,
+because the list response is a spec type and a field would put something on the wire ACP does not
+define; `0` means the log is whole, and no header at all means the server predates this — which is
+a different answer from "nothing was dropped". `AcpClient::list_run_events` returns a
+`RunEventLog` carrying it, with `is_complete()`.
+
 Also covered:
 
 - **All seven run states** — `created`, `in-progress`, `awaiting`, `cancelling`, `cancelled`,
