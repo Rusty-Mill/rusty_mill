@@ -192,6 +192,13 @@ async fn a_drained_run_is_terminal_in_the_store() {
 /// — and waiting only for the agent body already covers the first. One `WRITE`
 /// would therefore pass without the fix, measuring nothing; the second write is
 /// the whole of what changed.
+///
+/// The threshold sits *between* the two outcomes rather than on either. Without
+/// the fix a drain returns at about one `WRITE`, with it at about two, and the
+/// clock starts after `run_async` has returned — by which point the first write
+/// is already partly done. Asserting `>= 2 * WRITE` measured 598.96ms against a
+/// 600ms bar and failed on the millisecond, which is a flake rather than a
+/// finding.
 #[tokio::test]
 async fn a_drain_outlasts_the_writes_it_waits_on() {
     let (server, _store, client) = replica().await;
@@ -201,7 +208,7 @@ async fn a_drain_outlasts_the_writes_it_waits_on() {
     server.drain(Duration::from_secs(30)).await;
 
     assert!(
-        began.elapsed() >= 2 * WRITE,
+        began.elapsed() > WRITE + WRITE / 2,
         "drain returned in {:?}, which is not long enough to be behind the terminal write",
         began.elapsed()
     );

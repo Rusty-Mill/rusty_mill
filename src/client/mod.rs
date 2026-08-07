@@ -19,6 +19,8 @@
 //! # }
 //! ```
 
+mod telemetry;
+
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
@@ -358,7 +360,21 @@ impl AcpClient {
     /// last attempt is handed back intact, so the caller sees the server's own
     /// 503 rather than an error invented here.
     async fn send(&self, request: RequestBuilder, replay: Replay) -> Result<Response> {
+        // Named before the loop because a `RequestBuilder` is consumed by
+        // sending, and a span field cannot be filled in from something that has
+        // been moved.
+        let method = request.try_clone().map_or("unknown", |probe| {
+            probe.build().map_or("unknown", |built| match *built.method() {
+                Method::GET => "GET",
+                Method::POST => "POST",
+                Method::PUT => "PUT",
+                Method::DELETE => "DELETE",
+                _ => "other",
+            })
+        });
+
         let Some(policy) = self.policy_for(replay) else {
+            telemetry::request_sent(method);
             return send_once(request).await;
         };
 
@@ -367,33 +383,68 @@ impl AcpClient {
             // A request whose body cannot be cloned — a stream — cannot be
             // replayed, so it gets the one attempt it can have.
             let Some(this_attempt) = request.try_clone() else {
+                telemetry::request_sent(method);
                 return send_once(request).await;
             };
             let last_attempt = attempt >= policy.max_retries;
 
-            let delay = match this_attempt.send().await {
+            telemetry::request_sent(method);
+            let (delay, reason) = match this_attempt.send().await {
                 Ok(response) => {
-                    if last_attempt || !retryable_status(response.status()) {
+                    if !retryable_status(response.status()) {
+                        return Ok(response);
+                    }
+                    if last_attempt {
+                        // Warn, and only here. Each retry is routine and logged
+                        // at debug; running out of them is where a request
+                        // actually failed after the client tried to save it,
+                        // and is the line an operator wants.
+                        tracing::warn!(
+                            method,
+                            status = response.status().as_u16(),
+                            attempts = attempt + 1,
+                            "giving up on an acp request after exhausting the retry policy"
+                        );
+                        telemetry::retries_exhausted(method);
                         return Ok(response);
                     }
                     // A `Retry-After` longer than the ceiling is obeyed by
                     // giving up rather than by ignoring it: a server that asked
                     // for a minute should not be knocked on in five seconds.
                     match retry_after(response.headers()) {
-                        Some(asked) if asked > policy.max_backoff => return Ok(response),
-                        Some(asked) => asked,
-                        None => policy.backoff_for(attempt),
+                        Some(asked) if asked > policy.max_backoff => {
+                            tracing::debug!(
+                                method,
+                                ?asked,
+                                max_backoff = ?policy.max_backoff,
+                                "obeying a Retry-After longer than the ceiling by giving up"
+                            );
+                            return Ok(response);
+                        }
+                        Some(asked) => (asked, "retry_after"),
+                        None => (policy.backoff_for(attempt), "status"),
                     }
                 }
                 Err(error) => {
-                    if last_attempt || !retryable_transport(&error) {
+                    if !retryable_transport(&error) {
                         return Err(AcpError::Transport(error.to_string()));
                     }
-                    policy.backoff_for(attempt)
+                    if last_attempt {
+                        tracing::warn!(
+                            method,
+                            %error,
+                            attempts = attempt + 1,
+                            "giving up on an acp request after exhausting the retry policy"
+                        );
+                        telemetry::retries_exhausted(method);
+                        return Err(AcpError::Transport(error.to_string()));
+                    }
+                    (policy.backoff_for(attempt), "transport")
                 }
             };
 
-            tracing::debug!(attempt = attempt + 1, ?delay, "retrying acp request");
+            tracing::debug!(method, attempt = attempt + 1, ?delay, reason, "retrying acp request");
+            telemetry::retried(reason, delay);
             tokio::time::sleep(delay).await;
             attempt += 1;
         }
@@ -839,6 +890,11 @@ impl AcpClientBuilder {
 
     /// Validate the base URL and build the client.
     pub fn build(self) -> Result<AcpClient> {
+        // Registering descriptions is idempotent, so doing it per client rather
+        // than once globally costs nothing and needs no initialisation call a
+        // caller could forget. Same bargain the server makes in its builder.
+        telemetry::describe();
+
         let base_url = self.base_url.trim_end_matches('/').to_string();
         if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
             return Err(AcpError::InvalidUrl(format!(
@@ -947,13 +1003,35 @@ impl ResumeState {
     /// no event has yet said which run this is.
     async fn reconnect(&mut self) -> Result<bool> {
         let policy = &self.client.reconnect;
-        let Some(run_id) = self.run_id else { return Ok(false) };
+        let Some(run_id) = self.run_id else {
+            // No event has arrived, so there is no run id to resume against.
+            // Distinguished from the ceiling below because they call for
+            // different responses: this one is unlucky timing, that one is a
+            // policy an operator set.
+            telemetry::stream_abandoned("no_run_id");
+            return Ok(false);
+        };
         if self.attempts >= policy.max_attempts {
+            tracing::warn!(
+                %run_id,
+                attempts = self.attempts,
+                last_index = ?self.last_index,
+                "giving up on a dropped event stream after exhausting the reconnect policy"
+            );
+            telemetry::stream_abandoned("exhausted");
             return Ok(false);
         }
 
         let backoff = policy.backoff_for(self.attempts);
         self.attempts += 1;
+        tracing::debug!(
+            %run_id,
+            attempt = self.attempts,
+            ?backoff,
+            resume_from = ?self.last_index,
+            "reconnecting a dropped event stream"
+        );
+        telemetry::stream_reconnected();
         tokio::time::sleep(backoff).await;
 
         let request = self.client.events_request(run_id, self.last_index);
@@ -965,6 +1043,12 @@ impl ResumeState {
         let response = match send_checked(&self.client, request).await {
             Ok(response) => response,
             Err(error) if error.is_transient() => {
+                tracing::debug!(
+                    %run_id,
+                    %error,
+                    attempt = self.attempts,
+                    "a reconnection failed transiently; it costs an attempt, not the stream"
+                );
                 self.last_error = Some(error);
                 return Ok(true);
             }
