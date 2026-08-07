@@ -382,3 +382,141 @@ async fn completed_task_delivers_a_push_notification_to_the_configured_webhook()
     assert_eq!(token.as_deref(), Some("correlation-token"));
     assert_eq!(body["id"], task_id);
 }
+
+/// `SendMessageConfiguration.taskPushNotificationConfig` (spec Section
+/// 3.1.1) lets a client register push-notification delivery in the same
+/// request that creates the task, since it doesn't yet know the
+/// server-assigned task id to make a separate
+/// `CreateTaskPushNotificationConfig` call. Unlike the test above, no
+/// separate registration call happens at all here.
+#[tokio::test]
+async fn send_message_configuration_registers_push_notifications_at_task_creation() {
+    let base_url = spawn_push_test_server().await;
+    let (webhook_url, receiver) = spawn_webhook_receiver().await;
+    let (client, _) = A2aClient::discover(&base_url).await.expect("discover");
+
+    let mut push_config = TaskPushNotificationConfig::new(webhook_url);
+    push_config.token = Some("inline-token".to_string());
+    let config = rusty_a2a::types::SendMessageConfiguration {
+        return_immediately: true,
+        task_push_notification_config: Some(push_config),
+        ..Default::default()
+    };
+    let started = client
+        .send_message(Message::user_text("hello"), Some(config))
+        .await
+        .expect("send_message");
+    let task_id = started.as_task().expect("expected a task").id.clone();
+    assert!(!started.as_task().unwrap().status.state.is_terminal());
+
+    let mut delivered = Vec::new();
+    for _ in 0..50 {
+        let got = receiver.received.lock().unwrap().clone();
+        if got
+            .iter()
+            .any(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+        {
+            delivered = got;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let (token, body) = delivered
+        .iter()
+        .find(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+        .expect("expected a push notification delivery for the completed task");
+    assert_eq!(token.as_deref(), Some("inline-token"));
+    assert_eq!(body["id"], task_id);
+
+    // Also reachable via the ordinary CRUD read path, with the
+    // server-assigned `taskId`/`id` filled in.
+    let listed = client
+        .list_push_notification_configs(&task_id)
+        .await
+        .expect("list_push_notification_configs");
+    assert_eq!(listed.configs.len(), 1);
+    assert_eq!(listed.configs[0].task_id.as_deref(), Some(task_id.as_str()));
+}
+
+/// A continuation turn (the client resumes an existing task by sending a
+/// new message with `taskId` set) must NOT re-register a fresh duplicate
+/// push config even if it happens to echo the same
+/// `taskPushNotificationConfig` again - the client-supplied config has no
+/// server-assigned `id`, so registering it a second time would silently
+/// double every future delivery.
+#[tokio::test]
+async fn continuation_turns_do_not_duplicate_the_inline_push_config() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    struct AskThenCompleteAgent;
+    #[async_trait]
+    impl AgentExecutor for AskThenCompleteAgent {
+        async fn execute(&self, ctx: RequestContext, events: EventSink) -> Result<()> {
+            events.status(TaskState::Working);
+            if ctx.task.is_none() {
+                events.status_with_message(
+                    TaskState::InputRequired,
+                    Some(Message::agent_text("more info please")),
+                );
+            } else {
+                events.status_with_message(TaskState::Completed, Some(Message::agent_text("done")));
+            }
+            Ok(())
+        }
+    }
+
+    let card = AgentCard::new(
+        "Ask Then Complete Test Agent",
+        "An A2A agent used for rusty_a2a's inline-push-config-not-duplicated test.",
+        "0.0.0",
+        AgentInterface::json_rpc(base_url.clone()),
+    )
+    .with_push_notifications(true);
+    let server = AgentServer::new(card, Arc::new(AskThenCompleteAgent));
+    tokio::spawn(async move {
+        axum::serve(listener, server.into_router()).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let (client, _) = A2aClient::discover(&base_url).await.expect("discover");
+
+    let mut push_config = TaskPushNotificationConfig::new("https://example.com/webhook");
+    push_config.token = Some("repeated-token".to_string());
+    let config = rusty_a2a::types::SendMessageConfiguration {
+        task_push_notification_config: Some(push_config.clone()),
+        ..Default::default()
+    };
+    let first = client
+        .send_message(Message::user_text("hi"), Some(config))
+        .await
+        .expect("send_message");
+    let task_id = first.as_task().expect("expected a task").id.clone();
+    assert_eq!(first.as_task().unwrap().status.state, TaskState::InputRequired);
+
+    // Continuation turn, echoing the very same inline config again.
+    let mut follow_up = Message::user_text("here's more info");
+    follow_up.task_id = Some(task_id.clone());
+    let config2 = rusty_a2a::types::SendMessageConfiguration {
+        task_push_notification_config: Some(push_config),
+        ..Default::default()
+    };
+    let second = client
+        .send_message(follow_up, Some(config2))
+        .await
+        .expect("send_message (continuation)");
+    assert_eq!(second.as_task().unwrap().status.state, TaskState::Completed);
+
+    let listed = client
+        .list_push_notification_configs(&task_id)
+        .await
+        .expect("list_push_notification_configs");
+    assert_eq!(
+        listed.configs.len(),
+        1,
+        "expected exactly one config, not a duplicate per turn: {:?}",
+        listed.configs
+    );
+}

@@ -218,6 +218,31 @@ impl Engine {
         let (task_id, context_id, existing_task) =
             self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
 
+        // `SendMessageConfiguration.task_push_notification_config` (spec
+        // Section 3.1.1) lets a client register push-notification
+        // delivery in the same request that creates the task, since it
+        // can't yet know the server-assigned task id to make a separate
+        // `CreateTaskPushNotificationConfig` call - the proto's own
+        // comment says the config's `taskId` "should be empty when
+        // sending this configuration in a `SendMessage` request". Only
+        // honored on the turn that actually creates the task: applying it
+        // again on every continuation turn (e.g. answering
+        // `InputRequired`) would register a fresh duplicate config each
+        // time, since the client-supplied config has no server-assigned
+        // `id` for `put_push_config` to dedupe against.
+        if existing_task.is_none() {
+            if let Some(mut config) = req
+                .configuration
+                .as_ref()
+                .and_then(|c| c.task_push_notification_config.clone())
+            {
+                self.require_push_notifications()?;
+                config.task_id = Some(task_id.clone());
+                config.tenant = req.tenant.clone();
+                self.store.put_push_config(req.tenant.as_deref(), config).await;
+            }
+        }
+
         let (tx, mut rx) = mpsc::unbounded_channel::<StreamResponse>();
         let sink = EventSink::new(task_id.clone(), context_id.clone(), tx);
         let (bus, bus_rx) = broadcast::channel::<SeqEvent>(256);
@@ -253,6 +278,7 @@ impl Engine {
             let exec_handle = tokio::spawn(async move { executor.execute(ctx, sink).await });
 
             let mut saw_closing_event = false;
+            let mut first_event = true;
             while let Some(evt) = rx.recv().await {
                 let seq = apply_event(
                     &store,
@@ -263,9 +289,11 @@ impl Engine {
                     &bg_task_id,
                     &bg_context_id,
                     &seed_message,
+                    first_event,
                     &evt,
                 )
                 .await;
+                first_event = false;
                 let closing = evt.closes_stream();
                 let _ = bus.send((seq, evt));
                 if closing {
@@ -301,6 +329,7 @@ impl Engine {
                         &bg_task_id,
                         &bg_context_id,
                         &seed_message,
+                        first_event,
                         &failure,
                     )
                     .await;
@@ -546,6 +575,7 @@ impl Engine {
                 &req.id,
                 &context_id,
                 &seed,
+                false,
                 &evt,
             )
             .await;
@@ -579,6 +609,7 @@ impl Engine {
                 &req.id,
                 &context_id,
                 &seed,
+                false,
                 &evt,
             )
             .await;
@@ -741,6 +772,15 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
 /// caller can pair the exact same number onto the broadcast bus send
 /// (see [`Engine::subscribe_to_task`] on why that pairing has to be
 /// exact for replay to be race-free).
+/// `is_first_event_of_turn` marks the first event of one `start_execution`
+/// call (a "turn"): a brand-new task is always seeded with `seed_message`
+/// on creation, but a *continuation* turn (the client resumed an existing
+/// task by sending a new message with `task_id` set - e.g. answering
+/// `InputRequired`) finds the task already in the store from its earlier
+/// turn(s), so without this flag `seed_message` - this turn's actual
+/// inbound message - would never be recorded into `task.history` at all.
+/// `cancel_task`'s synthetic events aren't a new turn, so it always passes
+/// `false`.
 #[allow(clippy::too_many_arguments)]
 async fn apply_event(
     store: &Arc<dyn TaskStore>,
@@ -751,6 +791,7 @@ async fn apply_event(
     task_id: &str,
     context_id: &str,
     seed_message: &Message,
+    is_first_event_of_turn: bool,
     evt: &StreamResponse,
 ) -> u64 {
     let seq = next_seq.fetch_add(1, Ordering::Relaxed);
@@ -766,7 +807,12 @@ async fn apply_event(
     match evt {
         StreamResponse::StatusUpdate { status_update } => {
             let mut task = match store.get(tenant, task_id).await {
-                Some(t) => t,
+                Some(mut t) => {
+                    if is_first_event_of_turn {
+                        t.history.push(seed_message.clone());
+                    }
+                    t
+                }
                 None => {
                     let mut t = Task::new(task_id, context_id, TaskState::Submitted);
                     t.history.push(seed_message.clone());
@@ -782,7 +828,12 @@ async fn apply_event(
         }
         StreamResponse::ArtifactUpdate { artifact_update } => {
             let mut task = match store.get(tenant, task_id).await {
-                Some(t) => t,
+                Some(mut t) => {
+                    if is_first_event_of_turn {
+                        t.history.push(seed_message.clone());
+                    }
+                    t
+                }
                 None => {
                     let mut t = Task::new(task_id, context_id, TaskState::Working);
                     t.history.push(seed_message.clone());
