@@ -330,6 +330,30 @@ State is scoped to the session, shared by every run in it, and survives across r
 Following ACP's model, `Session.state` holds a *link* to the document rather than the document
 itself, so `GET /session/{id}` stays small however large the state grows.
 
+This is not only a performance note, because a session's history has a ceiling — 32 MiB by
+default:
+
+```rust
+AcpServer::builder().max_session_bytes(128 * 1024 * 1024)   // or .without_session_limit()
+```
+
+None of the other limits reaches this one. `max_sessions` bounds how *many* sessions the default
+store keeps, a Redis TTL and a Postgres retention window bound how *old* they get, and
+`max_run_event_bytes` bounds one run's log. Nothing bounded how long a single conversation grows,
+on any backend — and since the agent is handed its whole history every turn, an unbounded session
+gets steadily slower as well as steadily larger.
+
+Past the ceiling a run is **refused before it starts**, with `invalid_input` naming the limit and
+pointing back here. Refusing at admission rather than failing the output append at the other end
+is the whole design: the caller is told while it can still act — start a fresh session, or
+summarise into state — instead of after an agent has spent a minute producing output that cannot
+be recorded.
+
+It is a gate, not a hard cap. A run already admitted still records its output, so a session can
+overshoot by at most one `max_run_output_bytes` before the next run is turned away. That bound
+costs one read per run instead of two, and 32 MiB is on the order of five million words, so an
+ordinary conversation never approaches it.
+
 ### Artifacts
 
 An artifact is a named output — a file, image, or structured result — that a client can offer
@@ -961,7 +985,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-301 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+307 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
