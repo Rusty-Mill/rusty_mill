@@ -331,3 +331,56 @@ async fn rest_and_jsonrpc_clients_share_the_same_task_store() {
         .expect("get_task via JSON-RPC");
     assert_eq!(fetched.id, task_id);
 }
+
+/// Pins the HTTP method, which the tests above cannot: this crate's own
+/// server accepts both `GET` and `POST` on `/tasks/{id}:subscribe`, so a
+/// passing subscribe proves only that one of them worked.
+///
+/// This server implements the spec-literal `GET` binding and nothing else —
+/// which is all another SDK's server has any reason to implement — and
+/// answers `405` to anything that arrives as a `POST`.
+#[tokio::test]
+async fn subscribe_uses_the_spec_literal_get_binding() {
+    use axum::extract::Path;
+    use axum::http::StatusCode;
+    use axum::response::sse::{Event, Sse};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+
+    async fn subscribe(Path(id_and_action): Path<String>) -> axum::response::Response {
+        if id_and_action.rsplit_once(':').map(|(_, a)| a) != Some("subscribe") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        // One terminal status event, then end of stream.
+        let event = Event::default().json_data(serde_json::json!({
+            "statusUpdate": {
+                "taskId": "t-1",
+                "contextId": "c-1",
+                "status": {"state": "TASK_STATE_COMPLETED"},
+            }
+        }));
+        Sse::new(futures_util::stream::once(async move { event })).into_response()
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    // `get(...)` alone: axum answers 405 Method Not Allowed to a POST on a
+    // route that declares no POST handler.
+    let router = axum::Router::new().route("/tasks/:id", get(subscribe));
+    tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let client = RestClient::new(&base_url);
+    let mut stream = client
+        .subscribe_to_task("t-1")
+        .await
+        .expect("a GET-only server must accept this subscription");
+
+    let event = stream.next().await.expect("one event").expect("decodes");
+    match event {
+        StreamResponse::StatusUpdate { status_update } => {
+            assert_eq!(status_update.status.state, TaskState::Completed);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
