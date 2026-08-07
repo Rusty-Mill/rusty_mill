@@ -26,7 +26,7 @@ crates/
   platform          portable traits + types (api layer; forbid(unsafe))
   platform-mock     in-memory backend — the injectable test double
   platform-linux    libc floor; ffi (curated surface) → sys (all unsafe) → impls
-  platform-windows  windows-sys floor; same layering (Dir impl = R1, on Windows CI)
+  platform-windows  windows-sys floor (+ rusty_win32 track-w); same layering
   winargv           MSVCRT + cmd-rules command-line quoting — standalone for handback
   coreutils         reference consumer (rcat, ls) — tested against the mock
 docs/
@@ -80,7 +80,15 @@ behind the `track-p` feature, via a pinned `rusty_libc` dependency,
 D-12) covers every migrated family in `platform-linux/src/sys`: fdio
 (read/write, the openat family, statx), the reactor's pipe2/poll, and
 process control (kill, wait4, the signal trampoline) — parity-verified
-in both configurations on every CI run. A full-ecosystem donor survey
+in both configurations on every CI run. Windows has the counterpart
+move as of D-15: **Track W**, a pinned `rusty_win32` dependency behind
+the off-by-default `track-w` feature, migrating call families off
+windows-sys one at a time (`sys::fileio::read`/`write` first) and
+re-running the whole platform-windows suite in that configuration as
+the equivalence test. Unlike Track P it buys no lower tier — Windows
+publishes nothing supported beneath a documented DLL export, so it
+swaps the binding's provenance rather than its depth, and windows-sys
+stays the default floor (`docs/learning/003-…`). A full-ecosystem donor survey
 (`docs/extraction-map.md` D9–D16) then unparked the **Terminal**
 surface: is_tty, window size, and raw-mode enter/leave over termios
 (Linux) and console modes (Windows), with `rusty_term` as the design

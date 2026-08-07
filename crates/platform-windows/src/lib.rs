@@ -10,6 +10,33 @@
 //! lifetimes, error mapping, and (post-R2-hoist) the `winargv` quoting
 //! module, which is this crate's security boundary.
 //!
+//! ## Track W (D-15): the `track-w` feature
+//!
+//! Off by default. When on, curated call families route through
+//! `rusty_win32`'s hand-written `extern "system"` declarations instead of
+//! windows-sys — a rev-pinned dependency migrated call-by-call, the same
+//! shape `platform-linux` uses for `rusty_libc` behind `track-p`. Landed
+//! families: `sys::fileio::read`/`write`.
+//!
+//! This does **not** revise D-1, and the symmetric feature name should not
+//! be read as claiming it does. Track P descends a tier — raw syscalls
+//! under libc, with the kernel ABI as the new floor. Track W cannot:
+//! Windows publishes no supported tier beneath a documented DLL export
+//! (the `ntdll` stubs are renumbered between builds on purpose), so both
+//! configurations reach the identical `kernel32!ReadFile`. What the
+//! feature swaps is the binding's *provenance* — hand-written and
+//! reviewed, no `windows-targets` import-lib machinery, `no_std`-capable —
+//! not its depth. Families rusty_win32 has no binding for at the pinned
+//! rev stay on windows-sys in both configurations; [`ffi::nt_surface`]'s
+//! whole `NtCreateFile` capability model is the largest of them.
+//!
+//! Both arms produce bit-identical [`platform::error::PlatformError`]s
+//! (same classification table, same `OsCode::Win32`), which is what lets
+//! this crate's entire suite re-run under `--features track-w` as the
+//! equivalence test. See `docs/learning/003-…` for the full write-up,
+//! including the error-path lesson: with a wrapper between caller and
+//! call, the thread-local last-error slot is never the authority.
+//!
 //! ## Status: Dir/File landed (R1); winargv landed (R2 extraction step 1)
 //!
 //! The `Dir`/`File` impls run over `NtCreateFile` handle-relative opens

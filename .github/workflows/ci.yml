@@ -49,6 +49,21 @@ jobs:
         run: |
           cargo clippy -p platform-linux --features track-p --all-targets -- -D warnings
           cargo test -p platform-linux --features track-p
+      # D-15 / Track W: the Windows counterpart of the step above — the
+      # whole platform-windows suite (parity included) re-runs with the
+      # rusty_win32 path swapped in for the replaced call families.
+      # Windows + stable only, for the mirror-image reasons: the feature
+      # is meaningless on Linux, and rusty_win32's MSRV (1.88) is above
+      # the workspace floor (1.75), so Track W is opt-in precisely so the
+      # floor holds (see platform-windows/Cargo.toml). This is the leg
+      # that matters — `cargo test` here executes the swapped ReadFile/
+      # WriteFile against a real Windows kernel, which no cross-compile
+      # check can do.
+      - name: test platform-windows with track-w (rusty_win32 backend)
+        if: matrix.os == 'windows-latest' && matrix.toolchain == 'stable'
+        run: |
+          cargo clippy -p platform-windows --features track-w --all-targets -- -D warnings
+          cargo test -p platform-windows --features track-w
       # Tun surface (D14): TUNSETIFF needs CAP_NET_ADMIN, which the
       # hosted ubuntu-latest runner's default user lacks — the `test`
       # step above already ran tun_parity.rs, but every one of its
@@ -211,6 +226,14 @@ jobs:
         run: cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
       - name: cargo clippy (windows target, warnings are errors)
         run: cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
+      # D-15 / Track W gets the same minutes-not-queue-time pre-check the
+      # rest of platform-windows does. Compile coverage only — the real
+      # gate is the windows-latest `--features track-w` leg above, which
+      # actually runs the swapped calls. Cheap enough to be worth it: a
+      # feature nothing compiles until a Windows runner frees up is a
+      # feature that bit-rots between the runs that would catch it.
+      - name: cargo clippy (windows target, track-w feature)
+        run: cargo clippy -p platform-windows --features track-w --target x86_64-pc-windows-gnu --all-targets -- -D warnings
       # Scoped to the crates that build on these targets, not
       # `--workspace`: coreutils' bins are `#[cfg(any(target_os =
       # "linux", windows))]` for the reason the macos job's own comment

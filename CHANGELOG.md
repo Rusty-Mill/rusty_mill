@@ -20,6 +20,59 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.0
+
+- **Added `platform-windows`'s `track-w` feature — `rusty_win32` adopted
+  as a real dependency (D-15).** The Windows counterpart of D-12: an
+  off-by-default feature routing curated call families through
+  `rusty_win32`'s hand-written `extern "system"` declarations instead of
+  windows-sys, as a rev-pinned git dependency (one source of truth, no
+  vendored fork), migrated call-by-call. First family:
+  `sys::fileio::read`/`write`, deliberately mirroring Track P's own first
+  slice so the two adoptions stay comparable. Both configurations produce
+  bit-identical `PlatformError`s — same `kind_of_win32` table, same
+  `OsCode::Win32` — so the whole platform-windows suite re-runs under
+  `--features track-w` as the equivalence test rather than needing a
+  parallel one; that run is a new windows+stable CI leg, with a
+  cross-compile clippy pre-check beside it.
+
+  rusty_win32 had been a *donor* since the extraction map opened (D2, D5,
+  D9's console cluster). This does not retract any of that porting —
+  what's extracted stays extracted — it adds a second, narrower
+  relationship alongside it for the calls where the donor already
+  declares the import correctly.
+
+  **Not a lower tier, and recorded as such rather than left to the
+  symmetric feature name to imply:** Track P descends below libc to the
+  kernel ABI, whereas Windows publishes no supported tier beneath a
+  documented DLL export — both configurations reach the same
+  `kernel32!ReadFile`. `track-w` swaps the binding's provenance
+  (hand-written and reviewed, no `windows-targets` import-lib machinery,
+  `no_std`-capable), not its depth, so **D-1 stands unchanged** and
+  windows-sys remains the default floor. Families rusty_win32 has no
+  binding for at the pinned rev stay on windows-sys in both
+  configurations — `sys::nt` above all, whose `NtCreateFile`
+  handle-relative opens are this backend's entire capability model —
+  the same way `fchmodat` stays on libc in both Track P configurations.
+  Full write-up: `docs/learning/003-…`.
+
+  Two things worth knowing for the next rev bump. First, MSRV: like
+  rusty_libc, rusty_win32's floor (1.88) sits above this workspace's
+  (1.75), which is exactly why the feature is opt-in — the MSRV CI leg
+  never resolves it on. Second, and new: adopting it required a manifest
+  fix *upstream* (rusty_win32 edition 2024 → 2021, plus a declared
+  `rust-version = "1.88"` and its own MSRV CI job). Cargo parses the
+  manifest of every resolved dependency, including an optional one whose
+  feature is off, so the donor's `edition` was failing this workspace's
+  1.75 leg on the dependency's mere presence — before compiling a line.
+  A dependency's edition is a constraint on every consumer that merely
+  *lists* it, in a way its `rust-version` is not.
+
+  `y`, not `z`: a new Cargo feature is an addition to the crate's public
+  interface — nameable by any consumer, and resolvable — even though no
+  `pub` item's shape moved. §2's "stop treating additive changes as
+  free" applies.
+
 ### 0.24.0
 
 - **Added `platform::fs::AnonymousFile::create_memfd`** — `memfd_create`,

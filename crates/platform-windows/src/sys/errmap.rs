@@ -15,7 +15,7 @@ use platform::error::{ErrorKind, OsCode, PlatformError};
 
 use crate::ffi::win32_surface as w;
 
-fn kind_of_win32(code: u32) -> ErrorKind {
+pub(crate) fn kind_of_win32(code: u32) -> ErrorKind {
     match code {
         w::ERROR_FILE_NOT_FOUND | w::ERROR_PATH_NOT_FOUND | w::ERROR_NOT_FOUND => {
             ErrorKind::NotFound
@@ -57,6 +57,25 @@ pub fn last_win32_err(op: &'static str, path: &OsStr) -> PlatformError {
     } else {
         e.with_path(path)
     }
+}
+
+/// Track W error path (D-15): a `rusty_win32` wrapper reports failure by
+/// returning a `Win32Error` it captured itself, immediately after the
+/// failing call. Classification is identical to [`last_win32_err`] — same
+/// `GetLastError` number space, same [`kind_of_win32`] table — but the code
+/// must flow from the returned value rather than be re-read here. Re-reading
+/// would be a live race: the thread's last-error slot is overwritten by any
+/// intervening Win32 call, including ones the wrapper itself made on the way
+/// back out.
+///
+/// (The Linux side learned the same lesson from the opposite direction — see
+/// `docs/learning/002-…`, where Track P's raw syscalls return the errno in
+/// the return register and never touch the thread-local at all. Here the
+/// thread-local *is* still written; it just stops being the authority.)
+#[cfg(feature = "track-w")]
+pub fn trackw_err(op: &'static str, e: rusty_win32::error::Win32Error) -> PlatformError {
+    let code = e.code();
+    PlatformError::new(kind_of_win32(code), OsCode::Win32(code), op)
 }
 
 /// Error from a failed ConPTY HRESULT (`CreatePseudoConsole`/
