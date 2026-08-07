@@ -43,7 +43,10 @@ Known v1 fields:
 
 - `symlinks` — probed by `NativeCapabilities::detect()`. Windows can create
   symlinks under Developer Mode or with `SeCreateSymbolicLinkPrivilege`, and
-  a plain Windows host often cannot; the answer is per-host, not per-OS.
+  a plain Windows host often cannot; the answer is per-host, not per-OS,
+  which is why the matrix summarizes it as `varies` on Windows. Of three
+  real Windows hosts measured, two refused and one allowed it — so this is
+  the common case, not a corner case.
 - `unix_permissions` — false on Windows; POSIX mode bits are not emulated.
   Not probed: observing mode bits take effect also assumes a filesystem that
   honors them, so there is no clean thing to ask.
@@ -79,15 +82,36 @@ merges the three reports, and **fails the build if this section differs from
 what the probes reported**. A row cannot claim a behavior that no code
 exercised.
 
+**Each column reports the CI reference host for that OS, not every host of
+that OS.** One machine per OS runs the probes. Where a capability depends on
+the *machine* rather than the OS, a single measurement cannot speak for the
+platform, and the summary says so with `varies` instead of generalizing from
+a sample of one.
+
 Each primitive is one of:
 
 - **supported** — identical observable behavior across all three hosts.
 - **normalized** — the host differs underneath, but the adapter presents one
-  behavior.
+  behavior. Rely on the adapter; nothing to check.
 - **unsupported** — capability genuinely absent here; callers must check
   `NativeCapabilities::detect()` first.
+- **varies** — not portable to assume for this OS: availability depends on
+  host configuration, privilege, filesystem, or policy. **Callers MUST
+  consult `NativeCapabilities` on the current host.** Distinct from
+  `normalized`, and not a softer form of it: `normalized` means the adapter
+  guarantees one consistent contract despite host differences, while
+  `varies` means there is no such guarantee to lean on. The per-host
+  evidence below still records what each reference host actually did — a
+  `varies` summary never hides a measurement, it reports that the
+  measurement does not generalize.
 - **ERRORED** — the probe could not run. Always a CI failure: it means the
   matrix cannot be trusted.
+
+Why `varies` exists: the first generated matrix reported Windows symlink
+creation as `supported` on the strength of the `windows-latest` runner, while
+two other real Windows hosts refused it with `ERROR_PRIVILEGE_NOT_HELD`. That
+is a host-shaped fact in an OS-shaped cell — the same defect as the original
+compile-time `cfg!()` table, moved up one level rather than fixed.
 
 Regenerate locally with:
 
@@ -106,8 +130,8 @@ this section and fails on drift.*
 |---|---|---|---|
 | Scoped fs ops (write/read/stat/list/remove) | supported | supported | supported |
 | Scoped-root escape -> `PathEscape` | supported | supported | supported |
-| Scoped-root escape via symlink | normalized | normalized | normalized |
-| Symlink creation (probed, not assumed) | supported | supported | supported |
+| Scoped-root escape via symlink | varies | normalized | normalized |
+| Symlink creation (probed, not assumed) | varies | supported | supported |
 | Process spawn + stdout/stderr/exit capture | supported | supported | supported |
 | Process env isolation (`inherit_env: false`) | supported | supported | supported |
 | Process explicit working directory | supported | supported | normalized |
@@ -115,7 +139,12 @@ this section and fails on drift.*
 | Standard dirs resolve + absolute | supported | supported | supported |
 | Standard dirs config/cache/data are distinct | unsupported | supported | unsupported |
 | Interactive PTY (explicit command, stream, resize, wait) | supported | supported | supported |
-| Capability detection matches the host | normalized | supported | supported |
+| Capability detection matches the host | supported | supported | supported |
+
+### Conditions for `varies` rows
+
+- **Scoped-root escape via symlink** — reachable only where symlink creation is, so on Windows it inherits that OS's privilege gate; cap-std blocks the escape wherever the shape exists
+- **Symlink creation (probed, not assumed)** — on Windows, available with Developer Mode or SeCreateSymbolicLinkPrivilege and otherwise unavailable; unconditional on Linux and macOS
 
 ### Evidence
 
@@ -123,8 +152,8 @@ this section and fails on drift.*
 
 - `fs_scoped_ops` — supported: write/read/stat/create_dir/read_dir/remove all behave identically
 - `fs_escape_lexical` — supported: 5 escape shapes classified `PathEscape`; interior `a/../b` still resolves
-- `fs_escape_symlink` — normalized: blocked by cap-std, surfaced as `PermissionDenied` (not `PathEscape`)
-- `fs_symlink_create` — supported: symlink created and resolved; Capabilities::symlinks = true
+- `fs_escape_symlink` — varies: blocked by cap-std, surfaced as `PermissionDenied` (not `PathEscape`)
+- `fs_symlink_create` — varies: symlink created and resolved; Capabilities::symlinks = true
 - `proc_spawn_capture` — supported: stdout, stderr, and exit status 7 all captured separately
 - `proc_env_isolation` — supported: inherit_env true passes parent env; false yields an empty env
 - `proc_cwd` — supported: child cwd matches the requested path byte-for-byte
@@ -132,7 +161,7 @@ this section and fails on drift.*
 - `dirs_resolve` — supported: config/cache/data all resolve to absolute, app-suffixed, stable paths
 - `dirs_distinct` — unsupported: collides on this host: config==data
 - `pty_interactive` — supported: explicit command spawned; marker streamed; resize ok; wait() reaped exit 11
-- `capabilities_honest` — normalized: detection matches the host (symlinks = true) and corrects the conservative baseline, which claims false
+- `capabilities_honest` — supported: detection matches the host (symlinks = true); corrects the conservative baseline, which claims false
 
 **Linux**
 

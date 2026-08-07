@@ -18,6 +18,15 @@
 //! guess we are trying to eliminate. `cfg!` is allowed only to reach a
 //! host-specific *API* (there is no portable way to call `symlink`), never
 //! to shortcut the answer.
+//!
+//! One narrow amendment, added after the matrix shipped with a real defect:
+//! a probe may use `cfg!` to decide whether its measurement **generalizes to
+//! the OS** — see [`Verdict::Varies`] and `symlink_summary_verdict`. That is
+//! not the answer; the answer stays measured and appears verbatim in the
+//! evidence. It is a documented property of the platform's security model.
+//! Without this, a one-host-per-OS matrix silently presents a host-shaped
+//! fact in an OS-shaped cell, which is the original `cfg!()` bug relocated
+//! one level up rather than fixed.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,9 +46,22 @@ pub enum Verdict {
     /// Identical observable behavior to the other supported hosts.
     Supported,
     /// The host differs underneath, but the adapter presents one behavior.
+    ///
+    /// Distinct from [`Verdict::Varies`]: normalization means the adapter
+    /// guarantees one consistent contract *despite* host differences, so a
+    /// caller can rely on it without asking anything.
     Normalized,
     /// Capability genuinely absent here; callers must check first.
     Unsupported,
+    /// Not portable to assume for this OS: availability depends on host
+    /// configuration, privilege, filesystem, or policy, so no single machine
+    /// can answer for the OS.
+    ///
+    /// A summary verdict only. Per-host evidence still records what the
+    /// machine that ran the probe actually did — `varies` never hides a
+    /// measurement, it reports that the measurement does not generalize.
+    /// Callers MUST consult `NativeCapabilities` on the current host.
+    Varies,
     /// The probe itself failed. Always a CI failure — it means the matrix
     /// cannot be trusted, which is the exact problem this crate exists to
     /// prevent.
@@ -52,6 +74,7 @@ impl Verdict {
             Verdict::Supported => "supported",
             Verdict::Normalized => "normalized",
             Verdict::Unsupported => "unsupported",
+            Verdict::Varies => "varies",
             Verdict::Errored => "ERRORED",
         }
     }
@@ -61,6 +84,7 @@ impl Verdict {
             "supported" => Some(Verdict::Supported),
             "normalized" => Some(Verdict::Normalized),
             "unsupported" => Some(Verdict::Unsupported),
+            "varies" => Some(Verdict::Varies),
             "ERRORED" => Some(Verdict::Errored),
             _ => None,
         }
@@ -84,6 +108,14 @@ pub struct ProbeResult {
 pub struct Probe {
     pub id: &'static str,
     pub row: &'static str,
+    /// Why this capability is not portable to assume, stated for readers of
+    /// the matrix. Required when the probe can return [`Verdict::Varies`],
+    /// meaningless otherwise.
+    ///
+    /// Lives on the probe rather than the result because the condition is a
+    /// documented property of the capability, identical on every host — only
+    /// the *answer* is per-host, and that is what the evidence records.
+    pub condition: Option<&'static str>,
     pub run: fn() -> Result<(Verdict, String), String>,
 }
 
@@ -91,61 +123,79 @@ pub const PROBES: &[Probe] = &[
     Probe {
         id: "fs_scoped_ops",
         row: "Scoped fs ops (write/read/stat/list/remove)",
+        condition: None,
         run: probe_fs_scoped_ops,
     },
     Probe {
         id: "fs_escape_lexical",
         row: "Scoped-root escape -> `PathEscape`",
+        condition: None,
         run: probe_fs_escape_lexical,
     },
     Probe {
         id: "fs_escape_symlink",
         row: "Scoped-root escape via symlink",
+        condition: Some(
+            "reachable only where symlink creation is, so on Windows it inherits that OS's \
+             privilege gate; cap-std blocks the escape wherever the shape exists",
+        ),
         run: probe_fs_escape_symlink,
     },
     Probe {
         id: "fs_symlink_create",
         row: "Symlink creation (probed, not assumed)",
+        condition: Some(
+            "on Windows, available with Developer Mode or SeCreateSymbolicLinkPrivilege and \
+             otherwise unavailable; unconditional on Linux and macOS",
+        ),
         run: probe_fs_symlink_create,
     },
     Probe {
         id: "proc_spawn_capture",
         row: "Process spawn + stdout/stderr/exit capture",
+        condition: None,
         run: probe_proc_spawn_capture,
     },
     Probe {
         id: "proc_env_isolation",
         row: "Process env isolation (`inherit_env: false`)",
+        condition: None,
         run: probe_proc_env_isolation,
     },
     Probe {
         id: "proc_cwd",
         row: "Process explicit working directory",
+        condition: None,
         run: probe_proc_cwd,
     },
     Probe {
         id: "lock_advisory",
         row: "Advisory file locking (exclusive blocks)",
+        condition: None,
         run: probe_lock_advisory,
     },
     Probe {
         id: "dirs_resolve",
         row: "Standard dirs resolve + absolute",
+        condition: None,
         run: probe_dirs_resolve,
     },
     Probe {
         id: "dirs_distinct",
         row: "Standard dirs config/cache/data are distinct",
+        condition: None,
         run: probe_dirs_distinct,
     },
     Probe {
         id: "pty_interactive",
         row: "Interactive PTY (explicit command, stream, resize, wait)",
+        condition: None,
         run: probe_pty_interactive,
     },
     Probe {
         id: "capabilities_honest",
         row: "Capability detection matches the host",
+        condition: None,
         run: probe_capabilities_honest,
     },
 ];
@@ -325,6 +375,31 @@ fn probe_fs_escape_lexical() -> Result<(Verdict, String), String> {
     ))
 }
 
+/// Downgrades a measured symlink verdict to [`Verdict::Varies`] on hosts
+/// whose OS gates symlink creation behind a privilege.
+///
+/// This is the one place a probe consults `cfg!` for something other than an
+/// API, and it stays inside the module rule because it does not decide the
+/// *answer* — the answer is measured, and the caller's `detail` still reports
+/// exactly what this machine did. It decides whether that answer **is
+/// assumable for the OS**, which is a documented property of the platform's
+/// security model rather than an observation about this host: Windows gates
+/// symlink creation on Developer Mode or `SeCreateSymbolicLinkPrivilege`, so
+/// whichever way one Windows machine answers, another may legitimately
+/// answer the other way. Linux and macOS have no such gate, so there a
+/// single measurement does generalize.
+///
+/// The evidence for this being right rather than theoretical: three real
+/// Windows hosts were measured and two refused with `os error 1314`
+/// (`ERROR_PRIVILEGE_NOT_HELD`) while the `windows-latest` runner succeeded.
+fn symlink_summary_verdict(measured: Verdict) -> Verdict {
+    if cfg!(windows) {
+        Verdict::Varies
+    } else {
+        measured
+    }
+}
+
 fn probe_fs_escape_symlink() -> Result<(Verdict, String), String> {
     let tmp = unique_temp_dir("symesc")?;
     let root = tmp.join("root");
@@ -337,7 +412,7 @@ fn probe_fs_escape_symlink() -> Result<(Verdict, String), String> {
     if let Err(e) = make_symlink(&tmp.join("outside.txt"), &root.join("link")) {
         std::fs::remove_dir_all(&tmp).ok();
         return Ok((
-            Verdict::Unsupported,
+            symlink_summary_verdict(Verdict::Unsupported),
             format!("cannot create symlinks on this host, escape shape unreachable: {e}"),
         ));
     }
@@ -356,13 +431,13 @@ fn probe_fs_escape_symlink() -> Result<(Verdict, String), String> {
     // Blocked, but reported as PermissionDenied rather than PathEscape: the
     // lexical guard cannot see through a symlink, so cap-std's own denial is
     // what surfaces. A named divergence, not an accident.
-    let verdict = if result == "PathEscape" {
+    let measured = if result == "PathEscape" {
         Verdict::Supported
     } else {
         Verdict::Normalized
     };
     Ok((
-        verdict,
+        symlink_summary_verdict(measured),
         format!("blocked by cap-std, surfaced as `{result}` (not `PathEscape`)"),
     ))
 }
@@ -404,12 +479,12 @@ fn probe_fs_symlink_create() -> Result<(Verdict, String), String> {
                 return Err("symlink created but did not resolve to target".to_string());
             }
             (
-                Verdict::Supported,
+                symlink_summary_verdict(Verdict::Supported),
                 format!("symlink created and resolved; Capabilities::symlinks = {declared}"),
             )
         }
         Err(e) => (
-            Verdict::Unsupported,
+            symlink_summary_verdict(Verdict::Unsupported),
             format!("symlink creation refused ({e}); Capabilities::symlinks = {declared}"),
         ),
     };
@@ -781,22 +856,26 @@ fn probe_capabilities_honest() -> Result<(Verdict, String), String> {
         ));
     }
 
-    // Detection agreeing with the baseline is fine; disagreeing is the whole
-    // point of detecting, so record which happened.
-    if detected.symlinks == baseline.symlinks {
-        Ok((
-            Verdict::Supported,
-            format!("detection matches the host (symlinks = {actually_symlinks}); baseline agrees"),
-        ))
+    // The claim this row makes — "detection tells the truth about its host" —
+    // holds uniformly, so the verdict is `supported` either way. Whether
+    // detection also had to *correct* the baseline is a property of the host's
+    // privilege configuration, not of the contract, and belongs in evidence.
+    //
+    // Deliberately not `varies`: the guarantee is portable to assume even
+    // though the thing it reports about is not. Reporting `varies` here would
+    // say "you cannot rely on detection being honest," which is backwards.
+    let baseline_note = if detected.symlinks == baseline.symlinks {
+        "baseline agrees".to_string()
     } else {
-        Ok((
-            Verdict::Normalized,
-            format!(
-                "detection matches the host (symlinks = {actually_symlinks}) and corrects the conservative baseline, which claims {}",
-                baseline.symlinks
-            ),
-        ))
-    }
+        format!(
+            "corrects the conservative baseline, which claims {}",
+            baseline.symlinks
+        )
+    };
+    Ok((
+        Verdict::Supported,
+        format!("detection matches the host (symlinks = {actually_symlinks}); {baseline_note}"),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -890,6 +969,29 @@ pub fn render_matrix(hosts: &[(String, Vec<ProbeResult>)]) -> String {
         out.push('\n');
     }
 
+    // A bare `varies` cell is not actionable. Every row that reports one gets
+    // its condition spelled out here, so a reader learns what to check rather
+    // than only that something is uncertain.
+    let varying: Vec<&Probe> = PROBES
+        .iter()
+        .filter(|probe| {
+            hosts.iter().any(|(_, results)| {
+                results
+                    .iter()
+                    .any(|r| r.id == probe.id && r.verdict == Verdict::Varies)
+            })
+        })
+        .collect();
+    if !varying.is_empty() {
+        out.push_str("\n### Conditions for `varies` rows\n\n");
+        for probe in varying {
+            let condition = probe
+                .condition
+                .unwrap_or("no condition documented — this is a bug in the probe definition");
+            out.push_str(&format!("- **{}** — {condition}\n", probe.row));
+        }
+    }
+
     out.push_str("\n### Evidence\n");
     for (host, results) in hosts {
         out.push_str(&format!("\n**{host}**\n\n"));
@@ -950,6 +1052,53 @@ mod tests {
         assert_eq!(parsed[0].id, "fs_scoped_ops");
         assert_eq!(parsed[0].verdict, Verdict::Supported);
         assert_eq!(parsed[0].detail, "all good");
+    }
+
+    #[test]
+    fn varies_roundtrips_and_is_not_normalized() {
+        assert_eq!(Verdict::Varies.as_str(), "varies");
+        assert_eq!(Verdict::parse("varies"), Some(Verdict::Varies));
+        // The two mean opposite things to a caller: `normalized` means rely
+        // on the adapter, `varies` means go ask the host. Collapsing them
+        // would erase the distinction the verdict exists to draw.
+        assert_ne!(Verdict::Varies, Verdict::Normalized);
+    }
+
+    #[test]
+    fn every_probe_that_can_vary_documents_its_condition() {
+        // A `varies` cell with no stated condition tells a reader only that
+        // something is uncertain, which is worse than useless.
+        for probe in PROBES {
+            if probe.id.contains("symlink") {
+                assert!(
+                    probe.condition.is_some(),
+                    "probe `{}` can report `varies` but documents no condition",
+                    probe.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn matrix_states_conditions_for_varies_rows() {
+        let results = vec![ProbeResult {
+            id: "fs_symlink_create".to_string(),
+            row: "Symlink creation (probed, not assumed)".to_string(),
+            verdict: Verdict::Varies,
+            detail: "measured on this host".to_string(),
+        }];
+        let matrix = render_matrix(&[("Windows".to_string(), results)]);
+        assert!(matrix.contains("Conditions for `varies` rows"));
+        assert!(matrix.contains("SeCreateSymbolicLinkPrivilege"));
+        // The measurement must survive alongside the summary, never be
+        // replaced by it.
+        assert!(matrix.contains("measured on this host"));
+    }
+
+    #[test]
+    fn matrix_omits_the_conditions_block_when_nothing_varies() {
+        let matrix = render_matrix(&[("Linux".to_string(), sample())]);
+        assert!(!matrix.contains("Conditions for `varies` rows"));
     }
 
     #[test]
