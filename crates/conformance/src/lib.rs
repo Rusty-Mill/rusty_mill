@@ -24,7 +24,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use compat::{NativeProcessRunner, NativePtySession, NativeStandardDirs, Workspace};
+use compat::{
+    NativeCapabilities, NativeProcessRunner, NativePtySession, NativeStandardDirs, Workspace,
+};
 use contract::{
     ContractError, FileLock, FsRoot, ProcessRunner, ProcessSpec, PtySession, PtySpawn, StandardDirs,
 };
@@ -138,8 +140,13 @@ pub const PROBES: &[Probe] = &[
     },
     Probe {
         id: "pty_interactive",
-        row: "Interactive PTY (terminal echo roundtrip)",
+        row: "Interactive PTY (explicit command, stream, resize, wait)",
         run: probe_pty_interactive,
+    },
+    Probe {
+        id: "capabilities_honest",
+        row: "Capability detection matches the host",
+        run: probe_capabilities_honest,
     },
 ];
 
@@ -387,7 +394,7 @@ fn probe_fs_symlink_create() -> Result<(Verdict, String), String> {
     // Developer Mode or with SeCreateSymbolicLinkPrivilege. Rather than
     // hardcoding `false` and calling it a platform fact, find out.
     let outcome = make_symlink(&tmp.join("target.txt"), &tmp.join("link.txt"));
-    let declared = contract::Capabilities::detect().symlinks;
+    let declared = NativeCapabilities::detect().symlinks;
 
     let result = match outcome {
         Ok(()) => {
@@ -643,34 +650,30 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// The row `CONTRACT.md` asserted with zero tests behind it. Proves a real
-/// terminal by round-tripping a nonce: a PTY echoes typed input back on the
-/// master, which a plain pipe does not.
+/// The row `CONTRACT.md` asserted with zero tests behind it.
 ///
-/// Scope note, and a contract-design finding: `PtySession::spawn_shell` takes
-/// no command, so the only PTY this contract can open runs *the host user's
-/// configured shell, with their rc files*. On a developer box with a
-/// customized startup chain, that shell may never reach a state where `exit`
-/// terminates it — observed and reproduced 3/3 on a WSL Fedora host whose
-/// login chain hands off to an interactive zsh.
-///
-/// That makes teardown a function of dotfiles, not of the contract, so this
-/// probe's *verdict* covers only what the contract actually determines: that
-/// a real terminal exists (input is echoed) and that `resize` works.
-/// Teardown is recorded as evidence, never as a verdict — which independently
-/// agrees with `PtyControl`'s own doc note that session teardown is
-/// unverified. A `spawn_command`-style API would make it testable; see the
-/// PR discussion.
+/// Runs a **deterministic command** under the PTY rather than the host's
+/// login shell, per the contract decision to make command selection explicit.
+/// That matters for measurement, not just tidiness: with `spawn_shell` the
+/// only option, teardown was a function of the user's rc files — reproduced
+/// 3/3 on a WSL host whose login chain hands off to an interactive zsh that
+/// never exits on `exit` — so `wait` could not be a matrix row at all. With
+/// an explicit command, spawn, terminal stream, `resize`, exit code, and
+/// `wait` are all observable properties of the contract.
 fn probe_pty_interactive() -> Result<(Verdict, String), String> {
-    let nonce = format!("FIZZNONCE{}", std::process::id());
-    let session = NativePtySession;
+    let marker = format!("FIZZPTY{}", std::process::id());
+    let child = child_binary()?;
+    let command = ProcessSpec::new(child.to_string_lossy().into_owned())
+        .arg("pty")
+        .arg(&marker);
+
     let PtySpawn {
         mut reader,
         mut writer,
         mut control,
-    } = session
-        .spawn_shell(80, 24)
-        .map_err(|e| format!("spawn_shell: {e}"))?;
+    } = NativePtySession
+        .spawn(&command, 80, 24)
+        .map_err(|e| format!("spawn: {e}"))?;
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     std::thread::spawn(move || {
@@ -691,8 +694,7 @@ fn probe_pty_interactive() -> Result<(Verdict, String), String> {
     let started = SystemTime::now();
     let mut accumulated = Vec::new();
     let mut answered_dsr = false;
-    let mut sent_command = false;
-    let mut saw_nonce = false;
+    let mut saw_marker = false;
 
     while started.elapsed().map(|d| d < deadline).unwrap_or(false) {
         match rx.recv_timeout(Duration::from_millis(250)) {
@@ -703,8 +705,8 @@ fn probe_pty_interactive() -> Result<(Verdict, String), String> {
 
         // ConPTY asks the terminal where the cursor is and *blocks the child*
         // until something answers. A pipe-shaped test never notices; a real
-        // PTY consumer must reply. This is precisely the kind of divergence
-        // the row was claiming "supported" without ever exercising.
+        // PTY consumer must reply. This is precisely the divergence the row
+        // claimed `supported` for without ever exercising it.
         if !answered_dsr && contains_bytes(&accumulated, DSR_QUERY) {
             writer
                 .write_all(DSR_REPLY)
@@ -713,60 +715,88 @@ fn probe_pty_interactive() -> Result<(Verdict, String), String> {
             answered_dsr = true;
         }
 
-        // Send once the shell has shown signs of life, or unconditionally
-        // after 3s so a silent-but-live shell still gets probed.
-        let waited_long_enough = started
-            .elapsed()
-            .map(|d| d >= Duration::from_secs(3))
-            .unwrap_or(false);
-        if !sent_command && (!accumulated.is_empty() || waited_long_enough) {
-            // `\r\n`, not `\n`: a PTY carries raw terminal input and cmd.exe
-            // under ConPTY needs the carriage return.
-            write!(writer, "echo {nonce}\r\n").map_err(|e| format!("pty write: {e}"))?;
-            writer.flush().map_err(|e| format!("pty flush: {e}"))?;
-            sent_command = true;
-        }
-
-        if sent_command && String::from_utf8_lossy(&accumulated).contains(&nonce) {
-            saw_nonce = true;
+        if String::from_utf8_lossy(&accumulated).contains(&marker) {
+            saw_marker = true;
             break;
         }
     }
 
-    let resized = control.resize(100, 30).is_ok();
-    let _ = write!(writer, "exit\r\n");
-    let _ = writer.flush();
+    if !saw_marker {
+        let seen = String::from_utf8_lossy(&accumulated);
+        let preview: String = seen.chars().take(200).collect();
+        return Err(format!(
+            "marker never arrived over the pty within {deadline:?}; saw {preview:?}"
+        ));
+    }
 
-    // `wait` blocks with no timeout of its own, so it gets one here — a
-    // hung shell must fail the probe, not the whole CI job.
+    control
+        .resize(100, 30)
+        .map_err(|e| format!("resize on a live pty: {e}"))?;
+
+    // `wait` blocks with no timeout of its own, so it gets one here: a hung
+    // child must fail this probe, not the whole CI job. The child exits on
+    // its own, so nothing needs to be typed at it.
     let (wait_tx, wait_rx) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = wait_tx.send(control.wait().map_err(|e| e.to_string()));
     });
-    let exit = wait_rx.recv_timeout(Duration::from_secs(15));
 
-    if !saw_nonce {
-        let seen = String::from_utf8_lossy(&accumulated);
-        let preview: String = seen.chars().take(200).collect();
+    match wait_rx.recv_timeout(Duration::from_secs(15)) {
+        Ok(Ok(11)) => Ok((
+            Verdict::Supported,
+            "explicit command spawned; marker streamed; resize ok; wait() reaped exit 11"
+                .to_string(),
+        )),
+        Ok(Ok(other)) => Err(format!("wait() reported exit {other}, expected 11")),
+        Ok(Err(e)) => Err(format!("wait() failed: {e}")),
+        Err(_) => Err("wait() did not return within 15s of the child exiting".to_string()),
+    }
+}
+
+/// Guards the capability model against the host it describes.
+///
+/// This is the probe that would have caught the original defect: the model
+/// claimed `symlinks: false` on Windows hosts that create symlinks fine.
+/// Comparing what `NativeCapabilities::detect()` advertises against what the
+/// host actually does turns "the model drifted" into a red build.
+fn probe_capabilities_honest() -> Result<(Verdict, String), String> {
+    let detected = NativeCapabilities::detect();
+    let baseline = contract::Capabilities::conservative_baseline();
+
+    // Ground truth, measured independently of the capability model.
+    let tmp = unique_temp_dir("caps")?;
+    std::fs::write(tmp.join("target.txt"), b"data").map_err(|e| e.to_string())?;
+    let actually_symlinks = match make_symlink(&tmp.join("target.txt"), &tmp.join("link.txt")) {
+        Ok(()) => std::fs::read_to_string(tmp.join("link.txt"))
+            .map(|c| c == "data")
+            .unwrap_or(false),
+        Err(_) => false,
+    };
+    std::fs::remove_dir_all(&tmp).ok();
+
+    if detected.symlinks != actually_symlinks {
         return Err(format!(
-            "nonce never echoed back within {deadline:?}; saw {preview:?}"
+            "NativeCapabilities::detect() reports symlinks = {}, host actually does = {}",
+            detected.symlinks, actually_symlinks
         ));
     }
 
-    let exit_note = match exit {
-        Ok(Ok(code)) => format!("shell exited with {code}"),
-        Ok(Err(e)) => format!("wait() failed: {e}"),
-        Err(_) => {
-            "shell did not exit on `exit` (dotfile-dependent, not a contract guarantee)".to_string()
-        }
-    };
-    if !resized {
-        return Err("resize() failed on a live PTY".to_string());
+    // Detection agreeing with the baseline is fine; disagreeing is the whole
+    // point of detecting, so record which happened.
+    if detected.symlinks == baseline.symlinks {
+        Ok((
+            Verdict::Supported,
+            format!("detection matches the host (symlinks = {actually_symlinks}); baseline agrees"),
+        ))
+    } else {
+        Ok((
+            Verdict::Normalized,
+            format!(
+                "detection matches the host (symlinks = {actually_symlinks}) and corrects the                  conservative baseline, which claims {}",
+                baseline.symlinks
+            ),
+        ))
     }
-    Ok((
-        Verdict::Supported,
-        format!("input echoed back by the terminal; resize ok; teardown observed: {exit_note}"),
-    ))
 }
 
 // ---------------------------------------------------------------------------

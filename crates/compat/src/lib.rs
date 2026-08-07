@@ -2,15 +2,16 @@
 //! cap-std (fs), portable-pty (process/pty), dirs (standard dirs), and
 //! std's own file-locking methods (stable since 1.89). This crate is
 //! deliberately thin — the primitives it wraps are already cross-platform;
-//! the only genuinely OS-specific logic lives in `Capabilities::detect()`
-//! (in `contract`) and the PTY shell selection below.
+//! the genuinely OS-specific logic is `NativeCapabilities::detect()` and the
+//! default-shell selection below.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use contract::{
-    ContractError, DirEntryInfo, FileLock, FsRoot, LockGuard, Metadata, ProcessOutput,
-    ProcessRunner, ProcessSpec, PtyControl, PtySession, PtySpawn, Result, StandardDirs,
+    Capabilities, ContractError, DirEntryInfo, FileLock, FsRoot, LockGuard, Metadata,
+    ProcessOutput, ProcessRunner, ProcessSpec, PtyControl, PtySession, PtySpawn, Result,
+    StandardDirs,
 };
 
 /// Lexically simulates `..` resolution to decide whether `path` would climb
@@ -194,6 +195,9 @@ impl ProcessRunner for NativeProcessRunner {
 /// `Capabilities::pty_win32_input_mode` in the `contract` crate.
 pub struct NativePtySession;
 
+/// How this adapter picks the host's default shell, documented as
+/// `PtySession::host_default_shell` requires: `%COMSPEC%` falling back to
+/// `cmd.exe` on Windows, `$SHELL` falling back to `/bin/sh` elsewhere.
 fn default_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -226,7 +230,11 @@ impl PtyControl for NativePtyControl {
 }
 
 impl PtySession for NativePtySession {
-    fn spawn_shell(&self, cols: u16, rows: u16) -> Result<PtySpawn> {
+    /// `ProcessSpec` maps onto `CommandBuilder` field for field. Note that
+    /// `CommandBuilder::new` starts from the inherited environment, so
+    /// `inherit_env: false` must clear it explicitly — same semantics as
+    /// `NativeProcessRunner`'s `env_clear`.
+    fn spawn(&self, command: &ProcessSpec, cols: u16, rows: u16) -> Result<PtySpawn> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(portable_pty::PtySize {
@@ -236,7 +244,19 @@ impl PtySession for NativePtySession {
                 pixel_height: 0,
             })
             .map_err(|e| ContractError::Unsupported(e.to_string()))?;
-        let cmd = portable_pty::CommandBuilder::new(default_shell());
+
+        let mut cmd = portable_pty::CommandBuilder::new(&command.program);
+        cmd.args(&command.args);
+        if let Some(cwd) = &command.cwd {
+            cmd.cwd(cwd);
+        }
+        if !command.inherit_env {
+            cmd.env_clear();
+        }
+        for (key, value) in &command.env {
+            cmd.env(key, value);
+        }
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -258,6 +278,91 @@ impl PtySession for NativePtySession {
             }),
         })
     }
+
+    fn host_default_shell(&self) -> Result<ProcessSpec> {
+        Ok(ProcessSpec::new(default_shell()))
+    }
+}
+
+/// Capability detection that actually asks the host.
+///
+/// `contract::Capabilities::conservative_baseline()` answers from `cfg!`
+/// alone, which a real host can contradict: conformance observed a
+/// `windows-latest` runner create and resolve a symlink while the baseline
+/// reported `symlinks: false`. Detection needs I/O, so it lives here rather
+/// than in the I/O-free contract crate.
+pub struct NativeCapabilities;
+
+impl NativeCapabilities {
+    /// Probes what can be probed and falls back to the conservative baseline
+    /// for what cannot.
+    ///
+    /// Performs filesystem I/O in a temporary directory. Callers that cannot
+    /// afford that should use the baseline and accept its false negatives.
+    pub fn detect() -> Capabilities {
+        let baseline = Capabilities::conservative_baseline();
+        Capabilities {
+            symlinks: probe_symlinks().unwrap_or(baseline.symlinks),
+            // Not probed: no portable way to observe POSIX mode bits taking
+            // effect without also assuming a filesystem that honors them.
+            unix_permissions: baseline.unix_permissions,
+            // Not probed: tracks an upstream `portable-pty` gap, not a host
+            // property, so there is nothing on the host to ask.
+            pty_win32_input_mode: baseline.pty_win32_input_mode,
+            advisory_locking: probe_advisory_locking().unwrap_or(baseline.advisory_locking),
+        }
+    }
+}
+
+/// Returns `None` when the probe could not run at all (no temp dir, etc.),
+/// which is different from "the host refused" — only the latter is evidence
+/// that the capability is absent.
+fn probe_symlinks() -> Option<bool> {
+    let dir = scratch_dir("caps-symlink")?;
+    let target = dir.join("target");
+    std::fs::write(&target, b"probe").ok()?;
+    let link = dir.join("link");
+
+    #[cfg(unix)]
+    let created = std::os::unix::fs::symlink(&target, &link).is_ok();
+    #[cfg(windows)]
+    let created = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let created = false;
+
+    // Creating the link is not enough — it must also resolve.
+    let usable = created && std::fs::read(&link).map(|c| c == b"probe").unwrap_or(false);
+    std::fs::remove_dir_all(&dir).ok();
+    Some(usable)
+}
+
+fn probe_advisory_locking() -> Option<bool> {
+    let dir = scratch_dir("caps-lock")?;
+    let path = dir.join("lockfile");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .ok()?;
+    let locked = file.lock().is_ok();
+    if locked {
+        file.unlock().ok();
+    }
+    drop(file);
+    std::fs::remove_dir_all(&dir).ok();
+    Some(locked)
+}
+
+fn scratch_dir(tag: &str) -> Option<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("compat-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 /// Deterministic per-OS config/cache/data directories via the `dirs` crate.

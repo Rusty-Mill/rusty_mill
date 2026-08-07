@@ -16,21 +16,37 @@ Windows (MSVC), Linux, macOS. x86_64 and aarch64.
 | Filesystem ops | Open/read/write/stat/list/create/remove within a scoped root | `cap-std` |
 | File locking | Advisory exclusive/shared locks, best-effort on all hosts | `std::fs::File` (stable since 1.89) |
 | Process spawn | Spawn with explicit argv/env/cwd, inherit or capture stdout/stderr, block until exit | `std::process` |
-| Stdio / PTY | Byte-stream stdio always; interactive PTY as an unconditional baseline on all three supported hosts | `portable-pty` |
+| Stdio / PTY | Byte-stream stdio always; interactive PTY running an explicit `ProcessSpec`, as an unconditional baseline on all three supported hosts | `portable-pty` |
 | Environment variables | Read/write current-process env as UTF-8 `HashMap<String, String>` | `std::env` |
 | Standard directories | Per-OS config/cache/data dirs for a named app, deterministic | `dirs` |
 | Errors | Structured `ContractError` — `PathEscape`/`NotFound`/`PermissionDenied`/`Unsupported` are stable categories; `Io` is the explicit fallback with the OS error retained as `source` for diagnostics only, never for callers to match on | `thiserror` |
 
 ## Capability model
 
-Tools MUST query `Capabilities::detect()` before depending on a
-non-baseline behavior. Known v1 fields:
+There are two sources of capability data, and the difference is load-bearing:
 
-- `symlinks` — conservative baseline, not a hard platform fact: `true` on
-  Unix, `false` on Windows. Windows *can* create symlinks under Developer
-  Mode or elevated privilege; this crate does not yet probe for that, so
-  treat `false` as "not proven safe to assume," not "impossible."
+- **`compat::NativeCapabilities::detect()`** — asks the host. Performs
+  filesystem I/O. **Use this** unless you cannot afford a probe.
+- **`contract::Capabilities::conservative_baseline()`** — answers from
+  `cfg!` alone, does no I/O, and is named so it cannot be mistaken for
+  detection. Use only when a probe is impossible, and read a `false` as
+  "not proven safe to assume," never as "impossible on this host."
+
+The split exists because a compile-time table is not falsifiable by CI and
+drifted from reality unnoticed: conformance observed a `windows-latest`
+runner create and resolve a symlink while the baseline reported
+`symlinks: false`. A tool trusting that would refuse a feature that works.
+The `capabilities_honest` probe now fails the build whenever detection and
+the host disagree.
+
+Known v1 fields:
+
+- `symlinks` — probed by `NativeCapabilities::detect()`. Windows can create
+  symlinks under Developer Mode or with `SeCreateSymbolicLinkPrivilege`, and
+  a plain Windows host often cannot; the answer is per-host, not per-OS.
 - `unix_permissions` — false on Windows; POSIX mode bits are not emulated.
+  Not probed: observing mode bits take effect also assumes a filesystem that
+  honors them, so there is no clean thing to ask.
 - `pty_win32_input_mode` — tracks the known `portable-pty` gap where
   `PSEUDOCONSOLE_WIN32_INPUT_MODE` / `PASSTHROUGH_MODE` are not passed
   through on the stock crate. Report `false` until we adopt or vendor the
@@ -69,7 +85,7 @@ Each primitive is one of:
 - **normalized** — the host differs underneath, but the adapter presents one
   behavior.
 - **unsupported** — capability genuinely absent here; callers must check
-  `Capabilities::detect()` first.
+  `NativeCapabilities::detect()` first.
 - **ERRORED** — the probe could not run. Always a CI failure: it means the
   matrix cannot be trusted.
 
@@ -162,14 +178,22 @@ area, all built against `contract` only:
 matrix above honest — see its module docs for the rule that probes measure
 rather than assume.
 
-### Known limit on what the PTY row can promise
+### PTY sessions run an explicit command
 
-`PtySession::spawn_shell` takes no command, so the only PTY this contract can
-open runs the host user's configured shell *with their rc files*. PTY teardown
-is therefore a function of dotfiles rather than of the contract, and the
-`pty_interactive` probe deliberately scopes its verdict to what the contract
-determines — that a real terminal exists and `resize` works — recording
-teardown as evidence only. A `spawn_command`-style API would close this gap.
+`PtySession::spawn` takes a `ProcessSpec`, so argv/cwd/env — including
+`inherit_env` — mean exactly what they mean for `ProcessRunner::run`. A PTY
+is not a second, subtly different way to describe a process.
+
+`spawn_shell` remains as a convenience wrapper over `host_default_shell()`,
+but it is explicitly **not** a guarantee beyond "a PTY was opened": the
+resulting session depends on the user's shell and rc files, which this
+contract does not govern. That is not hypothetical — a WSL host whose login
+chain hands off to an interactive zsh never exits on `exit`, reproduced 3/3,
+which made `wait` untestable while `spawn_shell` was the only entry point.
+
+Command selection is what promotes spawn, terminal stream, `resize`, exit
+code, and `wait` from dotfile properties to contract properties. The
+`pty_interactive` probe asserts all five against a fixed command.
 
 ## Explicitly deferred prior art decision
 

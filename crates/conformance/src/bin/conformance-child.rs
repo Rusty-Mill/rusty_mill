@@ -24,6 +24,19 @@ fn main() {
                 Err(_) => print!("UNSET"),
             }
         }
+        // PTY payload: echoes back the marker it is given, then exits with a
+        // known code. Reads nothing from stdin and loads no rc files, so a
+        // PTY probe measures the contract rather than the user's shell.
+        "pty" => {
+            let marker = std::env::args().nth(2).unwrap_or_default();
+            print!("{marker}");
+            // A PTY delivers bytes as the child writes them; without an
+            // explicit flush a short marker can sit in the child's buffer
+            // until exit, which would make the probe time-dependent.
+            use std::io::Write;
+            std::io::stdout().flush().expect("flush pty marker");
+            std::process::exit(11);
+        }
         // Prints the child's working directory, for the cwd guarantee.
         "cwd" => {
             let cwd = std::env::current_dir().expect("child cwd");
