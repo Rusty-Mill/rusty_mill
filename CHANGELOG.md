@@ -16,6 +16,34 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ## [Unreleased]
 
+### Added
+
+- `scripts/check-published-tag.sh` and a `Release check` workflow, verifying
+  that a published tag is actually consumable ([#27]). Runs on every tag push,
+  and on demand via `workflow_dispatch`.
+
+  The pull-request CI cannot do this: `check-template.sh` rewrites the
+  generated project's dependency to a **path**, so the git dependency every
+  real consumer uses is never resolved. v0.4.0 shipped a defect that lived in
+  precisely that gap.
+
+  The check runs the documented `cargo generate --git … --tag <tag> template`,
+  leaves the dependency exactly as the template ships it, and builds and tests
+  the result.
+
+  **It fails on output, not just on exit status.** The v0.4.0 build *succeeded*
+  — it printed `error: invalid character` while returning zero — so a check
+  looking at exit codes alone would have waved it through. Warnings are
+  reported without failing, since a warning from a third-party dependency is
+  not something this repo can fix.
+
+  Validated against a known-bad input rather than only a known-good one:
+  pointed at `v0.4.0` it reproduces the original failure and exits non-zero;
+  pointed at `v0.5.0` it passes. There is also a `--self-test` for the detector
+  itself, which the workflow runs before trusting a green result.
+
+[#27]: https://github.com/baileyrd/rusty_mcp/issues/27
+
 ## [0.5.0] — 2026-08-06
 
 Finishes the pagination work 0.4.0 started. All four list methods now page on
