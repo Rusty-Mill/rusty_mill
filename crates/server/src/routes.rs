@@ -684,6 +684,22 @@ mod tests {
     }
 }
 
+/// A single self-contained static page (no build step, no JS framework, no
+/// CDN dependency) that authenticates and renders entirely client-side --
+/// it prompts for a bearer token and attaches it to `fetch()` calls against
+/// the JSON endpoints this file already exposes (`/v1/models`, `/v1/usage`,
+/// `/v1/providers/stats`, `/v1/free-tiers`, `/v1/admin/clients*`), so it's
+/// subject to exactly the same `check_auth`/`check_admin_auth` rules those
+/// already enforce. The page itself carries no secrets and needs none of
+/// its own, so it's served unauthenticated -- same reasoning as `/health`.
+pub async fn dashboard() -> Response {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../assets/dashboard.html"),
+    )
+        .into_response()
+}
+
 pub async fn health() -> &'static str {
     "ok"
 }

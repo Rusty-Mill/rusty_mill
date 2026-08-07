@@ -97,11 +97,15 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and their tr
 
 - **Not a model host.** No inference, no weights — pure routing and
   protocol translation in front of upstream provider APIs.
-- **Not a GUI/desktop product.** No Electron app, no PWA, no web
-  dashboard — every operator surface is JSON-in/JSON-out: the admin HTTP
-  API, `GET /v1/usage`, `GET /v1/free-tiers`, and `GET /metrics`
-  (Prometheus). See [ADR-0002](./docs/adr/0002-reporting-surface-is-json-only.md)
-  for why this stays JSON-only rather than growing an HTML dashboard.
+- **Not a GUI/desktop product.** No Electron app, no PWA, no i18n, no
+  MITM-based third-party CLI config injection. The JSON API (the admin
+  HTTP API, `GET /v1/usage`, `GET /v1/free-tiers`, `GET /metrics`) stays
+  the canonical operator surface either way; `GET /dashboard` is a
+  read-mostly, client-side-rendered view over that same API (one static
+  HTML file, no build step, no JS framework), not a packaged product. See
+  [ADR-0003](./docs/adr/0003-minimal-static-dashboard.md) (superseding
+  [ADR-0002](./docs/adr/0002-reporting-surface-is-json-only.md)) for why a
+  minimal dashboard was added without pulling in a frontend toolchain.
 - **Not multi-tenant SaaS.** `[[clients]]` are config-defined, not
   self-serve; there's no signup flow or billing integration. Persistence
   (SQLite/Postgres) lets multiple *trusted* processes share one usage/spend

@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rusty_provider dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e2e2e6;
+    --text: #1a1a1e;
+    --muted: #6b6b74;
+    --accent: #5b5be0;
+    --accent-text: #ffffff;
+    --danger: #c0392b;
+    --ok: #1f9d55;
+    --warn: #b8860b;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --panel: #1e1e24;
+      --border: #303038;
+      --text: #eaeaef;
+      --muted: #9a9aa4;
+      --accent: #8080f0;
+      --accent-text: #101014;
+      --danger: #ff6b5b;
+      --ok: #4ad07c;
+      --warn: #e0b04a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.9rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    flex-wrap: wrap;
+  }
+  header h1 {
+    font-size: 1rem;
+    margin: 0;
+    white-space: nowrap;
+  }
+  header h1 code {
+    font-family: var(--mono);
+    color: var(--accent);
+  }
+  .auth-form {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    margin-left: auto;
+    flex-wrap: wrap;
+  }
+  input[type="password"], input[type="text"] {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 0.4rem 0.6rem;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    width: 16rem;
+  }
+  button {
+    background: var(--accent);
+    color: var(--accent-text);
+    border: none;
+    border-radius: 6px;
+    padding: 0.45rem 0.8rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button.small {
+    padding: 0.25rem 0.55rem;
+    font-size: 0.75rem;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  main {
+    padding: 1.25rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 1rem;
+    max-width: 1600px;
+    margin: 0 auto;
+  }
+  section.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    min-width: 0;
+  }
+  section.panel.wide { grid-column: 1 / -1; }
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.6rem;
+  }
+  .panel-head h2 {
+    font-size: 0.9rem;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+  .status-dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    margin-right: 0.4rem;
+  }
+  .status-dot.ok { background: var(--ok); }
+  .status-dot.bad { background: var(--danger); }
+  .status-dot.unknown { background: var(--muted); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82rem;
+  }
+  th, td {
+    text-align: left;
+    padding: 0.35rem 0.5rem;
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  th {
+    color: var(--muted);
+    font-weight: 600;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  tr:last-child td { border-bottom: none; }
+  .empty, .error, .loading {
+    color: var(--muted);
+    font-size: 0.82rem;
+    padding: 0.4rem 0;
+  }
+  .error { color: var(--danger); }
+  .bar-track {
+    background: var(--border);
+    border-radius: 4px;
+    height: 6px;
+    width: 100%;
+    overflow: hidden;
+  }
+  .bar-fill {
+    background: var(--accent);
+    height: 100%;
+  }
+  .bar-fill.warn { background: var(--warn); }
+  .bar-fill.danger { background: var(--danger); }
+  .mono { font-family: var(--mono); }
+  .client-row { cursor: pointer; }
+  .client-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .history-row td {
+    padding: 0.6rem;
+    background: var(--bg);
+  }
+  .sparkline { display: block; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.75rem;
+    padding: 1.5rem;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>rusty_provider <code>/dashboard</code></h1>
+  <form class="auth-form" id="auth-form">
+    <span class="status-dot unknown" id="health-dot" title="health unknown"></span>
+    <input type="password" id="token" placeholder="Bearer token (admin or client key)" autocomplete="off">
+    <button type="submit">Connect</button>
+    <button type="button" class="secondary" id="refresh-all">Refresh all</button>
+  </form>
+</header>
+
+<main id="main">
+  <section class="panel">
+    <div class="panel-head"><h2>Models</h2><button class="small secondary" data-refresh="models">↻</button></div>
+    <div id="panel-models"><p class="loading">Connect to load.</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Provider stats</h2><button class="small secondary" data-refresh="providerStats">↻</button></div>
+    <div id="panel-provider-stats"><p class="loading">Connect to load.</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Usage (cumulative)</h2><button class="small secondary" data-refresh="usage">↻</button></div>
+    <div id="panel-usage"><p class="loading">Connect to load.</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>Free tiers</h2><button class="small secondary" data-refresh="freeTiers">↻</button></div>
+    <div id="panel-free-tiers"><p class="loading">Connect to load.</p></div>
+  </section>
+
+  <section class="panel wide">
+    <div class="panel-head"><h2>Clients</h2><button class="small secondary" data-refresh="clients">↻</button></div>
+    <div id="panel-clients"><p class="loading">Connect to load.</p></div>
+  </section>
+</main>
+
+<footer>Reads live from this server's own JSON API. Nothing here is cached or stored server-side; the token you enter is kept only in this browser tab's session storage.</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const TOKEN_KEY = "rusty_provider_dashboard_token";
+  const tokenInput = document.getElementById("token");
+  const healthDot = document.getElementById("health-dot");
+  const authForm = document.getElementById("auth-form");
+
+  const saved = sessionStorage.getItem(TOKEN_KEY);
+  if (saved) tokenInput.value = saved;
+
+  function token() {
+    return tokenInput.value.trim();
+  }
+
+  async function api(path, opts) {
+    const headers = Object.assign({}, (opts && opts.headers) || {});
+    if (token()) headers["Authorization"] = "Bearer " + token();
+    const res = await fetch(path, Object.assign({}, opts, { headers }));
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        if (body && body.error && body.error.message) detail = body.error.message;
+      } catch (_) { /* not JSON, keep statusText */ }
+      const err = new Error(`${res.status} ${detail}`);
+      err.status = res.status;
+      throw err;
+    }
+    const ct = res.headers.get("content-type") || "";
+    return ct.includes("application/json") ? res.json() : res.text();
+  }
+
+  function el(tag, attrs, children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (k === "text") node.textContent = v;
+      else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v);
+    }
+    for (const child of children || []) node.appendChild(child);
+    return node;
+  }
+
+  function money(n) {
+    if (n === null || n === undefined) return "—";
+    return "$" + Number(n).toFixed(4).replace(/0+$/, "").replace(/\.$/, ".0");
+  }
+
+  function num(n) {
+    return n === null || n === undefined ? "—" : Number(n).toLocaleString();
+  }
+
+  function pct(n) {
+    return n === null || n === undefined ? "—" : (Number(n) * 100).toFixed(1) + "%";
+  }
+
+  function showError(container, err) {
+    container.innerHTML = "";
+    container.appendChild(el("p", { class: "error", text: err.message || String(err) }));
+  }
+
+  function table(headers, rows, rowRenderer) {
+    if (rows.length === 0) {
+      return el("p", { class: "empty", text: "Nothing to show." });
+    }
+    const thead = el("thead", {}, [el("tr", {}, headers.map((h) => el("th", { text: h })))]);
+    const tbody = el("tbody", {}, rows.map(rowRenderer));
+    return el("table", {}, [thead, tbody]);
+  }
+
+  // --- health -------------------------------------------------------------
+
+  async function refreshHealth() {
+    try {
+      await fetch("/health").then((r) => {
+        if (!r.ok) throw new Error("unhealthy");
+      });
+      healthDot.className = "status-dot ok";
+      healthDot.title = "healthy";
+    } catch (_) {
+      healthDot.className = "status-dot bad";
+      healthDot.title = "unreachable";
+    }
+  }
+
+  // --- models ---------------------------------------------------------------
+
+  async function refreshModels() {
+    const container = document.getElementById("panel-models");
+    container.innerHTML = '<p class="loading">Loading…</p>';
+    try {
+      const body = await api("/v1/models");
+      const rows = body.data || [];
+      container.innerHTML = "";
+      container.appendChild(
+        table(["Model", "Owner", "Context", "Prompt $/M"], rows, (m) =>
+          el("tr", {}, [
+            el("td", { class: "mono", text: m.id }),
+            el("td", { text: m.owned_by || "—" }),
+            el("td", { text: num(m.context_length) }),
+            el("td", { text: m.pricing ? money(m.pricing.prompt) : "—" }),
+          ])
+        )
+      );
+    } catch (err) {
+      showError(container, err);
+    }
+  }
+
+  // --- provider stats ---------------------------------------------------------
+
+  async function refreshProviderStats() {
+    const container = document.getElementById("panel-provider-stats");
+    container.innerHTML = '<p class="loading">Loading…</p>';
+    try {
+      const body = await api("/v1/providers/stats");
+      const rows = body.data || [];
+      container.innerHTML = "";
+      container.appendChild(
+        table(["Model", "Latency (ms)", "Tok/s", "Uptime"], rows, (r) =>
+          el("tr", {}, [
+            el("td", { class: "mono", text: r.model }),
+            el("td", { text: r.latency_ms !== undefined ? Math.round(r.latency_ms) : "—" }),
+            el("td", { text: r.throughput_tokens_per_sec !== undefined ? Math.round(r.throughput_tokens_per_sec) : "—" }),
+            el("td", { text: pct(r.uptime) }),
+          ])
+        )
+      );
+    } catch (err) {
+      showError(container, err);
+    }
+  }
+
+  // --- usage --------------------------------------------------------------
+
+  async function refreshUsage() {
+    const container = document.getElementById("panel-usage");
+    container.innerHTML = '<p class="loading">Loading…</p>';
+    try {
+      const body = await api("/v1/usage");
+      const rows = body.data || [];
+      container.innerHTML = "";
+      container.appendChild(
+        table(["Model", "Requests", "Prompt tok", "Completion tok", "Cost"], rows, (r) =>
+          el("tr", {}, [
+            el("td", { class: "mono", text: r.model }),
+            el("td", { text: num(r.requests) }),
+            el("td", { text: num(r.prompt_tokens) }),
+            el("td", { text: num(r.completion_tokens) }),
+            el("td", { text: money(r.cost_usd) }),
+          ])
+        )
+      );
+    } catch (err) {
+      showError(container, err);
+    }
+  }
+
+  // --- free tiers -----------------------------------------------------------
+
+  async function refreshFreeTiers() {
+    const container = document.getElementById("panel-free-tiers");
+    container.innerHTML = '<p class="loading">Loading…</p>';
+    try {
+      const body = await api("/v1/free-tiers");
+      const rows = body.data || [];
+      container.innerHTML = "";
+      if (rows.length === 0) {
+        container.appendChild(el("p", { class: "empty", text: "No [[free_tiers]] configured." }));
+        return;
+      }
+      for (const r of rows) {
+        const limit = r.monthly_free_tokens;
+        const fraction = limit ? Math.max(0, Math.min(1, r.tokens_remaining / limit)) : 1;
+        const cls = fraction < 0.1 ? "danger" : fraction < 0.3 ? "warn" : "";
+        const row = el("div", { style: "margin-bottom:0.6rem" }, [
+          el("div", { style: "display:flex;justify-content:space-between;font-size:0.78rem;margin-bottom:0.2rem" }, [
+            el("span", { class: "mono", text: r.model }),
+            el("span", { class: "muted", text: `${num(r.tokens_remaining)} / ${num(limit)}` }),
+          ]),
+          el("div", { class: "bar-track" }, [
+            el("div", { class: "bar-fill " + cls, style: `width:${(fraction * 100).toFixed(1)}%` }),
+          ]),
+        ]);
+        container.appendChild(row);
+      }
+    } catch (err) {
+      showError(container, err);
+    }
+  }
+
+  // --- clients (admin) --------------------------------------------------------
+
+  function renderSparkline(days) {
+    const width = 240, height = 40, pad = 2;
+    if (!days.length) return el("p", { class: "empty", text: "No usage history yet." });
+    const max = Math.max(...days.map((d) => d.cost_usd), 0.0001);
+    const stepX = (width - pad * 2) / Math.max(days.length - 1, 1);
+    const points = days
+      .map((d, i) => {
+        const x = pad + i * stepX;
+        const y = height - pad - (d.cost_usd / max) * (height - pad * 2);
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      })
+      .join(" ");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "sparkline");
+    svg.setAttribute("width", width);
+    svg.setAttribute("height", height);
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#5b5be0";
+    const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+    polyline.setAttribute("points", points);
+    polyline.setAttribute("fill", "none");
+    polyline.setAttribute("stroke", accent);
+    polyline.setAttribute("stroke-width", "1.5");
+    svg.appendChild(polyline);
+    return svg;
+  }
+
+  async function toggleHistory(row, name) {
+    const existing = row.nextElementSibling;
+    if (existing && existing.classList.contains("history-row")) {
+      existing.remove();
+      return;
+    }
+    // Collapse any other open history row first, one at a time.
+    document.querySelectorAll(".history-row").forEach((n) => n.remove());
+
+    const cell = el("td", { colspan: "8" }, [el("p", { class: "loading", text: "Loading usage history…" })]);
+    const historyRow = el("tr", { class: "history-row" }, [cell]);
+    row.after(historyRow);
+
+    try {
+      const body = await api(`/v1/admin/clients/${encodeURIComponent(name)}/usage-history?days=30`);
+      const days = body.data || [];
+      cell.innerHTML = "";
+      cell.appendChild(
+        el("div", { style: "display:flex;align-items:center;gap:1rem;flex-wrap:wrap" }, [
+          renderSparkline(days),
+          el(
+            "span",
+            { class: "muted", text: days.length ? `${days.length} day(s), last: ${days[days.length - 1].day} — ${money(days[days.length - 1].cost_usd)}` : "" }
+          ),
+        ])
+      );
+    } catch (err) {
+      cell.innerHTML = "";
+      cell.appendChild(el("p", { class: "error", text: err.message }));
+    }
+  }
+
+  async function resetSpend(name, button) {
+    button.disabled = true;
+    try {
+      await api(`/v1/admin/clients/${encodeURIComponent(name)}/reset-spend`, { method: "POST" });
+      await refreshClients();
+    } catch (err) {
+      alert("Failed to reset spend: " + err.message);
+      button.disabled = false;
+    }
+  }
+
+  async function refreshClients() {
+    const container = document.getElementById("panel-clients");
+    container.innerHTML = '<p class="loading">Loading…</p>';
+    try {
+      const body = await api("/v1/admin/clients");
+      const rows = body.data || [];
+      container.innerHTML = "";
+      if (rows.length === 0) {
+        container.appendChild(el("p", { class: "empty", text: "No clients configured." }));
+        return;
+      }
+      const tbody = el("tbody", {}, []);
+      for (const c of rows) {
+        const budgetFraction = c.budget_usd ? Math.min(1, (c.spent_usd || 0) / c.budget_usd) : null;
+        const budgetCell =
+          c.budget_usd == null
+            ? el("td", { text: "unrestricted" })
+            : el("td", {}, [
+                el("span", { text: `${money(c.spent_usd)} / ${money(c.budget_usd)}` }),
+              ]);
+        const row = el("tr", { class: "client-row" }, [
+          el("td", { class: "mono", text: c.name }),
+          el("td", { text: c.organization || "—" }),
+          el("td", { text: c.workspace || "—" }),
+          el("td", { text: c.role }),
+          el("td", { text: num(c.requests_per_minute) + "/min" }),
+          budgetCell,
+          el("td", { text: c.budget_period || "—" }),
+          el(
+            "td",
+            {},
+            c.budget_usd == null
+              ? []
+              : [
+                  el("button", {
+                    class: "small secondary",
+                    text: "Reset spend",
+                    onclick: (e) => {
+                      e.stopPropagation();
+                      resetSpend(c.name, e.target);
+                    },
+                  }),
+                ]
+          ),
+        ]);
+        row.addEventListener("click", () => toggleHistory(row, c.name));
+        tbody.appendChild(row);
+      }
+      container.appendChild(
+        el("table", {}, [
+          el("thead", {}, [
+            el(
+              "tr",
+              {},
+              ["Name", "Org", "Workspace", "Role", "Rate limit", "Spend", "Period", ""].map((h) => el("th", { text: h }))
+            ),
+          ]),
+          tbody,
+        ])
+      );
+      container.appendChild(el("p", { class: "empty", text: "Click a row to view its usage history." }));
+    } catch (err) {
+      showError(container, err);
+    }
+  }
+
+  // --- wiring ---------------------------------------------------------------
+
+  const refreshers = {
+    models: refreshModels,
+    providerStats: refreshProviderStats,
+    usage: refreshUsage,
+    freeTiers: refreshFreeTiers,
+    clients: refreshClients,
+  };
+
+  async function refreshAll() {
+    await refreshHealth();
+    await Promise.all(Object.values(refreshers).map((fn) => fn()));
+  }
+
+  authForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    sessionStorage.setItem(TOKEN_KEY, token());
+    refreshAll();
+  });
+
+  document.getElementById("refresh-all").addEventListener("click", refreshAll);
+
+  document.querySelectorAll("[data-refresh]").forEach((btn) => {
+    btn.addEventListener("click", () => refreshers[btn.dataset.refresh]());
+  });
+
+  refreshHealth();
+  if (saved) refreshAll();
+})();
+</script>
+</body>
+</html>

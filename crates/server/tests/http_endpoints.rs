@@ -123,6 +123,41 @@ async fn health_endpoint_returns_ok_with_no_config() {
 }
 
 #[tokio::test]
+async fn dashboard_serves_html_unauthenticated_even_with_a_key_configured() {
+    // The page itself carries no secrets, so it's reachable without a
+    // token even when server.api_key_env is set -- the JS inside it is
+    // what authenticates, per-`fetch()`, against the JSON endpoints.
+    let key_var = unique_env_var("SERVER_API_KEY");
+    std::env::set_var(&key_var, "s3cret");
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        api_key_env = "{key_var}"
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::get(format!("{base_url}/dashboard"))
+        .await
+        .expect("request should succeed");
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/html; charset=utf-8"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("<title>rusty_provider dashboard</title>"));
+    assert!(body.contains("/v1/admin/clients"));
+}
+
+#[tokio::test]
 async fn ready_endpoint_returns_200_when_no_persistence_is_configured() {
     // Without [persistence] there's nothing external to check, so
     // readiness always passes -- distinct from /health only in principle,

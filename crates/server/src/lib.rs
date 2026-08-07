@@ -59,6 +59,7 @@ pub fn build_app(state: AppState) -> AxumRouter {
     let router = AxumRouter::new()
         .route("/health", get(routes::health))
         .route("/ready", get(routes::ready))
+        .route("/dashboard", get(routes::dashboard))
         .route("/v1/models", get(routes::list_models))
         .route("/v1/usage", get(routes::usage_stats))
         .route("/v1/free-tiers", get(routes::free_tiers))
