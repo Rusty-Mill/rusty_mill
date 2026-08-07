@@ -160,6 +160,23 @@ pub const DEFAULT_SYNC_TIMEOUT: Duration = Duration::from_secs(300);
 /// the fleet forever.
 pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 
+/// How large a request body this server will accept, by default.
+///
+/// Base64 costs about a third, so this clears roughly 6 MiB of actual bytes —
+/// enough for an ordinary photo or a few minutes of audio inline, which is what
+/// ACP's `base64` encoding is for. axum's own default of 2 MiB left about
+/// 1.5 MiB and rejected the common case.
+///
+/// It is a real limit rather than a formality, because a server that buffers
+/// whatever it is sent has a memory-exhaustion path that costs an attacker
+/// nothing. Note that [`max_concurrent_runs`](AcpServerBuilder::max_concurrent_runs)
+/// does **not** bound how many bodies are buffered at once: the body is read
+/// before the run is admitted, so the two limits govern different things.
+///
+/// Anything larger belongs behind a `content_url` part, which is the spec's own
+/// answer and costs the server nothing to serve.
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+
 /// How long a readiness answer is reused before the store is asked again.
 ///
 /// A load balancer probes on a schedule, from every replica, forever. Without a
@@ -505,6 +522,7 @@ pub struct AcpServer {
     sync_timeout: Option<Duration>,
     max_recovery_attempts: u32,
     await_timeout: Option<Duration>,
+    max_request_bytes: usize,
     in_flight: Arc<InFlight>,
     /// The last readiness answer and when it was given.
     readiness: Mutex<Option<(tokio::time::Instant, Readiness)>>,
@@ -567,6 +585,11 @@ impl AcpServer {
     /// How many runs may execute here at once, if a ceiling was set.
     pub fn max_concurrent_runs(&self) -> Option<usize> {
         self.in_flight.limit
+    }
+
+    /// The largest request body this server will accept.
+    pub fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
     }
 
     /// How many runs are running an agent body right now.
@@ -1489,6 +1512,7 @@ pub struct AcpServerBuilder {
     sync_timeout: Option<Option<Duration>>,
     max_recovery_attempts: Option<u32>,
     max_concurrent_runs: Option<usize>,
+    max_request_bytes: Option<usize>,
     await_timeout: Option<Option<Duration>>,
 }
 
@@ -1603,6 +1627,38 @@ impl AcpServerBuilder {
     /// ```
     pub fn max_concurrent_runs(mut self, max_concurrent_runs: usize) -> Self {
         self.max_concurrent_runs = Some(max_concurrent_runs);
+        self
+    }
+
+    /// Cap how large a request body this server will accept. Defaults to
+    /// [`DEFAULT_MAX_REQUEST_BYTES`].
+    ///
+    /// Raise it for an agent whose input is genuinely large and has to travel
+    /// inline. Note what it costs: the body is buffered before the run is
+    /// admitted, so this is multiplied by concurrent *requests*, not by
+    /// [`max_concurrent_runs`](AcpServerBuilder::max_concurrent_runs). The two
+    /// limits do not compose into one number.
+    ///
+    /// Base64 costs about a third, so the ceiling on actual bytes is roughly
+    /// three quarters of whatever is set here.
+    ///
+    /// ```
+    /// # use rusty_acp::server::AcpServer;
+    /// # fn demo() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let agent = rusty_acp::server::agent_fn(
+    /// #     rusty_acp::types::AgentManifest::new(
+    /// #         rusty_acp::types::AgentName::new("echo")?, "Echoes"),
+    /// #     |ctx: rusty_acp::server::RunContext| async move {
+    /// #         ctx.reply_text("hi").await.map(|_| ()) });
+    /// let server = AcpServer::builder()
+    ///     .agent(agent)
+    ///     .max_request_bytes(32 * 1024 * 1024)
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn max_request_bytes(mut self, max_request_bytes: usize) -> Self {
+        self.max_request_bytes = Some(max_request_bytes);
         self
     }
 
@@ -1735,6 +1791,7 @@ impl AcpServerBuilder {
                 .max_recovery_attempts
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
             await_timeout: self.await_timeout.unwrap_or(Some(DEFAULT_AWAIT_TIMEOUT)),
+            max_request_bytes: self.max_request_bytes.unwrap_or(DEFAULT_MAX_REQUEST_BYTES),
             in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
             readiness: Mutex::new(None),
         })
