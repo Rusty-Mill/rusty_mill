@@ -109,6 +109,30 @@ impl AgentServer {
         self
     }
 
+    /// Lets an `mtls` security scheme (spec Section 4.5.5) be satisfied via
+    /// a header/gRPC-metadata entry a TLS-terminating reverse proxy sets in
+    /// front of this server to report the result of verifying the client's
+    /// certificate - e.g. nginx's `ssl-client-verify`/`ssl-client-s-dn`,
+    /// Envoy's `x-forwarded-client-cert`, or an AWS ALB's
+    /// `x-amzn-mtls-clientcert`. This crate's own servers never terminate
+    /// TLS themselves (see the [`auth`] module docs), so without this
+    /// configured, an `mtls`-only requirement is never satisfiable - no
+    /// credential is ever extracted for it, so a registered
+    /// [`AuthVerifier`] is simply never called. `header_name` is looked up
+    /// the same case-insensitive way every other scheme's credential is:
+    /// as an HTTP header on JSON-RPC/REST, lowercased as gRPC metadata.
+    ///
+    /// This is a convenience for the common case of one proxy-set header
+    /// meaning "this connection's client certificate was verified"; your
+    /// [`AuthVerifier`] still decides what the extracted value has to say
+    /// to accept the request (e.g. checking it equals `"SUCCESS"`, or
+    /// parsing a subject DN out of it) - this crate has no opinion on your
+    /// proxy's specific header format.
+    pub fn with_mtls_header(mut self, header_name: impl Into<String>) -> Self {
+        self.engine.set_mtls_header(header_name.into());
+        self
+    }
+
     pub fn agent_card(&self) -> &AgentCard {
         self.engine.card()
     }

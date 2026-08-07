@@ -154,6 +154,7 @@ async fn require_auth(
                 .map(str::to_string)
         },
         Some(query),
+        engine.mtls_header(),
     );
     engine
         .authenticate(&credentials)
@@ -651,6 +652,7 @@ async fn get_extended_agent_card_impl(engine: Arc<Engine>, headers: HeaderMap) -
                 .map(str::to_string)
         },
         None,
+        engine.mtls_header(),
     );
     match engine.get_extended_agent_card(&credentials).await {
         Ok(card) => rest_ok(&card),

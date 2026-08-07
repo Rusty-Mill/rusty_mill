@@ -51,6 +51,7 @@ impl GrpcService {
                     .map(str::to_string)
             },
             None,
+            self.engine.mtls_header(),
         )
     }
 
