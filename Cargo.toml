@@ -162,5 +162,15 @@ name = "rest_tenant_path_bindings"
 path = "tests/rest_tenant_path_bindings.rs"
 required-features = ["server"]
 
+[[test]]
+name = "mtls_proxy_header"
+path = "tests/mtls_proxy_header.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "mtls_proxy_header_grpc"
+path = "tests/mtls_proxy_header_grpc.rs"
+required-features = ["grpc", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

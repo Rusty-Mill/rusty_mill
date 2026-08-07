@@ -93,6 +93,7 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
                 .map(str::to_string)
         },
         None,
+        engine.mtls_header(),
     );
     if envelope.method.as_str() != methods::GET_EXTENDED_AGENT_CARD {
         if let Err(auth_err) = engine.authenticate(&credentials).await {

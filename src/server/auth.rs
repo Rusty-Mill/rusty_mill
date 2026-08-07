@@ -19,12 +19,16 @@
 //! - `apiKey` schemes with `location: "query"` or `"cookie"` are only
 //!   extracted on the REST binding (JSON-RPC has no meaningful query
 //!   string, and gRPC has neither).
-//! - `mtls` schemes are never extracted here: verifying a client
-//!   certificate is normally a TLS-termination-layer concern, outside
-//!   what an application-level `Authorization`-header-style check can
-//!   see. An `AuthVerifier` asked to satisfy an `mtls`-only requirement
-//!   will simply never be called for it, since no credential is ever
-//!   found for that scheme name.
+//! - `mtls` schemes: this crate's own servers never terminate TLS
+//!   themselves, so there's no client certificate to inspect directly.
+//!   [`AgentServer::with_mtls_header`](super::AgentServer::with_mtls_header)
+//!   lets a deployment behind a TLS-terminating reverse proxy (which
+//!   verified the client certificate and recorded the result in a
+//!   header/metadata entry - e.g. nginx's `ssl-client-verify`, Envoy's
+//!   `x-forwarded-client-cert`) point every `mtls` scheme at that entry
+//!   instead. Without it configured, `mtls` requirements remain
+//!   unsatisfiable exactly as before: no credential is ever extracted, so
+//!   an `AuthVerifier` is simply never called for them.
 //!
 //! # Semantics
 //!
@@ -103,11 +107,15 @@ pub trait AuthVerifier: Send + Sync {
 /// Extracts whatever raw credential material each of `schemes` calls for,
 /// via `lookup_header` (case-insensitive header/metadata lookup) and
 /// `lookup_query` (`None` on bindings with no query string, e.g. JSON-RPC
-/// and gRPC).
+/// and gRPC). `mtls_header`, if set (see
+/// [`AgentServer::with_mtls_header`](super::AgentServer::with_mtls_header)),
+/// is the header/metadata key name an `mtls` scheme's credential is read
+/// from via `lookup_header`.
 pub(crate) fn extract_credentials(
     schemes: &HashMap<String, SecurityScheme>,
     lookup_header: impl Fn(&str) -> Option<String>,
     lookup_query: Option<&HashMap<String, String>>,
+    mtls_header: Option<&str>,
 ) -> Credentials {
     let mut found = HashMap::new();
     for (name, scheme) in schemes {
@@ -126,7 +134,7 @@ pub(crate) fn extract_credentials(
             SecurityScheme::OAuth2 { .. } | SecurityScheme::OpenIdConnect { .. } => {
                 lookup_header("authorization").and_then(|v| strip_scheme_prefix(&v, "Bearer"))
             }
-            SecurityScheme::MutualTls { .. } => None,
+            SecurityScheme::MutualTls { .. } => mtls_header.and_then(&lookup_header),
         };
         if let Some(v) = value {
             found.insert(name.clone(), v);

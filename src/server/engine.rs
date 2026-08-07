@@ -60,6 +60,9 @@ pub struct Engine {
     buses: Buses,
     cancel_tokens: Arc<Mutex<HashMap<String, CancellationToken>>>,
     auth_verifier: Option<Arc<dyn AuthVerifier>>,
+    /// The header/metadata key name (if any) an `mtls` security scheme's
+    /// credential is read from - see [`AgentServer::with_mtls_header`](super::AgentServer::with_mtls_header).
+    mtls_header: Option<String>,
     push_notifier: PushNotifier,
     /// A bounded tail of recent events per task, keyed by task id, so
     /// [`Engine::subscribe_to_task`] can replay what a reconnecting caller
@@ -81,6 +84,7 @@ impl Engine {
             buses: Arc::new(Mutex::new(HashMap::new())),
             cancel_tokens: Arc::new(Mutex::new(HashMap::new())),
             auth_verifier: None,
+            mtls_header: None,
             push_notifier: PushNotifier::new(),
             event_logs: Arc::new(Mutex::new(HashMap::new())),
             next_seq: Arc::new(AtomicU64::new(1)),
@@ -95,8 +99,19 @@ impl Engine {
         self.auth_verifier = Some(verifier);
     }
 
+    pub(crate) fn set_mtls_header(&mut self, header_name: String) {
+        self.mtls_header = Some(header_name);
+    }
+
     pub fn card(&self) -> &AgentCard {
         &self.card
+    }
+
+    /// The header/metadata key name `mtls` security scheme credentials are
+    /// read from, if [`AgentServer::with_mtls_header`](super::AgentServer::with_mtls_header)
+    /// was called.
+    pub(crate) fn mtls_header(&self) -> Option<&str> {
+        self.mtls_header.as_deref()
     }
 
     /// Enforces `AgentCard.capabilities.extensions[].required` (spec
