@@ -87,6 +87,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
+pub mod trace;
+
 pub mod types;
 
 #[cfg(feature = "client")]

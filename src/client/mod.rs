@@ -29,6 +29,7 @@ use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
 use crate::{
+    trace::{TraceContext, TRACEPARENT_HEADER},
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, Event, Message, Run, RunCreateRequest,
         RunEventsListResponse, RunId, RunMode, RunResumeRequest, Session, SessionId,
@@ -302,6 +303,7 @@ pub struct AcpClient {
     base_url: String,
     reconnect: ReconnectPolicy,
     retry: RetryPolicy,
+    send_trace_headers: bool,
 }
 
 impl AcpClient {
@@ -318,6 +320,7 @@ impl AcpClient {
             timeout: None,
             reconnect: ReconnectPolicy::default(),
             retry: RetryPolicy::default(),
+            send_trace_headers: true,
         }
     }
 
@@ -346,7 +349,28 @@ impl AcpClient {
     }
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.http.request(method, self.url(path))
+        self.traced(self.http.request(method, self.url(path)))
+    }
+
+    /// Attach a `traceparent`, unless the caller has turned it off.
+    ///
+    /// A fresh trace per call. Without OpenTelemetry there is no ambient
+    /// context to inherit — `tracing` spans carry no trace id of their own —
+    /// so the honest thing is to start one rather than to pretend to continue
+    /// something. It still earns its place: the id this client logs is the one
+    /// the server logs, and the one every replica that later touches the run
+    /// logs, which is the correlation that did not exist before.
+    ///
+    /// A caller that *does* have a trace — because something upstream gave it
+    /// one — sets the header on its own [`reqwest::Client`] and calls
+    /// [`without_trace_headers`](AcpClientBuilder::without_trace_headers), so
+    /// there is exactly one `traceparent` on the wire rather than two.
+    fn traced(&self, request: RequestBuilder) -> RequestBuilder {
+        if !self.send_trace_headers {
+            return request;
+        }
+        let context = TraceContext::mint();
+        request.header(TRACEPARENT_HEADER, context.to_string())
     }
 
     /// The retry policy in force.
@@ -848,7 +872,7 @@ impl AcpClient {
     pub async fn fetch_session_history(&self, session: &Session) -> Result<Vec<Message>> {
         futures_util::stream::iter(&session.history)
             .map(|url| async move {
-                let response = self.send(self.http.get(url), Replay::Safe).await?;
+                let response = self.send(self.traced(self.http.get(url)), Replay::Safe).await?;
                 json(response).await
             })
             .buffered(HISTORY_CONCURRENCY)
@@ -866,7 +890,7 @@ impl AcpClient {
         let Some(url) = &session.state else {
             return Ok(None);
         };
-        let response = self.send(self.http.get(url), Replay::Safe).await?;
+        let response = self.send(self.traced(self.http.get(url)), Replay::Safe).await?;
         json(response).await.map(Some)
     }
 }
@@ -946,6 +970,7 @@ pub struct AcpClientBuilder {
     timeout: Option<Duration>,
     reconnect: ReconnectPolicy,
     retry: RetryPolicy,
+    send_trace_headers: bool,
 }
 
 impl AcpClientBuilder {
@@ -1003,6 +1028,20 @@ impl AcpClientBuilder {
         self
     }
 
+    /// Stop attaching a `traceparent` header to outbound requests.
+    ///
+    /// For a caller that already has a trace and puts the header on its own
+    /// [`reqwest::Client`]. Without this the request would carry two, and which
+    /// one a server reads is not something to leave to chance.
+    ///
+    /// Turning it off and setting nothing in its place costs the correlation:
+    /// the server mints a trace per request either way, so the ids exist, but
+    /// nothing ties this client's own logging to them.
+    pub fn without_trace_headers(mut self) -> Self {
+        self.send_trace_headers = false;
+        self
+    }
+
     /// Validate the base URL and build the client.
     pub fn build(self) -> Result<AcpClient> {
         // Registering descriptions is idempotent, so doing it per client rather
@@ -1029,7 +1068,13 @@ impl AcpClientBuilder {
             }
         };
 
-        Ok(AcpClient { http, base_url, reconnect: self.reconnect, retry: self.retry })
+        Ok(AcpClient {
+            http,
+            base_url,
+            reconnect: self.reconnect,
+            retry: self.retry,
+            send_trace_headers: self.send_trace_headers,
+        })
     }
 }
 

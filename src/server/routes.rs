@@ -11,12 +11,13 @@ use axum::{
         rejection::JsonRejection, DefaultBodyLimit, FromRequest, Path, Query, Request, State,
     },
     http::{header, HeaderMap, StatusCode},
+    middleware::{from_fn, Next},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Response,
     },
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use futures_util::stream::{Stream, StreamExt};
 use serde::Deserialize;
@@ -27,6 +28,7 @@ use crate::{
         store::{Notification, NotificationStream},
         AcpServer,
     },
+    trace::{TraceContext, TRACEPARENT_HEADER},
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, ErrorCode, Event, Message, Run,
         RunCreateRequest, RunEventsListResponse, RunId, RunMode, RunResumeRequest, RunStatus,
@@ -193,7 +195,45 @@ pub(crate) fn router(server: Arc<AcpServer>) -> Router {
     // Layered on the whole router rather than on `POST /runs` alone. The
     // submission is the only endpoint expected to carry a large body, but a
     // limit that only guards the endpoint you thought of is not a limit.
-    router.layer(DefaultBodyLimit::max(server.max_request_bytes())).with_state(server)
+    router
+        .layer(DefaultBodyLimit::max(server.max_request_bytes()))
+        // Outermost, so the span covers the body limit's own rejection too: a
+        // 413 is a thing an operator wants to find by trace id as much as a
+        // success is.
+        .layer(from_fn(trace_context))
+        .with_state(server)
+}
+
+/// Give every request a span carrying the trace it belongs to.
+///
+/// Before this there were no request spans at all — #16 added `acp.run` and the
+/// reaper's, and nothing else — so a request that never got as far as starting
+/// a run produced no correlated output whatever.
+///
+/// An absent or malformed `traceparent` is **minted**, not rejected. A trace id
+/// that exists only inside this deployment is still worth having: it ties one
+/// caller's request to the run it started and to every replica that later
+/// touches it. Refusing the request instead would let a broken upstream proxy
+/// take a server down over a field nothing depends on.
+async fn trace_context(mut request: Request, next: Next) -> Response {
+    let context = request
+        .headers()
+        .get(TRACEPARENT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(TraceContext::parse)
+        .unwrap_or_else(TraceContext::mint);
+
+    // In the extensions so `create_run` can hand it to the run it starts, which
+    // outlives this span.
+    request.extensions_mut().insert(context);
+
+    let span = tracing::info_span!(
+        "acp.request",
+        method = %request.method(),
+        path = %request.uri().path(),
+        trace_id = %context.trace_id(),
+    );
+    tracing::Instrument::instrument(next.run(request), span).await
 }
 
 /// Open discovery: the registered manifests as YAML at the well-known location.
@@ -334,6 +374,11 @@ impl IntoResponse for RunEventsResponse {
 async fn create_run(
     State(server): State<Arc<AcpServer>>,
     headers: HeaderMap,
+    // Inserted by `trace_context`, so it is always present on a routed
+    // request. `Option` rather than a bare extractor anyway: a router composed
+    // into someone else's application may not carry the layer, and a missing
+    // trace should cost a field rather than a 500.
+    trace: Option<Extension<TraceContext>>,
     AcpJson(request): AcpJson<RunCreateRequest>,
 ) -> ApiResult<RunResponse> {
     // Checked before anything else: a replica that is going away should refuse
@@ -359,8 +404,10 @@ async fn create_run(
     let base_url = server.resolve_base_url(&headers);
     let mode = request.mode();
 
-    let (run_id, notifications) =
-        server.start_run(slot, request, &base_url).await.map_err(ApiError::from)?;
+    let (run_id, notifications) = server
+        .start_run(slot, request, &base_url, trace.map(|Extension(trace)| trace))
+        .await
+        .map_err(ApiError::from)?;
     deliver(&server, run_id, notifications, mode, StatusCode::ACCEPTED).await
 }
 
