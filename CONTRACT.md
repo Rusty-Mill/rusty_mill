@@ -43,7 +43,10 @@ Known v1 fields:
 
 - `symlinks` — probed by `NativeCapabilities::detect()`. Windows can create
   symlinks under Developer Mode or with `SeCreateSymbolicLinkPrivilege`, and
-  a plain Windows host often cannot; the answer is per-host, not per-OS.
+  a plain Windows host often cannot; the answer is per-host, not per-OS,
+  which is why the matrix summarizes it as `varies` on Windows. Of three
+  real Windows hosts measured, two refused and one allowed it — so this is
+  the common case, not a corner case.
 - `unix_permissions` — false on Windows; POSIX mode bits are not emulated.
   Not probed: observing mode bits take effect also assumes a filesystem that
   honors them, so there is no clean thing to ask.
@@ -79,15 +82,36 @@ merges the three reports, and **fails the build if this section differs from
 what the probes reported**. A row cannot claim a behavior that no code
 exercised.
 
+**Each column reports the CI reference host for that OS, not every host of
+that OS.** One machine per OS runs the probes. Where a capability depends on
+the *machine* rather than the OS, a single measurement cannot speak for the
+platform, and the summary says so with `varies` instead of generalizing from
+a sample of one.
+
 Each primitive is one of:
 
 - **supported** — identical observable behavior across all three hosts.
 - **normalized** — the host differs underneath, but the adapter presents one
-  behavior.
+  behavior. Rely on the adapter; nothing to check.
 - **unsupported** — capability genuinely absent here; callers must check
   `NativeCapabilities::detect()` first.
+- **varies** — not portable to assume for this OS: availability depends on
+  host configuration, privilege, filesystem, or policy. **Callers MUST
+  consult `NativeCapabilities` on the current host.** Distinct from
+  `normalized`, and not a softer form of it: `normalized` means the adapter
+  guarantees one consistent contract despite host differences, while
+  `varies` means there is no such guarantee to lean on. The per-host
+  evidence below still records what each reference host actually did — a
+  `varies` summary never hides a measurement, it reports that the
+  measurement does not generalize.
 - **ERRORED** — the probe could not run. Always a CI failure: it means the
   matrix cannot be trusted.
+
+Why `varies` exists: the first generated matrix reported Windows symlink
+creation as `supported` on the strength of the `windows-latest` runner, while
+two other real Windows hosts refused it with `ERROR_PRIVILEGE_NOT_HELD`. That
+is a host-shaped fact in an OS-shaped cell — the same defect as the original
+compile-time `cfg!()` table, moved up one level rather than fixed.
 
 Regenerate locally with:
 
