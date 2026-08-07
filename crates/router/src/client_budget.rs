@@ -73,13 +73,21 @@ pub fn period_key_at(period: BudgetPeriod, now_unix: i64) -> i64 {
     }
 }
 
-/// Converts Unix seconds (UTC) to a `(year, month)` pair via Howard
-/// Hinnant's `civil_from_days` algorithm
+/// Converts Unix seconds (UTC) to a `(year, month)` pair -- see
+/// [`ymd_from_days`] for the actual calendar math.
+fn year_month_from_unix(unix_secs: i64) -> (i32, u32) {
+    let (y, m, _d) = ymd_from_days(unix_secs.div_euclid(86_400));
+    (y, m)
+}
+
+/// Converts a day-since-epoch count (the same bucket
+/// `period_key_at(BudgetPeriod::Daily, ...)` produces) to a full
+/// `(year, month, day)` civil date, via Howard Hinnant's
+/// `civil_from_days` algorithm
 /// (<https://howardhinnant.github.io/date_algorithms.html>), since this
 /// otherwise has no date/time dependency for a single calendar
 /// computation.
-fn year_month_from_unix(unix_secs: i64) -> (i32, u32) {
-    let days = unix_secs.div_euclid(86_400);
+pub fn ymd_from_days(days: i64) -> (i32, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097; // [0, 146096]
@@ -87,9 +95,18 @@ fn year_month_from_unix(unix_secs: i64) -> (i32, u32) {
     let y = yoe + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
     let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
-    (y as i32, m as u32)
+    (y as i32, m as u32, d as u32)
+}
+
+/// `"YYYY-MM-DD"` for `day_index` (days since the Unix epoch, UTC) -- the
+/// same bucket [`period_key_at`]`(BudgetPeriod::Daily, ...)` produces, and
+/// what `Persistence`'s daily client usage rows are keyed by.
+pub fn day_string(day_index: i64) -> String {
+    let (y, m, d) = ymd_from_days(day_index);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Resets `state` to zero spend if `current_key` doesn't match its
@@ -162,6 +179,47 @@ mod tests {
     fn year_month_from_unix_crosses_a_year_boundary() {
         assert_eq!(year_month_from_unix(1_703_980_799), (2023, 12)); // 2023-12-31T23:59:59Z
         assert_eq!(year_month_from_unix(1_704_067_200), (2024, 1)); // 2024-01-01T00:00:00Z
+    }
+
+    // --- ymd_from_days / day_string ------------------------------------------------
+    // Same well-known reference epochs `year_month_from_unix`'s tests use,
+    // now also checked for day-of-month.
+
+    #[test]
+    fn ymd_from_days_matches_known_reference_epochs() {
+        assert_eq!(ymd_from_days(0), (1970, 1, 1));
+        assert_eq!(ymd_from_days(946_684_800 / 86_400), (2000, 1, 1));
+        assert_eq!(ymd_from_days(1_704_067_200 / 86_400), (2024, 1, 1));
+    }
+
+    #[test]
+    fn ymd_from_days_crosses_a_month_boundary() {
+        assert_eq!(ymd_from_days(1_706_745_599 / 86_400), (2024, 1, 31));
+        assert_eq!(ymd_from_days(1_706_745_600 / 86_400), (2024, 2, 1));
+    }
+
+    #[test]
+    fn ymd_from_days_handles_a_leap_year_february() {
+        assert_eq!(ymd_from_days(1_709_164_800 / 86_400), (2024, 2, 29));
+        assert_eq!(ymd_from_days(1_709_251_200 / 86_400), (2024, 3, 1));
+    }
+
+    #[test]
+    fn ymd_from_days_crosses_a_year_boundary() {
+        // 1_703_980_799 is 2023-12-30T23:59:59Z (one second before
+        // 2023-12-31T00:00:00Z == 1_703_980_800), not
+        // 2023-12-31T23:59:59Z -- only the (year, month) pair happens to
+        // be ambiguous between the two, which is why
+        // `year_month_from_unix_crosses_a_year_boundary`'s comment above
+        // doesn't distinguish them.
+        assert_eq!(ymd_from_days(1_703_980_799 / 86_400), (2023, 12, 30));
+        assert_eq!(ymd_from_days(1_704_067_200 / 86_400), (2024, 1, 1));
+    }
+
+    #[test]
+    fn day_string_formats_with_zero_padding() {
+        assert_eq!(day_string(0), "1970-01-01");
+        assert_eq!(day_string(1_706_745_600 / 86_400), "2024-02-01");
     }
 
     // --- period_key_at -------------------------------------------------------------

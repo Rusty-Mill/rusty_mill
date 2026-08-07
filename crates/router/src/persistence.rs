@@ -62,7 +62,29 @@ const SCHEMA_SQL: &str = "
         period_key BIGINT NOT NULL,
         spent_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0
     );
+    CREATE TABLE IF NOT EXISTS client_daily_usage (
+        client_name TEXT NOT NULL,
+        day BIGINT NOT NULL,
+        requests BIGINT NOT NULL DEFAULT 0,
+        prompt_tokens BIGINT NOT NULL DEFAULT 0,
+        completion_tokens BIGINT NOT NULL DEFAULT 0,
+        cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+        PRIMARY KEY (client_name, day)
+    );
 ";
+
+/// One client's usage rollup for one UTC day (`day` = days since the
+/// Unix epoch, the same bucket `client_budget::period_key_at`'s `Daily`
+/// variant produces -- see `client_budget::day_string` for the
+/// display-facing `"YYYY-MM-DD"` form).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DailyClientUsage {
+    pub day: i64,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+}
 
 /// Durable, cross-process backing store for cumulative usage/cost stats
 /// and client spend, dispatching to whichever backend `open` was pointed
@@ -162,6 +184,40 @@ impl Persistence {
         }
     }
 
+    /// Adds one request's usage/cost to `client_name`'s rollup for `day`
+    /// (days since the Unix epoch, UTC) -- for every named client this
+    /// router can identify, independent of whether it has a configured
+    /// `budget_usd` (unlike `record_client_spend`, which only tracks
+    /// budgeted clients). Fire-and-forget, like `record`/
+    /// `record_client_spend`.
+    pub fn record_daily_client_usage(
+        &self,
+        client_name: &str,
+        day: i64,
+        usage: &Usage,
+        cost_usd: Option<f64>,
+    ) {
+        match &self.backend {
+            Backend::Sqlite(b) => b.record_daily_client_usage(client_name, day, usage, cost_usd),
+            Backend::Postgres(b) => b.record_daily_client_usage(client_name, day, usage, cost_usd),
+        }
+    }
+
+    /// `client_name`'s daily usage rollups for every day from `since_day`
+    /// (inclusive, days since the Unix epoch, UTC) through today, oldest
+    /// first. A day with no recorded usage is simply absent, not a
+    /// zeroed row -- the caller decides whether to fill gaps.
+    pub async fn client_usage_history(
+        &self,
+        client_name: &str,
+        since_day: i64,
+    ) -> Result<Vec<DailyClientUsage>, PersistenceError> {
+        match &self.backend {
+            Backend::Sqlite(b) => b.client_usage_history(client_name, since_day).await,
+            Backend::Postgres(b) => b.client_usage_history(client_name, since_day).await,
+        }
+    }
+
     /// A trivial round trip (`SELECT 1`) confirming the backend is
     /// actually reachable right now, for `GET /ready`. Deliberately
     /// cheaper than `snapshot`/`load_all` -- readiness only needs to know
@@ -217,6 +273,13 @@ enum SqliteWrite {
     ResetClientSpend {
         client_name: String,
         period_key: i64,
+    },
+    DailyClientUsage {
+        client_name: String,
+        day: i64,
+        prompt_tokens: u32,
+        completion_tokens: u32,
+        cost_usd: Option<f64>,
     },
 }
 
@@ -297,6 +360,22 @@ impl SqliteBackend {
                                  period_key = ?2,
                                  spent_usd = 0.0",
                             rusqlite::params![client_name, period_key],
+                        ),
+                        SqliteWrite::DailyClientUsage { client_name, day, prompt_tokens, completion_tokens, cost_usd } => conn.execute(
+                            "INSERT INTO client_daily_usage (client_name, day, requests, prompt_tokens, completion_tokens, cost_usd)
+                             VALUES (?1, ?2, 1, ?3, ?4, ?5)
+                             ON CONFLICT(client_name, day) DO UPDATE SET
+                                 requests = requests + 1,
+                                 prompt_tokens = prompt_tokens + ?3,
+                                 completion_tokens = completion_tokens + ?4,
+                                 cost_usd = cost_usd + ?5",
+                            rusqlite::params![
+                                client_name,
+                                day,
+                                prompt_tokens,
+                                completion_tokens,
+                                cost_usd.unwrap_or(0.0),
+                            ],
                         ),
                     };
                     if let Err(e) = result {
@@ -385,6 +464,56 @@ impl SqliteBackend {
         })
         .await
         .expect("persistence ping task panicked")
+        .map_err(PersistenceError::from)
+    }
+
+    fn record_daily_client_usage(
+        &self,
+        client_name: &str,
+        day: i64,
+        usage: &Usage,
+        cost_usd: Option<f64>,
+    ) {
+        let event = SqliteWrite::DailyClientUsage {
+            client_name: client_name.to_string(),
+            day,
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            cost_usd,
+        };
+        if self.tx.send(event).is_err() {
+            tracing::warn!("persistence writer thread is gone; dropping daily client usage event");
+        }
+    }
+
+    async fn client_usage_history(
+        &self,
+        client_name: &str,
+        since_day: i64,
+    ) -> Result<Vec<DailyClientUsage>, PersistenceError> {
+        let path = self.path.clone();
+        let client_name = client_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            let conn = Connection::open(&path)?;
+            let mut stmt = conn.prepare(
+                "SELECT day, requests, prompt_tokens, completion_tokens, cost_usd
+                 FROM client_daily_usage
+                 WHERE client_name = ?1 AND day >= ?2
+                 ORDER BY day ASC",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![client_name, since_day], |row| {
+                Ok(DailyClientUsage {
+                    day: row.get(0)?,
+                    requests: row.get::<_, i64>(1)? as u64,
+                    prompt_tokens: row.get::<_, i64>(2)? as u64,
+                    completion_tokens: row.get::<_, i64>(3)? as u64,
+                    cost_usd: row.get(4)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+        .expect("persistence client_usage_history task panicked")
         .map_err(PersistenceError::from)
     }
 }
@@ -591,6 +720,66 @@ impl PostgresBackend {
     async fn ping(&self) -> Result<(), PersistenceError> {
         self.client.execute("SELECT 1", &[]).await?;
         Ok(())
+    }
+
+    fn record_daily_client_usage(
+        &self,
+        client_name: &str,
+        day: i64,
+        usage: &Usage,
+        cost_usd: Option<f64>,
+    ) {
+        let client = self.client.clone();
+        let client_name = client_name.to_string();
+        let (prompt_tokens, completion_tokens, cost_usd) = (
+            usage.prompt_tokens as i64,
+            usage.completion_tokens as i64,
+            cost_usd.unwrap_or(0.0),
+        );
+        tokio::spawn(async move {
+            let result = client
+                .execute(
+                    "INSERT INTO client_daily_usage (client_name, day, requests, prompt_tokens, completion_tokens, cost_usd)
+                     VALUES ($1, $2, 1, $3, $4, $5)
+                     ON CONFLICT (client_name, day) DO UPDATE SET
+                         requests = client_daily_usage.requests + 1,
+                         prompt_tokens = client_daily_usage.prompt_tokens + $3,
+                         completion_tokens = client_daily_usage.completion_tokens + $4,
+                         cost_usd = client_daily_usage.cost_usd + $5",
+                    &[&client_name, &day, &prompt_tokens, &completion_tokens, &cost_usd],
+                )
+                .await;
+            if let Err(e) = result {
+                tracing::warn!("failed to persist daily client usage event to postgres: {e}");
+            }
+        });
+    }
+
+    async fn client_usage_history(
+        &self,
+        client_name: &str,
+        since_day: i64,
+    ) -> Result<Vec<DailyClientUsage>, PersistenceError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT day, requests, prompt_tokens, completion_tokens, cost_usd
+                 FROM client_daily_usage
+                 WHERE client_name = $1 AND day >= $2
+                 ORDER BY day ASC",
+                &[&client_name, &since_day],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| DailyClientUsage {
+                day: row.get::<_, i64>(0),
+                requests: row.get::<_, i64>(1) as u64,
+                prompt_tokens: row.get::<_, i64>(2) as u64,
+                completion_tokens: row.get::<_, i64>(3) as u64,
+                cost_usd: row.get::<_, f64>(4),
+            })
+            .collect())
     }
 }
 
@@ -917,6 +1106,142 @@ mod tests {
         );
     }
 
+    // --- client_daily_usage (sqlite) -----------------------------------------------
+
+    fn usage(prompt_tokens: u32, completion_tokens: u32) -> Usage {
+        Usage {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens + completion_tokens,
+            cached_tokens: None,
+            cache_creation_tokens: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn client_usage_history_is_empty_for_an_unrecorded_client() {
+        let path = unique_temp_path("daily_usage_none");
+        let persistence = open_sqlite(&path).await;
+        assert!(persistence
+            .client_usage_history("acme", 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_daily_client_usage_persists_a_new_day() {
+        let path = unique_temp_path("daily_usage_new");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(100, 50), Some(0.5));
+        wait_for_writer();
+
+        let history = persistence
+            .client_usage_history("acme", 19_723)
+            .await
+            .unwrap();
+        assert_eq!(
+            history,
+            vec![DailyClientUsage {
+                day: 19_723,
+                requests: 1,
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                cost_usd: 0.5,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn record_daily_client_usage_accumulates_within_the_same_day() {
+        let path = unique_temp_path("daily_usage_accumulate");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(0.1));
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(0.1));
+        wait_for_writer();
+
+        let history = persistence
+            .client_usage_history("acme", 19_723)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].requests, 2);
+        assert_eq!(history[0].prompt_tokens, 20);
+        assert_eq!(history[0].completion_tokens, 10);
+        assert!((history[0].cost_usd - 0.2).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn record_daily_client_usage_keeps_separate_days_separate() {
+        let path = unique_temp_path("daily_usage_separate_days");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
+        persistence.record_daily_client_usage("acme", 19_724, &usage(20, 10), Some(2.0));
+        wait_for_writer();
+
+        let history = persistence
+            .client_usage_history("acme", 19_723)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].day, 19_723, "oldest day first");
+        assert_eq!(history[1].day, 19_724);
+    }
+
+    #[tokio::test]
+    async fn client_usage_history_excludes_days_before_since_day() {
+        let path = unique_temp_path("daily_usage_since_day");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
+        persistence.record_daily_client_usage("acme", 19_724, &usage(20, 10), Some(2.0));
+        wait_for_writer();
+
+        let history = persistence
+            .client_usage_history("acme", 19_724)
+            .await
+            .unwrap();
+        assert_eq!(
+            history,
+            vec![DailyClientUsage {
+                day: 19_724,
+                requests: 1,
+                prompt_tokens: 20,
+                completion_tokens: 10,
+                cost_usd: 2.0,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn record_daily_client_usage_is_independent_per_client() {
+        let path = unique_temp_path("daily_usage_independent_clients");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), Some(1.0));
+        persistence.record_daily_client_usage("globex", 19_723, &usage(20, 10), Some(2.0));
+        wait_for_writer();
+
+        let acme = persistence
+            .client_usage_history("acme", 19_723)
+            .await
+            .unwrap();
+        assert_eq!(acme.len(), 1);
+        assert_eq!(acme[0].cost_usd, 1.0);
+    }
+
+    #[tokio::test]
+    async fn record_daily_client_usage_with_no_cost_leaves_cost_usd_at_zero() {
+        let path = unique_temp_path("daily_usage_no_cost");
+        let persistence = open_sqlite(&path).await;
+        persistence.record_daily_client_usage("acme", 19_723, &usage(10, 5), None);
+        wait_for_writer();
+
+        let history = persistence
+            .client_usage_history("acme", 19_723)
+            .await
+            .unwrap();
+        assert_eq!(history[0].cost_usd, 0.0);
+    }
+
     // --- postgres backend ----------------------------------------------------------
     //
     // Gated on TEST_POSTGRES_URL so contributors without a local Postgres
@@ -1102,6 +1427,51 @@ mod tests {
             persistence.client_spend(&client_name).await.unwrap(),
             Some((100, 0.0))
         );
+    }
+
+    #[tokio::test]
+    async fn postgres_daily_client_usage_round_trips_and_accumulates() {
+        let Some(persistence) = open_postgres_for_test("daily_usage").await else {
+            eprintln!("skipping: TEST_POSTGRES_URL not set");
+            return;
+        };
+        let client_name = unique_key("daily_usage");
+        let day = 19_723;
+
+        persistence.record_daily_client_usage(&client_name, day, &usage(10, 5), Some(1.0));
+        persistence.record_daily_client_usage(&client_name, day, &usage(10, 5), Some(1.0));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let history = persistence
+            .client_usage_history(&client_name, day)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].day, day);
+        assert_eq!(history[0].requests, 2);
+        assert_eq!(history[0].prompt_tokens, 20);
+        assert_eq!(history[0].completion_tokens, 10);
+        assert!((history[0].cost_usd - 2.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn postgres_client_usage_history_excludes_days_before_since_day() {
+        let Some(persistence) = open_postgres_for_test("daily_usage_since_day").await else {
+            eprintln!("skipping: TEST_POSTGRES_URL not set");
+            return;
+        };
+        let client_name = unique_key("daily_usage_since_day");
+
+        persistence.record_daily_client_usage(&client_name, 19_723, &usage(10, 5), Some(1.0));
+        persistence.record_daily_client_usage(&client_name, 19_724, &usage(20, 10), Some(2.0));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let history = persistence
+            .client_usage_history(&client_name, 19_724)
+            .await
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].day, 19_724);
     }
 
     // --- postgres backend, TLS ------------------------------------------------------

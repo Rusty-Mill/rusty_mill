@@ -153,6 +153,19 @@ pub struct ClientSpendStatus {
     pub period: BudgetPeriod,
 }
 
+/// One client's usage rollup for one UTC calendar day, returned by
+/// [`Router::client_usage_history`] for the admin API. `day` is
+/// `"YYYY-MM-DD"`, not a Unix timestamp -- the display-facing form of
+/// [`persistence::DailyClientUsage`]'s raw day-index.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DailyUsage {
+    pub day: String,
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cost_usd: f64,
+}
+
 /// Per-million-token USD rates for one "provider/model", derived from its
 /// `[[pricing]]` entry with `cache_read_per_million`/`cache_write_per_million`
 /// defaulted to `prompt_per_million` when the operator left them unset.
@@ -1306,6 +1319,68 @@ impl Router {
                         setting.period,
                     );
                 }
+            }
+        }
+    }
+
+    /// Adds one request's usage/cost to `client_name`'s daily rollup, for
+    /// [`Self::client_usage_history`] (the admin API's historical usage
+    /// endpoint). Unlike `record_client_spend`, this applies to *every*
+    /// named client, not just ones with a configured `budget_usd` --
+    /// historical reporting is a different concern from budget
+    /// enforcement, and scoping it to budgeted clients only would make it
+    /// useless for the "which caller made this pile of requests" case a
+    /// billing review or anomaly investigation actually wants.
+    ///
+    /// A no-op without `[persistence]` configured: this needs to survive
+    /// a restart to mean anything as *history*, unlike the in-memory-only
+    /// current-period spend tracking `record_client_spend` falls back to.
+    pub fn record_client_daily_usage(
+        &self,
+        client_name: &str,
+        usage: &Usage,
+        cost_usd: Option<f64>,
+    ) {
+        let Some(persistence) = &self.persistence else {
+            return;
+        };
+        let day = client_budget::period_key_at(BudgetPeriod::Daily, client_budget::now_unix());
+        persistence.record_daily_client_usage(client_name, day, usage, cost_usd);
+    }
+
+    /// `client_name`'s daily usage rollups for the last `days` days
+    /// (inclusive of today), oldest first -- for the admin API
+    /// (`GET /v1/admin/clients/{name}/usage-history`). Empty (not an
+    /// error) when `[persistence]` isn't configured, or on a read
+    /// failure -- a caller diagnosing a billing question is better served
+    /// by an empty result than a request-failing error over what's
+    /// fundamentally reporting, not correctness-critical, data. A day
+    /// with no recorded usage is simply absent from the result, not a
+    /// zeroed entry.
+    pub async fn client_usage_history(&self, client_name: &str, days: u32) -> Vec<DailyUsage> {
+        let Some(persistence) = &self.persistence else {
+            return Vec::new();
+        };
+        let today = client_budget::period_key_at(BudgetPeriod::Daily, client_budget::now_unix());
+        let since_day = today - (days.max(1) as i64 - 1);
+
+        match persistence
+            .client_usage_history(client_name, since_day)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| DailyUsage {
+                    day: client_budget::day_string(row.day),
+                    requests: row.requests,
+                    prompt_tokens: row.prompt_tokens,
+                    completion_tokens: row.completion_tokens,
+                    cost_usd: row.cost_usd,
+                })
+                .collect(),
+            Err(e) => {
+                tracing::warn!(client = %client_name, "failed to read client usage history from persistence: {e}");
+                Vec::new()
             }
         }
     }
@@ -3007,6 +3082,125 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         server.verify().await;
+    }
+
+    // --- client daily usage history -----------------------------------------------
+
+    #[tokio::test]
+    async fn client_usage_history_is_empty_without_persistence() {
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        router.record_client_daily_usage(
+            "acme",
+            &Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                cached_tokens: None,
+                cache_creation_tokens: None,
+            },
+            Some(1.0),
+        );
+        assert!(router.client_usage_history("acme", 30).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_client_daily_usage_and_client_usage_history_round_trip() {
+        let path = unique_temp_db_path("daily_usage_round_trip");
+        let config = Config::from_toml_str(&format!(
+            "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let router = Router::from_config(&config).await;
+
+        router.record_client_daily_usage(
+            "acme",
+            &Usage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                cached_tokens: None,
+                cache_creation_tokens: None,
+            },
+            Some(0.75),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let history = router.client_usage_history("acme", 30).await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].requests, 1);
+        assert_eq!(history[0].prompt_tokens, 100);
+        assert_eq!(history[0].completion_tokens, 50);
+        assert_eq!(history[0].cost_usd, 0.75);
+        // Today's bucket, in "YYYY-MM-DD" form -- not asserting an exact
+        // value (that would just be today's date hardcoded and re-broken
+        // every day this test runs), just the shape.
+        assert_eq!(history[0].day.len(), "YYYY-MM-DD".len());
+        assert_eq!(history[0].day.matches('-').count(), 2);
+    }
+
+    #[tokio::test]
+    async fn record_client_daily_usage_applies_even_without_a_configured_budget() {
+        // Distinct from record_client_spend, which no-ops for a client
+        // with no budget_usd set -- historical usage tracking applies to
+        // every named client, budgeted or not.
+        let path = unique_temp_db_path("daily_usage_no_budget");
+        let config = Config::from_toml_str(&format!(
+            "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let router = Router::from_config(&config).await;
+        assert!(
+            router.client_budgets.read().unwrap().is_empty(),
+            "no [[clients]] configured at all, so certainly none with a budget"
+        );
+
+        router.record_client_daily_usage(
+            "unbudgeted-client",
+            &Usage {
+                prompt_tokens: 5,
+                completion_tokens: 5,
+                total_tokens: 10,
+                cached_tokens: None,
+                cache_creation_tokens: None,
+            },
+            None,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let history = router.client_usage_history("unbudgeted-client", 30).await;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].requests, 1);
+    }
+
+    #[tokio::test]
+    async fn client_usage_history_days_parameter_bounds_how_far_back_it_looks() {
+        let path = unique_temp_db_path("daily_usage_days_bound");
+        let config = Config::from_toml_str(&format!(
+            "providers = {{}}\n\n[persistence]\nsqlite_path = {:?}\n",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let router = Router::from_config(&config).await;
+
+        // A day well outside any `days` window this test asks for.
+        let persistence = router.persistence.clone().unwrap();
+        persistence.record_daily_client_usage(
+            "acme",
+            0, // 1970-01-01 -- long before "today minus 30 days"
+            &Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: None,
+                cache_creation_tokens: None,
+            },
+            Some(0.01),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(router.client_usage_history("acme", 30).await.is_empty());
     }
 
     #[tokio::test]

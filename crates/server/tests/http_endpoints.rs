@@ -1950,6 +1950,204 @@ async fn admin_reset_client_spend_is_404_for_a_client_with_no_configured_budget(
     assert_eq!(resp.status(), 404);
 }
 
+/// A unique SQLite file path, guaranteed empty even if a prior test run
+/// left one behind -- same rationale as `unique_env_var`, for
+/// `[persistence]`-backed tests.
+fn unique_temp_db_path(label: &str) -> String {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rp_server_test_{label}_{}.db",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = std::fs::remove_file(&path);
+    path.to_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn admin_client_usage_history_reports_a_dispatched_requests_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello there"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        })))
+        .mount(&server)
+        .await;
+
+    let admin_key_var = unique_env_var("ADMIN_KEY");
+    std::env::set_var(&admin_key_var, "admin-secret");
+    let openai_key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&openai_key_var, "test-key");
+    let client_key_var = unique_env_var("CLIENT_KEY");
+    std::env::set_var(&client_key_var, "client-secret");
+    let db_path = unique_temp_db_path("usage_history");
+
+    let config = format!(
+        r#"
+        [server]
+        admin_key_env = "{admin_key_var}"
+
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{openai_key_var}"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{client_key_var}"
+        requests_per_minute = 60
+
+        [persistence]
+        sqlite_path = "{db_path}"
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+
+    let dispatch = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .bearer_auth("client-secret")
+        .json(&json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dispatch.status(), 200);
+
+    // The persistence writer thread is asynchronous relative to the
+    // response; give it a moment to land before reading it back.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let resp = client
+        .get(format!("{base_url}/v1/admin/clients/acme/usage-history"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["client"], "acme");
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 1, "exactly one day's worth of history so far");
+    assert_eq!(data[0]["requests"], 1);
+    assert_eq!(data[0]["prompt_tokens"], 10);
+    assert_eq!(data[0]["completion_tokens"], 5);
+    assert!(
+        data[0]["day"].as_str().unwrap().len() == "YYYY-MM-DD".len(),
+        "day should be a YYYY-MM-DD string, got {:?}",
+        data[0]["day"]
+    );
+}
+
+#[tokio::test]
+async fn admin_client_usage_history_is_empty_without_persistence_configured() {
+    let admin_key_var = unique_env_var("ADMIN_KEY");
+    std::env::set_var(&admin_key_var, "admin-secret");
+    let client_key_var = unique_env_var("CLIENT_KEY");
+    std::env::set_var(&client_key_var, "client-secret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        admin_key_env = "{admin_key_var}"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{client_key_var}"
+        requests_per_minute = 60
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{base_url}/v1/admin/clients/acme/usage-history"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn admin_client_usage_history_is_404_for_an_unknown_client() {
+    let admin_key_var = unique_env_var("ADMIN_KEY");
+    std::env::set_var(&admin_key_var, "admin-secret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        admin_key_env = "{admin_key_var}"
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/v1/admin/clients/nobody/usage-history"))
+        .bearer_auth("admin-secret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn admin_client_usage_history_rejects_missing_or_wrong_admin_key() {
+    let admin_key_var = unique_env_var("ADMIN_KEY");
+    std::env::set_var(&admin_key_var, "admin-secret");
+    let client_key_var = unique_env_var("CLIENT_KEY");
+    std::env::set_var(&client_key_var, "client-secret");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [server]
+        admin_key_env = "{admin_key_var}"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{client_key_var}"
+        requests_per_minute = 60
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+
+    let no_auth = client
+        .get(format!("{base_url}/v1/admin/clients/acme/usage-history"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_auth.status(), 401);
+
+    let wrong_key = client
+        .get(format!("{base_url}/v1/admin/clients/acme/usage-history"))
+        .bearer_auth("nope")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong_key.status(), 401);
+}
+
 #[tokio::test]
 async fn chat_completions_cuts_off_a_client_after_a_streaming_response_exceeds_its_budget() {
     let server = MockServer::start().await;
