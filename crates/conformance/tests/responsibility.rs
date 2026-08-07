@@ -70,15 +70,13 @@ struct Surface {
     declared: Option<String>,
 }
 
-/// Scans `contract` for public API roots and the tag each one carries.
+/// Scans Rust source for public API roots and the tag each one carries.
 ///
-/// Panics if it finds none: a scanner that silently matches nothing would
-/// report success while checking nothing, which is the failure mode both
-/// gates in this repo exist to prevent.
-fn layer1_surfaces(root: &Path) -> Vec<Surface> {
-    let text = std::fs::read_to_string(root.join("crates/contract/src/lib.rs"))
-        .expect("read the contract crate");
-
+/// Split out from [`layer1_surfaces`] so its walk-back rule can be tested
+/// against synthetic input. Testing it against the real `contract` source
+/// cannot work: every property you would want to check there depends on
+/// which tags the neighbouring items happen to carry.
+fn scan_surfaces(text: &str) -> Vec<Surface> {
     let mut surfaces = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
 
@@ -111,6 +109,18 @@ fn layer1_surfaces(root: &Path) -> Vec<Surface> {
         }
         surfaces.push(Surface { name, declared });
     }
+    surfaces
+}
+
+/// Scans `contract` for public API roots and the tag each one carries.
+///
+/// Panics if it finds none: a scanner that silently matches nothing would
+/// report success while checking nothing, which is the failure mode both
+/// gates in this repo exist to prevent.
+fn layer1_surfaces(root: &Path) -> Vec<Surface> {
+    let text = std::fs::read_to_string(root.join("crates/contract/src/lib.rs"))
+        .expect("read the contract crate");
+    let surfaces = scan_surfaces(&text);
 
     assert!(
         !surfaces.is_empty(),
@@ -220,26 +230,61 @@ fn the_allow_list_only_names_known_responsibilities() {
 }
 
 #[test]
-fn the_scanner_credits_a_tag_only_to_the_item_it_precedes() {
-    // The subtle failure this scanner could have: crediting one item's tag to
-    // a later untagged item, which would silently exempt new surfaces. The
-    // real source has a tagged item followed by untagged `impl` blocks and
-    // then another item, so this property is load-bearing rather than
-    // theoretical.
-    let surfaces = layer1_surfaces(&workspace_root());
-    let tagged = surfaces.iter().filter(|s| s.declared.is_some()).count();
-    assert_eq!(
-        tagged,
-        surfaces.len(),
-        "every surface should be tagged in this repo today; if that changed, \
-         the omission test above reports which"
-    );
+fn a_tag_does_not_carry_across_intervening_code() {
+    // The subtle failure available to this scanner: crediting one item's tag
+    // to a later *untagged* item, which would silently exempt every new
+    // surface and quietly disable the omission test above.
+    //
+    // Checked against synthetic source rather than the real `contract`,
+    // because the real source cannot discriminate. `ProcessOutput` follows
+    // `ProcessSpec` across an `impl` block, but both are tagged `process` —
+    // so a scanner that wrongly carried the tag forward would produce the
+    // identical answer and the assertion would pass. The tags below are
+    // deliberately distinct so a wrongly-carried tag is observable.
+    const SOURCE: &str = "\
+/// Layer-1 responsibility: filesystem
+pub struct Tagged {}
 
-    // `ProcessOutput` sits after `ProcessSpec`'s `impl` block. It must have
-    // its own tag rather than inheriting one across the intervening code.
-    let output = surfaces
-        .iter()
-        .find(|s| s.name == "ProcessOutput")
-        .expect("ProcessOutput is part of the Layer-1 surface");
-    assert_eq!(output.declared.as_deref(), Some("process"));
+impl Tagged {
+    pub fn helper(&self) {}
+}
+
+pub struct Untagged {}
+
+/// Layer-1 responsibility: locking
+pub trait AlsoTagged {}
+";
+
+    let surfaces = scan_surfaces(SOURCE);
+    let names: Vec<&str> = surfaces.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Tagged", "Untagged", "AlsoTagged"]);
+
+    assert_eq!(surfaces[0].declared.as_deref(), Some("filesystem"));
+    assert_eq!(
+        surfaces[1].declared, None,
+        "`Untagged` inherited a tag across an intervening `impl` block; every \
+         new surface would be silently exempt from the omission check"
+    );
+    assert_eq!(
+        surfaces[2].declared.as_deref(),
+        Some("locking"),
+        "a tagged item after untagged code must still read its own tag"
+    );
+}
+
+#[test]
+fn the_scanner_finds_every_shape_of_public_root() {
+    // If a `pub` form stopped matching, the surfaces carrying it would vanish
+    // from every check above while the suite stayed green.
+    let surfaces = scan_surfaces(
+        "/// Layer-1 responsibility: errors\npub enum E {}\n\
+         /// Layer-1 responsibility: process\npub struct S {}\n\
+         /// Layer-1 responsibility: locking\npub trait T {}\n",
+    );
+    let names: Vec<&str> = surfaces.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["E", "S", "T"],
+        "a public root form stopped matching"
+    );
 }
