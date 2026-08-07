@@ -59,7 +59,7 @@ tool's own name.
 | `agentgateway-config` | The configuration model. Wire-compatible with agentgateway's local config. |
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
 | `agentgateway-auth` | The `jwtAuth` and `extAuthz` policies. |
-| `agentgateway-mcp` | MCP federation: targets, name qualification, tool gates, CEL rules, guardrails. |
+| `agentgateway-mcp` | MCP federation: targets, tools, prompts, resources, gates, CEL rules, guardrails. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
@@ -85,10 +85,10 @@ stops a client from calling a name it was never shown. A tool hidden from the
 catalogue but still callable is worse than one that was never hidden, because
 the operator believes it is gone. There is a test for exactly this.
 
-### Federated tool names
+### Federated names and URIs
 
 Two servers behind one endpoint may both export `search`, so names are
-qualified: `github_search`, `jira_search`.
+qualified: `github_search`, `jira_search`. Prompts take the same treatment.
 
 Resolving that back is sharper than it looks. Splitting on the first `_` breaks
 the moment a target is called `code_search` — its `index` tool federates to
@@ -98,8 +98,24 @@ target names, longest first. Genuinely ambiguous setups still exist, and
 `ToolNamer::collisions` reports them at startup rather than letting the gateway
 silently pick one.
 
-Set `nameMode: passthrough` on the backend to expose names unchanged; a
-collision is then reported as a startup warning.
+Resources cannot: they are identified by URI, and `alpha_memo:insights` is not
+a URI any client would accept. Upstream's answer, which this follows, is to
+widen the scheme instead — `memo:insights` on target `alpha` becomes
+`alpha+memo:insights`, still a well-formed URI because `+` is legal in a
+scheme. A URI with no scheme is left alone; there is nothing to widen, and
+inventing one would change what the client asked for. Contents come back from
+the upstream carrying its own URIs, so they are re-qualified on the way out —
+otherwise no client could read the URI back to us.
+
+Set `nameMode: passthrough` on the backend to expose names and URIs unchanged;
+a collision is then reported as a startup warning.
+
+Prompt and resource capabilities are advertised only when some target actually
+has them, read from what each server sent in its handshake. Claiming prompts
+the federation cannot serve would have clients call `prompts/list` and be told
+the method does not exist. A target that never advertised prompts is not asked
+for them either — a missing capability is not a fault, and a mixed federation is
+the normal case.
 
 ### Degraded operation
 
@@ -117,10 +133,10 @@ Implemented and tested:
 - Route matching: path (exact, segment-aware prefix, regex), method, headers,
   query — with percent-decoding, and Gateway API precedence
 - Hostname matching on listeners and routes, including single-label wildcards
-- `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federation, tool
-  name qualification, per-target `filters`, route-level `mcpAuthorization` —
-  both the `allowTools`/`denyTools` lists and upstream's CEL `rules`, see
-  [Tool authorization](#tool-authorization)
+- `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federating
+  tools, prompts and resources with name and URI qualification, per-target
+  `filters`, route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
+  lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)
 - `host` backends: HTTP reverse proxying with weighted load balancing,
@@ -249,42 +265,72 @@ unreachable authorizer and takes the fail-closed path.
 validated. `includeBody` parses but is not enforced — the authorizer never sees
 a request body, so a policy that depends on one will not do what it says.
 
-## Tool authorization
+## Authorization
 
-An `mcpAuthorization` policy decides which federated tools a caller on the
-route may use. Two forms, and they compose:
+An `mcpAuthorization` policy decides what a caller on the route may reach.
+Two forms, and they compose:
 
 ```yaml
 policies:
   mcpAuthorization:
-    # Regexes over the federated name.
+    # Regexes over the federated tool name. Tools only.
     denyTools: ["_delete$"]
     # CEL expressions over the call and the caller.
     rules:
       - 'mcp.tool.name == "echo"'
       - 'jwt.sub == "test-user" && mcp.tool.name == "get-sum"'
+      - 'mcp.prompt.name == "summarize"'
+      - 'mcp.resource.name.startsWith("memo:")'
       - require: 'jwt.iss == "https://auth.example.com"'
 ```
 
-`allowTools`/`denyTools` are name matching and nothing else. `rules` are
-upstream's CEL form, and are what you need when the answer depends on *who* is
-asking: `jwt` is the verified token's claims, so a rule can grant one tool to
-one subject and another to everyone.
+`allowTools`/`denyTools` are name matching and nothing else, and — as the name
+says — they are about tools. `rules` cover **tools, prompts and resources**, and
+are what you need when the answer depends on *who* is asking: `jwt` is the
+verified token's claims, so a rule can grant one thing to one subject and
+another to everyone.
 
-Every gate is enforced on `tools/call`, not only on `tools/list`. Filtering the
-catalogue alone is security theatre: nothing stops a client calling a name it
-was never shown, and a tool hidden from the listing but still callable is worse
-than one that was never hidden, because the operator believes it is gone.
+Every gate is enforced on the call, not only on the listing — `tools/call`,
+`prompts/get` and `resources/read` each re-check. Filtering the catalogue alone
+is security theatre: nothing stops a client asking for a name it was never
+shown, and something hidden from the listing but still reachable is worse than
+something that was never hidden, because the operator believes it is gone.
+
+### One subject is bound per call
+
+Exactly one of `mcp.tool`, `mcp.prompt` and `mcp.resource` exists for any one
+call. On a `prompts/get`, `mcp.tool.name` does not resolve, so
+`mcp.tool.name == "echo"` reads as **false** — not as "this rule isn't about
+prompts, skip it".
+
+That has a consequence worth stating plainly, because it is the one that
+catches people:
+
+> **A rule set written entirely as tool `allow` rules refuses every prompt and
+> resource.** It is an allow-list, and nothing in the prompt or resource space
+> can satisfy it.
+
+This is the safe direction — a policy that had never heard of prompts should not
+wave them through — and it is upstream's behaviour. But it does mean that adding
+prompts to a target behind an existing tool allow-list takes an explicit rule.
+A pure `deny` set behaves the opposite way: it names what is refused, so a
+prompt it does not name survives.
 
 ### A rule sees the unqualified name
 
 `mcp.tool.name` is the tool's own name on its target, and `mcp.tool.target` is
 the target — the pair *before* federation joins them. A tool federated as
 `everything_echo` is `mcp.tool.name == "echo"` with `mcp.tool.target ==
-"everything"`, so a rule written against `everything_echo` never fires.
+"everything"`, so a rule written against `everything_echo` never fires. Prompts
+work identically, and a resource's `mcp.resource.name` is the target's own URI:
+`memo:insights`, not the federated `alpha+memo:insights`.
 
-That is upstream's split, and it lets a rule name a tool without knowing what
-prefix the gateway will add. It is also the opposite of
+(`mcp.resource.name`, not `.uri` — upstream names the field for the shape it
+shares with tools and prompts rather than for what a resource calls its
+identifier.)
+
+That is upstream's split, and it lets a rule name something without knowing what
+the gateway will prefix it with. It is also the opposite of
 `allowTools`/`denyTools`, which match the federated name — which is what lets
 one route ban a tool on one target while leaving the same name on another
 alone. Both readings are right for their own form; the difference is worth
@@ -353,21 +399,24 @@ pinned against encoded bytes in a test rather than against the declarations.
 
 ### What is hooked
 
-This gateway serves `tools/list` and `tools/call`, so those are the two methods
-there is anything to hook. A processor keyed only on `prompts/*` or
-`resources/read` is reported by `--check` and at startup, because a guardrail
-that never fires looks exactly like one that always passes.
+This gateway serves `tools/list`, `tools/call`, `prompts/list`, `prompts/get`,
+`resources/list`, `resources/templates/list` and `resources/read`, and a
+processor can hook any of them. A processor keyed only on methods this gateway does
+not serve — `logging/setLevel`, `completion/complete` — is reported by `--check`
+and at startup, because a guardrail that never fires looks exactly like one that
+always passes.
 
-`tools/call` runs both phases. `tools/list` fans out, so its request phase runs
-once for the whole client call and carries no params — a processor can refuse
-there but has nothing to rewrite, and filtering a catalogue is response-phase
-work. An upstream *error* skips the response phase entirely: there is no result
+The single-target methods — `tools/call`, `prompts/get`, `resources/read` — run
+both phases. The `*/list` methods fan out, so their request phase runs once for
+the whole client call and carries no params: a processor can refuse there but
+has nothing to rewrite, and filtering a catalogue is response-phase work. An upstream *error* skips the response phase entirely: there is no result
 to inspect, and asking a guardrail to approve a failure is not a question it can
 answer.
 
 Processors see the **unmuxed** name — a call to `alpha_echo` arrives as
 `{"name": "echo"}` with `service_names: ["alpha"]`, which is what the upstream
-will actually receive.
+will actually receive. The same holds for a resource: `alpha+memo:insights`
+arrives as `{"uri": "memo:insights"}`.
 
 ### A chain is a pipeline, not a vote
 

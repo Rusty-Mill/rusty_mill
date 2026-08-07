@@ -567,12 +567,14 @@ binds:
           - policies:
               mcpGuardrails:
                 processors:
-                  - methods: { "prompts/get": full }
+                  - methods: { "logging/setLevel": full }
                     host: 127.0.0.1:9999
                   - methods: { "a*b": full }
                     host: 127.0.0.1:9999
                   - methods: { "tools/call": full }
                     backend: policy-service
+                  - methods: { "prompts/*": full, "resources/*": response }
+                    host: 127.0.0.1:9999
             backends:
               - mcp:
                   targets:

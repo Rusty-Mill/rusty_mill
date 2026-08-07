@@ -1,4 +1,4 @@
-//! Federated tool names.
+//! Federated names and URIs.
 //!
 //! Two MCP servers behind one endpoint may both export `search`, so names are
 //! qualified with the target they came from: `github_search`, `jira_search`.
@@ -76,6 +76,39 @@ impl ToolNamer {
         Resolution::Unqualified(federated)
     }
 
+    /// The URI a resource is advertised under.
+    ///
+    /// Resources are identified by URI rather than by name, so they cannot take
+    /// the `target_name` treatment: `alpha_memo:insights` is not a URI any
+    /// client would accept. Upstream's answer is to widen the scheme instead —
+    /// `memo:insights` on target `alpha` becomes `alpha+memo:insights`, which
+    /// is still a syntactically valid URI because `+` is legal in a scheme.
+    ///
+    /// A URI with no scheme is left alone. There is nothing to widen, and
+    /// inventing one would change what the client is asking for.
+    pub fn qualify_uri(&self, target: &str, uri: &str) -> String {
+        match self.mode {
+            NameMode::Prefix if scheme_len(uri).is_some() => format!("{target}+{uri}"),
+            _ => uri.to_string(),
+        }
+    }
+
+    /// Resolve an advertised URI back to a target and the target's own URI.
+    pub fn resolve_uri<'a>(&'a self, federated: &'a str) -> Resolution<'a> {
+        if self.mode == NameMode::Passthrough {
+            return Resolution::Unqualified(federated);
+        }
+        for target in &self.targets {
+            if let Some(rest) = federated.strip_prefix(target.as_str())
+                && let Some(uri) = rest.strip_prefix('+')
+                && !uri.is_empty()
+            {
+                return Resolution::Qualified { target, tool: uri };
+            }
+        }
+        Resolution::Unqualified(federated)
+    }
+
     /// Federated names that more than one `(target, tool)` pair would produce.
     ///
     /// `tools` is the unqualified tool list per target. Under
@@ -99,6 +132,27 @@ impl ToolNamer {
             .map(|(name, sources)| format!("`{name}` is produced by {}", sources.join(" and ")))
             .collect()
     }
+}
+
+/// Length of a URI's scheme, or `None` when it has none.
+///
+/// `scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )` per RFC 3986, which is
+/// what makes `alpha+memo:insights` a well-formed URI rather than a string that
+/// merely looks like one.
+fn scheme_len(uri: &str) -> Option<usize> {
+    let bytes = uri.as_bytes();
+    if bytes.first().is_none_or(|b| !b.is_ascii_alphabetic()) {
+        return None;
+    }
+    bytes
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(i, b)| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'+' | b'-' | b'.' => None,
+            b':' => Some(Some(i)),
+            _ => Some(None),
+        })?
 }
 
 #[cfg(test)]
@@ -220,5 +274,88 @@ mod tests {
         ]);
         assert_eq!(collisions.len(), 1, "got: {collisions:?}");
         assert!(collisions[0].contains("code_search_index"));
+    }
+}
+
+#[cfg(test)]
+mod uri_tests {
+    use super::*;
+
+    fn namer(mode: NameMode, targets: &[&str]) -> ToolNamer {
+        ToolNamer::new(mode, targets.iter().map(|t| t.to_string()))
+    }
+
+    #[test]
+    fn a_uri_is_qualified_by_widening_its_scheme() {
+        // `alpha_memo:insights` would not be a URI. `alpha+memo:insights` is,
+        // because `+` is legal in a scheme.
+        let namer = namer(NameMode::Prefix, &["alpha"]);
+        assert_eq!(
+            namer.qualify_uri("alpha", "memo:insights"),
+            "alpha+memo:insights"
+        );
+        assert_eq!(
+            namer.qualify_uri("alpha", "https://example.com/x"),
+            "alpha+https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn qualified_uris_round_trip() {
+        let namer = namer(NameMode::Prefix, &["alpha", "beta"]);
+        let federated = namer.qualify_uri("beta", "file:///etc/hosts");
+        assert_eq!(
+            namer.resolve_uri(&federated),
+            Resolution::Qualified {
+                target: "beta",
+                tool: "file:///etc/hosts"
+            }
+        );
+    }
+
+    #[test]
+    fn a_target_name_containing_a_plus_still_round_trips() {
+        // Same hazard as `code_search` for names: the longest target wins.
+        let namer = namer(NameMode::Prefix, &["a", "a+b"]);
+        assert_eq!(
+            namer.resolve_uri("a+b+memo:x"),
+            Resolution::Qualified {
+                target: "a+b",
+                tool: "memo:x"
+            }
+        );
+    }
+
+    #[test]
+    fn a_uri_with_no_scheme_is_left_alone() {
+        // There is nothing to widen, and inventing a scheme would change what
+        // the client asked for.
+        let namer = namer(NameMode::Prefix, &["alpha"]);
+        assert_eq!(
+            namer.qualify_uri("alpha", "/relative/path"),
+            "/relative/path"
+        );
+        assert_eq!(namer.qualify_uri("alpha", "1nvalid:x"), "1nvalid:x");
+    }
+
+    #[test]
+    fn passthrough_leaves_uris_alone_in_both_directions() {
+        let namer = namer(NameMode::Passthrough, &["alpha"]);
+        assert_eq!(namer.qualify_uri("alpha", "memo:insights"), "memo:insights");
+        assert_eq!(
+            namer.resolve_uri("memo:insights"),
+            Resolution::Unqualified("memo:insights")
+        );
+    }
+
+    #[test]
+    fn scheme_detection_follows_rfc_3986() {
+        assert_eq!(scheme_len("http://x"), Some(4));
+        assert_eq!(scheme_len("memo:x"), Some(4));
+        assert_eq!(scheme_len("a+b-c.d:x"), Some(7));
+        assert_eq!(scheme_len("1http:x"), None, "a scheme starts with a letter");
+        assert_eq!(scheme_len("no-colon"), None);
+        assert_eq!(scheme_len("has space:x"), None);
+        assert_eq!(scheme_len(""), None);
     }
 }

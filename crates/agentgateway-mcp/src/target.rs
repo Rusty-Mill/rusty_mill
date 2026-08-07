@@ -9,7 +9,11 @@
 use agentgateway_config::{McpTarget, McpTargetKind};
 use rmcp::{
     RoleClient, ServiceExt,
-    model::{CallToolRequest, ClientRequest, GetExtensions, ListToolsRequest, ServerResult},
+    model::{
+        CallToolRequest, ClientRequest, GetExtensions, GetPromptRequest, GetPromptRequestParams,
+        ListPromptsRequest, ListResourceTemplatesRequest, ListResourcesRequest, ListToolsRequest,
+        ReadResourceRequest, ReadResourceRequestParams, ServerResult,
+    },
     service::RunningService,
     transport::{
         StreamableHttpClientTransport, TokioChildProcess,
@@ -187,6 +191,121 @@ impl Target {
             ServerResult::CallToolResult(result) => Ok(result),
             other => {
                 tracing::warn!(target = %self.name, ?other, "unexpected result for tools/call");
+                Err(rmcp::service::ServiceError::UnexpectedResponse)
+            }
+        }
+    }
+
+    /// Whether this target advertised prompts in its handshake.
+    ///
+    /// Read from the capabilities the server sent when it connected, so asking
+    /// costs nothing. A target that never advertised prompts is not asked for
+    /// them: `prompts/list` against such a server is a method-not-found error,
+    /// and one target's missing capability should not read as a fault.
+    pub fn serves_prompts(&self) -> bool {
+        self.service
+            .peer_info()
+            .is_some_and(|info| info.capabilities.prompts.is_some())
+    }
+
+    /// Whether this target advertised resources in its handshake.
+    pub fn serves_resources(&self) -> bool {
+        self.service
+            .peer_info()
+            .is_some_and(|info| info.capabilities.resources.is_some())
+    }
+
+    /// The prompts this target exports.
+    ///
+    /// Prompts carry no per-target `filters`: `filters` names tools, and
+    /// widening it silently to prompts would change what existing configs mean.
+    /// `mcpAuthorization.rules` is what gates prompts.
+    pub async fn prompts(
+        &self,
+        headers: &HeaderOverride,
+    ) -> Result<Vec<rmcp::model::Prompt>, rmcp::service::ServiceError> {
+        let mut request = ClientRequest::ListPromptsRequest(ListPromptsRequest::default());
+        self.attach(&mut request, headers);
+
+        Ok(match self.service.send_request(request).await? {
+            ServerResult::ListPromptsResult(result) => result.prompts,
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for prompts/list");
+                Vec::new()
+            }
+        })
+    }
+
+    /// Fetch one prompt.
+    pub async fn get_prompt(
+        &self,
+        params: GetPromptRequestParams,
+        headers: &HeaderOverride,
+    ) -> Result<rmcp::model::GetPromptResult, rmcp::service::ServiceError> {
+        let mut request = ClientRequest::GetPromptRequest(GetPromptRequest::new(params));
+        self.attach(&mut request, headers);
+
+        match self.service.send_request(request).await? {
+            ServerResult::GetPromptResult(result) => Ok(result),
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for prompts/get");
+                Err(rmcp::service::ServiceError::UnexpectedResponse)
+            }
+        }
+    }
+
+    /// The resources this target exports.
+    pub async fn resources(
+        &self,
+        headers: &HeaderOverride,
+    ) -> Result<Vec<rmcp::model::Resource>, rmcp::service::ServiceError> {
+        let mut request = ClientRequest::ListResourcesRequest(ListResourcesRequest::default());
+        self.attach(&mut request, headers);
+
+        Ok(match self.service.send_request(request).await? {
+            ServerResult::ListResourcesResult(result) => result.resources,
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for resources/list");
+                Vec::new()
+            }
+        })
+    }
+
+    /// The resource templates this target exports.
+    pub async fn resource_templates(
+        &self,
+        headers: &HeaderOverride,
+    ) -> Result<Vec<rmcp::model::ResourceTemplate>, rmcp::service::ServiceError> {
+        let mut request =
+            ClientRequest::ListResourceTemplatesRequest(ListResourceTemplatesRequest::default());
+        self.attach(&mut request, headers);
+
+        Ok(match self.service.send_request(request).await? {
+            ServerResult::ListResourceTemplatesResult(result) => result.resource_templates,
+            other => {
+                tracing::warn!(
+                    target = %self.name,
+                    ?other,
+                    "unexpected result for resources/templates/list"
+                );
+                Vec::new()
+            }
+        })
+    }
+
+    /// Read one resource.
+    pub async fn read_resource(
+        &self,
+        params: ReadResourceRequestParams,
+        headers: &HeaderOverride,
+    ) -> Result<rmcp::model::ReadResourceResult, rmcp::service::ServiceError> {
+        let mut request = ClientRequest::ReadResourceRequest(ReadResourceRequest::new(params));
+        self.attach(&mut request, headers);
+
+        match self.service.send_request(request).await? {
+            ServerResult::ReadResourceResult(result) => Ok(result),
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for resources/read");
                 Err(rmcp::service::ServiceError::UnexpectedResponse)
             }
         }

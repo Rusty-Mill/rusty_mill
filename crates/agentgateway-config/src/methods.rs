@@ -15,7 +15,15 @@ use crate::Phase;
 /// Lives here rather than in `agentgateway-mcp` so `Config::lint` can report a
 /// processor keyed on a method that never arrives. The MCP crate imports this
 /// list rather than keeping its own, so the two cannot drift apart.
-pub const MCP_SERVED_METHODS: &[&str] = &["tools/call", "tools/list"];
+pub const MCP_SERVED_METHODS: &[&str] = &[
+    "prompts/get",
+    "prompts/list",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+    "tools/call",
+    "tools/list",
+];
 
 /// Whether a `methods` key is a pattern [`resolve`] can ever match.
 ///
