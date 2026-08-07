@@ -792,7 +792,7 @@ fn probe_capabilities_honest() -> Result<(Verdict, String), String> {
         Ok((
             Verdict::Normalized,
             format!(
-                "detection matches the host (symlinks = {actually_symlinks}) and corrects the                  conservative baseline, which claims {}",
+                "detection matches the host (symlinks = {actually_symlinks}) and corrects the conservative baseline, which claims {}",
                 baseline.symlinks
             ),
         ))

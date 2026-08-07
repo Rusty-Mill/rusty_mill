@@ -114,7 +114,8 @@ this section and fails on drift.*
 | Advisory file locking (exclusive blocks) | supported | supported | supported |
 | Standard dirs resolve + absolute | supported | supported | supported |
 | Standard dirs config/cache/data are distinct | unsupported | supported | unsupported |
-| Interactive PTY (terminal echo roundtrip) | supported | supported | supported |
+| Interactive PTY (explicit command, stream, resize, wait) | supported | supported | supported |
+| Capability detection matches the host | normalized | supported | supported |
 
 ### Evidence
 
@@ -123,14 +124,15 @@ this section and fails on drift.*
 - `fs_scoped_ops` — supported: write/read/stat/create_dir/read_dir/remove all behave identically
 - `fs_escape_lexical` — supported: 5 escape shapes classified `PathEscape`; interior `a/../b` still resolves
 - `fs_escape_symlink` — normalized: blocked by cap-std, surfaced as `PermissionDenied` (not `PathEscape`)
-- `fs_symlink_create` — supported: symlink created and resolved; Capabilities::symlinks = false
+- `fs_symlink_create` — supported: symlink created and resolved; Capabilities::symlinks = true
 - `proc_spawn_capture` — supported: stdout, stderr, and exit status 7 all captured separately
 - `proc_env_isolation` — supported: inherit_env true passes parent env; false yields an empty env
 - `proc_cwd` — supported: child cwd matches the requested path byte-for-byte
 - `lock_advisory` — supported: exclusive lock blocks a second handle and is released by unlock()
 - `dirs_resolve` — supported: config/cache/data all resolve to absolute, app-suffixed, stable paths
 - `dirs_distinct` — unsupported: collides on this host: config==data
-- `pty_interactive` — supported: input echoed back by the terminal; resize ok; teardown observed: shell exited with 0
+- `pty_interactive` — supported: explicit command spawned; marker streamed; resize ok; wait() reaped exit 11
+- `capabilities_honest` — normalized: detection matches the host (symlinks = true) and corrects the conservative baseline, which claims false
 
 **Linux**
 
@@ -144,7 +146,8 @@ this section and fails on drift.*
 - `lock_advisory` — supported: exclusive lock blocks a second handle and is released by unlock()
 - `dirs_resolve` — supported: config/cache/data all resolve to absolute, app-suffixed, stable paths
 - `dirs_distinct` — supported: config, cache, and data are three distinct directories
-- `pty_interactive` — supported: input echoed back by the terminal; resize ok; teardown observed: shell exited with 0
+- `pty_interactive` — supported: explicit command spawned; marker streamed; resize ok; wait() reaped exit 11
+- `capabilities_honest` — supported: detection matches the host (symlinks = true); baseline agrees
 
 **macOS**
 
@@ -158,7 +161,8 @@ this section and fails on drift.*
 - `lock_advisory` — supported: exclusive lock blocks a second handle and is released by unlock()
 - `dirs_resolve` — supported: config/cache/data all resolve to absolute, app-suffixed, stable paths
 - `dirs_distinct` — unsupported: collides on this host: config==data
-- `pty_interactive` — supported: input echoed back by the terminal; resize ok; teardown observed: shell exited with 0
+- `pty_interactive` — supported: explicit command spawned; marker streamed; resize ok; wait() reaped exit 11
+- `capabilities_honest` — supported: detection matches the host (symlinks = true); baseline agrees
 
 <!-- END GENERATED MATRIX -->
 
