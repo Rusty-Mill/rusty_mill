@@ -49,6 +49,11 @@ use rp_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatibleProvider};
 /// noise.
 const EWMA_ALPHA: f64 = 0.3;
 
+/// Below this observed EWMA success rate (see `Router::uptime`), a
+/// candidate is deprioritized by default in chain resolution -- see
+/// `Router::deprioritize_unhealthy`.
+const UNHEALTHY_UPTIME_THRESHOLD: f64 = 0.5;
+
 /// This router's own observed performance for one "provider/model", as
 /// returned by `GET /v1/providers/stats` -- the same EWMA figures
 /// `sort: "latency"`/`"throughput"`/`"uptime"` consult internally, finally
@@ -1402,7 +1407,9 @@ impl Router {
         mut chain: Vec<(String, String)>,
         prefs: Option<&ProviderPreferences>,
     ) -> Result<Vec<(String, String)>, RouterError> {
-        let Some(prefs) = prefs else { return Ok(chain) };
+        let Some(prefs) = prefs else {
+            return Ok(self.deprioritize_unhealthy(chain));
+        };
 
         if let Some(only) = &prefs.only {
             chain.retain(|(provider, _)| only.iter().any(|p| p == provider));
@@ -1504,7 +1511,39 @@ impl Router {
             _ => {}
         }
 
+        // Skipped when the request already asked for a full uptime
+        // ranking above -- that's already the more thorough version of
+        // this same concern, and re-partitioning after it would fight
+        // with where it placed unobserved candidates.
+        if prefs.sort.as_deref() != Some("uptime") {
+            chain = self.deprioritize_unhealthy(chain);
+        }
+
         Ok(chain)
+    }
+
+    /// Moves any candidate with an observed EWMA success rate (see
+    /// `uptime`) below [`UNHEALTHY_UPTIME_THRESHOLD`] after every other
+    /// candidate -- by default, regardless of the request's `sort`, so a
+    /// provider with a degraded/failing success rate stops receiving full
+    /// traffic in chain order just because nothing asked for
+    /// `sort: "uptime"` explicitly.
+    ///
+    /// A stable partition, not a full ranking: candidates keep their
+    /// existing relative order within each group (healthy-or-unobserved
+    /// first, unhealthy last), so it doesn't fight with whatever ordering
+    /// -- configured chain order, or another `sort` mode -- already
+    /// applied. An unobserved candidate is never deprioritized here --
+    /// optimistic until this router has actually seen it fail, unlike
+    /// `sort: "uptime"`'s own ranking, which sorts an unobserved entry
+    /// last too.
+    fn deprioritize_unhealthy(&self, mut chain: Vec<(String, String)>) -> Vec<(String, String)> {
+        let uptime = self.uptime.read().unwrap();
+        chain.sort_by_key(|(provider, model)| {
+            let rate = uptime.get(&format!("{provider}/{model}"));
+            matches!(rate, Some(rate) if *rate < UNHEALTHY_UPTIME_THRESHOLD)
+        });
+        chain
     }
 
     /// Runs every configured `[[guardrails]]` entry against `req`'s
@@ -4962,6 +5001,111 @@ mod tests {
             .apply_preferences(
                 "smart",
                 chain(&[("openai", "m2"), ("anthropic", "m1")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
+    // --- automatic unhealthy deprioritization -----------------------------
+
+    #[test]
+    fn apply_preferences_deprioritizes_an_unhealthy_candidate_with_no_prefs_at_all() {
+        // The default case the gap this closes was about: no `provider`
+        // preferences sent at all, so `prefs` is `None` -- deprioritization
+        // must still apply, not just when `sort: "uptime"` is requested.
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        router
+            .uptime
+            .write()
+            .unwrap()
+            .insert("anthropic/m1".to_string(), 0.1);
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            chain(&[("openai", "m2"), ("anthropic", "m1")]),
+            "anthropic's degraded success rate should move it after openai, unrequested"
+        );
+    }
+
+    #[test]
+    fn apply_preferences_deprioritizes_an_unhealthy_candidate_after_an_explicit_sort() {
+        // Applies as a final safety-net pass even on top of an explicit,
+        // unrelated `sort` -- price-cheapest-first here -- not just the
+        // no-`sort`-at-all default above.
+        let router = test_router(
+            vec![],
+            vec![],
+            vec![("anthropic/m1", 1.0, 1.0), ("openai/m2", 5.0, 5.0)],
+            vec![],
+            vec![],
+        );
+        router
+            .uptime
+            .write()
+            .unwrap()
+            .insert("anthropic/m1".to_string(), 0.2);
+        let prefs = ProviderPreferences {
+            sort: Some("price".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                Some(&prefs),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            chain(&[("openai", "m2"), ("anthropic", "m1")]),
+            "anthropic is cheaper but unhealthy, so it should still be deprioritized after the price sort"
+        );
+    }
+
+    #[test]
+    fn apply_preferences_does_not_deprioritize_an_unobserved_candidate() {
+        // No observation at all is optimistic, not "assume unhealthy" --
+        // distinct from `sort: "uptime"`'s own "unranked last" convention.
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
+                None,
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("anthropic", "m1"), ("openai", "m2")]));
+    }
+
+    #[test]
+    fn apply_preferences_skips_deprioritization_when_uptime_sort_is_explicitly_requested() {
+        // sort: "uptime" is already the fuller version of this same
+        // concern (and treats an unobserved candidate as worst, not
+        // neutral) -- re-partitioning after it would fight with that.
+        let router = test_router(vec![], vec![], vec![], vec![], vec![]);
+        router
+            .uptime
+            .write()
+            .unwrap()
+            .insert("anthropic/m1".to_string(), 0.1);
+        // "openai/m2" is unobserved -- under sort: "uptime" it sorts last
+        // (worse than any observed value, even a low one); the
+        // deprioritization pass would otherwise put it first instead.
+        let prefs = ProviderPreferences {
+            sort: Some("uptime".to_string()),
+            ..Default::default()
+        };
+        let result = router
+            .apply_preferences(
+                "smart",
+                chain(&[("anthropic", "m1"), ("openai", "m2")]),
                 Some(&prefs),
             )
             .unwrap();
