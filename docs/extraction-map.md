@@ -66,6 +66,20 @@ group-join half, shared with D2 below), `Signal` +
 > (edition 2024 → 2021 + a declared 1.88 MSRV): Cargo parses an optional
 > dependency's manifest even with its feature off, so the donor's edition
 > was breaking this workspace's 1.75 MSRV leg on mere presence.
+>
+> **Second slice, 2026-08-07 — D2's own families.** `sys::proc`'s job
+> create/assign/terminate, process open-by-pid/resume/terminate, and the
+> wait/wait_any set all moved onto the donor (`sys::pty` inherits the job
+> half, sharing that helper). D2's `CreateProcessW` itself is **struck
+> from the Track W list permanently, not deferred**: `spawn_suspended`
+> encodes rush's std-slot-swap stdio model — the one step 4 of the
+> extraction plan (near the end of this document) records this repo
+> deciding against, and whose rejection is what makes `Stdio::{Null,
+> Pipe, File}` possible at all — and additionally has no
+> working-directory parameter and a `&str` rather than `&[u16]` command
+> line. Not gaps to file upstream: a `spawn_suspended` fixed on all three
+> counts would just be this crate's `spawn` in the other repo
+> (`docs/learning/004-…`).
 
 ### D2 — `rush/src/winjob.rs` + `rusty_win32`: Windows jobs & spawn
 

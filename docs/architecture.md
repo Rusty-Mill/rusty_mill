@@ -65,7 +65,11 @@ surface where every admitted symbol is listed and justified.
 - **platform-windows** — `sys/{nt,proc,fileio,csignals}` + `winargv` over
   two floors: **windows-sys** (default, D-1) and **rusty_win32**'s
   hand-written `extern "system"` declarations behind `track-w` (D-15),
-  migrated call-by-call starting with `sys::fileio::read`/`write`.
+  migrated call-by-call: `sys::fileio::read`/`write`, then `sys::proc`'s
+  wait/job/terminate families (`sys::pty` sharing the job half).
+  `CreateProcessW` is struck from that list permanently, not pending —
+  the donor's `spawn_suspended` is shaped for a shell that swaps its own
+  std slots, which is the model D5 records this repo rejecting.
   rusty_win32 was already this backend's extraction donor — its typed-
   handle, `wait_any` and console patterns were mined into `sys/` (see the
   extraction map) — and D-15 turns that one-way flow into a real,

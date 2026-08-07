@@ -192,6 +192,26 @@ fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
 /// child the same way a `GroupSpec::NewGroup` spawn does here — see that
 /// module's own doc comment for why (a pty-hosted child is unconditionally
 /// its own session, mirroring the Linux backend's identical reasoning).
+///
+/// Track W (D-15): `rusty_win32::job::create` + `job::set_kill_on_close`.
+/// The donor splits into two calls what the windows-sys arm does inline,
+/// but the limit struct it builds is byte-for-byte the one below —
+/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `LimitFlags`, everything else
+/// zeroed — so the resulting job object is indistinguishable.
+#[cfg(feature = "track-w")]
+pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
+    let raw = rusty_win32::job::create().map_err(|e| errmap::trackw_err("CreateJobObjectW", e))?;
+    let job = OwnedWinHandle::from_raw(raw)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreateJobObjectW"))?;
+    // SAFETY: `job` is the valid handle just created and still open (it is
+    // dropped no earlier than this function's return) — `set_kill_on_close`'s
+    // whole safety contract.
+    unsafe { rusty_win32::job::set_kill_on_close(job.as_raw()) }
+        .map_err(|e| errmap::trackw_err("SetInformationJobObject", e))?;
+    Ok(job)
+}
+
+#[cfg(not(feature = "track-w"))]
 pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
     // SAFETY: null security attributes and name are documented-valid.
     let job = unsafe { w::CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
@@ -231,6 +251,28 @@ pub(crate) fn create_kill_on_close_job() -> Result<OwnedWinHandle> {
 /// instruction" was never a reachable guarantee for an adopted process
 /// the way it is for one this crate spawned suspended. Returns (process
 /// handle, job handle).
+///
+/// Track W (D-15): `rusty_win32::process::open_by_pid` + `job::assign`.
+/// The access mask stays `w::PROCESS_SET_QUOTA | w::PROCESS_TERMINATE`
+/// from windows-sys rather than the donor's own constants — it exports
+/// `PROCESS_TERMINATE` but has no `PROCESS_SET_QUOTA`, and inventing a
+/// second literal for a value already admitted in `ffi::win32_surface`
+/// would be exactly the hand-transcription D-1 exists to prevent.
+#[cfg(feature = "track-w")]
+pub fn adopt(pid: u32) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
+    let raw = rusty_win32::process::open_by_pid(pid, w::PROCESS_SET_QUOTA | w::PROCESS_TERMINATE)
+        .map_err(|e| errmap::trackw_err("OpenProcess", e))?;
+    let process = OwnedWinHandle::from_raw(raw)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "OpenProcess"))?;
+    let job = create_kill_on_close_job()?;
+    // SAFETY: `job` and `process` are both valid, currently-open handles,
+    // owned here and dropped no earlier than this function's return.
+    unsafe { rusty_win32::job::assign(job.as_raw(), process.as_raw()) }
+        .map_err(|e| errmap::trackw_err("AssignProcessToJobObject", e))?;
+    Ok((process, job))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn adopt(pid: u32) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     // SAFETY: `pid` is caller-supplied and may not name a live process at
     // all — `OpenProcess` reports that as a `NULL` return, checked by
@@ -262,6 +304,33 @@ pub type ParentPipes = [Option<OwnedWinHandle>; 3];
 /// anything it later spawns) executes a single instruction (extraction
 /// map D2's proven sequence). Returns (process handle, job handle if
 /// grouped, pid, parent pipe ends).
+///
+/// **Stays on windows-sys in both Track W configurations (D-15).** The
+/// surrounding job/resume/terminate steps migrated; this `CreateProcessW`
+/// call cannot, for three independent reasons, none of them fixable by
+/// bumping the pinned rev:
+///
+/// 1. **No per-spawn std-handle override.** `rusty_win32::process::
+///    spawn_suspended` passes a bare zeroed `STARTUPINFOW` and says so in
+///    its own docs: "redirect by swapping the parent's std-handle slots
+///    before spawning". That is rush's `winstdio` model, and the
+///    extraction map (D5, step 4) already records this repo's deliberate
+///    decision *against* it — `STARTF_USESTDHANDLES` per spawn, so
+///    `Stdio::{Null, Pipe, File}` never mutates process-global state.
+///    Migrating here would not be adopting a binding, it would be
+///    reversing a recorded architectural decision and deleting the
+///    `Stdio` mechanism with it.
+/// 2. **No working directory.** `spawn_suspended` passes `NULL` for
+///    `lpCurrentDirectory`; `Command::current_dir` needs it.
+/// 3. **`&str`, not `&[u16]`.** Its command line is UTF-8, so a
+///    winargv-built `&[u16]` would have to round-trip through `String`.
+///    winargv is this crate's security boundary (§5.4); routing it
+///    through a lossy conversion for unpaired surrogates is not a
+///    trade this slice gets to make.
+///
+/// The honest summary: the donor's spawn is shaped for a shell that owns
+/// its own std slots, and this backend deliberately isn't one. See
+/// `docs/convergence-roadmap.md` §1d.
 pub fn spawn(
     command_line: &[u16],
     cwd: &OsStr,
@@ -369,39 +438,81 @@ pub fn spawn(
     // Suspended → assign → resume. On any failure the suspended child
     // must not be leaked: terminate it directly (it never ran an
     // instruction, so this is clean).
+    //
+    // The assign and resume steps are Track W-migrated (`job::assign`,
+    // `process::resume`); the `CreateProcessW` call above is not, and
+    // cannot be — see this function's own doc comment.
     let sequence = (|| -> Result<OwnedWinHandle> {
         let job = create_kill_on_close_job()?;
-        // SAFETY: both handles are valid and open; the process is
-        // suspended, so membership precedes its first instruction.
-        let ok = unsafe { w::AssignProcessToJobObject(job.as_raw(), process.as_raw()) };
-        if ok == 0 {
-            return Err(errmap::last_win32_err(
-                "AssignProcessToJobObject",
-                OsStr::new(""),
-            ));
-        }
+        assign_to_job(&job, &process)?;
         let thread = thread.as_ref().ok_or_else(|| {
             PlatformError::new(ErrorKind::Other, OsCode::None, "CreateProcessW thread")
         })?;
-        // SAFETY: `thread` is the valid, suspended main-thread handle.
-        let prev = unsafe { w::ResumeThread(thread.as_raw()) };
-        if prev == u32::MAX {
-            return Err(errmap::last_win32_err("ResumeThread", OsStr::new("")));
-        }
+        resume_thread(thread)?;
         Ok(job)
     })();
     match sequence {
         Ok(job) => Ok((process, Some(job), pi.dwProcessId, parent_pipes)),
         Err(e) => {
-            // SAFETY: `process` is the valid handle of the still-suspended
-            // (or at worst just-assigned) child this call created; it is
-            // terminated exactly once here before the handles drop.
-            unsafe {
-                w::TerminateProcess(process.as_raw(), 1);
-            }
+            // The suspended (or at worst just-assigned) child this call
+            // created is terminated exactly once here before the handles
+            // drop. The result is deliberately discarded: this is the
+            // cleanup path of an already-failing spawn, and `e` — the
+            // reason the spawn failed — is the error worth reporting, not
+            // whatever a best-effort kill of a process that never ran an
+            // instruction has to say.
+            let _ = terminate_process(&process);
             Err(e)
         }
     }
+}
+
+/// `AssignProcessToJobObject` — Track W (D-15): `rusty_win32::job::assign`.
+/// Shared by `spawn`'s suspended→assign→resume sequence and [`adopt`]'s
+/// after-the-fact attach, so the migration lands once rather than twice.
+#[cfg(feature = "track-w")]
+fn assign_to_job(job: &OwnedWinHandle, process: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: both are valid, currently-open handles for the life of the
+    // `&` borrows — `assign`'s whole safety contract.
+    unsafe { rusty_win32::job::assign(job.as_raw(), process.as_raw()) }
+        .map_err(|e| errmap::trackw_err("AssignProcessToJobObject", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn assign_to_job(job: &OwnedWinHandle, process: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: both handles are valid and open for the life of the `&`
+    // borrows; when called from `spawn` the process is still suspended, so
+    // membership precedes its first instruction.
+    let ok = unsafe { w::AssignProcessToJobObject(job.as_raw(), process.as_raw()) };
+    if ok == 0 {
+        return Err(errmap::last_win32_err(
+            "AssignProcessToJobObject",
+            OsStr::new(""),
+        ));
+    }
+    Ok(())
+}
+
+/// `ResumeThread` — Track W (D-15): `rusty_win32::process::resume`. The
+/// donor performs the identical `prev == u32::MAX` failure check and
+/// discards the previous suspend count, which this caller never wanted
+/// either.
+#[cfg(feature = "track-w")]
+fn resume_thread(thread: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: `thread` is the valid, suspended main-thread handle, open
+    // for the life of the `&` borrow.
+    unsafe { rusty_win32::process::resume(thread.as_raw()) }
+        .map_err(|e| errmap::trackw_err("ResumeThread", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn resume_thread(thread: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: `thread` is the valid, suspended main-thread handle.
+    let prev = unsafe { w::ResumeThread(thread.as_raw()) };
+    if prev == u32::MAX {
+        return Err(errmap::last_win32_err("ResumeThread", OsStr::new("")));
+    }
+    Ok(())
 }
 
 /// `WaitForMultipleObjects`'s own hard cap on one call's handle count.
@@ -417,23 +528,6 @@ const MAXIMUM_WAIT_OBJECTS: usize = 64;
 /// through `&mut` children it continues to hold across this call — the
 /// borrow that guarantees every handle stays open for the duration.
 pub fn wait_many(raw: &[w::HANDLE], timeout: Option<std::time::Duration>) -> Result<Option<usize>> {
-    let wait_chunk = |chunk: &[w::HANDLE], ms: u32| -> Result<Option<usize>> {
-        // SAFETY: `chunk` is a valid array of at most 64 open process
-        // handles (borrowed for the duration of this call).
-        let r = unsafe { w::WaitForMultipleObjects(chunk.len() as u32, chunk.as_ptr(), 0, ms) };
-        if r == w::WAIT_TIMEOUT {
-            return Ok(None);
-        }
-        let idx = r.wrapping_sub(w::WAIT_OBJECT_0) as usize;
-        if idx < chunk.len() {
-            return Ok(Some(idx));
-        }
-        Err(errmap::last_win32_err(
-            "WaitForMultipleObjects",
-            OsStr::new(""),
-        ))
-    };
-
     if raw.len() <= MAXIMUM_WAIT_OBJECTS {
         let ms = timeout.map_or(w::INFINITE, |t| {
             t.as_millis().min(u128::from(w::INFINITE - 1)) as u32
@@ -457,8 +551,60 @@ pub fn wait_many(raw: &[w::HANDLE], timeout: Option<std::time::Duration>) -> Res
     }
 }
 
+/// One `WaitForMultipleObjects` call over at most [`MAXIMUM_WAIT_OBJECTS`]
+/// handles: `Some(index)` of the signaled handle, `None` on timeout. The
+/// chunking above is this crate's own and stays shared; only the single
+/// call is Track W-migrated.
+///
+/// Track W (D-15): `rusty_win32::process::wait_any`. That wrapper also
+/// fetches the signaled process's exit code via `GetExitCodeProcess`,
+/// which this caller discards — `wait_many` reports *which* child is ready
+/// and lets the caller do its own `wait`, so the extra query is a wasted
+/// call, not a behavior change. The one divergence worth naming: a failing
+/// `GetExitCodeProcess` turns a successful wait into an `Err` here, where
+/// the windows-sys arm would have returned `Some(index)` and surfaced that
+/// failure on the caller's subsequent `wait`. Both report the same
+/// `ErrorKind`/`OsCode` for the same OS condition, just one call earlier.
+#[cfg(feature = "track-w")]
+fn wait_chunk(chunk: &[w::HANDLE], ms: u32) -> Result<Option<usize>> {
+    // SAFETY: `chunk` is a valid array of at most 64 open process handles,
+    // borrowed for the duration of this call — `wait_any`'s contract.
+    match unsafe { rusty_win32::process::wait_any(chunk, Some(ms)) } {
+        Ok(Some((idx, _exit_code))) => Ok(Some(idx)),
+        Ok(None) => Ok(None),
+        Err(e) => Err(errmap::trackw_err("WaitForMultipleObjects", e)),
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
+fn wait_chunk(chunk: &[w::HANDLE], ms: u32) -> Result<Option<usize>> {
+    // SAFETY: `chunk` is a valid array of at most 64 open process
+    // handles (borrowed for the duration of this call).
+    let r = unsafe { w::WaitForMultipleObjects(chunk.len() as u32, chunk.as_ptr(), 0, ms) };
+    if r == w::WAIT_TIMEOUT {
+        return Ok(None);
+    }
+    let idx = r.wrapping_sub(w::WAIT_OBJECT_0) as usize;
+    if idx < chunk.len() {
+        return Ok(Some(idx));
+    }
+    Err(errmap::last_win32_err(
+        "WaitForMultipleObjects",
+        OsStr::new(""),
+    ))
+}
+
 /// Terminate every process in `job` (kill-tree). Exit code 1 — Windows
 /// has no signal identity to encode (divergence 001).
+/// Track W (D-15): `rusty_win32::job::terminate`, same exit code.
+#[cfg(feature = "track-w")]
+pub fn terminate_job(job: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: `job` is a valid open job handle for the life of `&self`.
+    unsafe { rusty_win32::job::terminate(job.as_raw(), 1) }
+        .map_err(|e| errmap::trackw_err("TerminateJobObject", e))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn terminate_job(job: &OwnedWinHandle) -> Result<()> {
     // SAFETY: `job` is a valid open job handle for the life of `&self`.
     let ok = unsafe { w::TerminateJobObject(job.as_raw(), 1) };
@@ -469,6 +615,16 @@ pub fn terminate_job(job: &OwnedWinHandle) -> Result<()> {
 }
 
 /// Terminate the single process `process` with exit code 1.
+/// Track W (D-15): `rusty_win32::process::terminate`, same exit code.
+#[cfg(feature = "track-w")]
+pub fn terminate_process(process: &OwnedWinHandle) -> Result<()> {
+    // SAFETY: `process` is a valid open process handle for the life of
+    // `&self`.
+    unsafe { rusty_win32::process::terminate(process.as_raw(), 1) }
+        .map_err(|e| errmap::trackw_err("TerminateProcess", e))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn terminate_process(process: &OwnedWinHandle) -> Result<()> {
     // SAFETY: `process` is a valid open process handle for the life of
     // `&self`.
@@ -481,6 +637,27 @@ pub fn terminate_process(process: &OwnedWinHandle) -> Result<()> {
 
 /// Non-blocking poll: zero-timeout `WaitForSingleObject`. `Some(code)` if
 /// the process has exited, `None` if still running.
+///
+/// Track W (D-15): `rusty_win32::process::wait` with a `Some(0)` timeout —
+/// the donor's own documented `waitpid(WNOHANG)` analog. Its `Ok(None)` is
+/// this function's `Ok(None)` (still running). Its `Err` is *also* mapped
+/// to `Ok(None)`, deliberately: that is precisely the
+/// "any-non-exit-result means still running" contract the windows-sys arm
+/// below states in its own comment, and a poll that started reporting
+/// errors under one feature flag and not the other would be a behavior
+/// difference, not a fidelity improvement. The genuine failure still
+/// surfaces on the eventual blocking [`wait`], identically in both arms.
+#[cfg(feature = "track-w")]
+pub fn try_wait(process: &OwnedWinHandle) -> Result<Option<ExitStatus>> {
+    // SAFETY: `process` is a valid open process handle for the life of
+    // `&self`; a zero timeout never blocks.
+    match unsafe { rusty_win32::process::wait(process.as_raw(), Some(0)) } {
+        Ok(Some(code)) => Ok(Some(ExitStatus::Code(code as i32))),
+        Ok(None) | Err(_) => Ok(None),
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn try_wait(process: &OwnedWinHandle) -> Result<Option<ExitStatus>> {
     // SAFETY: `process` is a valid open process handle for the life of
     // `&self`; a zero timeout never blocks.
@@ -501,6 +678,35 @@ pub fn try_wait(process: &OwnedWinHandle) -> Result<Option<ExitStatus>> {
 
 /// Block until `process` exits; decode the code. `Signaled` is never
 /// produced on Windows (behavior spec `docs/behavior/process.md`).
+///
+/// Track W (D-15): `rusty_win32::process::wait` with no timeout. The one
+/// divergence in this whole slice, and it is a diagnostic label only: the
+/// donor folds `WaitForSingleObject` and `GetExitCodeProcess` into one
+/// call, so a failure of the second is reported here under the first's
+/// `op` string. `ErrorKind` and `OsCode` — the two fields anything
+/// actually branches on — are identical either way, since both arms
+/// classify the same `GetLastError` code through the same table. A
+/// `WAIT_TIMEOUT` return is impossible with an infinite timeout, so the
+/// donor's `Ok(None)` arm is unreachable; it is mapped to the same error
+/// the windows-sys arm produces for a non-`WAIT_OBJECT_0` result rather
+/// than left to an `unreachable!()` that a future donor change could
+/// turn into a panic.
+#[cfg(feature = "track-w")]
+pub fn wait(process: &OwnedWinHandle) -> Result<ExitStatus> {
+    // SAFETY: `process` is a valid open process handle for the life of
+    // `&self`.
+    match unsafe { rusty_win32::process::wait(process.as_raw(), None) } {
+        Ok(Some(code)) => Ok(ExitStatus::Code(code as i32)),
+        Ok(None) => Err(PlatformError::new(
+            ErrorKind::Other,
+            OsCode::None,
+            "WaitForSingleObject",
+        )),
+        Err(e) => Err(errmap::trackw_err("WaitForSingleObject", e)),
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn wait(process: &OwnedWinHandle) -> Result<ExitStatus> {
     // SAFETY: `process` is a valid open process handle for the life of
     // `&self`.

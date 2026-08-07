@@ -132,6 +132,31 @@ above all, whose `NtCreateFile` handle-relative opens are this backend's
 whole capability model — stay on windows-sys in both configurations, the
 same way `fchmodat` stays on libc in both Track P configurations.
 
+**Slice 2 landed 2026-08-07 — `sys::proc`'s spawn/wait/job families.**
+Nine call sites migrated: `create_kill_on_close_job` (`job::create` +
+`set_kill_on_close`), `adopt` (`process::open_by_pid` + `job::assign`),
+`spawn`'s assign and resume steps, `terminate_job`, `terminate_process`,
+`try_wait`/`wait` (`process::wait`), and `wait_many`'s single
+`WaitForMultipleObjects` call (`process::wait_any`). `sys::pty` inherits
+the job-creation migration, sharing that helper already.
+
+**Closed, not deferred: `CreateProcessW` never migrates.** This is the
+one item on the Track W list that gets struck rather than scheduled, so
+a later slice doesn't reopen it. `rusty_win32::process::spawn_suspended`
+(a) passes a bare zeroed `STARTUPINFOW` and documents the std-slot-swap
+model instead — the model D5 step 4 above records this repo deciding
+*against*, and whose rejection is what makes `Stdio::{Null, Pipe, File}`
+possible; (b) passes `NULL` for `lpCurrentDirectory`; (c) takes `&str`
+where winargv produces `&[u16]`. These are not donor gaps to file
+upstream: a `spawn_suspended` fixed on all three counts would simply be
+this crate's `spawn` living in the other repo. Two correct answers to two
+different consumers' questions — see `docs/learning/004-…`.
+
+`wait_many`'s 64-handle chunking likewise stays this crate's own; the
+donor's `wait_any` reports `ERROR_INVALID_PARAMETER` past the cap exactly
+as the raw call does, which is right for a binding and wrong for the
+§5.6 reactor.
+
 ---
 
 ## Phase 2 — Terminal slice 2 (D9, remaining facets)

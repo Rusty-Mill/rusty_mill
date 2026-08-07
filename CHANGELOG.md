@@ -20,6 +20,46 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.1
+
+- **Track W slice 2: `sys::proc`'s spawn/wait/job families (D-15).** Nine
+  call sites moved onto `rusty_win32` behind `track-w`:
+  `create_kill_on_close_job` (`job::create` + `set_kill_on_close`),
+  `adopt` (`process::open_by_pid` + `job::assign`), `spawn`'s assign and
+  resume steps (`job::assign`, `process::resume`), `terminate_job`
+  (`job::terminate`), `terminate_process` (`process::terminate`),
+  `try_wait`/`wait` (`process::wait`), and `wait_many`'s single
+  `WaitForMultipleObjects` call (`process::wait_any`). `sys::pty` picks up
+  the job-creation migration for free — it already shares
+  `create_kill_on_close_job`.
+
+  **`CreateProcessW` itself stays on windows-sys in both configurations**,
+  and this is a permanent outcome rather than a gap to file upstream.
+  `rusty_win32::process::spawn_suspended` passes a bare zeroed
+  `STARTUPINFOW` (its docs direct callers to swap the parent's std-handle
+  slots instead — rush's `winstdio` model, which extraction map D5 step 4
+  records this repo deciding *against*), passes `NULL` for
+  `lpCurrentDirectory`, and takes a `&str` command line where winargv
+  produces `&[u16]`. Adopting it would reverse a recorded architectural
+  decision, drop `Command::current_dir`, and route this crate's security
+  boundary through a lossy conversion. See `docs/learning/004-…` for the
+  general form of that lesson.
+
+  The 64-handle chunking in `wait_many` also stays this crate's own: the
+  donor's `wait_any` reports `ERROR_INVALID_PARAMETER` past the cap
+  exactly as the raw call does, which is correct for a binding and wrong
+  for the §5.6 reactor.
+
+  One divergence, named rather than left implicit: `process::wait` folds
+  `WaitForSingleObject` and `GetExitCodeProcess` into one call, so a
+  failure of the second is reported under the first's `PlatformError::op`
+  label. `ErrorKind` and `OsCode` remain identical across both arms — `op`
+  is a diagnostic string in `Display`, asserted nowhere.
+
+  `z`, not `y`: no public item's shape changed. Every migrated function
+  keeps its exact signature; the two new helpers (`assign_to_job`,
+  `resume_thread`) and the extracted `wait_chunk` are private.
+
 ### 0.25.0
 
 - **Added `platform-windows`'s `track-w` feature — `rusty_win32` adopted
