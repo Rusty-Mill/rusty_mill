@@ -172,5 +172,10 @@ name = "mtls_proxy_header_grpc"
 path = "tests/mtls_proxy_header_grpc.rs"
 required-features = ["grpc", "server"]
 
+[[test]]
+name = "multi_turn_history"
+path = "tests/multi_turn_history.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
