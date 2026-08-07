@@ -1545,6 +1545,17 @@ admin_key_env = "RUSTY_PROVIDER_ADMIN_KEY"
   tracked spend for the current period, immediately un-blocking a client
   that's hit `402`. `404` for a client name that doesn't exist or has no
   configured budget.
+- **`GET /v1/admin/clients/{name}/usage-history?days=N`** — day-bucketed
+  `requests`/`prompt_tokens`/`completion_tokens`/`cost_usd` for `name`,
+  oldest first, over the last `N` days (default `30`, capped at `90`).
+  Unlike every other endpoint above, this isn't limited to clients with a
+  configured `budget_usd` — any client visible to the caller is queryable,
+  since it's a usage rollup, not a budget/spend concern. Requires
+  `[persistence]` to be configured (there's no in-memory equivalent —
+  history needs to survive a restart to mean anything): responds `200`
+  with an empty `data` array rather than an error when it isn't, or for a
+  day with nothing recorded. `404` for an unknown client name (or one
+  outside a scoped caller's organization).
 - **`POST /v1/admin/clients`** — provisions a new client at runtime, no
   config-file edit or restart needed. Body:
   ```jsonc

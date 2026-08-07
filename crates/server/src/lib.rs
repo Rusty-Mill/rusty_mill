@@ -82,6 +82,10 @@ pub fn build_app(state: AppState) -> AxumRouter {
         .route(
             "/v1/admin/clients/{name}/reset-spend",
             post(routes::admin_reset_client_spend),
+        )
+        .route(
+            "/v1/admin/clients/{name}/usage-history",
+            get(routes::admin_client_usage_history),
         );
     let router = mount_mcp(router, &state);
     router

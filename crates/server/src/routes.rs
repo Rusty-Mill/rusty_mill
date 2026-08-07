@@ -999,6 +999,56 @@ pub async fn admin_reset_client_spend(
     }
 }
 
+/// Days of history `admin_client_usage_history` returns when `days` is
+/// omitted from the query string.
+const DEFAULT_USAGE_HISTORY_DAYS: u32 = 30;
+/// Upper bound on `days`, regardless of what the caller asks for -- an
+/// unbounded range would let one request force an unbounded table scan.
+const MAX_USAGE_HISTORY_DAYS: u32 = 90;
+
+#[derive(Deserialize)]
+pub struct UsageHistoryQuery {
+    #[serde(default)]
+    days: Option<u32>,
+}
+
+/// `GET /v1/admin/clients/{name}/usage-history` -- day-bucketed
+/// requests/tokens/cost for `name`, from `[persistence]`'s
+/// `client_daily_usage` table. Unlike `admin_reset_client_spend` and the
+/// rest of this file's budget endpoints, this isn't scoped to clients
+/// with a configured `budget_usd` -- `Router::client_usage_history`
+/// tracks every named client, so any client visible to `identity` (see
+/// `in_admin_scope`) is queryable here, budgeted or not.
+pub async fn admin_client_usage_history(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Query(query): Query<UsageHistoryQuery>,
+) -> Response {
+    let identity = match check_admin_auth(&state, &headers) {
+        Ok(identity) => identity,
+        Err(resp) => return *resp,
+    };
+
+    let in_scope = state
+        .clients
+        .read()
+        .unwrap()
+        .iter()
+        .any(|c| c.name == name && in_admin_scope(&identity, c));
+    if !in_scope {
+        return json_error(404, &format!("no client named \"{name}\""));
+    }
+
+    let days = query
+        .days
+        .unwrap_or(DEFAULT_USAGE_HISTORY_DAYS)
+        .clamp(1, MAX_USAGE_HISTORY_DAYS);
+    let history = state.router.client_usage_history(&name, days).await;
+
+    Json(json!({ "object": "list", "client": name, "days": days, "data": history })).into_response()
+}
+
 /// Structured audit line for an admin-API mutation -- otherwise there's no
 /// way to answer "who changed this client's budget, and when" after the
 /// fact beyond whatever's in general application logs (if even that).
@@ -1420,8 +1470,17 @@ async fn chat_completions_dispatch(
                     .map(move |item| {
                         let event = match item {
                             Ok(chunk) => {
-                                if let (Some(name), Some(cost)) = (&client_name, chunk.cost_usd) {
-                                    router.record_client_spend(name, cost);
+                                if let Some(name) = &client_name {
+                                    if let Some(usage) = &chunk.usage {
+                                        router.record_client_daily_usage(
+                                            name,
+                                            usage,
+                                            chunk.cost_usd,
+                                        );
+                                    }
+                                    if let Some(cost) = chunk.cost_usd {
+                                        router.record_client_spend(name, cost);
+                                    }
                                 }
                                 Event::default()
                                     .json_data(&chunk)
@@ -1444,8 +1503,15 @@ async fn chat_completions_dispatch(
     } else {
         match state.router.dispatch(&req).await {
             Ok(resp) => {
-                if let (Some(name), Some(cost)) = (&client_name, resp.cost_usd) {
-                    state.router.record_client_spend(name, cost);
+                if let Some(name) = &client_name {
+                    if let Some(usage) = &resp.usage {
+                        state
+                            .router
+                            .record_client_daily_usage(name, usage, resp.cost_usd);
+                    }
+                    if let Some(cost) = resp.cost_usd {
+                        state.router.record_client_spend(name, cost);
+                    }
                 }
                 Json(resp).into_response()
             }
