@@ -14,6 +14,7 @@ use std::time::SystemTime;
 /// fallback category for OS errors with no better match — its `source`
 /// is retained for diagnostics (logging, `Display`) only; callers MUST
 /// match on the variant, never on message text, to stay portable.
+/// Layer-1 responsibility: errors
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
     #[error("path escapes scoped root: {0}")]
@@ -51,6 +52,7 @@ pub type Result<T, E = ContractError> = std::result::Result<T, E>;
 /// Per-host capability flags. Tools MUST check the relevant flag before
 /// depending on non-baseline behavior instead of branching on `cfg!(windows)`
 /// themselves — that keeps the divergence list in one place (CONTRACT.md).
+/// Layer-1 responsibility: capabilities
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
     /// Conservative baseline, not a hard platform fact: `true` on Unix,
@@ -94,6 +96,7 @@ impl Capabilities {
 }
 
 /// Metadata for a single filesystem entry, normalized across hosts.
+/// Layer-1 responsibility: filesystem
 #[derive(Debug, Clone)]
 pub struct Metadata {
     pub len: u64,
@@ -104,6 +107,7 @@ pub struct Metadata {
 }
 
 /// A directory entry returned by `FsRoot::read_dir`.
+/// Layer-1 responsibility: filesystem
 #[derive(Debug, Clone)]
 pub struct DirEntryInfo {
     pub name: String,
@@ -113,6 +117,7 @@ pub struct DirEntryInfo {
 /// Filesystem operations scoped to a single root directory. No path passed
 /// to these methods may escape the root — implementations MUST return
 /// `ContractError::PathEscape` rather than silently resolving `..`.
+/// Layer-1 responsibility: filesystem
 pub trait FsRoot {
     fn stat(&self, path: &Path) -> Result<Metadata>;
     fn read_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>>;
@@ -125,6 +130,7 @@ pub trait FsRoot {
 /// A process to spawn. `inherit_env` selects between "start from the
 /// current process environment" and "start from an empty environment plus
 /// `env`" — the contract has no implicit environment merging behavior.
+/// Layer-1 responsibility: process
 #[derive(Debug, Clone)]
 pub struct ProcessSpec {
     pub program: String,
@@ -151,6 +157,7 @@ impl ProcessSpec {
     }
 }
 
+/// Layer-1 responsibility: process
 #[derive(Debug, Clone)]
 pub struct ProcessOutput {
     pub status: i32,
@@ -159,6 +166,7 @@ pub struct ProcessOutput {
 }
 
 /// Non-interactive process execution: spawn, capture stdout/stderr, wait.
+/// Layer-1 responsibility: process
 pub trait ProcessRunner {
     fn run(&self, spec: &ProcessSpec) -> Result<ProcessOutput>;
 }
@@ -168,6 +176,7 @@ pub trait ProcessRunner {
 /// contract promises. Reader and writer are independent streams (as real
 /// PTY masters expose) so a caller can pump output on one thread while
 /// writing input on another without sharing a lock across a blocking read.
+/// Layer-1 responsibility: terminal
 pub struct PtySpawn {
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
@@ -191,6 +200,7 @@ pub struct PtySpawn {
 /// blocks and has a single owner — there is no way for more than one
 /// caller to await it. There is no `kill`/`terminate` method in this
 /// spike (see CONTRACT.md).
+/// Layer-1 responsibility: terminal
 pub trait PtyControl: Send {
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
     fn wait(&mut self) -> Result<i32>;
@@ -207,6 +217,7 @@ pub trait PtyControl: Send {
 ///
 /// Callers MUST check `pty_win32_input_mode` before relying on
 /// Win32-input-mode escape sequences.
+/// Layer-1 responsibility: terminal
 pub trait PtySession {
     /// Runs `command` under a new PTY of the given size. `ProcessSpec` is
     /// reused verbatim so that argv/cwd/env semantics — including
@@ -237,18 +248,21 @@ pub trait PtySession {
 /// A held advisory lock. Dropping without calling `unlock` MUST still
 /// release the lock (adapters implement `Drop`), `unlock` exists only to
 /// surface release errors explicitly.
+/// Layer-1 responsibility: locking
 pub trait LockGuard {
     fn unlock(self: Box<Self>) -> Result<()>;
 }
 
 /// Advisory, best-effort file locking. Never mandatory — two processes
 /// that ignore the lock can still race. See CONTRACT.md.
+/// Layer-1 responsibility: locking
 pub trait FileLock {
     fn lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>>;
     fn lock_shared(&self, path: &Path) -> Result<Box<dyn LockGuard>>;
 }
 
 /// Deterministic per-OS config/cache/data directories for a named app.
+/// Layer-1 responsibility: standard-directories
 pub trait StandardDirs {
     fn config_dir(&self, app: &str) -> Result<PathBuf>;
     fn cache_dir(&self, app: &str) -> Result<PathBuf>;
