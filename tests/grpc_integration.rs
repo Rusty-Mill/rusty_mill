@@ -150,6 +150,24 @@ async fn streaming_message_yields_ordered_events() {
         .expect("send_streaming_message")
         .into_inner();
 
+    // Spec Section 3.1.2: since this turn is task-shaped, the stream MUST
+    // begin with the `Task` object itself.
+    match stream
+        .next()
+        .await
+        .expect("first stream event")
+        .expect("stream event")
+        .payload
+    {
+        Some(pb::stream_response::Payload::Task(task)) => {
+            assert_eq!(
+                pb::TaskState::try_from(task.status.unwrap().state).unwrap(),
+                pb::TaskState::Submitted
+            );
+        }
+        other => panic!("expected the stream to lead with a Task, got {other:?}"),
+    }
+
     let mut saw_working = false;
     let mut saw_artifact = false;
     let mut saw_completed = false;

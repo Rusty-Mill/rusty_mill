@@ -89,9 +89,11 @@ async fn rest_subscribe_reconnect_replays_missed_events_via_last_event_id() {
     let http = reqwest::Client::new();
     let task_id = start_task(&http, &base_url).await;
 
-    // First connection: read exactly the initial `Working` event (already
-    // buffered by the time we subscribe, since `start_task` waited for
-    // it), then disconnect without advancing the agent further.
+    // First connection: a fresh subscribe (no Last-Event-ID) MUST begin
+    // with a `Task` snapshot (spec Section 3.1.6), then the initial
+    // `Working` event (already buffered by the time we subscribe, since
+    // `start_task` waited for it); disconnect without advancing the agent
+    // further.
     let first_resp = http
         .post(format!("{base_url}/tasks/{task_id}:subscribe"))
         .header("A2A-Version", "1.0")
@@ -99,6 +101,9 @@ async fn rest_subscribe_reconnect_replays_missed_events_via_last_event_id() {
         .await
         .expect("POST /tasks/{id}:subscribe");
     let mut first_events = first_resp.bytes_stream().eventsource();
+    let lead = first_events.next().await.expect("lead event").expect("sse event");
+    let lead_value: serde_json::Value = serde_json::from_str(&lead.data).unwrap();
+    assert_eq!(lead_value["task"]["id"], task_id);
     let first = first_events
         .next()
         .await
@@ -182,6 +187,13 @@ async fn rest_get_subscribe_is_the_spec_literal_binding_and_still_works() {
         .expect("GET /tasks/{id}:subscribe");
     assert_eq!(resp.status(), 200);
     let mut events = resp.bytes_stream().eventsource();
+
+    // Fresh subscribe (no Last-Event-ID) MUST begin with a `Task` snapshot
+    // (spec Section 3.1.6).
+    let lead = events.next().await.expect("lead event").expect("sse event");
+    let lead_value: serde_json::Value = serde_json::from_str(&lead.data).unwrap();
+    assert_eq!(lead_value["task"]["id"], task_id);
+
     let first = events.next().await.expect("first event").expect("sse event");
     let first_value: serde_json::Value = serde_json::from_str(&first.data).unwrap();
     assert_eq!(
