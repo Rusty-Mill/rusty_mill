@@ -80,6 +80,19 @@ group-join half, shared with D2 below), `Signal` +
 > line. Not gaps to file upstream: a `spawn_suspended` fixed on all three
 > counts would just be this crate's `spawn` in the other repo
 > (`docs/learning/004-…`).
+>
+> **Third slice, 2026-08-07 — D9's console cluster and D5's handle
+> primitives, completing the migration list.** `sys::handle`'s
+> `duplicate`/`close`; `sys::console`'s std-handle lookup, console-mode
+> get/set, viewport query, poll, read, and `alloc`/`attach`/`free`. One
+> boundary swap worth knowing about: the donor's `window_size` reports
+> `(cols, rows)` where this crate's reports `(rows, cols)` — same type,
+> opposite order, invisible to the compiler (`docs/learning/005-…`).
+> `reopen`'s `CONIN$`/`CONOUT$` open is declined for now rather than
+> closed: the donor's `fs::open_file` differs only by
+> `FILE_ATTRIBUTE_NORMAL` vs `0`, which cannot be verified from this
+> repo's Linux-host workflow and backs a probe with a documented history
+> of subtle failure.
 
 ### D2 — `rush/src/winjob.rs` + `rusty_win32`: Windows jobs & spawn
 

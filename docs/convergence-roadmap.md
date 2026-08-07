@@ -157,6 +157,32 @@ donor's `wait_any` reports `ERROR_INVALID_PARAMETER` past the cap exactly
 as the raw call does, which is right for a binding and wrong for the
 §5.6 reactor.
 
+**Slice 3 landed 2026-08-07 — `sys::console` and `sys::handle`,
+completing the list.** `sys::handle`'s `duplicate` and
+`OwnedWinHandle::drop`; `sys::console`'s std-handle lookup, the
+`GetConsoleMode`/`SetConsoleMode` pair (factored into two-armed helpers,
+so the ten public functions over it stay single-bodied), viewport query,
+`poll_readable`, `read_chunk`, `alloc`/`free`/`attach`, and the std-slot
+repoint. One boundary swap: the donor's `window_size` returns
+`(cols, rows)` against this crate's `(rows, cols)` — same type, opposite
+order, nothing in the compiler to catch it (`docs/learning/005-…`).
+
+**Declined for now, not closed:** `reopen`'s
+`CreateFileW("CONIN$"/"CONOUT$")`. The donor's `fs::open_file` differs
+only by `FILE_ATTRIBUTE_NORMAL` vs `0`, very probably inert on an
+`OPEN_EXISTING` console-device open — but it backs the `has_console`
+probe, whose last wrong answer cost a CI debugging session, and the
+claim can't be verified from this repo's Linux-host workflow. Worth
+distinguishing from `CreateProcessW` above, which is closed *permanently*:
+a migration list needs both verbs.
+
+**Track W's migration list is now empty.** What remains on windows-sys in
+both configurations is either permanently closed (`CreateProcessW`), held
+pending better evidence (`reopen`), or has no donor binding at all
+(`sys::nt`, `sys::net`, `sys::security`, `sys::fileio`'s directory
+enumeration and NT-relative opens). Any future slice starts by adding a
+binding upstream, not by picking from what is already there.
+
 ---
 
 ## Phase 2 — Terminal slice 2 (D9, remaining facets)
