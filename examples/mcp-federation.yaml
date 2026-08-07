@@ -69,8 +69,15 @@ binds:
                       "prompts/*": full
                       "resources/read": full
                       "*/list": response
+                    # CEL over `jwt`, `request` and `mcp` -- the subject the
+                    # call is about, unmuxed. Exactly one of mcp.tool /
+                    # mcp.prompt / mcp.resource exists per call, so a key
+                    # written against the wrong kind is simply dropped.
                     metadata:
                       tenant: 'request.headers["x-tenant"]'
+                      tool: 'mcp.tool.name'
+                      prompt: 'mcp.prompt.name'
+                      resource: 'mcp.resource.name'
                     requestHeaders:
                       allowed: [x-tenant]
               mcpAuthorization:

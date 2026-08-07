@@ -44,6 +44,8 @@ use agentgateway_config::{FailureMode, McpGuardrails, Processor, resolve};
 use cel::{Context, Program};
 use http::{HeaderMap, HeaderName, HeaderValue};
 
+use crate::rules::Subject;
+
 pub use wire::{
     AuthorizationError, HeaderMutation, McpHeader, McpRequest, McpRequestResult, McpResponse,
     McpResponseResult, authorization_error, request_result, response_result,
@@ -447,10 +449,22 @@ impl Guardrails {
 impl Compiled {
     /// Evaluate this processor's `metadata` expressions for one call.
     ///
+    /// The context is `request` (method and headers), `jwt` (the verified
+    /// token's claims) and `mcp` — the subject the call is about, in the same
+    /// shape `mcpAuthorization.rules` uses.
+    ///
+    /// `mcp` is ours rather than upstream's: upstream evaluates these
+    /// expressions against the HTTP request alone and reserves the MCP context
+    /// for RBAC. Adding it is additive — no expression that worked before
+    /// changes meaning — and it is what lets a processor be handed the prompt
+    /// or resource it is being asked about without parsing `mcp_request`.
+    ///
     /// An expression that fails to evaluate is skipped rather than failing the
     /// call: metadata is context for the processor, not a decision, and a
     /// missing `jwt` claim on an unauthenticated route should not take a
-    /// guardrail offline. The processor sees the key absent and decides.
+    /// guardrail offline. The processor sees the key absent and decides. That
+    /// is also what makes `mcp.prompt.name` harmless on a `prompts/list`,
+    /// which fans out and has no single subject.
     fn metadata_context(&self, call: CallContext<'_>) -> Option<prost_types::Struct> {
         if self.metadata.is_empty() {
             return None;
@@ -475,6 +489,16 @@ impl Compiled {
         context.add_variable("request", request).ok()?;
         if let Some(claims) = call.claims {
             context.add_variable("jwt", claims.clone()).ok()?;
+        }
+        // Bound exactly as `mcpAuthorization.rules` binds it, and by the same
+        // type, so the two cannot drift into disagreeing about what a subject
+        // is. Only the subject's own key exists, so `mcp.prompt.name` on a
+        // tool call does not resolve and its key is dropped.
+        if let (Some(subject), Some(target)) = (call.subject, call.target) {
+            let mcp = serde_json::json!({
+                subject.key(): { "name": subject.name(), "target": target },
+            });
+            context.add_variable("mcp", mcp).ok()?;
         }
 
         let fields = self
@@ -583,6 +607,13 @@ pub struct CallContext<'a> {
     pub headers: &'a HeaderMap,
     /// Claims from the verified token, when the route validated one.
     pub claims: Option<&'a serde_json::Value>,
+    /// What the call is about, for the methods that are about one thing.
+    ///
+    /// `None` for the `*/list` methods, which fan out across every target and
+    /// so have no single subject to name.
+    pub subject: Option<Subject<'a>>,
+    /// The target the subject belongs to, alongside `subject`.
+    pub target: Option<&'a str>,
 }
 
 /// The headers a processor is shown.

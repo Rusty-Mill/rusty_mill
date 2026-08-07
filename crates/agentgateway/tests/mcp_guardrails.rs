@@ -43,7 +43,21 @@ enum Script {
 struct Seen {
     requests: Mutex<Vec<(String, Option<String>)>>,
     responses: Mutex<Vec<(String, String)>>,
+    /// `metadata_context` per call, flattened to string values.
+    metadata: Mutex<Vec<Vec<(String, String)>>>,
     calls: AtomicUsize,
+}
+
+/// A `metadata_context` struct as plain key/value strings.
+fn flatten(context: Option<prost_types::Struct>) -> Vec<(String, String)> {
+    context
+        .into_iter()
+        .flat_map(|s| s.fields)
+        .filter_map(|(k, v)| match v.kind {
+            Some(prost_types::value::Kind::StringValue(text)) => Some((k, text)),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn free_port() -> u16 {
@@ -98,6 +112,9 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
 
                 let payload = if is_request {
                     let decoded = McpRequest::decode(message).expect("should decode");
+                    if let Ok(mut seen) = recorder.metadata.lock() {
+                        seen.push(flatten(decoded.metadata_context));
+                    }
                     if let Ok(mut seen) = recorder.requests.lock() {
                         seen.push((
                             decoded.method,
@@ -136,6 +153,9 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                     .encode_to_vec()
                 } else {
                     let decoded = McpResponse::decode(message).expect("should decode");
+                    if let Ok(mut seen) = recorder.metadata.lock() {
+                        seen.push(flatten(decoded.metadata_context));
+                    }
                     if let Ok(mut seen) = recorder.responses.lock() {
                         seen.push((
                             decoded.method,
@@ -1231,6 +1251,194 @@ async fn the_response_phase_sees_a_resource_read_re_qualified() {
         responses[0].1.contains("alpha+memo:insights"),
         "contents reach the response phase already re-qualified: {}",
         responses[0].1
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// `metadata` naming the subject
+// ---------------------------------------------------------------------------
+
+impl Harness {
+    /// Boot a gateway with one processor carrying `metadata` expressions.
+    async fn with_metadata(host: &str, methods: &str, metadata: &str) -> Harness {
+        let port = free_port().await;
+        let yaml = format!(
+            r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              mcpGuardrails:
+                processors:
+                  - host: "{host}"
+                    timeout: 5s
+                    methods: {methods}
+                    metadata:
+{metadata}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      stdio:
+                        cmd: "{server}"
+                        env:
+                          MOCK_LABEL: alpha
+                          MOCK_TOOLS: "echo"
+                          MOCK_PROMPTS: "summarize"
+                          MOCK_RESOURCES: "memo:insights"
+"#,
+            server = mock_server()
+        );
+
+        let config = Config::from_yaml(&yaml).expect("config should parse");
+        config.validate().expect("config should validate");
+        let gateway = Gateway::build(&config, None)
+            .await
+            .expect("gateway should build");
+
+        let shutdown = CancellationToken::new();
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+            .await
+            .expect("gateway should bind");
+
+        let client = ()
+            .serve(StreamableHttpClientTransport::from_uri(format!(
+                "http://127.0.0.1:{port}/mcp"
+            )))
+            .await
+            .expect("client should complete the MCP handshake");
+
+        Harness { client, shutdown }
+    }
+}
+
+fn sent(seen: &Seen, index: usize) -> Vec<(String, String)> {
+    let mut fields = seen.metadata.lock().expect("lock")[index].clone();
+    fields.sort();
+    fields
+}
+
+#[tokio::test]
+async fn metadata_names_the_prompt_end_to_end() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::with_metadata(
+        &host,
+        r#"{ "prompts/get": request }"#,
+        "                      prompt: 'mcp.prompt.name'\n                      target: 'mcp.prompt.target'",
+    )
+    .await;
+
+    assert_eq!(
+        harness.get_prompt("alpha_summarize").await,
+        Ok("alpha:summarize".into())
+    );
+
+    assert_eq!(
+        sent(&seen, 0),
+        vec![
+            ("prompt".to_string(), "summarize".to_string()),
+            ("target".to_string(), "alpha".to_string()),
+        ],
+        "the processor should be told which prompt, unmuxed, and whose"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn metadata_names_the_resource_end_to_end() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::with_metadata(
+        &host,
+        r#"{ "resources/read": request }"#,
+        "                      uri: 'mcp.resource.name'",
+    )
+    .await;
+
+    harness.read_resource("alpha+memo:insights").await.ok();
+
+    assert_eq!(
+        sent(&seen, 0),
+        vec![("uri".to_string(), "memo:insights".to_string())],
+        "the target's own URI, matching what the request body carries"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn metadata_names_the_tool_end_to_end() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::with_metadata(
+        &host,
+        r#"{ "tools/call": request }"#,
+        "                      tool: 'mcp.tool.name'",
+    )
+    .await;
+
+    harness.call("alpha_echo").await.ok();
+
+    assert_eq!(
+        sent(&seen, 0),
+        vec![("tool".to_string(), "echo".to_string())]
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_listing_sends_no_subject_but_keeps_the_rest() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::with_metadata(
+        &host,
+        r#"{ "prompts/list": request }"#,
+        "                      prompt: 'mcp.prompt.name'\n                      method: 'request.method'",
+    )
+    .await;
+
+    harness.prompt_names().await;
+
+    assert_eq!(
+        sent(&seen, 0),
+        vec![("method".to_string(), "prompts/list".to_string())],
+        "a fanout has no single subject, so that key is dropped rather than invented"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn the_response_phase_names_what_was_actually_fetched() {
+    // A request-phase rewrite changes what the result is about, and the
+    // response phase should describe the result it is looking at rather than
+    // the name the client happened to ask for.
+    let (host, seen, stop) = processor(Script::Rewrite(r#"{"name":"summarize"}"#.into())).await;
+    let harness = Harness::with_metadata(
+        &host,
+        r#"{ "prompts/get": full }"#,
+        "                      prompt: 'mcp.prompt.name'",
+    )
+    .await;
+
+    harness.get_prompt("alpha_summarize").await.ok();
+
+    let metadata = seen.metadata.lock().expect("lock").clone();
+    assert_eq!(metadata.len(), 2, "request then response");
+    assert_eq!(
+        metadata[1],
+        vec![("prompt".to_string(), "summarize".to_string())]
     );
 
     stop.cancel();
