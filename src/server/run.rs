@@ -25,6 +25,12 @@ struct LocalState {
     run: Run,
     /// Parts accumulated since the last `message.created`.
     pending: Option<Message>,
+    /// Summed [`Message::approximate_size`] of everything in `run.output`.
+    ///
+    /// Tracked rather than recomputed: the check runs on every completed
+    /// message, and re-summing the whole vector each time would make a long run
+    /// quadratic in exactly the case the limit exists for.
+    output_bytes: usize,
 }
 
 /// Tracks one run being executed by this replica.
@@ -37,19 +43,65 @@ pub struct RunHandle {
     state: Mutex<LocalState>,
     cancel: CancellationToken,
     resume_tx: mpsc::Sender<AwaitResume>,
+    /// Ceiling on the run's accumulated output, or `None` for no ceiling.
+    max_output_bytes: Option<usize>,
 }
 
 impl RunHandle {
     /// Create a handle for `run` and the receiver the agent awaits on.
-    pub(crate) fn new(store: Arc<dyn Store>, run: Run) -> (Arc<Self>, mpsc::Receiver<AwaitResume>) {
+    pub(crate) fn new(
+        store: Arc<dyn Store>,
+        run: Run,
+        max_output_bytes: Option<usize>,
+    ) -> (Arc<Self>, mpsc::Receiver<AwaitResume>) {
         let (resume_tx, resume_rx) = mpsc::channel(1);
         let handle = Arc::new(Self {
             store,
-            state: Mutex::new(LocalState { run, pending: None }),
+            state: Mutex::new(LocalState { run, pending: None, output_bytes: 0 }),
             cancel: CancellationToken::new(),
             resume_tx,
+            max_output_bytes,
         });
         (handle, resume_rx)
+    }
+
+    /// Take `message` into the run's output, or refuse if it would not fit.
+    ///
+    /// Refusing rather than dropping the oldest, which is what the *log* does.
+    /// The two are not the same choice because they have different vocabulary
+    /// for the loss: an event log can say where it now starts — that is what
+    /// `earliest_event`, the 410 and `Acp-Events-From` are for — while
+    /// [`Run::output`] is a plain list in the ACP schema with no way to mark a
+    /// hole. Worse, every `run.*` event carries the whole [`Run`], and those go
+    /// out over SSE where there is no header to put a caveat in. A truncated
+    /// output would therefore be indistinguishable from a short one on the
+    /// endpoint *and* on the stream.
+    ///
+    /// So the run fails, loudly, naming the limit. An agent producing this much
+    /// inline output has the answer already documented for it: a `content_url`
+    /// part costs the server nothing to serve and has no ceiling.
+    ///
+    /// Caller must hold the state lock.
+    fn take_output(
+        state: &mut LocalState,
+        limit: Option<usize>,
+        message: Message,
+    ) -> Result<(), Error> {
+        let size = message.approximate_size();
+        if let Some(limit) = limit {
+            // Naturally sticky: nothing is ever added past the ceiling, so an
+            // agent that swallows the first error gets the same one again
+            // rather than resuming its growth.
+            if state.output_bytes.saturating_add(size) > limit {
+                return Err(Error::server_error(format!(
+                    "run output exceeded {limit} bytes; emit a content_url part \
+                     instead of accumulating inline output"
+                )));
+            }
+        }
+        state.output_bytes += size;
+        state.run.output.push(message);
+        Ok(())
     }
 
     /// A snapshot of the run as this replica sees it.
@@ -136,7 +188,7 @@ impl RunHandle {
             if let Some(mut pending) = state.pending.take() {
                 if !pending.parts.is_empty() {
                     pending.complete();
-                    state.run.output.push(pending.clone());
+                    Self::take_output(&mut state, self.max_output_bytes, pending.clone())?;
                     flushed = Some(pending);
                 }
             }
@@ -175,7 +227,12 @@ impl RunHandle {
                 },
                 Event::MessageCompleted { message } => {
                     state.pending = None;
-                    state.run.output.push(message.clone());
+                    // Refused *before* the event is logged, so a run that
+                    // exceeds its ceiling fails without a `message.completed`
+                    // in the log naming output the run does not report. The
+                    // parts are already there and the log's own bound governs
+                    // them; this is only about the assembled copy.
+                    Self::take_output(&mut state, self.max_output_bytes, message.clone())?;
                 }
                 _ => {}
             }
@@ -220,8 +277,25 @@ impl RunHandle {
                 if let Some(mut pending) = state.pending.take() {
                     if !pending.parts.is_empty() {
                         pending.complete();
-                        state.run.output.push(pending.clone());
-                        flushed = Some(pending);
+                        // Over the output ceiling, this drops the message and
+                        // says so rather than failing, because a terminal
+                        // transition that cannot be written is strictly worse
+                        // than a trailing message the run does not report — the
+                        // run would stay non-terminal until a reaper found it.
+                        //
+                        // Reachable only from a terminal write that skipped
+                        // `finalize_output`, i.e. a cancellation: on every other
+                        // path `finalize_output` has already taken `pending`,
+                        // and if the ceiling stopped it there the run is failing
+                        // with that error attached.
+                        match Self::take_output(&mut state, self.max_output_bytes, pending.clone())
+                        {
+                            Ok(()) => flushed = Some(pending),
+                            Err(error) => tracing::warn!(
+                                %error,
+                                "dropping a trailing message that would exceed the output ceiling"
+                            ),
+                        }
                     }
                 }
             }

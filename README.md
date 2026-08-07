@@ -362,6 +362,28 @@ The two limits do not compose into one number. Past the limit the server answers
 limit and the way around it — a `content_url` part rather than inline `content`, which is the
 spec's own answer and costs the server nothing to serve.
 
+Output has a ceiling too, at the same 8 MiB — what a client may send in and what an agent may
+hand back are the same kind of quantity, so there is one number to reason about rather than two:
+
+```rust
+AcpServer::builder().max_run_output_bytes(64 * 1024 * 1024)   // or .without_run_output_limit()
+```
+
+`Run.output` holds every completed message the run produced. It is rewritten on each status
+transition, returned by `GET /runs/{run_id}`, and carried whole inside every `run.*` event, so
+an agent that accumulates without limit grows all three at once.
+
+Past the ceiling **the run fails**, which is the opposite of what the event log does a few
+sections down — and the difference is the point. A log that drops its oldest events can *say
+so*: `earliest_event` records where it now starts, the resumable stream answers 410, and the
+list carries `Acp-Events-From`. `Run.output` is a plain list in the ACP schema with nowhere to
+record a hole, and every `run.*` event carries the whole run over SSE where there is no header
+to put a caveat in. A truncated output would be indistinguishable from a short one on the
+endpoint *and* on the stream, so the choice is between failing loudly and lying quietly.
+
+The events survive either way — the ceiling bounds the aggregate, not the log — so a client that
+watched the stream saw everything the agent emitted before it stopped.
+
 ### Open discovery
 
 With the `well-known` feature, the server also publishes its manifests as YAML at
@@ -939,7 +961,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-295 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+301 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
