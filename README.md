@@ -18,7 +18,7 @@ The crate gives you three layers, each usable on its own:
 | `rusty_acp::server::store` | `redis-store` | A Redis-backed store, for several replicas behind a load balancer. |
 | `rusty_acp::server::store` | `postgres-store` | A Postgres-backed store: the same, with history that outlives a key expiry and is queryable. |
 | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
-| metrics | `metrics` | Records run, lease and store metrics through the [`metrics`] facade. |
+| metrics | `metrics` | Records run, lease, store and client metrics through the [`metrics`] facade. Implies neither layer. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
 TypeScript, LangChain or CrewAI one.
@@ -948,9 +948,14 @@ any other middleware — the crate does not duplicate it.
 
 ### Metrics
 
-With the `metrics` feature, the server records through the [`metrics`] facade. It records but
+With the `metrics` feature, both halves record through the [`metrics`] facade. It records but
 does not export — whichever exporter you install receives them, and installing none costs an
 atomic load per call. Same bargain as the router: the crate does not pick your stack.
+
+The feature implies neither `client` nor `server`, so a client-only build can have metrics
+without pulling in a server it will not use. Whichever layers are on contribute their own.
+
+#### From the server
 
 | Metric | Type | Labels |
 | --- | --- | --- |
@@ -974,6 +979,29 @@ mint unbounded time series by submitting fresh names.
 The lease and recovery counters are the ones worth a dashboard. Individually those events are
 already logged; what a log cannot answer is *"is this happening more than it used to"*, which is
 the question that matters when a fleet starts losing replicas.
+
+#### From the client
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `acp_client_requests_total` | counter | `method` |
+| `acp_client_retries_total` | counter | `reason` (`status`/`transport`/`retry_after`) |
+| `acp_client_retries_exhausted_total` | counter | `method` |
+| `acp_client_backoff_duration_seconds` | histogram | — |
+| `acp_client_stream_reconnects_total` | counter | — |
+| `acp_client_streams_abandoned_total` | counter | `reason` (`exhausted`/`no_run_id`) |
+
+The client's whole job in these paths is to *not* surface something to the caller: it retries
+with backoff, honours `Retry-After`, reconnects a dropped stream from its last event, and
+tolerates transient failures while polling. Each of those is invisible by design, which is
+exactly why it needs counting — a caller timing `run_sync` otherwise cannot tell a slow agent
+from a fast one behind four retries.
+
+`acp_client_requests_total` counts *attempts*, so the gap between it and the server's own
+request count is precisely what the retry policy added. `acp_client_backoff_duration_seconds` is
+the one to reach for first: latency that looks like a slow agent and is not. Retries are logged
+at `debug`; exhausting the policy — where a request actually failed after the client tried to
+save it — is a `warn`.
 
 Store latency is opt-in, because wrapping the store you passed in would mean `server.store()`
 handing back something else:

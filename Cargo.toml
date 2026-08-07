@@ -29,7 +29,12 @@ well-known = ["server", "dep:serde_norway"]
 # Postgres-backed Store: durable multi-replica without a key expiry.
 postgres-store = ["server", "dep:sqlx"]
 # Emit metrics through the `metrics` facade, leaving the exporter to you.
-metrics = ["server", "dep:metrics"]
+#
+# Deliberately independent of `server` and `client`: a client-only build wanting
+# metrics is an ordinary case, and implying `server` made it impossible to ask
+# for. Whichever layers are on contribute their own; the server-side store
+# decorator lives under `server` and is gated on both.
+metrics = ["dep:metrics"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
