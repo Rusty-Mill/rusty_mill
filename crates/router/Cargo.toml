@@ -23,6 +23,7 @@ rustls.workspace = true
 rustls-native-certs.workspace = true
 reqwest.workspace = true
 regex.workspace = true
+ring.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

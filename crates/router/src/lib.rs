@@ -889,11 +889,16 @@ impl Router {
                     }
                 }
             });
-            Arc::new(WebhookNotifier::new(
-                cfg.url.clone(),
-                auth_header,
-                cfg.timeout_secs,
-            ))
+            let signing_secret = cfg.signing_secret_env.as_ref().and_then(|var| {
+                match std::env::var(var) {
+                    Ok(v) if !v.is_empty() => Some(v),
+                    _ => {
+                        tracing::warn!(env_var = %var, "webhook signing_secret_env is set but not resolvable; sending webhook requests unsigned");
+                        None
+                    }
+                }
+            });
+            Arc::new(WebhookNotifier::from_config(cfg, auth_header, signing_secret))
         });
 
         // A guardrail with an invalid regex is a soft failure -- skipped
@@ -2326,6 +2331,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use webhook::RetryPolicy;
 
     /// Directly construct a `Router` with arbitrary private-field state,
     /// bypassing `from_config` (which only ever builds real provider
@@ -2950,7 +2956,13 @@ mod tests {
     ) -> Router {
         let router = router_with_budgeted_client(budget_usd, BudgetPeriod::Total);
         Router {
-            webhook: Some(Arc::new(WebhookNotifier::new(webhook_url, auth_header, 5))),
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                webhook_url,
+                auth_header,
+                5,
+                None,
+                RetryPolicy::none(),
+            ))),
             ..router
         }
     }
@@ -3075,10 +3087,168 @@ mod tests {
 
         let router = test_router(vec![], vec![], vec![], vec![], vec![]);
         let router = Router {
-            webhook: Some(Arc::new(WebhookNotifier::new(server.uri(), None, 5))),
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                server.uri(),
+                None,
+                5,
+                None,
+                RetryPolicy::none(),
+            ))),
             ..router
         };
         assert!(!router.reset_client_spend("acme"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_carries_a_valid_hmac_signature_when_signing_secret_is_configured() {
+        let server = MockServer::start().await;
+        let expected_body =
+            br#"{"event":"budget_reset","client":"acme","budget_usd":10.0,"period":"total"}"#;
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, b"s3cret");
+        let expected_signature = format!(
+            "sha256={}",
+            ring::hmac::sign(&key, expected_body)
+                .as_ref()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(header("x-rp-signature", expected_signature.as_str()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                server.uri(),
+                None,
+                5,
+                Some("s3cret".to_string()),
+                RetryPolicy::none(),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_sends_no_signature_header_when_signing_secret_is_unset() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client_and_webhook(10.0, server.uri(), None);
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        // The mock above has no header() matcher, so this only proves *a*
+        // delivery happened -- explicitly assert the header is absent too.
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].headers.get("x-rp-signature").is_none());
+    }
+
+    #[tokio::test]
+    async fn webhook_retries_after_a_5xx_and_succeeds() {
+        let server = MockServer::start().await;
+        // First attempt 500s, second succeeds -- `.up_to_n_times` sequences
+        // two distinct responses across the retry.
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(500))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                server.uri(),
+                None,
+                5,
+                None,
+                RetryPolicy::for_test(10, 3),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        // Generous relative to the 10ms initial backoff -- just needs to
+        // outlast one retry round-trip, not be tight against it.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_gives_up_after_exhausting_max_retries() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(3) // 1 initial attempt + 2 retries, then give up
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                server.uri(),
+                None,
+                5,
+                None,
+                RetryPolicy::for_test(10, 2),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_does_not_retry_a_4xx_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(400))
+            .expect(1) // no retry -- a 4xx is treated as permanent
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client(10.0, BudgetPeriod::Total);
+        let router = Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                server.uri(),
+                None,
+                5,
+                None,
+                RetryPolicy::for_test(10, 3),
+            ))),
+            ..router
+        };
+        assert!(router.reset_client_spend("acme"));
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         server.verify().await;

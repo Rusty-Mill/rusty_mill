@@ -7,6 +7,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 ### Added
 - `server.cors_allowed_origins` — restricts CORS to an explicit browser-
   origin allowlist. Unset preserves the existing any-origin behavior.
+- `[webhook]` HMAC-SHA256 signing (`signing_secret_env`) and
+  retry-with-backoff (`retry_backoff_secs`/`retry_backoff_max_secs`/
+  `max_retries`) — a `5xx`/network-error delivery now retries instead of
+  failing after one attempt; a `4xx` is still treated as permanent.
 - `docs/PROVIDERS.md` + curated commented-out provider presets in
   `config.example.toml` (~20 more OpenAI-wire-compatible backends).
 - `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-declared,
