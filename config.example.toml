@@ -50,6 +50,11 @@ port = 8080
 #
 # issuer = "https://your-idp.example.com/"   # optional -- verified against `iss` if set
 # audience = "rusty-provider"                # optional -- verified against `aud` if set
+#
+# Optional: map a claim to a [[clients]] name (a match resolves that
+# client's budget/rate-limit/usage identity for the rest of the request;
+# no match falls back to the same unmapped access a static shared key gets):
+# client_claim = "sub"
 
 # --- MCP (optional) ----------------------------------------------------------
 # Exposes rusty_provider's own routing as MCP tools, and/or proxies other MCP

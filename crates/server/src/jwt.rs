@@ -66,6 +66,7 @@ pub struct JwtVerifier {
     mode: Mode,
     issuer: Option<String>,
     audience: Option<String>,
+    client_claim: Option<String>,
     http: reqwest::Client,
 }
 
@@ -94,8 +95,15 @@ impl JwtVerifier {
             mode,
             issuer: cfg.issuer.clone(),
             audience: cfg.audience.clone(),
+            client_claim: cfg.client_claim.clone(),
             http: reqwest::Client::new(),
         })
+    }
+
+    /// The claim name configured via `[jwt].client_claim`, if any -- see
+    /// `routes::resolve_client_identity`, the only caller.
+    pub fn client_claim(&self) -> Option<&str> {
+        self.client_claim.as_deref()
     }
 
     /// Verifies `token`, returning its claims on success. `None` on
@@ -188,6 +196,14 @@ impl JwtVerifier {
     }
 }
 
+/// Reads `claim` out of a verified token's claims as a string. `None` if
+/// the claim is absent or isn't a JSON string (a numeric/boolean/array
+/// `sub`, say) -- treated as "no identity to map," not an error, by
+/// `routes::resolve_client_identity`, the only caller.
+pub(crate) fn claim_as_str<'a>(claims: &'a Value, claim: &str) -> Option<&'a str> {
+    claims.get(claim)?.as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -203,6 +219,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         }
     }
 
@@ -236,6 +253,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         };
         assert!(JwtVerifier::new(&cfg, None).is_none());
     }
@@ -248,6 +266,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         };
         let verifier = JwtVerifier::new(&cfg, Some("s3cret".to_string())).unwrap();
         assert!(matches!(verifier.mode, Mode::Hs256(_)));
@@ -377,6 +396,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         };
         let verifier = JwtVerifier::new(&cfg, None).unwrap();
         let token = hs256_token("irrelevant", &json!({"sub": "alice", "exp": future_exp()}));
@@ -405,6 +425,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         };
         let verifier = JwtVerifier::new(&cfg, None).unwrap();
         let header = base64url(&json!({"alg": "RS256", "kid": "the-actual-kid"}).to_string());
@@ -425,6 +446,7 @@ mod tests {
             issuer: None,
             audience: None,
             jwks_cache_secs: 300,
+            client_claim: None,
         };
         let verifier = JwtVerifier::new(&cfg, None).unwrap();
         // No `kid` header at all -- HS256-encoded here just to produce

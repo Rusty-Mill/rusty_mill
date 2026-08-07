@@ -86,7 +86,11 @@ dependency), so neither was auto-implemented in the original run:
   `server.api_key_env`/`[[clients]]`, fails closed on any verification
   failure. New dependency `jsonwebtoken`, approved at the time. Verified via
   a live smoke-test (#111 fixed a follow-on gap: `rp-cli` hadn't been
-  updated to know about `jwt.hs256_secret_env`).
+  updated to know about `jwt.hs256_secret_env`). The "no JWT-claims-to-
+  `[[clients]]`-identity mapping in this pass" scope cut from #109/#110 was
+  itself closed by #125: opt-in `[jwt].client_claim` maps a verified
+  token's claim to a `[[clients]].name` for budget/rate-limit/usage
+  purposes (`/v1/admin/*` stays untouched by design).
 - **MCP (Model Context Protocol) support — done.** User approved this as an
   explicit follow-up on 2026-08-06, explicitly asking for both directions
   ("expose rusty_provider as an MCP server" and "proxy other MCP servers"),
