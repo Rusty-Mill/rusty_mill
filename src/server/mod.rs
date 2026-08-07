@@ -204,6 +204,28 @@ pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 /// [`AcpServerBuilder::without_run_output_limit`].
 pub const DEFAULT_MAX_RUN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
+/// How much history one session may hold before further runs are refused.
+///
+/// The limit none of the others reach. `max_sessions` bounds how *many*
+/// sessions the default store keeps, a Redis TTL and a Postgres retention
+/// window bound how *old* they get, and
+/// [`DEFAULT_MAX_RUN_EVENT_BYTES`] bounds one run's log — nothing bounded how
+/// long a single conversation grows.
+///
+/// It is latency as much as memory. An agent is handed its whole history on
+/// every turn, so the cost of a session climbs with its length and never levels
+/// off; that is precisely what [`RunContext::load_state`] and
+/// [`RunContext::store_state`] exist to let an agent avoid, and they remain the
+/// real answer. This is the backstop for the deployments that do not use them.
+///
+/// 32 MiB, larger than any single run's limit because a session accumulates
+/// across many of them. That is on the order of five million words of plain
+/// text, so an ordinary conversation never approaches it and one that does has
+/// stopped being a conversation. Set it with
+/// [`AcpServerBuilder::max_session_bytes`], or remove it with
+/// [`AcpServerBuilder::without_session_limit`].
+pub const DEFAULT_MAX_SESSION_BYTES: usize = 32 * 1024 * 1024;
+
 /// How long a readiness answer is reused before the store is asked again.
 ///
 /// A load balancer probes on a schedule, from every replica, forever. Without a
@@ -551,6 +573,7 @@ pub struct AcpServer {
     await_timeout: Option<Duration>,
     max_request_bytes: usize,
     max_run_output_bytes: Option<usize>,
+    max_session_bytes: Option<usize>,
     in_flight: Arc<InFlight>,
     /// The last readiness answer and when it was given.
     readiness: Mutex<Option<(tokio::time::Instant, Readiness)>>,
@@ -623,6 +646,11 @@ impl AcpServer {
     /// The ceiling on one run's accumulated output, or `None` if removed.
     pub fn max_run_output_bytes(&self) -> Option<usize> {
         self.max_run_output_bytes
+    }
+
+    /// The ceiling on one session's history, or `None` if removed.
+    pub fn max_session_bytes(&self) -> Option<usize> {
+        self.max_session_bytes
     }
 
     /// How many runs are running an agent body right now.
@@ -897,6 +925,9 @@ impl AcpServer {
         // Resolve the session before the run, so history is captured as it
         // stood before this run's input was added.
         let (session, history) = self.resolve_session(&request).await?;
+        if session.is_some() {
+            self.check_session_capacity(&history, &request.input)?;
+        }
 
         self.launch(
             LaunchSpec {
@@ -1092,6 +1123,43 @@ impl AcpServer {
             "started a replacement run"
         );
         Ok(replacement)
+    }
+
+    /// Refuse a run that would push its session past the ceiling.
+    ///
+    /// A **gate before the work, not a cap during it.** The client is told no
+    /// while it can still do something about the answer — start a fresh
+    /// session, or summarise the conversation into
+    /// [`store_state`](RunContext::store_state) — rather than after an agent
+    /// has spent a minute producing output that cannot be recorded.
+    ///
+    /// Which is why nothing checks the *output* append at the other end. Doing
+    /// so would need a second read of the session, and it would deliver its
+    /// verdict at the worst possible moment: after the work, to a caller with
+    /// no remaining choice. The overshoot that buys is bounded, and bounded by
+    /// something already enforced — a run cannot contribute more than
+    /// [`max_run_output_bytes`](AcpServerBuilder::max_run_output_bytes) — so a
+    /// session can exceed this ceiling by at most one run's worth of output,
+    /// and then no further run is admitted to it. A ceiling with a known
+    /// overshoot, rather than an exact cap paid for on every run.
+    ///
+    /// `invalid_input` rather than `server_error`: nothing has gone wrong on
+    /// this side, and the caller is the only one who can resolve it. That also
+    /// makes it a 400 and so not retried, which is correct — retrying is
+    /// exactly the wrong response to a session that is full.
+    fn check_session_capacity(&self, history: &[Message], input: &[Message]) -> Result<(), Error> {
+        let Some(limit) = self.max_session_bytes else { return Ok(()) };
+
+        let held: usize = history.iter().map(Message::approximate_size).sum();
+        let adding: usize = input.iter().map(Message::approximate_size).sum();
+        if held.saturating_add(adding) <= limit {
+            return Ok(());
+        }
+
+        Err(Error::invalid_input(format!(
+            "session history would exceed {limit} bytes ({held} held, {adding} more); \
+             start a new session, or summarise the conversation with store_state"
+        )))
     }
 
     /// Determine the session for a run and the history it should see.
@@ -1548,6 +1616,7 @@ pub struct AcpServerBuilder {
     max_concurrent_runs: Option<usize>,
     max_request_bytes: Option<usize>,
     max_run_output_bytes: Option<Option<usize>>,
+    max_session_bytes: Option<Option<usize>>,
     max_run_event_bytes: Option<usize>,
     await_timeout: Option<Option<Duration>>,
 }
@@ -1758,6 +1827,37 @@ impl AcpServerBuilder {
         self
     }
 
+    /// Refuse a run whose session already holds `max_session_bytes` of history.
+    /// Defaults to [`DEFAULT_MAX_SESSION_BYTES`].
+    ///
+    /// Checked *before* the run starts, so the caller is told no while it can
+    /// still act on the answer. The reply is `invalid_input` naming the limit
+    /// and pointing at [`store_state`](RunContext::store_state), which is the
+    /// actual answer to a conversation this long — this setting is the backstop
+    /// for deployments that do not use it.
+    ///
+    /// Not a hard cap: a run already admitted still records its output, so a
+    /// session may exceed this by up to one
+    /// [`max_run_output_bytes`](AcpServerBuilder::max_run_output_bytes) before
+    /// the next run is turned away.
+    ///
+    /// Applies to the runs this server admits, so unlike the store limits it is
+    /// **not** ignored when a store is supplied.
+    pub fn max_session_bytes(mut self, max_session_bytes: usize) -> Self {
+        self.max_session_bytes = Some(Some(max_session_bytes));
+        self
+    }
+
+    /// Let a session's history grow without limit.
+    ///
+    /// The growth is real and it is not only storage: an agent is handed its
+    /// whole history every turn, so an unbounded session gets steadily slower
+    /// as well as steadily larger.
+    pub fn without_session_limit(mut self) -> Self {
+        self.max_session_bytes = Some(None);
+        self
+    }
+
     /// Cap how many runs the default [`InMemoryStore`] retains. Defaults to
     /// [`DEFAULT_MAX_RUNS`]. Active runs are never evicted.
     ///
@@ -1882,6 +1982,7 @@ impl AcpServerBuilder {
             max_run_output_bytes: self
                 .max_run_output_bytes
                 .unwrap_or(Some(DEFAULT_MAX_RUN_OUTPUT_BYTES)),
+            max_session_bytes: self.max_session_bytes.unwrap_or(Some(DEFAULT_MAX_SESSION_BYTES)),
             in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
             readiness: Mutex::new(None),
         })
