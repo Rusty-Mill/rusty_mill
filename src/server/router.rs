@@ -126,9 +126,11 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
         None,
         engine.mtls_header(),
     );
+    let mut auth_context = None;
     if envelope.method.as_str() != methods::GET_EXTENDED_AGENT_CARD {
-        if let Err(auth_err) = engine.authenticate(&credentials).await {
-            return jsonrpc_error_response(envelope.id, auth_err);
+        match engine.authenticate(&credentials).await {
+            Ok(ctx) => auth_context = ctx,
+            Err(auth_err) => return jsonrpc_error_response(envelope.id, auth_err),
         }
     }
 
@@ -146,35 +148,35 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
     match envelope.method.as_str() {
         methods::SEND_MESSAGE => {
             let req: SendMessageRequest = parse_params!();
-            match engine.send_message(req).await {
+            match engine.send_message(req, auth_context.as_ref()).await {
                 Ok(result) => jsonrpc_ok(envelope.id, &result),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::SEND_STREAMING_MESSAGE => {
             let req: SendMessageRequest = parse_params!();
-            match engine.send_streaming_message(req).await {
+            match engine.send_streaming_message(req, auth_context.as_ref()).await {
                 Ok(stream) => sse_response(envelope.id, stream),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::GET_TASK => {
             let req: GetTaskRequest = parse_params!();
-            match engine.get_task(req).await {
+            match engine.get_task(req, auth_context.as_ref()).await {
                 Ok(task) => jsonrpc_ok(envelope.id, &task),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::LIST_TASKS => {
             let req: ListTasksRequest = parse_params!();
-            match engine.list_tasks(req).await {
+            match engine.list_tasks(req, auth_context.as_ref()).await {
                 Ok(res) => jsonrpc_ok(envelope.id, &res),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::CANCEL_TASK => {
             let req: CancelTaskRequest = parse_params!();
-            match engine.cancel_task(req).await {
+            match engine.cancel_task(req, auth_context.as_ref()).await {
                 Ok(task) => jsonrpc_ok(envelope.id, &task),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
@@ -182,35 +184,50 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
         methods::SUBSCRIBE_TO_TASK => {
             let req: SubscribeToTaskRequest = parse_params!();
             let since_seq = parse_last_event_id(&headers);
-            match engine.subscribe_to_task(req, since_seq).await {
+            match engine
+                .subscribe_to_task(req, since_seq, auth_context.as_ref())
+                .await
+            {
                 Ok(stream) => sse_subscribe_response(envelope.id, stream),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::CREATE_TASK_PUSH_NOTIFICATION_CONFIG => {
             let req: TaskPushNotificationConfig = parse_params!();
-            match engine.create_push_notification_config(req).await {
+            match engine
+                .create_push_notification_config(req, auth_context.as_ref())
+                .await
+            {
                 Ok(cfg) => jsonrpc_ok(envelope.id, &cfg),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::GET_TASK_PUSH_NOTIFICATION_CONFIG => {
             let req: GetTaskPushNotificationConfigRequest = parse_params!();
-            match engine.get_push_notification_config(req).await {
+            match engine
+                .get_push_notification_config(req, auth_context.as_ref())
+                .await
+            {
                 Ok(cfg) => jsonrpc_ok(envelope.id, &cfg),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::LIST_TASK_PUSH_NOTIFICATION_CONFIGS => {
             let req: ListTaskPushNotificationConfigsRequest = parse_params!();
-            match engine.list_push_notification_configs(req).await {
+            match engine
+                .list_push_notification_configs(req, auth_context.as_ref())
+                .await
+            {
                 Ok(res) => jsonrpc_ok(envelope.id, &res),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }
         }
         methods::DELETE_TASK_PUSH_NOTIFICATION_CONFIG => {
             let req: DeleteTaskPushNotificationConfigRequest = parse_params!();
-            match engine.delete_push_notification_config(req).await {
+            match engine
+                .delete_push_notification_config(req, auth_context.as_ref())
+                .await
+            {
                 Ok(()) => jsonrpc_ok(envelope.id, &Value::Null),
                 Err(e) => jsonrpc_error_response(envelope.id, e),
             }

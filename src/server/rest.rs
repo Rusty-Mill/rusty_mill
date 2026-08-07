@@ -58,7 +58,7 @@ use crate::types::{
     StreamResponse, SubscribeToTaskRequest, TaskPushNotificationConfig,
 };
 
-use super::auth::extract_credentials;
+use super::auth::{extract_credentials, AuthContext};
 use super::engine::{check_version, parse_extensions_header, Engine};
 
 const A2A_JSON: &str = "application/a2a+json";
@@ -171,7 +171,7 @@ async fn require_auth(
     engine: &Engine,
     headers: &HeaderMap,
     query: &HashMap<String, String>,
-) -> Result<(), Response> {
+) -> Result<Option<AuthContext>, Response> {
     check_version(headers.get("A2A-Version").and_then(|v| v.to_str().ok())).map_err(rest_error)?;
 
     let declared_extensions =
@@ -191,11 +191,7 @@ async fn require_auth(
         Some(query),
         engine.mtls_header(),
     );
-    engine
-        .authenticate(&credentials)
-        .await
-        .map(|_| ())
-        .map_err(rest_error)
+    engine.authenticate(&credentials).await.map_err(rest_error)
 }
 
 /// Like [`axum::Json`], but a rejection (malformed JSON, or JSON that
@@ -312,18 +308,19 @@ async fn message_action_impl(
     headers: HeaderMap,
     mut req: SendMessageRequest,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &HashMap::new()).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     if tenant.is_some() {
         req.tenant = tenant;
     }
     match action.as_str() {
-        "message:send" => match engine.send_message(req).await {
+        "message:send" => match engine.send_message(req, auth.as_ref()).await {
             Ok(result) => rest_ok(&result),
             Err(e) => rest_error(e),
         },
-        "message:stream" => match engine.send_streaming_message(req).await {
+        "message:stream" => match engine.send_streaming_message(req, auth.as_ref()).await {
             Ok(stream) => sse_response(stream),
             Err(e) => rest_error(e),
         },
@@ -374,9 +371,10 @@ async fn get_task_or_subscribe_impl(
     query: GetTaskQuery,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     match id_and_action.rsplit_once(':') {
         Some((id, "subscribe")) => {
             let req = SubscribeToTaskRequest {
@@ -384,7 +382,7 @@ async fn get_task_or_subscribe_impl(
                 id: id.to_string(),
             };
             let since_seq = parse_last_event_id(&headers);
-            match engine.subscribe_to_task(req, since_seq).await {
+            match engine.subscribe_to_task(req, since_seq, auth.as_ref()).await {
                 Ok(stream) => sse_subscribe_response(stream),
                 Err(e) => rest_error(e),
             }
@@ -398,7 +396,7 @@ async fn get_task_or_subscribe_impl(
                 id: id_and_action,
                 history_length: query.history_length,
             };
-            match engine.get_task(req).await {
+            match engine.get_task(req, auth.as_ref()).await {
                 Ok(task) => rest_ok(&task),
                 Err(e) => rest_error(e),
             }
@@ -434,13 +432,14 @@ async fn list_tasks_impl(
     mut req: ListTasksRequest,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     if tenant.is_some() {
         req.tenant = tenant;
     }
-    match engine.list_tasks(req).await {
+    match engine.list_tasks(req, auth.as_ref()).await {
         Ok(res) => rest_ok(&res),
         Err(e) => rest_error(e),
     }
@@ -481,9 +480,10 @@ async fn task_action_impl(
     headers: HeaderMap,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let Some((id, action)) = id_and_action.rsplit_once(':') else {
         return rest_error(A2aError::InvalidRequest(format!(
             "expected \"{{id}}:cancel\" or \"{{id}}:subscribe\", got \"{id_and_action}\""
@@ -496,7 +496,7 @@ async fn task_action_impl(
                 id: id.to_string(),
                 metadata: None,
             };
-            match engine.cancel_task(req).await {
+            match engine.cancel_task(req, auth.as_ref()).await {
                 Ok(task) => rest_ok(&task),
                 Err(e) => rest_error(e),
             }
@@ -507,7 +507,7 @@ async fn task_action_impl(
                 id: id.to_string(),
             };
             let since_seq = parse_last_event_id(&headers);
-            match engine.subscribe_to_task(req, since_seq).await {
+            match engine.subscribe_to_task(req, since_seq, auth.as_ref()).await {
                 Ok(stream) => sse_subscribe_response(stream),
                 Err(e) => rest_error(e),
             }
@@ -547,14 +547,18 @@ async fn create_push_notification_config_impl(
     headers: HeaderMap,
     mut config: TaskPushNotificationConfig,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &HashMap::new()).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     config.task_id = Some(task_id);
     if tenant.is_some() {
         config.tenant = tenant;
     }
-    match engine.create_push_notification_config(config).await {
+    match engine
+        .create_push_notification_config(config, auth.as_ref())
+        .await
+    {
         Ok(cfg) => rest_ok(&cfg),
         Err(e) => rest_error(e),
     }
@@ -591,15 +595,16 @@ async fn get_push_notification_config_impl(
     headers: HeaderMap,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let req = GetTaskPushNotificationConfigRequest {
         tenant,
         task_id,
         id: config_id,
     };
-    match engine.get_push_notification_config(req).await {
+    match engine.get_push_notification_config(req, auth.as_ref()).await {
         Ok(cfg) => rest_ok(&cfg),
         Err(e) => rest_error(e),
     }
@@ -645,16 +650,17 @@ async fn list_push_notification_configs_impl(
     query: PageQuery,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let req = ListTaskPushNotificationConfigsRequest {
         tenant,
         task_id,
         page_size: query.page_size,
         page_token: query.page_token,
     };
-    match engine.list_push_notification_configs(req).await {
+    match engine.list_push_notification_configs(req, auth.as_ref()).await {
         Ok(res) => rest_ok(&res),
         Err(e) => rest_error(e),
     }
@@ -691,15 +697,16 @@ async fn delete_push_notification_config_impl(
     headers: HeaderMap,
     raw_query: HashMap<String, String>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
-        return resp;
-    }
+    let auth = match require_auth(&engine, &headers, &raw_query).await {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
     let req = DeleteTaskPushNotificationConfigRequest {
         tenant,
         task_id,
         id: config_id,
     };
-    match engine.delete_push_notification_config(req).await {
+    match engine.delete_push_notification_config(req, auth.as_ref()).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => rest_error(e),
     }

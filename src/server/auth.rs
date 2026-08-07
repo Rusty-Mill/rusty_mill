@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::error::{A2aError, Result};
-use crate::types::{SecurityRequirement, SecurityScheme};
+use crate::types::{SecurityRequirement, SecurityScheme, Task};
 
 /// The outcome of a successful [`AuthVerifier::verify`] call: whatever the
 /// application wants to say about who this request is from. Not currently
@@ -102,6 +102,41 @@ pub trait AuthVerifier: Send + Sync {
         requirement: &SecurityRequirement,
         credentials: &Credentials,
     ) -> Result<AuthContext>;
+
+    /// Spec Section 13.1 ("Implementations MUST ensure appropriate scope
+    /// limitation based on the authenticated caller's authorization
+    /// boundaries... even when `contextId` or other filter parameters are
+    /// not specified"): called, whenever a request that successfully
+    /// authenticated (against a non-empty `securityRequirements`) goes on
+    /// to touch a specific task, to decide whether `context`'s caller may
+    /// access `task`.
+    ///
+    /// For `ListTasks`, called once per candidate task already matching
+    /// the request's own filters; a task this rejects is silently
+    /// dropped from the result rather than failing the whole call,
+    /// matching the MUST's "only return tasks visible to the
+    /// authenticated client" (not "reject the request"). For every other
+    /// operation that touches one specific task - `GetTask`,
+    /// `CancelTask`, `SubscribeToTask`, the push-notification-config CRUD
+    /// family, and a `SendMessage`/`SendStreamingMessage` continuing an
+    /// existing task - rejecting fails the whole request with whatever
+    /// error this returns.
+    ///
+    /// This crate has no way to know what "authorized" means for your
+    /// deployment (exact ownership? role-based? team-shared? admin
+    /// override?) - the same reason [`AuthVerifier::verify`] doesn't try
+    /// to decide what a valid credential is - so the default
+    /// implementation grants access unconditionally, preserving the
+    /// tenant-only isolation every deployment already gets even without
+    /// implementing this.
+    async fn authorize_task(
+        &self,
+        _context: &AuthContext,
+        _tenant: Option<&str>,
+        _task: &Task,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Extracts whatever raw credential material each of `schemes` calls for,

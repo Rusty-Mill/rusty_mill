@@ -244,5 +244,10 @@ name = "server_message_ids"
 path = "tests/server_message_ids.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "task_authorization_scoping"
+path = "tests/task_authorization_scoping.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
