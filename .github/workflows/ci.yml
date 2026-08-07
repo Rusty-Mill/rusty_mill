@@ -125,3 +125,4 @@ jobs:
           cargo test --features grpc,server --test tenant_isolation_grpc -- --list
           cargo test --features client,server --test rest_client -- --list
           cargo test --features client,grpc,server --test grpc_client -- --list
+          cargo test --features server --test rest_tenant_path_bindings -- --list
