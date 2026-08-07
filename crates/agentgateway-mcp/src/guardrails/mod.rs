@@ -48,7 +48,7 @@ use crate::rules::Subject;
 
 pub use wire::{
     AuthorizationError, HeaderMutation, McpHeader, McpRequest, McpRequestResult, McpResponse,
-    McpResponseResult, authorization_error, request_result, response_result,
+    McpResponseResult, authorization_error, request_result, response_result, to_proto_value,
 };
 
 /// Budget for one processor call when the config names none.
@@ -200,14 +200,98 @@ impl From<HeaderChanges> for crate::mutating_client::HeaderOverride {
     }
 }
 
+/// Values a processor attached to a call, for whoever is watching.
+///
+/// `McpRequestResult.metadata` is an arbitrary bag a processor fills in — the
+/// classification it made, the rule it matched, the tenant it resolved. This
+/// gateway puts it on the request's telemetry span, so a decision a guardrail
+/// took in-band is visible in the trace afterwards rather than only in the
+/// processor's own logs.
+///
+/// Upstream stashes the same bag for downstream CEL filters to read. Those do
+/// not exist here, and a bag nothing can read is worse than no bag at all.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Annotations(Vec<(String, serde_json::Value)>);
+
+/// How many keys one call may carry onto a span.
+///
+/// A processor is an external service, and an unbounded key count would let it
+/// grow every span the gateway exports. Excess is dropped with a warning
+/// rather than truncating silently.
+const MAX_ANNOTATIONS: usize = 32;
+
+/// How long one annotation value may be once rendered.
+const MAX_ANNOTATION_BYTES: usize = 1024;
+
+impl Annotations {
+    /// Whether a processor sent anything.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The key/value pairs, in the order they were accepted.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &serde_json::Value)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v))
+    }
+
+    /// Fold one processor's answer into the running set.
+    ///
+    /// Later processors win on a key collision, which is upstream's rule and
+    /// the one that makes a chain read as a pipeline: the last thing to say
+    /// something about a call is the most informed.
+    fn merge(&mut self, metadata: prost_types::Struct) {
+        for (key, value) in metadata.fields {
+            let Some(value) = wire::proto_to_json(value) else {
+                tracing::debug!(
+                    key,
+                    "a processor sent an annotation with no JSON form; skipping"
+                );
+                continue;
+            };
+
+            let value = match &value {
+                serde_json::Value::String(text) if text.len() > MAX_ANNOTATION_BYTES => {
+                    tracing::warn!(
+                        key,
+                        len = text.len(),
+                        "a processor sent an oversized annotation; truncating"
+                    );
+                    let mut end = MAX_ANNOTATION_BYTES;
+                    while !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    serde_json::Value::String(text[..end].to_string())
+                }
+                _ => value,
+            };
+
+            let existing = self.0.iter().position(|(name, _)| name == &key);
+            match existing {
+                Some(at) => self.0[at].1 = value,
+                None if self.0.len() < MAX_ANNOTATIONS => self.0.push((key, value)),
+                None => {
+                    tracing::warn!(
+                        key,
+                        max = MAX_ANNOTATIONS,
+                        "a processor sent more annotations than a span will carry; dropping"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// What a processor's request-phase answer amounts to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RequestDecision {
     /// Pass, a rewritten body, or a refusal.
     pub outcome: Outcome,
     /// Header changes to apply to the upstream call. Empty on a refusal:
     /// side effects from a request that never happens would surprise.
     pub headers: HeaderChanges,
+    /// Values to put on the call's telemetry span. Empty on a refusal, for
+    /// the same reason.
+    pub annotations: Annotations,
 }
 
 /// JSON-RPC codes for refusals that have no standard MCP equivalent.
@@ -333,6 +417,7 @@ impl Guardrails {
         let mut current = params.map(<[u8]>::to_vec);
         let mut outcome = Outcome::Pass;
         let mut headers = HeaderChanges::default();
+        let mut annotations = Annotations::default();
 
         for processor in &self.processors {
             if !resolve(method, &processor.config.methods).runs_request() {
@@ -356,6 +441,7 @@ impl Guardrails {
                         return RequestDecision {
                             outcome,
                             headers: HeaderChanges::default(),
+                            annotations: Annotations::default(),
                         };
                     }
                     None => continue,
@@ -382,6 +468,7 @@ impl Guardrails {
                     return RequestDecision {
                         outcome: reject(error),
                         headers: HeaderChanges::default(),
+                        annotations: Annotations::default(),
                     };
                 }
             }
@@ -392,9 +479,16 @@ impl Guardrails {
             if let Some(mutation) = result.header_mutation {
                 headers.merge(mutation);
             }
+            if let Some(metadata) = result.metadata {
+                annotations.merge(metadata);
+            }
         }
 
-        RequestDecision { outcome, headers }
+        RequestDecision {
+            outcome,
+            headers,
+            annotations,
+        }
     }
 
     /// Run the response side of the chain.

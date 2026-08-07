@@ -16,6 +16,7 @@ mod guardrails;
 mod mutating_client;
 mod naming;
 mod rules;
+mod span;
 mod target;
 
 pub use federation::{Federation, FederationError, TokenClaims};
@@ -23,7 +24,7 @@ pub use gate::{Authorization, GateError, TargetFilter};
 pub use guardrails::{
     AuthorizationError, CallContext, Guardrails, GuardrailsError, HeaderMutation, McpHeader,
     McpRequest, McpRequestResult, McpResponse, McpResponseResult, Outcome, authorization_error,
-    request_result, response_result,
+    request_result, response_result, to_proto_value,
 };
 pub use mutating_client::{HeaderOverride, MutatingClient};
 pub use naming::{Resolution, ToolNamer};

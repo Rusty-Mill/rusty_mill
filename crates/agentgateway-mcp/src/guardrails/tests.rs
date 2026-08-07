@@ -29,6 +29,8 @@ enum Script {
     Hang,
     /// Pass, but ask for these header changes on the upstream call.
     Headers(Vec<(&'static str, &'static str)>, Vec<&'static str>),
+    /// Pass, attaching this metadata bag.
+    Annotate(serde_json::Value),
 }
 
 /// What the processor was asked, recorded for assertions.
@@ -137,6 +139,15 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                             }
                             _ => request_result::Result::Pass(Pass {}),
                         }),
+                        metadata: match &script {
+                            Script::Annotate(value) => {
+                                match wire::to_proto_value(value.clone()).kind {
+                                    Some(prost_types::value::Kind::StructValue(s)) => Some(s),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        },
                         header_mutation: match &script {
                             Script::Headers(set, remove) => Some(HeaderMutation {
                                 set: set
@@ -150,7 +161,6 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                             }),
                             _ => None,
                         },
-                        ..Default::default()
                     }
                     .encode_to_vec()
                 } else {
@@ -1079,4 +1089,195 @@ async fn the_response_phase_gets_the_subject_too() {
         Some("summarize")
     );
     stop.cancel();
+}
+
+/// One processor's metadata bag, folded into a running set.
+fn annotations(value: serde_json::Value) -> Annotations {
+    let mut annotations = Annotations::default();
+    let Some(prost_types::value::Kind::StructValue(structure)) = wire::to_proto_value(value).kind
+    else {
+        panic!("a metadata bag must be an object");
+    };
+    annotations.merge(structure);
+    annotations
+}
+
+fn pairs(annotations: &Annotations) -> Vec<(String, serde_json::Value)> {
+    let mut out: Vec<(String, serde_json::Value)> = annotations
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+#[test]
+fn every_json_scalar_survives_the_round_trip() {
+    // The bag goes out as a protobuf `Struct` and comes back as JSON, so a
+    // value that changes shape in transit would be a silent corruption.
+    let annotations = annotations(serde_json::json!({
+        "text": "phishing",
+        "score": 0.75,
+        "count": 3,
+        "blocked": true,
+        "absent": null,
+    }));
+
+    assert_eq!(
+        pairs(&annotations),
+        vec![
+            ("absent".to_string(), serde_json::Value::Null),
+            ("blocked".to_string(), serde_json::json!(true)),
+            ("count".to_string(), serde_json::json!(3.0)),
+            ("score".to_string(), serde_json::json!(0.75)),
+            ("text".to_string(), serde_json::json!("phishing")),
+        ],
+        "`count` comes back as 3.0: protobuf's Struct has one number type, a \
+         double, and that is the protocol's choice rather than ours"
+    );
+}
+
+#[test]
+fn nested_values_survive_as_structure() {
+    let annotations = annotations(serde_json::json!({
+        "rule": {"id": "r-1", "tags": ["pii", "email"]},
+    }));
+    assert_eq!(
+        pairs(&annotations),
+        vec![(
+            "rule".to_string(),
+            serde_json::json!({"id": "r-1", "tags": ["pii", "email"]})
+        )]
+    );
+}
+
+#[test]
+fn a_later_processor_wins_a_key_collision() {
+    // A chain reads as a pipeline: the last thing to say something about a
+    // call is the most informed.
+    let mut annotations = annotations(serde_json::json!({"verdict": "unknown"}));
+    let Some(prost_types::value::Kind::StructValue(second)) =
+        wire::to_proto_value(serde_json::json!({"verdict": "clean"})).kind
+    else {
+        unreachable!()
+    };
+    annotations.merge(second);
+
+    assert_eq!(
+        pairs(&annotations),
+        vec![("verdict".to_string(), serde_json::json!("clean"))]
+    );
+}
+
+#[test]
+fn an_oversized_value_is_truncated_rather_than_exported_whole() {
+    // A processor is an external service. An unbounded string would go
+    // straight onto every exported span.
+    let annotations = annotations(serde_json::json!({"blob": "x".repeat(5_000)}));
+    let (_, value) = &pairs(&annotations)[0];
+    assert_eq!(
+        value.as_str().map(str::len),
+        Some(MAX_ANNOTATION_BYTES),
+        "truncated to the cap"
+    );
+}
+
+#[test]
+fn truncation_does_not_split_a_character() {
+    // The cap is in bytes and the value is UTF-8, so cutting at the byte
+    // offset would panic on a multi-byte boundary.
+    let annotations = annotations(serde_json::json!({"blob": "é".repeat(5_000)}));
+    let (_, value) = &pairs(&annotations)[0];
+    let text = value.as_str().expect("a string");
+    assert!(text.len() <= MAX_ANNOTATION_BYTES);
+    assert!(text.chars().all(|c| c == 'é'));
+}
+
+#[test]
+fn a_flood_of_keys_is_capped() {
+    let bag: serde_json::Map<String, serde_json::Value> = (0..MAX_ANNOTATIONS + 10)
+        .map(|i| (format!("k{i:03}"), serde_json::json!(i)))
+        .collect();
+    let annotations = annotations(serde_json::Value::Object(bag));
+    assert_eq!(annotations.iter().count(), MAX_ANNOTATIONS);
+}
+
+#[tokio::test]
+async fn annotations_reach_the_caller_of_the_chain() {
+    let (host, _, stop) = processor(Script::Annotate(
+        serde_json::json!({"classification": "phishing", "score": 0.9}),
+    ))
+    .await;
+    let chain = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Request)],
+    )]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    assert_eq!(decision.outcome, Outcome::Pass);
+    assert_eq!(
+        pairs(&decision.annotations),
+        vec![
+            ("classification".to_string(), serde_json::json!("phishing")),
+            ("score".to_string(), serde_json::json!(0.9)),
+        ]
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn a_refusal_carries_no_annotations() {
+    // Same reason a refusal carries no header changes: a request that never
+    // happens should leave no trace on the one that replaces it.
+    let (annotator, _, stop_a) =
+        processor(Script::Annotate(serde_json::json!({"seen": true}))).await;
+    let (refuser, _, stop_b) = processor(Script::Refuse(
+        authorization_error::Code::PermissionDenied,
+        "no",
+    ))
+    .await;
+
+    let chain = chain(vec![
+        processor_config(&annotator, &[("tools/call", Phase::Request)]),
+        processor_config(&refuser, &[("tools/call", Phase::Request)]),
+    ]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    assert!(matches!(decision.outcome, Outcome::Reject { .. }));
+    assert!(decision.annotations.is_empty());
+    stop_a.cancel();
+    stop_b.cancel();
+}
+
+#[tokio::test]
+async fn annotations_accumulate_across_the_chain() {
+    let (first, _, stop_a) =
+        processor(Script::Annotate(serde_json::json!({"stage": "scan"}))).await;
+    let (second, _, stop_b) =
+        processor(Script::Annotate(serde_json::json!({"verdict": "clean"}))).await;
+
+    let chain = chain(vec![
+        processor_config(&first, &[("tools/call", Phase::Request)]),
+        processor_config(&second, &[("tools/call", Phase::Request)]),
+    ]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    assert_eq!(
+        pairs(&decision.annotations),
+        vec![
+            ("stage".to_string(), serde_json::json!("scan")),
+            ("verdict".to_string(), serde_json::json!("clean")),
+        ]
+    );
+    stop_a.cancel();
+    stop_b.cancel();
 }

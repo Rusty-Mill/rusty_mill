@@ -274,6 +274,35 @@ pub fn cel_to_json(value: cel::Value) -> Option<serde_json::Value> {
     })
 }
 
+/// Convert a protobuf `Struct` field value back into JSON.
+///
+/// The inverse of [`to_proto_value`], for reading what a processor sent.
+/// `None` when the value carries no kind at all, which a well-formed encoder
+/// never produces but a hand-rolled one might.
+pub fn proto_to_json(value: prost_types::Value) -> Option<serde_json::Value> {
+    use prost_types::value::Kind;
+    Some(match value.kind? {
+        Kind::NullValue(_) => serde_json::Value::Null,
+        Kind::BoolValue(b) => serde_json::Value::Bool(b),
+        Kind::NumberValue(n) => serde_json::Number::from_f64(n)
+            .map(serde_json::Value::Number)
+            // NaN and the infinities have no JSON form. Rendering them as text
+            // keeps the key rather than dropping the processor's answer.
+            .unwrap_or_else(|| serde_json::Value::String(n.to_string())),
+        Kind::StringValue(s) => serde_json::Value::String(s),
+        Kind::ListValue(list) => {
+            serde_json::Value::Array(list.values.into_iter().filter_map(proto_to_json).collect())
+        }
+        Kind::StructValue(structure) => serde_json::Value::Object(
+            structure
+                .fields
+                .into_iter()
+                .filter_map(|(k, v)| proto_to_json(v).map(|v| (k, v)))
+                .collect(),
+        ),
+    })
+}
+
 /// Convert a JSON value into the protobuf `Struct` field type.
 ///
 /// `prost_types::Value` has no `From<serde_json::Value>`, and the mapping is
