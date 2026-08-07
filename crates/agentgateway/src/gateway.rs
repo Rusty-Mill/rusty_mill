@@ -171,6 +171,7 @@ impl Gateway {
                         route.policies.mcp_authorization.as_ref(),
                         route.policies.mcp_guardrails.as_ref(),
                         route.policies.request_header_modifier.as_ref(),
+                        route.policies.url_rewrite.as_ref(),
                         backend_timeout,
                         &at,
                     )

@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_config::{HeaderModifier, McpAuthorization, McpBackend, McpGuardrails};
+use agentgateway_config::{
+    HeaderModifier, McpAuthorization, McpBackend, McpGuardrails, PathRewrite, UrlRewrite,
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -133,9 +135,21 @@ impl Federation {
         authorization: Option<&McpAuthorization>,
         guardrails: Option<&McpGuardrails>,
         request_headers: Option<&HeaderModifier>,
+        url_rewrite: Option<&UrlRewrite>,
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
+        // A path override only applies where it can be unambiguous: one
+        // target, speaking Streamable HTTP. Everything else `urlRewrite` can
+        // say about an MCP route is reported by `Config::lint` rather than
+        // guessed at here.
+        let path_override =
+            url_rewrite
+                .filter(|_| backend.targets.len() == 1)
+                .and_then(|rewrite| match &rewrite.path {
+                    Some(PathRewrite::Full(path)) => Some(path.as_str()),
+                    _ => None,
+                });
         let transform = match request_headers {
             Some(modifier) => Transform::new(modifier, &format!("{at}.requestHeaderModifier"))?,
             None => Transform::default(),
@@ -157,7 +171,7 @@ impl Federation {
         let mut targets = Vec::new();
         let mut degraded = Vec::new();
         for (i, config) in backend.targets.iter().enumerate() {
-            match Target::connect(config, &format!("{at}.targets[{i}]")).await {
+            match Target::connect(config, path_override, &format!("{at}.targets[{i}]")).await {
                 Ok(target) => {
                     tracing::info!(target = %target.name, "MCP target connected");
                     targets.push(target);

@@ -168,9 +168,10 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
-- `urlRewrite` on a route with an `mcp` backend — reported by `--check`, and
-  see [Reaching the upstream request](#reaching-the-upstream-request) for why
-  it cannot mean anything there
+- `urlRewrite.authority` and `urlRewrite.path.prefix` on a route with an `mcp`
+  backend, and `path.full` where the route has more than one target — all
+  reported by `--check`; `path.full` over a single `mcp:` target *is* applied,
+  see [Reaching the upstream request](#reaching-the-upstream-request)
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -646,21 +647,38 @@ the one going back out. CORS is added after the modifier runs, so a route
 cannot accidentally strip the headers that answer a preflight: those are the
 gateway's own protocol rather than the route's payload.
 
-`urlRewrite` is the one thing here that genuinely cannot apply, and it is
-reported rather than quietly ignored:
+`urlRewrite` mostly cannot apply here, and the one part that can is narrow.
 
-```
-warning: ...policies.urlRewrite: an `mcp` backend terminates the protocol rather than
-         forwarding a request line, so there is no URL to rewrite; the target's own
-         `mcp:` block names its host, port and path
+**`path.full` overrides a single target's path:**
+
+```yaml
+policies:
+  urlRewrite:
+    path: { full: /rpc }        # the target below is reached at /rpc
+backends:
+  - mcp:
+      targets:
+        - name: alpha
+          mcp: { host: 127.0.0.1, port: 3001, path: /mcp }
 ```
 
-Both of its fields — `authority` and `path` — describe a request line sent to
-an upstream. An MCP route never sends one: the gateway terminates the protocol
-and opens its own session to each target at the address that target's `mcp:`
-block already names. Honouring the policy would mean overriding a target's
-address from a route-level field that cannot say *which* target, so the honest
-answer is to say it does not apply.
+One target means there is no ambiguity about whose path is meant, which is the
+whole reason it is allowed there and nowhere else.
+
+Everything else about `urlRewrite` is reported by `--check` and at startup
+rather than quietly ignored:
+
+| | Why not |
+| --- | --- |
+| `authority` | An `mcp:` target names its own host and port. There is no authority here for a route-level policy to replace. |
+| `path.prefix` | The upstream path is the target's own configuration, not something derived from the request, so there is no matched prefix to replace. Use `full`. |
+| `path.full`, several targets | "The path" has no answer when there is more than one target. |
+| `path.full`, a `stdio` target | A pipe has no path. |
+
+The underlying reason is that an MCP route terminates the protocol rather than
+forwarding a request line: the gateway opens its own session to each target at
+the address that target names. A path is the one piece of that address a route
+can sensibly speak for, and only when there is exactly one target to speak for.
 
 ### The span itself
 

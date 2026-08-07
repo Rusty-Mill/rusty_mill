@@ -90,8 +90,11 @@ binds:
                   x-classification: "{{mcpGuardrails.classification}}"
               # Applies to the response the gateway itself returns; an MCP
               # route has no upstream HTTP response a client ever sees.
-              # `urlRewrite` is the one policy that cannot apply here at all,
-              # and `--check` says so.
+              #
+              # `urlRewrite` is mostly inapplicable here and `--check` says so,
+              # with one exception: `path.full` overrides the endpoint of a
+              # federation that has exactly one `mcp:` target. This example has
+              # two, so it would be reported.
               responseHeaderModifier:
                 set:
                   x-served-by: rusty-agent-gateway

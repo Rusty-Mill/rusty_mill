@@ -632,10 +632,64 @@ binds:
     assert_eq!(config.lint(), Vec::<String>::new());
 }
 
+/// A route with the given `urlRewrite` over one Streamable HTTP target.
+fn one_target_with_rewrite(rewrite: &str) -> Config {
+    Config::from_yaml(&format!(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+{rewrite}
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#
+    ))
+    .expect("should parse")
+}
+
 #[test]
-fn lint_reports_url_rewrite_on_an_mcp_route() {
-    // An `mcp` backend terminates the protocol rather than forwarding a
-    // request line, so there is no URL for a rewrite to act on.
+fn a_full_path_rewrite_over_one_mcp_target_lints_clean() {
+    // One target, so there is no ambiguity about whose path is meant.
+    assert_eq!(
+        one_target_with_rewrite("                path:\n                  full: /rpc").lint(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn lint_reports_an_authority_rewrite_on_an_mcp_route() {
+    // A target names its own host and port; there is no authority here for a
+    // route-level policy to replace.
+    let findings = one_target_with_rewrite("                authority: elsewhere:8080").lint();
+    assert!(
+        findings.iter().any(|f| f.contains("urlRewrite.authority")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn lint_reports_a_prefix_rewrite_on_an_mcp_route() {
+    // The upstream path is the target's own configuration rather than
+    // something derived from the request, so there is no matched prefix.
+    let findings =
+        one_target_with_rewrite("                path:\n                  prefix: /v2").lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("urlRewrite.path.prefix") && f.contains("use `full`")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn lint_reports_a_path_rewrite_over_more_than_one_target() {
     let config = Config::from_yaml(
         r#"
 binds:
@@ -644,13 +698,17 @@ binds:
       - routes:
           - policies:
               urlRewrite:
-                authority: "elsewhere:8080"
+                path:
+                  full: /rpc
             backends:
               - mcp:
                   targets:
-                    - name: t
+                    - name: a
                       mcp:
                         host: http://localhost:3001/mcp
+                    - name: b
+                      mcp:
+                        host: http://localhost:3002/mcp
 "#,
     )
     .expect("should parse");
@@ -659,7 +717,38 @@ binds:
     assert!(
         findings
             .iter()
-            .any(|f| f.contains("urlRewrite") && f.contains("no URL to rewrite")),
+            .any(|f| f.contains("exactly one target") && f.contains("this route has 2")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn lint_reports_a_path_rewrite_over_a_stdio_target() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                path:
+                  full: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      stdio:
+                        cmd: /bin/true
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("only an `mcp:` target has a path")),
         "{findings:?}"
     );
 }

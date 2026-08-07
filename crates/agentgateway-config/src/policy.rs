@@ -76,21 +76,7 @@ pub struct Policies {
 }
 
 impl Policies {
-    pub(crate) fn lint(&self, at: &str, serves_mcp: bool, findings: &mut Vec<String>) {
-        // `urlRewrite` names an authority and a path for a request line sent
-        // upstream. An MCP route never sends one: the gateway terminates the
-        // protocol and opens its own session to each target, whose `mcp:`
-        // block already names host, port and path. There is nothing here for
-        // a rewrite to act on, and honouring it would mean overriding a
-        // target's own address from a policy that cannot say which target.
-        if serves_mcp && self.url_rewrite.is_some() {
-            findings.push(format!(
-                "{at}.policies.urlRewrite: an `mcp` backend terminates the protocol rather \
-                 than forwarding a request line, so there is no URL to rewrite; the target's \
-                 own `mcp:` block names its host, port and path"
-            ));
-        }
-
+    pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
         let unimplemented: [(&str, bool); 3] = [
             (
                 "extAuthz.includeBody",

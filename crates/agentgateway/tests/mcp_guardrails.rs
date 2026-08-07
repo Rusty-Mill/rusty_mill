@@ -561,6 +561,25 @@ async fn http_target() -> (
     Arc<Mutex<Vec<Vec<(String, String)>>>>,
     CancellationToken,
 ) {
+    let (port, headers, _paths, shutdown) = http_target_at("/mcp").await;
+    (port, headers, shutdown)
+}
+
+/// The paths an HTTP target's requests arrived on.
+type SeenPaths = Arc<Mutex<Vec<String>>>;
+
+/// The same server, mounted where the caller asks and recording paths too.
+///
+/// Mounting somewhere other than `/mcp` is what lets a test tell a path
+/// override from a target that was reachable anyway.
+async fn http_target_at(
+    mount: &'static str,
+) -> (
+    u16,
+    Arc<Mutex<Vec<Vec<(String, String)>>>>,
+    SeenPaths,
+    CancellationToken,
+) {
     use rmcp::{
         ErrorData as McpError, ServerHandler,
         model::{
@@ -615,13 +634,19 @@ async fn http_target() -> (
         Default::default(),
     );
 
+    let paths: SeenPaths = Arc::new(Mutex::new(Vec::new()));
     let recorder = Arc::clone(&seen);
+    let path_recorder = Arc::clone(&paths);
     let app = axum::Router::new()
-        .nest_service("/mcp", service)
+        .nest_service(mount, service)
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let recorder = Arc::clone(&recorder);
+                let path_recorder = Arc::clone(&path_recorder);
                 async move {
+                    if let Ok(mut seen) = path_recorder.lock() {
+                        seen.push(request.uri().path().to_string());
+                    }
                     if let Ok(mut seen) = recorder.lock() {
                         seen.push(
                             request
@@ -651,7 +676,7 @@ async fn http_target() -> (
             .await;
     });
 
-    (port, seen, shutdown)
+    (port, seen, paths, shutdown)
 }
 
 /// Boot a gateway with one HTTP MCP target behind a guardrail.
@@ -1894,4 +1919,127 @@ binds:
         err.to_string().contains("responseHeaderModifier"),
         "and should say which policy: {err}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `urlRewrite.path` over a single target
+// ---------------------------------------------------------------------------
+
+/// An HTTP MCP target served at `/elsewhere` rather than the usual `/mcp`.
+///
+/// The target's own config still says `/mcp`, so the only way a call lands is
+/// if the route's `urlRewrite` moved it.
+async fn target_at(mount: &'static str) -> (u16, SeenPaths, CancellationToken) {
+    let (port, _headers, paths, shutdown) = http_target_at(mount).await;
+    (port, paths, shutdown)
+}
+
+#[tokio::test]
+async fn a_full_path_rewrite_moves_a_single_targets_endpoint() {
+    let (target_port, paths, stop_target) = target_at("/elsewhere").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                path:
+                  full: /elsewhere
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert_eq!(
+        config.lint(),
+        Vec::<String>::new(),
+        "one target, so the override is unambiguous and lints clean"
+    );
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("the gateway should reach the target at the overridden path");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+    let result = client
+        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .await
+        .expect("the call should reach the target");
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
+    );
+
+    let seen = paths.lock().expect("lock").clone();
+    assert!(
+        seen.iter().all(|p| p == "/elsewhere"),
+        "every upstream request should have gone to the overridden path, saw {seen:?}"
+    );
+    assert!(!seen.is_empty(), "the target should have been reached");
+
+    let _ = client.cancel().await;
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn without_the_rewrite_the_targets_own_path_is_used() {
+    // The control: the same target mounted somewhere the config does not name
+    // must not be reachable, or the test above proves nothing.
+    let (target_port, _paths, stop_target) = target_at("/elsewhere").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        Gateway::build(&config, None).await.is_err(),
+        "nothing is served at /mcp, so the federation should have no reachable target"
+    );
+
+    stop_target.cancel();
 }
