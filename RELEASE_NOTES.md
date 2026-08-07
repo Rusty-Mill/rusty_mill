@@ -6,6 +6,37 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## manifest: edition 2021 + declared 1.88 MSRV, so rustils can depend on this crate
+**2026-08-07** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
+
+- **Changed:** `edition = "2024"` → `"2021"`, and `rust-version = "1.88"`
+  declared for the first time. This is a packaging change, not a language
+  one — no source file changed. Cargo parses the manifest of every
+  resolved dependency, *including an optional one whose feature is off*,
+  so an edition-2024 manifest here fails `cargo check` outright for any
+  consumer on a pre-1.85 toolchain. rustils keeps a 1.75 MSRV leg in its
+  CI matrix and now wires this crate in as an optional, feature-gated
+  Windows backend (`platform-windows`'s `track-w`, off by default), which
+  is only viable if the dependency's mere presence costs that floor
+  nothing. `rusty_libc` — adopted into rustils the same way, behind
+  `track-p` — already has exactly this shape.
+- **Changed:** `[lints.rust] unsafe_op_in_unsafe_fn = "deny"` added, and
+  `rustfmt.toml` added pinning `style_edition = "2024"`. Both exist to
+  make the edition drop a no-op in every respect except manifest
+  parsing: the first keeps edition 2024's "an `unsafe fn` body is not an
+  implicit `unsafe` block" rule (already how this crate is written
+  throughout), the second stops rustfmt — whose style edition otherwise
+  follows the crate edition — from reflowing the entire codebase.
+- **Added:** an `msrv` CI job (Rust 1.88, cross-compiled to
+  `x86_64-pc-windows-gnu`). A `rust-version` nobody compiles against
+  drifts upward silently on the first use of a newer library API, and
+  this one is now load-bearing for a real consumer. The 1.88 figure was
+  measured, not guessed: `impl Default for *mut T` stabilized there, and
+  `#[derive(Default)]` on the OVERLAPPED/handle-bearing structs in
+  `watch`/`net`/`conpty` needs it — 1.87 fails, 1.88 is clean.
+
+---
+
 ## PR #266 — conpty: expose CreatePseudoConsole's PSEUDOCONSOLE_INHERIT_CURSOR flag
 **2026-08-05** · [#266](https://github.com/baileyrd/rusty_win32/pull/266)
 

@@ -5,6 +5,33 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- **Manifest compatibility, so rustils can adopt this crate as a
+  dependency.** `edition` dropped from 2024 to 2021 and `rust-version =
+  "1.88"` declared for the first time. Cargo parses the manifest of every
+  *resolved* dependency — including an optional one whose feature is
+  switched off — so an `edition = "2024"` manifest here made
+  `cargo check` fail outright for any consumer on a toolchain older than
+  1.85, before compiling a line. rustils holds a 1.75 MSRV leg on its CI
+  matrix and wires this crate in as an optional, feature-gated Windows
+  backend (`platform-windows`'s `track-w`), which only works if merely
+  *having* the dependency present costs its floor nothing. Same shape the
+  sibling crate `rusty_libc` already uses for the same adoption
+  (edition 2021, `rust-version = "1.88"`).
+  - Nothing about the crate's safety discipline changed: the one
+    edition-2024 default it relies on, `unsafe_op_in_unsafe_fn`, is
+    re-asserted explicitly as `deny` in `[lints.rust]`, matching how
+    every `unsafe fn` in this crate is already written.
+  - Nothing about the crate's formatting changed either: `rustfmt.toml`
+    pins `style_edition = "2024"`, since rustfmt otherwise follows the
+    crate edition and would have reflowed the whole codebase (`use`-list
+    sort order, single-line `if`/`else`, trailing-comment indentation).
+  - The declared 1.88 floor is real and now verified in CI by a new
+    `msrv` job: `impl Default for *mut T` stabilized in 1.88, and
+    `#[derive(Default)]` on the OVERLAPPED/handle-bearing structs in
+    `watch`/`net`/`conpty` needs it — 1.87 fails to compile, 1.88 is
+    clean.
+
+### Changed
 - `gap-analysis.md` (the `conpty`-vs-real-Win32-ConPTY parity-loop pass,
   PR #265) closed out and moved to `docs/archive/gap-analysis-conpty.md`
   with a status banner: one row shipped (#263, PR #266), the other
