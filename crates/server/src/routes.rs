@@ -197,10 +197,18 @@ fn in_admin_scope(identity: &AdminIdentity, client: &ClientConfig) -> bool {
     }
 }
 
-/// Resolve which rate-limit bucket a request falls into: the named client
-/// its bearer token matches, or (if `server.default_rate_limit_rpm` is
-/// set) a bucket keyed by source IP. Returns `None` if no limit applies —
-/// an unmatched caller with no configured default has no cap.
+/// Resolve which rate-limit bucket a request falls into: the identity
+/// `resolve_client_identity` already resolved (a static-key or
+/// JWT-claim-mapped `[[clients]]` name), or (if
+/// `server.default_rate_limit_rpm` is set) a bucket keyed by source IP.
+/// Returns `None` if no limit applies — an unmatched caller with no
+/// configured default has no cap.
+///
+/// The rpm for a resolved identity always comes from `state.clients`
+/// (the `ClientConfig` itself), not `state.client_keys`'s embedded rpm —
+/// a JWT-mapped identity has no entry in `client_keys` at all (it never
+/// authenticated via a static key), so this is the one lookup that works
+/// uniformly for both paths.
 ///
 /// The source IP is the raw TCP peer address; behind a reverse proxy this
 /// is the proxy's address, not the real client's, unless you run
@@ -210,12 +218,19 @@ fn in_admin_scope(identity: &AdminIdentity, client: &ClientConfig) -> bool {
 /// bucket).
 fn resolve_rate_limit(
     state: &AppState,
-    headers: &HeaderMap,
+    client_name: Option<&str>,
     addr: SocketAddr,
 ) -> Option<(String, u32)> {
-    if let Some(token) = bearer_token(headers) {
-        if let Some((name, rpm)) = state.client_keys.read().unwrap().get(token) {
-            return Some((format!("client:{name}"), *rpm));
+    if let Some(name) = client_name {
+        let rpm = state
+            .clients
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.requests_per_minute);
+        if let Some(rpm) = rpm {
+            return Some((format!("client:{name}"), rpm));
         }
     }
     state
@@ -258,19 +273,38 @@ fn apply_rate_limit_headers(resp: &mut Response, status: &RateLimitStatus) {
     }
 }
 
-/// The configured `[[clients]]` name whose key matches this request's
-/// bearer token, if any. `None` for an unauthenticated request, one using
-/// only the shared `server.api_key_env` token, or an unmatched caller —
-/// spend budgets only apply to named clients, never the IP-bucketed
-/// fallback.
-fn matched_client_name(state: &AppState, headers: &HeaderMap) -> Option<String> {
+/// The `[[clients]]` name this request authenticates as, if any. Tried in
+/// order:
+/// 1. The bearer token directly matches a configured client key (the
+///    existing, static-key path).
+/// 2. If `[jwt].client_claim` is configured, the token verifies as a JWT
+///    (re-verified here -- `check_auth` already checked it once for the
+///    authentication decision, but discards the claims, so this is a
+///    second, cheap decode/signature-check, not a second *auth* check:
+///    `check_auth` already ran first and would have rejected an invalid
+///    token before this function is ever reached) and that claim's string
+///    value matches a configured client's `name`.
+///
+/// `None` for an unauthenticated request, one using only the shared
+/// `server.api_key_env` token, a JWT with no configured/matching claim, or
+/// any other unmatched caller — spend budgets and per-subject rate limits
+/// only apply to a resolved identity, never the IP-bucketed fallback.
+async fn resolve_client_identity(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let token = bearer_token(headers)?;
+    if let Some((name, _)) = state.client_keys.read().unwrap().get(token) {
+        return Some(name.clone());
+    }
+    let jwt = state.jwt.as_ref()?;
+    let claim_name = jwt.client_claim()?;
+    let claims = jwt.verify(token).await?;
+    let claim_value = crate::jwt::claim_as_str(&claims, claim_name)?;
     state
-        .client_keys
+        .clients
         .read()
         .unwrap()
-        .get(token)
-        .map(|(name, _)| name.clone())
+        .iter()
+        .find(|c| c.name == claim_value)
+        .map(|c| c.name.clone())
 }
 
 fn budget_exceeded_response(
@@ -298,12 +332,42 @@ mod tests {
     use rp_core::RateLimiter;
     use rp_router::{Config, Router};
 
+    use crate::jwt::JwtVerifier;
+
     async fn test_state(
         client_keys: Vec<(&str, &str, u32)>,
         default_rate_limit_rpm: Option<u32>,
     ) -> AppState {
+        test_state_with_jwt(client_keys, default_rate_limit_rpm, None).await
+    }
+
+    // `clients` is always kept in sync with `client_keys` here, mirroring
+    // the invariant every admin create/update/delete handler maintains in
+    // production (`resolve_rate_limit` sources rpm from `clients`, not the
+    // rpm embedded in `client_keys`, so a test with an empty `clients` vec
+    // but a non-empty `client_keys` map would silently fall through to the
+    // IP-bucket default instead of the client bucket it looks like it's
+    // testing).
+    async fn test_state_with_jwt(
+        client_keys: Vec<(&str, &str, u32)>,
+        default_rate_limit_rpm: Option<u32>,
+        jwt: Option<Arc<JwtVerifier>>,
+    ) -> AppState {
         let router =
             Arc::new(Router::from_config(&Config::from_toml_str("providers = {}").unwrap()).await);
+        let clients = client_keys
+            .iter()
+            .map(|(_, name, rpm)| ClientConfig {
+                name: name.to_string(),
+                api_key_env: format!("{name}_KEY"),
+                requests_per_minute: *rpm,
+                budget_usd: None,
+                budget_period: BudgetPeriod::default(),
+                organization: None,
+                workspace: None,
+                role: ClientRole::Member,
+            })
+            .collect::<Vec<_>>();
         let client_keys = client_keys
             .into_iter()
             .map(|(key, name, rpm)| (key.to_string(), (name.to_string(), rpm)))
@@ -314,10 +378,10 @@ mod tests {
             client_keys: Arc::new(std::sync::RwLock::new(client_keys)),
             default_rate_limit_rpm,
             rate_limiter: Arc::new(RateLimiter::new()),
-            clients: Arc::new(std::sync::RwLock::new(vec![])),
+            clients: Arc::new(std::sync::RwLock::new(clients)),
             admin_key: None,
             max_body_bytes: 20 * 1024 * 1024,
-            jwt: None,
+            jwt,
             mcp: None,
             mcp_path: "/mcp".to_string(),
             concurrency_limiter: None,
@@ -342,54 +406,66 @@ mod tests {
     #[tokio::test]
     async fn resolve_rate_limit_is_none_with_no_client_match_and_no_default() {
         let state = test_state(vec![], None).await;
-        let result = resolve_rate_limit(&state, &HeaderMap::new(), addr());
+        let result = resolve_rate_limit(&state, None, addr());
         assert_eq!(result, None);
     }
 
     #[tokio::test]
     async fn resolve_rate_limit_falls_back_to_ip_bucket_when_default_is_configured() {
         let state = test_state(vec![], Some(60)).await;
-        let result = resolve_rate_limit(&state, &HeaderMap::new(), addr());
+        let result = resolve_rate_limit(&state, None, addr());
         assert_eq!(result, Some(("ip:127.0.0.1".to_string(), 60)));
     }
 
     #[tokio::test]
-    async fn resolve_rate_limit_uses_client_bucket_when_bearer_token_matches() {
+    async fn resolve_rate_limit_uses_client_bucket_when_an_identity_is_resolved() {
         let state = test_state(vec![("secret-key", "acme", 30)], None).await;
-        let result = resolve_rate_limit(&state, &bearer_headers("secret-key"), addr());
+        let result = resolve_rate_limit(&state, Some("acme"), addr());
         assert_eq!(result, Some(("client:acme".to_string(), 30)));
     }
 
     #[tokio::test]
     async fn resolve_rate_limit_prefers_client_bucket_over_ip_fallback() {
         let state = test_state(vec![("secret-key", "acme", 30)], Some(60)).await;
-        let result = resolve_rate_limit(&state, &bearer_headers("secret-key"), addr());
+        let result = resolve_rate_limit(&state, Some("acme"), addr());
         assert_eq!(
             result,
             Some(("client:acme".to_string(), 30)),
-            "a matched client key must win over the IP-bucket default"
+            "a resolved client identity must win over the IP-bucket default"
         );
     }
 
     #[tokio::test]
-    async fn resolve_rate_limit_falls_back_to_ip_when_bearer_present_but_unmatched() {
+    async fn resolve_rate_limit_falls_back_to_ip_when_no_identity_was_resolved() {
         let state = test_state(vec![("secret-key", "acme", 30)], Some(60)).await;
-        let result = resolve_rate_limit(&state, &bearer_headers("wrong-key"), addr());
+        let result = resolve_rate_limit(&state, None, addr());
         assert_eq!(result, Some(("ip:127.0.0.1".to_string(), 60)));
     }
 
     #[tokio::test]
-    async fn resolve_rate_limit_is_none_when_bearer_unmatched_and_no_default() {
+    async fn resolve_rate_limit_is_none_when_no_identity_was_resolved_and_no_default() {
         let state = test_state(vec![("secret-key", "acme", 30)], None).await;
-        let result = resolve_rate_limit(&state, &bearer_headers("wrong-key"), addr());
+        let result = resolve_rate_limit(&state, None, addr());
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_rate_limit_is_none_when_the_resolved_identity_has_no_matching_client() {
+        // Defensive: `client_name` came from `resolve_client_identity`, which
+        // only ever returns a name backed by a real `[[clients]]` entry, but
+        // `resolve_rate_limit` itself doesn't assume that -- an identity with
+        // no matching `ClientConfig` falls back to the IP bucket rather than
+        // panicking or fabricating a limit.
+        let state = test_state(vec![], Some(60)).await;
+        let result = resolve_rate_limit(&state, Some("ghost"), addr());
+        assert_eq!(result, Some(("ip:127.0.0.1".to_string(), 60)));
     }
 
     #[tokio::test]
     async fn resolve_rate_limit_ip_bucket_key_reflects_the_caller_address() {
         let state = test_state(vec![], Some(60)).await;
         let other_addr = SocketAddr::from(([10, 0, 0, 5], 8080));
-        let result = resolve_rate_limit(&state, &HeaderMap::new(), other_addr);
+        let result = resolve_rate_limit(&state, None, other_addr);
         assert_eq!(result, Some(("ip:10.0.0.5".to_string(), 60)));
     }
 
@@ -474,28 +550,140 @@ mod tests {
             .contains("retry after 5s"));
     }
 
-    // --- matched_client_name -------------------------------------------------
+    // --- resolve_client_identity -----------------------------------------
 
     #[tokio::test]
-    async fn matched_client_name_is_none_with_no_bearer_token() {
-        let state = test_state(vec![("secret-key", "acme", 30)], None).await;
-        assert_eq!(matched_client_name(&state, &HeaderMap::new()), None);
-    }
-
-    #[tokio::test]
-    async fn matched_client_name_is_none_for_an_unmatched_token() {
+    async fn resolve_client_identity_is_none_with_no_bearer_token() {
         let state = test_state(vec![("secret-key", "acme", 30)], None).await;
         assert_eq!(
-            matched_client_name(&state, &bearer_headers("wrong-key")),
+            resolve_client_identity(&state, &HeaderMap::new()).await,
             None
         );
     }
 
     #[tokio::test]
-    async fn matched_client_name_returns_the_name_for_a_matching_client_token() {
+    async fn resolve_client_identity_is_none_for_an_unmatched_token() {
         let state = test_state(vec![("secret-key", "acme", 30)], None).await;
         assert_eq!(
-            matched_client_name(&state, &bearer_headers("secret-key")),
+            resolve_client_identity(&state, &bearer_headers("wrong-key")).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_returns_the_name_for_a_matching_client_token() {
+        let state = test_state(vec![("secret-key", "acme", 30)], None).await;
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers("secret-key")).await,
+            Some("acme".to_string())
+        );
+    }
+
+    // --- resolve_client_identity (JWT claim mapping) ----------------------
+
+    fn hs256_jwt_config(client_claim: Option<&str>) -> rp_router::JwtConfig {
+        rp_router::JwtConfig {
+            jwks_url: None,
+            hs256_secret_env: Some("UNUSED_IN_TESTS".to_string()),
+            issuer: None,
+            audience: None,
+            jwks_cache_secs: 300,
+            client_claim: client_claim.map(str::to_string),
+        }
+    }
+
+    fn hs256_jwt(secret: &str, claims: &serde_json::Value) -> String {
+        use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+        encode(
+            &Header::new(Algorithm::HS256),
+            claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .unwrap()
+    }
+
+    fn future_exp() -> i64 {
+        (std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_maps_a_jwt_claim_to_a_matching_client() {
+        let cfg = hs256_jwt_config(Some("sub"));
+        let jwt = Arc::new(JwtVerifier::new(&cfg, Some("jwt-secret".to_string())).unwrap());
+        let state = test_state_with_jwt(vec![("secret-key", "acme", 30)], None, Some(jwt)).await;
+        let token = hs256_jwt(
+            "jwt-secret",
+            &serde_json::json!({"sub": "acme", "exp": future_exp()}),
+        );
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers(&token)).await,
+            Some("acme".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_is_none_when_the_jwt_claim_matches_no_client() {
+        let cfg = hs256_jwt_config(Some("sub"));
+        let jwt = Arc::new(JwtVerifier::new(&cfg, Some("jwt-secret".to_string())).unwrap());
+        let state = test_state_with_jwt(vec![("secret-key", "acme", 30)], None, Some(jwt)).await;
+        let token = hs256_jwt(
+            "jwt-secret",
+            &serde_json::json!({"sub": "someone-else", "exp": future_exp()}),
+        );
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers(&token)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_is_none_when_client_claim_is_not_configured() {
+        // `[jwt].client_claim` unset (the default) -- a valid JWT whose
+        // `sub` happens to match a client name still resolves to no
+        // identity, preserving pre-mapping behavior for anyone not opted in.
+        let cfg = hs256_jwt_config(None);
+        let jwt = Arc::new(JwtVerifier::new(&cfg, Some("jwt-secret".to_string())).unwrap());
+        let state = test_state_with_jwt(vec![("secret-key", "acme", 30)], None, Some(jwt)).await;
+        let token = hs256_jwt(
+            "jwt-secret",
+            &serde_json::json!({"sub": "acme", "exp": future_exp()}),
+        );
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers(&token)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_is_none_when_the_configured_claim_is_absent() {
+        let cfg = hs256_jwt_config(Some("email"));
+        let jwt = Arc::new(JwtVerifier::new(&cfg, Some("jwt-secret".to_string())).unwrap());
+        let state = test_state_with_jwt(vec![("secret-key", "acme", 30)], None, Some(jwt)).await;
+        let token = hs256_jwt(
+            "jwt-secret",
+            &serde_json::json!({"sub": "acme", "exp": future_exp()}),
+        );
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers(&token)).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_client_identity_prefers_a_static_key_match_over_jwt_mapping() {
+        let cfg = hs256_jwt_config(Some("sub"));
+        let jwt = Arc::new(JwtVerifier::new(&cfg, Some("jwt-secret".to_string())).unwrap());
+        let state = test_state_with_jwt(vec![("secret-key", "acme", 30)], None, Some(jwt)).await;
+        // The bearer token itself is a configured static key, so it's
+        // resolved directly -- never handed to jwt.verify() at all (a
+        // static key is never a well-formed JWT here, so this also proves
+        // the static-key branch short-circuits before attempting to decode
+        // it as one).
+        assert_eq!(
+            resolve_client_identity(&state, &bearer_headers("secret-key")).await,
             Some("acme".to_string())
         );
     }
@@ -1396,15 +1584,17 @@ pub async fn chat_completions(
         return resp;
     }
 
+    let client_name = resolve_client_identity(&state, &headers).await;
+
     let mut rate_limit_status = None;
-    if let Some((identity, rpm)) = resolve_rate_limit(&state, &headers, addr) {
+    if let Some((identity, rpm)) = resolve_rate_limit(&state, client_name.as_deref(), addr) {
         match state.rate_limiter.check(&identity, rpm) {
             Ok(status) => rate_limit_status = Some(status),
             Err(status) => return rate_limited_response(&state, &identity, &status),
         }
     }
 
-    let mut resp = chat_completions_dispatch(&state, &headers, req).await;
+    let mut resp = chat_completions_dispatch(&state, client_name, req).await;
     if let Some(status) = &rate_limit_status {
         apply_rate_limit_headers(&mut resp, status);
     }
@@ -1426,8 +1616,10 @@ pub async fn embeddings(
         return resp;
     }
 
+    let client_name = resolve_client_identity(&state, &headers).await;
+
     let mut rate_limit_status = None;
-    if let Some((identity, rpm)) = resolve_rate_limit(&state, &headers, addr) {
+    if let Some((identity, rpm)) = resolve_rate_limit(&state, client_name.as_deref(), addr) {
         match state.rate_limiter.check(&identity, rpm) {
             Ok(status) => rate_limit_status = Some(status),
             Err(status) => return rate_limited_response(&state, &identity, &status),
@@ -1450,7 +1642,7 @@ pub async fn embeddings(
 /// the response.
 async fn chat_completions_dispatch(
     state: &AppState,
-    headers: &HeaderMap,
+    client_name: Option<String>,
     mut req: ChatRequest,
 ) -> Response {
     if req.messages.is_empty() {
@@ -1471,7 +1663,6 @@ async fn chat_completions_dispatch(
         return router_error_response(e);
     }
 
-    let client_name = matched_client_name(state, headers);
     if let Some(name) = &client_name {
         if let Err(exceeded) = state.router.check_client_budget(name).await {
             return budget_exceeded_response(state, name, exceeded);

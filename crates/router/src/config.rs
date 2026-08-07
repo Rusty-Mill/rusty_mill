@@ -478,6 +478,19 @@ pub struct JwtConfig {
     /// (handles key rotation) rather than waiting out the rest of this TTL.
     #[serde(default = "default_jwks_cache_secs")]
     pub jwks_cache_secs: u64,
+    /// Name of a claim (e.g. `"sub"`) whose string value is matched against
+    /// a configured `[[clients]].name`. A match resolves the exact same
+    /// identity a static per-client API key would -- budget enforcement,
+    /// per-subject rate limiting, usage/spend tracking -- for the rest of
+    /// that request. Unset (the default) disables this entirely: a
+    /// JWT-authenticated caller gets the same access a valid
+    /// `server.api_key_env` token would, same as before this existed. No
+    /// match (claim absent from the token, or no `[[clients]]` entry with
+    /// that name) falls back to that same unmatched behavior, not an error
+    /// -- this is an identity-resolution layer on top of authentication
+    /// that `JwtVerifier::verify` already settled, not a second auth check.
+    #[serde(default)]
+    pub client_claim: Option<String>,
 }
 
 /// Configures `model: "auto"` -- a heuristic (not ML) complexity-based

@@ -870,6 +870,7 @@ hs256_secret_env = "JWT_SECRET"
 
 issuer = "https://your-idp.example.com/"   # optional -- verified against `iss` if set
 audience = "rusty-provider"                # optional -- verified against `aud` if set
+client_claim = "sub"                       # optional -- maps a claim to a [[clients]] name
 ```
 
 If both `hs256_secret_env` (resolved) and `jwks_url` are set, HS256 wins
@@ -894,13 +895,26 @@ algorithm-confusion hole.
 A request with `[jwt]` configured but no `server.api_key_env`/
 `[[clients]]` at all still requires *some* credential — `[jwt]` alone is
 enough to turn authentication on, the same as either of those would be by
-themselves. A JWT-authenticated caller gets the same access a valid
-`server.api_key_env` token would; this version doesn't map JWT claims to a
-`[[clients]]` identity, so there's no per-subject budget/spend tracking
-and rate limiting falls back to the same source-IP bucket an unmatched
-caller gets (see [Rate limiting](#rate-limiting) below) rather than a
-dedicated per-subject one. `/v1/admin/*` is unaffected by `[jwt]` entirely
-— it stays `server.admin_key_env`/admin-role `[[clients]]` only.
+themselves. Without `client_claim` set, a JWT-authenticated caller gets
+the same access a valid `server.api_key_env` token would: no per-subject
+budget/spend tracking, and rate limiting falls back to the same source-IP
+bucket an unmatched caller gets (see [Rate limiting](#rate-limiting)
+below).
+
+Setting `client_claim` (e.g. `"sub"`) maps a verified token's claim value
+to a configured `[[clients]].name` — a match resolves the exact same
+identity a static per-client API key would for the rest of that request:
+the client's own budget is enforced, its usage/spend is tracked under its
+name (visible via `/v1/usage`, `/v1/admin/clients/{name}/usage-history`),
+and it's rate-limited under its own `client:{name}` bucket instead of the
+IP fallback. No match (the claim is absent from the token, or no
+`[[clients]]` entry has that name) falls back to the same unmapped
+behavior above, not an error — a JWT that already passed verification
+stays authenticated either way; `client_claim` only affects which
+identity, if any, it resolves to. `/v1/admin/*` is unaffected by `[jwt]`
+entirely, `client_claim` included — it stays `server.admin_key_env`/
+admin-role `[[clients]]`' own API keys only, never a JWT, even one that
+maps to an admin-role client.
 
 ## MCP (Model Context Protocol)
 

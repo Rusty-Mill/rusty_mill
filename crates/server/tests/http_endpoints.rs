@@ -426,6 +426,218 @@ async fn protected_endpoint_still_accepts_the_static_key_when_jwt_is_also_config
 }
 
 #[tokio::test]
+async fn chat_completions_enforces_budget_for_a_jwt_mapped_client_identity() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello there"},
+                "finish_reason": "stop"
+            }],
+            // At $1/token this response costs $15 -- over the client's $1
+            // budget, so it must be the last request the client can make.
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        })))
+        .mount(&server)
+        .await;
+
+    let openai_key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&openai_key_var, "test-key");
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+    // Deliberately never set -- this client is only reachable via the JWT
+    // claim mapping below, proving the mapping works standalone, not just
+    // as a fallback alongside a static key that happens to also match.
+    let unused_client_key_var = unique_env_var("CLIENT_KEY");
+
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{openai_key_var}"
+
+        [[pricing]]
+        model = "openai/gpt-4o-mini"
+        prompt_per_million = 1000000.0
+        completion_per_million = 1000000.0
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+        client_claim = "sub"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{unused_client_key_var}"
+        requests_per_minute = 1000
+        budget_usd = 1.0
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+    let token = hs256_jwt("jwt-s3cret", &json!({"sub": "acme", "exp": future_exp()}));
+    let body = json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let first = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200);
+
+    // The second request is rejected -- proving the JWT-mapped identity's
+    // own budget was actually enforced, not silently skipped the way an
+    // unmatched caller's would be.
+    let second = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 402);
+    let err: Value = second.json().await.unwrap();
+    assert!(err["error"]["message"].as_str().unwrap().contains("acme"));
+}
+
+#[tokio::test]
+async fn chat_completions_rate_limits_a_jwt_mapped_client_under_its_own_bucket() {
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+    let unused_client_key_var = unique_env_var("CLIENT_KEY");
+
+    let config = format!(
+        r#"
+        providers = {{}}
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+        client_claim = "sub"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{unused_client_key_var}"
+        requests_per_minute = 1
+        "#
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+    let token = hs256_jwt("jwt-s3cret", &json!({"sub": "acme", "exp": future_exp()}));
+    let body = json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    let first = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(first.status(), 429);
+    assert_eq!(
+        first.headers().get("x-ratelimit-limit").unwrap(),
+        "1",
+        "must be bucketed under acme's own requests_per_minute, not the IP fallback"
+    );
+
+    let second = client
+        .post(format!("{base_url}/v1/chat/completions"))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 429);
+}
+
+#[tokio::test]
+async fn chat_completions_does_not_map_a_jwt_claim_when_client_claim_is_unconfigured() {
+    // Same claim, same matching client name -- but [jwt] doesn't set
+    // client_claim, so this must behave exactly like pre-mapping [jwt]:
+    // no budget enforcement, i.e. unlimited requests despite acme's $1
+    // budget existing in config.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello there"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        })))
+        .mount(&server)
+        .await;
+
+    let openai_key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&openai_key_var, "test-key");
+    let secret_var = unique_env_var("JWT_SECRET");
+    std::env::set_var(&secret_var, "jwt-s3cret");
+    let unused_client_key_var = unique_env_var("CLIENT_KEY");
+
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{openai_key_var}"
+
+        [[pricing]]
+        model = "openai/gpt-4o-mini"
+        prompt_per_million = 1000000.0
+        completion_per_million = 1000000.0
+
+        [jwt]
+        hs256_secret_env = "{secret_var}"
+
+        [[clients]]
+        name = "acme"
+        api_key_env = "{unused_client_key_var}"
+        requests_per_minute = 1000
+        budget_usd = 1.0
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+    let client = reqwest::Client::new();
+    let token = hs256_jwt("jwt-s3cret", &json!({"sub": "acme", "exp": future_exp()}));
+    let body = json!({
+        "model": "openai/gpt-4o-mini",
+        "messages": [{"role": "user", "content": "hi"}]
+    });
+
+    for _ in 0..2 {
+        let resp = client
+            .post(format!("{base_url}/v1/chat/completions"))
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+}
+
+#[tokio::test]
 async fn usage_stats_endpoint_returns_empty_list_before_any_requests() {
     let base_url = spawn_app("providers = {}").await;
 

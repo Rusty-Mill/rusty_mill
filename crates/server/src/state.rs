@@ -52,9 +52,12 @@ pub struct AppState {
     /// its modes (`hs256_secret_env` resolved, or `jwks_url` set)
     /// actually activated. `None` means a presented bearer token can only
     /// ever satisfy `api_key`/`client_keys` above, same as before this
-    /// field existed. Only consulted by `check_auth`, never
-    /// `check_admin_auth` -- `/v1/admin/*` stays `admin_key`/admin-role
-    /// clients only.
+    /// field existed. Consulted by `check_auth` (the auth decision) and,
+    /// if `[jwt].client_claim` is also set, by `resolve_client_identity`
+    /// (mapping a verified token's claim to a `[[clients]]` name for
+    /// budget/rate-limit/usage purposes) -- never by `check_admin_auth`,
+    /// which stays `admin_key`/admin-role clients' own API keys only,
+    /// regardless of `client_claim`.
     pub jwt: Option<Arc<JwtVerifier>>,
     /// The combined MCP handler (native tools + proxied upstreams), if
     /// `[mcp].enabled = true`. `None` means the MCP endpoint isn't mounted
