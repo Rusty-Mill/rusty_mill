@@ -868,7 +868,7 @@ fn probe_capabilities_honest() -> Result<(Verdict, String), String> {
         "baseline agrees".to_string()
     } else {
         format!(
-            "and corrects the conservative baseline, which claims {}",
+            "corrects the conservative baseline, which claims {}",
             baseline.symlinks
         )
     };
