@@ -18,9 +18,15 @@
 //!
 //! The proto's `additional_bindings` (serving every route again nested
 //! under a `/{tenant}` path prefix) aren't implemented; a `tenant` value
-//! can still be sent per-request via the `tenant` field already present
-//! on the JSON body (`POST`) or query string (`GET`) of every operation -
-//! the same scope the JSON-RPC binding has.
+//! can still be sent per-request via the `tenant` field on the JSON body
+//! for operations that have one, or a `?tenant=` query parameter
+//! otherwise (`GET`s, and the body-less `:cancel`/`:subscribe`/`DELETE`
+//! actions) - the same scope the JSON-RPC binding has. Every handler
+//! honors it: [`super::store::TaskStore`] treats each tenant (including
+//! the absent one) as a fully isolated namespace, so a task or push
+//! notification config created under one tenant is invisible - not just
+//! inaccessible - to a request that omits `tenant` or names a different
+//! one.
 
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -206,7 +212,7 @@ async fn get_task(
         return resp;
     }
     let req = GetTaskRequest {
-        tenant: None,
+        tenant: raw_query.get("tenant").cloned(),
         id,
         history_length: query.history_length,
     };
@@ -239,8 +245,9 @@ async fn task_action(
     State(engine): State<Arc<Engine>>,
     Path(id_and_action): Path<String>,
     headers: HeaderMap,
+    Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
         return resp;
     }
     let Some((id, action)) = id_and_action.rsplit_once(':') else {
@@ -248,10 +255,11 @@ async fn task_action(
             "expected \"{{id}}:cancel\" or \"{{id}}:subscribe\", got \"{id_and_action}\""
         )));
     };
+    let tenant = raw_query.get("tenant").cloned();
     match action {
         "cancel" => {
             let req = CancelTaskRequest {
-                tenant: None,
+                tenant,
                 id: id.to_string(),
                 metadata: None,
             };
@@ -262,7 +270,7 @@ async fn task_action(
         }
         "subscribe" => {
             let req = SubscribeToTaskRequest {
-                tenant: None,
+                tenant,
                 id: id.to_string(),
             };
             let since_seq = parse_last_event_id(&headers);
@@ -307,7 +315,7 @@ async fn get_push_notification_config(
         return resp;
     }
     let req = GetTaskPushNotificationConfigRequest {
-        tenant: None,
+        tenant: raw_query.get("tenant").cloned(),
         task_id,
         id: config_id,
     };
@@ -337,7 +345,7 @@ async fn list_push_notification_configs(
         return resp;
     }
     let req = ListTaskPushNotificationConfigsRequest {
-        tenant: None,
+        tenant: raw_query.get("tenant").cloned(),
         task_id,
         page_size: query.page_size,
         page_token: query.page_token,
@@ -354,12 +362,13 @@ async fn delete_push_notification_config(
     State(engine): State<Arc<Engine>>,
     Path((task_id, config_id)): Path<(String, String)>,
     headers: HeaderMap,
+    Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = require_auth(&engine, &headers, &HashMap::new()).await {
+    if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
         return resp;
     }
     let req = DeleteTaskPushNotificationConfigRequest {
-        tenant: None,
+        tenant: raw_query.get("tenant").cloned(),
         task_id,
         id: config_id,
     };

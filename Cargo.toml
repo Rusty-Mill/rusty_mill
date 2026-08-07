@@ -137,5 +137,15 @@ name = "subscribe_replay_grpc"
 path = "tests/subscribe_replay_grpc.rs"
 required-features = ["grpc", "server"]
 
+[[test]]
+name = "tenant_isolation"
+path = "tests/tenant_isolation.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "tenant_isolation_grpc"
+path = "tests/tenant_isolation_grpc.rs"
+required-features = ["grpc", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
