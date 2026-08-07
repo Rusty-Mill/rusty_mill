@@ -176,13 +176,20 @@ struct RouteState {
     ext_authz: Option<ExtAuthz>,
     /// Budget for producing a response on this route.
     timeout: Option<Duration>,
-    /// `responseHeaderModifier`, for backends that do not apply it themselves.
+    /// `responseHeaderModifier`, applied to whatever the route's backend
+    /// produced.
     ///
-    /// The `host` proxy applies its own to the upstream's response. An MCP
-    /// route has no upstream HTTP response to modify — `rmcp`'s transport
-    /// consumes those — so the modifier acts on the response the gateway
-    /// itself produces, which is the only one a client ever sees.
-    mcp_response_headers: Option<Headers>,
+    /// One place for every backend kind. It used to live inside the `host`
+    /// proxy, which meant it reached a proxied upstream response and nothing
+    /// else: not an `ai` completion, not an A2A card or refusal the gateway
+    /// answers itself, not an MCP response, since none of those go through the
+    /// proxy. Applying it where the backends converge covers all of them and
+    /// keeps one description true of every route.
+    ///
+    /// Still scoped to backend responses. A preflight, a JWT challenge and an
+    /// `extAuthz` refusal are answered before dispatch and are the gateway's
+    /// own, not the route's payload.
+    response_headers: Option<Headers>,
     backend: BackendState,
 }
 
@@ -241,7 +248,7 @@ impl Gateway {
             jwt: None,
             ext_authz: None,
             timeout: None,
-            mcp_response_headers: None,
+            response_headers: None,
             backend: BackendState::Unsupported("route has no backend".into()),
         });
 
@@ -387,16 +394,13 @@ impl Gateway {
                 None => BackendState::Unsupported("route has no backend".into()),
             };
 
-            // Only for MCP: the `host` proxy compiles and applies its own,
-            // and applying it twice would append `add` values twice.
-            let mcp_response_headers =
-                match (&backend, route.policies.response_header_modifier.as_ref()) {
-                    (BackendState::Mcp { .. }, Some(modifier)) => Some(Headers::new(
-                        modifier,
-                        &format!("{at}.responseHeaderModifier"),
-                    )?),
-                    _ => None,
-                };
+            let response_headers = match route.policies.response_header_modifier.as_ref() {
+                Some(modifier) => Some(Headers::new(
+                    modifier,
+                    &format!("{at}.responseHeaderModifier"),
+                )?),
+                None => None,
+            };
 
             routes[route.id] = RouteState {
                 cors,
@@ -404,7 +408,7 @@ impl Gateway {
                 jwt,
                 ext_authz,
                 timeout,
-                mcp_response_headers,
+                response_headers,
                 backend,
             };
         }
@@ -523,7 +527,7 @@ impl Gateway {
 
         let call = self.dispatch(state, &selection, peer, scheme, request);
 
-        let response = match state.timeout {
+        let mut response = match state.timeout {
             Some(budget) => match tokio::time::timeout(budget, call).await {
                 Ok(response) => response,
                 Err(_) => {
@@ -541,6 +545,9 @@ impl Gateway {
             None => call.await,
         };
 
+        if let Some(headers) = &state.response_headers {
+            headers.apply(response.headers_mut());
+        }
         Ok(with_cors(response, cors_headers))
     }
 
@@ -556,36 +563,24 @@ impl Gateway {
             // `call` takes &mut self, but the service is cheap to clone and
             // clones share the session manager -- which is what makes an
             // Mcp-Session-Id issued on one request usable on the next.
-            BackendState::Mcp { service, metrics } => {
-                let mut response = match metrics {
-                    // Layering per request is just a struct wrap; the
-                    // instruments behind it are shared, which is what makes
-                    // the counts add up.
-                    Some(metrics) => {
-                        let mut service = metrics.layer(service.clone());
-                        match service.call(request).await {
-                            Ok(response) => response,
-                            Err(never) => match never {},
-                        }
+            BackendState::Mcp { service, metrics } => match metrics {
+                // Layering per request is just a struct wrap; the instruments
+                // behind it are shared, which is what makes the counts add up.
+                Some(metrics) => {
+                    let mut service = metrics.layer(service.clone());
+                    match service.call(request).await {
+                        Ok(response) => response,
+                        Err(never) => match never {},
                     }
-                    None => {
-                        let mut service = service.clone();
-                        match service.call(request).await {
-                            Ok(response) => response.into_response(),
-                            Err(never) => match never {},
-                        }
-                    }
-                };
-
-                // Applied to what the gateway is about to send the client.
-                // CORS is added after this, so a modifier cannot strip the
-                // headers that answer a preflight -- those are the gateway's
-                // own protocol, not the route's payload.
-                if let Some(headers) = &state.mcp_response_headers {
-                    headers.apply(response.headers_mut());
                 }
-                response
-            }
+                None => {
+                    let mut service = service.clone();
+                    match service.call(request).await {
+                        Ok(response) => response.into_response(),
+                        Err(never) => match never {},
+                    }
+                }
+            },
             BackendState::Host { proxy, a2a } => {
                 let (parts, body) = request.into_parts();
                 let prefix = selection.matched_prefix.as_deref();

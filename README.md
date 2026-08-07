@@ -630,10 +630,10 @@ nothing has classified anything at that point.
 Only `mcp:` targets, for the same reason as `headerMutation`: a `stdio` target
 speaks over a pipe and has no headers.
 
-### The response side, and the one that cannot apply
+### Response headers, and the one policy that cannot apply
 
-`responseHeaderModifier` works on an MCP route, on the response the **gateway
-itself** produces:
+`responseHeaderModifier` applies to whatever the route's backend produced, on
+**every** backend kind:
 
 ```yaml
 policies:
@@ -642,11 +642,21 @@ policies:
     remove: [mcp-session-id]
 ```
 
-There is no upstream HTTP response to modify — `rmcp`'s transport consumes
-those, and a client never sees one — so the only response worth acting on is
-the one going back out. CORS is added after the modifier runs, so a route
-cannot accidentally strip the headers that answer a preflight: those are the
-gateway's own protocol rather than the route's payload.
+It used to live inside the `host` proxy, which meant it reached a proxied
+upstream response and nothing else — not an `ai` completion, not an A2A card or
+refusal the gateway answers itself, not an MCP response, since none of those go
+through the proxy. It is applied where the backends converge instead, so one
+description of the policy is true of every route.
+
+On an MCP route there is no upstream HTTP response to modify at all: `rmcp`'s
+transport consumes those and a client never sees one, so the only response
+worth acting on is the one going back out.
+
+It stays scoped to *backend* responses. A CORS preflight, a JWT challenge and
+an `extAuthz` refusal are answered before dispatch and are the gateway's own
+rather than the route's payload. CORS is added after the modifier runs for the
+same reason — a route cannot accidentally strip the headers that answer a
+preflight.
 
 `urlRewrite` replaces parts of the one address the gateway dials. All three of
 `authority`, `path.full` and `path.prefix` apply, where there is a single

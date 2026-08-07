@@ -110,6 +110,16 @@ async fn start(
     provider_port: u16,
     extra: &str,
 ) -> (String, CancellationToken) {
+    start_with(provider_kind, provider_port, extra, "").await
+}
+
+/// The same, with extra route policies spliced in.
+async fn start_with(
+    provider_kind: &str,
+    provider_port: u16,
+    extra: &str,
+    extra_policies: &str,
+) -> (String, CancellationToken) {
     let port = free_port().await;
     let yaml = format!(
         r#"
@@ -119,6 +129,7 @@ binds:
       - routes:
           - name: llm
             policies:
+{extra_policies}
               backendAuth:
                 key: test-key
             backends:
@@ -485,4 +496,48 @@ binds:
         err.to_string().contains("bedrock"),
         "the error should name the provider: {err}"
     );
+}
+
+#[tokio::test]
+async fn a_response_modifier_reaches_an_ai_completion() {
+    // An `ai` backend answers from inside the gateway rather than through the
+    // `host` proxy, so it never saw the modifier before.
+    let (provider_port, _seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "                      model: gpt-4o",
+        "              responseHeaderModifier:\n                set:\n                  x-served-by: rusty",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{url}/v1/chat/completions"))
+        .json(&serde_json::json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let headers: Vec<(String, String)> = response
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect();
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-served-by" && v == "rusty"),
+        "saw {headers:?}"
+    );
+
+    shutdown.cancel();
 }

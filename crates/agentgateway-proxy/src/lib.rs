@@ -49,7 +49,6 @@ pub struct HostProxy {
     client: Client<HttpConnector, RequestBody>,
     rewrite: Option<Rewrite>,
     request_headers: Option<Headers>,
-    response_headers: Option<Headers>,
     backend_auth: Option<BackendAuth>,
     /// Budget for a single upstream attempt.
     timeout: Option<Duration>,
@@ -85,14 +84,6 @@ impl HostProxy {
             )?),
             None => None,
         };
-        let response_headers = match policies.response_header_modifier.as_ref() {
-            Some(modifier) => Some(Headers::new(
-                modifier,
-                &format!("{at}.responseHeaderModifier"),
-            )?),
-            None => None,
-        };
-
         let timeout = policies
             .timeout
             .as_ref()
@@ -110,7 +101,6 @@ impl HostProxy {
             client,
             rewrite,
             request_headers,
-            response_headers,
             backend_auth: policies.backend_auth.clone(),
             timeout,
             retry: policies.retry.as_ref().and_then(Retry::new),
@@ -254,7 +244,7 @@ impl HostProxy {
                             .as_ref()
                             .is_some_and(|r| r.retries_status(status));
                     if !retry_this {
-                        return finish(response, self.response_headers.as_ref());
+                        return finish(response);
                     }
                     tracing::debug!(
                         upstream = %authority,
@@ -293,21 +283,21 @@ impl HostProxy {
 
         let (mut parts, body) = response.into_parts();
         transform::strip_hop_by_hop(&mut parts.headers);
-        if let Some(headers) = &self.response_headers {
-            headers.apply(&mut parts.headers);
-        }
 
         Response::from_parts(parts, ProxyBody::Upstream(body))
     }
 }
 
 /// Apply response policies and hand the body back to the caller.
-fn finish(response: Response<Incoming>, headers: Option<&Headers>) -> Response<ProxyBody> {
+/// Hand an upstream response on, minus the headers that do not cross a hop.
+///
+/// A route's `responseHeaderModifier` used to be applied here. It moved to the
+/// gateway, where every backend kind converges, so that one description of the
+/// policy is true of `ai` and `a2a` routes too rather than only of proxied
+/// ones.
+fn finish(response: Response<Incoming>) -> Response<ProxyBody> {
     let (mut parts, body) = response.into_parts();
     transform::strip_hop_by_hop(&mut parts.headers);
-    if let Some(headers) = headers {
-        headers.apply(&mut parts.headers);
-    }
     Response::from_parts(parts, ProxyBody::Upstream(body))
 }
 
