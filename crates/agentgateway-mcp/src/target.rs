@@ -94,7 +94,15 @@ impl std::fmt::Debug for Target {
 
 impl Target {
     /// Dial a target and complete the MCP handshake.
-    pub async fn connect(config: &McpTarget, at: &str) -> Result<Self, TargetError> {
+    ///
+    /// `path_override` replaces a Streamable HTTP target's own path. It comes
+    /// from the route's `urlRewrite.path.full`, and the federation only
+    /// resolves one when there is a single target to be unambiguous about.
+    pub async fn connect(
+        config: &McpTarget,
+        path_override: Option<&str>,
+        at: &str,
+    ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
         let name = config.name.clone();
 
@@ -123,7 +131,8 @@ impl Target {
                     })?
             }
             McpTargetKind::Mcp(http) => {
-                let uri = format!("http://{}:{}{}", http.host, http.port, http.path);
+                let path = path_override.unwrap_or(&http.path);
+                let uri = format!("http://{}:{}{}", http.host, http.port, path);
                 // `MutatingClient` rather than a bare `reqwest::Client`, so a
                 // guardrail's `headerMutation` can reach the outgoing request.
                 let transport = StreamableHttpClientTransport::with_client(

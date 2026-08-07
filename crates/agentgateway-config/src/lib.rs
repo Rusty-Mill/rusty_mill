@@ -362,15 +362,70 @@ impl Route {
         Ok(())
     }
 
+    /// Report a `urlRewrite` that cannot act on this route's backends.
+    ///
+    /// An `mcp` backend terminates the protocol rather than forwarding a
+    /// request line, so most of what `urlRewrite` describes has nothing to act
+    /// on. The one exception is a *single* Streamable HTTP target, whose path
+    /// `path.full` overrides — with one target there is no ambiguity about
+    /// whose path is meant.
+    fn lint_url_rewrite(&self, policies: &Policies, at: &str, findings: &mut Vec<String>) {
+        let Some(rewrite) = &policies.url_rewrite else {
+            return;
+        };
+        let mcp: Vec<&McpBackend> = self
+            .backends
+            .iter()
+            .filter_map(|b| match &b.target {
+                BackendTarget::Mcp(backend) => Some(backend),
+                _ => None,
+            })
+            .collect();
+        if mcp.is_empty() {
+            return;
+        }
+
+        let at = format!("{at}.policies.urlRewrite");
+
+        if rewrite.authority.is_some() {
+            findings.push(format!(
+                "{at}.authority: an `mcp` target names its own host and port, so there is \
+                 no authority here for a route-level policy to replace"
+            ));
+        }
+
+        match &rewrite.path {
+            None => {}
+            Some(PathRewrite::Prefix(_)) => findings.push(format!(
+                "{at}.path.prefix: the upstream path of an `mcp` target is its own \
+                 configuration rather than something derived from the request, so there is \
+                 no matched prefix to replace; use `full`"
+            )),
+            Some(PathRewrite::Full(_)) => {
+                let targets: usize = mcp.iter().map(|b| b.targets.len()).sum();
+                if targets != 1 {
+                    findings.push(format!(
+                        "{at}.path: overriding a target's path needs exactly one target to \
+                         be unambiguous, and this route has {targets}"
+                    ));
+                } else if !mcp
+                    .iter()
+                    .flat_map(|b| &b.targets)
+                    .any(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
+                {
+                    findings.push(format!(
+                        "{at}.path: only an `mcp:` target has a path to override; a `stdio` \
+                         target speaks over a pipe"
+                    ));
+                }
+            }
+        }
+    }
+
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         if let Some(policies) = &self.policies {
-            // Some policies only mean something for some backend kinds, and a
-            // policy that cannot apply is worth saying out loud.
-            let serves_mcp = self
-                .backends
-                .iter()
-                .any(|b| matches!(b.target, BackendTarget::Mcp(_)));
-            policies.lint(at, serves_mcp, findings);
+            policies.lint(at, findings);
+            self.lint_url_rewrite(policies, at, findings);
         }
         for (i, backend) in self.backends.iter().enumerate() {
             backend.lint(&format!("{at}.backends[{i}]"), findings);
