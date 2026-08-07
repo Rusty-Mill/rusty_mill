@@ -1660,6 +1660,15 @@ unlocks the clients panel. The token is kept in the browser tab's session
 storage only — never sent anywhere but this server, never written to
 disk.
 
+The dashboard's own UI text (panel titles, column headers, button
+labels) goes through a small `t()`-keyed translation dictionary and a
+language switcher in the header, persisted in `localStorage`. This is a
+switching *mechanism*, not a translation project — only `en` is
+populated today; a new locale is added by extending the dictionary in
+`dashboard.html`, not by this router guessing a translation nobody
+asked for. Server-generated JSON error messages (the ones every
+endpoint already returns) are unaffected and stay English.
+
 ## Organizations, workspaces & roles
 
 `[[clients]]` entries (config-defined or admin-API-provisioned) can carry
