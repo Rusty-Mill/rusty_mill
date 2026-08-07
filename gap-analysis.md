@@ -190,6 +190,12 @@ enough to plausibly belong in a headless HTTP router.
   simpler model; the suffix-composition scheme may be more surface area
   than value added.
 
+**User decision (2026-08-07):** skip all 5 borderline items and the opt-in
+pricing sync. File issues for the 7 remaining candidates (CORS allowlist,
+webhook HMAC signing + retry, budget warning threshold, reasoning replay
+cache, `strategy = "fusion"` routing, per-request budget cap, routing-
+decision trace headers) — filed as #135-#141, `parity-gap` labeled.
+
 **Re-confirmed out of scope, not re-flagged:** free-tier *aggregation*
 (Quota Sharing Engine, "stack these providers" — both depend on the
 declined multi-account-pooling concept), MITM/traffic-interception docs,
