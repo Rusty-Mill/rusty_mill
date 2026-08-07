@@ -34,8 +34,8 @@ pub enum SecurityScheme {
 }
 
 /// See `PartContentRepr` (`src/types/message.rs`) for why this mirror type
-/// - and the manual `Deserialize` impl below that delegates to it only
-/// after checking exactly one key is present - exists: spec Section 4.5.1
+/// and the manual `Deserialize` impl below (which delegates to it only
+/// after checking exactly one key is present) exist: spec Section 4.5.1
 /// ("A SecurityScheme MUST contain exactly one of the following:
 /// apiKeySecurityScheme, httpAuthSecurityScheme, oauth2SecurityScheme,
 /// openIdConnectSecurityScheme, mtlsSecurityScheme") isn't enforced by a
