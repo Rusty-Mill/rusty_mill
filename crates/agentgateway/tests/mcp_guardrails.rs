@@ -32,6 +32,8 @@ enum Script {
     Rewrite(String),
     /// Refuse.
     Refuse(&'static str),
+    /// Pass, asking for `x-user-id` on the upstream request.
+    SetHeaders,
 }
 
 /// What the processor was asked.
@@ -114,7 +116,18 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                                     mcp_error: None,
                                 })
                             }
-                            Script::Pass => request_result::Result::Pass(Default::default()),
+                            Script::Pass | Script::SetHeaders => {
+                                request_result::Result::Pass(Default::default())
+                            }
+                        }),
+                        header_mutation: matches!(script, Script::SetHeaders).then(|| {
+                            agentgateway_mcp::HeaderMutation {
+                                set: vec![agentgateway_mcp::McpHeader {
+                                    key: "x-user-id".into(),
+                                    value: b"u-42".to_vec(),
+                                }],
+                                remove: Vec::new(),
+                            }
                         }),
                         ..Default::default()
                     }
@@ -139,7 +152,9 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                                     mcp_error: None,
                                 })
                             }
-                            Script::Pass => response_result::Result::Pass(Default::default()),
+                            Script::Pass | Script::SetHeaders => {
+                                response_result::Result::Pass(Default::default())
+                            }
                         }),
                     }
                     .encode_to_vec()
@@ -495,4 +510,221 @@ binds:
         .err()
         .expect("an unaddressable processor should be a startup failure");
     assert!(err.to_string().contains("processors[0]"), "got: {err}");
+}
+
+/// The headers each request to an HTTP target carried, in arrival order.
+type SeenHeaders = Arc<Mutex<Vec<Vec<(String, String)>>>>;
+
+/// A Streamable HTTP MCP server that records the headers each request carried.
+///
+/// The stdio fixture cannot serve this test: `headerMutation` changes the
+/// upstream *HTTP* request, and a subprocess speaking over a pipe has none.
+async fn http_target() -> (
+    u16,
+    Arc<Mutex<Vec<Vec<(String, String)>>>>,
+    CancellationToken,
+) {
+    use rmcp::{
+        ErrorData as McpError, ServerHandler,
+        model::{
+            CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
+            PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        },
+        service::{RequestContext, RoleServer},
+        transport::streamable_http_server::{
+            StreamableHttpService, session::local::LocalSessionManager,
+        },
+    };
+
+    #[derive(Clone)]
+    struct Echo;
+
+    impl ServerHandler for Echo {
+        fn get_info(&self) -> ServerInfo {
+            ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        }
+
+        async fn list_tools(
+            &self,
+            _request: Option<PaginatedRequestParams>,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<ListToolsResult, McpError> {
+            let mut schema = serde_json::Map::new();
+            schema.insert("type".into(), serde_json::Value::String("object".into()));
+            Ok(ListToolsResult {
+                tools: vec![Tool::new("echo", "echo", Arc::new(schema))],
+                ..Default::default()
+            })
+        }
+
+        async fn call_tool(
+            &self,
+            _request: CallToolRequestParams,
+            _context: RequestContext<RoleServer>,
+        ) -> Result<CallToolResponse, McpError> {
+            Ok(CallToolResponse::Complete(CallToolResult::success(vec![
+                ContentBlock::text("served"),
+            ])))
+        }
+    }
+
+    let port = free_port().await;
+    let seen: SeenHeaders = Arc::new(Mutex::new(Vec::new()));
+    let shutdown = CancellationToken::new();
+
+    let service = StreamableHttpService::new(
+        || Ok(Echo),
+        LocalSessionManager::default().into(),
+        Default::default(),
+    );
+
+    let recorder = Arc::clone(&seen);
+    let app = axum::Router::new()
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let recorder = Arc::clone(&recorder);
+                async move {
+                    if let Ok(mut seen) = recorder.lock() {
+                        seen.push(
+                            request
+                                .headers()
+                                .iter()
+                                .map(|(k, v)| {
+                                    (
+                                        k.as_str().to_string(),
+                                        v.to_str().unwrap_or_default().to_string(),
+                                    )
+                                })
+                                .collect(),
+                        );
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("target should bind");
+    let stopping = shutdown.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app)
+            .with_graceful_shutdown(async move { stopping.cancelled().await })
+            .await;
+    });
+
+    (port, seen, shutdown)
+}
+
+/// Boot a gateway with one HTTP MCP target behind a guardrail.
+async fn start_with_http_target(
+    host: &str,
+    methods: &str,
+    target_port: u16,
+) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              mcpGuardrails:
+                processors:
+                  - host: "{host}"
+                    timeout: 5s
+                    methods: {methods}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    config.validate().expect("config should validate");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    (port, shutdown)
+}
+
+#[tokio::test]
+async fn a_header_mutation_reaches_the_upstream_request() {
+    // The load-bearing assumption of the whole feature: the change rides in
+    // the request's extensions, which rmcp carries in memory from the peer
+    // down to the transport. Nothing but a real call proves that.
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::SetHeaders).await;
+    let (port, shutdown) =
+        start_with_http_target(&host, r#"{ "tools/call": request }"#, target_port).await;
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .await
+        .expect("the call should succeed");
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
+    );
+
+    let seen = target_headers.lock().expect("lock").clone();
+    let last = seen.last().expect("the target should have been called");
+    let get = |name: &str| last.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+    assert_eq!(
+        get("x-user-id"),
+        Some("u-42".to_string()),
+        "the processor's header should be on the upstream request; saw {last:?}"
+    );
+
+    // The handshake happened before any processor was consulted, so it must
+    // not carry the header -- this is a per-call change, not a connection one.
+    let handshake = seen.first().expect("there should be a handshake request");
+    assert!(
+        !handshake.iter().any(|(k, _)| k == "x-user-id"),
+        "the header should not have leaked onto the connection: {handshake:?}"
+    );
+
+    let _ = client.cancel().await;
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_header_mutation_on_a_stdio_target_is_dropped_not_fatal() {
+    // A pipe has no headers. The call should still succeed rather than
+    // failing because a processor asked for something that cannot apply.
+    let (host, _, stop) = processor(Script::SetHeaders).await;
+    let harness = Harness::start(&host, r#"{ "tools/call": request }"#).await;
+
+    assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+
+    stop.cancel();
+    harness.stop().await;
 }

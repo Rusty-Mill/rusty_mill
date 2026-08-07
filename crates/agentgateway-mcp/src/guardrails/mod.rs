@@ -22,6 +22,13 @@
 //! pipeline, not a vote. That is upstream's behaviour and it is the useful
 //! one: a redactor followed by a validator should see redacted input.
 //!
+//! # Rewriting the upstream request
+//!
+//! A processor's request-phase answer can also change the headers of the
+//! upstream HTTP request carrying the call — see [`HeaderChanges`]. That is a
+//! per-call change on a connection dialled once at startup, so it travels in
+//! the request's extensions; `mutating_client` is the other half.
+//!
 //! # Failing closed
 //!
 //! A processor that cannot be reached, times out, or answers something
@@ -35,11 +42,11 @@ use std::time::Duration;
 
 use agentgateway_config::{FailureMode, McpGuardrails, Processor, resolve};
 use cel::{Context, Program};
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName, HeaderValue};
 
 pub use wire::{
-    AuthorizationError, McpHeader, McpRequest, McpRequestResult, McpResponse, McpResponseResult,
-    authorization_error, request_result, response_result,
+    AuthorizationError, HeaderMutation, McpHeader, McpRequest, McpRequestResult, McpResponse,
+    McpResponseResult, authorization_error, request_result, response_result,
 };
 
 /// Budget for one processor call when the config names none.
@@ -90,6 +97,115 @@ pub enum Outcome {
         /// Structured payload from the processor, if it sent one.
         data: Option<serde_json::Value>,
     },
+}
+
+/// Header changes a processor asked for, resolved and ready to apply.
+///
+/// Collected across the whole chain: a later processor setting a name an
+/// earlier one set wins, and a later `remove` cancels an earlier `set` (and
+/// vice versa). That falls out of applying each processor's mutation in turn to
+/// the same map, which is what upstream does.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HeaderChanges {
+    set: Vec<(HeaderName, HeaderValue)>,
+    remove: Vec<HeaderName>,
+}
+
+impl HeaderChanges {
+    /// Whether a processor asked for anything at all.
+    pub fn is_empty(&self) -> bool {
+        self.set.is_empty() && self.remove.is_empty()
+    }
+
+    /// Headers to add or overwrite on the upstream call.
+    pub fn set(&self) -> &[(HeaderName, HeaderValue)] {
+        &self.set
+    }
+
+    /// Header names to drop from the upstream call.
+    pub fn remove(&self) -> &[HeaderName] {
+        &self.remove
+    }
+
+    /// Fold one processor's answer into the running set.
+    ///
+    /// Names and values a processor sends that HTTP cannot represent are
+    /// skipped with a warning rather than failing the call: a malformed header
+    /// is a bug in the processor, and refusing every request because of one is
+    /// a worse outcome than dropping it and saying so.
+    ///
+    /// Repeated `set` entries for one name are joined with `", "`. The protocol
+    /// says they form a list replacing the existing header, and a single field
+    /// line with comma-separated values is how HTTP spells that — the one
+    /// exception being `Set-Cookie`, which cannot be folded and which has no
+    /// business on a request anyway.
+    fn merge(&mut self, mutation: HeaderMutation) {
+        // Within one mutation the first entry for a name overwrites and the
+        // rest append, so a processor can send a list. `written` is marked only
+        // after a successful write, so a skipped malformed first entry does not
+        // turn a later valid one into a stray append.
+        let mut written: Vec<HeaderName> = Vec::new();
+
+        for header in mutation.set {
+            let Ok(name) = HeaderName::try_from(header.key.as_str()) else {
+                tracing::warn!(key = %header.key, "a processor sent an invalid header name; skipping");
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_bytes(&header.value) else {
+                tracing::warn!(key = %name, "a processor sent an invalid header value; skipping");
+                continue;
+            };
+
+            self.remove.retain(|dropped| *dropped != name);
+            let appending = written.contains(&name);
+            match self.set.iter_mut().find(|(existing, _)| *existing == name) {
+                Some((_, existing)) if appending => *existing = join(existing, &value),
+                Some((_, existing)) => *existing = value,
+                None => self.set.push((name.clone(), value)),
+            }
+            if !appending {
+                written.push(name);
+            }
+        }
+
+        for key in mutation.remove {
+            let Ok(name) = HeaderName::try_from(key.as_str()) else {
+                tracing::warn!(%key, "a processor asked to remove an invalid header name; skipping");
+                continue;
+            };
+            self.set.retain(|(existing, _)| *existing != name);
+            if !self.remove.contains(&name) {
+                self.remove.push(name);
+            }
+        }
+    }
+}
+
+/// Join two header values into one comma-separated field line.
+fn join(first: &HeaderValue, second: &HeaderValue) -> HeaderValue {
+    let mut bytes = first.as_bytes().to_vec();
+    bytes.extend_from_slice(b", ");
+    bytes.extend_from_slice(second.as_bytes());
+    HeaderValue::from_bytes(&bytes).unwrap_or_else(|_| second.clone())
+}
+
+impl From<HeaderChanges> for crate::mutating_client::HeaderOverride {
+    fn from(changes: HeaderChanges) -> Self {
+        crate::mutating_client::HeaderOverride {
+            set: changes.set,
+            remove: changes.remove,
+        }
+    }
+}
+
+/// What a processor's request-phase answer amounts to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestDecision {
+    /// Pass, a rewritten body, or a refusal.
+    pub outcome: Outcome,
+    /// Header changes to apply to the upstream call. Empty on a refusal:
+    /// side effects from a request that never happens would surprise.
+    pub headers: HeaderChanges,
 }
 
 /// JSON-RPC codes for refusals that have no standard MCP equivalent.
@@ -210,10 +326,11 @@ impl Guardrails {
         call: CallContext<'_>,
         backends: &[String],
         params: Option<&[u8]>,
-    ) -> Outcome {
+    ) -> RequestDecision {
         let method = call.method;
         let mut current = params.map(<[u8]>::to_vec);
         let mut outcome = Outcome::Pass;
+        let mut headers = HeaderChanges::default();
 
         for processor in &self.processors {
             if !resolve(method, &processor.config.methods).runs_request() {
@@ -233,7 +350,12 @@ impl Guardrails {
             let result = match processor.call_request(request).await {
                 Ok(result) => result,
                 Err(status) => match processor.on_failure("checkRequest", &status) {
-                    Some(reject) => return reject,
+                    Some(outcome) => {
+                        return RequestDecision {
+                            outcome,
+                            headers: HeaderChanges::default(),
+                        };
+                    }
                     None => continue,
                 },
             };
@@ -246,16 +368,31 @@ impl Guardrails {
                             method,
                             "a processor rewrote a request that carries no params; discarding"
                         );
-                        continue;
+                    } else {
+                        current = Some(body.clone());
+                        outcome = Outcome::Mutated(body);
                     }
-                    current = Some(body.clone());
-                    outcome = Outcome::Mutated(body);
                 }
-                Some(request_result::Result::Error(error)) => return reject(error),
+                // Header changes are dropped along with everything else on a
+                // refusal: a request that never happens should leave no trace
+                // on the one that replaces it.
+                Some(request_result::Result::Error(error)) => {
+                    return RequestDecision {
+                        outcome: reject(error),
+                        headers: HeaderChanges::default(),
+                    };
+                }
+            }
+
+            // Honoured on pass and on a rewrite alike -- including for a
+            // rewrite this gateway discarded, because the header change was
+            // never about the body.
+            if let Some(mutation) = result.header_mutation {
+                headers.merge(mutation);
             }
         }
 
-        outcome
+        RequestDecision { outcome, headers }
     }
 
     /// Run the response side of the chain.
