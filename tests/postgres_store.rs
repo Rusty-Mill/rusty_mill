@@ -244,6 +244,7 @@ async fn expiring_store() -> Option<PostgresStore> {
         // Everything already written is instantly past it.
         retention: Some(Duration::ZERO),
         max_connections: TEST_POOL,
+        ..PostgresStoreConfig::default()
     };
     Some(PostgresStore::connect_with(&url, config).await.unwrap())
 }
@@ -400,6 +401,7 @@ async fn adopting_a_session_keeps_it() {
         // Long enough that only the write times decide, not the clock.
         retention: Some(Duration::from_secs(3)),
         max_connections: TEST_POOL,
+        ..PostgresStoreConfig::default()
     };
     let store = PostgresStore::connect_with(&url, config).await.unwrap();
 

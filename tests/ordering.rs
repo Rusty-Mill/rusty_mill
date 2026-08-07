@@ -12,7 +12,11 @@
 //! session takes a beat, so a run that is marked terminal before its history is
 //! written is caught every time rather than occasionally.
 
-#![cfg(feature = "server")]
+// Both, not just `server`: this drives the ordering through a real client, so
+// a `server`-only build has nothing to compile it against. Invisible to CI,
+// whose per-feature jobs build rather than test, and so only reachable by
+// someone running `cargo test --no-default-features --features server`.
+#![cfg(all(feature = "server", feature = "client"))]
 
 use std::sync::Arc;
 use std::time::Duration;

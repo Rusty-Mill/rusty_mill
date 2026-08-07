@@ -49,6 +49,7 @@ fn backends(runtime: &Runtime) -> Vec<(&'static str, Arc<dyn Store>)> {
         let config = RedisStoreConfig {
             key_prefix: format!("acp-bench:{}", uuid::Uuid::new_v4()),
             ttl: Some(Duration::from_secs(300)),
+            ..RedisStoreConfig::default()
         };
         match runtime.block_on(RedisStore::connect_with(&url, config)) {
             Ok(store) => backends.push(("redis", Arc::new(store))),

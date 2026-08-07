@@ -457,6 +457,7 @@ multi-replica suite, so the choice is about what happens to a run *after* it fin
 | | `RedisStore` | `PostgresStore` |
 | --- | --- | --- |
 | Expiry | A key TTL, 24h by default — the HA guide's model | None. `sweep()` deletes finished runs and idle sessions past a configured retention, and only when you call it |
+| One run's log | `max_run_event_bytes`, 4 MiB | `max_run_event_bytes`, 4 MiB |
 | History | Gone when the TTL lapses | Kept until you decide otherwise |
 | Queries | By run id only | Ordinary SQL: which runs failed today, which agent is busiest, what a session contained |
 | Setup | None | Tables are created on connect |
@@ -483,6 +484,11 @@ That is the one thing a bound on this must not do quietly. The event just emitte
 so a live tail keeps working even for an agent whose single artifact exceeds the whole limit — and
 since nothing is appended after a run reaches a terminal state, that rule is also what guarantees a
 late attacher still finds out how the run ended.
+
+All three backends bound a run's log the same way and on the same number, because a TTL and a
+retention window bound how *long* a log is kept, not how *much* — one streaming run can exhaust an
+instance well inside either. Past the cap the oldest events go, and `earliest_event` is what the
+410 above is built on, so a client is told rather than served short whichever backend is behind it.
 
 A `run.*` event is **not** charged for the output it carries. That payload already lives on the run
 itself, outside the log, so counting it here would count the same bytes twice — and the effect was

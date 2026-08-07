@@ -267,6 +267,7 @@ impl Backend {
                 let config = RedisStoreConfig {
                     key_prefix: key_prefix.clone(),
                     ttl: Some(Duration::from_secs(60)),
+                    ..RedisStoreConfig::default()
                 };
                 Arc::new(
                     RedisStore::connect_with(url, config)

@@ -32,11 +32,24 @@ pub struct RedisStoreConfig {
     /// how it is applied. `None` keeps keys forever, which needs external
     /// cleanup.
     pub ttl: Option<Duration>,
+    /// How much of one run's event log is kept, in bytes.
+    ///
+    /// A TTL bounds how *long* a log is kept, not how *much*: a single
+    /// streaming run can exhaust an instance well inside its window. Matches
+    /// [`InMemoryStore`](super::InMemoryStore)'s
+    /// [`max_run_event_bytes`](super::InMemoryStore::max_run_event_bytes) so
+    /// the backends agree on what a byte of log is, and measured with
+    /// [`Event::approximate_size`] for the same reason.
+    pub max_run_event_bytes: usize,
 }
 
 impl Default for RedisStoreConfig {
     fn default() -> Self {
-        Self { key_prefix: DEFAULT_KEY_PREFIX.to_string(), ttl: Some(DEFAULT_TTL) }
+        Self {
+            key_prefix: DEFAULT_KEY_PREFIX.to_string(),
+            ttl: Some(DEFAULT_TTL),
+            max_run_event_bytes: super::DEFAULT_MAX_RUN_EVENT_BYTES,
+        }
     }
 }
 
@@ -115,6 +128,27 @@ impl RedisStore {
 
     fn events_key(&self, run_id: RunId) -> String {
         format!("{}:events:{run_id}", self.config.key_prefix)
+    }
+
+    /// The index the next append to this run's log will be given.
+    ///
+    /// A counter of its own rather than the list's length, which is what it
+    /// used to be. `RPUSH` returns the new length and that made the index free
+    /// — until the front of the list became droppable, at which point the
+    /// length stops being the count and two different events would be handed
+    /// the same `Last-Event-ID`. In memory that was caught by a test; here it
+    /// would have arrived as a resuming client silently skipping or repeating,
+    /// with nothing failing.
+    fn next_index_key(&self, run_id: RunId) -> String {
+        format!("{}:next:{run_id}", self.config.key_prefix)
+    }
+
+    /// The summed [`Event::approximate_size`] of this run's retained events.
+    ///
+    /// Tracked rather than derived, because asking Redis how many bytes a list
+    /// holds means reading the list back.
+    fn events_bytes_key(&self, run_id: RunId) -> String {
+        format!("{}:evbytes:{run_id}", self.config.key_prefix)
     }
 
     fn channel(&self, run_id: RunId) -> String {
@@ -215,17 +249,82 @@ impl Store for RedisStore {
 
     async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
         let key = self.events_key(run_id);
+        let index_key = self.next_index_key(run_id);
+        let bytes_key = self.events_bytes_key(run_id);
         let mut connection = self.connection.clone();
-        // RPUSH is atomic, so concurrent appends cannot interleave or be lost.
-        // It returns the list's new length, which makes the index the append
-        // was given free — and unique, since no two appends can be told the
-        // same length.
-        let length: u64 = connection
+
+        // Several commands rather than one, and deliberately not wrapped in a
+        // transaction or a Lua script. The sole-writer invariant is what makes
+        // that safe: one replica writes a given run, and it appends that run's
+        // events in order, so nothing can interleave between these. Two runs
+        // touch different keys entirely.
+        let next: u64 = connection
+            .incr(&index_key, 1)
+            .await
+            .map_err(|err| redis_error("reserve event index", err))?;
+        let index = next - 1;
+
+        let size = event.approximate_size();
+        let _: () = connection
             .rpush(&key, encode(event)?)
             .await
             .map_err(|err| redis_error("append event", err))?;
+        let mut held: i64 = connection
+            .incr(&bytes_key, size as i64)
+            .await
+            .map_err(|err| redis_error("account for event size", err))?;
+
+        // Trimmed after appending, so the event just emitted is always kept —
+        // a log that dropped what it was being given could not serve even a
+        // live tail.
+        let limit = self.config.max_run_event_bytes as i64;
+        let mut dropped = 0u64;
+        while held > limit {
+            let length: u64 =
+                connection.llen(&key).await.map_err(|err| redis_error("measure event log", err))?;
+            if length <= 1 {
+                break;
+            }
+            let Some(oldest): Option<String> =
+                connection.lpop(&key, None).await.map_err(|err| redis_error("trim log", err))?
+            else {
+                break;
+            };
+            let freed = decode::<Event>(&oldest).map(|event| event.approximate_size()).unwrap_or(0);
+            held = connection
+                .decr(&bytes_key, freed as i64)
+                .await
+                .map_err(|err| redis_error("account for a trimmed event", err))?;
+            dropped += 1;
+        }
+        if dropped > 0 {
+            tracing::warn!(
+                %run_id,
+                dropped,
+                limit,
+                "dropped the oldest events of a run past the log size bound"
+            );
+        }
+
         self.touch(&key).await?;
-        Ok(length - 1)
+        self.touch(&index_key).await?;
+        self.touch(&bytes_key).await?;
+        Ok(index)
+    }
+
+    async fn earliest_event(&self, run_id: RunId) -> StoreResult<u64> {
+        let mut connection = self.connection.clone();
+        let next: Option<u64> = connection
+            .get(self.next_index_key(run_id))
+            .await
+            .map_err(|err| redis_error("read the next event index", err))?;
+        let length: u64 = connection
+            .llen(self.events_key(run_id))
+            .await
+            .map_err(|err| redis_error("measure event log", err))?;
+        // What was appended, less what is still held. Derived rather than
+        // stored, so the two can never disagree.
+        Ok(next.unwrap_or(0).saturating_sub(length))
     }
 
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
@@ -238,11 +337,18 @@ impl Store for RedisStore {
     }
 
     async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        // Relative to the earliest event still held, not to zero. With a
+        // trimmed front those stopped being the same number, and seeking by
+        // the absolute index would return real events from the wrong position
+        // — worse than returning none.
+        let earliest = self.earliest_event(run_id).await?;
+        let offset = from.saturating_sub(earliest);
+
         let mut connection = self.connection.clone();
         // LRANGE seeks, so a reconnection costs the tail rather than the whole
         // run so far.
         let raw: Vec<String> = connection
-            .lrange(self.events_key(run_id), from as isize, -1)
+            .lrange(self.events_key(run_id), offset as isize, -1)
             .await
             .map_err(|err| redis_error("read events", err))?;
         raw.iter().map(|entry| decode(entry)).collect()
