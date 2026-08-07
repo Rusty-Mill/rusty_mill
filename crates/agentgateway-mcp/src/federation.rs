@@ -133,7 +133,7 @@ impl Federation {
         authorization: Option<&McpAuthorization>,
         guardrails: Option<&McpGuardrails>,
         request_headers: Option<&HeaderModifier>,
-        over: Override,
+        overrides: Vec<Override>,
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
@@ -158,6 +158,9 @@ impl Federation {
         let mut targets = Vec::new();
         let mut degraded = Vec::new();
         for (i, config) in backend.targets.iter().enumerate() {
+            // One override per target, in order: a path rewrite transforms
+            // each target's own path, so they are not interchangeable.
+            let over = overrides.get(i).cloned().unwrap_or_default();
             match Target::connect(config, &over, &format!("{at}.targets[{i}]")).await {
                 Ok(target) => {
                     tracing::info!(target = %target.name, "MCP target connected");

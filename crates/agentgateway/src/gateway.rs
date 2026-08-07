@@ -58,28 +58,37 @@ pub struct Gateway {
 ///
 /// Empty unless there is exactly one target: with more than one, "the address"
 /// has no answer. `Config::lint` reports every case this returns nothing for.
-fn mcp_override(
+fn mcp_overrides(
     policies: &agentgateway_config::Policies,
     matches: &[agentgateway_core::RouteMatcher],
     backend: &agentgateway_config::McpBackend,
     at: &str,
-) -> anyhow::Result<McpOverride> {
-    let single = (backend.targets.len() == 1).then(|| &backend.targets[0]);
-    let Some((rewrite, target)) = policies.url_rewrite.as_ref().zip(single) else {
-        return Ok(McpOverride::default());
-    };
-    // Only an `mcp:` target has an address; a `stdio` one speaks over a pipe.
-    let agentgateway_config::McpTargetKind::Mcp(http) = &target.kind else {
-        return Ok(McpOverride::default());
+) -> anyhow::Result<Vec<McpOverride>> {
+    let blank = || vec![McpOverride::default(); backend.targets.len()];
+    let Some(rewrite) = policies.url_rewrite.as_ref() else {
+        return Ok(blank());
     };
 
-    let authority = match rewrite.authority.as_deref() {
+    // A path rewrite generalises across targets: it transforms each target's
+    // own configured path and leaves its host alone, so a federation of
+    // servers that agree on a path layout can be moved together.
+    //
+    // An authority does not. Applied to several targets it would point them
+    // all at the same server -- not a redirect but a collapse, since a
+    // target's address is what distinguishes it from the others. `Config::lint`
+    // reports that rather than doing it.
+    let authority = match rewrite
+        .authority
+        .as_deref()
+        .filter(|_| backend.targets.len() == 1)
+    {
         // An authority may legally hold `user:password@`, and that is the
         // problem: a credential in an upstream URI hides somewhere nobody
         // thinks to look and is sent on every request. `backendAuth` is where
         // one belongs.
         Some(raw) if raw.contains('@') => anyhow::bail!(
-            "{at}.urlRewrite.authority: `{raw}` is not a valid authority: userinfo does not              belong in an upstream address, use `backendAuth`"
+            "{at}.urlRewrite.authority: `{raw}` is not a valid authority: userinfo does not \
+             belong in an upstream address, use `backendAuth`"
         ),
         Some(raw) => Some(http::uri::Authority::try_from(raw).map_err(|_| {
             anyhow::anyhow!("{at}.urlRewrite.authority: `{raw}` is not a valid authority")
@@ -87,10 +96,22 @@ fn mcp_override(
         None => None,
     };
 
-    Ok(McpOverride {
-        path: mcp_path(rewrite, matches, &http.path),
-        authority,
-    })
+    Ok(backend
+        .targets
+        .iter()
+        .map(|target| {
+            // Only an `mcp:` target has an address; a `stdio` one speaks over
+            // a pipe, and a rewrite aimed at it is dropped rather than
+            // quietly landing somewhere else.
+            let agentgateway_config::McpTargetKind::Mcp(http) = &target.kind else {
+                return McpOverride::default();
+            };
+            McpOverride {
+                path: mcp_path(rewrite, matches, &http.path),
+                authority: authority.clone(),
+            }
+        })
+        .collect())
 }
 
 /// The replacement path, if the rewrite names one this route can resolve.
@@ -251,7 +272,7 @@ impl Gateway {
                         route.policies.mcp_authorization.as_ref(),
                         route.policies.mcp_guardrails.as_ref(),
                         route.policies.request_header_modifier.as_ref(),
-                        mcp_override(&route.policies, &route.matches, mcp, &at)?,
+                        mcp_overrides(&route.policies, &route.matches, mcp, &at)?,
                         backend_timeout,
                         &at,
                     )

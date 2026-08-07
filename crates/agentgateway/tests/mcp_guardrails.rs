@@ -62,11 +62,28 @@ fn flatten(context: Option<prost_types::Struct>) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A port nothing in this binary has been handed yet.
+///
+/// Binding to port 0 and dropping the listener leaves a window in which the
+/// same port can be handed out twice, and two tests racing for it fail with
+/// `Address already in use`. Remembering what has been issued closes the
+/// window between tests, which is where the collisions actually came from.
 async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("should bind");
-    listener.local_addr().expect("should have an addr").port()
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    static ISSUED: LazyLock<Mutex<HashSet<u16>>> = LazyLock::new(Default::default);
+
+    for _ in 0..64 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind");
+        let port = listener.local_addr().expect("should have an addr").port();
+        drop(listener);
+        if ISSUED.lock().expect("lock").insert(port) {
+            return port;
+        }
+    }
+    panic!("could not find a port this binary has not already used");
 }
 
 fn mock_server() -> String {
@@ -2476,4 +2493,245 @@ binds:
 
     shutdown.cancel();
     stop_target.cancel();
+}
+
+// ---------------------------------------------------------------------------
+// `urlRewrite` over a federation of several targets
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_path_rewrite_moves_every_target_to_its_own_rewritten_path() {
+    // Each target keeps its own host and gets its own path transformed, which
+    // is what makes a path rewrite generalise where an authority cannot.
+    let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc/a").await;
+    let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc/b").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {alpha_port}
+                        path: /mcp/a
+                    - name: beta
+                      mcp:
+                        host: 127.0.0.1
+                        port: {beta_port}
+                        path: /mcp/b
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert_eq!(
+        config.lint(),
+        Vec::<String>::new(),
+        "a path rewrite over several targets is well-defined"
+    );
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("both targets should be reachable at their rewritten paths");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+
+    let names: Vec<String> = client
+        .list_all_tools()
+        .await
+        .expect("tools/list should work")
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(names.len(), 2, "both targets federated: {names:?}");
+
+    let seen_a = alpha_paths.lock().expect("lock").clone();
+    let seen_b = beta_paths.lock().expect("lock").clone();
+    assert!(
+        !seen_a.is_empty() && seen_a.iter().all(|p| p == "/rpc/a"),
+        "{seen_a:?}"
+    );
+    assert!(
+        !seen_b.is_empty() && seen_b.iter().all(|p| p == "/rpc/b"),
+        "{seen_b:?}"
+    );
+
+    let _ = client.cancel().await;
+    shutdown.cancel();
+    stop_alpha.cancel();
+    stop_beta.cancel();
+}
+
+#[tokio::test]
+async fn a_full_path_rewrite_gives_every_target_the_same_path_on_its_own_host() {
+    // A fleet of identical servers on different hosts is a normal shape, and
+    // `full` is how you point at all of them at once.
+    let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc").await;
+    let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                path:
+                  full: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {alpha_port}
+                        path: /mcp
+                    - name: beta
+                      mcp:
+                        host: 127.0.0.1
+                        port: {beta_port}
+                        path: /elsewhere
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("both targets should be reachable at /rpc on their own hosts");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    assert!(
+        alpha_paths
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|p| p == "/rpc"),
+        "alpha: {:?}",
+        alpha_paths.lock().expect("lock")
+    );
+    assert!(
+        beta_paths.lock().expect("lock").iter().all(|p| p == "/rpc"),
+        "beta: {:?}",
+        beta_paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_alpha.cancel();
+    stop_beta.cancel();
+}
+
+#[tokio::test]
+async fn an_authority_over_several_targets_is_reported_and_not_applied() {
+    // Pointing every target at one server is a collapse, not a redirect: a
+    // target's address is what distinguishes it from the others. The path half
+    // of the same rewrite still applies.
+    let (alpha_port, _ah, alpha_paths, stop_alpha) = http_target_at("/rpc/a").await;
+    let (beta_port, _bh, beta_paths, stop_beta) = http_target_at("/rpc/b").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                authority: 127.0.0.1:{alpha_port}
+                path:
+                  prefix: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {alpha_port}
+                        path: /mcp/a
+                    - name: beta
+                      mcp:
+                        host: 127.0.0.1
+                        port: {beta_port}
+                        path: /mcp/b
+"#
+    )
+    .replace(
+        "      - routes:\n              - path:",
+        "      - routes:\n          - matches:\n              - path:",
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("urlRewrite.authority") && f.contains("point them all at")),
+        "{findings:?}"
+    );
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("the path half applies, so both targets are still reachable");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // beta was reached on its own port, not collapsed onto alpha's.
+    assert!(
+        !beta_paths.lock().expect("lock").is_empty(),
+        "beta should have been dialled on its own host"
+    );
+    assert!(
+        alpha_paths
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|p| p == "/rpc/a"),
+        "{:?}",
+        alpha_paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_alpha.cancel();
+    stop_beta.cancel();
 }

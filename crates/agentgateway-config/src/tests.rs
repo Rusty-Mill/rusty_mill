@@ -750,7 +750,7 @@ binds:
 }
 
 #[test]
-fn lint_reports_a_path_rewrite_over_more_than_one_target() {
+fn a_path_rewrite_over_more_than_one_target_lints_clean() {
     let config = Config::from_yaml(
         r#"
 binds:
@@ -774,17 +774,15 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
-    assert!(
-        findings
-            .iter()
-            .any(|f| f.contains("exactly one target") && f.contains("this route has 2")),
-        "{findings:?}"
+    assert_eq!(
+        config.lint(),
+        Vec::<String>::new(),
+        "a path rewrite transforms each target's own path, so it generalises"
     );
 }
 
 #[test]
-fn lint_names_both_overrides_when_both_are_set() {
+fn lint_reports_an_authority_rewrite_over_more_than_one_target() {
     let config = Config::from_yaml(
         r#"
 binds:
@@ -811,8 +809,14 @@ binds:
 
     let findings = config.lint();
     assert!(
-        findings.iter().any(|f| f.contains("path and authority")),
-        "the finding should name what is actually being overridden: {findings:?}"
+        findings
+            .iter()
+            .any(|f| f.contains("urlRewrite.authority") && f.contains("point them all at")),
+        "an authority over several targets is a collapse, not a redirect: {findings:?}"
+    );
+    assert!(
+        !findings.iter().any(|f| f.contains("urlRewrite.path")),
+        "and the path half of the same rewrite still applies: {findings:?}"
     );
 }
 
@@ -842,7 +846,7 @@ binds:
     assert!(
         findings
             .iter()
-            .any(|f| f.contains("only an `mcp:` target has an address")),
+            .any(|f| f.contains("no target here has a path to rewrite")),
         "{findings:?}"
     );
 }

@@ -91,10 +91,11 @@ binds:
               # Applies to the response the gateway itself returns; an MCP
               # route has no upstream HTTP response a client ever sees.
               #
-              # `urlRewrite` replaces parts of the one address the gateway
-              # dials -- `authority`, `path.full` and `path.prefix` all apply,
-              # but only to a federation with exactly one `mcp:` target. This
-              # example has two, so any of them would be reported by `--check`.
+              # A `urlRewrite` path rewrite transforms each target's own
+              # path, so it works across a whole federation -- `prefix: /rpc`
+              # here would dial the two targets below at /rpc/... each.
+              # `authority` is the exception: pointed at several targets it
+              # would collapse them onto one server, so `--check` reports it.
               responseHeaderModifier:
                 set:
                   x-served-by: rusty-agent-gateway
