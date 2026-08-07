@@ -85,6 +85,15 @@ pub struct PostgresStoreConfig {
     /// write, so a session outlives the runs that fed it for exactly as long as
     /// a run outlives its own completion.
     pub retention: Option<Duration>,
+    /// How much of one run's event log is kept, in bytes.
+    ///
+    /// A retention window bounds how *long* a log is kept, not how *much*: a
+    /// single streaming run can fill a table well inside it. Matches
+    /// [`InMemoryStore`](super::InMemoryStore)'s
+    /// [`max_run_event_bytes`](super::InMemoryStore::max_run_event_bytes) so
+    /// the backends agree on what a byte of log is, and measured with
+    /// [`Event::approximate_size`] for the same reason.
+    pub max_run_event_bytes: usize,
     /// Maximum pooled connections.
     pub max_connections: u32,
 }
@@ -94,6 +103,7 @@ impl Default for PostgresStoreConfig {
         Self {
             table_prefix: DEFAULT_TABLE_PREFIX.to_string(),
             retention: None,
+            max_run_event_bytes: super::DEFAULT_MAX_RUN_EVENT_BYTES,
             max_connections: 10,
         }
     }
@@ -188,6 +198,7 @@ impl PostgresStore {
                      run_id      uuid PRIMARY KEY,
                      run         jsonb NOT NULL,
                      next_event  bigint NOT NULL DEFAULT 0,
+                     event_bytes bigint NOT NULL DEFAULT 0,
                      updated_at  timestamptz NOT NULL DEFAULT now()
                  )",
                 self.table("runs")
@@ -197,6 +208,7 @@ impl PostgresStore {
                      run_id  uuid NOT NULL,
                      idx     bigint NOT NULL,
                      event   jsonb NOT NULL,
+                     bytes   bigint NOT NULL DEFAULT 0,
                      PRIMARY KEY (run_id, idx)
                  )",
                 self.table("events")
@@ -263,6 +275,92 @@ impl PostgresStore {
                 .await
                 .map_err(|err| pg_error("create schema", err))?;
         }
+
+        // `CREATE TABLE IF NOT EXISTS` does nothing to a table that already
+        // exists, so a database created before the log bound would never get
+        // these. Separate and idempotent, for the same reason the creates are:
+        // several replicas may start at once.
+        let columns = [
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS event_bytes bigint NOT NULL DEFAULT 0",
+                self.table("runs")
+            ),
+            format!(
+                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS bytes bigint NOT NULL DEFAULT 0",
+                self.table("events")
+            ),
+        ];
+        for statement in columns {
+            sqlx::query(&statement)
+                .execute(&self.pool)
+                .await
+                .map_err(|err| pg_error("add schema columns", err))?;
+        }
+        Ok(())
+    }
+
+    /// Drop the oldest events of a run until its log is back inside the bound.
+    ///
+    /// Run inside the appending transaction, so a reader never sees a log that
+    /// has been trimmed but not yet accounted for.
+    async fn trim_events(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        run_id: RunId,
+    ) -> StoreResult<()> {
+        let events = self.table("events");
+        // The window sums backwards from the newest, so `running <= limit`
+        // marks exactly the suffix that fits and `MIN(idx)` of it is the first
+        // event to keep. `COALESCE` to the newest index covers the case where
+        // not even one event fits: everything before it goes and the newest
+        // stays, which is the same rule the other backends keep — a log that
+        // dropped what it was just given could not serve a live tail.
+        let deleted = sqlx::query(&format!(
+            "WITH kept AS (
+                 SELECT MIN(idx) AS first_kept FROM (
+                     SELECT idx, SUM(bytes) OVER (ORDER BY idx DESC) AS running
+                     FROM {events} WHERE run_id = $1
+                 ) windowed WHERE running <= $2
+             ),
+             boundary AS (
+                 SELECT COALESCE(
+                     (SELECT first_kept FROM kept),
+                     (SELECT MAX(idx) FROM {events} WHERE run_id = $1)
+                 ) AS first_kept
+             )
+             DELETE FROM {events}
+             WHERE run_id = $1 AND idx < (SELECT first_kept FROM boundary)
+             RETURNING bytes",
+            events = events,
+        ))
+        .bind(*run_id.as_uuid())
+        .bind(self.config.max_run_event_bytes as i64)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|err| pg_error("trim event log", err))?;
+
+        if deleted.is_empty() {
+            return Ok(());
+        }
+
+        let freed: i64 =
+            deleted.iter().map(|row| row.try_get::<i64, _>("bytes").unwrap_or(0)).sum();
+        sqlx::query(&format!(
+            "UPDATE {} SET event_bytes = GREATEST(event_bytes - $2, 0) WHERE run_id = $1",
+            self.table("runs")
+        ))
+        .bind(*run_id.as_uuid())
+        .bind(freed)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|err| pg_error("account for trimmed events", err))?;
+
+        tracing::warn!(
+            %run_id,
+            dropped = deleted.len(),
+            limit = self.config.max_run_event_bytes,
+            "dropped the oldest events of a run past the log size bound"
+        );
         Ok(())
     }
 
@@ -471,13 +569,19 @@ impl Store for PostgresStore {
         let mut transaction =
             self.pool.begin().await.map_err(|err| pg_error("begin transaction", err))?;
 
+        let size = event.approximate_size() as i64;
+
         // Taking the run's row lock is what makes the index unique: a
         // concurrent append blocks here rather than computing the same one.
+        // The running byte total rides on the same statement, so accounting
+        // for the log costs nothing on the path that does not trim.
         let row = sqlx::query(&format!(
-            "UPDATE {} SET next_event = next_event + 1 WHERE run_id = $1 RETURNING next_event - 1 AS idx",
+            "UPDATE {} SET next_event = next_event + 1, event_bytes = event_bytes + $2
+             WHERE run_id = $1 RETURNING next_event - 1 AS idx, event_bytes",
             self.table("runs")
         ))
         .bind(*run_id.as_uuid())
+        .bind(size)
         .fetch_optional(&mut *transaction)
         .await
         .map_err(|err| pg_error("reserve event index", err))?;
@@ -486,20 +590,41 @@ impl Store for PostgresStore {
             return Err(Error::not_found(format!("run {run_id} not found")));
         };
         let index: i64 = row.try_get("idx").map_err(|err| pg_error("read event index", err))?;
+        let held: i64 = row.try_get("event_bytes").map_err(|err| pg_error("read log size", err))?;
 
         sqlx::query(&format!(
-            "INSERT INTO {} (run_id, idx, event) VALUES ($1, $2, $3)",
+            "INSERT INTO {} (run_id, idx, event, bytes) VALUES ($1, $2, $3, $4)",
             self.table("events")
         ))
         .bind(*run_id.as_uuid())
         .bind(index)
         .bind(encode(event)?)
+        .bind(size)
         .execute(&mut *transaction)
         .await
         .map_err(|err| pg_error("append event", err))?;
 
+        if held > self.config.max_run_event_bytes as i64 {
+            self.trim_events(&mut transaction, run_id).await?;
+        }
+
         transaction.commit().await.map_err(|err| pg_error("commit event", err))?;
         Ok(index as u64)
+    }
+
+    async fn earliest_event(&self, run_id: RunId) -> StoreResult<u64> {
+        // `MIN(idx)` is the answer directly: rows are deleted from the front,
+        // and indices are absolute, so the lowest surviving one *is* where the
+        // log now starts. Nothing to store and nothing that can disagree.
+        let row: Option<(Option<i64>,)> = sqlx::query_as(&format!(
+            "SELECT MIN(idx) FROM {} WHERE run_id = $1",
+            self.table("events")
+        ))
+        .bind(*run_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| pg_error("read the earliest event", err))?;
+        Ok(row.and_then(|(idx,)| idx).unwrap_or(0).max(0) as u64)
     }
 
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
