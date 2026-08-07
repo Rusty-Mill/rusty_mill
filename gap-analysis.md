@@ -124,3 +124,78 @@ One additional gap **was** filed since it's additive and dependency-free
 | Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | Semantic response cache | fn (existing, new mode) | spec | n/a | agentgateway.dev "semantic caching" | no | M | Opt-in alongside the existing exact-match `[cache]`: embed the request via the already-configured embeddings provider, cosine-similarity match against cached entries above a configurable threshold. No new dependency — reuses the router's own `/v1/embeddings` dispatch path. |
+
+## Follow-up pass — 2026-08-07
+
+Since the 2026-08-06 baseline above, rusty_provider also shipped JWT/OIDC
+auth, MCP server+gateway with reconnect-backoff, the semantic response
+cache, and `rp-cli setup` (non-MITM CLI config-file rewriting, its own
+ADR-0004 — narrows "no MITM-based CLI config injection" to "no traffic
+interception" in `ARCHITECTURE.md`'s non-goals). This section re-runs the
+comparison against OmniRoute's *current* docs (cloned at
+`diegosouzapw/omniroute`, commit `6c22f8d` / 2026-08-07) rather than
+re-deriving scope from scratch — the "explicitly out of scope" list above
+stands unchanged unless noted otherwise below.
+
+OmniRoute's own doc tree has grown substantially since the baseline pass
+(agent-protocol frameworks, a plugin marketplace, a memory subsystem, an
+eval framework, more routing strategies) — almost all of it is product/UI
+surface that was already ruled out by the standing non-goals. The rows
+below are the subset that's genuinely new *and* server-side/router-level
+enough to plausibly belong in a headless HTTP router.
+
+| Symbol | Category | Source | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Configurable CORS allowlist | fn (existing, hardening) | spec (`docs/security/CORS.md`) | no | S | `crates/server/src/lib.rs` currently hardcodes `CorsLayer::permissive()` — any browser origin can read any response. New `[server].cors_allowed_origins`, default unchanged (permissive) to avoid a silent breaking change for existing deployments. No new dependency (`tower_http::cors` already in use). |
+| Webhook HMAC signing + retry-with-backoff | fn (existing, hardening) | spec (`docs/frameworks/WEBHOOKS.md`) | no | S/M | `[webhook]` is currently fire-and-forget, unsigned, single-attempt. Add HMAC-SHA256 body signing (`ring::hmac`, already a workspace dependency) plus retry-with-backoff on 5xx/network errors, mirroring the same backoff shape MCP reconnect already uses. |
+| Budget warning threshold | fn (existing, new field) | spec (`docs/reference/API_REFERENCE.md`) | no | S | New optional `[[clients]].budget_warning_threshold` (e.g. 0.8) alongside the existing hard `budget_usd` limit; fires a new `budget_warning` `[webhook]` event before the hard cutoff. Additive field, no schema break. |
+| Reasoning replay cache | fn (new) | spec (`docs/routing/REASONING_REPLAY.md`) | no | M | Some reasoning-capable models (DeepSeek-reasoner, Kimi-K-series, QwQ, GLM-thinking) hard-reject a follow-up turn missing prior `reasoning_content` — most client SDKs strip it themselves. Cache it server-side keyed by `tool_call_id`, re-inject transparently on the next turn. In-memory by default, optionally `[persistence]`-backed like the existing response cache. No new dependency. |
+| `strategy = "fusion"` routing | fn (new route strategy) | spec (`docs/routing/AUTO-COMBO.md`) | no | M/L | Fan a request to every model in a panel in parallel, then a configured judge model synthesizes one answer from anonymized outputs. Does **not** depend on the declined multi-account-pooling ("combo") concept — one key per provider, same as every other route. Same abstraction level as the existing `sort:` strategies. |
+| Per-request budget cap (`max_request_price_usd` + fallback policy) | fn (existing, new field) | spec (`docs/routing/AUTO-COMBO.md`) | no | S | Complements the existing per-candidate `provider.max_price` ceiling with a per-request total-cost cap, estimated from `max_tokens` × pricing before dispatch; `provider.budget_fallback: "strict"\|"cheapest"` chooses hard-402 vs. serve-via-cheapest when every candidate exceeds it. |
+| Routing-decision trace headers | fn (new) | spec (`docs/reference/API_REFERENCE.md`) | no | S | New response headers (`X-RP-Decision: strategy=...;provider=...;latency_ms=...`, `X-RP-Fallback-Attempts`) so a caller can see which concrete provider/model actually served an alias/chain request without a separate `GET /v1/generation?id=` round trip. Headers only, no schema change. |
+| Opt-in external pricing sync | fn (new) | spec (`docs/guides/COST_TRACKING.md`) | no | M | Optionally sync `[[pricing]]` rates from LiteLLM's public `model_prices_and_context_window.json` on an interval; explicit config-set entries always take precedence over synced ones. No new Cargo dependency (`reqwest` already present) — **but** this is the one candidate that adds a new *runtime* dependency on a third-party URL outside the operator's own configured providers, which is a different kind of new surface than a crate. Flagged for an explicit decision rather than filed automatically. |
+
+**Borderline — flagged, not auto-included, needs a scope call:**
+
+- **Memory system** (`docs/frameworks/MEMORY.md`/`MEMORY_BACKEND.md`) —
+  persistent per-API-key conversational memory with regex fact extraction
+  and FTS5/vector hybrid retrieval, injected into requests server-side.
+  The single biggest doc-volume gap found, but it pushes rusty_provider
+  from "stateless router" toward "stateful AI platform" — arguably
+  adjacent to the standing "not multi-tenant SaaS" non-goal rather than a
+  router capability. Would need its own ADR either way given the size.
+- **Eval framework** (`docs/frameworks/EVALS.md`) — a suite-runner
+  (built-in + custom test cases, scoring rubrics, A/B comparison) for
+  regression-testing routing/model changes over the existing
+  chat-completions path. Server-side and API-testable, but a materially
+  new subsystem (persistence tables, runner, scoring engine) — closer to
+  "product feature" than "router capability." Est. **L**.
+- **Reasoning routing rules** (`docs/routing/REASONING_ROUTING.md`) — a
+  priority-ordered rule engine (scope: key/combo/model/global) forcing or
+  defaulting reasoning effort/budget, plus known-incompatible-model
+  rejection. Meaningfully overlaps what `[[presets]]` + the providers'
+  existing reasoning translation already do; the one piece with clear
+  marginal value (reject a known-incompatible model before dispatch) may
+  not justify a whole new rule-engine surface on its own.
+- **3-state circuit breaker** (CLOSED/OPEN/HALF_OPEN + probe requests) —
+  cited explicitly in OmniRoute's own comparison table. rusty_provider's
+  existing health-based deprioritization (issue #75: EWMA success-rate
+  stable-partition) reaches a similar practical outcome via a simpler
+  mechanism. Possibly an internal-implementation nuance rather than a
+  user-facing gap.
+- **Auto-Combo category×tier suffix composition**
+  (`auto/coding:fast`, `auto/reasoning:pro`, etc.) — rusty_provider's
+  existing `auto_routing` (3-tier complexity classifier +
+  `auto_bias: cost|quality`) already covers similar ground with a
+  simpler model; the suffix-composition scheme may be more surface area
+  than value added.
+
+**Re-confirmed out of scope, not re-flagged:** free-tier *aggregation*
+(Quota Sharing Engine, "stack these providers" — both depend on the
+declined multi-account-pooling concept), MITM/traffic-interception docs,
+Relay Backend Strategy / Provider Plugin Manifest (OmniRoute's own
+TS-core→native-sidecar split — not applicable, rusty_provider already
+*is* the native router), Route Guard Tiers / Ban Detection / Public Creds
+(Electron-spawn-capable-route and OAuth-CLI-scraping concerns with no
+rusty_provider analog), the 43-language i18n rows in OmniRoute's own
+comparison table.
