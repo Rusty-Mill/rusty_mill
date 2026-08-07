@@ -148,8 +148,11 @@ By default tasks are held in an in-memory `TaskStore`; implement the `TaskStore`
 ```sh
 cargo test --features full                       # everything; needs protoc
 cargo test --features client,server              # everything but the gRPC suite
+cargo test --test wire_format                    # protocol conformance; no features
 cargo clippy --features full --all-targets
 ```
+
+`tests/wire_format.rs` pins the JSON encoding against the vendored [`spec/a2a.proto`](spec/a2a.proto): field names, enum spellings, `oneof` wrapper keys, base64 for `bytes`, RFC 3339 for timestamps, which fields are omitted when unset, and two whole documents (an Agent Card and a `Task`) spelled out literally. Expectations are written as **proto field names** and camel-cased at assert time, so each list diffs line-for-line against the `message` block it cites rather than being hand-transcribed into camelCase — which is where a typo would hide. It needs no features: the data model is always compiled, and its encoding is what every binding and every peer SDK shares. The suites below drive this crate's client against this crate's server, so a name that is wrong symmetrically on both sides passes all of them; this one catches it.
 
 `tests/integration.rs` spins up a real `AgentServer` on a local port and drives it with a real `A2aClient` and a bare `reqwest::Client`, covering the full task lifecycle, streaming, non-blocking sends, cancellation, push notification config CRUD, and the REST binding's routing/error shape, over both bindings sharing one task store. `tests/grpc_integration.rs` does the same against `AgentServices::serve_grpc` with a real generated `tonic` client. `tests/security_and_push_notifications.rs` covers `AuthVerifier` enforcement (accepted/rejected/misconfigured-fail-closed, across JSON-RPC and REST, plus the `GetExtendedAgentCard` auth gate) and push notification delivery to a real local webhook receiver. `tests/history_length_and_extensions.rs` covers `historyLength` truncation on `SendMessage` and required-extension enforcement across JSON-RPC and REST.
 
