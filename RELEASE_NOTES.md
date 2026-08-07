@@ -40,6 +40,121 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #123 — Add a minimal static dashboard at GET /dashboard
+**2026-08-07** · [#123](https://github.com/baileyrd/rusty_provider/pull/123) · [ADR-0003](docs/adr/0003-minimal-static-dashboard.md)
+
+- **Added:** `GET /dashboard` — one self-contained HTML file
+  (`crates/server/assets/dashboard.html`), no build step, no npm, no JS
+  framework, no CDN dependency, compiled into `rp-server` via
+  `include_str!`. Renders entirely client-side: prompts for a bearer
+  token and attaches it to every `fetch()` against the existing JSON
+  endpoints (`/v1/models`, `/v1/usage`, `/v1/providers/stats`,
+  `/v1/free-tiers`, `/v1/admin/clients` + per-client usage-history
+  sparkline + a reset-spend button), so it's subject to exactly the same
+  `check_auth`/`check_admin_auth` rules those endpoints already enforce.
+  The page itself is served unauthenticated (it carries no secrets), same
+  reasoning as `/health`.
+- **Changed:** `ARCHITECTURE.md`'s non-goal softened again, from "no UI"
+  to "no Electron/PWA/desktop product" — see ADR-0003, superseding
+  [ADR-0002](docs/adr/0002-reporting-surface-is-json-only.md).
+- Zero new Rust dependencies, zero new config surface, zero new persisted
+  state — a rendering layer over what already existed.
+
+---
+
+## PR #121 — Audit SSE streaming coverage; add unrecognized-field robustness tests
+**2026-08-07** · [#121](https://github.com/baileyrd/rusty_provider/pull/121)
+
+- **Added:** unrecognized-extra-field robustness tests for the Gemini and
+  OpenAI-compatible streaming adapters (`WireResponse`/`WireChunk` and
+  friends rely on serde's default "ignore unknown fields" behavior, but
+  neither had a test proving it). Anthropic already had equivalent
+  coverage via its explicit event-type discriminator.
+- **Known limitation (confirmed, not a gap):** SSE byte-to-event framing
+  (a JSON payload split across reads, comment/keep-alive lines) is
+  `eventsource-stream`'s own tested responsibility, fully resolved before
+  any adapter sees a complete event — audited and found not to need
+  application-level tests. Closes #80.
+
+---
+
+## PR #120 — Add historical/time-series usage export admin endpoint
+**2026-08-07** · [#120](https://github.com/baileyrd/rusty_provider/pull/120)
+
+- **Added:** `GET /v1/admin/clients/{name}/usage-history?days=N` —
+  day-bucketed `requests`/`prompt_tokens`/`completion_tokens`/`cost_usd`
+  for a client, oldest first, over the last `N` days (default 30, capped
+  at 90). New `client_daily_usage` table in both the SQLite and Postgres
+  persistence backends. Applies to every named client, not just ones with
+  a configured budget — history is a different concern from budget
+  enforcement. No-op (empty `data`) without `[persistence]` configured,
+  since history needs to survive a restart to mean anything.
+
+---
+
+## PR #119 — Make auto-routing tier resolution cost-aware
+**2026-08-07** · [#119](https://github.com/baileyrd/rusty_provider/pull/119)
+
+- **Changed:** when `model: "auto"` resolves to a `[[routes]]` alias
+  spanning multiple candidates, dispatch now defaults `provider.sort` to
+  `"price"` among them, unless the request already set its own explicit
+  `sort` (which always wins unchanged). Previously the complexity-based
+  tier classifier had no visibility into per-model pricing at all.
+
+---
+
+## PR #118 — Automatically deprioritize unhealthy providers in chain resolution
+**2026-08-07** · [#118](https://github.com/baileyrd/rusty_provider/pull/118)
+
+- **Changed:** chain resolution now stably deprioritizes (not
+  re-ranks) any candidate with an observed EWMA success rate below
+  `0.5`, by default. Previously that health signal only applied when a
+  request explicitly opted in with `sort: "uptime"`; it's skipped when
+  that sort is explicitly requested, since it's already the fuller
+  version of the same concern.
+
+---
+
+## PR #117 — Retry a transient error against the same provider before falling through
+**2026-08-06** · [#117](https://github.com/baileyrd/rusty_provider/pull/117)
+
+- **Added:** one same-candidate retry (fixed 200ms backoff) on a
+  genuinely transient error (timeout, network error, `5xx`) before
+  falling through to the next chain entry, across `dispatch`/
+  `dispatch_stream`/`embeddings`. `ProviderError::is_transient()` — a
+  strict subset of `is_retryable()` — excludes rate limits and
+  unsupported-content/feature mismatches, since retrying the *same*
+  candidate can't fix either.
+
+---
+
+## PR #116 — Add structured audit log for admin API mutations
+**2026-08-06** · [#116](https://github.com/baileyrd/rusty_provider/pull/116)
+
+- **Added:** a structured `tracing::info!` "admin action" event
+  (identity, organization, action, target) on every successful
+  `admin_create_client`/`admin_update_client`/`admin_delete_client`/
+  `admin_reset_client_spend` mutation — previously no admin mutation was
+  logged anywhere distinct from normal request tracing.
+
+---
+
+## PR #115 — Warn on unresolvable route-alias providers; add global concurrency cap
+**2026-08-06** · [#115](https://github.com/baileyrd/rusty_provider/pull/115)
+
+- **Added:** `Router::from_config` now warns at startup when a
+  `[[routes]]` alias's chain references a provider name with no matching
+  `[[providers]]` entry, instead of only surfacing the typo implicitly
+  through degraded fallback behavior at request time.
+- **Added:** `server.max_concurrent_requests` — a server-wide in-flight
+  request ceiling (`Semaphore::try_acquire_owned`, enforced as the
+  outermost middleware layer); once saturated, the next request gets
+  `503` immediately rather than queuing. Distinct from the existing
+  per-caller rate limiting, which bounds rate, not total in-flight count.
+  Unset by default (no cap).
+
+---
+
 ## PR #111 — rp-cli: cover [jwt].hs256_secret_env in keys check / config check
 **2026-08-06** · [#111](https://github.com/baileyrd/rusty_provider/pull/111)
 
