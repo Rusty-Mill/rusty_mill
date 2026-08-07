@@ -876,6 +876,12 @@ they usually cluster and one answer at a time is a slow way to find that out.
 
 Every endpoint and schema in the ACP v0.2.0 [OpenAPI document][openapi] is implemented.
 
+That sentence used to be a claim maintained by hand. The document now lives in `spec/`, and
+`tests/spec_coverage.rs` reads it: every operation it declares must be routed, the table below
+must name every one of them, and — the useful direction — **every route served that the spec does
+not define must be declared as an extension, with its reason**. Add a route without saying why it
+is not in the specification and the suite fails.
+
 | Endpoint | Server | Client |
 | --- | --- | --- |
 | `GET /ping` | ✅ | `ping` |
@@ -994,7 +1000,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-312 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+317 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
