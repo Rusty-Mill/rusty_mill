@@ -31,12 +31,12 @@ Implemented:
 - `SubscribeToTask` reconnection replay: each task keeps a bounded log of its recent events, so reconnecting mid-stream catches up on what was missed instead of only seeing a point-in-time snapshot. JSON-RPC and REST support the standard SSE `Last-Event-ID` reconnect header for precise resume; gRPC has no equivalent field in the canonical request, so a gRPC resubscribe always replays the whole buffered log.
 - Multi-tenant isolation: `TaskStore` scopes every task and push notification config by `tenant` (spec Section 4.2) — a task or config created under one tenant (or no tenant at all) is invisible to, unlistable by, and unmutable through a request naming a different tenant. All three bindings pass the caller's real `tenant` through to the store; REST reads it from the JSON body where an operation has one, or a `?tenant=` query parameter otherwise (`GET`s and the body-less `:cancel`/`:subscribe`/`DELETE` actions).
 - Client-side REST and gRPC transports (`client::RestClient`, `client::GrpcClient`), matching `A2aClient`'s JSON-RPC API one-for-one — including SSE/gRPC streaming and best-effort reconstruction of the specific `A2aError` from each binding's wire error shape (exact for JSON-RPC/REST; gRPC's bare status code is inherently lossier, since this crate's gRPC server sends no structured error details beyond it).
+- REST's `SubscribeToTask` is routed on its spec-literal `GET /tasks/{id}:subscribe` binding; `POST /tasks/{id}:subscribe` (this crate's original, non-spec-literal wiring) still works too, for backward compatibility.
 
 Not implemented (contributions welcome):
 
 - `mtls` security schemes are never satisfied by the built-in credential extraction (verifying a client certificate is a TLS-termination-layer concern); an `AuthVerifier` asked to satisfy an `mtls`-only requirement is simply never called for it.
 - REST's `additional_bindings` (serving every route again nested under a `/{tenant}` path prefix) aren't implemented — tenant scoping works (see above), just not via that particular URL shape; use the `tenant` body field or `?tenant=` query parameter instead.
-- REST's `:subscribe` action is only wired as `POST /tasks/{id}:subscribe`; a spec-literal `GET /tasks/{id}:subscribe` isn't routed.
 
 ## Quick start
 
