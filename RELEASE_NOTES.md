@@ -24,19 +24,24 @@ entries are tracked by PR rather than by release.
 
 ---
 
-## PR #114 — Add MCP support: expose rusty_provider as an MCP server and gateway
-**2026-08-06** · [#114](https://github.com/baileyrd/rusty_provider/pull/114) · [docs/MCP.md](docs/MCP.md)
+## PR #126 — Map JWT claims to [[clients]] identity
+**2026-08-07** · [#126](https://github.com/baileyrd/rusty_provider/pull/126)
 
-- **Added:** `[mcp]` config section, opt-in. Two directions at once, built
-  on [`rusty_mcp`](https://github.com/baileyrd/rusty_mcp): rusty_provider's
-  own routing exposed as MCP tools (`chat_completion`/`list_models`/
-  `embeddings`), plus a gateway proxying configured `[[mcp.upstreams]]`
-  (stdio subprocess or Streamable HTTP) under `"{upstream}/{tool}"` names,
-  merged into one `tools/list`. Mounted inside the existing app/port,
-  guarded by the same `server.api_key_env`/`[[clients]]`/`[jwt]` auth every
-  other route already uses, not a separate auth model. `MCP_STDIO=1` serves
-  the same handler over stdio for desktop clients. New dependencies
-  `rusty-mcp` (git) and `rmcp`.
+- **Added:** opt-in `[jwt].client_claim` (e.g. `"sub"`) — a verified JWT's
+  claim value matched against a configured `[[clients]].name` resolves
+  that client's identity for the rest of the request: the same budget
+  enforcement, per-subject rate-limit bucket, and usage/spend tracking a
+  static per-client API key already gets. No match (claim absent, or no
+  client with that name) falls back to the prior behavior unchanged —
+  same access a valid `server.api_key_env` token would get, no budget/
+  spend tracking, rate-limited via the IP fallback. `/v1/admin/*` is
+  untouched by design, `client_claim` included.
+- **Changed:** `matched_client_name` replaced by `resolve_client_identity`
+  — a request's client identity is now resolved once per request and
+  threaded into both rate-limit resolution and dispatch, rather than each
+  call site independently re-deriving it from the bearer token.
+- Closes the scope explicitly deferred when `[jwt]` shipped (#109/#110):
+  "no JWT-claims-to-`[[clients]]`-identity mapping in this pass."
 
 ---
 
@@ -152,6 +157,22 @@ entries are tracked by PR rather than by release.
   `503` immediately rather than queuing. Distinct from the existing
   per-caller rate limiting, which bounds rate, not total in-flight count.
   Unset by default (no cap).
+
+---
+
+## PR #114 — Add MCP support: expose rusty_provider as an MCP server and gateway
+**2026-08-06** · [#114](https://github.com/baileyrd/rusty_provider/pull/114) · [docs/MCP.md](docs/MCP.md)
+
+- **Added:** `[mcp]` config section, opt-in. Two directions at once, built
+  on [`rusty_mcp`](https://github.com/baileyrd/rusty_mcp): rusty_provider's
+  own routing exposed as MCP tools (`chat_completion`/`list_models`/
+  `embeddings`), plus a gateway proxying configured `[[mcp.upstreams]]`
+  (stdio subprocess or Streamable HTTP) under `"{upstream}/{tool}"` names,
+  merged into one `tools/list`. Mounted inside the existing app/port,
+  guarded by the same `server.api_key_env`/`[[clients]]`/`[jwt]` auth every
+  other route already uses, not a separate auth model. `MCP_STDIO=1` serves
+  the same handler over stdio for desktop clients. New dependencies
+  `rusty-mcp` (git) and `rmcp`.
 
 ---
 
