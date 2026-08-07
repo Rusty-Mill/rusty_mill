@@ -20,9 +20,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 - `[jwt]` — JWT/OIDC bearer-token authentication (HS256 shared-secret or
   JWKS/RS256), additive alongside `server.api_key_env`/`[[clients]]`.
   Fails closed on any verification failure.
+- `rp-cli setup` (`list`/`show`/`apply`) — rewrites a known third-party CLI
+  tool's own config file (opencode, Crush) to point its endpoint at
+  rusty_provider. Data-driven target list (`crates/cli/cli_targets.toml`,
+  extensible via `--targets`), dry-run by default, `--yes`-gated writes
+  with an automatic backup, never writes a literal API key (an env-var
+  reference naming `--api-key-env` when the target format supports one).
+  Static file rewriting only — no proxy, no traffic interception (ADR-0004).
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
-  softened to "no UI" (ADR-0002).
+  softened to "no UI" (ADR-0002); "no MITM-based third-party CLI config
+  injection" narrowed to "no traffic interception" now that `rp-cli setup`
+  covers the static config-file-rewriting case (ADR-0004).
 ### Fixed
 ### Security
 

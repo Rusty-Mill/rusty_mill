@@ -71,9 +71,11 @@ check container health directly rather than via an external prober.
 
 ### Operator CLI
 
-`rp-cli` is a small, synchronous, read-only companion binary for checking
-a config before you deploy it — it never makes a network call and never
-prints a resolved secret's value, only whether its env var is set:
+`rp-cli` is a small, synchronous companion binary for checking a config
+before you deploy it and, optionally, pointing a third-party CLI tool at
+your running instance. Its `config`/`providers`/`keys` commands never make
+a network call and never print a resolved secret's value, only whether its
+env var is set:
 
 ```sh
 cargo run -p rp-cli -- config check --path config.toml
@@ -97,6 +99,46 @@ cargo run -p rp-cli -- keys check --path config.toml
 `--path` defaults to `config.toml` in the current directory. Not built
 into the Docker image described above (`rp-server` only) — run it from a
 checkout, or `cargo install --path crates/cli` for a standalone binary.
+
+#### `setup` — point a third-party CLI tool at rusty_provider
+
+Several terminal AI coding agents ([opencode](https://opencode.ai),
+[Crush](https://charm.land/crush), and others) already read their
+provider/endpoint settings from a local JSON or TOML file. `rp-cli setup`
+rewrites just that field, in place, to point the tool at a running
+rusty_provider instance — see
+[ADR-0004](./docs/adr/0004-cli-target-config-rewriting.md) for why this is
+scoped to static file rewriting (no proxy, no traffic interception, no
+trust-store changes):
+
+```sh
+cargo run -p rp-cli -- setup list
+cargo run -p rp-cli -- setup show opencode --api-key-env RUSTY_PROVIDER_KEY
+cargo run -p rp-cli -- setup apply opencode --api-key-env RUSTY_PROVIDER_KEY --yes
+```
+
+- **`setup list`** — every known target with its config file path and
+  whether that file currently exists.
+- **`setup show <name>`** — a dry run: prints the file that would be
+  written (merged with whatever's already there), without touching disk.
+  Always run this before `apply`.
+- **`setup apply <name> --yes`** — writes it for real. Requires `--yes`.
+  Backs up the previous file to `<path>.bak` first (skipped only if the
+  file didn't exist). Merges into the existing file rather than
+  overwriting it — unrelated keys are kept, and it refuses rather than
+  clobbers if an existing value at that path isn't an object/table.
+- `--base-url` defaults to `http://localhost:8080/v1` (rp-server's own
+  documented default `server.host:server.port`); `--config-path` overrides
+  a target's default config file location; `--targets <path>` replaces the
+  built-in target list (`crates/cli/cli_targets.toml`) with your own —
+  useful for a tool not listed here, or a config schema that's drifted
+  from what's shipped.
+- **Never writes a literal API key.** A target whose config format
+  supports an env-var-reference syntax (opencode's `{env:VAR}`, Crush's
+  `$VAR`) gets that syntax naming whatever variable `--api-key-env` names
+  — `rp-cli` never reads the variable's actual value to do this. Omit
+  `--api-key-env` and that field is skipped entirely (reported in the
+  output) rather than left half-configured.
 
 ## API
 

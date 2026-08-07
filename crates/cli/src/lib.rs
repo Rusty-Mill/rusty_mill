@@ -11,6 +11,8 @@
 
 use rp_router::{Config, ProviderKind};
 
+pub mod setup;
+
 /// One `[providers.*]` entry's resolution status, mirroring exactly what
 /// `Router::from_config` itself decides at startup (an unresolvable
 /// `api_key_env` is skipped with a warning, not a hard failure) -- so

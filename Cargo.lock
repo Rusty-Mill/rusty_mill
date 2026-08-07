@@ -1719,6 +1719,9 @@ version = "0.1.0"
 dependencies = [
  "regex",
  "rp-router",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
