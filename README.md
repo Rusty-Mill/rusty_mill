@@ -1076,6 +1076,17 @@ rather than queuing — a caller waiting behind a long queue at an already-
 saturated server is worse than one told plainly to retry. Unset (the
 default) means no cap, same as before this existed.
 
+## CORS
+
+By default every route allows any browser origin (`Access-Control-Allow-Origin: *`) — the same behavior this router has always had. Set `server.cors_allowed_origins` to restrict that to an explicit allowlist instead:
+
+```toml
+[server]
+cors_allowed_origins = ["https://my-dashboard.example", "https://app.example.com"]
+```
+
+An origin not on the list gets no `Access-Control-Allow-Origin` header at all (the browser blocks the response from being read by page JS), same as any other CORS-restricted API. Only origin is restricted — methods and headers stay wildcard either way, since there's no cookie-based/credentialed auth here for that to be unsafe with (bearer tokens go in `Authorization`, not a cookie jar). An entry that doesn't parse as a valid `Origin` header value is skipped with a startup warning rather than failing the whole list, logged the same way an invalid `[[guardrails]]` pattern is.
+
 ## Request body size limit
 
 `server.max_body_bytes` caps an inbound request body, in bytes, rejected
@@ -1152,6 +1163,10 @@ proactively. `[webhook]` adds a push notification on top:
 url = "https://hooks.example.com/rusty-provider"
 auth_header_env = "WEBHOOK_AUTH_HEADER"   # optional; e.g. "Bearer <token>"
 timeout_secs = 10                         # optional, this is the default
+signing_secret_env = "WEBHOOK_SIGNING_SECRET"  # optional
+retry_backoff_secs = 1                    # optional, these three are the defaults
+retry_backoff_max_secs = 30
+max_retries = 3
 ```
 
 This router POSTs a JSON body to `url` on two events:
@@ -1174,10 +1189,19 @@ neither) — same class of caveat the tracked spend total itself already
 carries. `auth_header_env` names an env var holding the exact value to
 send as this POST's `Authorization` header (e.g. `"Bearer <token>"`), so
 the receiver can verify the request came from this router; leaving it
-unset sends no `Authorization` header at all. Delivery is fire-and-forget
-— a slow or unreachable receiver never adds latency to the request that
-triggered the event, and a delivery failure is only logged, never
-surfaced to the client.
+unset sends no `Authorization` header at all. `signing_secret_env` names
+an env var holding an HMAC-SHA256 secret; when set, every delivery
+carries an `X-RP-Signature: sha256=<hex>` header computed over the exact
+JSON body sent, so the receiver can verify the request actually came from
+this router rather than trusting `auth_header_env` alone — compute the
+same HMAC over the raw request body on your end and compare. Delivery is
+fire-and-forget — a slow or unreachable receiver never adds latency to
+the request that triggered the event. A failed delivery (network error,
+or a `5xx` response) retries with exponential backoff
+(`retry_backoff_secs`, doubling up to `retry_backoff_max_secs`, up to
+`max_retries` retries); a `4xx` response is treated as permanent and not
+retried. Giving up after the retry budget is exhausted is only logged,
+never surfaced to the client that triggered the event.
 
 ## Free tiers
 

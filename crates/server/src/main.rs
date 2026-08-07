@@ -122,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         mcp,
         mcp_path,
         concurrency_limiter,
+        cors_allowed_origins: config.server.cors_allowed_origins.clone(),
     };
 
     if std::env::var("MCP_STDIO").is_ok() {

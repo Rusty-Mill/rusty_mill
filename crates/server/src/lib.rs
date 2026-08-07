@@ -11,10 +11,39 @@ use axum::routing::{get, patch, post};
 use axum::Router as AxumRouter;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::streamable_http_server::StreamableHttpService;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
+
+/// Builds the CORS layer from `state.cors_allowed_origins` -- `None`
+/// (unset) keeps the original any-origin behavior; `Some` restricts to
+/// exactly those origins. Methods/headers stay wildcard either way, since
+/// this is scoped to origin restriction, not the rest of the CORS surface
+/// -- and there's no credentialed (cookie-based) auth here for a wildcard
+/// origin to be unsafe with. An entry that doesn't parse as a valid
+/// `Origin` header value is skipped with a startup warning rather than
+/// failing the whole list, same soft-failure posture as an invalid
+/// `[[guardrails]]` pattern.
+fn build_cors_layer(cors_allowed_origins: &Option<Vec<String>>) -> CorsLayer {
+    let Some(origins) = cors_allowed_origins else {
+        return CorsLayer::permissive();
+    };
+    let parsed: Vec<axum::http::HeaderValue> = origins
+        .iter()
+        .filter_map(|origin| match origin.parse() {
+            Ok(value) => Some(value),
+            Err(e) => {
+                tracing::warn!(origin, error = %e, "skipping invalid cors_allowed_origins entry");
+                None
+            }
+        })
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(parsed))
+        .allow_methods(Any)
+        .allow_headers(Any)
+}
 
 /// Mount the MCP endpoint at `state.mcp_path`, guarded by [`routes::mcp_auth`]
 /// (the same `check_auth` every other route already uses -- see that
@@ -56,6 +85,7 @@ fn mount_mcp(router: AxumRouter<AppState>, state: &AppState) -> AxumRouter<AppSt
 /// (serving on an ephemeral port via the same `axum::serve` path).
 pub fn build_app(state: AppState) -> AxumRouter {
     let max_body_bytes = state.max_body_bytes;
+    let cors_layer = build_cors_layer(&state.cors_allowed_origins);
     let router = AxumRouter::new()
         .route("/health", get(routes::health))
         .route("/ready", get(routes::ready))
@@ -91,7 +121,7 @@ pub fn build_app(state: AppState) -> AxumRouter {
     let router = mount_mcp(router, &state);
     router
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer)
         .layer(DefaultBodyLimit::max(max_body_bytes))
         // Outermost: a shed request costs a semaphore try-acquire and
         // nothing else -- ahead of body-limit/CORS/tracing, the same

@@ -60,6 +60,16 @@ pub struct ServerConfig {
     /// or local resources with no backpressure. Unset means no cap.
     #[serde(default)]
     pub max_concurrent_requests: Option<usize>,
+    /// Restricts CORS to an explicit browser-origin allowlist instead of
+    /// the default any-origin behavior. Unset preserves today's behavior
+    /// unchanged -- this is opt-in hardening, not a default flip, so an
+    /// existing deployment isn't silently broken by upgrading. Each entry
+    /// must parse as a valid `Origin` header value (`scheme://host[:port]`,
+    /// no path); an entry that doesn't parse is skipped with a startup
+    /// warning rather than failing the whole list, same soft-failure
+    /// posture as an invalid `[[guardrails]]` pattern.
+    #[serde(default)]
+    pub cors_allowed_origins: Option<Vec<String>>,
 }
 
 impl Default for ServerConfig {
@@ -72,6 +82,7 @@ impl Default for ServerConfig {
             default_rate_limit_rpm: None,
             admin_key_env: None,
             max_concurrent_requests: None,
+            cors_allowed_origins: None,
         }
     }
 }
@@ -643,6 +654,18 @@ fn default_auxiliary_timeout_secs() -> u64 {
     10
 }
 
+fn default_webhook_retry_backoff_secs() -> u64 {
+    1
+}
+
+fn default_webhook_retry_backoff_max_secs() -> u64 {
+    30
+}
+
+fn default_webhook_max_retries() -> u32 {
+    3
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct WebhookConfig {
     /// URL this router POSTs a JSON event payload to.
@@ -659,6 +682,29 @@ pub struct WebhookConfig {
     /// never surfaced to the client that triggered the event.
     #[serde(default = "default_auxiliary_timeout_secs")]
     pub timeout_secs: u64,
+    /// Name of the environment variable holding an HMAC-SHA256 signing
+    /// secret. When set, every webhook POST carries an
+    /// `X-RP-Signature: sha256=<hex>` header computed over the exact JSON
+    /// body sent, so the receiver can verify the request actually came
+    /// from this router rather than trusting `auth_header_env` alone.
+    /// Unset sends no signature header, same as before this field
+    /// existed.
+    #[serde(default)]
+    pub signing_secret_env: Option<String>,
+    /// Backoff before the first retry, in seconds, doubling each further
+    /// attempt up to `retry_backoff_max_secs` -- same shape `[mcp]`
+    /// upstream reconnect already uses. Only a 5xx response or a network
+    /// error triggers a retry; any other status (a 4xx, for instance) is
+    /// treated as permanent and not retried.
+    #[serde(default = "default_webhook_retry_backoff_secs")]
+    pub retry_backoff_secs: u64,
+    #[serde(default = "default_webhook_retry_backoff_max_secs")]
+    pub retry_backoff_max_secs: u64,
+    /// Retries attempted after the first delivery try before giving up
+    /// and logging the failure. `0` disables retry -- the original
+    /// single-attempt behavior.
+    #[serde(default = "default_webhook_max_retries")]
+    pub max_retries: u32,
 }
 
 fn default_moderation_base_url() -> String {
@@ -1484,6 +1530,49 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.webhook.unwrap().timeout_secs, 3);
+    }
+
+    #[test]
+    fn webhook_signing_and_retry_fields_default_when_unset() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [webhook]
+            url = "http://localhost:9999/events"
+            "#,
+        )
+        .unwrap();
+        let webhook = config.webhook.unwrap();
+        assert!(webhook.signing_secret_env.is_none());
+        assert_eq!(webhook.retry_backoff_secs, 1);
+        assert_eq!(webhook.retry_backoff_max_secs, 30);
+        assert_eq!(webhook.max_retries, 3);
+    }
+
+    #[test]
+    fn webhook_signing_and_retry_fields_are_honored_when_set() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [webhook]
+            url = "http://localhost:9999/events"
+            signing_secret_env = "WEBHOOK_SIGNING_SECRET"
+            retry_backoff_secs = 2
+            retry_backoff_max_secs = 60
+            max_retries = 5
+            "#,
+        )
+        .unwrap();
+        let webhook = config.webhook.unwrap();
+        assert_eq!(
+            webhook.signing_secret_env.as_deref(),
+            Some("WEBHOOK_SIGNING_SECRET")
+        );
+        assert_eq!(webhook.retry_backoff_secs, 2);
+        assert_eq!(webhook.retry_backoff_max_secs, 60);
+        assert_eq!(webhook.max_retries, 5);
     }
 
     // --- moderation ----------------------------------------------------------------
