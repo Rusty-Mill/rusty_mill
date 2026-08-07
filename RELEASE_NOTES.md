@@ -24,6 +24,40 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #131 — Add reconnect-with-backoff for dropped MCP gateway upstreams
+**2026-08-07** · [#131](https://github.com/baileyrd/rusty_provider/pull/131)
+
+- **Added:** a `[[mcp.upstreams]]` connection that was previously
+  established and then drops (upstream process crashes, network blip on
+  an HTTP upstream) is now reconnected automatically with exponential
+  backoff, instead of staying dead until `rp-server` restarts. New
+  `[mcp]` fields: `reconnect_backoff_secs` (default 1),
+  `reconnect_backoff_max_secs` (default 60), `max_reconnect_attempts`
+  (default unbounded). A startup connection failure is unchanged — still
+  a soft warning, absent from the tool list until restart.
+- Closes the item explicitly scoped out when MCP support shipped
+  (#114): "Reconnect-with-backoff for a dropped upstream (log-and-drop
+  is enough to start)."
+
+---
+
+## PR #129 — Add an i18n framework to the dashboard
+**2026-08-07** · [#129](https://github.com/baileyrd/rusty_provider/pull/129)
+
+- **Added:** the dashboard's UI text (panel titles, column headers,
+  button labels, empty/loading states) now goes through a `t()`-keyed
+  translation dictionary and a language switcher in the header,
+  persisted in `localStorage`. Framework only — only `en` is populated;
+  a new locale is added by extending the dictionary in
+  `dashboard.html`, not by guessing a translation nobody asked for.
+  Server-generated JSON error messages stay English (a separate,
+  larger `Accept-Language`-aware effort, out of scope here).
+- **Changed:** `ARCHITECTURE.md`'s non-goals dropped the "no i18n"
+  clause, with a note that the dashboard's i18n framework is a
+  switching mechanism (English-only today), not a translation project.
+
+---
+
 ## PR #126 — Map JWT claims to [[clients]] identity
 **2026-08-07** · [#126](https://github.com/baileyrd/rusty_provider/pull/126)
 
