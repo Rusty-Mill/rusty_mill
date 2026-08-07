@@ -116,3 +116,5 @@ jobs:
           cargo test --features grpc,server --test grpc_integration -- --list
           cargo test --features client,server --test subscribe_replay -- --list
           cargo test --features grpc,server --test subscribe_replay_grpc -- --list
+          cargo test --features client,server --test tenant_isolation -- --list
+          cargo test --features grpc,server --test tenant_isolation_grpc -- --list

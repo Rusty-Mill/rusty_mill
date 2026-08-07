@@ -49,6 +49,7 @@ use super::store::TaskStore;
 struct Started {
     task_id: String,
     context_id: String,
+    tenant: Option<String>,
 }
 
 pub struct Engine {
@@ -162,11 +163,15 @@ impl Engine {
         }
     }
 
-    async fn resolve_ids(&self, message: &Message) -> Result<(String, String, Option<Task>)> {
+    async fn resolve_ids(
+        &self,
+        tenant: Option<&str>,
+        message: &Message,
+    ) -> Result<(String, String, Option<Task>)> {
         if let Some(task_id) = &message.task_id {
             let task = self
                 .store
-                .get(task_id)
+                .get(tenant, task_id)
                 .await
                 .ok_or_else(|| A2aError::TaskNotFound(task_id.clone()))?;
             if let Some(msg_ctx) = &message.context_id {
@@ -195,7 +200,8 @@ impl Engine {
         &self,
         req: &SendMessageRequest,
     ) -> Result<(Started, broadcast::Receiver<SeqEvent>)> {
-        let (task_id, context_id, existing_task) = self.resolve_ids(&req.message).await?;
+        let (task_id, context_id, existing_task) =
+            self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
 
         let (tx, mut rx) = mpsc::unbounded_channel::<StreamResponse>();
         let sink = EventSink::new(task_id.clone(), context_id.clone(), tx);
@@ -226,6 +232,7 @@ impl Engine {
         let seed_message = req.message.clone();
         let bg_task_id = task_id.clone();
         let bg_context_id = context_id.clone();
+        let bg_tenant = req.tenant.clone();
 
         tokio::spawn(async move {
             let exec_handle = tokio::spawn(async move { executor.execute(ctx, sink).await });
@@ -237,6 +244,7 @@ impl Engine {
                     &push,
                     &event_logs,
                     &next_seq,
+                    bg_tenant.as_deref(),
                     &bg_task_id,
                     &bg_context_id,
                     &seed_message,
@@ -274,6 +282,7 @@ impl Engine {
                         &push,
                         &event_logs,
                         &next_seq,
+                        bg_tenant.as_deref(),
                         &bg_task_id,
                         &bg_context_id,
                         &seed_message,
@@ -294,12 +303,19 @@ impl Engine {
             cancel_tokens.lock().await.remove(&bg_task_id);
         });
 
-        Ok((Started { task_id, context_id }, bus_rx))
+        Ok((
+            Started {
+                task_id,
+                context_id,
+                tenant: req.tenant.clone(),
+            },
+            bus_rx,
+        ))
     }
 
     async fn snapshot_task(&self, started: &Started) -> Task {
         self.store
-            .get(&started.task_id)
+            .get(started.tenant.as_deref(), &started.task_id)
             .await
             .unwrap_or_else(|| Task::new(&started.task_id, &started.context_id, TaskState::Submitted))
     }
@@ -362,7 +378,7 @@ impl Engine {
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => {
-                    return match self.store.get(&started.task_id).await {
+                    return match self.store.get(started.tenant.as_deref(), &started.task_id).await {
                         Some(task) => finish(task),
                         None => Err(A2aError::InvalidAgentResponse(
                             "agent finished without producing a message or task update".to_string(),
@@ -400,7 +416,7 @@ impl Engine {
         self.require_streaming()?;
         let task = self
             .store
-            .get(&req.id)
+            .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
         if task.status.state.is_terminal() {
@@ -449,7 +465,7 @@ impl Engine {
     pub async fn get_task(&self, req: GetTaskRequest) -> Result<Task> {
         let mut task = self
             .store
-            .get(&req.id)
+            .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
         apply_history_length(&mut task, req.history_length);
@@ -458,7 +474,7 @@ impl Engine {
 
     /// `ListTasks` (spec Section 3.1.4).
     pub async fn list_tasks(&self, req: ListTasksRequest) -> Result<ListTasksResponse> {
-        let (mut tasks, next_page_token, total) = self.store.list(&req).await;
+        let (mut tasks, next_page_token, total) = self.store.list(req.tenant.as_deref(), &req).await;
         for t in &mut tasks {
             apply_history_length(t, req.history_length);
         }
@@ -475,7 +491,7 @@ impl Engine {
     pub async fn cancel_task(&self, req: CancelTaskRequest) -> Result<Task> {
         let task = self
             .store
-            .get(&req.id)
+            .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
         if task.status.state.is_terminal() {
@@ -511,6 +527,7 @@ impl Engine {
                 &self.push_notifier,
                 &self.event_logs,
                 &self.next_seq,
+                req.tenant.as_deref(),
                 &req.id,
                 &context_id,
                 &seed,
@@ -524,7 +541,11 @@ impl Engine {
 
         // Guarantee a canceled/terminal outcome even if the executor's
         // `cancel` override didn't explicitly emit one.
-        let mut updated = self.store.get(&req.id).await.unwrap_or(task);
+        let mut updated = self
+            .store
+            .get(req.tenant.as_deref(), &req.id)
+            .await
+            .unwrap_or(task);
         if !updated.status.state.is_terminal() {
             updated.status = TaskStatus::new(TaskState::Canceled);
             let evt: StreamResponse = TaskStatusUpdateEvent {
@@ -539,6 +560,7 @@ impl Engine {
                 &self.push_notifier,
                 &self.event_logs,
                 &self.next_seq,
+                req.tenant.as_deref(),
                 &req.id,
                 &context_id,
                 &seed,
@@ -548,7 +570,11 @@ impl Engine {
             if let Some(b) = &bus {
                 let _ = b.send((seq, evt));
             }
-            updated = self.store.get(&req.id).await.unwrap_or(updated);
+            updated = self
+                .store
+                .get(req.tenant.as_deref(), &req.id)
+                .await
+                .unwrap_or(updated);
         }
         Ok(updated)
     }
@@ -563,11 +589,12 @@ impl Engine {
             .task_id
             .clone()
             .ok_or_else(|| A2aError::InvalidParams("taskId is required".to_string()))?;
+        let tenant = config.tenant.clone();
         self.store
-            .get(&task_id)
+            .get(tenant.as_deref(), &task_id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(task_id.clone()))?;
-        Ok(self.store.put_push_config(config).await)
+        Ok(self.store.put_push_config(tenant.as_deref(), config).await)
     }
 
     /// `GetTaskPushNotificationConfig` (spec Section 3.1.8).
@@ -577,7 +604,7 @@ impl Engine {
     ) -> Result<TaskPushNotificationConfig> {
         self.require_push_notifications()?;
         self.store
-            .get_push_config(&req.task_id, &req.id)
+            .get_push_config(req.tenant.as_deref(), &req.task_id, &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(format!("push notification config {}", req.id)))
     }
@@ -588,7 +615,10 @@ impl Engine {
         req: ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse> {
         self.require_push_notifications()?;
-        let configs = self.store.list_push_configs(&req.task_id).await;
+        let configs = self
+            .store
+            .list_push_configs(req.tenant.as_deref(), &req.task_id)
+            .await;
         Ok(ListTaskPushNotificationConfigsResponse {
             configs,
             next_page_token: String::new(),
@@ -601,7 +631,11 @@ impl Engine {
         req: DeleteTaskPushNotificationConfigRequest,
     ) -> Result<()> {
         self.require_push_notifications()?;
-        if self.store.delete_push_config(&req.task_id, &req.id).await {
+        if self
+            .store
+            .delete_push_config(req.tenant.as_deref(), &req.task_id, &req.id)
+            .await
+        {
             Ok(())
         } else {
             Err(A2aError::TaskNotFound(format!(
@@ -698,6 +732,7 @@ async fn apply_event(
     push: &PushNotifier,
     event_logs: &EventLogs,
     next_seq: &Arc<AtomicU64>,
+    tenant: Option<&str>,
     task_id: &str,
     context_id: &str,
     seed_message: &Message,
@@ -715,7 +750,7 @@ async fn apply_event(
 
     match evt {
         StreamResponse::StatusUpdate { status_update } => {
-            let mut task = match store.get(task_id).await {
+            let mut task = match store.get(tenant, task_id).await {
                 Some(t) => t,
                 None => {
                     let mut t = Task::new(task_id, context_id, TaskState::Submitted);
@@ -727,11 +762,11 @@ async fn apply_event(
             if let Some(msg) = &status_update.status.message {
                 task.history.push(msg.clone());
             }
-            store.put(task.clone()).await;
-            notify_push_configs(store, push, &task).await;
+            store.put(tenant, task.clone()).await;
+            notify_push_configs(store, push, tenant, &task).await;
         }
         StreamResponse::ArtifactUpdate { artifact_update } => {
-            let mut task = match store.get(task_id).await {
+            let mut task = match store.get(tenant, task_id).await {
                 Some(t) => t,
                 None => {
                     let mut t = Task::new(task_id, context_id, TaskState::Working);
@@ -740,8 +775,8 @@ async fn apply_event(
                 }
             };
             merge_artifact(&mut task, artifact_update);
-            store.put(task.clone()).await;
-            notify_push_configs(store, push, &task).await;
+            store.put(tenant, task.clone()).await;
+            notify_push_configs(store, push, tenant, &task).await;
         }
         StreamResponse::Task { .. } | StreamResponse::Message { .. } => {}
     }
@@ -752,8 +787,13 @@ async fn apply_event(
 /// Fires off push notification delivery (spec Section 4.3) to every
 /// config registered for `task.id`, one background task per config so a
 /// slow/unreachable webhook can never delay task processing.
-async fn notify_push_configs(store: &Arc<dyn TaskStore>, push: &PushNotifier, task: &Task) {
-    for config in store.list_push_configs(&task.id).await {
+async fn notify_push_configs(
+    store: &Arc<dyn TaskStore>,
+    push: &PushNotifier,
+    tenant: Option<&str>,
+    task: &Task,
+) {
+    for config in store.list_push_configs(tenant, &task.id).await {
         let push = push.clone();
         let task = task.clone();
         tokio::spawn(async move { push.notify(&config, &task).await });
