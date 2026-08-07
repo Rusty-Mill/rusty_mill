@@ -22,7 +22,7 @@ windows-sys.workspace = true
 # 2021 for that reason too: Cargo parses the manifest of every resolved
 # dependency, optional-and-disabled included, so an edition-2024 manifest
 # would have broken the MSRV leg on the dependency's mere presence.
-rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "ea8600d16a99517313c70810876538fe47d868ba", optional = true }
+rusty_win32 = { git = "https://github.com/baileyrd/rusty_win32", rev = "ae5ce310c200c206909cca0b01650e883522a7c9", optional = true }
 
 [features]
 # RFC v2 §2 Track W: route curated call families through rusty_win32's
