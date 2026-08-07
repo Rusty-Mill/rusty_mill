@@ -1770,13 +1770,46 @@ impl Router {
     /// isn't configured at all, passes through unchanged -- an
     /// unconfigured `"auto"` then resolves exactly like any other
     /// unrecognized alias (a `400`), not a special error.
-    fn resolve_target_model(&self, req: &ChatRequest) -> String {
+    ///
+    /// The second element is whether this resolution actually went
+    /// through auto-routing -- callers use it to decide whether
+    /// [`Self::auto_routed_price_preference`] should apply.
+    fn resolve_target_model(&self, req: &ChatRequest) -> (String, bool) {
         if req.model == "auto" {
             if let Some(config) = &self.auto_routing {
-                return auto_routing::resolve_tier(config, req);
+                return (auto_routing::resolve_tier(config, req), true);
             }
         }
-        req.model.clone()
+        (req.model.clone(), false)
+    }
+
+    /// When `model: "auto"` picked a tier and the caller didn't already
+    /// request an explicit `sort`, defaults it to `"price"` -- so an
+    /// auto-routed request prefers the cheapest candidate within its
+    /// resolved tier's own fallback chain, rather than the complexity
+    /// classifier and the pricing system staying two disconnected
+    /// mechanisms. A caller's own explicit `sort` (or a non-auto `model`)
+    /// always wins unchanged: `None` here means "use `req.provider` as
+    /// given," not "no preferences."
+    fn auto_routed_price_preference(
+        &self,
+        req: &ChatRequest,
+        was_auto_routed: bool,
+    ) -> Option<ProviderPreferences> {
+        if !was_auto_routed {
+            return None;
+        }
+        if req
+            .provider
+            .as_ref()
+            .and_then(|p| p.sort.as_deref())
+            .is_some()
+        {
+            return None;
+        }
+        let mut prefs = req.provider.clone().unwrap_or_default();
+        prefs.sort = Some("price".to_string());
+        Some(prefs)
     }
 
     /// The caller-supplied BYOK key for `provider_name`, if
@@ -1931,9 +1964,11 @@ impl Router {
     /// those need their own copy of fallback/retry/instrumentation, only
     /// a different cache check wrapped around this.
     async fn dispatch_uncached(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
-        let target_model = self.resolve_target_model(req);
+        let (target_model, was_auto_routed) = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
-        let chain = self.apply_preferences(&target_model, chain, req.provider.as_ref())?;
+        let auto_price_prefs = self.auto_routed_price_preference(req, was_auto_routed);
+        let effective_prefs = auto_price_prefs.as_ref().or(req.provider.as_ref());
+        let chain = self.apply_preferences(&target_model, chain, effective_prefs)?;
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
         let mut last_err: Option<RouterError> = None;
 
@@ -2054,9 +2089,11 @@ impl Router {
     }
 
     pub async fn dispatch_stream(&self, req: &ChatRequest) -> Result<ChatStream, RouterError> {
-        let target_model = self.resolve_target_model(req);
+        let (target_model, was_auto_routed) = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
-        let chain = self.apply_preferences(&target_model, chain, req.provider.as_ref())?;
+        let auto_price_prefs = self.auto_routed_price_preference(req, was_auto_routed);
+        let effective_prefs = auto_price_prefs.as_ref().or(req.provider.as_ref());
+        let chain = self.apply_preferences(&target_model, chain, effective_prefs)?;
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
         let mut last_err: Option<RouterError> = None;
 
@@ -3586,7 +3623,7 @@ mod tests {
         let req = test_request("anthropic/claude-sonnet-5");
         assert_eq!(
             router.resolve_target_model(&req),
-            "anthropic/claude-sonnet-5"
+            ("anthropic/claude-sonnet-5".to_string(), false)
         );
     }
 
@@ -3594,7 +3631,10 @@ mod tests {
     fn resolve_target_model_passes_auto_through_unchanged_when_unconfigured() {
         let router = test_router(vec![], vec![], vec![], vec![], vec![]);
         let req = test_request("auto");
-        assert_eq!(router.resolve_target_model(&req), "auto");
+        assert_eq!(
+            router.resolve_target_model(&req),
+            ("auto".to_string(), false)
+        );
     }
 
     #[test]
@@ -3602,7 +3642,10 @@ mod tests {
         let mut router = test_router(vec![], vec![], vec![], vec![], vec![]);
         router.auto_routing = Some(auto_routing_config());
         let req = test_request("auto");
-        assert_eq!(router.resolve_target_model(&req), "openai/gpt-4o-mini");
+        assert_eq!(
+            router.resolve_target_model(&req),
+            ("openai/gpt-4o-mini".to_string(), true)
+        );
     }
 
     #[test]
@@ -3613,8 +3656,115 @@ mod tests {
         req.messages = vec![ChatMessage::user("word ".repeat(1000))];
         assert_eq!(
             router.resolve_target_model(&req),
-            "anthropic/claude-opus-4-8"
+            ("anthropic/claude-opus-4-8".to_string(), true)
         );
+    }
+
+    // --- auto-routed price preference ---------------------------------------
+
+    /// A request that lands in the "medium" tier (the `TOOLS_BONUS` pushes
+    /// a short prompt past `simple_max_score`, same as
+    /// `auto_routing::tests::a_request_with_tools_resolves_to_a_higher_tier_than_plain_text_of_the_same_length`),
+    /// whose tier resolves to the "smart" alias -- a two-candidate chain
+    /// so cost-awareness has something to prefer between.
+    fn auto_routed_medium_tier_request() -> ChatRequest {
+        let mut req = test_request("auto");
+        req.tools = Some(vec![rp_core::Tool {
+            kind: "function".to_string(),
+            function: rp_core::FunctionDef {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+        req
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_routed_request_prefers_the_cheaper_candidate_within_its_tier() {
+        let calls_expensive = Arc::new(AtomicUsize::new(0));
+        let calls_cheap = Arc::new(AtomicUsize::new(0));
+        let expensive = Arc::new(MockProvider {
+            name: "expensive".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_expensive.clone(),
+        });
+        let cheap = Arc::new(MockProvider {
+            name: "cheap".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_cheap.clone(),
+        });
+        let mut router = test_router(
+            vec![("expensive", expensive), ("cheap", cheap)],
+            vec![("smart", vec!["expensive/m1", "cheap/m2"])],
+            vec![("expensive/m1", 10.0, 10.0), ("cheap/m2", 0.5, 0.5)],
+            vec![],
+            vec![],
+        );
+        router.auto_routing = Some(auto_routing_config());
+
+        let resp = router
+            .dispatch(&auto_routed_medium_tier_request())
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(
+            resp.model, "cheap/m2",
+            "with no explicit sort, an auto-routed request should prefer the cheaper candidate"
+        );
+        assert_eq!(calls_cheap.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_expensive.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_auto_routed_request_honors_an_explicit_sort_preference() {
+        // "expensive" is slower-priced but recorded as far lower latency --
+        // proving an explicit `sort: "latency"` wins over auto-routing's
+        // own default `sort: "price"`, which would otherwise have picked
+        // "cheap" instead (see the sibling test above).
+        let calls_expensive = Arc::new(AtomicUsize::new(0));
+        let calls_cheap = Arc::new(AtomicUsize::new(0));
+        let expensive = Arc::new(MockProvider {
+            name: "expensive".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_expensive.clone(),
+        });
+        let cheap = Arc::new(MockProvider {
+            name: "cheap".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_cheap.clone(),
+        });
+        let mut router = test_router(
+            vec![("expensive", expensive), ("cheap", cheap)],
+            vec![("smart", vec!["expensive/m1", "cheap/m2"])],
+            vec![("expensive/m1", 10.0, 10.0), ("cheap/m2", 0.5, 0.5)],
+            vec![],
+            vec![],
+        );
+        router.auto_routing = Some(auto_routing_config());
+        {
+            let mut latency = router.latency.write().unwrap();
+            latency.insert("expensive/m1".to_string(), 10.0);
+            latency.insert("cheap/m2".to_string(), 500.0);
+        }
+
+        let mut req = auto_routed_medium_tier_request();
+        req.provider = Some(rp_core::ProviderPreferences {
+            sort: Some("latency".to_string()),
+            ..Default::default()
+        });
+
+        let resp = router
+            .dispatch(&req)
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(
+            resp.model, "expensive/m1",
+            "an explicit sort preference must not be overridden by auto-routing's own default"
+        );
+        assert_eq!(calls_expensive.load(Ordering::SeqCst), 1);
+        assert_eq!(calls_cheap.load(Ordering::SeqCst), 0);
     }
 
     // --- unresolved_route_providers -----------------------------------------

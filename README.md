@@ -1356,6 +1356,15 @@ when `model` is `"auto"`.
 Without `[auto_routing]` configured, `"auto"` isn't special-cased at all
 — it resolves like any other unrecognized alias, a `400`.
 
+When a tier's model is a `[[routes]]` alias spanning multiple candidates,
+an auto-routed request defaults to `sort: "price"` among them — cheapest
+candidate first — unless the request already set its own `provider.sort`
+explicitly, which always wins unchanged. This is what actually connects
+the complexity classifier to the pricing system: picking a tier is still
+purely complexity-based, but *within* that tier, cost now breaks the tie
+by default instead of the classifier and pricing staying two disconnected
+mechanisms.
+
 ## BYOK (bring your own key)
 
 A request can supply its own API key for a configured provider, used for
