@@ -63,7 +63,7 @@ pub(crate) fn build_rest_router(engine: Arc<Engine>) -> Router {
         // can't be written as literal patterns.
         .route("/:action", post(message_action))
         .route("/tasks", get(list_tasks))
-        .route("/tasks/:id", get(get_task).post(task_action))
+        .route("/tasks/:id", get(get_task_or_subscribe).post(task_action))
         .route(
             "/tasks/:id/pushNotificationConfigs",
             post(create_push_notification_config).get(list_push_notification_configs),
@@ -200,10 +200,15 @@ struct GetTaskQuery {
     history_length: Option<i32>,
 }
 
-/// `GET /tasks/{id}` (spec Section 11.3.2).
-async fn get_task(
+/// Handles both `GET /tasks/{id}` and the spec-literal `GET
+/// /tasks/{id}:subscribe` (spec Sections 3.1.6 / 11.3.2), dispatching on an
+/// optional `:subscribe` suffix in the path segment the same way
+/// [`task_action`] dispatches `POST /tasks/{id}:cancel` -
+/// `POST /tasks/{id}:subscribe` (this crate's original, non-spec-literal
+/// wiring, kept for backward compatibility) still works too.
+async fn get_task_or_subscribe(
     State(engine): State<Arc<Engine>>,
-    Path(id): Path<String>,
+    Path(id_and_action): Path<String>,
     headers: HeaderMap,
     Query(query): Query<GetTaskQuery>,
     Query(raw_query): Query<HashMap<String, String>>,
@@ -211,14 +216,33 @@ async fn get_task(
     if let Err(resp) = require_auth(&engine, &headers, &raw_query).await {
         return resp;
     }
-    let req = GetTaskRequest {
-        tenant: raw_query.get("tenant").cloned(),
-        id,
-        history_length: query.history_length,
-    };
-    match engine.get_task(req).await {
-        Ok(task) => rest_ok(&task),
-        Err(e) => rest_error(e),
+    let tenant = raw_query.get("tenant").cloned();
+    match id_and_action.rsplit_once(':') {
+        Some((id, "subscribe")) => {
+            let req = SubscribeToTaskRequest {
+                tenant,
+                id: id.to_string(),
+            };
+            let since_seq = parse_last_event_id(&headers);
+            match engine.subscribe_to_task(req, since_seq).await {
+                Ok(stream) => sse_subscribe_response(stream),
+                Err(e) => rest_error(e),
+            }
+        }
+        Some((_, other)) => rest_error(A2aError::InvalidRequest(format!(
+            "unknown task action \"{other}\""
+        ))),
+        None => {
+            let req = GetTaskRequest {
+                tenant,
+                id: id_and_action,
+                history_length: query.history_length,
+            };
+            match engine.get_task(req).await {
+                Ok(task) => rest_ok(&task),
+                Err(e) => rest_error(e),
+            }
+        }
     }
 }
 
@@ -238,9 +262,13 @@ async fn list_tasks(
     }
 }
 
-/// Handles both `POST /tasks/{id}:cancel` and `POST /tasks/{id}:subscribe`
-/// (spec Section 11.3.2), dispatching on the suffix after the last `:` in
-/// the path segment.
+/// Handles `POST /tasks/{id}:cancel` (spec Section 11.3.2, the only
+/// literal binding `CancelTask` has) and, for backward compatibility,
+/// `POST /tasks/{id}:subscribe` too - the spec-literal binding for
+/// `SubscribeToTask` is `GET`, handled by
+/// [`get_task_or_subscribe`] instead, but this crate wired subscribe as
+/// `POST` before that was added, so both still work. Dispatches on the
+/// suffix after the last `:` in the path segment.
 async fn task_action(
     State(engine): State<Arc<Engine>>,
     Path(id_and_action): Path<String>,

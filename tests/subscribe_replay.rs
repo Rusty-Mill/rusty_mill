@@ -165,6 +165,63 @@ async fn rest_subscribe_reconnect_replays_missed_events_via_last_event_id() {
 }
 
 #[tokio::test]
+async fn rest_get_subscribe_is_the_spec_literal_binding_and_still_works() {
+    let (base_url, advance) = spawn_stepped_server().await;
+    let http = reqwest::Client::new();
+    let task_id = start_task(&http, &base_url).await;
+
+    // `GET /tasks/{id}:subscribe` (spec Section 3.1.6 / 11.3.2) is the only
+    // literal HTTP binding `SubscribeToTask` has; `POST` (covered above) is
+    // this crate's own pre-existing, non-spec-literal addition kept for
+    // backward compatibility. Both must work identically.
+    let resp = http
+        .get(format!("{base_url}/tasks/{task_id}:subscribe"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET /tasks/{id}:subscribe");
+    assert_eq!(resp.status(), 200);
+    let mut events = resp.bytes_stream().eventsource();
+    let first = events.next().await.expect("first event").expect("sse event");
+    let first_value: serde_json::Value = serde_json::from_str(&first.data).unwrap();
+    assert_eq!(
+        first_value["statusUpdate"]["status"]["state"],
+        "TASK_STATE_WORKING"
+    );
+
+    advance.notify_one();
+    advance.notify_one();
+    let mut saw_completed = false;
+    while let Some(event) = events.next().await {
+        let value: serde_json::Value = serde_json::from_str(&event.expect("sse event").data).unwrap();
+        if value["statusUpdate"]["status"]["state"] == "TASK_STATE_COMPLETED" {
+            saw_completed = true;
+            break;
+        }
+    }
+    assert!(saw_completed, "expected the completion event");
+}
+
+#[tokio::test]
+async fn rest_get_on_a_plain_task_id_is_unaffected_by_the_subscribe_dispatch() {
+    let (base_url, _advance) = spawn_stepped_server().await;
+    let http = reqwest::Client::new();
+    let task_id = start_task(&http, &base_url).await;
+
+    // A plain `GET /tasks/{id}` (no `:subscribe` suffix) must still behave
+    // as an ordinary `GetTask`, not get swept into the subscribe dispatch.
+    let resp = http
+        .get(format!("{base_url}/tasks/{task_id}"))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET /tasks/{id}");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.expect("response body");
+    assert_eq!(body["id"], task_id);
+}
+
+#[tokio::test]
 async fn json_rpc_subscribe_sets_a_replayable_sse_event_id() {
     let (base_url, advance) = spawn_stepped_server().await;
     let http = reqwest::Client::new();
