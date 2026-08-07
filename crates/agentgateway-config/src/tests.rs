@@ -633,6 +633,86 @@ binds:
 }
 
 #[test]
+fn lint_reports_url_rewrite_on_an_mcp_route() {
+    // An `mcp` backend terminates the protocol rather than forwarding a
+    // request line, so there is no URL for a rewrite to act on.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                authority: "elsewhere:8080"
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("urlRewrite") && f.contains("no URL to rewrite")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn url_rewrite_on_a_host_route_is_not_reported() {
+    // Where it does apply, it must stay silent.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                authority: "elsewhere:8080"
+            backends:
+              - host: "10.0.0.1:8080"
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
+fn a_response_header_modifier_on_an_mcp_route_is_not_reported() {
+    // It applies to the response the gateway itself returns, so there is
+    // nothing to warn about.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              responseHeaderModifier:
+                set:
+                  x-served-by: rusty
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
 fn a_clean_config_lints_clean() {
     let config = Config::from_yaml(UPSTREAM_MCP_EXAMPLE).expect("should parse");
     assert_eq!(

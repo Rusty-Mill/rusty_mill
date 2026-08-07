@@ -168,9 +168,9 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
-- `responseHeaderModifier` and `urlRewrite` on a route with an `mcp` backend;
-  they apply to `host` backends only (`requestHeaderModifier` does apply — see
-  [Reaching the upstream request](#reaching-the-upstream-request))
+- `urlRewrite` on a route with an `mcp` backend — reported by `--check`, and
+  see [Reaching the upstream request](#reaching-the-upstream-request) for why
+  it cannot mean anything there
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -626,8 +626,41 @@ build the name index — carries static values but resolves no templates, since
 nothing has classified anything at that point.
 
 Only `mcp:` targets, for the same reason as `headerMutation`: a `stdio` target
-speaks over a pipe and has no headers. `responseHeaderModifier` and
-`urlRewrite` remain `host`-only.
+speaks over a pipe and has no headers.
+
+### The response side, and the one that cannot apply
+
+`responseHeaderModifier` works on an MCP route, on the response the **gateway
+itself** produces:
+
+```yaml
+policies:
+  responseHeaderModifier:
+    set: { x-served-by: rusty-agent-gateway }
+    remove: [mcp-session-id]
+```
+
+There is no upstream HTTP response to modify — `rmcp`'s transport consumes
+those, and a client never sees one — so the only response worth acting on is
+the one going back out. CORS is added after the modifier runs, so a route
+cannot accidentally strip the headers that answer a preflight: those are the
+gateway's own protocol rather than the route's payload.
+
+`urlRewrite` is the one thing here that genuinely cannot apply, and it is
+reported rather than quietly ignored:
+
+```
+warning: ...policies.urlRewrite: an `mcp` backend terminates the protocol rather than
+         forwarding a request line, so there is no URL to rewrite; the target's own
+         `mcp:` block names its host, port and path
+```
+
+Both of its fields — `authority` and `path` — describe a request line sent to
+an upstream. An MCP route never sends one: the gateway terminates the protocol
+and opens its own session to each target at the address that target's `mcp:`
+block already names. Honouring the policy would mean overriding a target's
+address from a route-level field that cannot say *which* target, so the honest
+answer is to say it does not apply.
 
 ### The span itself
 
