@@ -59,7 +59,7 @@ tool's own name.
 | `agentgateway-config` | The configuration model. Wire-compatible with agentgateway's local config. |
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
 | `agentgateway-auth` | The `jwtAuth` and `extAuthz` policies. |
-| `agentgateway-mcp` | MCP federation: targets, tools, prompts, resources, gates, CEL rules, guardrails. |
+| `agentgateway-mcp` | MCP federation: targets, tools, prompts, resources, gates, rules, guardrails, spans. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
@@ -156,8 +156,8 @@ Implemented and tested:
 - `timeout`: both `requestTimeout` and `backendRequestTimeout` — see
   [Timeouts](#timeouts), because they bound different things and only one of
   them bounds a tool call
-- OpenTelemetry: OTLP traces and metrics, with MCP request metrics labelled by
-  method and tool name
+- OpenTelemetry: OTLP traces and metrics, a span per MCP request, and metrics
+  labelled by method and tool name
 - Process-wide load shedding: a concurrency bound answered with `503` and
   `Retry-After`
 - Graceful shutdown on SIGINT/SIGTERM
@@ -535,6 +535,64 @@ An expression that cannot be evaluated is dropped rather than failing the call:
 metadata is context for the processor, not a decision, and a missing claim
 should not take a guardrail offline. One that does not *compile* is a startup
 failure.
+
+### What a processor sends back
+
+`metadata_context` goes to the processor. `McpRequestResult.metadata` comes
+**back** — an arbitrary bag a processor fills in with whatever it decided: the
+classification it made, the rule it matched, the tenant it resolved.
+
+Upstream stashes that for downstream CEL filters (`transformation`) to read.
+This gateway has none, and a bag nothing can read is worse than no bag at all,
+so the values go on the request's telemetry span instead:
+
+```
+McpRequestResult.metadata = {classification: "phishing", rule: "r-9b2e"}
+                          ↓
+span tools/call
+  mcpGuardrails.classification = "phishing"
+  mcpGuardrails.rule           = "r-9b2e"
+```
+
+A decision a guardrail took in-band becomes visible in the trace afterwards,
+rather than only in the processor's own logs. Keys are namespaced by the policy
+that produced them, so a processor cannot collide with the gateway's own
+attributes.
+
+Scalars go on natively, so a trace viewer can filter on them; anything nested
+is rendered as JSON, because OpenTelemetry attribute values are scalars and
+flattening an object into dotted keys would invent structure the processor did
+not ask for. Note that a whole number comes back as a double — protobuf's
+`Struct` has one number type, and that is the protocol's choice rather than
+ours.
+
+A processor is an external service, so the bag is bounded: at most 32 keys and
+1 KiB per value, with the excess dropped or truncated and a warning logged.
+Without that, a processor could grow every span the gateway exports. Later
+processors in a chain win a key collision, on the grounds that the last thing
+to say something about a call is the most informed. A refusal carries no
+annotations at all, for the same reason it carries no header changes.
+
+Setting an attribute is a no-op unless `config.tracing` names a collector, so
+this costs nothing when tracing is off.
+
+### The span itself
+
+There was not one before this. `tracing` fields have to be declared when a span
+is opened, so arbitrary processor-supplied keys cannot be recorded as fields at
+all — they go on as OpenTelemetry attributes, which need an OpenTelemetry span
+to go on. It is worth having on its own: a `tools/call` that took four seconds
+was not visible anywhere otherwise.
+
+The span carries the client's W3C trace context when `_meta` propagated one, so
+a request joins the caller's trace rather than starting its own.
+
+It is deliberately **not** entered. The OpenTelemetry layer times a span from
+creation to close rather than from enter to exit, so the duration is right
+either way — and `Span::enter` returns a thread-bound guard, so holding one
+across an `.await` in a server that multiplexes tasks onto a thread pool would
+attribute another request's events to this span. The trade is that log lines
+inside a handler are not nested under it.
 
 ### `headerMutation`
 

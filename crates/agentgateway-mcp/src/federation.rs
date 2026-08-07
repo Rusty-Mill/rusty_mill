@@ -31,10 +31,11 @@ use tokio::sync::RwLock;
 
 use crate::{
     gate::{Authorization, GateError},
-    guardrails::{CallContext, Guardrails, GuardrailsError, Outcome},
+    guardrails::{Annotations, CallContext, Guardrails, GuardrailsError, Outcome},
     mutating_client::HeaderOverride,
     naming::{Resolution, ToolNamer},
     rules::{Call, RuleError, RuleSet, Subject},
+    span,
     target::Target,
 };
 
@@ -344,6 +345,8 @@ impl ServerHandler for Federation {
         _request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
+        let span = span::request(TOOLS_LIST, &context);
+
         let claims = claims(&context);
         let backends: Vec<String> = self
             .inner
@@ -383,6 +386,8 @@ impl ServerHandler for Federation {
             {
                 return Err(mcp_error(code, message, data));
             }
+
+            span::annotate(&span, &decision.annotations);
 
             // `tools/list` fans out, so a header change applies to every
             // target's request -- there is one client call and several
@@ -445,6 +450,8 @@ impl ServerHandler for Federation {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let federated = request.name.to_string();
+
+        let span = span::request(TOOLS_CALL, &context);
 
         // Authorization is checked here, not only in list_tools. Nothing stops
         // a client from calling a name it was never shown, so filtering the
@@ -534,6 +541,7 @@ impl ServerHandler for Federation {
                 } => return Err(mcp_error(code, message, data)),
             }
 
+            span::annotate(&span, &decision.annotations);
             upstream_headers = decision.headers.into();
         }
 
@@ -608,9 +616,13 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let headers = self
+        let span = span::request(PROMPTS_LIST, &context);
+
+        let guarded = self
             .guard_request(PROMPTS_LIST, &backends, None, None, &context)
             .await?;
+        span::annotate(&span, &guarded.annotations);
+        let headers = guarded.headers;
 
         let mut prompts: Vec<Prompt> = Vec::new();
         let mut index = HashMap::new();
@@ -662,6 +674,8 @@ impl ServerHandler for Federation {
     ) -> Result<GetPromptResponse, McpError> {
         let federated = request.name.clone();
 
+        let span = span::request(PROMPTS_GET, &context);
+
         let Some((target, name)) = self.route_prompt(&federated).await else {
             return Err(McpError::invalid_params(
                 format!("unknown prompt `{federated}`"),
@@ -686,6 +700,7 @@ impl ServerHandler for Federation {
                 &context,
             )
             .await?;
+        span::annotate(&span, &headers.annotations);
         let (params, headers) = (headers.body.unwrap_or(params), headers.headers);
         // What was actually fetched, which a request-phase rewrite may have
         // changed. The response phase should describe the result it is looking
@@ -726,9 +741,13 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let headers = self
+        let span = span::request(RESOURCES_LIST, &context);
+
+        let guarded = self
             .guard_request(RESOURCES_LIST, &backends, None, None, &context)
             .await?;
+        span::annotate(&span, &guarded.annotations);
+        let headers = guarded.headers;
 
         let mut resources: Vec<Resource> = Vec::new();
         let mut index = HashMap::new();
@@ -782,9 +801,13 @@ impl ServerHandler for Federation {
             .collect();
         let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
 
-        let headers = self
+        let span = span::request(RESOURCES_TEMPLATES_LIST, &context);
+
+        let guarded = self
             .guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, None, &context)
             .await?;
+        span::annotate(&span, &guarded.annotations);
+        let headers = guarded.headers;
 
         let mut templates: Vec<ResourceTemplate> = Vec::new();
 
@@ -842,6 +865,8 @@ impl ServerHandler for Federation {
     ) -> Result<ReadResourceResponse, McpError> {
         let federated = request.uri.clone();
 
+        let span = span::request(RESOURCES_READ, &context);
+
         let Some((target, uri)) = self.route_resource(&federated).await else {
             return Err(McpError::invalid_params(
                 format!("unknown resource `{federated}`"),
@@ -864,6 +889,7 @@ impl ServerHandler for Federation {
                 &context,
             )
             .await?;
+        span::annotate(&span, &headers.annotations);
         let (mut params, headers) = (headers.body.unwrap_or(params), headers.headers);
 
         // The upstream knows its own URI, never the federated one. A guardrail
@@ -928,6 +954,8 @@ struct Guarded<T> {
     body: Option<T>,
     /// Header changes for the upstream call.
     headers: HeaderOverride,
+    /// Values to put on this request's span.
+    annotations: Annotations,
 }
 
 impl Federation {
@@ -1024,9 +1052,13 @@ impl Federation {
         params: Option<&[u8]>,
         about: Option<(Subject<'_>, &str)>,
         context: &RequestContext<RoleServer>,
-    ) -> Result<HeaderOverride, McpError> {
+    ) -> Result<Guarded<()>, McpError> {
         if !self.inner.guardrails.runs_request(method) {
-            return Ok(HeaderOverride::default());
+            return Ok(Guarded {
+                body: None,
+                headers: HeaderOverride::default(),
+                annotations: Annotations::default(),
+            });
         }
 
         let decision = self
@@ -1051,7 +1083,11 @@ impl Federation {
                 message,
                 data,
             } => Err(mcp_error(code, message, data)),
-            _ => Ok(decision.headers.into()),
+            _ => Ok(Guarded {
+                body: None,
+                headers: decision.headers.into(),
+                annotations: decision.annotations,
+            }),
         }
     }
 
@@ -1071,6 +1107,7 @@ impl Federation {
             return Ok(Guarded {
                 body: None,
                 headers: HeaderOverride::default(),
+                annotations: Annotations::default(),
             });
         }
 
@@ -1116,6 +1153,7 @@ impl Federation {
         Ok(Guarded {
             body,
             headers: decision.headers.into(),
+            annotations: decision.annotations,
         })
     }
 }

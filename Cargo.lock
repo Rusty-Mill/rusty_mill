@@ -40,6 +40,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
@@ -128,12 +129,14 @@ dependencies = [
  "cel",
  "http",
  "http-body-util",
+ "opentelemetry",
  "process-wrap",
  "prost",
  "prost-types",
  "regex",
  "reqwest",
  "rmcp",
+ "rusty-mcp",
  "serde",
  "serde_json",
  "thiserror 2.0.19",
@@ -142,6 +145,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
