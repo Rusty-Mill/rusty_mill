@@ -762,6 +762,15 @@ where
     result
 }
 
+/// The absolute spend, in USD, at which `setting`'s `budget_warning`
+/// event should fire -- `None` if no `budget_warning_threshold` is
+/// configured, same as "no warning event" everywhere else in this file.
+fn warning_amount(setting: &ClientBudgetSetting) -> Option<f64> {
+    setting
+        .warning_threshold
+        .map(|threshold| threshold * setting.budget_usd)
+}
+
 impl Router {
     pub async fn from_config(config: &Config) -> Self {
         let metrics = Metrics::new();
@@ -1293,16 +1302,26 @@ impl Router {
                         persistence.client_spend(&client_name).await
                     {
                         let before = spent_usd - cost_usd;
-                        if period_key == current_key
-                            && before < setting.budget_usd
-                            && spent_usd >= setting.budget_usd
-                        {
-                            webhook.notify_budget_exceeded(
-                                &client_name,
-                                spent_usd,
-                                setting.budget_usd,
-                                setting.period,
-                            );
+                        if period_key == current_key {
+                            if before < setting.budget_usd && spent_usd >= setting.budget_usd {
+                                webhook.notify_budget_exceeded(
+                                    &client_name,
+                                    spent_usd,
+                                    setting.budget_usd,
+                                    setting.period,
+                                );
+                            }
+                            if let Some(warning_amount) = warning_amount(&setting) {
+                                if before < warning_amount && spent_usd >= warning_amount {
+                                    webhook.notify_budget_warning(
+                                        &client_name,
+                                        spent_usd,
+                                        setting.budget_usd,
+                                        setting.warning_threshold.unwrap(),
+                                        setting.period,
+                                    );
+                                }
+                            }
                         }
                     }
                 });
@@ -1315,14 +1334,25 @@ impl Router {
             state.spent_usd += cost_usd;
             let after = state.spent_usd;
             drop(spend);
-            if before < setting.budget_usd && after >= setting.budget_usd {
-                if let Some(webhook) = &self.webhook {
+            if let Some(webhook) = &self.webhook {
+                if before < setting.budget_usd && after >= setting.budget_usd {
                     webhook.notify_budget_exceeded(
                         client_name,
                         after,
                         setting.budget_usd,
                         setting.period,
                     );
+                }
+                if let Some(warning_amount) = warning_amount(&setting) {
+                    if before < warning_amount && after >= warning_amount {
+                        webhook.notify_budget_warning(
+                            client_name,
+                            after,
+                            setting.budget_usd,
+                            setting.warning_threshold.unwrap(),
+                            setting.period,
+                        );
+                    }
                 }
             }
         }
@@ -1404,7 +1434,13 @@ impl Router {
             Some((budget_usd, period)) => {
                 budgets.insert(
                     client_name.to_string(),
-                    ClientBudgetSetting { budget_usd, period },
+                    ClientBudgetSetting {
+                        budget_usd,
+                        period,
+                        // `budget_warning_threshold` isn't settable via
+                        // the admin API yet -- config-only for now.
+                        warning_threshold: None,
+                    },
                 );
             }
             None => {
@@ -2893,10 +2929,22 @@ mod tests {
     // --- client_spend_status / reset_client_spend (admin API) --------------------
 
     fn router_with_budgeted_client(budget_usd: f64, period: BudgetPeriod) -> Router {
+        router_with_budgeted_client_and_warning(budget_usd, period, None)
+    }
+
+    fn router_with_budgeted_client_and_warning(
+        budget_usd: f64,
+        period: BudgetPeriod,
+        warning_threshold: Option<f64>,
+    ) -> Router {
         let router = test_router(vec![], vec![], vec![], vec![], vec![]);
         router.client_budgets.write().unwrap().insert(
             "acme".to_string(),
-            ClientBudgetSetting { budget_usd, period },
+            ClientBudgetSetting {
+                budget_usd,
+                period,
+                warning_threshold,
+            },
         );
         router
     }
@@ -3047,6 +3095,97 @@ mod tests {
             Some("Bearer s3cret".to_string()),
         );
         router.record_client_spend("acme", 12.0);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.verify().await;
+    }
+
+    fn router_with_budgeted_client_webhook_and_warning(
+        budget_usd: f64,
+        warning_threshold: f64,
+        webhook_url: String,
+    ) -> Router {
+        let router = router_with_budgeted_client_and_warning(
+            budget_usd,
+            BudgetPeriod::Total,
+            Some(warning_threshold),
+        );
+        Router {
+            webhook: Some(Arc::new(WebhookNotifier::new(
+                webhook_url,
+                None,
+                5,
+                None,
+                RetryPolicy::none(),
+            ))),
+            ..router
+        }
+    }
+
+    #[tokio::test]
+    async fn record_client_spend_fires_budget_warning_on_the_crossing_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_json(json!({
+                "event": "budget_warning",
+                "client": "acme",
+                "spent_usd": 9.0,
+                "budget_usd": 10.0,
+                "warning_threshold": 0.8,
+                "period": "total",
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client_webhook_and_warning(10.0, 0.8, server.uri());
+        router.record_client_spend("acme", 5.0); // 5.0 -- under the 8.0 warning amount
+        router.record_client_spend("acme", 4.0); // 9.0 -- crosses it
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn record_client_spend_does_not_refire_budget_warning_once_already_over_threshold() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_json(json!({
+                "event": "budget_warning",
+                "client": "acme",
+                "spent_usd": 9.0,
+                "budget_usd": 10.0,
+                "warning_threshold": 0.8,
+                "period": "total",
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client_webhook_and_warning(10.0, 0.8, server.uri());
+        router.record_client_spend("acme", 9.0); // crosses 8.0 -- fires
+        router.record_client_spend("acme", 0.5); // still over 8.0 -- no refire
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+        server.verify().await;
+    }
+
+    #[tokio::test]
+    async fn record_client_spend_sends_no_budget_warning_before_reaching_the_threshold() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let router = router_with_budgeted_client_webhook_and_warning(10.0, 0.8, server.uri());
+        router.record_client_spend("acme", 7.0); // under the 8.0 warning amount
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
         server.verify().await;
@@ -3385,6 +3524,7 @@ mod tests {
         let setting = ClientBudgetSetting {
             budget_usd: 10.0,
             period: BudgetPeriod::Total,
+            warning_threshold: None,
         };
 
         let mut router_a = test_router(vec![], vec![], vec![], vec![], vec![]);
@@ -3434,6 +3574,7 @@ mod tests {
         let setting = ClientBudgetSetting {
             budget_usd: 10.0,
             period: BudgetPeriod::Total,
+            warning_threshold: None,
         };
 
         let mut router_a = test_router(vec![], vec![], vec![], vec![], vec![]);

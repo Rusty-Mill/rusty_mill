@@ -14,6 +14,10 @@ use crate::config::{BudgetPeriod, ClientConfig};
 pub struct ClientBudgetSetting {
     pub budget_usd: f64,
     pub period: BudgetPeriod,
+    /// Fraction of `budget_usd` at which a `budget_warning` webhook event
+    /// fires. `None` means no warning event, same as before this field
+    /// existed.
+    pub warning_threshold: Option<f64>,
 }
 
 /// One client's in-memory spend, scoped to whichever period key was
@@ -41,6 +45,7 @@ pub fn settings_from_clients(clients: &[ClientConfig]) -> HashMap<String, Client
                     ClientBudgetSetting {
                         budget_usd,
                         period: c.budget_period,
+                        warning_threshold: c.budget_warning_threshold,
                     },
                 )
             })
@@ -124,12 +129,22 @@ mod tests {
     use super::*;
 
     fn client(name: &str, budget_usd: Option<f64>, period: BudgetPeriod) -> ClientConfig {
+        client_with_warning(name, budget_usd, period, None)
+    }
+
+    fn client_with_warning(
+        name: &str,
+        budget_usd: Option<f64>,
+        period: BudgetPeriod,
+        warning_threshold: Option<f64>,
+    ) -> ClientConfig {
         ClientConfig {
             name: name.to_string(),
             api_key_env: format!("{}_KEY", name.to_uppercase()),
             requests_per_minute: 60,
             budget_usd,
             budget_period: period,
+            budget_warning_threshold: warning_threshold,
             organization: None,
             workspace: None,
             role: crate::config::ClientRole::default(),
@@ -150,6 +165,19 @@ mod tests {
         let setting = &settings["acme"];
         assert_eq!(setting.budget_usd, 10.0);
         assert_eq!(setting.period, BudgetPeriod::Monthly);
+        assert_eq!(setting.warning_threshold, None);
+    }
+
+    #[test]
+    fn settings_from_clients_includes_warning_threshold_when_set() {
+        let clients = [client_with_warning(
+            "acme",
+            Some(10.0),
+            BudgetPeriod::Monthly,
+            Some(0.8),
+        )];
+        let settings = settings_from_clients(&clients);
+        assert_eq!(settings["acme"].warning_threshold, Some(0.8));
     }
 
     // --- year_month_from_unix ----------------------------------------------------

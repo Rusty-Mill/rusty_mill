@@ -236,6 +236,15 @@ pub struct ClientConfig {
     /// `budget_usd` set.
     #[serde(default)]
     pub budget_period: BudgetPeriod,
+    /// Fraction of `budget_usd` (e.g. `0.8` for 80%) at which a
+    /// `[webhook]` `budget_warning` event fires -- a heads-up before the
+    /// hard `budget_exceeded` cutoff, not a second limit. Fires once per
+    /// crossing, same "only on the request that crosses it" rule
+    /// `budget_exceeded` already follows. Meaningless (but harmless)
+    /// without `budget_usd` set; unset sends no warning event, same as
+    /// before this field existed.
+    #[serde(default)]
+    pub budget_warning_threshold: Option<f64>,
     /// Groups this client under a named organization, for admin-API
     /// scoping (see `role`) and the `GET /v1/admin/organizations` rollup.
     /// Purely a label otherwise -- it has no effect on chat completions.
@@ -1248,6 +1257,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("budget_period"));
+    }
+
+    #[test]
+    fn client_budget_warning_threshold_defaults_to_absent() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[clients]]
+            name = "acme"
+            api_key_env = "ACME_KEY"
+            requests_per_minute = 60
+            budget_usd = 10.0
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.clients[0].budget_warning_threshold, None);
+    }
+
+    #[test]
+    fn client_budget_warning_threshold_is_honored_when_set() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[clients]]
+            name = "acme"
+            api_key_env = "ACME_KEY"
+            requests_per_minute = 60
+            budget_usd = 10.0
+            budget_warning_threshold = 0.8
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.clients[0].budget_warning_threshold, Some(0.8));
     }
 
     #[test]

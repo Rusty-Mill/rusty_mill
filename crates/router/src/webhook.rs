@@ -10,6 +10,9 @@ use crate::config::{BudgetPeriod, WebhookConfig};
 /// client's next request and a Prometheus counter.
 #[derive(Debug, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
+// Every variant sharing a "Budget" prefix is intentional -- this enum is
+// scoped to budget-related events by design, not a naming accident.
+#[allow(clippy::enum_variant_names)]
 enum WebhookEvent {
     BudgetExceeded {
         client: String,
@@ -20,6 +23,17 @@ enum WebhookEvent {
     BudgetReset {
         client: String,
         budget_usd: f64,
+        period: BudgetPeriod,
+    },
+    /// A client's tracked spend just crossed its configured
+    /// `budget_warning_threshold` -- a heads-up before `BudgetExceeded`,
+    /// not a second limit. Fires once per crossing, same rule
+    /// `BudgetExceeded` already follows.
+    BudgetWarning {
+        client: String,
+        spent_usd: f64,
+        budget_usd: f64,
+        warning_threshold: f64,
         period: BudgetPeriod,
     },
 }
@@ -230,6 +244,27 @@ impl WebhookNotifier {
         self.send(WebhookEvent::BudgetReset {
             client: client_name.to_string(),
             budget_usd,
+            period,
+        });
+    }
+
+    /// A client's tracked spend just crossed `warning_threshold *
+    /// budget_usd`, on the specific request that pushed it over that
+    /// fraction -- same "only on the crossing request" rule
+    /// `notify_budget_exceeded` follows.
+    pub(crate) fn notify_budget_warning(
+        &self,
+        client_name: &str,
+        spent_usd: f64,
+        budget_usd: f64,
+        warning_threshold: f64,
+        period: BudgetPeriod,
+    ) {
+        self.send(WebhookEvent::BudgetWarning {
+            client: client_name.to_string(),
+            spent_usd,
+            budget_usd,
+            warning_threshold,
             period,
         });
     }
