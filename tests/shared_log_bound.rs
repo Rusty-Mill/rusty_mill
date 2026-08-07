@@ -21,7 +21,8 @@
 
 use std::time::Duration;
 
-use rusty_acp::server::store::Store;
+use futures_util::StreamExt;
+use rusty_acp::server::store::{Notification, Store};
 use rusty_acp::types::{AgentName, Event, MessagePart, Run, RunId};
 
 /// Small enough that a handful of events crosses it.
@@ -92,6 +93,74 @@ async fn check_contract(store: &dyn Store) {
     assert_eq!(store.earliest_event(untouched).await.unwrap(), 0);
 }
 
+/// A notified event arrives under its own index, or does not arrive at all.
+///
+/// The one that gets away from a backend publishing a *pointer* rather than a
+/// payload. Postgres has to — a `NOTIFY` payload is capped at 8000 bytes and an
+/// event carrying a base64 artifact is not — so it sends the index and has each
+/// subscriber read the row, leaving a gap between the publish and the read that
+/// the trim inside every append is free to close.
+///
+/// It used to read that row by seeking: `events_from(index)`, take the first.
+/// Identical to an exact match until the log is trimmed past `index`, at which
+/// point it returns the earliest *surviving* event and labels it with the index
+/// that was asked for.
+///
+/// Losing the event would have been fine. Delivery is best-effort, the log is
+/// the durable record, and a subscriber that misses one is the case the 410 and
+/// `Acp-Events-From` were built for. What made it worth fixing is that the
+/// index becomes the client's `Last-Event-ID`, so it would resume from a point
+/// it never reached — holding content it did receive under a cursor pointing
+/// somewhere else, with nothing reporting an error.
+///
+/// Checked against both shared backends although only one could ever have
+/// failed it. Redis carries the whole notification through its channel and
+/// cannot mislabel anything today; the day it grows a pointer scheme for the
+/// same 8000-byte reason, this is already here.
+async fn check_a_notified_event_matches_its_index(store: &dyn Store) {
+    let run_id = seeded_run(store).await;
+    for index in 0..40u64 {
+        store.append_event(run_id, &numbered_event(index)).await.unwrap();
+    }
+
+    let earliest = store.earliest_event(run_id).await.unwrap();
+    assert!(earliest > 0, "the log was not trimmed, so this proves nothing");
+    let live = 39;
+    let gone = 0;
+    assert!(gone < earliest, "the index being probed is still in the log");
+
+    let mut subscriber = store.subscribe(run_id).await.unwrap();
+
+    // The trimmed index first, then a live one. Both backends deliver a
+    // channel in order, so the live event is a *barrier*: once it arrives,
+    // anything the trimmed publish was going to deliver already has. That is
+    // what keeps this off a timeout — "nothing arrived within N" would pass on
+    // a slow runner for the wrong reason.
+    store.publish(run_id, Notification::event_at(gone, numbered_event(gone))).await.unwrap();
+    store.publish(run_id, Notification::event_at(live, numbered_event(live))).await.unwrap();
+
+    loop {
+        let received = tokio::time::timeout(Duration::from_secs(5), subscriber.next())
+            .await
+            .expect("the live event never arrived")
+            .expect("the subscription ended");
+
+        let (Some(index), Some(event)) = (received.index(), received.event()) else {
+            panic!("expected a logged event, got {received:?}");
+        };
+        assert_eq!(
+            numbered_value(event),
+            index,
+            "event {} arrived under index {index}, which is not its own",
+            numbered_value(event)
+        );
+
+        if index == live {
+            break;
+        }
+    }
+}
+
 /// The newest event is kept even when it alone exceeds the whole limit, so a
 /// live tail keeps working for an agent emitting one oversized artifact.
 async fn check_newest_is_kept(store: &dyn Store) {
@@ -144,6 +213,11 @@ mod redis {
     #[tokio::test]
     async fn keeps_the_newest_event() {
         check_newest_is_kept(&store_or_skip!()).await;
+    }
+
+    #[tokio::test]
+    async fn a_notified_event_matches_its_index() {
+        check_a_notified_event_matches_its_index(&store_or_skip!()).await;
     }
 
     /// Indices stay dense and unique when appends race a trim.
@@ -213,5 +287,10 @@ mod postgres {
     #[tokio::test]
     async fn keeps_the_newest_event() {
         check_newest_is_kept(&store_or_skip!()).await;
+    }
+
+    #[tokio::test]
+    async fn a_notified_event_matches_its_index() {
+        check_a_notified_event_matches_its_index(&store_or_skip!()).await;
     }
 }
