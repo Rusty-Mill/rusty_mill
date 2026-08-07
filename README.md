@@ -58,7 +58,7 @@ tool's own name.
 | --- | --- |
 | `agentgateway-config` | The configuration model. Wire-compatible with agentgateway's local config. |
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
-| `agentgateway-auth` | The `jwtAuth` policy, over [`rusty_mcp`][rusty_mcp]'s JWKS validator. |
+| `agentgateway-auth` | The `jwtAuth` and `extAuthz` policies. |
 | `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
@@ -132,6 +132,8 @@ Implemented and tested:
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
+- `extAuthz`: an external authorization service consulted before a request is
+  served, failing closed — see [External authorization](#external-authorization)
 - `timeout`: both `requestTimeout` and `backendRequestTimeout` — see
   [Timeouts](#timeouts), because they bound different things and only one of
   them bounds a tool call
@@ -143,7 +145,8 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
-- `ai` backends (the LLM gateway), `a2a` policies, `extAuthz`
+- `extAuthz.includeBody`: the authorizer sees the method, path and allow-listed
+  headers, never the body
 - `service` backends (service discovery), `dynamic` backends
 - `mcpAuthorization.rules` (upstream's policy-expression form; the
   `allowTools`/`denyTools` lists are ours and *are* enforced)
@@ -151,9 +154,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   certificates is a startup error rather than a guess
 - `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
   forwarded
-- `retry`, `localRateLimit`, header modifiers and `urlRewrite` are modelled but
-  not yet applied
-- `service` backends need service discovery; use `host` with a literal address
 
 Not supported at all:
 
@@ -199,6 +199,52 @@ A `file:` JWKS is read once at startup, so a missing, malformed or empty key set
 stops the gateway booting instead of turning every request into a runtime error
 that reads like a client problem. Rotating that file needs a restart — which is
 what the `url:` form is for.
+
+## External authorization
+
+An `extAuthz` policy asks an authorization service about each request before it
+is served:
+
+```yaml
+policies:
+  extAuthz:
+    target: http://authz.internal:9000
+    timeout: 250ms
+    includeHeaders: [authorization]
+    allowedUpstreamHeaders: [x-user-id]
+```
+
+The call carries the request's original method and path, so the authorizer can
+route on what is being authorized instead of reading it back out of a header. A
+2xx allows the request; anything else denies it, and the authorizer's own
+status, body and `WWW-Authenticate` are returned to the caller — an authorizer
+answering `403 {"reason": "not in group"}` is telling the caller something a
+generic "forbidden" would throw away.
+
+**It fails closed.** When the authorizer cannot be reached the request is
+denied, because an authorization service that is down must not become an open
+door. `failOpen: true` reverses that for deployments that would rather serve
+than stall, but it has to be asked for. The refusal is a **503, not a 403**:
+nothing decided the request was forbidden, and saying "forbidden" would send
+someone to check their permissions when the real problem is a service being
+down.
+
+**Both header lists are allow-lists, and the outbound one matters more.**
+`includeHeaders` bounds what the authorizer sees, keeping cookies and payloads
+away from a service that has no need for them. `allowedUpstreamHeaders` bounds
+what the authorizer may set on the request that continues upstream — without
+it, an authorizer could write any header the upstream trusts (`x-user-id`,
+`x-is-admin`), which turns an authorization service into an impersonation
+service. Both default to empty, which allows nothing rather than everything.
+
+The default budget is 250ms. This call sits in front of every request on the
+route, so a slow authorizer is a slow gateway; exceeding the budget is an
+unreachable authorizer and takes the fail-closed path.
+
+`extAuthz` runs after `jwtAuth`, so an authorizer configured with
+`includeHeaders: [authorization]` sees a token the gateway has already
+validated. `includeBody` parses but is not enforced — the authorizer never sees
+a request body, so a policy that depends on one will not do what it says.
 
 ## Proxying
 

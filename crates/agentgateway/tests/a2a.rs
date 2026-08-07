@@ -48,7 +48,12 @@ struct Agent {
 }
 
 /// Start a mock agent. `card` is `None` to serve a malformed one.
-async fn agent(name: &'static str, skills: &'static [&'static str], streaming: bool, valid_card: bool) -> Agent {
+async fn agent(
+    name: &'static str,
+    skills: &'static [&'static str],
+    streaming: bool,
+    valid_card: bool,
+) -> Agent {
     use axum::{Router, extract::Request, routing::any};
 
     let port = free_port().await;
@@ -164,14 +169,21 @@ const CARD_POLICY: &str = r#"                agentCard:
 #[tokio::test]
 async fn a_permitted_method_reaches_the_agent() {
     let a = agent("Alpha", &["echo"], true, true).await;
-    let (base, shutdown) = start("                denyMethods: [\"^tasks/cancel$\"]", &[a.port]).await;
+    let (base, shutdown) = start(
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[a.port],
+    )
+    .await;
 
     let response = call(&base, "message/send").await;
     assert_eq!(response["result"]["ok"], true);
     assert_eq!(a.hits.load(Ordering::Relaxed), 1);
 
     let calls = a.calls.lock().expect("lock");
-    assert_eq!(calls[0]["method"], "message/send", "the body arrives intact");
+    assert_eq!(
+        calls[0]["method"], "message/send",
+        "the body arrives intact"
+    );
 
     shutdown.cancel();
 }
@@ -179,7 +191,11 @@ async fn a_permitted_method_reaches_the_agent() {
 #[tokio::test]
 async fn a_denied_method_never_reaches_the_agent() {
     let a = agent("Alpha", &["echo"], true, true).await;
-    let (base, shutdown) = start("                denyMethods: [\"^tasks/cancel$\"]", &[a.port]).await;
+    let (base, shutdown) = start(
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[a.port],
+    )
+    .await;
 
     let response = call(&base, "tasks/cancel").await;
 
@@ -187,7 +203,10 @@ async fn a_denied_method_never_reaches_the_agent() {
         response["error"]["code"], -32011,
         "the spec's PermissionDenied code, not an invented one"
     );
-    assert_eq!(response["id"], 1, "a client matches the response to its call");
+    assert_eq!(
+        response["id"], 1,
+        "a client matches the response to its call"
+    );
     assert_eq!(
         a.hits.load(Ordering::Relaxed),
         0,

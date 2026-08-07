@@ -346,7 +346,10 @@ binds:
       - routes:
           - policies:
               extAuthz:
-                target: authz:9000
+                target: "http://authz:9000"
+                includeBody: 4096
+              ai:
+                promptGuard: {}
             backends:
               - ai:
                   provider:
@@ -358,8 +361,18 @@ binds:
 
     let findings = config.lint();
     assert!(
-        findings.iter().any(|f| f.contains("extAuthz")),
-        "lint should flag extAuthz: {findings:?}"
+        findings.iter().any(|f| f.contains("extAuthz.includeBody")),
+        "forwarding a body is not implemented and must be reported: {findings:?}"
+    );
+    assert!(
+        findings.iter().any(|f| f.contains("policies.ai")),
+        "ai policies are not enforced and must be reported: {findings:?}"
+    );
+    assert!(
+        !findings
+            .iter()
+            .any(|f| f.ends_with("policies.extAuthz: parsed but not enforced by this build")),
+        "extAuthz itself is enforced now and must not be reported as inert: {findings:?}"
     );
     assert!(
         !findings.iter().any(|f| f.contains("`ai` backend")),

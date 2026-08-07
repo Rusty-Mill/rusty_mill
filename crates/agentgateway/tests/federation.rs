@@ -10,9 +10,7 @@ use std::net::SocketAddr;
 use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
 use rmcp::{
-    ServiceExt,
-    model::CallToolRequestParams,
-    service::RunningService,
+    ServiceExt, model::CallToolRequestParams, service::RunningService,
     transport::StreamableHttpClientTransport,
 };
 use tokio_util::sync::CancellationToken;
@@ -77,9 +75,8 @@ impl Harness {
             .await
             .expect("gateway should bind");
 
-        let transport = StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
-        ));
+        let transport =
+            StreamableHttpClientTransport::from_uri(format!("http://127.0.0.1:{port}/mcp"));
         let client = ()
             .serve(transport)
             .await
@@ -187,7 +184,10 @@ async fn an_unadvertised_tool_name_is_rejected() {
         .call("gamma_echo")
         .await
         .expect_err("a name from no known target must not route anywhere");
-    assert!(err.contains("gamma_echo"), "error should name the tool: {err}");
+    assert!(
+        err.contains("gamma_echo"),
+        "error should name the tool: {err}"
+    );
 
     harness.stop().await;
 }
@@ -229,7 +229,10 @@ async fn a_filtered_tool_is_hidden_and_uncallable() {
         .call("alpha_ping")
         .await
         .expect_err("a filtered tool must not be callable");
-    assert!(err.contains("alpha_ping"), "error should name the tool: {err}");
+    assert!(
+        err.contains("alpha_ping"),
+        "error should name the tool: {err}"
+    );
 
     harness.stop().await;
 }
@@ -280,7 +283,10 @@ async fn route_authorization_bans_one_target_but_not_the_other() {
         .call("beta_echo")
         .await
         .expect_err("a denied tool must not be callable");
-    assert!(err.contains("beta_echo"), "error should name the tool: {err}");
+    assert!(
+        err.contains("beta_echo"),
+        "error should name the tool: {err}"
+    );
 
     harness.stop().await;
 }
@@ -292,7 +298,9 @@ async fn a_route_that_does_not_match_is_a_404() {
         .replace("{server}", &mock_server())
         .replace("{port}", &port.to_string());
     let config = Config::from_yaml(&yaml).expect("config should parse");
-    let gateway = Gateway::build(&config, None).await.expect("gateway should build");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");

@@ -22,8 +22,8 @@ static PRIMARY: std::sync::OnceLock<(Vec<u8>, Value)> = std::sync::OnceLock::new
 
 fn keys() -> (EncodingKey, Value) {
     let (der, jwks) = PRIMARY.get_or_init(|| {
-        use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
         use base64::Engine as _;
+        use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey, traits::PublicKeyParts};
 
         let mut rng = rand::thread_rng();
         let private = RsaPrivateKey::new(&mut rng, 2048).expect("should generate a key");
@@ -120,7 +120,9 @@ async fn start() -> (String, CancellationToken, tempfile::TempDir) {
 
     let config = Config::from_yaml(&yaml).expect("config should parse");
     config.validate().expect("config should validate");
-    let gateway = Gateway::build(&config, None).await.expect("gateway should build");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
@@ -154,7 +156,10 @@ async fn post(url: &str, token: Option<&str>) -> reqwest::Response {
     if let Some(token) = token {
         request = request.header("authorization", format!("Bearer {token}"));
     }
-    request.send().await.expect("request should reach the gateway")
+    request
+        .send()
+        .await
+        .expect("request should reach the gateway")
 }
 
 #[tokio::test]

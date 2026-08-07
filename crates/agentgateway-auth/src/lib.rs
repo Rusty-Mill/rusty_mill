@@ -1,4 +1,4 @@
-//! The `jwtAuth` route policy.
+//! The `jwtAuth` and `extAuthz` route policies.
 //!
 //! Validation itself is [`rusty_mcp`]'s work: [`rusty_mcp::auth::JwtValidator`]
 //! is a JWKS-backed validator with key caching, an algorithm allow-list pinned
@@ -19,7 +19,12 @@
 //!   test named for exactly that.
 //! - **A file-backed JWKS.** `JwtValidator` fetches over HTTP only, and our
 //!   config also accepts `jwks: {file: ...}`. See [`FileJwks`].
+//!
+//! It also holds [`ExtAuthz`], the `extAuthz` policy — a different mechanism
+//! with the same job, which fails closed for the same reason the JWT path
+//! denies on an unrecognized error.
 
+mod extauthz;
 mod file_jwks;
 
 use std::sync::Arc;
@@ -28,6 +33,7 @@ use agentgateway_config::{JwtAuth, JwtSource};
 use http::{HeaderMap, StatusCode, header};
 use rusty_mcp::auth::{JwtValidator, TokenError, TokenValidator, VerifiedToken};
 
+pub use extauthz::{Authorization, ExtAuthz, ExtAuthzError};
 pub use file_jwks::{FileJwks, FileJwksError};
 
 /// Failure to build an authenticator from configuration.

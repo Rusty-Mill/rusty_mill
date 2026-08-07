@@ -38,10 +38,7 @@ fn certificate() -> Certificate {
     std::fs::write(dir.path().join("cert.pem"), &cert_pem).expect("should write the cert");
     std::fs::write(dir.path().join("key.pem"), &key_pem).expect("should write the key");
 
-    Certificate {
-        dir,
-        pem: cert_pem,
-    }
+    Certificate { dir, pem: cert_pem }
 }
 
 /// An upstream that echoes the headers it saw.

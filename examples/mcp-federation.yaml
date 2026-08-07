@@ -66,6 +66,16 @@ binds:
               - path:
                   pathPrefix: /api
             policies:
+              # Asked before the request is served, and fails closed: an
+              # authorizer that cannot be reached denies with 503 rather than
+              # becoming an open door. Both header lists are allow-lists --
+              # allowedUpstreamHeaders is what stops an authorizer setting any
+              # header the upstream trusts.
+              extAuthz:
+                target: http://authz.internal:9000
+                timeout: 250ms
+                includeHeaders: [authorization]
+                allowedUpstreamHeaders: [x-user-id]
               # Two retries after the first try. Only the listed codes are
               # retried; a transport error is retried only when it is a connect
               # failure, which is the one that cannot have been processed.

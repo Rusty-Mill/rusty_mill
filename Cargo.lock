@@ -65,6 +65,7 @@ dependencies = [
  "http",
  "jsonwebtoken",
  "rand 0.8.7",
+ "reqwest",
  "rsa",
  "rusty-mcp",
  "serde_json",
