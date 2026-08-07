@@ -346,6 +346,22 @@ ctx.reply_part(MessagePart::binary_artifact("chart.png", "image/png", png_bytes)
 `MessagePart::decoded_content()` reverses it on the receiving side, undoing base64 when that is
 the declared encoding.
 
+### How much can travel inline
+
+Request bodies are capped at 8 MiB by default. Base64 costs about a third, so that clears roughly
+6 MiB of actual bytes — an ordinary photo or a few minutes of audio. axum's own default of 2 MiB
+left about 1.5 MiB and rejected the common case.
+
+```rust
+AcpServer::builder().max_request_bytes(32 * 1024 * 1024)
+```
+
+Raise it if your input is genuinely larger, and know what it costs: the body is buffered before
+the run is admitted, so this multiplies by concurrent *requests*, not by `max_concurrent_runs`.
+The two limits do not compose into one number. Past the limit the server answers 413 with the
+limit and the way around it — a `content_url` part rather than inline `content`, which is the
+spec's own answer and costs the server nothing to serve.
+
 ### Open discovery
 
 With the `well-known` feature, the server also publishes its manifests as YAML at

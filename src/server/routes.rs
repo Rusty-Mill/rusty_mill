@@ -7,7 +7,9 @@
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
-    extract::{Path, Query, State},
+    extract::{
+        rejection::JsonRejection, DefaultBodyLimit, FromRequest, Path, Query, Request, State,
+    },
     http::{header, HeaderMap, StatusCode},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -103,6 +105,49 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
+/// [`Json`], with a 413 that says what to do about it.
+///
+/// axum's own rejection is `Failed to buffer the request body: length limit
+/// exceeded`, which describes its internals rather than the caller's problem —
+/// and does not mention the limit, or that ACP has an answer for content too
+/// large to inline. Every other rejection is passed through untouched; only the
+/// one this crate has something to add to is rewritten.
+///
+/// A plain body rather than an ACP error object, for the same reason `Draining`
+/// and the authentication example's 401 are plain: ACP defines three error
+/// codes and none of them means "too large".
+pub(crate) struct AcpJson<T>(pub(crate) T);
+
+impl<T> FromRequest<Arc<AcpServer>> for AcpJson<T>
+where
+    Json<T>: FromRequest<Arc<AcpServer>, Rejection = JsonRejection>,
+{
+    type Rejection = Response;
+
+    async fn from_request(
+        request: Request,
+        server: &Arc<AcpServer>,
+    ) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(request, server).await {
+            Ok(Json(value)) => Ok(AcpJson(value)),
+            Err(rejection) if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+                let limit = server.max_request_bytes();
+                tracing::debug!(limit, "refusing a request body over the limit");
+                Err((
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "request body exceeds this server's limit of {limit} bytes; \
+                         send large content as a message part with `content_url` \
+                         instead of inline `content`"
+                    ),
+                )
+                    .into_response())
+            }
+            Err(rejection) => Err(rejection.into_response()),
+        }
+    }
+}
+
 /// Build the router serving every ACP endpoint.
 pub(crate) fn router(server: Arc<AcpServer>) -> Router {
     let router = Router::new()
@@ -121,7 +166,10 @@ pub(crate) fn router(server: Arc<AcpServer>) -> Router {
     #[cfg(feature = "well-known")]
     let router = router.route("/.well-known/agent.yml", get(well_known_agents));
 
-    router.with_state(server)
+    // Layered on the whole router rather than on `POST /runs` alone. The
+    // submission is the only endpoint expected to carry a large body, but a
+    // limit that only guards the endpoint you thought of is not a limit.
+    router.layer(DefaultBodyLimit::max(server.max_request_bytes())).with_state(server)
 }
 
 /// Open discovery: the registered manifests as YAML at the well-known location.
@@ -260,7 +308,7 @@ impl IntoResponse for RunEventsResponse {
 async fn create_run(
     State(server): State<Arc<AcpServer>>,
     headers: HeaderMap,
-    Json(request): Json<RunCreateRequest>,
+    AcpJson(request): AcpJson<RunCreateRequest>,
 ) -> ApiResult<RunResponse> {
     // Checked before anything else: a replica that is going away should refuse
     // at the door rather than validate, resolve a session and then refuse.
@@ -293,7 +341,7 @@ async fn create_run(
 async fn resume_run(
     State(server): State<Arc<AcpServer>>,
     Path(run_id): Path<String>,
-    Json(request): Json<RunResumeRequest>,
+    AcpJson(request): AcpJson<RunResumeRequest>,
 ) -> ApiResult<RunResponse> {
     let run_id: RunId = run_id.parse().map_err(ApiError::from)?;
     if request.run_id != run_id {
