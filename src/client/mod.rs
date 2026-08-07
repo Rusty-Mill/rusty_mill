@@ -33,7 +33,7 @@ use crate::{
         AgentManifest, AgentName, AgentsListResponse, Error, Event, Message, Run, RunCreateRequest,
         RunEventsListResponse, RunId, RunMode, RunResumeRequest, Session, SessionId,
     },
-    AcpError, Result,
+    AcpError, Result, EVENTS_FROM_HEADER,
 };
 
 /// Default interval between polls in [`AcpClient::wait_for_run`].
@@ -776,14 +776,30 @@ impl AcpClient {
         Ok(resumable_stream(self.clone(), response, Some(run_id), after))
     }
 
-    /// Fetch the full event log of a run.
-    pub async fn list_run_events(&self, run_id: RunId) -> Result<Vec<Event>> {
-        let response: RunEventsListResponse = json(
-            self.send(self.request(Method::GET, &format!("/runs/{run_id}/events")), Replay::Safe)
-                .await?,
-        )
-        .await?;
-        Ok(response.events)
+    /// Fetch a run's event log.
+    ///
+    /// Returns a [`RunEventLog`] rather than a bare `Vec<Event>` because the
+    /// log may not be whole: a server bounding how much of one run it keeps
+    /// drops the oldest events, and a short list would otherwise be
+    /// indistinguishable from a short run. See
+    /// [`is_complete`](RunEventLog::is_complete).
+    pub async fn list_run_events(&self, run_id: RunId) -> Result<RunEventLog> {
+        let response = self
+            .send(self.request(Method::GET, &format!("/runs/{run_id}/events")), Replay::Safe)
+            .await?;
+        let response = check_status(response).await?;
+
+        // Absent on a server from before the header existed, where the honest
+        // answer is "no idea" rather than "nothing was dropped" — so it is
+        // reported as `None` and `is_complete` says so.
+        let first_index = response
+            .headers()
+            .get(EVENTS_FROM_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok());
+
+        let body: RunEventsListResponse = json(response).await?;
+        Ok(RunEventLog { events: body.events, first_index })
     }
 
     /// Fetch a session.
@@ -820,6 +836,73 @@ impl AcpClient {
         };
         let response = self.send(self.http.get(url), Replay::Safe).await?;
         json(response).await.map(Some)
+    }
+}
+
+/// A run's event log, and where it starts.
+///
+/// A server that bounds how much of one run's log it keeps drops the oldest
+/// events, so the list it returns can be a tail rather than the whole thing. A
+/// bare `Vec<Event>` could not say which, and a short log that reads as
+/// complete is the silent loss the resumable stream's 410 exists to prevent —
+/// left in place on this endpoint until now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunEventLog {
+    /// The events the server returned, in order.
+    pub events: Vec<Event>,
+    /// The index the first returned event sits at in the run's log.
+    ///
+    /// `Some(0)` means nothing was dropped. `None` means the server did not
+    /// say — it predates the header — which is different from saying nothing
+    /// was dropped, and is why this is an `Option` rather than defaulting to
+    /// zero.
+    pub first_index: Option<u64>,
+}
+
+impl RunEventLog {
+    /// Whether this is known to be the whole log.
+    ///
+    /// `false` for a log with a trimmed front **and** for one whose server did
+    /// not say. A caller that needs certainty gets the cautious answer; one
+    /// that only wants the events can ignore this entirely.
+    pub fn is_complete(&self) -> bool {
+        self.first_index == Some(0)
+    }
+
+    /// How many events were dropped from the front, when the server said.
+    pub fn dropped(&self) -> Option<u64> {
+        self.first_index
+    }
+
+    /// The events, discarding what is known about the log's completeness.
+    pub fn into_events(self) -> Vec<Event> {
+        self.events
+    }
+}
+
+impl std::ops::Deref for RunEventLog {
+    type Target = [Event];
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+impl IntoIterator for RunEventLog {
+    type Item = Event;
+    type IntoIter = std::vec::IntoIter<Event>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a RunEventLog {
+    type Item = &'a Event;
+    type IntoIter = std::slice::Iter<'a, Event>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.events.iter()
     }
 }
 

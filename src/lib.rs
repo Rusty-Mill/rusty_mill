@@ -136,6 +136,24 @@ pub use types::Error as ProtocolError;
 /// The ACP specification version this crate implements.
 pub const ACP_VERSION: &str = "0.2.0";
 
+/// Header naming the first index a run's event list actually starts at.
+///
+/// An extension this crate defines, like the resumable event stream and
+/// `/ready`. A server that bounds how much of one run's log it keeps drops the
+/// oldest events, and the list response is a *spec* type — a field added to it
+/// would put something on the wire ACP does not define, where a header says the
+/// same thing to a client that looks and nothing at all to one that does not.
+///
+/// Sent on every list response rather than only when events have been dropped.
+/// `0` means the log is whole; **no header at all** means the server predates
+/// this, which is a different answer and one that absence-means-complete could
+/// not give.
+///
+/// At the crate root because both halves need it: the server sends it and
+/// [`AcpClient::list_run_events`](client::AcpClient::list_run_events) reads it,
+/// and either feature can be enabled without the other.
+pub const EVENTS_FROM_HEADER: &str = "acp-events-from";
+
 /// Errors surfaced by the client and server layers.
 ///
 /// [`AcpError::Protocol`] wraps an [`Error`](types::Error) object returned by a

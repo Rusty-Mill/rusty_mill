@@ -32,6 +32,7 @@ use crate::{
         RunCreateRequest, RunEventsListResponse, RunId, RunMode, RunResumeRequest, RunStatus,
         Session, SessionId,
     },
+    EVENTS_FROM_HEADER,
 };
 
 /// How long a client is asked to wait when this replica is draining.
@@ -315,14 +316,16 @@ impl IntoResponse for RunResponse {
 
 /// The event log, in whichever shape the client asked for.
 enum RunEventsResponse {
-    Json(RunEventsListResponse),
+    Json(u64, RunEventsListResponse),
     Stream(Response),
 }
 
 impl IntoResponse for RunEventsResponse {
     fn into_response(self) -> Response {
         match self {
-            RunEventsResponse::Json(events) => Json(events).into_response(),
+            RunEventsResponse::Json(first_index, events) => {
+                ([(EVENTS_FROM_HEADER, first_index.to_string())], Json(events)).into_response()
+            }
             RunEventsResponse::Stream(response) => response,
         }
     }
@@ -638,8 +641,14 @@ async fn list_run_events(
     require_live_run(&server, run_id).await?;
 
     if !wants_event_stream(&headers) {
+        // The list is served whatever has been dropped — refusing it would deny
+        // a caller the tail it could still use — but it says where it starts,
+        // so a short log is distinguishable from a short run. The stream half
+        // below refuses instead, because there the client has named an index
+        // and can be told that exact index is gone.
+        let first_index = server.store().earliest_event(run_id).await.map_err(ApiError::from)?;
         let events = server.store().events(run_id).await.map_err(ApiError::from)?;
-        return Ok(RunEventsResponse::Json(RunEventsListResponse { events }));
+        return Ok(RunEventsResponse::Json(first_index, RunEventsListResponse { events }));
     }
 
     // Resume after the last event the client acknowledged; with no header, send
