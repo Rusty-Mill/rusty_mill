@@ -32,6 +32,14 @@ use crate::types::{
     StreamResponse, SubscribeToTaskRequest, Task, TaskPushNotificationConfig,
 };
 
+pub mod rest;
+pub use rest::RestClient;
+
+#[cfg(feature = "grpc")]
+pub mod grpc;
+#[cfg(feature = "grpc")]
+pub use grpc::GrpcClient;
+
 /// Errors that can occur while acting as an A2A client: transport-level
 /// failures (network, JSON encoding) as well as [`A2aError`]s returned by
 /// the remote agent.
@@ -47,6 +55,17 @@ pub enum ClientError {
     Stream(String),
     #[error("agent card declares no JSONRPC interface")]
     NoJsonRpcInterface,
+    #[error("agent card declares no HTTP+JSON interface")]
+    NoRestInterface,
+    #[cfg(feature = "grpc")]
+    #[error("agent card declares no GRPC interface")]
+    NoGrpcInterface,
+    #[cfg(feature = "grpc")]
+    #[error("invalid gRPC client configuration: {0}")]
+    GrpcConfig(String),
+    #[cfg(feature = "grpc")]
+    #[error("gRPC error: {0}")]
+    Grpc(#[from] tonic::Status),
     #[error("unexpected response (HTTP {status}): {body}")]
     UnexpectedResponse { status: u16, body: String },
 }

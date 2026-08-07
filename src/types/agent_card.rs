@@ -34,6 +34,7 @@ pub struct AgentInterface {
 impl AgentInterface {
     pub const JSONRPC: &'static str = "JSONRPC";
     pub const HTTP_JSON: &'static str = "HTTP+JSON";
+    pub const GRPC: &'static str = "GRPC";
 
     pub fn json_rpc(url: impl Into<String>) -> Self {
         AgentInterface {
@@ -54,6 +55,18 @@ impl AgentInterface {
         AgentInterface {
             url: url.into(),
             protocol_binding: Self::HTTP_JSON.to_string(),
+            tenant: None,
+            protocol_version: crate::PROTOCOL_VERSION.to_string(),
+        }
+    }
+
+    /// An interface using the gRPC binding (spec Section 10). `url` is a
+    /// `host:port` gRPC endpoint (no scheme), as accepted by
+    /// [`tonic::transport::Endpoint`].
+    pub fn grpc(url: impl Into<String>) -> Self {
+        AgentInterface {
+            url: url.into(),
+            protocol_binding: Self::GRPC.to_string(),
             tenant: None,
             protocol_version: crate::PROTOCOL_VERSION.to_string(),
         }

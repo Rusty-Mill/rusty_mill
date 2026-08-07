@@ -9,12 +9,7 @@
 //! [`AgentServices`](super::AgentServices) for running it alongside them
 //! against the same agent state.
 
-pub mod pb {
-    #![allow(clippy::doc_lazy_continuation)]
-    tonic::include_proto!("lf.a2a.v1");
-}
-
-mod convert;
+pub use crate::pb;
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -25,7 +20,7 @@ use tonic::{Request, Response, Status};
 
 use super::auth::{extract_credentials, Credentials};
 use super::engine::{parse_extensions_header, Engine};
-use convert::*;
+use crate::grpc_convert::*;
 use pb::a2a_service_server::A2aService;
 
 /// The `A2AService` gRPC service implementation, wrapping an `Engine`
