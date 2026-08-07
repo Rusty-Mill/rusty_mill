@@ -308,6 +308,15 @@ let session = client.get_session(session_id).await?;
 let messages = client.fetch_session_history(&session).await?;   // follows every URL, local or remote
 ```
 
+Those URLs are dereferenced **eight at a time**, and the returned messages are in session order
+regardless of which requests finish first. Following them one by one made a long conversation
+cost the *sum* of every latency rather than the largest — each entry potentially a separate host,
+each retry stalling every turn queued behind it.
+
+An error abandons the whole fetch rather than returning what arrived. A history with a hole in it
+that reads as complete is the same failure the `410` prevents on a trimmed event log, except that
+here the difference is what gets handed to an agent.
+
 Inside an agent, `ctx.history()` gives the messages this server already holds, and
 `ctx.session()` gives the full link list for anything hosted elsewhere.
 
@@ -985,7 +994,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-307 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+312 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and

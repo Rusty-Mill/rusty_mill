@@ -24,7 +24,7 @@ mod telemetry;
 use std::time::Duration;
 
 use eventsource_stream::Eventsource;
-use futures_util::{Stream, StreamExt};
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
@@ -41,6 +41,21 @@ pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Default ceiling on how long [`AcpClient::wait_for_run`] keeps polling.
 pub const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How many session-history URLs are dereferenced at once.
+///
+/// A fixed number rather than a builder setting. Every knob is another thing to
+/// get wrong, and this crate has declined a second one before — `retention`
+/// deliberately covers runs and sessions with a single window. Nobody has a
+/// reason to want a different value yet; when somebody does, that reason is
+/// what should design the setting.
+///
+/// Eight, because the constraint is the *other* end. History URLs may point at
+/// several different servers, and a client fetching several sessions multiplies
+/// whatever this is; a number small enough to be polite to one host is the right
+/// default, and it already turns a two-hundred-turn conversation from two
+/// hundred sequential round trips into twenty-five.
+pub const HISTORY_CONCURRENCY: usize = 8;
 
 /// How a dropped event stream is resumed.
 ///
@@ -813,15 +828,32 @@ impl AcpClient {
 
     /// Dereference every URL in a session's history into a [`Message`].
     ///
-    /// History URLs may point at other servers; each is fetched with this
-    /// client's HTTP client, in order.
+    /// The returned messages are in the session's order. The *fetches* are not:
+    /// up to [`HISTORY_CONCURRENCY`] are in flight at once, and `buffered`
+    /// — rather than `buffer_unordered` — puts the results back in order. The
+    /// ordering that matters is of the answer, not of the requests, and the two
+    /// were previously the same thing only because the loop was serial.
+    ///
+    /// Which cost a lot. ACP models history as *dereferenceable URLs* precisely
+    /// so a session can span servers, so a long conversation was one round trip
+    /// per turn, in sequence, each potentially to a different host: the total
+    /// was the sum of every latency rather than the largest. Retries made it
+    /// worse, since one slow server's backoff stalled every turn behind it.
+    ///
+    /// An error abandons the fetch rather than returning a partial history.
+    /// A history with a hole in it that reads as complete is the failure the
+    /// `410` and `Acp-Events-From` exist to prevent on the event log, and this
+    /// is the same shape: a caller cannot tell a short conversation from a
+    /// truncated one, and here it would be feeding that difference to an agent.
     pub async fn fetch_session_history(&self, session: &Session) -> Result<Vec<Message>> {
-        let mut messages = Vec::with_capacity(session.history.len());
-        for url in &session.history {
-            let response = self.send(self.http.get(url), Replay::Safe).await?;
-            messages.push(json(response).await?);
-        }
-        Ok(messages)
+        futures_util::stream::iter(&session.history)
+            .map(|url| async move {
+                let response = self.send(self.http.get(url), Replay::Safe).await?;
+                json(response).await
+            })
+            .buffered(HISTORY_CONCURRENCY)
+            .try_collect()
+            .await
     }
 
     /// Fetch the state document a session points at, decoded as `T`.
