@@ -134,8 +134,8 @@ Implemented and tested:
   query — with percent-decoding, and Gateway API precedence
 - Hostname matching on listeners and routes, including single-label wildcards
 - `mcp` backends: `stdio` and Streamable HTTP (`mcp:`) targets, federating
-  tools, prompts and resources with name and URI qualification, per-target
-  `filters`, route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
+  tools, prompts and resources with name and URI qualification, `via` egress,
+  per-target `filters`, route-level `mcpAuthorization` — both the `allowTools`/`denyTools`
   lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)
@@ -683,12 +683,44 @@ backends:
           mcp: { host: b.internal, port: 3001, path: /mcp/b }   # -> /rpc/b
 ```
 
-An **authority** does not generalise the same way, and this is the one place
-the line is drawn rather than moved. Pointed at several targets it would make
-them all the same server — not a redirect but a collapse, since a target's
-address is exactly what distinguishes it from the others. Over a single target
-it is a redirect and applies; over several it is reported and the path half of
-the same rewrite still runs.
+An **authority** does not generalise the same way. Pointed at several targets
+it would make them all the same server — not a redirect but a collapse, since a
+target's address is exactly what distinguishes it from the others. Over a
+single target it is a redirect and applies; over several it is reported and the
+path half of the same rewrite still runs.
+
+### Collapsing a federation onto one address
+
+The collapse is sometimes exactly what you want — an egress proxy or a mesh
+sidecar that all upstream traffic goes through. It has its own spelling, on the
+backend that owns the targets rather than on a route policy, so nobody reaches
+it while meaning to write a redirect:
+
+```yaml
+backends:
+  - mcp:
+      via: egress.local:8443      # every target dialled here
+      targets:
+        - name: alpha
+          mcp: { host: a.internal, port: 3001, path: /a }
+        - name: beta
+          mcp: { host: b.internal, port: 3001, path: /b }
+```
+
+Each target keeps its own path, which is then the only thing telling them
+apart. Two that would end up at the same address *and* path are two connections
+to the same endpoint federating the same tools twice, so `--check` reports it:
+
+```
+warning: ...mcp.via: targets `alpha` and `beta` would both be dialled at
+         `egress.local:8443` port 8443 path `/same`, so they are the same
+         endpoint federated twice; only their paths tell them apart once collapsed
+```
+
+`via` follows the same port rule as `urlRewrite.authority` — an address naming
+no port keeps each target's own — and refuses userinfo for the same reason.
+When a config sets both, `via` wins: it is the more specific of the two and the
+one that names targets, so the outcome does not depend on which is read first.
 
 **The path a rewrite acts on is the target's own configured path**, not
 anything derived from the request. An MCP route terminates the protocol and

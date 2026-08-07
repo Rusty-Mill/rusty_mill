@@ -437,11 +437,66 @@ impl Route {
         }
     }
 
+    /// Report a `via` that would leave two targets indistinguishable.
+    ///
+    /// Collapsing a federation onto one address is the point of the field, but
+    /// what tells the targets apart afterwards is only their paths. Two that
+    /// end up at the same address *and* path are two connections to the same
+    /// endpoint, federating the same tools twice.
+    fn lint_via(&self, at: &str, findings: &mut Vec<String>) {
+        for (i, backend) in self.backends.iter().enumerate() {
+            let BackendTarget::Mcp(mcp) = &backend.target else {
+                continue;
+            };
+            let Some(via) = &mcp.via else {
+                continue;
+            };
+            let at = format!("{at}.backends[{i}].mcp.via");
+
+            let addressed: Vec<(&str, u16, &str)> = mcp
+                .targets
+                .iter()
+                .filter_map(|t| match &t.kind {
+                    McpTargetKind::Mcp(http) => {
+                        Some((t.name.as_str(), http.port, http.path.as_str()))
+                    }
+                    _ => None,
+                })
+                .collect();
+
+            if addressed.is_empty() {
+                findings.push(format!(
+                    "{at}: no target here has an address to replace; a `stdio` target speaks \
+                     over a pipe"
+                ));
+                continue;
+            }
+
+            // Which port a target keeps depends on whether `via` names one, so
+            // the collision test has to ask the same question the dialler will.
+            let shared_port = via
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok());
+            let mut seen: std::collections::BTreeMap<(u16, &str), &str> = Default::default();
+            for (name, port, path) in addressed {
+                let port = shared_port.unwrap_or(port);
+                if let Some(first) = seen.insert((port, path), name) {
+                    findings.push(format!(
+                        "{at}: targets `{first}` and `{name}` would both be dialled at \
+                         `{via}` port {port} path `{path}`, so they are the same endpoint \
+                         federated twice; only their paths tell them apart once collapsed"
+                    ));
+                }
+            }
+        }
+    }
+
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         if let Some(policies) = &self.policies {
             policies.lint(at, findings);
             self.lint_url_rewrite(policies, at, findings);
         }
+        self.lint_via(at, findings);
         for (i, backend) in self.backends.iter().enumerate() {
             backend.lint(&format!("{at}.backends[{i}]"), findings);
         }

@@ -899,6 +899,83 @@ binds:
     assert_eq!(config.lint(), Vec::<String>::new());
 }
 
+/// A federation dialled through `via`, with the given targets.
+fn via_config(via: &str, targets: &str) -> Config {
+    Config::from_yaml(&format!(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  via: {via}
+                  targets:
+{targets}
+"#
+    ))
+    .expect("should parse")
+}
+
+#[test]
+fn a_via_over_targets_with_distinct_paths_lints_clean() {
+    // Collapsing onto one address is the point; the paths are what keep the
+    // targets apart afterwards.
+    assert_eq!(
+        via_config(
+            "egress.local:8443",
+            "                    - name: a\n                      mcp: { host: a.internal, path: /a }\n             \n                    - name: b\n                      mcp: { host: b.internal, path: /b }"
+        )
+        .lint(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn lint_reports_two_targets_that_via_would_make_identical() {
+    // Same address and same path is the same endpoint federated twice.
+    let findings = via_config(
+        "egress.local:8443",
+        "                    - name: a\n                      mcp: { host: a.internal, path: /mcp }\n         \n                    - name: b\n                      mcp: { host: b.internal, path: /mcp }",
+    )
+    .lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("`a` and `b`") && f.contains("the same endpoint federated twice")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_via_naming_no_port_keeps_each_targets_own() {
+    // Which means two targets on different ports stay distinct even at the
+    // same path -- the same rule `urlRewrite.authority` follows.
+    assert_eq!(
+        via_config(
+            "egress.local",
+            "                    - name: a\n                      mcp: { host: a.internal, port: 3001, path: /mcp }\n             \n                    - name: b\n                      mcp: { host: b.internal, port: 3002, path: /mcp }"
+        )
+        .lint(),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn lint_reports_a_via_over_stdio_targets() {
+    let findings = via_config(
+        "egress.local:8443",
+        "                    - name: a\n                      stdio: { cmd: /bin/true }",
+    )
+    .lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("no target here has an address to replace")),
+        "{findings:?}"
+    );
+}
+
 #[test]
 fn a_clean_config_lints_clean() {
     let config = Config::from_yaml(UPSTREAM_MCP_EXAMPLE).expect("should parse");
