@@ -56,25 +56,33 @@ non-baseline behavior. Known v1 fields:
 
 ## Behavior matrix
 
-Produced by `cargo test --workspace` across the CI OS matrix
-(`.github/workflows/ci.yml`). Each primitive is one of:
+Every row below is **measured, not asserted**. `crates/conformance` defines
+one probe per row that executes the primitive on the host it runs on;
+`.github/workflows/ci.yml` runs the probes on Windows, Linux, and macOS,
+merges the three reports, and **fails the build if this section differs from
+what the probes reported**. A row cannot claim a behavior that no code
+exercised.
 
-- **supported** — identical behavior across all three hosts.
-- **normalized** — behavior differs at the OS level but the adapter hides
-  it (e.g. path separators, case sensitivity of `dirs` output).
-- **unsupported** — capability absent on that host; callers must check
+Each primitive is one of:
+
+- **supported** — identical observable behavior across all three hosts.
+- **normalized** — the host differs underneath, but the adapter presents one
+  behavior.
+- **unsupported** — capability genuinely absent here; callers must check
   `Capabilities::detect()` first.
+- **ERRORED** — the probe could not run. Always a CI failure: it means the
+  matrix cannot be trusted.
 
-Current matrix (updated as reference tools land):
+Regenerate locally with:
 
-| Primitive | Windows | Linux | macOS |
-|---|---|---|---|
-| Scoped fs ops (`stat-tool`) | supported | supported | supported |
-| Symlinks | unsupported (no elevation) | supported | supported |
-| Process spawn + stdio capture (`proc-runner`) | supported | supported | supported |
-| Interactive PTY (`pty-shell`) | normalized (ConPTY, flag gap noted above) | supported | supported |
-| Advisory file locking | supported | supported | supported |
-| Standard dirs | normalized (`%APPDATA%` vs XDG vs `~/Library`) | supported | supported |
+```sh
+cargo run --bin conformance-report -- probe > report-$(uname -s).tsv
+cargo run --bin conformance-report -- write CONTRACT.md \
+    Windows=report-windows.tsv Linux=report-linux.tsv macOS=report-macos.tsv
+```
+
+<!-- BEGIN GENERATED MATRIX -->
+<!-- END GENERATED MATRIX -->
 
 ## Reference tools
 
@@ -87,6 +95,19 @@ area, all built against `contract` only:
    reports exit status.
 3. `tools/pty-shell` — opens an interactive PTY and spawns the host's
    default shell in it.
+
+`crates/conformance` is not a reference tool but the harness that keeps the
+matrix above honest — see its module docs for the rule that probes measure
+rather than assume.
+
+### Known limit on what the PTY row can promise
+
+`PtySession::spawn_shell` takes no command, so the only PTY this contract can
+open runs the host user's configured shell *with their rc files*. PTY teardown
+is therefore a function of dotfiles rather than of the contract, and the
+`pty_interactive` probe deliberately scopes its verdict to what the contract
+determines — that a real terminal exists and `resize` works — recording
+teardown as evidence only. A `spawn_command`-style API would close this gap.
 
 ## Explicitly deferred prior art decision
 
