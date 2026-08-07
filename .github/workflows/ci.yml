@@ -94,3 +94,27 @@ jobs:
 
       - name: cargo test (host target — platform-neutral logic only, e.g. error.rs)
         run: cargo test --features std
+
+  # `rust-version` in Cargo.toml is a promise to consumers, and rustils is now
+  # a real one: it adopts this crate as an optional, feature-gated Windows
+  # backend (`platform-windows`'s `track-w`) and enables that feature only on
+  # its stable CI leg *because* this floor sits above its own 1.75 MSRV. An
+  # unverified floor drifts upward silently on the first use of a newer
+  # library API, so compile it. Cross-compile rather than windows-latest: the
+  # floor is a compile-time property, and this is the fast runner.
+  msrv:
+    name: MSRV (1.88, cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: cargo check --target x86_64-pc-windows-gnu (no default features)
+        run: cargo check --target x86_64-pc-windows-gnu --all-targets
+
+      - name: cargo check --target x86_64-pc-windows-gnu (std feature)
+        run: cargo check --target x86_64-pc-windows-gnu --all-targets --features std
