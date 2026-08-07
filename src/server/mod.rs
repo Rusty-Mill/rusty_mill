@@ -177,6 +177,33 @@ pub const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 3;
 /// answer and costs the server nothing to serve.
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 
+/// How much output one run may accumulate before it is failed, by default.
+///
+/// [`Run::output`] holds every completed message assembled from the run's
+/// events. #60 and #68 bounded the event *log* on all three backends, on the
+/// argument that a TTL or a retention window bounds how long a log is kept and
+/// not how much — and that argument applied unchanged to the aggregate beside
+/// it, which nothing bounded. The snapshot is written on every status
+/// transition, returned by `GET /runs/{run_id}`, and carried whole inside every
+/// `run.*` event.
+///
+/// The limit **fails the run** rather than dropping the oldest, which is what
+/// the log does. See [`RunHandle`]'s output handling for why the two differ:
+/// the log has a vocabulary for a hole and [`Run::output`] does not.
+///
+/// 8 MiB, matching [`DEFAULT_MAX_REQUEST_BYTES`] — what a client may send in
+/// and what an agent may hand back are the same kind of quantity, and picking
+/// one number for both means there is one thing to reason about. It sits above
+/// [`DEFAULT_MAX_RUN_EVENT_BYTES`]
+/// deliberately, so the log trims well before the run dies.
+///
+/// Generous on purpose. This turns a run that works today into one that fails,
+/// so the ceiling has to be somewhere no reasonable agent goes; an agent that
+/// does go there wants a `content_url` part, which has no ceiling at all. Set
+/// it with [`AcpServerBuilder::max_run_output_bytes`], or remove it with
+/// [`AcpServerBuilder::without_run_output_limit`].
+pub const DEFAULT_MAX_RUN_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+
 /// How long a readiness answer is reused before the store is asked again.
 ///
 /// A load balancer probes on a schedule, from every replica, forever. Without a
@@ -523,6 +550,7 @@ pub struct AcpServer {
     max_recovery_attempts: u32,
     await_timeout: Option<Duration>,
     max_request_bytes: usize,
+    max_run_output_bytes: Option<usize>,
     in_flight: Arc<InFlight>,
     /// The last readiness answer and when it was given.
     readiness: Mutex<Option<(tokio::time::Instant, Readiness)>>,
@@ -590,6 +618,11 @@ impl AcpServer {
     /// The largest request body this server will accept.
     pub fn max_request_bytes(&self) -> usize {
         self.max_request_bytes
+    }
+
+    /// The ceiling on one run's accumulated output, or `None` if removed.
+    pub fn max_run_output_bytes(&self) -> Option<usize> {
+        self.max_run_output_bytes
     }
 
     /// How many runs are running an agent body right now.
@@ -941,7 +974,8 @@ impl AcpServer {
             }
         }
 
-        let (handle, resume_rx) = RunHandle::new(Arc::clone(&self.store), run);
+        let (handle, resume_rx) =
+            RunHandle::new(Arc::clone(&self.store), run, self.max_run_output_bytes);
         handle.spawn_control_listener(control_stream);
         handle.set_created().await?;
 
@@ -1513,6 +1547,7 @@ pub struct AcpServerBuilder {
     max_recovery_attempts: Option<u32>,
     max_concurrent_runs: Option<usize>,
     max_request_bytes: Option<usize>,
+    max_run_output_bytes: Option<Option<usize>>,
     max_run_event_bytes: Option<usize>,
     await_timeout: Option<Option<Duration>>,
 }
@@ -1663,20 +1698,6 @@ impl AcpServerBuilder {
         self
     }
 
-    /// Cap how many sessions the default [`InMemoryStore`] retains. Defaults
-    /// to [`DEFAULT_MAX_SESSIONS`].
-    ///
-    /// Past the cap the least recently used session is dropped, along with its
-    /// state document. An evicted session is indistinguishable from one that
-    /// never existed, so an agent's conversation silently starts over — the
-    /// eviction is logged at `warn` for exactly that reason.
-    ///
-    /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
-    pub fn max_run_event_bytes(mut self, max_run_event_bytes: usize) -> Self {
-        self.max_run_event_bytes = Some(max_run_event_bytes);
-        self
-    }
-
     /// Cap how much of a single run's event log the default [`InMemoryStore`]
     /// keeps. Defaults to [`DEFAULT_MAX_RUN_EVENT_BYTES`].
     ///
@@ -1689,8 +1710,51 @@ impl AcpServerBuilder {
     /// log with a hole in it.
     ///
     /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
+    pub fn max_run_event_bytes(mut self, max_run_event_bytes: usize) -> Self {
+        self.max_run_event_bytes = Some(max_run_event_bytes);
+        self
+    }
+
+    /// Cap how many sessions the default [`InMemoryStore`] retains. Defaults
+    /// to [`DEFAULT_MAX_SESSIONS`].
+    ///
+    /// Past the cap the least recently used session is dropped, along with its
+    /// state document. An evicted session is indistinguishable from one that
+    /// never existed, so an agent's conversation silently starts over — the
+    /// eviction is logged at `warn` for exactly that reason.
+    ///
+    /// Ignored when a store is supplied with [`store`](AcpServerBuilder::store).
     pub fn max_sessions(mut self, max_sessions: usize) -> Self {
         self.max_sessions = Some(max_sessions);
+        self
+    }
+
+    /// Fail a run whose accumulated output passes `max_run_output_bytes`.
+    /// Defaults to [`DEFAULT_MAX_RUN_OUTPUT_BYTES`].
+    ///
+    /// Unlike [`max_run_event_bytes`](AcpServerBuilder::max_run_event_bytes),
+    /// which drops the oldest events and tells a resuming client where the log
+    /// now starts, this one **fails the run**. [`Run::output`] is a plain list
+    /// in the ACP schema with nowhere to record a hole, and every `run.*` event
+    /// carries the whole [`Run`] over SSE where there is no header to put a
+    /// caveat in — so a truncated output would be indistinguishable from a
+    /// short one on every path a client can look.
+    ///
+    /// Applies to the run this server executes, so unlike the store limits it
+    /// is **not** ignored when a store is supplied.
+    pub fn max_run_output_bytes(mut self, max_run_output_bytes: usize) -> Self {
+        self.max_run_output_bytes = Some(Some(max_run_output_bytes));
+        self
+    }
+
+    /// Let a run accumulate output without limit.
+    ///
+    /// For a deployment that would rather risk the memory than lose the run —
+    /// a batch job whose output is the deliverable, say. The growth is real:
+    /// the snapshot is rewritten on every status transition and carried whole
+    /// inside every `run.*` event.
+    pub fn without_run_output_limit(mut self) -> Self {
+        self.max_run_output_bytes = Some(None);
         self
     }
 
@@ -1815,6 +1879,9 @@ impl AcpServerBuilder {
                 .unwrap_or(DEFAULT_MAX_RECOVERY_ATTEMPTS),
             await_timeout: self.await_timeout.unwrap_or(Some(DEFAULT_AWAIT_TIMEOUT)),
             max_request_bytes: self.max_request_bytes.unwrap_or(DEFAULT_MAX_REQUEST_BYTES),
+            max_run_output_bytes: self
+                .max_run_output_bytes
+                .unwrap_or(Some(DEFAULT_MAX_RUN_OUTPUT_BYTES)),
             in_flight: Arc::new(InFlight::new(self.max_concurrent_runs)),
             readiness: Mutex::new(None),
         })

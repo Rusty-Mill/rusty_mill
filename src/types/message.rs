@@ -418,6 +418,17 @@ pub struct Message {
 }
 
 impl Message {
+    /// Roughly how many bytes this message occupies, for the limits that count
+    /// a run's output rather than its log.
+    ///
+    /// The same estimate [`MessagePart::approximate_size`] gives, summed. Same
+    /// units on purpose: a bound on the log and a bound on the output are
+    /// measuring the same content assembled two ways, and two different notions
+    /// of "a byte" would make the two settings incomparable.
+    pub fn approximate_size(&self) -> usize {
+        self.parts.iter().map(MessagePart::approximate_size).sum()
+    }
+
     /// Build a message from a role and its parts.
     pub fn new(role: Role, parts: impl IntoIterator<Item = MessagePart>) -> Self {
         Self {
