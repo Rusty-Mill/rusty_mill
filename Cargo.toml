@@ -177,5 +177,10 @@ name = "multi_turn_history"
 path = "tests/multi_turn_history.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "content_type_validation"
+path = "tests/content_type_validation.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

@@ -178,6 +178,29 @@ impl Engine {
         }
     }
 
+    /// Rejects a message carrying a `Part.mediaType` this agent never
+    /// declared support for (`ContentTypeNotSupportedError`, spec Section
+    /// 3.3.2). Checked against `AgentCard.defaultInputModes` only - the
+    /// protocol has no way to know which `AgentSkill` (whose `inputModes`
+    /// can override the agent-wide defaults) a message is meant to invoke,
+    /// so a skill-level override can't be applied here. A part with no
+    /// `mediaType` set makes no claim to check. An agent that leaves
+    /// `defaultInputModes` empty is treated as accepting anything, rather
+    /// than rejecting everything.
+    fn check_content_types(&self, message: &Message) -> Result<()> {
+        if self.card.default_input_modes.is_empty() {
+            return Ok(());
+        }
+        for part in &message.parts {
+            if let Some(media_type) = &part.media_type {
+                if !self.card.default_input_modes.iter().any(|m| m == media_type) {
+                    return Err(A2aError::ContentTypeNotSupported(media_type.clone()));
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn resolve_ids(
         &self,
         tenant: Option<&str>,
@@ -215,6 +238,7 @@ impl Engine {
         &self,
         req: &SendMessageRequest,
     ) -> Result<(Started, broadcast::Receiver<SeqEvent>)> {
+        self.check_content_types(&req.message)?;
         let (task_id, context_id, existing_task) =
             self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
 
@@ -655,19 +679,44 @@ impl Engine {
             .ok_or_else(|| A2aError::TaskNotFound(format!("push notification config {}", req.id)))
     }
 
-    /// `ListTaskPushNotificationConfigs` (spec Section 3.1.9).
+    /// `ListTaskPushNotificationConfigs` (spec Section 3.1.9). Paginates
+    /// in memory over [`TaskStore::list_push_configs`]'s full result
+    /// (rather than pushing pagination down into the store, the way
+    /// [`Engine::list_tasks`] does via [`TaskStore::list`]) since
+    /// `list_push_configs` already exists as an unpaginated "every config
+    /// for this task" query for [`notify_push_configs`]'s webhook fan-out,
+    /// and the number of configs on one task is expected to be small.
     pub async fn list_push_notification_configs(
         &self,
         req: ListTaskPushNotificationConfigsRequest,
     ) -> Result<ListTaskPushNotificationConfigsResponse> {
         self.require_push_notifications()?;
-        let configs = self
+        let mut configs = self
             .store
             .list_push_configs(req.tenant.as_deref(), &req.task_id)
             .await;
+        configs.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let page_size = req.page_size.unwrap_or(50).clamp(1, 100) as usize;
+        let start = req
+            .page_token
+            .as_ref()
+            .and_then(|token| {
+                configs
+                    .iter()
+                    .position(|c| c.id.as_deref() == Some(token.as_str()))
+            })
+            .unwrap_or(0);
+        let end = (start + page_size).min(configs.len());
+        let next_page_token = if end < configs.len() {
+            configs[end].id.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         Ok(ListTaskPushNotificationConfigsResponse {
-            configs,
-            next_page_token: String::new(),
+            configs: configs[start..end].to_vec(),
+            next_page_token,
         })
     }
 

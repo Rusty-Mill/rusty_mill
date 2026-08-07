@@ -129,3 +129,4 @@ jobs:
           cargo test --features client,server --test mtls_proxy_header -- --list
           cargo test --features grpc,server --test mtls_proxy_header_grpc -- --list
           cargo test --features client,server --test multi_turn_history -- --list
+          cargo test --features client,server --test content_type_validation -- --list

@@ -520,3 +520,78 @@ async fn continuation_turns_do_not_duplicate_the_inline_push_config() {
         listed.configs
     );
 }
+
+/// `ListTaskPushNotificationConfigs.pageSize`/`pageToken` (spec Section
+/// 3.1.9) - neither `A2aClient` nor `client::GrpcClient` expose these on
+/// their `list_push_notification_configs` methods (they always pass
+/// `None`), so this drives the REST binding directly to reach them.
+#[tokio::test]
+async fn list_push_notification_configs_honors_page_size_and_page_token() {
+    let base_url = spawn_push_test_server().await;
+    let (client, _) = A2aClient::discover(&base_url).await.expect("discover");
+    let http = reqwest::Client::new();
+
+    let result = client
+        .send_message(Message::user_text("hello"), None)
+        .await
+        .expect("send_message");
+    let task_id = result.as_task().expect("expected a task").id.clone();
+
+    for i in 0..3 {
+        let mut config = TaskPushNotificationConfig::new(format!("https://example.com/webhook-{i}"));
+        config.task_id = Some(task_id.clone());
+        client
+            .create_push_notification_config(config)
+            .await
+            .expect("create_push_notification_config");
+    }
+
+    let page1: serde_json::Value = http
+        .get(format!(
+            "{base_url}/tasks/{task_id}/pushNotificationConfigs?pageSize=2"
+        ))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET .../pushNotificationConfigs?pageSize=2")
+        .json()
+        .await
+        .expect("response body");
+    let page1_configs = page1["configs"].as_array().expect("configs array");
+    assert_eq!(page1_configs.len(), 2, "expected exactly 2 configs on page 1");
+    let next_token = page1["nextPageToken"].as_str().expect("non-empty nextPageToken");
+    assert!(!next_token.is_empty());
+
+    let page2: serde_json::Value = http
+        .get(format!(
+            "{base_url}/tasks/{task_id}/pushNotificationConfigs?pageSize=2&pageToken={next_token}"
+        ))
+        .header("A2A-Version", "1.0")
+        .send()
+        .await
+        .expect("GET .../pushNotificationConfigs?pageSize=2&pageToken=...")
+        .json()
+        .await
+        .expect("response body");
+    let page2_configs = page2["configs"].as_array().expect("configs array");
+    assert_eq!(
+        page2_configs.len(),
+        1,
+        "expected the remaining 1 config on page 2"
+    );
+    assert_eq!(
+        page2["nextPageToken"], "",
+        "expected an empty nextPageToken on the last page"
+    );
+
+    // The two pages together must be exactly the 3 distinct configs, with
+    // no overlap or omission.
+    let mut all_ids: Vec<&str> = page1_configs
+        .iter()
+        .chain(page2_configs.iter())
+        .map(|c| c["id"].as_str().expect("config id"))
+        .collect();
+    all_ids.sort_unstable();
+    all_ids.dedup();
+    assert_eq!(all_ids.len(), 3, "expected 3 distinct configs across both pages");
+}
