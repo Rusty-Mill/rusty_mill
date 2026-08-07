@@ -381,20 +381,23 @@ impl Route {
                 _ => None,
             })
             .collect();
-        if mcp.is_empty() {
+        // A `host` backend rewrites per request and knows what that request
+        // matched. `mcp` and `ai` both resolve one address at startup, before
+        // any request exists, so both face the `prefix` question below.
+        let resolves_at_startup = !mcp.is_empty()
+            || self
+                .backends
+                .iter()
+                .any(|b| matches!(b.target, BackendTarget::Ai(_)));
+        if !resolves_at_startup {
             return;
         }
 
         let at = format!("{at}.policies.urlRewrite");
-        let targets: Vec<&McpTarget> = mcp.iter().flat_map(|b| &b.targets).collect();
-        let addressable = targets
-            .iter()
-            .filter(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
-            .count();
 
         // A `prefix` rewrite replaces whatever the route matched. Which prefix
-        // a request matched is not knowable when the target is dialled, which
-        // happens once at startup -- unless the route offers exactly one.
+        // a request matched is not knowable when the address is resolved --
+        // unless the route offers exactly one.
         if matches!(rewrite.path, Some(PathRewrite::Prefix(_))) {
             let prefixes = self
                 .matches
@@ -409,6 +412,17 @@ impl Route {
                 ));
             }
         }
+
+        // The rest is about MCP targets specifically; an `ai` route has one
+        // endpoint and no `stdio` variant to worry about.
+        if mcp.is_empty() {
+            return;
+        }
+        let targets: Vec<&McpTarget> = mcp.iter().flat_map(|b| &b.targets).collect();
+        let addressable = targets
+            .iter()
+            .filter(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
+            .count();
 
         // A path rewrite transforms each target's own path and leaves its host
         // alone, so it generalises across a federation. An authority does not:

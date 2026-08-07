@@ -9,17 +9,36 @@ use serde_json::Value;
 
 use crate::translate::{self, TranslateError, Usage};
 
-/// A provider this build cannot route to.
+/// A provider configuration this build cannot serve.
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "{at}: the `{provider}` provider is not served by this build; \
-     `openAI` (or any OpenAI-compatible endpoint via `hostOverride`) and `anthropic` are"
-)]
-pub struct ProviderError {
-    /// Where in the configuration it came from.
-    pub at: String,
-    /// The provider that was asked for.
-    pub provider: &'static str,
+pub enum ProviderError {
+    /// The provider itself is not implemented here.
+    #[error(
+        "{at}: the `{provider}` provider is not served by this build; \
+         `openAI` (or any OpenAI-compatible endpoint via `hostOverride`) and `anthropic` are"
+    )]
+    Unsupported {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The provider that was asked for.
+        provider: &'static str,
+    },
+    /// The base URL carries a credential.
+    ///
+    /// An address may legally hold `user:password@`, and that is the problem:
+    /// a credential there hides somewhere nobody thinks to look, is sent on
+    /// every request, and would be logged with the endpoint. `backendAuth.key`
+    /// is where a provider credential belongs.
+    #[error(
+        "{at}.hostOverride: `{value}` carries userinfo, which does not belong in an upstream \
+         address; use `backendAuth.key`"
+    )]
+    Userinfo {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The offending text.
+        value: String,
+    },
 }
 
 /// A configured model provider.
@@ -43,29 +62,36 @@ pub struct Settings {
 impl Provider {
     /// Resolve a configured provider.
     pub fn new(provider: &AiProvider, at: &str) -> Result<Self, ProviderError> {
-        let settings = |params: &AiProviderParams| Settings {
-            model: params.model.clone(),
-            host: params.host_override.clone(),
+        let settings = |params: &AiProviderParams| -> Result<Settings, ProviderError> {
+            if let Some(host) = params.host_override.as_deref()
+                && host.contains('@')
+            {
+                return Err(ProviderError::Userinfo {
+                    at: at.to_string(),
+                    value: host.to_string(),
+                });
+            }
+            Ok(Settings {
+                model: params.model.clone(),
+                host: params.host_override.clone(),
+            })
+        };
+        let unsupported = |provider| {
+            Err(ProviderError::Unsupported {
+                at: at.to_string(),
+                provider,
+            })
         };
 
         match provider {
-            AiProvider::OpenAi(params) => Ok(Provider::OpenAi(settings(params))),
-            AiProvider::Anthropic(params) => Ok(Provider::Anthropic(settings(params))),
+            AiProvider::OpenAi(params) => Ok(Provider::OpenAi(settings(params)?)),
+            AiProvider::Anthropic(params) => Ok(Provider::Anthropic(settings(params)?)),
             // Gemini, Vertex and Bedrock each need their own request shape and,
             // for the latter two, a signing scheme. Refusing at startup beats
             // accepting the config and failing every request.
-            AiProvider::Gemini(_) => Err(ProviderError {
-                at: at.to_string(),
-                provider: "gemini",
-            }),
-            AiProvider::Vertex(_) => Err(ProviderError {
-                at: at.to_string(),
-                provider: "vertex",
-            }),
-            AiProvider::Bedrock(_) => Err(ProviderError {
-                at: at.to_string(),
-                provider: "bedrock",
-            }),
+            AiProvider::Gemini(_) => unsupported("gemini"),
+            AiProvider::Vertex(_) => unsupported("vertex"),
+            AiProvider::Bedrock(_) => unsupported("bedrock"),
         }
     }
 

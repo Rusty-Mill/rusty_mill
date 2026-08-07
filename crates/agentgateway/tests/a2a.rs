@@ -63,6 +63,8 @@ struct Agent {
     calls: Arc<Mutex<Vec<Value>>>,
     /// Headers the agent saw on the last forwarded call.
     seen_headers: Arc<Mutex<Vec<(String, String)>>>,
+    /// The path the last forwarded call arrived on.
+    seen_path: Arc<Mutex<String>>,
     hits: Arc<AtomicUsize>,
 }
 
@@ -78,15 +80,18 @@ async fn agent(
     let port = free_port().await;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let seen_headers = Arc::new(Mutex::new(Vec::new()));
+    let seen_path = Arc::new(Mutex::new(String::new()));
     let hits = Arc::new(AtomicUsize::new(0));
 
     let recorder = Arc::clone(&calls);
     let header_recorder = Arc::clone(&seen_headers);
+    let path_recorder = Arc::clone(&seen_path);
     let counter = Arc::clone(&hits);
 
     let app = Router::new().fallback(any(move |request: Request| {
         let recorder = Arc::clone(&recorder);
         let header_recorder = Arc::clone(&header_recorder);
+        let path_recorder = Arc::clone(&path_recorder);
         let counter = Arc::clone(&counter);
         async move {
             let path = request.uri().path().to_string();
@@ -107,6 +112,9 @@ async fn agent(
             }
 
             counter.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut seen) = path_recorder.lock() {
+                seen.clone_from(&path);
+            }
             if let Ok(mut seen) = header_recorder.lock() {
                 *seen = request
                     .headers()
@@ -148,6 +156,7 @@ async fn agent(
         port,
         calls,
         seen_headers,
+        seen_path,
         hits,
     }
 }
@@ -163,11 +172,30 @@ async fn start_with(
     agents: &[u16],
     extra_policies: &str,
 ) -> (String, CancellationToken) {
+    start_at("", policy, agents, extra_policies).await
+}
+
+/// The same again, with the route matching on a `pathPrefix`.
+///
+/// A `prefix` rewrite needs one to anchor on, and a route with no `matches`
+/// has none.
+async fn start_at(
+    prefix: &str,
+    policy: &str,
+    agents: &[u16],
+    extra_policies: &str,
+) -> (String, CancellationToken) {
     let port = free_port().await;
     let backends: String = agents
         .iter()
         .map(|p| format!("              - host: \"127.0.0.1:{p}\"\n"))
         .collect();
+    let matches = match prefix {
+        "" => String::new(),
+        prefix => format!(
+            "            matches:\n              - path:\n                  pathPrefix: {prefix}\n"
+        ),
+    };
 
     let yaml = format!(
         r#"
@@ -176,7 +204,7 @@ binds:
     listeners:
       - routes:
           - name: agents
-            policies:
+{matches}            policies:
 {extra_policies}
               a2a:
 {policy}
@@ -607,6 +635,131 @@ async fn a_request_modifier_applies_to_a_call_the_a2a_policy_had_to_buffer() {
     assert!(
         seen.iter().any(|(k, v)| k == "x-tenant" && v == "acme"),
         "saw {seen:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_path_rewrite_reaches_a_proxied_a2a_agent() {
+    // An `a2a` route dispatches through the same `host` proxy that has always
+    // applied this. Asserted rather than assumed.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_at(
+        "/a2a",
+        "                allowMethods: [\"message/send\"]",
+        &[agent.port],
+        "              urlRewrite:\n                path:\n                  prefix: /rpc",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{url}/a2a/send"))
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+
+    assert_eq!(
+        *agent.seen_path.lock().expect("lock"),
+        "/rpc/send",
+        "the matched prefix is what a `prefix` rewrite replaces"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_path_rewrite_survives_the_buffering_the_a2a_policy_forces() {
+    // Gating reads the method out of the body, so the proxy is handed an
+    // already-buffered request rather than a stream. The rewrite is applied on
+    // that second path too.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_at(
+        "/a2a",
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[agent.port],
+        "              urlRewrite:\n                path:\n                  full: /fixed",
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{url}/a2a/anything"))
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {}}))
+        .send()
+        .await
+        .expect("the gateway should answer");
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(agent.hits.load(Ordering::Relaxed), 1);
+    assert_eq!(*agent.seen_path.lock().expect("lock"), "/fixed");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_authority_rewrite_redirects_a2a_traffic_and_card_discovery_with_it() {
+    // The backend address is a port with nothing on it; only the rewrite makes
+    // this route work at all. Discovery has to follow, or the gateway serves a
+    // card it fetched from an address it never sends traffic to -- and behind
+    // an egress proxy that is the only route to the agents, no card at all.
+    let real = agent("Alpha", &["echo"], true, true).await;
+    let dead = free_port().await;
+    let (url, shutdown) = start_with(
+        &format!("                allowMethods: [\"message/send\"]\n{CARD_POLICY}"),
+        &[dead],
+        &format!(
+            "              urlRewrite:\n                authority: \"127.0.0.1:{}\"",
+            real.port
+        ),
+    )
+    .await;
+
+    // The merged card exists, which means the card fetch found the agent.
+    let card: Value = reqwest::Client::new()
+        .get(format!("{url}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .expect("the gateway should answer")
+        .json()
+        .await
+        .expect("should be JSON");
+    assert_eq!(
+        card["skills"][0]["id"], "echo",
+        "discovery must have reached the rewritten address: {card}"
+    );
+
+    // And so does the call itself.
+    let response = call(&url, "message/send").await;
+    assert_eq!(response["result"]["ok"], true);
+    assert_eq!(real.hits.load(Ordering::Relaxed), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_path_rewrite_does_not_move_agent_card_discovery() {
+    // The well-known path is the A2A spec's, not the route's. Asking an agent
+    // for its card somewhere else finds nothing.
+    let agent = agent("Alpha", &["echo"], true, true).await;
+    let (url, shutdown) = start_with(
+        &format!("                allowMethods: [\"message/send\"]\n{CARD_POLICY}"),
+        &[agent.port],
+        "              urlRewrite:\n                path:\n                  full: /fixed",
+    )
+    .await;
+
+    let card: Value = reqwest::Client::new()
+        .get(format!("{url}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .expect("the gateway should answer")
+        .json()
+        .await
+        .expect("should be JSON");
+    assert_eq!(
+        card["skills"][0]["id"], "echo",
+        "the card was still fetched from the well-known path: {card}"
     );
 
     shutdown.cancel();

@@ -203,6 +203,13 @@ binds:
               requestHeaderModifier:
                 set:
                   x-gateway: rusty-agent-gateway
+              # The address rewritten here is the *provider's* endpoint -- a
+              # client's path never reaches a provider. `/v1/messages` with the
+              # route's matched `/v1` replaced, so this dials
+              # https://api.anthropic.com/proxy/v1/messages.
+              urlRewrite:
+                path:
+                  prefix: /proxy/v1
             backends:
               - ai:
                   provider:

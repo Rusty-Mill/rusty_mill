@@ -26,10 +26,10 @@ pub mod translate;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::{AiBackend, BackendAuth, Policies};
-use agentgateway_core::Headers;
+use agentgateway_core::{Headers, Rewrite};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
-use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, header};
+use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use serde_json::Value;
@@ -54,6 +54,20 @@ pub enum LlmError {
     /// A route's `requestHeaderModifier` named something HTTP cannot represent.
     #[error(transparent)]
     HeaderModifier(#[from] agentgateway_core::HeaderError),
+    /// A route's `urlRewrite` named an authority HTTP cannot represent.
+    #[error(transparent)]
+    Rewrite(#[from] agentgateway_core::RewriteError),
+    /// A `urlRewrite` was asked to act on an endpoint that is not a URL.
+    #[error(
+        "{at}.urlRewrite: `{endpoint}` is not an absolute URL, so there is nothing to rewrite; \
+         check `hostOverride`"
+    )]
+    Endpoint {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The endpoint that would have been dialled.
+        endpoint: String,
+    },
 }
 
 /// The body an LLM response carries.
@@ -72,6 +86,12 @@ pub struct LlmBackend {
     /// forwarded, so nothing else would ever apply it: an `ai` route's
     /// modifier used to parse and do nothing.
     request_headers: Option<Headers>,
+    /// The URL this backend POSTs to, with the route's `urlRewrite` applied.
+    ///
+    /// Resolved once: the provider's endpoint is fixed for the life of the
+    /// backend and so is a rewrite of it, so there is nothing per-request to
+    /// decide and no string to rebuild on every call.
+    endpoint: String,
     client: reqwest::Client,
 }
 
@@ -87,9 +107,19 @@ impl std::fmt::Debug for LlmBackend {
 
 impl LlmBackend {
     /// Build a backend for a route's `ai` configuration.
-    pub fn new(backend: &AiBackend, policies: &Policies, at: &str) -> Result<Self, LlmError> {
+    ///
+    /// `matched_prefix` is the route's sole `pathPrefix` match, when it has
+    /// exactly one; it is what a `urlRewrite.path.prefix` anchors on. See
+    /// [`resolve_endpoint`].
+    pub fn new(
+        backend: &AiBackend,
+        policies: &Policies,
+        matched_prefix: Option<&str>,
+        at: &str,
+    ) -> Result<Self, LlmError> {
         let provider = Provider::new(&backend.provider, at)?;
         let model = provider.forced_model().map(str::to_string);
+        let endpoint = resolve_endpoint(&provider, policies, matched_prefix, at)?;
 
         let request_headers = match policies.request_header_modifier.as_ref() {
             Some(modifier) => Some(Headers::new(
@@ -134,6 +164,7 @@ impl LlmBackend {
             model,
             key,
             request_headers,
+            endpoint,
             client,
         })
     }
@@ -141,6 +172,11 @@ impl LlmBackend {
     /// The provider this backend routes to.
     pub fn provider(&self) -> &Provider {
         &self.provider
+    }
+
+    /// The URL this backend will POST to.
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
     }
 
     /// Serve one OpenAI-compatible request.
@@ -212,7 +248,7 @@ impl LlmBackend {
 
         let upstream = self
             .client
-            .post(self.provider.endpoint())
+            .post(&self.endpoint)
             .headers(headers)
             .json(&upstream_body);
 
@@ -360,6 +396,80 @@ impl LlmBackend {
     }
 }
 
+/// The URL an `ai` route dials, with `urlRewrite` applied.
+///
+/// `urlRewrite` names parts of the one address the gateway dials. On an `ai`
+/// route that address is the provider's endpoint, and it is *built* rather
+/// than forwarded — so the policy used to parse and do nothing here, the same
+/// way `requestHeaderModifier` did.
+///
+/// # `authority` replaces the host, `hostOverride` sets the base
+///
+/// The two compose rather than competing, because they are not the same
+/// operation: `hostOverride` is a base URL and carries the scheme, while
+/// `authority` replaces only the host and port. Setting both means "this route
+/// talks to a self-hosted compatible endpoint, and its egress goes through
+/// that address" — which is the `host` proxy's arrangement of a backend
+/// address plus a rewrite, in the shape an `ai` backend has.
+///
+/// That is deliberately not the rule `mcp` follows for `via` versus
+/// `urlRewrite.authority`, where one wins. Those two *are* the same operation
+/// spelled twice, so one had to.
+///
+/// # `path` acts on the provider's path, not the client's
+///
+/// A client's request path never reaches the provider — the endpoint's path is
+/// the provider's API, `/v1/chat/completions` or `/v1/messages`. So `full`
+/// replaces that, which is how an Azure-style or gateway-mounted deployment is
+/// reached, and `prefix` transforms it against the route's own matched prefix,
+/// exactly as an `mcp` target's configured path is transformed.
+fn resolve_endpoint(
+    provider: &Provider,
+    policies: &Policies,
+    matched_prefix: Option<&str>,
+    at: &str,
+) -> Result<String, LlmError> {
+    let endpoint = provider.endpoint();
+    let Some(rewrite) = policies.url_rewrite.as_ref() else {
+        return Ok(endpoint);
+    };
+    let rewrite = Rewrite::new(rewrite, &format!("{at}.urlRewrite"))?;
+
+    let unrewritable = || LlmError::Endpoint {
+        at: at.to_string(),
+        endpoint: endpoint.clone(),
+    };
+    // A rewrite that cannot be applied is a startup failure rather than a
+    // silent no-op: the config says the gateway should be dialling somewhere
+    // else, and serving traffic to the original address instead is the
+    // outcome nobody asked for.
+    let uri = Uri::try_from(endpoint.as_str()).map_err(|_| unrewritable())?;
+    let scheme = uri.scheme().ok_or_else(unrewritable)?.clone();
+    let authority = match rewrite.authority() {
+        Some(authority) => authority.clone(),
+        None => uri.authority().ok_or_else(unrewritable)?.clone(),
+    };
+
+    // A replacement may carry its own query, which is how Azure's mandatory
+    // `?api-version=` is set. The provider endpoints have none of their own,
+    // so there is nothing to merge with.
+    let path_and_query = match rewrite.path(uri.path(), matched_prefix) {
+        Some(path) => path,
+        None => uri
+            .path_and_query()
+            .map(|pq| pq.as_str().to_string())
+            .unwrap_or_else(|| "/".into()),
+    };
+
+    Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path_and_query)
+        .build()
+        .map(|uri| uri.to_string())
+        .map_err(|_| unrewritable())
+}
+
 /// Report token usage.
 ///
 /// A structured log line rather than a metric: token counts are per-request
@@ -415,4 +525,176 @@ fn full(bytes: Bytes) -> LlmBody {
     // `BodyExt::boxed` and `Either`'s inherent one both apply here, so name
     // the trait method explicitly.
     BodyExt::boxed(http_body_util::Full::new(bytes).map_err(|never| match never {}))
+}
+
+#[cfg(test)]
+mod tests {
+    use agentgateway_config::{AiProvider, AiProviderParams, PathRewrite, UrlRewrite};
+
+    use super::*;
+
+    fn provider(kind: &str, host: Option<&str>) -> Provider {
+        let params = AiProviderParams {
+            model: None,
+            host_override: host.map(str::to_string),
+        };
+        let provider = match kind {
+            "openai" => AiProvider::OpenAi(params),
+            _ => AiProvider::Anthropic(params),
+        };
+        Provider::new(&provider, "route[0]").expect("should resolve")
+    }
+
+    fn policies(authority: Option<&str>, path: Option<PathRewrite>) -> Policies {
+        Policies {
+            url_rewrite: Some(UrlRewrite {
+                authority: authority.map(str::to_string),
+                path,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn endpoint(
+        provider: &Provider,
+        policies: &Policies,
+        matched_prefix: Option<&str>,
+    ) -> Result<String, LlmError> {
+        resolve_endpoint(provider, policies, matched_prefix, "route[0]")
+    }
+
+    #[test]
+    fn no_rewrite_leaves_the_provider_endpoint_alone() {
+        let provider = provider("openai", None);
+        assert_eq!(
+            endpoint(&provider, &Policies::default(), None).expect("should resolve"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn an_authority_replaces_the_host_and_keeps_the_scheme_and_path() {
+        // The scheme stays because `authority` names a host and port and
+        // nothing else; `hostOverride` is where a scheme is chosen.
+        let provider = provider("openai", None);
+        assert_eq!(
+            endpoint(&provider, &policies(Some("llm.internal:8443"), None), None)
+                .expect("should resolve"),
+            "https://llm.internal:8443/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn an_authority_composes_with_a_host_override_rather_than_losing_to_it() {
+        // They are not the same operation: `hostOverride` is a base URL and
+        // carries the scheme, `authority` replaces only host and port. A route
+        // reaching a self-hosted endpoint over http through an egress address
+        // needs both to mean something.
+        let provider = provider("openai", Some("http://vllm.internal:8000"));
+        assert_eq!(
+            endpoint(&provider, &policies(Some("egress:15001"), None), None)
+                .expect("should resolve"),
+            "http://egress:15001/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn a_full_path_rewrite_replaces_the_providers_api_path() {
+        // The shape an Azure-style or gateway-mounted deployment needs.
+        let provider = provider("openai", Some("https://acme.openai.azure.com"));
+        let rewrite = policies(
+            None,
+            Some(PathRewrite::Full(
+                "/openai/deployments/gpt4o/chat/completions".into(),
+            )),
+        );
+        assert_eq!(
+            endpoint(&provider, &rewrite, None).expect("should resolve"),
+            "https://acme.openai.azure.com/openai/deployments/gpt4o/chat/completions"
+        );
+    }
+
+    #[test]
+    fn a_prefix_rewrite_transforms_the_providers_path_against_the_matched_prefix() {
+        // `/v1/chat/completions` with `/v1` matched and replaced by `/openai/v1`.
+        let provider = provider("openai", Some("http://compat.internal:8080"));
+        let rewrite = policies(None, Some(PathRewrite::Prefix("/openai/v1".into())));
+        assert_eq!(
+            endpoint(&provider, &rewrite, Some("/v1")).expect("should resolve"),
+            "http://compat.internal:8080/openai/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn a_prefix_rewrite_with_no_prefix_to_anchor_on_leaves_the_path_alone() {
+        // A route matching on zero or several prefixes cannot say which one a
+        // request replaced. Leaving the path beats anchoring on a guess.
+        let provider = provider("openai", None);
+        let rewrite = policies(None, Some(PathRewrite::Prefix("/openai".into())));
+        assert_eq!(
+            endpoint(&provider, &rewrite, None).expect("should resolve"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn anthropics_own_path_is_what_gets_rewritten() {
+        // Not OpenAI's: the path being rewritten is the provider's API, and
+        // the two providers do not share one.
+        let provider = provider("anthropic", None);
+        let rewrite = policies(None, Some(PathRewrite::Prefix("/proxy/v1".into())));
+        assert_eq!(
+            endpoint(&provider, &rewrite, Some("/v1")).expect("should resolve"),
+            "https://api.anthropic.com/proxy/v1/messages"
+        );
+    }
+
+    #[test]
+    fn a_full_rewrite_may_carry_a_query() {
+        // Azure rejects a request without `api-version`, and the endpoint has
+        // nowhere else to put one.
+        let provider = provider("openai", Some("https://acme.openai.azure.com"));
+        let rewrite = policies(
+            None,
+            Some(PathRewrite::Full(
+                "/openai/deployments/gpt4o/chat/completions?api-version=2024-02-01".into(),
+            )),
+        );
+        assert_eq!(
+            endpoint(&provider, &rewrite, None).expect("should resolve"),
+            "https://acme.openai.azure.com/openai/deployments/gpt4o/chat/completions\
+             ?api-version=2024-02-01"
+        );
+    }
+
+    #[test]
+    fn an_authority_and_a_path_rewrite_both_apply_together() {
+        let provider = provider("openai", None);
+        let rewrite = policies(
+            Some("egress:15001"),
+            Some(PathRewrite::Full("/upstream/chat".into())),
+        );
+        assert_eq!(
+            endpoint(&provider, &rewrite, None).expect("should resolve"),
+            "https://egress:15001/upstream/chat"
+        );
+    }
+
+    #[test]
+    fn a_rewrite_on_an_endpoint_that_is_not_a_url_fails_at_startup() {
+        // Serving traffic to the original address, when the config says to
+        // dial somewhere else, is the outcome nobody asked for.
+        let provider = provider("openai", Some("not a url"));
+        let err = endpoint(&provider, &policies(Some("other:443"), None), None)
+            .expect_err("should not resolve");
+        assert!(err.to_string().contains("hostOverride"), "got: {err}");
+    }
+
+    #[test]
+    fn an_authority_carrying_a_credential_fails_at_startup() {
+        let provider = provider("openai", None);
+        let err = endpoint(&provider, &policies(Some("user:secret@host"), None), None)
+            .expect_err("should not resolve");
+        assert!(err.to_string().contains("backendAuth"), "got: {err}");
+    }
 }
