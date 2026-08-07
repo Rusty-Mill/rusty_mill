@@ -1,6 +1,6 @@
 # ADR-0002: Reporting surface stays JSON-only, not a dashboard
 
-Status: Accepted
+Status: Superseded by [ADR-0003](./0003-minimal-static-dashboard.md)
 Date: 2026-08-06
 
 ## Context

@@ -1624,6 +1624,28 @@ budget, and when" is answerable from logs. Rejected/no-op requests (`404`,
 `409`, a validation error) aren't logged here, since nothing changed for
 there to be anything to record.
 
+## Dashboard
+
+`GET /dashboard` serves a small read-only web UI over the JSON endpoints
+above — models, provider health, cumulative usage, free-tier budgets, and
+(admin-authenticated) clients with per-client spend and a 30-day usage
+history sparkline, with a "reset spend" action.
+
+It's a single static HTML file with vanilla JS — no build step, no npm,
+no JS framework, no CDN dependency — compiled directly into the `rp-server`
+binary. The page itself carries no secrets and needs no auth of its own to
+load (same reasoning as `/health`); it prompts for a bearer token in the
+browser and attaches it to every `fetch()` call, so it's subject to
+exactly the same `check_auth`/`check_admin_auth` rules those endpoints
+already enforce elsewhere in this file. Use an admin-role client's own key
+(see [Organizations, workspaces & roles](#organizations-workspaces--roles)
+below) to unlock every panel with one token; a plain client key or
+`server.api_key_env` only unlocks the non-admin panels (models, provider
+stats, usage, free tiers), and the global `admin_key_env` alone only
+unlocks the clients panel. The token is kept in the browser tab's session
+storage only — never sent anywhere but this server, never written to
+disk.
+
 ## Organizations, workspaces & roles
 
 `[[clients]]` entries (config-defined or admin-API-provisioned) can carry
