@@ -48,6 +48,25 @@ group-join half, shared with D2 below), `Signal` +
 `docs/behavior/term.md`) gated on `ignore_sigttou`. Unix-only throughout;
 `docs/divergences.md` #008 records the Windows gaps.
 
+> **Donor-status note, 2026-08-07 (D-15):** `rusty_win32` — cited below in
+> D2, D5, D9 and the Time bullet — is no longer *only* a donor. It is now
+> also a rev-pinned optional dependency of `platform-windows`, behind the
+> off-by-default `track-w` feature, exactly as D4's own landed-note records
+> for `rusty_libc`/`track-p`. This does not retract any porting decision
+> recorded below: everything already extracted stays extracted (semantics
+> and tests ported, re-floored on §2/§5), and the entries below remain the
+> record of *why*. What changed is that a second, narrower relationship now
+> runs alongside the extraction — for the call families where the honest
+> answer is "the donor already declares this import correctly, link it
+> rather than re-declare it." First replaced family:
+> `sys::fileio::read`/`write`, mirroring Track P's own first slice, with the
+> whole platform-windows suite re-run under `--features track-w` as the
+> equivalence test and the asymmetry-with-Track-P lesson written up
+> (`docs/learning/003-…`). Adopting it also forced a manifest fix upstream
+> (edition 2024 → 2021 + a declared 1.88 MSRV): Cargo parses an optional
+> dependency's manifest even with its feature off, so the donor's edition
+> was breaking this workspace's 1.75 MSRV leg on mere presence.
+
 ### D2 — `rush/src/winjob.rs` + `rusty_win32`: Windows jobs & spawn
 
 - Suspended-spawn → assign-to-Job-Object → resume: membership guaranteed

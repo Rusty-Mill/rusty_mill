@@ -96,6 +96,42 @@ in all of `platform-windows` for one quoting module. The actual
 handback PRs (rusty_naner, rush) are still open, tracked as their own
 convergence work, not implied by this landing.
 
+### 1d. rusty_win32 as a dependency (Track W) — surface work, landed here
+
+**Landed here 2026-08-07 (D-15).** `platform-windows` gained an
+off-by-default `track-w` feature routing curated call families through
+`rusty_win32` — a rev-pinned git dependency, one source of truth, no
+vendored fork — instead of windows-sys. Structurally identical to D-12's
+`rusty_libc`/`track-p` adoption on the Linux side, including the MSRV
+posture (rusty_win32's floor is 1.88, above this workspace's 1.75, so the
+feature is enabled only on the windows+stable CI leg) and the
+call-by-call migration discipline. First family:
+`sys::fileio::read`/`write`.
+
+Filed under Phase 1 because it needed no new PAL surface and no consumer
+gate: `platform::fs`'s contract is unchanged, both configurations produce
+bit-identical `PlatformError`s, and the entire platform-windows suite
+re-runs under `--features track-w` as the equivalence test. It is
+*surface* work only in the Cargo sense — a new feature is a public
+interface addition (hence the `y` bump), not a new trait.
+
+What this is **not**: a lower tier. Track P descends below libc to the
+kernel ABI; Windows publishes no supported tier below a documented DLL
+export, so `track-w` swaps the binding's provenance and leaves D-1's
+floor decision intact. The write-up is `docs/learning/003-…`; the
+asymmetry is called out there, in D-15, and in `docs/architecture.md`
+rather than left for a reader to infer from the symmetric feature name.
+
+Remaining Track W work, in the same call-by-call spirit and each its own
+slice — not authorized by this landing, listed so the migration has a
+visible shape: `sys::proc`'s spawn/wait/job families (the donor's own
+strongest material, D2), `sys::console`'s mode and screen-buffer calls
+(D9), and `sys::handle`'s pipe/duplicate/inheritability calls (D5).
+Families where rusty_win32 has no binding at the pinned rev — `sys::nt`
+above all, whose `NtCreateFile` handle-relative opens are this backend's
+whole capability model — stay on windows-sys in both configurations, the
+same way `fchmodat` stays on libc in both Track P configurations.
+
 ---
 
 ## Phase 2 — Terminal slice 2 (D9, remaining facets)

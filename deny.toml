@@ -28,6 +28,10 @@ yanked = "deny"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/baileyrd/rusty_libc",
+    # D-15: rusty_win32 is rusty_libc's Windows counterpart, admitted on
+    # the same terms — the Track W backend behind platform-windows's
+    # `track-w` feature, pinned by rev, bumped deliberately.
+    "https://github.com/baileyrd/rusty_win32",
     "https://github.com/baileyrd/rusty_regx",
     "https://github.com/baileyrd/rpath",
 ]

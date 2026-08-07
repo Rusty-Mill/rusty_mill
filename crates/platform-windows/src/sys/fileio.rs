@@ -41,7 +41,46 @@ pub fn open_ambient_dir(path: &OsStr) -> Result<OwnedWinHandle> {
     OwnedWinHandle::from_raw(handle).ok_or_else(|| errmap::last_win32_err("CreateFileW", path))
 }
 
+/// `ReadFile` into `buf` — Track W: `rusty_win32::fs::read_file` (D-15).
+///
+/// The first replaced call family, chosen to mirror Track P's own first
+/// slice (`platform-linux`'s `sys::fdio::read`/`write`) so the two
+/// adoptions stay comparable: the smallest possible surface, exercised by
+/// essentially every test in the suite, with a `Result<usize>` contract
+/// that leaves nothing to interpret.
+///
+/// Same `ReadFile` call underneath, from the other side of the tier
+/// doctrine: windows-sys' metadata-generated declaration versus
+/// rusty_win32's hand-written `extern "system"` one. What differs is the
+/// error path — see [`errmap::trackw_err`] — and the length clamp below.
+#[cfg(feature = "track-w")]
+pub fn read(handle: &OwnedWinHandle, buf: &mut [u8]) -> Result<usize> {
+    // `rusty_win32::fs::read_file` passes `buf.len() as u32` straight to
+    // `ReadFile`, so an oversized slice would *wrap* rather than saturate
+    // (a 4 GiB + 1 buffer reading one byte, or zero). Clamp on this side to
+    // keep the two arms' contract identical to the `u32::try_from(…)
+    // .unwrap_or(u32::MAX)` the windows-sys arm does inline. Short reads
+    // are already this function's contract, so a clamp is not a behavior
+    // change — only a bound on how much one call can move.
+    let len = buf.len().min(u32::MAX as usize);
+    // SAFETY: `read_file`'s contract is a currently-open, valid, readable
+    // handle. `OwnedWinHandle`'s own type invariant is exactly that — it is
+    // constructed only from a freshly-returned valid handle and closes it
+    // once, on drop — and `&self` here proves it has not dropped yet.
+    match unsafe { rusty_win32::fs::read_file(handle.as_raw(), &mut buf[..len]) } {
+        Ok(n) => Ok(n),
+        // A pipe whose write side has fully closed reports BROKEN_PIPE on
+        // read; that IS end-of-file for pipes — mirroring unix read()
+        // returning 0. Same rule as the windows-sys arm below, restated
+        // against the code the wrapper returned rather than a fresh
+        // `GetLastError` read.
+        Err(e) if e.code() == w::ERROR_BROKEN_PIPE => Ok(0),
+        Err(e) => Err(errmap::trackw_err("ReadFile", e)),
+    }
+}
+
 /// `ReadFile` into `buf`.
+#[cfg(not(feature = "track-w"))]
 pub fn read(handle: &OwnedWinHandle, buf: &mut [u8]) -> Result<usize> {
     let mut n: u32 = 0;
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
@@ -72,7 +111,19 @@ pub fn read(handle: &OwnedWinHandle, buf: &mut [u8]) -> Result<usize> {
     Ok(n as usize)
 }
 
+/// `WriteFile` from `buf` — Track W: `rusty_win32::fs::write_file` (D-15).
+#[cfg(feature = "track-w")]
+pub fn write(handle: &OwnedWinHandle, buf: &[u8]) -> Result<usize> {
+    // Clamped for the same reason as `read` above.
+    let len = buf.len().min(u32::MAX as usize);
+    // SAFETY: as in `read` above — `OwnedWinHandle`'s type invariant is
+    // `write_file`'s safety contract, and `&self` proves it is still open.
+    unsafe { rusty_win32::fs::write_file(handle.as_raw(), &buf[..len]) }
+        .map_err(|e| errmap::trackw_err("WriteFile", e))
+}
+
 /// `WriteFile` from `buf`.
+#[cfg(not(feature = "track-w"))]
 pub fn write(handle: &OwnedWinHandle, buf: &[u8]) -> Result<usize> {
     let mut n: u32 = 0;
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);

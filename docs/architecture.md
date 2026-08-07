@@ -28,7 +28,7 @@ beside-the-PAL shelf additions recorded below, is
 ├──────────────────────────────────────────────────────────────┤
 │  LAYER 1 — OS Implementation (all unsafe lives here)         │
 │  platform-linux (libc floor · rusty_libc track-p)            │
-│  platform-windows (windows-sys floor · rusty_win32 as donor) │
+│  platform-windows (windows-sys floor · rusty_win32 track-w)  │
 ├──────────────────────────────────────────────────────────────┤
 │  LAYER 0 — OS Kernel                                         │
 │  Linux kernel ABI            ·           Windows NT kernel   │
@@ -63,9 +63,19 @@ surface where every admitted symbol is listed and justified.
   open items are getdents64 and pidfd_open (upstream additions to
   rusty_libc).
 - **platform-windows** — `sys/{nt,proc,fileio,csignals}` + `winargv` over
-  windows-sys (D-1). **rusty_win32** is the extraction donor whose typed-
-  handle and wait_any patterns were mined (extraction map D-repos); it
-  keeps running independently until convergence.
+  two floors: **windows-sys** (default, D-1) and **rusty_win32**'s
+  hand-written `extern "system"` declarations behind `track-w` (D-15),
+  migrated call-by-call starting with `sys::fileio::read`/`write`.
+  rusty_win32 was already this backend's extraction donor — its typed-
+  handle, `wait_any` and console patterns were mined into `sys/` (see the
+  extraction map) — and D-15 turns that one-way flow into a real,
+  rev-pinned dependency, the same move D-12 made for rusty_libc. Note the
+  asymmetry with Track P, recorded rather than glossed: Track P descends a
+  tier (raw syscalls under libc), Track W does not — Windows exposes no
+  supported tier below a documented DLL export, so `track-w` swaps the
+  binding's *provenance*, not its depth, and D-1 stands unchanged. The
+  donor crate still runs independently; the `winargv` handback still flows
+  the other way.
 
 ## Layer 2 — Platform Abstraction Layer
 
