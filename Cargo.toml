@@ -187,5 +187,10 @@ name = "client_jws_verification"
 path = "tests/client_jws_verification.rs"
 required-features = ["client", "grpc", "signing", "server"]
 
+[[test]]
+name = "terminal_task_rejection"
+path = "tests/terminal_task_rejection.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

@@ -10,7 +10,7 @@
 
 use reqwest::Client;
 
-use crate::types::{AuthenticationInfo, Task, TaskPushNotificationConfig};
+use crate::types::{AuthenticationInfo, StreamResponse, Task, TaskPushNotificationConfig};
 
 #[derive(Clone)]
 pub(crate) struct PushNotifier {
@@ -25,7 +25,10 @@ impl PushNotifier {
     }
 
     pub(crate) async fn notify(&self, config: &TaskPushNotificationConfig, task: &Task) {
-        let mut request = self.client.post(&config.url).json(task);
+        // Spec Section 4.3.3: the webhook payload is a `StreamResponse`
+        // object (i.e. `{"task": {...}}`), not the bare `Task`.
+        let payload = StreamResponse::Task { task: task.clone() };
+        let mut request = self.client.post(&config.url).json(&payload);
         if let Some(token) = &config.token {
             request = request.header("X-A2A-Notification-Token", token);
         }

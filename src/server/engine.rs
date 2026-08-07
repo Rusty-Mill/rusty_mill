@@ -242,6 +242,17 @@ impl Engine {
         let (task_id, context_id, existing_task) =
             self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
 
+        // Spec Sections 3.1.1/3.1.2: "Messages sent to Tasks that are in a
+        // terminal state... cannot accept further messages."
+        if let Some(task) = &existing_task {
+            if task.status.state.is_terminal() {
+                return Err(A2aError::UnsupportedOperation(format!(
+                    "task {} is already in a terminal state and cannot accept further messages",
+                    task.id
+                )));
+            }
+        }
+
         // `SendMessageConfiguration.task_push_notification_config` (spec
         // Section 3.1.1) lets a client register push-notification
         // delivery in the same request that creates the task, since it
@@ -266,6 +277,22 @@ impl Engine {
                 self.store.put_push_config(req.tenant.as_deref(), config).await;
             }
         }
+
+        // Snapshot of the task as it stands right before this turn's own
+        // updates: the existing task's current state for a continuation,
+        // or a freshly-`Submitted` task seeded with this message for a
+        // brand-new one - mirrors exactly what `apply_event`'s own
+        // store-side fallback constructs when no row exists yet. Used
+        // below to lead the stream with a `Task` object the moment this
+        // turn turns out to be task-shaped (spec Sections 3.1.2/3.1.6).
+        let lead_task_snapshot = match &existing_task {
+            Some(task) => task.clone(),
+            None => {
+                let mut task = Task::new(&task_id, &context_id, TaskState::Submitted);
+                task.history.push(req.message.clone());
+                task
+            }
+        };
 
         let (tx, mut rx) = mpsc::unbounded_channel::<StreamResponse>();
         let sink = EventSink::new(task_id.clone(), context_id.clone(), tx);
@@ -304,6 +331,7 @@ impl Engine {
             let mut saw_closing_event = false;
             let mut first_event = true;
             while let Some(evt) = rx.recv().await {
+                lead_with_task_if_needed(&next_seq, &bus, &lead_task_snapshot, first_event, &evt);
                 let seq = apply_event(
                     &store,
                     &push,
@@ -344,6 +372,7 @@ impl Engine {
                         metadata: None,
                     }
                     .into();
+                    lead_with_task_if_needed(&next_seq, &bus, &lead_task_snapshot, first_event, &failure);
                     let seq = apply_event(
                         &store,
                         &push,
@@ -475,7 +504,14 @@ impl Engine {
     /// caller reconnecting mid-stream (typically via SSE's `Last-Event-ID`,
     /// read by the bindings' handlers) catches up on what it missed
     /// instead of only seeing where things stand *now*. `since_seq: None`
-    /// replays everything still buffered.
+    /// both replays everything still buffered *and* - per spec Section
+    /// 3.1.6's explicit requirement that the operation "MUST return a Task
+    /// object as the first event in the stream, representing the current
+    /// state of the task at the time of subscription" - leads with a
+    /// `Task` snapshot; a reconnect (`since_seq: Some`, this crate's own
+    /// extension beyond the spec) skips that lead, since re-announcing
+    /// state the caller already has would defeat the point of replaying
+    /// only what was missed.
     pub async fn subscribe_to_task(
         &self,
         req: SubscribeToTaskRequest,
@@ -511,13 +547,28 @@ impl Engine {
                 .unwrap_or_default()
         };
         let max_replayed = replay.last().map(|(seq, _)| *seq);
+        let lead: Option<SeqEvent> = if since_seq.is_none() {
+            let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+            Some((seq, StreamResponse::Task { task: task.clone() }))
+        } else {
+            None
+        };
 
         match bus_rx {
-            Some(rx) => Ok(Box::pin(replay_then_live(replay, rx, max_replayed))),
+            Some(rx) => Ok(Box::pin(replay_then_live(lead, replay, rx, max_replayed))),
+            None if lead.is_some() => {
+                // Fresh subscribe to an idle task: the lead snapshot above
+                // already satisfies "current state at time of
+                // subscription" on its own - nothing else to add.
+                Ok(Box::pin(async_stream::stream! {
+                    yield lead.expect("lead is Some in this branch");
+                }))
+            }
             None => {
-                // Idle but not terminal (e.g. InputRequired/AuthRequired):
-                // no live tail to attach to, so replay whatever's
-                // buffered, then a final current-state snapshot.
+                // Idle but not terminal (e.g. InputRequired/AuthRequired),
+                // reconnecting via `since_seq`: no live tail to attach to,
+                // so replay whatever's buffered, then a final
+                // current-state snapshot.
                 let snapshot_seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
                 Ok(Box::pin(async_stream::stream! {
                     for item in replay {
@@ -815,6 +866,34 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
     }
 }
 
+/// If this is the first event of the turn and it's task-shaping (anything
+/// but a bare `Message`), sends `lead_task` as a `StreamResponse::Task`
+/// ahead of it on the bus - spec Sections 3.1.2/3.1.6 require a
+/// task-shaped `SendStreamingMessage` stream, and every `SubscribeToTask`
+/// stream, to begin with the `Task` object itself. Sent directly to the
+/// bus without going through the shared `event_logs`/`apply_event`
+/// machinery: it carries no new information (it's a snapshot of state
+/// [`Engine::subscribe_to_task`] can just as easily reconstruct itself
+/// from the store for its own leading `Task`), so logging it would only
+/// risk a duplicate for a subscriber that attaches mid-turn.
+fn lead_with_task_if_needed(
+    next_seq: &Arc<AtomicU64>,
+    bus: &broadcast::Sender<SeqEvent>,
+    lead_task: &Task,
+    first_event: bool,
+    evt: &StreamResponse,
+) {
+    if first_event && !matches!(evt, StreamResponse::Message { .. }) {
+        let seq = next_seq.fetch_add(1, Ordering::Relaxed);
+        let _ = bus.send((
+            seq,
+            StreamResponse::Task {
+                task: lead_task.clone(),
+            },
+        ));
+    }
+}
+
 /// Applies `evt` to the store (as before), fires push notifications, and
 /// appends it to `task_id`'s bounded event log under a freshly assigned,
 /// engine-wide monotonic sequence number - which it returns, so the
@@ -954,20 +1033,29 @@ fn stream_through_close(mut rx: broadcast::Receiver<SeqEvent>) -> impl Stream<It
     }
 }
 
-/// Yields `replay` (already-buffered events a reconnecting subscriber
-/// missed) followed by the live tail of `rx`, until - and including - the
-/// first event that closes the stream. Skips any live event whose
-/// sequence number is `<= max_replayed`: since [`Engine::subscribe_to_task`]
-/// subscribes to the bus *before* taking the `replay` snapshot, every
-/// event either lands in `replay` or arrives live (never both missed, but
-/// sometimes both) - this filter is what makes "both" safe instead of a
-/// duplicate.
+/// Yields `lead` (a fresh subscriber's required leading `Task` snapshot,
+/// see [`Engine::subscribe_to_task`]), then `replay` (already-buffered
+/// events a reconnecting subscriber missed), then the live tail of `rx`,
+/// until - and including - the first event that closes the stream. Skips
+/// any live event whose sequence number is `<= max_replayed`: since
+/// [`Engine::subscribe_to_task`] subscribes to the bus *before* taking the
+/// `replay` snapshot, every event either lands in `replay` or arrives
+/// live (never both missed, but sometimes both) - this filter is what
+/// makes "both" safe instead of a duplicate.
 fn replay_then_live(
+    lead: Option<SeqEvent>,
     replay: Vec<SeqEvent>,
     mut rx: broadcast::Receiver<SeqEvent>,
     max_replayed: Option<u64>,
 ) -> impl Stream<Item = (u64, StreamResponse)> {
     stream! {
+        if let Some((seq, evt)) = lead {
+            let closing = evt.closes_stream();
+            yield (seq, evt);
+            if closing {
+                return;
+            }
+        }
         for (seq, evt) in &replay {
             let closing = evt.closes_stream();
             yield (*seq, evt.clone());

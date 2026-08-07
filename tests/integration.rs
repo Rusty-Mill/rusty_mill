@@ -179,6 +179,18 @@ async fn streaming_message_yields_ordered_events_ending_in_terminal_status() {
         .await
         .expect("send_streaming_message");
 
+    // Spec Section 3.1.2: since this turn is task-shaped, the stream MUST
+    // begin with the `Task` object itself.
+    let first = stream
+        .next()
+        .await
+        .expect("first stream event")
+        .expect("stream event");
+    match first {
+        StreamResponse::Task { task } => assert_eq!(task.status.state, TaskState::Submitted),
+        other => panic!("expected the stream to lead with a Task, got {other:?}"),
+    }
+
     let mut saw_working = false;
     let mut saw_artifact = false;
     let mut saw_completed = false;

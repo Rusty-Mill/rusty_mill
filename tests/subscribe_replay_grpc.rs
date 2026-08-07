@@ -102,8 +102,11 @@ async fn grpc_resubscribe_replays_the_whole_buffered_log() {
         other => panic!("expected a task, got {other:?}"),
     };
 
-    // First subscribe: read the `Working` event, then disconnect by
-    // dropping the stream without reading further.
+    // First subscribe: gRPC's `SubscribeToTaskRequest` has no
+    // Last-Event-ID-style resume field, so this is always treated as a
+    // fresh subscription and MUST begin with a `Task` snapshot (spec
+    // Section 3.1.6) before the `Working` event; disconnect by dropping
+    // the stream without reading further.
     let mut first_stream = client
         .subscribe_to_task(pb::SubscribeToTaskRequest {
             id: task_id.clone(),
@@ -112,6 +115,15 @@ async fn grpc_resubscribe_replays_the_whole_buffered_log() {
         .await
         .expect("subscribe_to_task")
         .into_inner();
+    let lead = first_stream
+        .next()
+        .await
+        .expect("lead event")
+        .expect("stream item");
+    match lead.payload {
+        Some(pb::stream_response::Payload::Task(task)) => assert_eq!(task.id, task_id),
+        other => panic!("expected the stream to lead with a Task, got {other:?}"),
+    }
     let first = first_stream
         .next()
         .await
@@ -140,6 +152,22 @@ async fn grpc_resubscribe_replays_the_whole_buffered_log() {
         .await
         .expect("subscribe_to_task (resubscribe)")
         .into_inner();
+
+    // Resubscribing is *also* a fresh subscription by gRPC's lights (no
+    // Last-Event-ID equivalent), so it too leads with a `Task` snapshot -
+    // this one reflecting the artifact already applied.
+    let lead = second_stream
+        .next()
+        .await
+        .expect("lead event")
+        .expect("stream item");
+    match lead.payload {
+        Some(pb::stream_response::Payload::Task(task)) => {
+            assert_eq!(task.status.unwrap().state, pb::TaskState::Working as i32);
+            assert_eq!(task.artifacts.len(), 1);
+        }
+        other => panic!("expected the resubscribe stream to lead with a Task, got {other:?}"),
+    }
 
     let replayed_working = second_stream
         .next()

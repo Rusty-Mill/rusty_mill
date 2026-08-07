@@ -367,7 +367,7 @@ async fn completed_task_delivers_a_push_notification_to_the_configured_webhook()
         let got = receiver.received.lock().unwrap().clone();
         if got
             .iter()
-            .any(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+            .any(|(_, body)| body["task"]["status"]["state"] == "TASK_STATE_COMPLETED")
         {
             delivered = got;
             break;
@@ -375,12 +375,14 @@ async fn completed_task_delivers_a_push_notification_to_the_configured_webhook()
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // Spec Section 4.3.3: the webhook payload is a `StreamResponse`
+    // envelope (`{"task": {...}}`), not a bare `Task`.
     let (token, body) = delivered
         .iter()
-        .find(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+        .find(|(_, body)| body["task"]["status"]["state"] == "TASK_STATE_COMPLETED")
         .expect("expected a push notification delivery for the completed task");
     assert_eq!(token.as_deref(), Some("correlation-token"));
-    assert_eq!(body["id"], task_id);
+    assert_eq!(body["task"]["id"], task_id);
 }
 
 /// `SendMessageConfiguration.taskPushNotificationConfig` (spec Section
@@ -414,7 +416,7 @@ async fn send_message_configuration_registers_push_notifications_at_task_creatio
         let got = receiver.received.lock().unwrap().clone();
         if got
             .iter()
-            .any(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+            .any(|(_, body)| body["task"]["status"]["state"] == "TASK_STATE_COMPLETED")
         {
             delivered = got;
             break;
@@ -422,12 +424,14 @@ async fn send_message_configuration_registers_push_notifications_at_task_creatio
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
+    // Spec Section 4.3.3: the webhook payload is a `StreamResponse`
+    // envelope (`{"task": {...}}`), not a bare `Task`.
     let (token, body) = delivered
         .iter()
-        .find(|(_, body)| body["status"]["state"] == "TASK_STATE_COMPLETED")
+        .find(|(_, body)| body["task"]["status"]["state"] == "TASK_STATE_COMPLETED")
         .expect("expected a push notification delivery for the completed task");
     assert_eq!(token.as_deref(), Some("inline-token"));
-    assert_eq!(body["id"], task_id);
+    assert_eq!(body["task"]["id"], task_id);
 
     // Also reachable via the ordinary CRUD read path, with the
     // server-assigned `taskId`/`id` filled in.
