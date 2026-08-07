@@ -68,9 +68,22 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Static per-OS matrix. Deliberately data-only — no I/O, no external
-    /// crates — so it belongs in the contract, not an adapter.
-    pub fn detect() -> Self {
+    /// The conservative compile-time baseline: what is safe to assume on a
+    /// host of this family *without asking it anything*.
+    ///
+    /// This is **not** detection, and is named so it cannot be mistaken for
+    /// it. Deciding capabilities from `cfg!` alone produces answers a real
+    /// host can contradict — conformance measured exactly that, creating and
+    /// resolving a symlink on a `windows-latest` runner while this function
+    /// reports `symlinks: false`. A capability model that CI cannot falsify
+    /// will drift from reality silently.
+    ///
+    /// Real detection needs I/O, and this crate is deliberately I/O-free, so
+    /// it lives in the adapter: use `compat::NativeCapabilities::detect()`
+    /// whenever you can afford the probe. Reach for this only when you
+    /// cannot, and treat a `false` as "not proven safe to assume," never as
+    /// "impossible on this host."
+    pub fn conservative_baseline() -> Self {
         Capabilities {
             symlinks: cfg!(unix),
             unix_permissions: cfg!(unix),
@@ -183,11 +196,42 @@ pub trait PtyControl: Send {
     fn wait(&mut self) -> Result<i32>;
 }
 
-/// Opens interactive PTY sessions running the host's default shell.
-/// Callers MUST check `Capabilities::detect().pty_win32_input_mode` before
-/// relying on Win32-input-mode escape sequences.
+/// Opens interactive PTY sessions.
+///
+/// The primary operation is [`PtySession::spawn`], which runs an explicit
+/// command. That is deliberate: when the only way to open a PTY was "run the
+/// host's default shell," every observable property of a session — including
+/// whether it ever exits — was a function of the user's rc files rather than
+/// of this contract, and so could not be stated as a guarantee or tested as
+/// one. Command selection is what makes PTY behavior a contract property.
+///
+/// Callers MUST check `pty_win32_input_mode` before relying on
+/// Win32-input-mode escape sequences.
 pub trait PtySession {
-    fn spawn_shell(&self, cols: u16, rows: u16) -> Result<PtySpawn>;
+    /// Runs `command` under a new PTY of the given size. `ProcessSpec` is
+    /// reused verbatim so that argv/cwd/env semantics — including
+    /// `inherit_env` — are identical to `ProcessRunner::run`; a PTY should
+    /// not be a second, subtly different way to describe a process.
+    fn spawn(&self, command: &ProcessSpec, cols: u16, rows: u16) -> Result<PtySpawn>;
+
+    /// The host's default interactive shell, as a spawnable command.
+    ///
+    /// Adapters MUST document how they choose it. It is exposed separately
+    /// so callers can inspect or override the choice rather than having it
+    /// baked into the spawn path.
+    fn host_default_shell(&self) -> Result<ProcessSpec>;
+
+    /// Convenience wrapper over [`PtySession::spawn`].
+    ///
+    /// Behavior of the resulting session depends on the user's shell and
+    /// their rc files, which this contract does not govern: a customized
+    /// login chain can hand off to another shell that never exits on `exit`.
+    /// Nothing about this method is a guarantee beyond "a PTY was opened."
+    /// Use [`PtySession::spawn`] for anything that must be deterministic.
+    fn spawn_shell(&self, cols: u16, rows: u16) -> Result<PtySpawn> {
+        let command = self.host_default_shell()?;
+        self.spawn(&command, cols, rows)
+    }
 }
 
 /// A held advisory lock. Dropping without calling `unlock` MUST still
@@ -217,7 +261,7 @@ mod tests {
 
     #[test]
     fn capabilities_are_internally_consistent() {
-        let caps = Capabilities::detect();
+        let caps = Capabilities::conservative_baseline();
         // Win32 input mode is a Windows-only gap; it can never be true
         // while symlinks (a Unix-only baseline) is also true.
         assert!(!(caps.pty_win32_input_mode && caps.symlinks));

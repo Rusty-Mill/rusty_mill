@@ -10,11 +10,11 @@
 use std::io::{Read, Write};
 use std::thread;
 
-use compat::NativePtySession;
-use contract::{Capabilities, PtySession};
+use compat::{NativeCapabilities, NativePtySession};
+use contract::PtySession;
 
 fn main() -> anyhow::Result<()> {
-    let caps = Capabilities::detect();
+    let caps = NativeCapabilities::detect();
     eprintln!(
         "pty-shell: capabilities.pty_win32_input_mode={}",
         caps.pty_win32_input_mode

@@ -4,8 +4,8 @@
 
 use std::path::Path;
 
-use compat::Workspace;
-use contract::{Capabilities, FsRoot};
+use compat::{NativeCapabilities, Workspace};
+use contract::FsRoot;
 
 fn main() -> anyhow::Result<()> {
     let target = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(Path::new("."));
 
     let ws = Workspace::open_ambient(root)?;
-    let caps = Capabilities::detect();
+    let caps = NativeCapabilities::detect();
     println!("capabilities: {caps:?}");
 
     let meta = ws.stat(name)?;

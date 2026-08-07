@@ -2,16 +2,67 @@
 //! cap-std (fs), portable-pty (process/pty), dirs (standard dirs), and
 //! std's own file-locking methods (stable since 1.89). This crate is
 //! deliberately thin — the primitives it wraps are already cross-platform;
-//! the only genuinely OS-specific logic lives in `Capabilities::detect()`
-//! (in `contract`) and the PTY shell selection below.
+//! the genuinely OS-specific logic is `NativeCapabilities::detect()` and the
+//! default-shell selection below.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use contract::{
-    ContractError, DirEntryInfo, FileLock, FsRoot, LockGuard, Metadata, ProcessOutput,
-    ProcessRunner, ProcessSpec, PtyControl, PtySession, PtySpawn, Result, StandardDirs,
+    Capabilities, ContractError, DirEntryInfo, FileLock, FsRoot, LockGuard, Metadata,
+    ProcessOutput, ProcessRunner, ProcessSpec, PtyControl, PtySession, PtySpawn, Result,
+    StandardDirs,
 };
+
+/// Lexically simulates `..` resolution to decide whether `path` would climb
+/// above the scoped root at any point, or is rooted/absolute to begin with.
+///
+/// This exists because cap-std reports an escape attempt as a plain
+/// `io::ErrorKind::PermissionDenied`, which is indistinguishable from a
+/// genuine OS denial without matching on the error's message text — exactly
+/// what CONTRACT.md forbids callers from doing. Classifying structurally, at
+/// the boundary where we know the operation was scoped, keeps
+/// `ContractError::PathEscape` reachable and precise.
+///
+/// Deliberately *not* an unconditional `..` rejection: `a/../b` stays inside
+/// the root and cap-std accepts it, so rejecting it here would narrow the
+/// contract for no security gain.
+fn escapes_lexically(path: &Path) -> bool {
+    use std::path::Component;
+
+    let mut depth: i32 = 0;
+    for component in path.components() {
+        match component {
+            // An absolute path or a Windows drive/UNC prefix is not scoped
+            // to the root at all.
+            Component::Prefix(_) | Component::RootDir => return true,
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return true;
+                }
+            }
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+        }
+    }
+    false
+}
+
+/// Guard applied to every scoped path before it reaches cap-std. cap-std
+/// remains the enforcement backstop — this only makes the *category* stable.
+///
+/// Known divergence: escape via a symlink inside the root that points out of
+/// it cannot be caught lexically. cap-std still blocks it, but it surfaces as
+/// `PermissionDenied` rather than `PathEscape`. Recorded in CONTRACT.md's
+/// behavior matrix and asserted by the `path_escape_symlink` conformance
+/// probe, so it stays a named decision rather than an accident.
+fn ensure_scoped(path: &Path) -> Result<()> {
+    if escapes_lexically(path) {
+        return Err(ContractError::PathEscape(path.display().to_string()));
+    }
+    Ok(())
+}
 
 fn to_metadata(m: cap_std::fs::Metadata) -> Metadata {
     Metadata {
@@ -38,10 +89,12 @@ impl Workspace {
 
 impl FsRoot for Workspace {
     fn stat(&self, path: &Path) -> Result<Metadata> {
+        ensure_scoped(path)?;
         Ok(to_metadata(self.dir.metadata(path)?))
     }
 
     fn read_dir(&self, path: &Path) -> Result<Vec<DirEntryInfo>> {
+        ensure_scoped(path)?;
         let mut out = Vec::new();
         for entry in self.dir.read_dir(path)? {
             let entry = entry?;
@@ -54,18 +107,22 @@ impl FsRoot for Workspace {
     }
 
     fn read_to_string(&self, path: &Path) -> Result<String> {
+        ensure_scoped(path)?;
         Ok(self.dir.read_to_string(path)?)
     }
 
     fn write(&self, path: &Path, contents: &[u8]) -> Result<()> {
+        ensure_scoped(path)?;
         Ok(self.dir.write(path, contents)?)
     }
 
     fn create_dir(&self, path: &Path) -> Result<()> {
+        ensure_scoped(path)?;
         Ok(self.dir.create_dir(path)?)
     }
 
     fn remove_file(&self, path: &Path) -> Result<()> {
+        ensure_scoped(path)?;
         Ok(self.dir.remove_file(path)?)
     }
 }
@@ -81,6 +138,7 @@ impl LockGuard for StdFileLockGuard {
 
 impl FileLock for Workspace {
     fn lock_exclusive(&self, path: &Path) -> Result<Box<dyn LockGuard>> {
+        ensure_scoped(path)?;
         let file = self.dir.open_with(
             path,
             cap_std::fs::OpenOptions::new()
@@ -94,6 +152,7 @@ impl FileLock for Workspace {
     }
 
     fn lock_shared(&self, path: &Path) -> Result<Box<dyn LockGuard>> {
+        ensure_scoped(path)?;
         let file = self.dir.open_with(
             path,
             cap_std::fs::OpenOptions::new()
@@ -136,6 +195,9 @@ impl ProcessRunner for NativeProcessRunner {
 /// `Capabilities::pty_win32_input_mode` in the `contract` crate.
 pub struct NativePtySession;
 
+/// How this adapter picks the host's default shell, documented as
+/// `PtySession::host_default_shell` requires: `%COMSPEC%` falling back to
+/// `cmd.exe` on Windows, `$SHELL` falling back to `/bin/sh` elsewhere.
 fn default_shell() -> String {
     if cfg!(windows) {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
@@ -168,7 +230,11 @@ impl PtyControl for NativePtyControl {
 }
 
 impl PtySession for NativePtySession {
-    fn spawn_shell(&self, cols: u16, rows: u16) -> Result<PtySpawn> {
+    /// `ProcessSpec` maps onto `CommandBuilder` field for field. Note that
+    /// `CommandBuilder::new` starts from the inherited environment, so
+    /// `inherit_env: false` must clear it explicitly — same semantics as
+    /// `NativeProcessRunner`'s `env_clear`.
+    fn spawn(&self, command: &ProcessSpec, cols: u16, rows: u16) -> Result<PtySpawn> {
         let pty_system = portable_pty::native_pty_system();
         let pair = pty_system
             .openpty(portable_pty::PtySize {
@@ -178,7 +244,19 @@ impl PtySession for NativePtySession {
                 pixel_height: 0,
             })
             .map_err(|e| ContractError::Unsupported(e.to_string()))?;
-        let cmd = portable_pty::CommandBuilder::new(default_shell());
+
+        let mut cmd = portable_pty::CommandBuilder::new(&command.program);
+        cmd.args(&command.args);
+        if let Some(cwd) = &command.cwd {
+            cmd.cwd(cwd);
+        }
+        if !command.inherit_env {
+            cmd.env_clear();
+        }
+        for (key, value) in &command.env {
+            cmd.env(key, value);
+        }
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -200,6 +278,91 @@ impl PtySession for NativePtySession {
             }),
         })
     }
+
+    fn host_default_shell(&self) -> Result<ProcessSpec> {
+        Ok(ProcessSpec::new(default_shell()))
+    }
+}
+
+/// Capability detection that actually asks the host.
+///
+/// `contract::Capabilities::conservative_baseline()` answers from `cfg!`
+/// alone, which a real host can contradict: conformance observed a
+/// `windows-latest` runner create and resolve a symlink while the baseline
+/// reported `symlinks: false`. Detection needs I/O, so it lives here rather
+/// than in the I/O-free contract crate.
+pub struct NativeCapabilities;
+
+impl NativeCapabilities {
+    /// Probes what can be probed and falls back to the conservative baseline
+    /// for what cannot.
+    ///
+    /// Performs filesystem I/O in a temporary directory. Callers that cannot
+    /// afford that should use the baseline and accept its false negatives.
+    pub fn detect() -> Capabilities {
+        let baseline = Capabilities::conservative_baseline();
+        Capabilities {
+            symlinks: probe_symlinks().unwrap_or(baseline.symlinks),
+            // Not probed: no portable way to observe POSIX mode bits taking
+            // effect without also assuming a filesystem that honors them.
+            unix_permissions: baseline.unix_permissions,
+            // Not probed: tracks an upstream `portable-pty` gap, not a host
+            // property, so there is nothing on the host to ask.
+            pty_win32_input_mode: baseline.pty_win32_input_mode,
+            advisory_locking: probe_advisory_locking().unwrap_or(baseline.advisory_locking),
+        }
+    }
+}
+
+/// Returns `None` when the probe could not run at all (no temp dir, etc.),
+/// which is different from "the host refused" — only the latter is evidence
+/// that the capability is absent.
+fn probe_symlinks() -> Option<bool> {
+    let dir = scratch_dir("caps-symlink")?;
+    let target = dir.join("target");
+    std::fs::write(&target, b"probe").ok()?;
+    let link = dir.join("link");
+
+    #[cfg(unix)]
+    let created = std::os::unix::fs::symlink(&target, &link).is_ok();
+    #[cfg(windows)]
+    let created = std::os::windows::fs::symlink_file(&target, &link).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let created = false;
+
+    // Creating the link is not enough — it must also resolve.
+    let usable = created && std::fs::read(&link).map(|c| c == b"probe").unwrap_or(false);
+    std::fs::remove_dir_all(&dir).ok();
+    Some(usable)
+}
+
+fn probe_advisory_locking() -> Option<bool> {
+    let dir = scratch_dir("caps-lock")?;
+    let path = dir.join("lockfile");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .ok()?;
+    let locked = file.lock().is_ok();
+    if locked {
+        file.unlock().ok();
+    }
+    drop(file);
+    std::fs::remove_dir_all(&dir).ok();
+    Some(locked)
+}
+
+fn scratch_dir(tag: &str) -> Option<PathBuf> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("compat-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 /// Deterministic per-OS config/cache/data directories via the `dirs` crate.
@@ -246,6 +409,65 @@ mod tests {
         assert!(entries.iter().any(|e| e.name == "hello.txt"));
 
         ws.remove_file(Path::new("hello.txt")).unwrap();
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn escaping_paths_return_path_escape_not_a_raw_denial() {
+        let tmp = std::env::temp_dir().join(format!("compat-escape-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("inner")).unwrap();
+        std::fs::write(tmp.join("outside.txt"), b"secret").unwrap();
+        let ws = Workspace::open_ambient(&tmp.join("inner")).unwrap();
+
+        // Every scoped method must classify an escape identically. Before
+        // this guard existed, cap-std surfaced all of these as
+        // `PermissionDenied`, making `PathEscape` unreachable.
+        let up = Path::new("../outside.txt");
+        assert!(matches!(ws.stat(up), Err(ContractError::PathEscape(_))));
+        assert!(matches!(
+            ws.read_to_string(up),
+            Err(ContractError::PathEscape(_))
+        ));
+        assert!(matches!(
+            ws.write(up, b"x"),
+            Err(ContractError::PathEscape(_))
+        ));
+        assert!(matches!(
+            ws.create_dir(Path::new("../newdir")),
+            Err(ContractError::PathEscape(_))
+        ));
+        assert!(matches!(
+            ws.remove_file(up),
+            Err(ContractError::PathEscape(_))
+        ));
+        assert!(matches!(
+            ws.read_dir(Path::new("..")),
+            Err(ContractError::PathEscape(_))
+        ));
+
+        // An absolute path is not scoped to the root at all, even when it
+        // happens to point inside it.
+        let abs = tmp.join("outside.txt");
+        assert!(matches!(ws.stat(&abs), Err(ContractError::PathEscape(_))));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn interior_parent_dir_still_resolves() {
+        // `a/../b` never leaves the root. cap-std accepts it, so the guard
+        // must not reject it — the check simulates `..` rather than banning it.
+        let tmp = std::env::temp_dir().join(format!("compat-interior-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("a")).unwrap();
+        std::fs::create_dir_all(tmp.join("b")).unwrap();
+        std::fs::write(tmp.join("b").join("f.txt"), b"inside").unwrap();
+        let ws = Workspace::open_ambient(&tmp).unwrap();
+
+        assert_eq!(
+            ws.read_to_string(Path::new("a/../b/f.txt")).unwrap(),
+            "inside"
+        );
+
         std::fs::remove_dir_all(&tmp).ok();
     }
 
