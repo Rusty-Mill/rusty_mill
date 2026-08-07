@@ -21,6 +21,13 @@ use crate::{
 /// Returning `Ok(())` completes the run; returning `Err` fails it with the
 /// given protocol error.
 ///
+/// **Panicking also fails the run**, rather than leaving it stranded. The panic
+/// is contained to the one run, logged with its payload, and reported to the
+/// caller as a server error that says an agent panicked and no more — a panic
+/// message carries whatever was in scope, which the operator needs and a remote
+/// caller does not. Returning `Err` is still the better way to fail: it is the
+/// only one that lets you say something useful about *why*.
+///
 /// ```
 /// use rusty_acp::server::{Agent, RunContext};
 /// use rusty_acp::types::{AgentManifest, AgentName, Error};

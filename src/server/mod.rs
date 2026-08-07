@@ -1320,18 +1320,60 @@ async fn run_to_terminal(
     telemetry::run_started(&agent_name);
     let cancel = handle.cancel_token();
 
+    // The agent body runs in a task of its own so that a panic in it kills only
+    // that task. Everything below — the terminal write, leaving the in-flight
+    // set, releasing the slot, stopping the lease renewal — has to happen for a
+    // run to be finished with, and unwinding through this function skipped all
+    // of it. The renewal was the worst of them: a dropped `JoinHandle` detaches
+    // rather than cancels, so the orphan kept the lease alive and every reaper
+    // that read the run saw a healthy writer and left it alone, forever.
+    //
+    // `catch_unwind` is not the tool here. The agent's future is held across
+    // await points and `RunContext` is not `UnwindSafe`, so the panic has to be
+    // caught at a task boundary instead. The cost is one extra spawn per run.
+    //
+    // Instrumented explicitly, because a spawned task does not inherit the
+    // span that was current when it was spawned — it gets whatever is current
+    // wherever the runtime happens to poll it, which is nothing. Without this
+    // the agent's own log lines fall outside `acp.run` and the correlation #16
+    // exists for is gone.
+    let mut agent_task =
+        tokio::spawn(async move { agent.run(ctx).await }.instrument(tracing::Span::current()));
+
     let outcome = tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             tracing::debug!(%run_id, "run cancelled");
+            agent_task.abort();
+            // Awaited, not just aborted. Dropping the future in place used to
+            // stop the agent synchronously; an abort only takes effect at the
+            // task's next visit to the scheduler, and an emit already in flight
+            // would otherwise be free to land after the run is recorded
+            // cancelled.
+            let _ = (&mut agent_task).await;
             Outcome::Cancelled
         }
-        result = agent.run(ctx) => match result {
-            Ok(()) => Outcome::Completed,
-            Err(error) => {
+        result = &mut agent_task => match result {
+            Ok(Ok(())) => Outcome::Completed,
+            Ok(Err(error)) => {
                 tracing::warn!(%run_id, %error, "agent run failed");
                 Outcome::Failed(error)
             }
+            Err(join_error) if join_error.is_panic() => {
+                let payload = join_error.into_panic();
+                // Logged in full, reported in outline. The payload is the one
+                // place an operator can find out what actually went wrong, and
+                // the one place a remote caller has no business reading — panic
+                // messages carry paths, values and whatever else was in scope.
+                tracing::error!(%run_id, panic = panic_message(&*payload), "agent panicked");
+                Outcome::Failed(Error::server_error(
+                    "the agent panicked; see the server logs for the cause",
+                ))
+            }
+            // Aborted by something other than the cancel arm above, which
+            // nothing does today. Recorded as a cancellation rather than a
+            // failure because that is what it is.
+            Err(_) => Outcome::Cancelled,
         },
     };
 
@@ -1383,6 +1425,23 @@ async fn run_to_terminal(
     // A finished run will never be replayed, so stop holding its input.
     if let Err(error) = server.store.put_recovery_record(run_id, None).await {
         tracing::warn!(%run_id, %error, "failed to clear the recovery record");
+    }
+}
+
+/// What a panic said, as far as it can be recovered.
+///
+/// `panic!` with a literal gives a `&'static str` and one with a format string
+/// gives a `String`; anything else came from `panic_any` and there is nothing
+/// useful to print. Returning the fallback rather than a `Result` because a
+/// panic whose payload cannot be read is still a panic, and the caller has
+/// nothing different to do about it.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    if let Some(text) = payload.downcast_ref::<&'static str>() {
+        text
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text
+    } else {
+        "a payload that is not a string"
     }
 }
 
