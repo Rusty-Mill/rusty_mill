@@ -364,7 +364,13 @@ impl Route {
 
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         if let Some(policies) = &self.policies {
-            policies.lint(at, findings);
+            // Some policies only mean something for some backend kinds, and a
+            // policy that cannot apply is worth saying out loud.
+            let serves_mcp = self
+                .backends
+                .iter()
+                .any(|b| matches!(b.target, BackendTarget::Mcp(_)));
+            policies.lint(at, serves_mcp, findings);
         }
         for (i, backend) in self.backends.iter().enumerate() {
             backend.lint(&format!("{at}.backends[{i}]"), findings);

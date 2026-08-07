@@ -88,6 +88,13 @@ binds:
               requestHeaderModifier:
                 set:
                   x-classification: "{{mcpGuardrails.classification}}"
+              # Applies to the response the gateway itself returns; an MCP
+              # route has no upstream HTTP response a client ever sees.
+              # `urlRewrite` is the one policy that cannot apply here at all,
+              # and `--check` says so.
+              responseHeaderModifier:
+                set:
+                  x-served-by: rusty-agent-gateway
               mcpAuthorization:
                 # Deny wins over allow, and an empty allow list means
                 # "everything not denied". These match the *federated* name.

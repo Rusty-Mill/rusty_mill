@@ -1735,3 +1735,163 @@ async fn the_startup_warm_up_carries_the_routes_static_headers() {
     stop_proc.cancel();
     stop_target.cancel();
 }
+
+// ---------------------------------------------------------------------------
+// `responseHeaderModifier` on an MCP route
+// ---------------------------------------------------------------------------
+
+/// Boot a gateway whose MCP route carries a response header modifier.
+async fn with_response_modifier(modifier: &str) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              responseHeaderModifier:
+{modifier}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      stdio:
+                        cmd: "{server}"
+                        env:
+                          MOCK_LABEL: alpha
+                          MOCK_TOOLS: "echo"
+"#,
+        server = mock_server()
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    config.validate().expect("config should validate");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    (port, shutdown)
+}
+
+/// The headers on the gateway's own HTTP response to an MCP request.
+async fn response_headers(port: u16) -> Vec<(String, String)> {
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/mcp"))
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .body(body)
+        .send()
+        .await
+        .expect("the gateway should answer");
+
+    assert!(
+        response.status().is_success(),
+        "the MCP handshake should have succeeded, got {}",
+        response.status()
+    );
+
+    response
+        .headers()
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_string(),
+                v.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_response_modifier_reaches_the_client() {
+    // An MCP route has no upstream HTTP response to modify -- rmcp's transport
+    // consumes those -- so the modifier acts on the response the gateway
+    // itself produces, which is the only one a client ever sees.
+    let (port, shutdown) =
+        with_response_modifier("                set:\n                  x-served-by: 'rusty'")
+            .await;
+
+    let headers = response_headers(port).await;
+    assert!(
+        headers
+            .iter()
+            .any(|(k, v)| k == "x-served-by" && v == "rusty"),
+        "saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_modifier_can_strip_a_header_the_gateway_would_have_sent() {
+    let (port, shutdown) =
+        with_response_modifier("                remove: ['mcp-session-id']").await;
+
+    let headers = response_headers(port).await;
+    assert!(
+        !headers.iter().any(|(k, _)| k == "mcp-session-id"),
+        "the session header the MCP transport sets should be gone; saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_modifier_add_appends_rather_than_replacing() {
+    let (port, shutdown) =
+        with_response_modifier("                add:\n                  x-tag: 'one'").await;
+
+    let headers = response_headers(port).await;
+    assert_eq!(
+        headers.iter().filter(|(k, _)| k == "x-tag").count(),
+        1,
+        "saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_bad_response_header_fails_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              responseHeaderModifier:
+                set:
+                  "not a name": "v"
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      stdio:
+                        cmd: "{server}"
+"#,
+        server = mock_server()
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .err()
+        .expect("an invalid header name should be a startup failure");
+    assert!(
+        err.to_string().contains("responseHeaderModifier"),
+        "and should say which policy: {err}"
+    );
+}

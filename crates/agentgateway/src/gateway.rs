@@ -21,7 +21,7 @@ use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
 use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::{Federation, TokenClaims};
-use agentgateway_proxy::{HostProxy, RequestBody, Scheme};
+use agentgateway_proxy::{Headers, HostProxy, RequestBody, Scheme};
 use agentgateway_tls::{TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
@@ -53,6 +53,13 @@ struct RouteState {
     ext_authz: Option<ExtAuthz>,
     /// Budget for producing a response on this route.
     timeout: Option<Duration>,
+    /// `responseHeaderModifier`, for backends that do not apply it themselves.
+    ///
+    /// The `host` proxy applies its own to the upstream's response. An MCP
+    /// route has no upstream HTTP response to modify — `rmcp`'s transport
+    /// consumes those — so the modifier acts on the response the gateway
+    /// itself produces, which is the only one a client ever sees.
+    mcp_response_headers: Option<Headers>,
     backend: BackendState,
 }
 
@@ -111,6 +118,7 @@ impl Gateway {
             jwt: None,
             ext_authz: None,
             timeout: None,
+            mcp_response_headers: None,
             backend: BackendState::Unsupported("route has no backend".into()),
         });
 
@@ -255,12 +263,24 @@ impl Gateway {
                 None => BackendState::Unsupported("route has no backend".into()),
             };
 
+            // Only for MCP: the `host` proxy compiles and applies its own,
+            // and applying it twice would append `add` values twice.
+            let mcp_response_headers =
+                match (&backend, route.policies.response_header_modifier.as_ref()) {
+                    (BackendState::Mcp { .. }, Some(modifier)) => Some(Headers::new(
+                        modifier,
+                        &format!("{at}.responseHeaderModifier"),
+                    )?),
+                    _ => None,
+                };
+
             routes[route.id] = RouteState {
                 cors,
                 rate_limit,
                 jwt,
                 ext_authz,
                 timeout,
+                mcp_response_headers,
                 backend,
             };
         }
@@ -412,24 +432,36 @@ impl Gateway {
             // `call` takes &mut self, but the service is cheap to clone and
             // clones share the session manager -- which is what makes an
             // Mcp-Session-Id issued on one request usable on the next.
-            BackendState::Mcp { service, metrics } => match metrics {
-                // Layering per request is just a struct wrap; the instruments
-                // behind it are shared, which is what makes the counts add up.
-                Some(metrics) => {
-                    let mut service = metrics.layer(service.clone());
-                    match service.call(request).await {
-                        Ok(response) => response,
-                        Err(never) => match never {},
+            BackendState::Mcp { service, metrics } => {
+                let mut response = match metrics {
+                    // Layering per request is just a struct wrap; the
+                    // instruments behind it are shared, which is what makes
+                    // the counts add up.
+                    Some(metrics) => {
+                        let mut service = metrics.layer(service.clone());
+                        match service.call(request).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        }
                     }
-                }
-                None => {
-                    let mut service = service.clone();
-                    match service.call(request).await {
-                        Ok(response) => response.into_response(),
-                        Err(never) => match never {},
+                    None => {
+                        let mut service = service.clone();
+                        match service.call(request).await {
+                            Ok(response) => response.into_response(),
+                            Err(never) => match never {},
+                        }
                     }
+                };
+
+                // Applied to what the gateway is about to send the client.
+                // CORS is added after this, so a modifier cannot strip the
+                // headers that answer a preflight -- those are the gateway's
+                // own protocol, not the route's payload.
+                if let Some(headers) = &state.mcp_response_headers {
+                    headers.apply(response.headers_mut());
                 }
-            },
+                response
+            }
             BackendState::Host { proxy, a2a } => {
                 let (parts, body) = request.into_parts();
                 let prefix = selection.matched_prefix.as_deref();
