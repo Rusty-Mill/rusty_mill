@@ -192,6 +192,23 @@ impl RedisStore {
     }
 }
 
+/// A lease TTL in milliseconds, for `PX`.
+///
+/// Seconds — `SET EX`, which this used until the conformance suite in #69 asked
+/// a store to honour a sub-second lease — cannot express what the trait
+/// promises. `Duration::as_secs` *truncates*, so a 1500ms lease expired after
+/// one, and `.max(1)` then rounded a 500ms lease *up* to a second. Expiring
+/// early is the dangerous half: a lease that lapses under a replica still
+/// renewing it gets a live run reaped as abandoned.
+///
+/// `PX` has been in Redis since 2.6 and costs nothing, so there was never much
+/// to weigh — the seconds version was simply the first thing written.
+fn lease_millis(ttl: Duration) -> u64 {
+    // Saturating rather than wrapping: a nonsensically large TTL should pin the
+    // lease open, not wrap round to a short one.
+    u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX).max(1)
+}
+
 fn redis_error(action: &str, err: redis::RedisError) -> Error {
     Error::server_error(format!("failed to {action}: {err}"))
 }
@@ -501,7 +518,7 @@ impl Store for RedisStore {
         // need: a replica that dies stops renewing and the lease lapses without
         // anyone having to notice.
         let _: () = connection
-            .set_ex(self.lease_key(run_id), owner, ttl.as_secs().max(1))
+            .pset_ex(self.lease_key(run_id), owner, lease_millis(ttl))
             .await
             .map_err(|err| redis_error("renew run lease", err))?;
         Ok(())
@@ -522,13 +539,13 @@ impl Store for RedisStore {
         ttl: Duration,
     ) -> StoreResult<bool> {
         let mut connection = self.connection.clone();
-        // SET NX EX is a single atomic operation, so exactly one claimant wins.
+        // SET NX PX is a single atomic operation, so exactly one claimant wins.
         let claimed: Option<String> = redis::cmd("SET")
             .arg(self.lease_key(run_id))
             .arg(owner)
             .arg("NX")
-            .arg("EX")
-            .arg(ttl.as_secs().max(1))
+            .arg("PX")
+            .arg(lease_millis(ttl))
             .query_async(&mut connection)
             .await
             .map_err(|err| redis_error("claim run lease", err))?;
@@ -636,5 +653,100 @@ impl Store for RedisStore {
 
         self.touch(&state_key).await?;
         self.touch(&meta_key).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `PTTL` reports the remaining life of a key in milliseconds, which is the
+    /// only way to check a lease's resolution without racing it. Sleeping past
+    /// a boundary and asking who holds the lease would work, but the fractional
+    /// second is the entire gap between right and wrong — a test built on it
+    /// would have under half a second of margin on both sides and would fail on
+    /// a loaded runner for reasons the code cannot fix.
+    async fn remaining_millis(store: &RedisStore, run_id: RunId) -> i64 {
+        let mut connection = store.connection.clone();
+        redis::cmd("PTTL")
+            .arg(store.lease_key(run_id))
+            .query_async(&mut connection)
+            .await
+            .expect("PTTL")
+    }
+
+    /// Set `ACP_TEST_REDIS_URL` to run these. When it is set, an unreachable
+    /// Redis fails rather than quietly skipping — a silent skip is how a
+    /// backend goes untested for a release.
+    async fn store() -> Option<RedisStore> {
+        let url = std::env::var("ACP_TEST_REDIS_URL").ok()?;
+        Some(
+            RedisStore::connect(&url)
+                .await
+                .expect("ACP_TEST_REDIS_URL is set but Redis is unreachable"),
+        )
+    }
+
+    #[test]
+    fn a_lease_ttl_is_carried_at_the_resolution_it_was_given() {
+        // The two ways `EX` got it wrong. Truncation is the dangerous one: a
+        // lease that lapses early gets a live run reaped as abandoned.
+        assert_eq!(lease_millis(Duration::from_millis(1500)), 1500);
+        assert_eq!(lease_millis(Duration::from_millis(500)), 500);
+        assert_eq!(lease_millis(Duration::from_secs(30)), 30_000);
+    }
+
+    /// Redis has no expiry shorter than one millisecond, and a lease of zero
+    /// would be one already expired — which reads as a replica that never
+    /// claimed the run rather than one that just did.
+    #[test]
+    fn a_zero_lease_still_lives_for_an_instant() {
+        assert_eq!(lease_millis(Duration::ZERO), 1);
+        assert_eq!(lease_millis(Duration::MAX), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn a_renewed_lease_keeps_its_fractional_second() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: set ACP_TEST_REDIS_URL to run the Redis lease tests");
+            return;
+        };
+        let run_id = RunId::new();
+
+        store.renew_lease(run_id, "replica-a", Duration::from_millis(1900)).await.unwrap();
+        let remaining = remaining_millis(&store, run_id).await;
+        assert!(
+            remaining > 1000,
+            "a 1900ms lease had {remaining}ms left, so it was truncated to whole seconds"
+        );
+        assert!(remaining <= 1900, "a 1900ms lease had {remaining}ms left");
+
+        // And the other direction: a sub-second lease must not be rounded up to
+        // a second, which is three times what a 300ms lease asked for.
+        store.renew_lease(run_id, "replica-a", Duration::from_millis(300)).await.unwrap();
+        let remaining = remaining_millis(&store, run_id).await;
+        assert!(remaining <= 300, "a 300ms lease had {remaining}ms left, so it was rounded up");
+    }
+
+    /// `try_claim_lease` takes the same TTL and is a separate command, so it
+    /// can drift from `renew_lease` without anything noticing.
+    #[tokio::test]
+    async fn a_claimed_lease_keeps_its_fractional_second() {
+        let Some(store) = store().await else {
+            eprintln!("skipping: set ACP_TEST_REDIS_URL to run the Redis lease tests");
+            return;
+        };
+        let run_id = RunId::new();
+
+        assert!(store
+            .try_claim_lease(run_id, "replica-a", Duration::from_millis(1900))
+            .await
+            .unwrap());
+        let remaining = remaining_millis(&store, run_id).await;
+        assert!(
+            remaining > 1000,
+            "a 1900ms claim had {remaining}ms left, so it was truncated to whole seconds"
+        );
+        assert!(remaining <= 1900, "a 1900ms claim had {remaining}ms left");
     }
 }

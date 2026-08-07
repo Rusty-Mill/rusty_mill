@@ -47,6 +47,10 @@
 
 mod memory;
 
+#[cfg(feature = "store-testkit")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store-testkit")))]
+pub mod testkit;
+
 #[cfg(feature = "metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 mod metered;
@@ -312,6 +316,16 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     /// Delivery is best-effort and fan-out: every live subscriber on every
     /// replica should receive it. Publishing to a run with no subscribers is
     /// not an error.
+    ///
+    /// **Append before you publish.** A [`Notification::Event`] carrying an
+    /// index says *where the event is*, and a backend is entitled to send only
+    /// the index and have each subscriber read the log — which is what
+    /// [`PostgresStore`] does, because a `NOTIFY` payload is capped at 8000
+    /// bytes and an event carrying an artifact is not. Publishing an index the
+    /// log does not hold yet delivers nothing on such a backend and delivers
+    /// the event on one that inlines it, which is the worst kind of difference:
+    /// it works in development and disappears in production. The server always
+    /// appends first.
     async fn publish(&self, run_id: RunId, notification: Notification) -> StoreResult<()>;
 
     /// Subscribe to a run's channel.
@@ -378,6 +392,13 @@ pub trait Store: Send + Sync + std::fmt::Debug + 'static {
     /// Implementations must expire the lease `ttl` after the last renewal,
     /// without needing anyone to come back and delete it — the whole point is
     /// that it outlives a replica that stopped being able to do anything.
+    ///
+    /// Expiring *late* is safe and expiring *early* is not: a lease that lapses
+    /// under a replica still renewing it gets a live run reaped as abandoned.
+    /// A backend whose expiry is coarser than the `ttl` asked for should
+    /// therefore round up. Backing onto a store with second-granular TTLs is
+    /// fine on those terms; silently truncating a 1500ms lease to one second is
+    /// not.
     ///
     /// Renewing is unconditional: the executing replica is the only writer, so
     /// there is no other claimant to lose a race with.

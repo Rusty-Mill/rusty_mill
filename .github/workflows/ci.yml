@@ -125,6 +125,8 @@ jobs:
             flags: --no-default-features --features metrics
           - name: well-known
             flags: --no-default-features --features well-known
+          - name: store-testkit
+            flags: --no-default-features --features store-testkit
           - name: all
             flags: --all-features
     steps:
