@@ -150,22 +150,26 @@ fn mcp_path(
     let compiled = Rewrite::new(rewrite, "").ok()?;
 
     let matched_prefix = match &rewrite.path {
-        Some(PathRewrite::Prefix(_)) => {
-            // Which prefix a request matched is not knowable at startup unless
-            // the route offers exactly one.
-            let mut prefixes = matches
-                .iter()
-                .filter_map(agentgateway_core::RouteMatcher::path_prefix);
-            let only = prefixes.next()?;
-            if prefixes.next().is_some() {
-                return None;
-            }
-            Some(only)
-        }
+        Some(PathRewrite::Prefix(_)) => Some(sole_path_prefix(matches)?),
         _ => None,
     };
 
     compiled.path(configured, matched_prefix)
+}
+
+/// The one `pathPrefix` this route matches on, if it matches on exactly one.
+///
+/// A `prefix` rewrite replaces whatever the request matched, and which prefix
+/// that was is not knowable at startup — which is when a backend that
+/// terminates its protocol resolves the address it dials. One prefix makes the
+/// question answerable; zero or several do not, and the rewrite is dropped
+/// rather than anchored on a guess.
+fn sole_path_prefix(matches: &[agentgateway_core::RouteMatcher]) -> Option<&str> {
+    let mut prefixes = matches
+        .iter()
+        .filter_map(agentgateway_core::RouteMatcher::path_prefix);
+    let only = prefixes.next()?;
+    prefixes.next().is_none().then_some(only)
 }
 
 /// Per-route serving state.
@@ -358,14 +362,39 @@ impl Gateway {
 
                             let a2a = match route.policies.a2a.as_ref() {
                                 Some(policy) => {
-                                    let agents: Vec<String> = route
+                                    // Card discovery follows a rewritten
+                                    // authority. Forwarded calls already go
+                                    // there, and a gateway that fetched cards
+                                    // from an address it never sends traffic to
+                                    // would serve a card describing the wrong
+                                    // agents -- or, behind an egress proxy that
+                                    // is the only route to them, none at all.
+                                    //
+                                    // A path rewrite deliberately does not
+                                    // follow: the well-known path is the A2A
+                                    // spec's, not the route's, and asking for a
+                                    // card somewhere else finds nothing.
+                                    let redirect = route
+                                        .policies
+                                        .url_rewrite
+                                        .as_ref()
+                                        .and_then(|rewrite| rewrite.authority.as_deref());
+                                    let mut agents: Vec<String> = route
                                         .backends
                                         .iter()
                                         .filter_map(|b| match &b.target {
-                                            BackendTarget::Host(host) => Some(host.clone()),
+                                            BackendTarget::Host(host) => {
+                                                Some(redirect.unwrap_or(host.as_str()).to_string())
+                                            }
                                             _ => None,
                                         })
                                         .collect();
+                                    // Every backend behind one rewritten
+                                    // authority is the same address -- the
+                                    // proxy already sends them all there -- and
+                                    // fetching that card once per backend would
+                                    // merge an agent with itself.
+                                    agents.dedup();
                                     Some(A2aGateway::build(policy, &agents, &at).await?)
                                 }
                                 None => None,
@@ -379,10 +408,16 @@ impl Gateway {
                     }
                 }
                 Some(BackendTarget::Ai(ai)) => {
-                    let backend = LlmBackend::new(ai, &route.policies, &at)?;
+                    let backend = LlmBackend::new(
+                        ai,
+                        &route.policies,
+                        sole_path_prefix(&route.matches),
+                        &at,
+                    )?;
                     tracing::info!(
                         route = %at,
                         provider = backend.provider().name(),
+                        endpoint = backend.endpoint(),
                         "LLM backend ready"
                     );
                     BackendState::Ai(backend)

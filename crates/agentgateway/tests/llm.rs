@@ -689,3 +689,176 @@ binds:
         "the error should say what was wrong: {err}"
     );
 }
+
+#[tokio::test]
+async fn a_full_path_rewrite_moves_the_provider_endpoint() {
+    // The path the provider is asked for is its own API path, not the
+    // client's -- a client's path never reaches it. This is the shape an
+    // Azure-style or gateway-mounted deployment needs.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        "              urlRewrite:\n                path:\n                  full: /openai/deployments/gpt4o/chat/completions",
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.path, "/openai/deployments/gpt4o/chat/completions");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_prefix_rewrite_transforms_the_providers_own_path() {
+    // `/v1/chat/completions` with the route's matched `/v1` replaced.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - name: llm
+            matches:
+              - path:
+                  pathPrefix: /v1
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /openai/v1
+              backendAuth:
+                key: test-key
+            backends:
+              - ai:
+                  provider:
+                    openAI:
+                      hostOverride: "http://127.0.0.1:{provider_port}"
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        config.lint().is_empty(),
+        "one `pathPrefix` is exactly what a prefix rewrite needs: {:?}",
+        config.lint()
+    );
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    let response = post(
+        &format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        &chat_request(),
+    )
+    .await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(seen.path, "/openai/v1/chat/completions");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_authority_rewrite_redirects_the_provider_request() {
+    // Two providers listening; the route names one via `hostOverride` and the
+    // rewrite sends the request to the other instead.
+    let (intended, intended_seen) = provider(openai_reply(), None).await;
+    let (elsewhere, elsewhere_seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        intended,
+        "",
+        &format!("              urlRewrite:\n                authority: \"127.0.0.1:{elsewhere}\""),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    assert!(
+        elsewhere_seen.lock().expect("lock").body.is_some(),
+        "the rewritten authority is where the request should land"
+    );
+    assert!(
+        intended_seen.lock().expect("lock").body.is_none(),
+        "and the original address should see nothing"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_url_rewrite_that_cannot_be_applied_fails_an_ai_route_at_startup() {
+    // Serving traffic to the original address, when the config says to dial
+    // somewhere else, is the outcome nobody asked for.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                authority: "not a host"
+              backendAuth:
+                key: test-key
+            backends:
+              - ai:
+                  provider:
+                    openAI: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an unusable authority should not start");
+    assert!(
+        err.to_string().contains("not a host"),
+        "the error should name the offending value: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_host_override_carrying_a_credential_fails_at_startup() {
+    // It would be sent on every request from a place nobody reads, and logged
+    // with the endpoint besides. `backendAuth.key` is where one belongs.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - ai:
+                  provider:
+                    openAI:
+                      hostOverride: "https://user:secret@compat.internal"
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("userinfo in an upstream address should not start");
+    assert!(
+        err.to_string().contains("backendAuth"),
+        "the error should say where a credential belongs: {err}"
+    );
+}

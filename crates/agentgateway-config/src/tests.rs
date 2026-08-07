@@ -873,6 +873,89 @@ binds:
 }
 
 #[test]
+fn a_prefix_rewrite_on_an_ai_route_needs_one_matched_prefix() {
+    // An `ai` route resolves one endpoint at startup, before any request
+    // exists, so it faces the same question an `mcp` target does: which prefix
+    // did the request match? A route matching on none cannot say.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                path:
+                  prefix: /openai
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("urlRewrite.path.prefix") && f.contains("exactly one")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_prefix_rewrite_on_an_ai_route_with_one_matched_prefix_is_not_reported() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /v1
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /openai/v1
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
+fn a_full_rewrite_on_an_ai_route_is_not_reported() {
+    // `full` needs nothing to anchor on, so a route with no `matches` is fine.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                authority: "egress:15001"
+                path:
+                  full: /openai/deployments/gpt4o/chat/completions
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
 fn a_response_header_modifier_on_an_mcp_route_is_not_reported() {
     // It applies to the response the gateway itself returns, so there is
     // nothing to warn about.

@@ -809,6 +809,92 @@ What `--check` reports rather than quietly ignoring:
 | A rewrite where no target is `mcp:` | A pipe has no address. |
 | `path.prefix`, not exactly one `pathPrefix` match | Which prefix a request matched is not knowable when the session is dialled. Use `full` to set the path outright. |
 
+The last of those covers an `ai` route too: it resolves one endpoint at startup,
+before any request exists, so it faces the same question. A `host` route
+rewrites per request and knows what that request matched, so it is exempt.
+
+### `urlRewrite` on an `ai` or `a2a` route
+
+Same policy, same three fields, on the remaining two backend kinds.
+
+An **`a2a`** route dispatches through the `host` proxy, so it already rewrote
+per request, on both the ordinary path and the one where the policy has to
+buffer the body to read the JSON-RPC method out of it. Both are tested now
+rather than assumed.
+
+What is new there is **discovery**. Agent cards are fetched at startup, and that
+fetch now follows a rewritten `authority`:
+
+```yaml
+policies:
+  urlRewrite:
+    authority: egress.local:8443   # calls *and* card discovery go here
+  a2a:
+    agentCard: { url: "https://gateway.example.com/a2a" }
+backends:
+  - host: "agent-a:9000"
+```
+
+A gateway that fetched cards from an address it never sends traffic to would
+serve a card describing the wrong agents — and behind an egress proxy that is
+the only route to them, no card at all. Every backend behind one rewritten
+authority is the same address, so it is fetched once rather than once per
+backend, which would otherwise merge an agent with itself.
+
+A **path** rewrite deliberately does not follow: the well-known path is the A2A
+spec's, not the route's, and asking an agent for its card somewhere else finds
+nothing.
+
+An **`ai`** route is the one that did nothing before. Its request is built
+rather than forwarded, so the address being rewritten is the *provider's
+endpoint*:
+
+```yaml
+policies:
+  urlRewrite:
+    authority: acme.openai.azure.com
+    path:
+      full: /openai/deployments/gpt4o/chat/completions?api-version=2024-02-01
+backends:
+  - ai:
+      provider:
+        openAI: {}
+```
+
+**The path acted on is the provider's, not the client's.** A client's request
+path never reaches a provider — the endpoint's path is the provider's API,
+`/v1/chat/completions` or `/v1/messages`. So `full` replaces that, which is how
+an Azure-style or gateway-mounted deployment is reached, and `prefix`
+transforms it against the route's own matched prefix, exactly as an `mcp`
+target's configured path is transformed:
+
+```yaml
+matches:
+  - path: { pathPrefix: /v1 }
+policies:
+  urlRewrite:
+    path: { prefix: /openai/v1 }    # /v1/chat/completions -> /openai/v1/chat/completions
+```
+
+`authority` and `hostOverride` **compose rather than competing**, because they
+are not the same operation: `hostOverride` is a base URL and carries the
+scheme, while `authority` replaces only host and port. Setting both means "this
+route talks to a self-hosted compatible endpoint over http, and its egress goes
+through that address" — the `host` proxy's arrangement of a backend address
+plus a rewrite, in the shape an `ai` backend has. That is deliberately not the
+rule `mcp` follows for `via` versus `urlRewrite.authority`, where one wins:
+those two *are* the same operation spelled twice, so one had to.
+
+A rewrite that cannot be applied — an endpoint that is not an absolute URL —
+is a **startup failure**, not a silent no-op. The config says the gateway
+should be dialling somewhere else; serving traffic to the original address
+instead is the outcome nobody asked for.
+
+`hostOverride` carrying userinfo is a startup failure too, for the same reason
+`urlRewrite.authority` always was: a credential there is sent on every request
+from a place nobody reads, and would be logged with the resolved endpoint
+besides.
+
 ### The span itself
 
 There was not one before this. `tracing` fields have to be declared when a span

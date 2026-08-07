@@ -11,9 +11,9 @@
 
 use std::net::IpAddr;
 
-use agentgateway_config::{BackendAuth, PathRewrite, UrlRewrite};
+use agentgateway_config::BackendAuth;
 // Re-exported so the proxy's own callers need not learn where these moved.
-pub use agentgateway_core::{HeaderError, Headers};
+pub use agentgateway_core::{HeaderError, Headers, Rewrite, RewriteError};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri, header, uri::Authority, uri::PathAndQuery};
 
 /// The scheme a client used to reach the gateway.
@@ -73,75 +73,6 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
 
     for name in HOP_BY_HOP.iter().chain(named.iter()) {
         headers.remove(name);
-    }
-}
-
-/// A compiled [`UrlRewrite`].
-#[derive(Debug, Clone, Default)]
-pub struct Rewrite {
-    authority: Option<Authority>,
-    path: Option<PathRewrite>,
-}
-
-/// Failure to compile a rewrite.
-#[derive(Debug, thiserror::Error)]
-#[error("{at}: `{value}` is not a valid authority")]
-pub struct RewriteError {
-    /// Where in the configuration it came from.
-    pub at: String,
-    /// The offending text.
-    pub value: String,
-}
-
-impl Rewrite {
-    /// Compile a rewrite policy.
-    pub fn new(rewrite: &UrlRewrite, at: &str) -> Result<Self, RewriteError> {
-        let authority = match &rewrite.authority {
-            Some(value) => Some(
-                Authority::try_from(value.as_str()).map_err(|_| RewriteError {
-                    at: at.to_string(),
-                    value: value.clone(),
-                })?,
-            ),
-            None => None,
-        };
-        Ok(Rewrite {
-            authority,
-            path: rewrite.path.clone(),
-        })
-    }
-
-    /// The authority this rewrite forces, if any.
-    pub fn authority(&self) -> Option<&Authority> {
-        self.authority.as_ref()
-    }
-
-    /// Rewrite a path, given the route prefix that matched.
-    ///
-    /// `matched_prefix` is what a `prefix` rewrite replaces; without it the
-    /// rewrite has nothing to anchor on and the path is left alone rather than
-    /// mangled.
-    pub fn path(&self, path: &str, matched_prefix: Option<&str>) -> Option<String> {
-        match self.path.as_ref()? {
-            PathRewrite::Full(replacement) => Some(replacement.clone()),
-            PathRewrite::Prefix(replacement) => {
-                let prefix = matched_prefix?;
-                let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
-                let rest = path.strip_prefix(prefix).unwrap_or(path);
-                let replacement = replacement.strip_suffix('/').unwrap_or(replacement);
-
-                let rewritten = match (replacement.is_empty(), rest.is_empty()) {
-                    // Replacing `/api` with `/` on a request for `/api` must
-                    // produce `/`, not an empty path, which is not a valid
-                    // origin-form target.
-                    (true, true) => "/".to_string(),
-                    (true, false) => rest.to_string(),
-                    (false, true) => replacement.to_string(),
-                    (false, false) => format!("{replacement}{rest}"),
-                };
-                Some(rewritten)
-            }
-        }
     }
 }
 
@@ -294,52 +225,6 @@ mod tests {
         );
         assert!(map.get("x-hop").is_none());
         assert!(map.get("x-keep").is_some());
-    }
-
-    fn rewrite(authority: Option<&str>, path: Option<PathRewrite>) -> Rewrite {
-        Rewrite::new(
-            &UrlRewrite {
-                authority: authority.map(|a| a.to_string()),
-                path,
-            },
-            "test",
-        )
-        .expect("should compile")
-    }
-
-    #[test]
-    fn a_full_path_rewrite_replaces_everything() {
-        let r = rewrite(None, Some(PathRewrite::Full("/v2/thing".into())));
-        assert_eq!(
-            r.path("/api/v1/thing", Some("/api")).as_deref(),
-            Some("/v2/thing")
-        );
-    }
-
-    #[test]
-    fn a_prefix_rewrite_replaces_only_the_matched_prefix() {
-        let r = rewrite(None, Some(PathRewrite::Prefix("/internal".into())));
-        assert_eq!(
-            r.path("/api/v1/thing", Some("/api")).as_deref(),
-            Some("/internal/v1/thing")
-        );
-    }
-
-    #[test]
-    fn a_prefix_rewrite_to_root_keeps_a_valid_path() {
-        // `/api` -> `/` on a request for exactly `/api` must not produce an
-        // empty target, which is not a valid origin-form request line.
-        let r = rewrite(None, Some(PathRewrite::Prefix("/".into())));
-        assert_eq!(r.path("/api", Some("/api")).as_deref(), Some("/"));
-        assert_eq!(r.path("/api/x", Some("/api")).as_deref(), Some("/x"));
-    }
-
-    #[test]
-    fn a_prefix_rewrite_without_a_matched_prefix_leaves_the_path_alone() {
-        // An exact or regex match has no prefix to anchor on. Leaving the path
-        // untouched beats guessing and mangling it.
-        let r = rewrite(None, Some(PathRewrite::Prefix("/internal".into())));
-        assert_eq!(r.path("/api/v1", None), None);
     }
 
     #[test]
