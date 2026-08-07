@@ -80,6 +80,14 @@ binds:
                       resource: 'mcp.resource.name'
                     requestHeaders:
                       allowed: [x-tenant]
+              # Applies to the upstream MCP request. `{{mcpGuardrails.<key>}}`
+              # reads what a processor returned, so a classification made
+              # in-band reaches the server behind the gateway. An unresolved
+              # placeholder drops its header rather than sending the template
+              # text upstream.
+              requestHeaderModifier:
+                set:
+                  x-classification: "{{mcpGuardrails.classification}}"
               mcpAuthorization:
                 # Deny wins over allow, and an empty allow list means
                 # "everything not denied". These match the *federated* name.

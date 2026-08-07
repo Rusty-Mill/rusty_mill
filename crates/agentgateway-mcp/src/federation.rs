@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_config::{McpAuthorization, McpBackend, McpGuardrails};
+use agentgateway_config::{HeaderModifier, McpAuthorization, McpBackend, McpGuardrails};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -37,6 +37,7 @@ use crate::{
     rules::{Call, RuleError, RuleSet, Subject},
     span,
     target::Target,
+    transform::{Transform, TransformError},
 };
 
 /// JSON-RPC method names the guardrail chain is keyed on.
@@ -71,6 +72,10 @@ pub enum FederationError {
     #[error(transparent)]
     Guardrails(#[from] GuardrailsError),
 
+    /// A route's header modifier did not compile.
+    #[error(transparent)]
+    Transform(#[from] TransformError),
+
     /// Every target failed to come up, so there is nothing to serve.
     #[error("no MCP target could be reached; the federation would serve nothing")]
     NoTargets,
@@ -87,6 +92,8 @@ struct Inner {
     authorization: Authorization,
     rules: RuleSet,
     guardrails: Guardrails,
+    /// The route's `requestHeaderModifier`, applied to upstream calls.
+    transform: Transform,
     /// Budget for a single upstream call.
     ///
     /// This is the timeout that actually bounds a tool call. A route's
@@ -125,9 +132,14 @@ impl Federation {
         backend: &McpBackend,
         authorization: Option<&McpAuthorization>,
         guardrails: Option<&McpGuardrails>,
+        request_headers: Option<&HeaderModifier>,
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
+        let transform = match request_headers {
+            Some(modifier) => Transform::new(modifier, &format!("{at}.requestHeaderModifier"))?,
+            None => Transform::default(),
+        };
         let guardrails = match guardrails {
             Some(policy) => Guardrails::new(policy, &format!("{at}.mcpGuardrails"))?,
             None => Guardrails::default(),
@@ -172,6 +184,7 @@ impl Federation {
                 authorization,
                 rules,
                 guardrails,
+                transform,
                 backend_timeout,
                 targets,
                 degraded,
@@ -220,12 +233,17 @@ impl Federation {
         let mut per_target: Vec<(String, Vec<String>)> = Vec::new();
 
         for target in &self.inner.targets {
-            // Startup warm-up, not a client call, so no processor was asked
-            // and there is nothing to mutate.
-            if let Some(tools) = self
-                .list_with_timeout(target, &HeaderOverride::default())
-                .await
-            {
+            // No processor is asked about a warm-up -- there is no client
+            // call to ask about -- but the route's own header modifier still
+            // applies. An upstream that requires a static header would
+            // otherwise reject the one request the gateway makes on its own
+            // behalf. Templated values find no annotations here and drop,
+            // which is the right reading: nothing classified this.
+            let headers = self
+                .transformed::<()>(HeaderOverride::default(), Annotations::default())
+                .headers;
+
+            if let Some(tools) = self.list_with_timeout(target, &headers).await {
                 let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
                 for name in &names {
                     index.insert(
@@ -359,7 +377,9 @@ impl ServerHandler for Federation {
         // client call rather than once per target. It carries no params, so a
         // processor can refuse here but has nothing to rewrite -- filtering a
         // catalogue is response-phase work.
-        let mut upstream_headers = HeaderOverride::default();
+        let mut upstream_headers = self
+            .transformed::<()>(HeaderOverride::default(), Annotations::default())
+            .headers;
         if self.inner.guardrails.runs_request(TOOLS_LIST) {
             let decision = self
                 .inner
@@ -392,7 +412,9 @@ impl ServerHandler for Federation {
             // `tools/list` fans out, so a header change applies to every
             // target's request -- there is one client call and several
             // upstream ones, and singling one out would be arbitrary.
-            upstream_headers = decision.headers.into();
+            upstream_headers = self
+                .transformed::<()>(decision.headers.into(), decision.annotations)
+                .headers;
         }
 
         let mut tools: Vec<Tool> = Vec::new();
@@ -500,7 +522,9 @@ impl ServerHandler for Federation {
         // about calls that were otherwise going to happen, and it sees the
         // unmuxed name the upstream will actually receive.
         let backends = vec![target.name.clone()];
-        let mut upstream_headers = HeaderOverride::default();
+        let mut upstream_headers = self
+            .transformed::<()>(HeaderOverride::default(), Annotations::default())
+            .headers;
         if self.inner.guardrails.runs_request(TOOLS_CALL) {
             let encoded = serde_json::to_vec(&params).unwrap_or_default();
             let decision = self
@@ -542,7 +566,9 @@ impl ServerHandler for Federation {
             }
 
             span::annotate(&span, &decision.annotations);
-            upstream_headers = decision.headers.into();
+            upstream_headers = self
+                .transformed::<()>(decision.headers.into(), decision.annotations)
+                .headers;
         }
 
         let call = target.call(params, &upstream_headers);
@@ -1053,12 +1079,10 @@ impl Federation {
         about: Option<(Subject<'_>, &str)>,
         context: &RequestContext<RoleServer>,
     ) -> Result<Guarded<()>, McpError> {
+        // Still runs when no processor is keyed on this method: a route may
+        // set a static header without any guardrail at all.
         if !self.inner.guardrails.runs_request(method) {
-            return Ok(Guarded {
-                body: None,
-                headers: HeaderOverride::default(),
-                annotations: Annotations::default(),
-            });
+            return Ok(self.transformed(HeaderOverride::default(), Annotations::default()));
         }
 
         let decision = self
@@ -1083,11 +1107,7 @@ impl Federation {
                 message,
                 data,
             } => Err(mcp_error(code, message, data)),
-            _ => Ok(Guarded {
-                body: None,
-                headers: decision.headers.into(),
-                annotations: decision.annotations,
-            }),
+            _ => Ok(self.transformed(decision.headers.into(), decision.annotations)),
         }
     }
 
@@ -1103,12 +1123,10 @@ impl Federation {
     where
         T: serde::Serialize + serde::de::DeserializeOwned,
     {
+        // Still runs when no processor is keyed on this method: a route may
+        // set a static header without any guardrail at all.
         if !self.inner.guardrails.runs_request(method) {
-            return Ok(Guarded {
-                body: None,
-                headers: HeaderOverride::default(),
-                annotations: Annotations::default(),
-            });
+            return Ok(self.transformed(HeaderOverride::default(), Annotations::default()));
         }
 
         let encoded = serde_json::to_vec(params).unwrap_or_default();
@@ -1150,11 +1168,24 @@ impl Federation {
             } => return Err(mcp_error(code, message, data)),
         };
 
-        Ok(Guarded {
-            body,
-            headers: decision.headers.into(),
-            annotations: decision.annotations,
-        })
+        let mut guarded = self.transformed(decision.headers.into(), decision.annotations);
+        guarded.body = body;
+        Ok(guarded)
+    }
+
+    /// Fold the route's header modifier into a guardrail's changes.
+    ///
+    /// Runs last, so route configuration wins over a processor's runtime
+    /// decision, and so its templates see everything the whole chain produced.
+    fn transformed<T>(&self, mut headers: HeaderOverride, annotations: Annotations) -> Guarded<T> {
+        if !self.inner.transform.is_empty() {
+            self.inner.transform.apply(&mut headers, &annotations);
+        }
+        Guarded {
+            body: None,
+            headers,
+            annotations,
+        }
     }
 }
 

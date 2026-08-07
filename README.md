@@ -168,6 +168,9 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
+- `responseHeaderModifier` and `urlRewrite` on a route with an `mcp` backend;
+  they apply to `host` backends only (`requestHeaderModifier` does apply — see
+  [Reaching the upstream request](#reaching-the-upstream-request))
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -575,6 +578,56 @@ annotations at all, for the same reason it carries no header changes.
 
 Setting an attribute is a no-op unless `config.tracing` names a collector, so
 this costs nothing when tracing is off.
+
+### Reaching the upstream request
+
+The other half of what upstream's metadata bag is for. `requestHeaderModifier`
+was consumed only by the `host` proxy path — on a route with an `mcp` backend it
+parsed and did nothing. It applies to MCP upstream requests now, and its values
+can reference what a guardrail decided:
+
+```yaml
+policies:
+  mcpGuardrails:
+    processors: [...]           # returns metadata {classification: "phishing"}
+  requestHeaderModifier:
+    set:
+      x-classification: "{{mcpGuardrails.classification}}"
+      x-rule: "rule={{mcpGuardrails.rule}}"
+      x-api-key: "static-value"
+```
+
+A processor classifies a call in-band, and the MCP server behind the gateway is
+told, without ever speaking to the policy service itself. That is upstream's
+`transformation` consumer, in the shape this gateway already has.
+
+`{{...}}` placeholders rather than bare CEL, because a header value is a string
+and most of them are literals — requiring a delimiter means adding this cannot
+change what an existing static value means. Only `mcpGuardrails.<key>` resolves;
+anything else is a **startup failure**, rather than a header that silently never
+fires, which would read exactly like a guardrail that never ran.
+
+An unresolved placeholder **drops its header** rather than sending
+`{{mcpGuardrails.classification}}` upstream as though it were data. A guardrail
+that did not run, or did not set that key, should read as "no classification",
+and an absent header says that where a literal template string says something
+false. Other headers in the same modifier are unaffected.
+
+The modifier runs **after** a guardrail's `headerMutation`, so route
+configuration wins over a processor's runtime decision — the operator's intent
+is the one written down, and upstream's ordering says the bag exists so that
+*subsequent* filters can read it.
+
+Two smaller things worth knowing. `add` cannot append the way it does on the
+HTTP proxy path, because one value per name crosses to the transport; a name
+already spoken for is joined into one comma-separated field line instead. And
+the startup warm-up — the one listing the gateway makes on its own behalf to
+build the name index — carries static values but resolves no templates, since
+nothing has classified anything at that point.
+
+Only `mcp:` targets, for the same reason as `headerMutation`: a `stdio` target
+speaks over a pipe and has no headers. `responseHeaderModifier` and
+`urlRewrite` remain `host`-only.
 
 ### The span itself
 
