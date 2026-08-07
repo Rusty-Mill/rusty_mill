@@ -107,7 +107,16 @@ dependency), so neither was auto-implemented in the original run:
   time as part of the same instruction. Verified via `crates/mcp/tests/`
   and `crates/server/tests/http_endpoints.rs`'s `mcp_endpoint_*` tests, both
   driving the merged handler with a real `rmcp` client over an in-process
-  transport.
+  transport. The one item this left explicitly deferred -- a dropped
+  upstream connection just failed its calls until restart, no reconnect --
+  was itself closed by a follow-up: `[mcp]` upstreams now get
+  reconnect-with-backoff (`reconnect_backoff_secs`/
+  `reconnect_backoff_max_secs`/`max_reconnect_attempts`), a background
+  supervisor task per upstream that redials with exponential backoff once
+  a *previously connected* upstream drops. Verified via
+  `crates/mcp/src/gateway.rs`'s backoff-policy unit tests plus a live
+  smoke test (a real subprocess repeatedly killed and observed
+  reconnecting through several cycles).
 
 One additional gap **was** filed since it's additive and dependency-free
 (the router can already call an embeddings provider itself):

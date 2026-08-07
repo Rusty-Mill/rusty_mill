@@ -392,10 +392,36 @@ pub struct McpConfig {
     /// Other MCP servers to connect to and re-expose through this endpoint.
     #[serde(default)]
     pub upstreams: Vec<McpUpstreamConfig>,
+    /// Delay before the first reconnect attempt after a *previously
+    /// connected* upstream's connection drops, in seconds -- doubles after
+    /// each failed attempt, capped at `reconnect_backoff_max_secs`. Only
+    /// applies once an upstream has connected at least once; a connection
+    /// that fails at startup stays absent from the tool list until restart
+    /// (see `McpUpstreamConfig`'s doc comment) -- that's a separate,
+    /// already-soft-failing case, not a drop to recover from.
+    #[serde(default = "default_mcp_reconnect_backoff_secs")]
+    pub reconnect_backoff_secs: u64,
+    /// Ceiling the doubling backoff above never exceeds.
+    #[serde(default = "default_mcp_reconnect_backoff_max_secs")]
+    pub reconnect_backoff_max_secs: u64,
+    /// Cap on reconnect attempts after a drop before giving that upstream
+    /// up for good (it then stays absent from the tool list until
+    /// restart, same as a startup failure). Unset (the default) retries
+    /// forever.
+    #[serde(default)]
+    pub max_reconnect_attempts: Option<u32>,
 }
 
 fn default_mcp_path() -> String {
     "/mcp".to_string()
+}
+
+fn default_mcp_reconnect_backoff_secs() -> u64 {
+    1
+}
+
+fn default_mcp_reconnect_backoff_max_secs() -> u64 {
+    60
 }
 
 /// One upstream MCP server to proxy. Its tools appear in this router's own
@@ -1725,6 +1751,43 @@ mod tests {
             }
             other => panic!("expected Http transport, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn mcp_reconnect_backoff_defaults_when_unset() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            "#,
+        )
+        .unwrap();
+        let mcp = config.mcp.unwrap();
+        assert_eq!(mcp.reconnect_backoff_secs, 1);
+        assert_eq!(mcp.reconnect_backoff_max_secs, 60);
+        assert!(mcp.max_reconnect_attempts.is_none());
+    }
+
+    #[test]
+    fn mcp_reconnect_backoff_parses_when_set() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [mcp]
+            enabled = true
+            reconnect_backoff_secs = 2
+            reconnect_backoff_max_secs = 120
+            max_reconnect_attempts = 5
+            "#,
+        )
+        .unwrap();
+        let mcp = config.mcp.unwrap();
+        assert_eq!(mcp.reconnect_backoff_secs, 2);
+        assert_eq!(mcp.reconnect_backoff_max_secs, 120);
+        assert_eq!(mcp.max_reconnect_attempts, Some(5));
     }
 
     // --- persistence backend -----------------------------------------------------

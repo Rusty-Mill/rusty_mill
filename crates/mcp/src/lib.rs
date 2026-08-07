@@ -24,8 +24,10 @@ pub use server::RustyMcpServer;
 /// Build the combined MCP handler: native tools wrapping `router`, plus
 /// every configured upstream connected (best-effort -- a failed connection
 /// is logged and simply absent from the tool list, not a startup failure).
+/// A connection that later drops is reconnected with backoff in the
+/// background -- see `gateway`'s module doc.
 pub async fn build(config: &McpConfig, router: Arc<Router>) -> Arc<RustyMcpServer> {
     let native = NativeTools::new(router);
-    let gateway = Arc::new(McpGateway::connect(&config.upstreams).await);
+    let gateway = Arc::new(McpGateway::connect(&config.upstreams, config).await);
     Arc::new(RustyMcpServer::new(native, gateway))
 }
