@@ -97,8 +97,13 @@ See [docs/adr/](./docs/adr/) for the record of individual decisions and their tr
 
 - **Not a model host.** No inference, no weights — pure routing and
   protocol translation in front of upstream provider APIs.
-- **Not a GUI/desktop product.** No Electron app, no PWA, no MITM-based
-  third-party CLI config injection. The JSON API (the admin HTTP API,
+- **Not a GUI/desktop product.** No Electron app, no PWA, no traffic
+  interception (no MITM proxy, no CA/trust-store changes). `rp-cli setup`
+  (see [ADR-0004](./docs/adr/0004-cli-target-config-rewriting.md)) rewrites
+  a known third-party CLI's own config file to point its endpoint at
+  rusty_provider -- static, opt-in, and data-driven (`cli_targets.toml`) --
+  which is a different, much smaller thing than sitting in the middle of
+  that tool's traffic. The JSON API (the admin HTTP API,
   `GET /v1/usage`, `GET /v1/free-tiers`, `GET /metrics`) stays the
   canonical operator surface either way; `GET /dashboard` is a
   read-mostly, client-side-rendered view over that same API (one static
