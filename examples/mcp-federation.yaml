@@ -60,8 +60,14 @@ binds:
                   - kind: remote
                     host: guardrail.internal:9000
                     timeout: 5s
+                    # Any of the seven served methods. A processor sees the
+                    # unmuxed name on the request side (`summarize`,
+                    # `memo:insights`) and the federated form on the response
+                    # side, so a filter has to know which side it is on.
                     methods:
                       tools/call: full
+                      "prompts/*": full
+                      "resources/read": full
                       "*/list": response
                     metadata:
                       tenant: 'request.headers["x-tenant"]'
