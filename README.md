@@ -63,6 +63,7 @@ tool's own name.
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
+| `agentgateway-a2a` | A2A method gating and agent-card discovery, over [`rusty_a2a`][rusty_a2a]. |
 | `agentgateway` | The binary: data plane assembly, sockets, graceful shutdown. |
 
 Three decisions are worth knowing up front, because they shape everything else.
@@ -125,6 +126,8 @@ Implemented and tested:
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
   included — see [The LLM gateway](#the-llm-gateway)
+- `a2a` policies: JSON-RPC method gating and a merged agent card — see
+  [Agent-to-agent](#agent-to-agent)
 - TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
@@ -248,6 +251,74 @@ answers, so `backendRequestTimeout` genuinely bounds the wait here.
 A route mixing `host` with a backend kind this build cannot serve is refused
 rather than served: silently dropping the unsupported share onto the hosts
 would send traffic somewhere the operator never asked for.
+
+## Agent-to-agent
+
+```yaml
+policies:
+  a2a:
+    denyMethods: ["^tasks/cancel$"]
+    agentCard:
+      url: "https://gateway.example.com/a2a"   # what clients should call
+backends:
+  - host: "agent-a:9000"
+  - host: "agent-b:9000"
+```
+
+An `a2a` policy marks a route as carrying [Agent2Agent] traffic. The gateway
+does not become an agent — it fronts them — so it takes only
+[`rusty_a2a`][rusty_a2a]'s protocol types.
+
+### Method gating
+
+An A2A call names its operation in the JSON-RPC `method` field, so a route can
+permit `message/send` and refuse `tasks/cancel`. Denies win, and an empty allow
+list means "everything not denied" — the same reading as the MCP tool gate.
+
+A refusal is a **JSON-RPC error object with HTTP 200**, carrying the spec's
+`PermissionDenied` code (`-32011`) and echoing the caller's request id. That is
+where a JSON-RPC client looks; an HTTP error status would surface as a
+transport failure rather than the reason.
+
+A body that is *not* JSON-RPC passes through untouched. A2A also has REST and
+gRPC bindings, and refusing everything this gate cannot read would break them
+for no security benefit — the gate refuses named methods, it is not a schema
+validator.
+
+### Agent card discovery
+
+With `agentCard` set, the gateway serves a merged card at
+`/.well-known/agent-card.json`. **The URL rewrite is the point**: an agent
+behind a gateway advertises its own address, and a client that reads the card
+verbatim goes straight around the gateway, past its authentication, rate limits
+and audit trail.
+
+Skills across agents are unioned. Capabilities are **intersected** rather than
+unioned — advertising `streaming` because one agent supports it sends a
+streaming client to an agent that cannot, and the failure lands on the client.
+A skill id offered by two agents is listed once and reported at startup rather
+than renamed: unlike an MCP tool name, a skill id is descriptive rather than
+what a caller invokes, so qualifying it would misrepresent the agent.
+
+Cards are parsed **leniently**. `rusty_a2a`'s types are transliterated
+field-for-field from the normative proto with required fields enforced —
+correct for an agent, awkward for a gateway aggregating cards from agents it
+does not control. One non-conformant agent is excluded and reported rather than
+breaking discovery for the rest. If *no* card can be assembled the well-known
+path answers `503`, because serving a half-built card would be worse than
+admitting there is none.
+
+Without `agentCard`, the gateway has no opinion about discovery and the
+well-known path is proxied like any other request.
+
+**What a merged card does not promise:** the union of skills describes what is
+reachable behind the route, not a routing table. This gateway load-balances
+across backends by weight and does not route by skill, so a client picking a
+skill is not guaranteed to reach the agent offering it. With one backend — a
+gateway fronting a single agent — the question does not arise, and the card is
+that agent's with its URL corrected.
+
+[Agent2Agent]: https://a2a-protocol.org
 
 ## The LLM gateway
 
@@ -555,13 +626,36 @@ workspace has two — `ring` via `rusty_tls`, `aws-lc-rs` via `reqwest` — so i
 panics on the first handshake. `agentgateway-tls` installs `ring` explicitly,
 once, which needs a direct `rustls` dependency pinned to the same 0.23.
 
+## On `rusty_a2a`
+
+A2A support is [`rusty_a2a`][rusty_a2a] — a complete implementation of the
+protocol: all 11 operations across JSON-RPC, gRPC and HTTP+JSON/REST, agent
+card discovery, JWS signing and push notifications.
+
+The gateway uses about a tenth of it, and that is the right amount. The crate's
+centre of gravity is *being* an agent — `AgentExecutor`, task store, lifecycle,
+streaming — while a gateway fronts agents. So this takes the protocol types and
+leaves the harness alone.
+
+That also settles what looked like the main integration cost. `rusty_a2a` pins
+`axum` 0.7, `tonic` and `reqwest` 0.12 against this workspace's 0.8 and 0.13,
+which would mean two copies of `reqwest` with separate TLS stacks. All of it is
+behind the `client`, `server`, `grpc` and `signing` features, so
+`default-features = false` pulls **45 crates with no `axum`, no `tonic` and a
+single `reqwest` 0.13**. `build.rs` is gated on `grpc`, so no `protoc` either.
+
+The one real friction is strictness, described under
+[Agent-to-agent](#agent-to-agent): the types enforce required fields exactly as
+the proto specifies, which is right for an agent and wrong for a gateway
+aggregating third-party cards. Hence the lenient parse here.
+
 ## Tests
 
 ```bash
 cargo test --workspace
 ```
 
-197 tests. The config tests are anchored on YAML taken verbatim from
+226 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -577,8 +671,10 @@ The timeout tests drive a genuinely slow subprocess rather than a stubbed
 future, which is how the `requestTimeout`/`backendRequestTimeout` distinction
 above was found rather than assumed.
 
-The LLM tests stand up a mock provider that records the body it actually
-received, so the assertions are about whether the provider got the shape its
+The A2A tests run mock agents that serve real agent cards and record the calls
+they received, so "was the method refused" is told apart from "did the agent
+see it anyway". The LLM tests stand up a mock provider that records the body it
+actually received, so the assertions are about whether the provider got the shape its
 API requires rather than merely whether the gateway answered.
 
 The proxy tests stand up a real upstream that echoes back the request line and
@@ -594,3 +690,4 @@ tested at a single resolution, on one machine, when CI was not busy.
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp
 [rusty_tls]: https://github.com/baileyrd/rusty_tls
+[rusty_a2a]: https://github.com/baileyrd/rusty_a2a

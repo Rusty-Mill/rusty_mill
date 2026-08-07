@@ -108,3 +108,19 @@ binds:
                   provider:
                     anthropic:
                       model: claude-sonnet-4
+
+          # Agents behind the gateway. The card served here names the gateway,
+          # not the agents -- a client reading an agent's own URL would go
+          # around the gateway entirely.
+          - name: agents
+            matches:
+              - path:
+                  pathPrefix: /a2a
+            policies:
+              a2a:
+                denyMethods: ["^tasks/cancel$"]
+                agentCard:
+                  url: "https://gateway.example.com/a2a"
+            backends:
+              - host: "agent-a:9000"
+              - host: "agent-b:9000"

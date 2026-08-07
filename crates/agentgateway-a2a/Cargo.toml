@@ -1,0 +1,30 @@
+[package]
+name = "agentgateway-a2a"
+version = "0.1.0"
+description = "Agent2Agent (A2A) method gating and agent-card discovery for rusty_agent_gateway"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+agentgateway-config = { workspace = true }
+# Types only. `default-features = false` leaves the agent harness, the
+# JSON-RPC client and the gRPC binding out of the graph -- which is what keeps
+# this crate's `axum` 0.7, `tonic` and `reqwest` 0.12 from colliding with the
+# workspace's own versions. The gateway fronts agents; it does not become one.
+rusty_a2a = { git = "https://github.com/baileyrd/rusty_a2a", rev = "b9778e1", default-features = false }
+http = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

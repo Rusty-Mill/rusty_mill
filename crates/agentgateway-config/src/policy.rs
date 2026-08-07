@@ -64,7 +64,7 @@ pub struct Policies {
 
     /// Agent-to-agent protocol handling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub a2a: Option<BTreeMap<String, serde_json::Value>>,
+    pub a2a: Option<A2aPolicy>,
 
     /// LLM-specific policies such as prompt guards and model routing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -73,9 +73,8 @@ pub struct Policies {
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 5] = [
+        let unimplemented: [(&str, bool); 4] = [
             ("extAuthz", self.ext_authz.is_some()),
-            ("a2a", self.a2a.is_some()),
             ("ai", self.ai.is_some()),
             (
                 "mcpAuthorization.rules",
@@ -98,6 +97,48 @@ impl Policies {
             }
         }
     }
+}
+
+/// Agent-to-agent protocol handling.
+///
+/// Marks a route as carrying A2A traffic, which lets the gateway gate the
+/// JSON-RPC methods a caller may invoke and serve a merged agent card for the
+/// agents behind it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct A2aPolicy {
+    /// Methods callable through this route, as unanchored regexes over the
+    /// JSON-RPC method name. Empty allows everything not denied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_methods: Vec<String>,
+
+    /// Methods refused on this route. Denies win over allows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_methods: Vec<String>,
+
+    /// Serve an agent card for the agents behind this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_card: Option<AgentCardPolicy>,
+}
+
+/// How the gateway presents the agents behind a route.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCardPolicy {
+    /// The URL clients should call — the gateway's, not the agents'.
+    ///
+    /// This is the field that makes a card served through a gateway usable: an
+    /// upstream agent advertises its own address, and a client that reads it
+    /// verbatim goes around the gateway entirely.
+    pub url: String,
+
+    /// Name for the merged card. Defaults to the sole agent's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Description for the merged card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Cross-origin resource sharing.

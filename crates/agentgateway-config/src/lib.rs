@@ -45,8 +45,9 @@ pub use matcher::{
     HeaderMatch, HeaderMatchValue, PathMatch, QueryMatch, QueryMatchValue, RouteMatch,
 };
 pub use policy::{
-    BackendAuth, CorsPolicy, DurationString, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit,
-    McpAuthorization, PathRewrite, Policies, RateLimitKind, RetryPolicy, TimeoutPolicy, UrlRewrite,
+    A2aPolicy, AgentCardPolicy, BackendAuth, CorsPolicy, DurationString, HeaderModifier, JwtAuth,
+    JwtSource, LocalRateLimit, McpAuthorization, PathRewrite, Policies, RateLimitKind, RetryPolicy,
+    TimeoutPolicy, UrlRewrite,
 };
 
 use std::path::Path;
