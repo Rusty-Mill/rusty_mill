@@ -2043,3 +2043,211 @@ binds:
 
     stop_target.cancel();
 }
+
+// ---------------------------------------------------------------------------
+// `urlRewrite.authority` over a single target
+// ---------------------------------------------------------------------------
+
+/// Boot a gateway whose single target's configured address is deliberately
+/// wrong, and see whether the rewrite is what makes it reachable.
+async fn with_rewrite(
+    rewrite: &str,
+    configured_host: &str,
+    configured_port: u16,
+) -> Result<(u16, CancellationToken), String> {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+{rewrite}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: {configured_host}
+                        port: {configured_port}
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    Ok((port, shutdown))
+}
+
+async fn echo_through(port: u16) {
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+    let result = client
+        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .await
+        .expect("the call should reach the target");
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| b.as_text().is_some_and(|t| t.text == "served"))
+    );
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn an_authority_rewrite_moves_a_single_targets_address() {
+    let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
+    let dead = free_port().await;
+
+    // The target config points at a port nothing is listening on. Only the
+    // rewrite can make this reachable.
+    let (port, shutdown) = with_rewrite(
+        &format!("                authority: 127.0.0.1:{real_port}"),
+        "127.0.0.1",
+        dead,
+    )
+    .await
+    .expect("the rewrite should have redirected the federation to a live target");
+
+    echo_through(port).await;
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn without_the_authority_rewrite_the_configured_address_is_used() {
+    // The control: the same misconfiguration must fail without the rewrite,
+    // or the test above proves nothing.
+    let (_real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
+    let dead = free_port().await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {dead}
+                        path: /mcp
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        Gateway::build(&config, None).await.is_err(),
+        "nothing listens on the configured port, so the federation has no reachable target"
+    );
+
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn an_authority_without_a_port_keeps_the_targets_own() {
+    // The target names a port explicitly and the override did not, so
+    // dropping to 80 would break a config that only meant to move hosts.
+    let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
+
+    let (port, shutdown) = with_rewrite(
+        "                authority: localhost",
+        "127.0.0.1",
+        real_port,
+    )
+    .await
+    .expect("the host moved and the port stayed");
+
+    echo_through(port).await;
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn authority_and_path_compose() {
+    let (real_port, _headers, paths, stop_target) = http_target_at("/elsewhere").await;
+    let dead = free_port().await;
+
+    let (port, shutdown) = with_rewrite(
+        &format!(
+            "                authority: 127.0.0.1:{real_port}\n                path:\n                  full: /elsewhere"
+        ),
+        "127.0.0.1",
+        dead,
+    )
+    .await
+    .expect("both halves of the address should have been replaced");
+
+    echo_through(port).await;
+
+    let seen = paths.lock().expect("lock").clone();
+    assert!(
+        !seen.is_empty() && seen.iter().all(|p| p == "/elsewhere"),
+        "{seen:?}"
+    );
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn an_authority_carrying_credentials_fails_at_startup() {
+    // An authority may legally hold `user:password@`, but putting a credential
+    // in an upstream URI hides it somewhere nobody looks and sends it on every
+    // request. `backendAuth` is where one belongs.
+    let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
+
+    let err = with_rewrite(
+        &format!("                authority: 'admin:hunter2@127.0.0.1:{real_port}'"),
+        "127.0.0.1",
+        real_port,
+    )
+    .await
+    .expect_err("credentials in an authority should be refused");
+    assert!(
+        err.contains("userinfo") && err.contains("backendAuth"),
+        "got: {err}"
+    );
+
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_malformed_authority_fails_at_startup() {
+    let (real_port, _headers, _paths, stop_target) = http_target_at("/mcp").await;
+
+    let err = with_rewrite(
+        "                authority: 'not a host'",
+        "127.0.0.1",
+        real_port,
+    )
+    .await
+    .expect_err("a malformed authority should be refused");
+    assert!(err.contains("not a valid authority"), "got: {err}");
+
+    stop_target.cancel();
+}

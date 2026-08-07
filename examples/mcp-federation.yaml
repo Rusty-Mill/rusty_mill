@@ -91,10 +91,10 @@ binds:
               # Applies to the response the gateway itself returns; an MCP
               # route has no upstream HTTP response a client ever sees.
               #
-              # `urlRewrite` is mostly inapplicable here and `--check` says so,
-              # with one exception: `path.full` overrides the endpoint of a
-              # federation that has exactly one `mcp:` target. This example has
-              # two, so it would be reported.
+              # `urlRewrite` replaces parts of the one address the gateway
+              # dials: `authority` and `path.full` both apply, but only to a
+              # federation with exactly one `mcp:` target. This example has
+              # two, so either would be reported by `--check`.
               responseHeaderModifier:
                 set:
                   x-served-by: rusty-agent-gateway

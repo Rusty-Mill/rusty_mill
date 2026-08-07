@@ -66,6 +66,20 @@ pub enum TargetError {
     },
 }
 
+/// Parts of a target's address a route's `urlRewrite` replaces.
+///
+/// Empty unless the federation has exactly one target: with more than one,
+/// "the host" and "the path" have no answer, and choosing would be the gateway
+/// deciding something the operator did not say. `Config::lint` reports the
+/// cases this cannot cover.
+#[derive(Debug, Clone, Default)]
+pub struct Override {
+    /// Replacement path, from `urlRewrite.path.full`.
+    pub path: Option<String>,
+    /// Replacement host and, when it names one, port.
+    pub authority: Option<http::uri::Authority>,
+}
+
 /// A live connection to one upstream MCP server.
 pub struct Target {
     /// Name used to qualify this target's tools.
@@ -95,12 +109,12 @@ impl std::fmt::Debug for Target {
 impl Target {
     /// Dial a target and complete the MCP handshake.
     ///
-    /// `path_override` replaces a Streamable HTTP target's own path. It comes
-    /// from the route's `urlRewrite.path.full`, and the federation only
-    /// resolves one when there is a single target to be unambiguous about.
+    /// `over` replaces parts of a Streamable HTTP target's address. It comes
+    /// from the route's `urlRewrite`, and the federation only resolves one
+    /// when there is a single target to be unambiguous about.
     pub async fn connect(
         config: &McpTarget,
-        path_override: Option<&str>,
+        over: &Override,
         at: &str,
     ) -> Result<Self, TargetError> {
         let filter = TargetFilter::new(&config.filters, at)?;
@@ -131,8 +145,18 @@ impl Target {
                     })?
             }
             McpTargetKind::Mcp(http) => {
-                let path = path_override.unwrap_or(&http.path);
-                let uri = format!("http://{}:{}{}", http.host, http.port, path);
+                let path = over.path.as_deref().unwrap_or(&http.path);
+                // An authority without a port keeps the target's own. The
+                // target names a port explicitly and the override did not, so
+                // silently dropping to 80 would break a config that only meant
+                // to move hosts.
+                let (host, port) = match &over.authority {
+                    Some(authority) => {
+                        (authority.host(), authority.port_u16().unwrap_or(http.port))
+                    }
+                    None => (http.host.as_str(), http.port),
+                };
+                let uri = format!("http://{host}:{port}{path}");
                 // `MutatingClient` rather than a bare `reqwest::Client`, so a
                 // guardrail's `headerMutation` can reach the outgoing request.
                 let transport = StreamableHttpClientTransport::with_client(
