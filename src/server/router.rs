@@ -72,10 +72,29 @@ async fn agent_card_handler(State(engine): State<Arc<Engine>>, headers: HeaderMa
 }
 
 async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, body: Bytes) -> Response {
-    let envelope: JsonRpcRequest = match serde_json::from_slice(&body) {
-        Ok(r) => r,
+    // Spec Section 9.5 distinguishes these: `-32700` ("The server received
+    // invalid JSON") is for input that isn't valid JSON at all; `-32600`
+    // ("The JSON sent is not a valid Request object") is for
+    // syntactically valid JSON that just doesn't have the shape of a
+    // JSON-RPC request (wrong/missing `jsonrpc`/`method`, ...) - parsing
+    // in two steps is what lets these be told apart, rather than
+    // collapsing both into `-32700`.
+    let value: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
         Err(_) => {
             let err = A2aError::ParseError;
+            let body = json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": JsonRpcErrorObject::from(&err),
+            });
+            return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        }
+    };
+    let envelope: JsonRpcRequest = match serde_json::from_value(value) {
+        Ok(r) => r,
+        Err(e) => {
+            let err = A2aError::InvalidRequest(e.to_string());
             let body = json!({
                 "jsonrpc": "2.0",
                 "id": Value::Null,

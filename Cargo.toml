@@ -229,5 +229,20 @@ name = "webhook_retry"
 path = "tests/webhook_retry.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "extended_agent_card_auth"
+path = "tests/extended_agent_card_auth.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "input_validation"
+path = "tests/input_validation.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "server_message_ids"
+path = "tests/server_message_ids.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

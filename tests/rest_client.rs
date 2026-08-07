@@ -10,11 +10,37 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rusty_a2a::client::{ClientError, RestClient};
 use rusty_a2a::error::{A2aError, Result};
-use rusty_a2a::server::{AgentExecutor, AgentServer, EventSink, RequestContext};
-use rusty_a2a::types::{
-    AgentCard, AgentInterface, Artifact, Message, Part, SendMessageConfiguration, SendMessageResult,
-    StreamResponse, TaskPushNotificationConfig, TaskState,
+use rusty_a2a::server::{
+    AgentExecutor, AgentServer, AuthContext, AuthVerifier, Credentials, EventSink, RequestContext,
 };
+use rusty_a2a::types::{
+    AgentCard, AgentInterface, Artifact, HttpAuthSecurityScheme, Message, Part, SecurityRequirement,
+    SecurityScheme, SendMessageConfiguration, SendMessageResult, StreamResponse, TaskPushNotificationConfig,
+    TaskState,
+};
+
+const EXTENDED_CARD_TOKEN: &str = "extended-card-secret";
+
+/// Accepts exactly one bearer token, for
+/// `get_extended_agent_card_round_trips` - spec Section 13.3 makes
+/// `GetExtendedAgentCard` authenticated unconditionally, so exercising it
+/// needs a real `AuthVerifier` even though every other test in this file
+/// hits an unauthenticated agent.
+struct ExtendedCardVerifier;
+
+#[async_trait]
+impl AuthVerifier for ExtendedCardVerifier {
+    async fn verify(
+        &self,
+        _requirement: &SecurityRequirement,
+        credentials: &Credentials,
+    ) -> Result<AuthContext> {
+        match credentials.0.get("bearer") {
+            Some(token) if token == EXTENDED_CARD_TOKEN => Ok(AuthContext::new("test-user")),
+            _ => Err(A2aError::Unauthenticated("invalid bearer token".to_string())),
+        }
+    }
+}
 
 /// Same coverage as `tests/integration.rs`'s `TestAgent`: "clarify" ->
 /// bare message, "fail" -> a `Failed` task, "wait" -> blocks on
@@ -65,9 +91,21 @@ async fn spawn_test_server() -> String {
     .with_streaming(true)
     .with_push_notifications(true);
     card.capabilities.extended_agent_card = Some(true);
+    card.security_schemes.insert(
+        "bearer".to_string(),
+        SecurityScheme::HttpAuth {
+            http_auth_security_scheme: HttpAuthSecurityScheme {
+                description: None,
+                scheme: "Bearer".to_string(),
+                bearer_format: None,
+            },
+        },
+    );
     let extended_card = card.clone();
 
-    let server = AgentServer::new(card, Arc::new(TestAgent)).with_extended_card(extended_card);
+    let server = AgentServer::new(card, Arc::new(TestAgent))
+        .with_extended_card(extended_card)
+        .with_auth_verifier(Arc::new(ExtendedCardVerifier));
     tokio::spawn(async move {
         axum::serve(listener, server.into_router()).await.unwrap();
     });
@@ -315,6 +353,7 @@ async fn push_notification_config_crud() {
 async fn get_extended_agent_card_round_trips() {
     let base_url = spawn_test_server().await;
     let (client, _) = RestClient::discover(&base_url).await.expect("discover");
+    let client = client.with_bearer_token(EXTENDED_CARD_TOKEN);
 
     let card = client
         .get_extended_agent_card()

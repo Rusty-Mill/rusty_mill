@@ -1,7 +1,7 @@
 //! `Message`, `Part` and `Role` (spec Section 4.1.4-4.1.6 / proto `Message`,
 //! `Part`, `Role`).
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
@@ -20,7 +20,7 @@ pub enum Role {
 
 /// The content union of a [`Part`] (proto `oneof content`). Exactly one
 /// variant is present in any given `Part`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum PartContent {
     /// Plain text content.
@@ -34,6 +34,66 @@ pub enum PartContent {
     Url { url: String },
     /// Arbitrary structured JSON data.
     Data { data: Value },
+}
+
+/// Deriving `Deserialize` directly on an untagged enum, as `PartContent`
+/// otherwise would, doesn't enforce spec Section 4.1.6's "A Part MUST
+/// contain exactly one of the following: text, raw, url, data" - serde
+/// tries each variant in turn and accepts the first one that matches,
+/// silently ignoring any of the other three keys that also happen to be
+/// present rather than rejecting the input. This mirror type keeps that
+/// same derived (and therefore reused, not reimplemented) per-variant
+/// deserialization logic, but only after [`PartContent`]'s own
+/// `Deserialize` impl below has confirmed exactly one of the four keys is
+/// present.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PartContentRepr {
+    Text {
+        text: String,
+    },
+    Raw {
+        #[serde(with = "crate::codec::base64_bytes")]
+        raw: Vec<u8>,
+    },
+    Url {
+        url: String,
+    },
+    Data {
+        data: Value,
+    },
+}
+
+impl From<PartContentRepr> for PartContent {
+    fn from(repr: PartContentRepr) -> Self {
+        match repr {
+            PartContentRepr::Text { text } => PartContent::Text { text },
+            PartContentRepr::Raw { raw } => PartContent::Raw { raw },
+            PartContentRepr::Url { url } => PartContent::Url { url },
+            PartContentRepr::Data { data } => PartContent::Data { data },
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PartContent {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("a Part must be a JSON object"))?;
+        const KEYS: [&str; 4] = ["text", "raw", "url", "data"];
+        let present: Vec<&str> = KEYS.iter().copied().filter(|k| obj.contains_key(*k)).collect();
+        if present.len() != 1 {
+            return Err(serde::de::Error::custom(format!(
+                "a Part must contain exactly one of `text`, `raw`, `url`, `data` (spec Section \
+                 4.1.6); found {} ({present:?})",
+                present.len()
+            )));
+        }
+        serde_json::from_value::<PartContentRepr>(value)
+            .map(Into::into)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// A container for a section of communication content: text, a file (by

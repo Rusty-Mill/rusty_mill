@@ -171,19 +171,30 @@ fn apply_authentication(
     }
 }
 
-/// Spec Section 13.2 (SHOULD): reject a webhook URL whose host is (or
-/// resolves to) a private, loopback, or link-local address - guards
-/// against SSRF, where a malicious client registers a webhook that
-/// probes the agent's own internal network. A literal IP-address host is
-/// checked directly with no DNS lookup involved; a hostname is resolved
-/// fresh every call (rather than caching the result) so this also catches
-/// DNS rebinding - a hostname that resolved to a public address at
-/// registration time but a private one by the time of a later delivery.
+/// Only ever called while SSRF protection is enabled (see
+/// [`PushNotifier::check_webhook_url`]/[`PushNotifier::notify`]) - reject
+/// a webhook URL whose host is (or resolves to) a private, loopback, or
+/// link-local address - guards against SSRF, where a malicious client
+/// registers a webhook that probes the agent's own internal network - and,
+/// spec Section 13.2 (SHOULD, "Webhook URLs SHOULD use HTTPS to protect
+/// payload confidentiality in transit"), require `https`: bundled under
+/// this same opt-in flag since both guard the same delivery path, and
+/// plain `http` would ship task content (which can carry message/artifact
+/// data) in cleartext. A literal IP-address host is checked directly with
+/// no DNS lookup involved; a hostname is resolved fresh every call (rather
+/// than caching the result) so this also catches DNS rebinding - a
+/// hostname that resolved to a public address at registration time but a
+/// private one by the time of a later delivery.
 pub(crate) async fn validate_webhook_url(url: &str) -> std::result::Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid webhook URL: {e}"))?;
     match parsed.scheme() {
-        "http" | "https" => {}
-        other => return Err(format!("unsupported webhook URL scheme {other:?}")),
+        "https" => {}
+        other => {
+            return Err(format!(
+                "webhook URL scheme {other:?} is not allowed; only \"https\" is, to protect payload \
+                 confidentiality in transit"
+            ))
+        }
     }
     let host = parsed
         .host_str()

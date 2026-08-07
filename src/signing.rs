@@ -224,13 +224,19 @@ pub fn canonical_json(card: &AgentCard) -> std::result::Result<String, serde_jso
 /// Computes a JWS signature over `card` (spec Section 8.4), returning an
 /// [`AgentCardSignature`] ready to push onto `card.signatures`. `kid`, if
 /// given, is included in the protected header so verifiers can pick the
-/// right key when a card has multiple signatures.
+/// right key when a card has multiple signatures; if omitted, a `kid` is
+/// still always included (spec Section 8.4.2 lists it, alongside `alg` and
+/// `typ`, as a header member the protected header "MUST include"),
+/// deterministically derived from the key's own public material so it
+/// stays consistent across every signature this key ever makes rather than
+/// e.g. a fresh random value each call, which would defeat a verifier's
+/// `kid`-based key lookup.
 pub fn sign_agent_card(card: &AgentCard, key: &SigningKey, kid: Option<&str>) -> Result<AgentCardSignature> {
     let mut header = Map::new();
     header.insert("alg".to_string(), json!(key.algorithm().jwa_name()));
-    if let Some(kid) = kid {
-        header.insert("kid".to_string(), json!(kid));
-    }
+    header.insert("typ".to_string(), json!("JOSE"));
+    let kid = kid.map(str::to_string).unwrap_or_else(|| default_kid(key));
+    header.insert("kid".to_string(), json!(kid));
     let protected_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Value::Object(header))?);
 
     let payload_b64 = URL_SAFE_NO_PAD.encode(canonical_json(card)?);
@@ -243,6 +249,17 @@ pub fn sign_agent_card(card: &AgentCard, key: &SigningKey, kid: Option<&str>) ->
         signature: signature_b64,
         header: None,
     })
+}
+
+/// A stable `kid` derived from `key`'s own public material (base64url of
+/// its public key bytes - the SEC1-compressed point for ES256, the raw
+/// 32-byte public key for EdDSA) - see [`sign_agent_card`].
+fn default_kid(key: &SigningKey) -> String {
+    let public_bytes: Vec<u8> = match key.verifying_key() {
+        VerifyingKey::Es256(vk) => vk.to_sec1_bytes().to_vec(),
+        VerifyingKey::Ed25519(vk) => vk.to_bytes().to_vec(),
+    };
+    URL_SAFE_NO_PAD.encode(public_bytes)
 }
 
 /// Verifies that `signature` is a valid JWS over `card`'s canonical form,
@@ -353,6 +370,35 @@ mod tests {
             !json.contains(": ") && !json.contains(", ") && !json.contains('\n'),
             "canonical JSON must be compact: {json}"
         );
+    }
+
+    /// Spec Section 8.4.2: the protected header "MUST include: `alg` ...
+    /// `typ`: SHOULD be set to `"JOSE"` ... `kid`".
+    #[test]
+    fn protected_header_always_includes_typ_and_kid() {
+        fn decode_protected_header(signature: &AgentCardSignature) -> Value {
+            let bytes = URL_SAFE_NO_PAD.decode(&signature.protected).unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        let key = SigningKey::from_ed25519_bytes(&ED25519_SEED);
+        let card = sample_card();
+
+        let with_explicit_kid = card.signed(&key, Some("key-1")).unwrap();
+        let header = decode_protected_header(&with_explicit_kid.signatures[0]);
+        assert_eq!(header["typ"], "JOSE");
+        assert_eq!(header["kid"], "key-1");
+
+        // No `kid` supplied: still present, and stable across repeated
+        // calls with the same key (not e.g. a fresh random value each
+        // time, which would defeat a verifier's `kid`-based key lookup).
+        let without_kid_first = card.signed(&key, None).unwrap();
+        let without_kid_second = card.signed(&key, None).unwrap();
+        let header_first = decode_protected_header(&without_kid_first.signatures[0]);
+        let header_second = decode_protected_header(&without_kid_second.signatures[0]);
+        assert_eq!(header_first["typ"], "JOSE");
+        assert!(header_first["kid"].is_string() && !header_first["kid"].as_str().unwrap().is_empty());
+        assert_eq!(header_first["kid"], header_second["kid"]);
     }
 
     #[test]

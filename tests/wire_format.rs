@@ -595,6 +595,29 @@ fn part_content_oneof_keys() {
     }
 }
 
+/// Spec Section 4.1.6: "A Part MUST contain exactly one of the following:
+/// text, raw, url, data" - a JSON object with zero or more than one of
+/// those keys must be rejected, not silently resolved to whichever
+/// variant happens to be tried first.
+#[test]
+fn part_content_rejects_zero_or_multiple_content_keys() {
+    let zero = json!({});
+    let two = json!({"text": "hi", "data": {"k": 1}});
+    for bad in [zero, two] {
+        let full = {
+            let mut obj = bad.as_object().unwrap().clone();
+            obj.insert("mediaType".to_string(), json!("text/plain"));
+            Value::Object(obj)
+        };
+        let err = serde_json::from_value::<Part>(full.clone())
+            .expect_err(&format!("expected an error deserializing {full}"));
+        assert!(
+            err.to_string().contains("exactly one"),
+            "expected an 'exactly one' validation error, got: {err}"
+        );
+    }
+}
+
 /// proto `message SecurityScheme`, `oneof scheme`.
 #[test]
 fn security_scheme_oneof_keys() {
@@ -654,6 +677,26 @@ fn security_scheme_oneof_keys() {
     for (scheme, proto_field) in cases {
         assert_fields(&scheme, &[proto_field]);
         assert_round_trips(&scheme);
+    }
+}
+
+/// Spec Section 4.5.1: "A SecurityScheme MUST contain exactly one of the
+/// following: apiKeySecurityScheme, httpAuthSecurityScheme,
+/// oauth2SecurityScheme, openIdConnectSecurityScheme, mtlsSecurityScheme".
+#[test]
+fn security_scheme_rejects_zero_or_multiple_scheme_keys() {
+    let zero = json!({});
+    let two = json!({
+        "httpAuthSecurityScheme": {"scheme": "Bearer"},
+        "mtlsSecurityScheme": {},
+    });
+    for bad in [zero, two] {
+        let err = serde_json::from_value::<SecurityScheme>(bad.clone())
+            .expect_err(&format!("expected an error deserializing {bad}"));
+        assert!(
+            err.to_string().contains("exactly one"),
+            "expected an 'exactly one' validation error, got: {err}"
+        );
     }
 }
 
@@ -719,6 +762,26 @@ fn oauth_flow_oneof_keys() {
     for (flow, proto_field) in cases {
         assert_fields(&flow, &[proto_field]);
         assert_round_trips(&flow);
+    }
+}
+
+/// Spec Section 4.5.7: "A OAuthFlows MUST contain exactly one of the
+/// following: authorizationCode, clientCredentials, implicit, password,
+/// deviceCode".
+#[test]
+fn oauth_flows_rejects_zero_or_multiple_flow_keys() {
+    let zero = json!({});
+    let two = json!({
+        "implicit": {"authorizationUrl": "https://example.com/auth"},
+        "password": {"tokenUrl": "https://example.com/token"},
+    });
+    for bad in [zero, two] {
+        let err = serde_json::from_value::<OAuthFlows>(bad.clone())
+            .expect_err(&format!("expected an error deserializing {bad}"));
+        assert!(
+            err.to_string().contains("exactly one"),
+            "expected an 'exactly one' validation error, got: {err}"
+        );
     }
 }
 

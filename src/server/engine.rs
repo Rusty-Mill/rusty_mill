@@ -59,6 +59,10 @@ pub struct Engine {
     /// construction - see [`Engine::agent_card_etag`].
     agent_card_etag: String,
     extended_card: Option<AgentCard>,
+    /// A quoted `ETag` value for `extended_card` (spec Section 13.3,
+    /// SHOULD - "appropriate caching headers"), precomputed once in
+    /// [`Engine::set_extended_card`] the same way `agent_card_etag` is.
+    extended_card_etag: Option<String>,
     executor: Arc<dyn AgentExecutor>,
     store: Arc<dyn TaskStore>,
     buses: Buses,
@@ -88,6 +92,7 @@ impl Engine {
             card,
             agent_card_etag,
             extended_card: None,
+            extended_card_etag: None,
             executor,
             store,
             buses: Arc::new(Mutex::new(HashMap::new())),
@@ -101,6 +106,7 @@ impl Engine {
     }
 
     pub(crate) fn set_extended_card(&mut self, card: AgentCard) {
+        self.extended_card_etag = Some(format!("\"{}\"", card.version.replace('"', "'")));
         self.extended_card = Some(card);
     }
 
@@ -124,6 +130,12 @@ impl Engine {
     /// [`Engine::new`].
     pub(crate) fn agent_card_etag(&self) -> &str {
         &self.agent_card_etag
+    }
+
+    /// The `ETag` value for the extended agent card (spec Section 13.3),
+    /// if one is configured - see [`Engine::set_extended_card`].
+    pub(crate) fn extended_card_etag(&self) -> Option<&str> {
+        self.extended_card_etag.as_deref()
     }
 
     /// The header/metadata key name `mtls` security scheme credentials are
@@ -380,6 +392,13 @@ impl Engine {
             let mut saw_turn_outcome = false;
             let mut first_event = true;
             while let Some(evt) = rx.recv().await {
+                if is_empty_artifact_update(&evt) {
+                    tracing::warn!(
+                        task_id = %bg_task_id,
+                        "ignoring an artifact update with no parts (spec Section 4.1.7 requires at least one)"
+                    );
+                    continue;
+                }
                 lead_with_task_if_needed(&next_seq, &bus, &lead_task_snapshot, first_event, &evt);
                 let seq = apply_event(
                     &store,
@@ -417,7 +436,14 @@ impl Engine {
                         context_id: bg_context_id.clone(),
                         status: TaskStatus {
                             state: TaskState::Failed,
-                            message: Some(Message::agent_text(reason)),
+                            // Spec Section 4.1.4: server messages MUST
+                            // carry a `contextId`, and `taskId` since a
+                            // task now exists.
+                            message: Some(
+                                Message::agent_text(reason)
+                                    .with_context_id(bg_context_id.clone())
+                                    .with_task_id(bg_task_id.clone()),
+                            ),
                             timestamp: Some(Utc::now()),
                         },
                         metadata: None,
@@ -483,6 +509,7 @@ impl Engine {
             .map(|c| c.return_immediately)
             .unwrap_or(false);
         let history_length = req.configuration.as_ref().and_then(|c| c.history_length);
+        validate_history_length(history_length)?;
         let finish = |mut task: Task| {
             apply_history_length(&mut task, history_length);
             Ok(SendMessageResult::Task { task })
@@ -633,6 +660,7 @@ impl Engine {
 
     /// `GetTask` (spec Section 3.1.3).
     pub async fn get_task(&self, req: GetTaskRequest) -> Result<Task> {
+        validate_history_length(req.history_length)?;
         let mut task = self
             .store
             .get(req.tenant.as_deref(), &req.id)
@@ -644,11 +672,12 @@ impl Engine {
 
     /// `ListTasks` (spec Section 3.1.4).
     pub async fn list_tasks(&self, req: ListTasksRequest) -> Result<ListTasksResponse> {
+        let page_size = validate_page_size(req.page_size)?;
+        validate_history_length(req.history_length)?;
         let (mut tasks, next_page_token, total) = self.store.list(req.tenant.as_deref(), &req).await;
         for t in &mut tasks {
             apply_history_length(t, req.history_length);
         }
-        let page_size = req.page_size.unwrap_or(50).clamp(1, 100);
         Ok(ListTasksResponse {
             tasks,
             next_page_token,
@@ -692,6 +721,13 @@ impl Engine {
 
         let bus = self.buses.lock().await.get(&req.id).cloned();
         while let Ok(evt) = rx.try_recv() {
+            if is_empty_artifact_update(&evt) {
+                tracing::warn!(
+                    task_id = %req.id,
+                    "ignoring an artifact update with no parts (spec Section 4.1.7 requires at least one)"
+                );
+                continue;
+            }
             let seq = apply_event(
                 &self.store,
                 &self.push_notifier,
@@ -803,7 +839,7 @@ impl Engine {
             .await;
         configs.sort_by(|a, b| a.id.cmp(&b.id));
 
-        let page_size = req.page_size.unwrap_or(50).clamp(1, 100) as usize;
+        let page_size = validate_page_size(req.page_size)? as usize;
         let start = req
             .page_token
             .as_ref()
@@ -848,15 +884,18 @@ impl Engine {
 
     /// `GetExtendedAgentCard` (spec Section 3.1.11): unlike every other
     /// operation, this one is authenticated even when
-    /// `AgentCard.securityRequirements` is empty, since the spec
-    /// describes it as being "for the authenticated agent" - if an
-    /// [`AuthVerifier`] is configured, this uses `securityRequirements`
-    /// when declared, or else falls back to treating each entry in
-    /// `securitySchemes` as its own single-scheme alternative (any one
-    /// successfully verified scheme is sufficient). With no verifier
-    /// configured, or no schemes declared at all to fall back to, this
-    /// method can't enforce anything and just checks the capability flag,
-    /// same as before this crate had any auth enforcement.
+    /// `AgentCard.securityRequirements` is empty, since the spec describes
+    /// it as being "for the authenticated agent" - it uses
+    /// `securityRequirements` when declared, or else falls back to
+    /// treating each entry in `securitySchemes` as its own single-scheme
+    /// alternative (any one successfully verified scheme is sufficient).
+    /// Spec Section 13.3 makes this unconditional ("MUST require
+    /// authentication"), so - unlike [`Engine::authenticate`], where an
+    /// empty `securityRequirements` legitimately means "this agent is
+    /// public" - there's no configuration under which this operation is
+    /// allowed to skip enforcement: no [`AuthVerifier`] configured, or no
+    /// `securitySchemes` declared to fall back to, both fail closed rather
+    /// than silently serving the card unauthenticated.
     pub async fn get_extended_agent_card(&self, credentials: &Credentials) -> Result<AgentCard> {
         match self.card.capabilities.extended_agent_card {
             Some(true) => {}
@@ -866,12 +905,22 @@ impl Engine {
                 ))
             }
         }
-        if let Some(verifier) = self.auth_verifier.as_deref() {
-            let requirements = self.extended_card_security_requirements();
-            if !requirements.is_empty() {
-                authenticate_against(&requirements, verifier, credentials).await?;
-            }
+        let verifier = self.auth_verifier.as_deref().ok_or_else(|| {
+            A2aError::Internal(
+                "GetExtendedAgentCard requires authentication (spec Section 13.3) but no \
+                 AuthVerifier is configured (see AgentServer::with_auth_verifier)"
+                    .to_string(),
+            )
+        })?;
+        let requirements = self.extended_card_security_requirements();
+        if requirements.is_empty() {
+            return Err(A2aError::Internal(
+                "GetExtendedAgentCard requires authentication (spec Section 13.3) but this \
+                 agent declares no securitySchemes to authenticate against"
+                    .to_string(),
+            ));
         }
+        authenticate_against(&requirements, verifier, credentials).await?;
         self.extended_card
             .clone()
             .ok_or(A2aError::ExtendedAgentCardNotConfigured)
@@ -923,6 +972,15 @@ pub(crate) fn check_version(value: Option<&str>) -> Result<()> {
     }
 }
 
+/// Spec Section 4.1.7: `Artifact.parts` "must contain at least one part" -
+/// checked here, right where an `AgentExecutor`'s events are first
+/// consumed, so a buggy executor can never put a spec-violating `Artifact`
+/// on the wire (in a store write, a push notification, or a live/replayed
+/// stream event) in the first place.
+fn is_empty_artifact_update(evt: &StreamResponse) -> bool {
+    matches!(evt, StreamResponse::ArtifactUpdate { artifact_update } if artifact_update.artifact.parts.is_empty())
+}
+
 fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
     if let Some(n) = history_length {
         if n <= 0 {
@@ -935,6 +993,35 @@ fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
             }
         }
     }
+}
+
+/// Spec Section 3.1.4's field description for `pageSize` ("The minimum
+/// value is 1. The maximum value is 100") plus Section 3.3.2's "Servers
+/// MUST validate all input parameters before processing": an out-of-range
+/// `pageSize` is a validation error, not something to silently clamp into
+/// range. Returns the effective page size (the spec's own default, 50,
+/// when unset).
+fn validate_page_size(page_size: Option<i32>) -> Result<i32> {
+    match page_size {
+        None => Ok(50),
+        Some(n) if (1..=100).contains(&n) => Ok(n),
+        Some(n) => Err(A2aError::InvalidParams(format!(
+            "pageSize must be between 1 and 100 inclusive, got {n}"
+        ))),
+    }
+}
+
+/// Spec Section 3.3.2: a negative `historyLength` is a validation error
+/// (0 is valid - it means "no history", per [`apply_history_length`]).
+fn validate_history_length(history_length: Option<i32>) -> Result<()> {
+    if let Some(n) = history_length {
+        if n < 0 {
+            return Err(A2aError::InvalidParams(format!(
+                "historyLength must be a non-negative integer, got {n}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// If this is the first event of the turn and it's task-shaping (anything

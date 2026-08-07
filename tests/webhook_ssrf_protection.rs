@@ -65,11 +65,11 @@ async fn loopback_and_private_webhook_urls_are_rejected_when_enabled() {
     let task_id = result.as_task().expect("expected a task").id.clone();
 
     for disallowed_url in [
-        "http://127.0.0.1:9/hook", // loopback
-        "http://10.0.0.5/hook",    // private (10.0.0.0/8)
-        "http://192.168.1.1/hook", // private (192.168.0.0/16)
-        "http://172.16.0.1/hook",  // private (172.16.0.0/12)
-        "http://169.254.1.1/hook", // link-local
+        "https://127.0.0.1:9/hook", // loopback
+        "https://10.0.0.5/hook",    // private (10.0.0.0/8)
+        "https://192.168.1.1/hook", // private (192.168.0.0/16)
+        "https://172.16.0.1/hook",  // private (172.16.0.0/12)
+        "https://169.254.1.1/hook", // link-local
     ] {
         let mut config = TaskPushNotificationConfig::new(disallowed_url);
         config.task_id = Some(task_id.clone());
@@ -97,12 +97,35 @@ async fn a_public_looking_webhook_url_is_still_accepted_when_enabled() {
     // link-local blocklist, so registration should succeed even though
     // delivery to it will simply fail later (that's a normal unreachable-
     // webhook outcome, not an SSRF rejection).
-    let mut config = TaskPushNotificationConfig::new("http://203.0.113.5/hook");
+    let mut config = TaskPushNotificationConfig::new("https://203.0.113.5/hook");
     config.task_id = Some(task_id.clone());
     client
         .create_push_notification_config(config)
         .await
-        .expect("a public-looking address should be accepted");
+        .expect("a public-looking https address should be accepted");
+}
+
+#[tokio::test]
+async fn a_plain_http_webhook_url_is_rejected_when_enabled() {
+    let base_url = spawn_test_server(true).await;
+    let (client, _) = A2aClient::discover(&base_url).await.expect("discover");
+
+    let result = client
+        .send_message(Message::user_text("hello"), None)
+        .await
+        .expect("send_message");
+    let task_id = result.as_task().expect("expected a task").id.clone();
+
+    // Spec Section 13.2 (SHOULD): a public-looking address is otherwise
+    // accepted (see the test above), but only over https - a plain http
+    // webhook would ship task content in cleartext.
+    let mut config = TaskPushNotificationConfig::new("http://203.0.113.5/hook");
+    config.task_id = Some(task_id.clone());
+    let err = client.create_push_notification_config(config).await.unwrap_err();
+    match err {
+        ClientError::Protocol(A2aError::InvalidParams(_)) => {}
+        other => panic!("expected InvalidParams rejecting a plain http webhook, got {other:?}"),
+    }
 }
 
 #[tokio::test]
