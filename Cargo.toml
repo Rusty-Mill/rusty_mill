@@ -99,6 +99,12 @@ path = "examples/send_message.rs"
 required-features = ["client"]
 
 [[test]]
+name = "wire_format"
+path = "tests/wire_format.rs"
+# Deliberately no `required-features`: the data model is always compiled, and
+# its JSON encoding is what every binding and every peer SDK shares.
+
+[[test]]
 name = "integration"
 path = "tests/integration.rs"
 # JSON-RPC and REST only — deliberately not `full`. Gating this on `grpc`

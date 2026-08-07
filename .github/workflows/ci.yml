@@ -109,6 +109,7 @@ jobs:
       # minimum it actually needs is what makes an over-strict gate an error.
       - name: Every test suite runs under its own features
         run: |
+          cargo test --test wire_format -- --list
           cargo test --features client,server --test integration -- --list
           cargo test --features client,server --test security_and_push_notifications -- --list
           cargo test --features client,server --test history_length_and_extensions -- --list
