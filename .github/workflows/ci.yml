@@ -4,6 +4,11 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  # So CI can be run deliberately rather than only as a side effect of a push.
+  # During the 2026-08-06 Actions incident, webhooks were throttled and runs
+  # were never created for several merges — with no manual trigger, the only
+  # options were cancel-and-rerun of an unrelated stuck run, or a fresh commit.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always

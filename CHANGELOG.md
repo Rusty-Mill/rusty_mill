@@ -18,6 +18,16 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
 
 ### Added
 
+- `workflow_dispatch` on the CI workflow ([#35]), so CI can be run deliberately
+  rather than only as a side effect of a push.
+
+  During the 2026-08-06 Actions incident webhooks were throttled to ~15% and
+  runs were simply never created for several merges. With no manual trigger the
+  only options were cancel-and-rerun of an unrelated stuck run — which
+  re-queued behind the same throttle and achieved nothing — or a fresh commit.
+  Verifying `main` meant reproducing all three jobs by hand in a clean-room
+  checkout.
+
 - `scripts/check-published-tag.sh` and a `Release check` workflow, verifying
   that a published tag is actually consumable ([#27]). Runs on every tag push,
   and on demand via `workflow_dispatch`.
@@ -43,6 +53,7 @@ Targets MCP specification [2026-07-28][spec], on [`rmcp`][rmcp] 3.x.
   itself, which the workflow runs before trusting a green result.
 
 [#27]: https://github.com/baileyrd/rusty_mcp/issues/27
+[#35]: https://github.com/baileyrd/rusty_mcp/issues/35
 
 ## [0.5.0] — 2026-08-06
 
