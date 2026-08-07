@@ -99,14 +99,23 @@ path = "examples/send_message.rs"
 required-features = ["client"]
 
 [[test]]
+name = "wire_format"
+path = "tests/wire_format.rs"
+# Deliberately no `required-features`: the data model is always compiled, and
+# its JSON encoding is what every binding and every peer SDK shares.
+
+[[test]]
 name = "integration"
 path = "tests/integration.rs"
-required-features = ["full"]
+# JSON-RPC and REST only — deliberately not `full`. Gating this on `grpc`
+# would make the suite silently skip anywhere `protoc` is missing.
+required-features = ["client", "server"]
 
 [[test]]
 name = "grpc_integration"
 path = "tests/grpc_integration.rs"
-required-features = ["grpc"]
+# The gRPC service lives under `server`, which `grpc` does not itself enable.
+required-features = ["grpc", "server"]
 
 [[test]]
 name = "security_and_push_notifications"
