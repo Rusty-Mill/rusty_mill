@@ -133,6 +133,27 @@ impl AgentServer {
         self
     }
 
+    /// Enables SSRF protection on push notification webhook URLs (spec
+    /// Section 13.2, SHOULD): a `url` that's a literal private/loopback/
+    /// link-local IP address, or a hostname that resolves to one, is
+    /// rejected both when a config naming it is registered
+    /// (`CreateTaskPushNotificationConfig`, or the inline
+    /// `taskPushNotificationConfig` on `SendMessage`) and again right
+    /// before each delivery (to also catch DNS rebinding - a hostname
+    /// that resolved to a public address at registration time but a
+    /// private one later).
+    ///
+    /// Off by default: a local development or test setup delivering to
+    /// its own `127.0.0.1` webhook receiver is a completely legitimate
+    /// use this crate has no way to distinguish from an attacker
+    /// registering a webhook to probe this agent's own internal
+    /// network - only you know which situation you're in, so this is
+    /// opt-in rather than assumed.
+    pub fn with_webhook_ssrf_protection(mut self) -> Self {
+        self.engine.set_webhook_ssrf_protection(true);
+        self
+    }
+
     pub fn agent_card(&self) -> &AgentCard {
         self.engine.card()
     }

@@ -141,3 +141,6 @@ jobs:
           cargo test --features client,grpc,server --test version_negotiation -- --list
           cargo test --features client,grpc,server --test grpc_error_details -- --list
           cargo test --features client,server --test auth_required_continuation -- --list
+          cargo test --features client,server --test webhook_ssrf_protection -- --list
+          cargo test --features server --test agent_card_caching -- --list
+          cargo test --features client,server --test webhook_retry -- --list

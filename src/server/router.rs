@@ -40,8 +40,35 @@ pub(crate) fn build_router(engine: Arc<Engine>) -> Router {
         .with_state(engine)
 }
 
-async fn agent_card_handler(State(engine): State<Arc<Engine>>) -> impl IntoResponse {
-    Json(engine.card().clone())
+/// Spec Section 8.6.1 (SHOULD): the Agent Card endpoint sends `Cache-Control`
+/// and an `ETag` (derived from `version`), and honors a conditional-GET
+/// `If-None-Match` with a bare `304`.
+async fn agent_card_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap) -> Response {
+    let etag = engine.agent_card_etag();
+    let cache_control = "public, max-age=300";
+    if headers
+        .get(axum::http::header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        == Some(etag)
+    {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (axum::http::header::ETAG, etag),
+                (axum::http::header::CACHE_CONTROL, cache_control),
+            ],
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::ETAG, etag),
+            (axum::http::header::CACHE_CONTROL, cache_control),
+        ],
+        Json(engine.card().clone()),
+    )
+        .into_response()
 }
 
 async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, body: Bytes) -> Response {
