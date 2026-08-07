@@ -142,6 +142,29 @@ fn sse_response(stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>>) -> R
         .into_response()
 }
 
+/// Parses the standard SSE `Last-Event-ID` reconnect header (sent
+/// automatically by browser `EventSource` implementations, and settable
+/// manually by any other client) into the sequence number
+/// [`Engine::subscribe_to_task`] should replay events after.
+fn parse_last_event_id(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get("Last-Event-ID")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse().ok())
+}
+
+/// Like [`sse_response`], but for the `:subscribe` action: each event's
+/// SSE `id:` field is set to its sequence number, so a client (or a
+/// spec-compliant `EventSource`) that reconnects sends it back as
+/// `Last-Event-ID` and [`parse_last_event_id`] can resume the replay from
+/// exactly where it left off.
+fn sse_subscribe_response(stream: Pin<Box<dyn Stream<Item = (u64, StreamResponse)> + Send>>) -> Response {
+    let sse_stream = stream.map(|(seq, item)| Event::default().id(seq.to_string()).json_data(item));
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 /// `POST /message:send` and `POST /message:stream` (spec Section 11.3.1).
 async fn message_action(
     State(engine): State<Arc<Engine>>,
@@ -242,8 +265,9 @@ async fn task_action(
                 tenant: None,
                 id: id.to_string(),
             };
-            match engine.subscribe_to_task(req).await {
-                Ok(stream) => sse_response(stream),
+            let since_seq = parse_last_event_id(&headers);
+            match engine.subscribe_to_task(req, since_seq).await {
+                Ok(stream) => sse_subscribe_response(stream),
                 Err(e) => rest_error(e),
             }
         }

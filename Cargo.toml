@@ -127,5 +127,15 @@ name = "history_length_and_extensions"
 path = "tests/history_length_and_extensions.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "subscribe_replay"
+path = "tests/subscribe_replay.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "subscribe_replay_grpc"
+path = "tests/subscribe_replay_grpc.rs"
+required-features = ["grpc", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

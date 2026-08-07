@@ -153,12 +153,17 @@ impl A2aService for GrpcService {
     ) -> Result<Response<Self::SubscribeToTaskStream>, Status> {
         self.authenticate(&request).await?;
         let req = pb_subscribe_to_task_request_to_ours(request.into_inner());
+        // The canonical `SubscribeToTaskRequest` has no resume-point
+        // field (unlike SSE's `Last-Event-ID`, which the JSON-RPC/REST
+        // bindings read from a request header), so a gRPC resubscribe
+        // always replays this task's whole buffered event log, then
+        // continues live - see `Engine::subscribe_to_task`.
         let stream = self
             .engine
-            .subscribe_to_task(req)
+            .subscribe_to_task(req, None)
             .await
             .map_err(a2a_error_to_status)?;
-        let mapped = stream.map(|item| Ok(our_stream_response_to_pb(item)));
+        let mapped = stream.map(|(_, item)| Ok(our_stream_response_to_pb(item)));
         Ok(Response::new(Box::pin(mapped)))
     }
 
