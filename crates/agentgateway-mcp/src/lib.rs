@@ -13,9 +13,11 @@
 mod federation;
 mod gate;
 mod naming;
+mod rules;
 mod target;
 
-pub use federation::{Federation, FederationError};
+pub use federation::{Federation, FederationError, TokenClaims};
 pub use gate::{Authorization, GateError, TargetFilter};
 pub use naming::{Resolution, ToolNamer};
+pub use rules::{RuleError, RuleSet, ToolCall};
 pub use target::{Target, TargetError};

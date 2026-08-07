@@ -87,7 +87,10 @@ pub fn merge(cards: Vec<(String, AgentCard)>, policy: &AgentCardPolicy) -> Optio
                 // Reported rather than renamed: unlike an MCP tool name, a
                 // skill id is descriptive and not what a caller invokes, so
                 // silently qualifying it would misrepresent the agent.
-                collisions.push(format!("`{}` is offered by {agent} and another agent", skill.id));
+                collisions.push(format!(
+                    "`{}` is offered by {agent} and another agent",
+                    skill.id
+                ));
                 continue;
             }
             card.skills.push(skill.clone());
@@ -173,7 +176,10 @@ mod tests {
         // Without this a client reads the agent's own address and goes around
         // the gateway entirely.
         let merged = merge(
-            vec![("a".into(), card("Agent", "http://agent:9000", &["echo"], true))],
+            vec![(
+                "a".into(),
+                card("Agent", "http://agent:9000", &["echo"], true),
+            )],
             &policy("https://gateway.example.com/a2a"),
         )
         .expect("should merge");

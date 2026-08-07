@@ -203,12 +203,16 @@ async fn a_token_signed_by_an_unknown_key_is_rejected() {
     use rsa::{RsaPrivateKey, pkcs1::EncodeRsaPrivateKey};
     let mut rng = rand::thread_rng();
     let other = RsaPrivateKey::new(&mut rng, 2048).expect("should generate a key");
-    let der = other.to_pkcs1_der().expect("should encode").as_bytes().to_vec();
+    let der = other
+        .to_pkcs1_der()
+        .expect("should encode")
+        .as_bytes()
+        .to_vec();
 
     let mut header = Header::new(Algorithm::RS256);
     header.kid = Some(KID.into());
-    let forged = encode(&header, &valid_claims(), &EncodingKey::from_rsa_der(&der))
-        .expect("should sign");
+    let forged =
+        encode(&header, &valid_claims(), &EncodingKey::from_rsa_der(&der)).expect("should sign");
 
     let rejection = auth
         .authenticate(&bearer_headers(&forged))

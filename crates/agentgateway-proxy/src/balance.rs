@@ -64,11 +64,10 @@ impl Endpoints {
 
         for (host, weight) in backends {
             saw_any = true;
-            let authority =
-                Authority::try_from(host).map_err(|_| BalanceError::Authority {
-                    at: at.to_string(),
-                    value: host.to_string(),
-                })?;
+            let authority = Authority::try_from(host).map_err(|_| BalanceError::Authority {
+                at: at.to_string(),
+                value: host.to_string(),
+            })?;
             if weight == 0 {
                 continue;
             }
@@ -137,8 +136,7 @@ mod tests {
 
     #[test]
     fn equal_weights_alternate_evenly() {
-        let endpoints =
-            Endpoints::new([("a:80", 1), ("b:80", 1)], "test").expect("should build");
+        let endpoints = Endpoints::new([("a:80", 1), ("b:80", 1)], "test").expect("should build");
         let tally = counts(&endpoints, 100);
         assert_eq!(tally.len(), 2);
         for (name, count) in tally {
@@ -148,8 +146,7 @@ mod tests {
 
     #[test]
     fn weights_are_honoured_exactly_over_a_cycle() {
-        let endpoints =
-            Endpoints::new([("a:80", 1), ("b:80", 9)], "test").expect("should build");
+        let endpoints = Endpoints::new([("a:80", 1), ("b:80", 9)], "test").expect("should build");
         let tally = counts(&endpoints, 100);
 
         let a = tally.iter().find(|(n, _)| n == "a:80").expect("a").1;
@@ -161,8 +158,7 @@ mod tests {
     fn a_zero_weight_backend_is_drained_not_rejected() {
         // Weight 0 is how a backend is taken out of rotation without deleting
         // its configuration.
-        let endpoints =
-            Endpoints::new([("a:80", 0), ("b:80", 1)], "test").expect("should build");
+        let endpoints = Endpoints::new([("a:80", 0), ("b:80", 1)], "test").expect("should build");
         assert_eq!(endpoints.len(), 1);
         let tally = counts(&endpoints, 10);
         assert_eq!(tally, vec![("b:80".to_string(), 10)]);
@@ -178,8 +174,7 @@ mod tests {
 
     #[test]
     fn an_unparseable_host_is_rejected_at_build_time() {
-        let err = Endpoints::new([("not a host", 1)], "route[0]")
-            .expect_err("should not build");
+        let err = Endpoints::new([("not a host", 1)], "route[0]").expect_err("should not build");
         assert!(err.to_string().contains("not a host"), "got: {err}");
     }
 

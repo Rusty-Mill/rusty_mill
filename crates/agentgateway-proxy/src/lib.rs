@@ -25,8 +25,7 @@ use hyper_util::rt::TokioExecutor;
 
 pub use balance::{BalanceError, Endpoints};
 pub use retry::{MAX_REPLAY_BYTES, RequestBody, Retry};
-pub use transform::{HeaderError, Headers, RewriteError, Rewrite, Scheme};
-
+pub use transform::{HeaderError, Headers, Rewrite, RewriteError, Scheme};
 
 /// Failure to build a proxy from configuration.
 #[derive(Debug, thiserror::Error)]
@@ -250,7 +249,10 @@ impl HostProxy {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     let retry_this = retryable_left
-                        && self.retry.as_ref().is_some_and(|r| r.retries_status(status));
+                        && self
+                            .retry
+                            .as_ref()
+                            .is_some_and(|r| r.retries_status(status));
                     if !retry_this {
                         return finish(response, self.response_headers.as_ref());
                     }
@@ -273,10 +275,7 @@ impl HostProxy {
                     // and processed, with the response lost on the way back, so
                     // replaying it could double a write.
                     if !(retryable_left && err.is_connect()) {
-                        return error(
-                            StatusCode::BAD_GATEWAY,
-                            "the upstream could not be reached",
-                        );
+                        return error(StatusCode::BAD_GATEWAY, "the upstream could not be reached");
                     }
                 }
             }
@@ -289,10 +288,7 @@ impl HostProxy {
         }
 
         let Some(response) = last_response else {
-            return error(
-                StatusCode::BAD_GATEWAY,
-                "the upstream could not be reached",
-            );
+            return error(StatusCode::BAD_GATEWAY, "the upstream could not be reached");
         };
 
         let (mut parts, body) = response.into_parts();

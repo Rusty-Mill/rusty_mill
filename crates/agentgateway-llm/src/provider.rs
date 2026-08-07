@@ -187,11 +187,16 @@ mod tests {
     #[test]
     fn default_endpoints_are_the_real_ones() {
         let openai = Provider::new(&AiProvider::OpenAi(params(None, None)), "t").expect("ok");
-        assert_eq!(openai.endpoint(), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            openai.endpoint(),
+            "https://api.openai.com/v1/chat/completions"
+        );
 
-        let anthropic =
-            Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
-        assert_eq!(anthropic.endpoint(), "https://api.anthropic.com/v1/messages");
+        let anthropic = Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
+        assert_eq!(
+            anthropic.endpoint(),
+            "https://api.anthropic.com/v1/messages"
+        );
     }
 
     #[test]
@@ -217,14 +222,11 @@ mod tests {
             vec![("authorization", "Bearer sk-1".to_string())]
         );
 
-        let anthropic =
-            Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
+        let anthropic = Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
         let headers = anthropic.auth_headers(Some("sk-ant"));
         assert!(headers.contains(&("x-api-key", "sk-ant".to_string())));
         assert!(
-            headers
-                .iter()
-                .any(|(name, _)| *name == "anthropic-version"),
+            headers.iter().any(|(name, _)| *name == "anthropic-version"),
             "Anthropic rejects a request without a version header"
         );
     }
@@ -233,8 +235,7 @@ mod tests {
     fn the_version_header_is_sent_even_without_a_key() {
         // Otherwise a keyless misconfiguration produces a confusing "missing
         // version" error instead of the authentication one it really is.
-        let anthropic =
-            Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
+        let anthropic = Provider::new(&AiProvider::Anthropic(params(None, None)), "t").expect("ok");
         let headers = anthropic.auth_headers(None);
         assert_eq!(headers.len(), 1);
         assert_eq!(headers[0].0, "anthropic-version");
@@ -283,9 +284,11 @@ mod tests {
 
     #[test]
     fn a_forced_model_is_reported() {
-        let provider =
-            Provider::new(&AiProvider::Anthropic(params(Some("claude-sonnet-4"), None)), "t")
-                .expect("ok");
+        let provider = Provider::new(
+            &AiProvider::Anthropic(params(Some("claude-sonnet-4"), None)),
+            "t",
+        )
+        .expect("ok");
         assert_eq!(provider.forced_model(), Some("claude-sonnet-4"));
     }
 }

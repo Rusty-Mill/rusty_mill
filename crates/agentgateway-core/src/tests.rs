@@ -94,7 +94,10 @@ binds:
 "#,
     );
 
-    assert_eq!(named(router.select(8080, &get("/admin"))).as_deref(), Some("admin"));
+    assert_eq!(
+        named(router.select(8080, &get("/admin"))).as_deref(),
+        Some("admin")
+    );
     assert_eq!(
         named(router.select(8080, &get("/admin/users"))).as_deref(),
         Some("admin")
@@ -133,7 +136,10 @@ binds:
         .header("x-canary", "true")
         .body(())
         .expect("request should build");
-    assert_eq!(named(router.select(8080, &canary)).as_deref(), Some("with-header"));
+    assert_eq!(
+        named(router.select(8080, &canary)).as_deref(),
+        Some("with-header")
+    );
     assert_eq!(
         named(router.select(8080, &get("/api/thing"))).as_deref(),
         Some("plain"),

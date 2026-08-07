@@ -253,7 +253,10 @@ mod tests {
         for _ in 0..3 {
             assert!(limiter.check_at(now).is_ok());
         }
-        assert!(limiter.check_at(now).is_err(), "the fourth exceeds the burst");
+        assert!(
+            limiter.check_at(now).is_err(),
+            "the fourth exceeds the burst"
+        );
     }
 
     #[test]
@@ -300,7 +303,9 @@ mod tests {
             assert!(limiter.check_at(start + Duration::from_millis(ms)).is_err());
         }
         assert!(
-            limiter.check_at(start + Duration::from_millis(1000)).is_ok(),
+            limiter
+                .check_at(start + Duration::from_millis(1000))
+                .is_ok(),
             "the token must arrive exactly one interval after the last fill"
         );
     }

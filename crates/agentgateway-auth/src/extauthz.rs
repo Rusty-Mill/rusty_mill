@@ -115,7 +115,10 @@ impl ExtAuthz {
                 .collect()
         };
 
-        let timeout = policy.timeout.map(Duration::from).unwrap_or(DEFAULT_TIMEOUT);
+        let timeout = policy
+            .timeout
+            .map(Duration::from)
+            .unwrap_or(DEFAULT_TIMEOUT);
 
         Ok(ExtAuthz {
             target,
@@ -191,7 +194,10 @@ impl ExtAuthz {
     }
 
     /// The subset of the authorizer's headers allowed onto the upstream call.
-    fn upstream_headers(&self, from: &reqwest::header::HeaderMap) -> Vec<(HeaderName, HeaderValue)> {
+    fn upstream_headers(
+        &self,
+        from: &reqwest::header::HeaderMap,
+    ) -> Vec<(HeaderName, HeaderValue)> {
         self.allowed_upstream
             .iter()
             .filter_map(|name| {

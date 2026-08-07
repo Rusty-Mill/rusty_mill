@@ -25,6 +25,8 @@ rmcp = { workspace = true, features = [
 tokio = { workspace = true, features = ["rt", "macros", "process", "sync"] }
 serde_json = { workspace = true }
 regex = { workspace = true }
+cel = { workspace = true }
+http = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 process-wrap = { version = "9", features = ["tokio1"] }

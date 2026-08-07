@@ -174,7 +174,11 @@ impl CompiledListener {
         for (r, route) in listener.routes.iter().enumerate() {
             let id = *next_id;
             *next_id += 1;
-            routes.push(CompiledRoute::build(route, &format!("{at}.routes[{r}]"), id)?);
+            routes.push(CompiledRoute::build(
+                route,
+                &format!("{at}.routes[{r}]"),
+                id,
+            )?);
         }
 
         let mut order = Vec::new();
@@ -292,11 +296,7 @@ pub struct CompiledRoute {
 }
 
 impl CompiledRoute {
-    fn build(
-        route: &agentgateway_config::Route,
-        at: &str,
-        id: usize,
-    ) -> Result<Self, RouterError> {
+    fn build(route: &agentgateway_config::Route, at: &str, id: usize) -> Result<Self, RouterError> {
         let mut matches = Vec::with_capacity(route.matches.len());
         for (m, matcher) in route.matches.iter().enumerate() {
             matches.push(RouteMatcher::build(matcher, &format!("{at}.matches[{m}]"))?);

@@ -73,7 +73,7 @@ pub struct Policies {
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 4] = [
+        let unimplemented: [(&str, bool); 3] = [
             (
                 "extAuthz.includeBody",
                 self.ext_authz
@@ -81,12 +81,6 @@ impl Policies {
                     .is_some_and(|e| e.include_body.is_some()),
             ),
             ("ai", self.ai.is_some()),
-            (
-                "mcpAuthorization.rules",
-                self.mcp_authorization
-                    .as_ref()
-                    .is_some_and(|a| !a.rules.is_empty()),
-            ),
             (
                 "localRateLimit[type=tokens]",
                 self.local_rate_limit
@@ -250,14 +244,122 @@ one_of_enum! {
     }
 }
 
+/// One CEL rule in an `mcpAuthorization` policy.
+///
+/// A bare string is an [`AuthorizationRule::Allow`], which is how upstream's
+/// own examples are written; the map forms exist for the other two modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorizationRule {
+    /// Permit the call when this expression is true.
+    Allow(String),
+
+    /// Refuse the call when this expression is true.
+    ///
+    /// Read the warning on [`AuthorizationRule`]'s `deny` arm in the config
+    /// docs before reaching for it: an expression that fails to evaluate
+    /// counts as false, so a `deny` that errors lets the call through.
+    Deny(String),
+
+    /// Refuse the call unless this expression is true.
+    ///
+    /// The safe way to express "deny": a `require` that fails to evaluate
+    /// refuses, where a `deny` that fails to evaluate permits.
+    Require(String),
+}
+
+impl AuthorizationRule {
+    /// The expression text, whichever mode this is.
+    pub fn expression(&self) -> &str {
+        match self {
+            AuthorizationRule::Allow(text)
+            | AuthorizationRule::Deny(text)
+            | AuthorizationRule::Require(text) => text,
+        }
+    }
+}
+
+/// The wire shape: either a bare string or a single-key map.
+///
+/// Untagged over a struct of optional fields rather than an externally-tagged
+/// enum, because `serde_yaml` 0.9 encodes those as YAML tags (`!allow expr`)
+/// and rejects the map form upstream's configs actually use.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum RuleRepr {
+    Bare(String),
+    Tagged {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deny: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        require: Option<String>,
+    },
+}
+
+impl<'de> Deserialize<'de> for AuthorizationRule {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        match RuleRepr::deserialize(deserializer)? {
+            RuleRepr::Bare(text) => Ok(AuthorizationRule::Allow(text)),
+            RuleRepr::Tagged {
+                allow,
+                deny,
+                require,
+            } => {
+                // Two modes in one rule has no single meaning, and guessing
+                // one would quietly enforce something nobody wrote.
+                let mut found = [
+                    allow.map(AuthorizationRule::Allow),
+                    deny.map(AuthorizationRule::Deny),
+                    require.map(AuthorizationRule::Require),
+                ]
+                .into_iter()
+                .flatten();
+
+                let first = found.next().ok_or_else(|| {
+                    D::Error::custom("a rule needs one of `allow`, `deny` or `require`")
+                })?;
+                if found.next().is_some() {
+                    return Err(D::Error::custom(
+                        "a rule names only one of `allow`, `deny` or `require`",
+                    ));
+                }
+                Ok(first)
+            }
+        }
+    }
+}
+
+impl Serialize for AuthorizationRule {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let repr = match self {
+            AuthorizationRule::Allow(text) => RuleRepr::Bare(text.clone()),
+            AuthorizationRule::Deny(text) => RuleRepr::Tagged {
+                allow: None,
+                deny: Some(text.clone()),
+                require: None,
+            },
+            AuthorizationRule::Require(text) => RuleRepr::Tagged {
+                allow: None,
+                deny: None,
+                require: Some(text.clone()),
+            },
+        };
+        repr.serialize(serializer)
+    }
+}
+
 /// Tool-level authorization for MCP backends.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpAuthorization {
-    /// Upstream policy expressions. Accepted for compatibility; this build
-    /// does not evaluate them, and [`Policies::lint`] says so at startup.
+    /// CEL expressions evaluated against each tool call.
+    ///
+    /// The context is `mcp.tool.name`, `mcp.tool.target` and `jwt`, the
+    /// verified token's claims.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rules: Vec<String>,
+    pub rules: Vec<AuthorizationRule>,
 
     /// Tools callable through this route, as unanchored regexes over the
     /// federated (prefixed) name. Empty allows all not denied below.
