@@ -950,7 +950,11 @@ same `server.api_key_env`/`[[clients]]`/`[jwt]` auth every other route
 already uses — there's no separate MCP auth model to configure. An upstream
 that fails to connect at startup is logged and simply absent from the tool
 list, the same soft-failure pattern `[jwt]`/`[webhook]`/`[persistence]`
-already use.
+already use, until `rp-server` restarts. An upstream that connects and
+*later* drops is different: it's reconnected automatically with
+exponential backoff (`reconnect_backoff_secs`/`reconnect_backoff_max_secs`/
+`max_reconnect_attempts` under `[mcp]`) — see [docs/MCP.md](docs/MCP.md)
+for the details.
 
 For a desktop client that spawns its MCP server as a stdio subprocess
 instead of talking HTTP, set `MCP_STDIO=1` when starting `rp-server` — it

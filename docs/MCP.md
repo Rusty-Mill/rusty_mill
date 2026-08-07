@@ -46,9 +46,29 @@ gateway proxying. An upstream that fails to connect at startup (bad
 command, unreachable URL, wrong `bearer_token_env`) is logged and simply
 absent from the tool list, not a hard failure of the whole server — the
 same soft-failure pattern `[jwt]`/`[webhook]`/`[persistence]` already use.
-Reconnect-with-backoff for a connection that drops *after* startup isn't
-implemented yet; a dead connection just starts failing its calls, which the
-client sees as an ordinary tool error.
+It stays absent until `rp-server` restarts; a startup failure isn't
+retried, since there's nothing yet to know a connection *dropped from*.
+
+A connection that drops *after* connecting is different: a background
+task per upstream reconnects it with exponential backoff, so a transient
+outage (the upstream process crashes and gets supervised back up, a
+network blip on an HTTP upstream) recovers on its own. Configurable via
+`[mcp]`:
+
+```toml
+[mcp]
+enabled = true
+reconnect_backoff_secs = 1        # optional, this is the default
+reconnect_backoff_max_secs = 60   # optional, this is the default
+# max_reconnect_attempts = 10     # optional -- unset (default) retries forever
+```
+
+The delay doubles after each failed attempt, capped at
+`reconnect_backoff_max_secs`. While an upstream is down (mid-backoff or
+permanently given up on), its tools are simply absent from `tools/list`
+and any `tools/call` naming it gets `GatewayError::UnknownUpstream` --
+the same shape of error as a typo'd upstream name, not a distinct "it's
+reconnecting" state a client needs to handle specially.
 
 ## Auth
 
@@ -112,7 +132,6 @@ reference for the exact call shapes if you're integrating a client.
 
 ## Out of scope for now
 
-- Reconnect-with-backoff for a dropped upstream connection.
 - MCP prompts/resources — tools only.
 - Streaming chat completions as an MCP tool (no natural fit without MRTR
   tasks).
