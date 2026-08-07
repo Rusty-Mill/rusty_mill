@@ -15,18 +15,21 @@ Windows (MSVC), Linux, macOS. x86_64 and aarch64.
 | Paths | Canonical, absolute, `/`-normalized-for-display paths; capability-scoped roots (no `..`-escape) | `cap-std` |
 | Filesystem ops | Open/read/write/stat/list/create/remove within a scoped root | `cap-std` |
 | File locking | Advisory exclusive/shared locks, best-effort on all hosts | `std::fs::File` (stable since 1.89) |
-| Process spawn | Spawn with explicit argv/env/cwd, inherit or capture stdout/stderr, wait, kill | `std::process` |
+| Process spawn | Spawn with explicit argv/env/cwd, inherit or capture stdout/stderr, block until exit | `std::process` |
 | Stdio / PTY | Byte-stream stdio always; interactive PTY where the capability model reports `pty: true` | `portable-pty` |
 | Environment variables | Read/write current-process env as UTF-8 `HashMap<String, String>` | `std::env` |
 | Standard directories | Per-OS config/cache/data dirs for a named app, deterministic | `dirs` |
-| Errors | Structured `ContractError` — every failure carries a stable variant, not a raw OS errno/HRESULT leak | `thiserror` |
+| Errors | Structured `ContractError` — `PathEscape`/`NotFound`/`PermissionDenied`/`Unsupported` are stable categories; `Io` is the explicit fallback with the OS error retained as `source` for diagnostics only, never for callers to match on | `thiserror` |
 
 ## Capability model
 
 Tools MUST query `Capabilities::detect()` before depending on a
 non-baseline behavior. Known v1 fields:
 
-- `symlinks` — false on Windows without Developer Mode or elevated privilege.
+- `symlinks` — conservative baseline, not a hard platform fact: `true` on
+  Unix, `false` on Windows. Windows *can* create symlinks under Developer
+  Mode or elevated privilege; this crate does not yet probe for that, so
+  treat `false` as "not proven safe to assume," not "impossible."
 - `unix_permissions` — false on Windows; POSIX mode bits are not emulated.
 - `pty_win32_input_mode` — tracks the known `portable-pty` gap where
   `PSEUDOCONSOLE_WIN32_INPUT_MODE` / `PASSTHROUGH_MODE` are not passed
@@ -42,8 +45,11 @@ non-baseline behavior. Known v1 fields:
 - POSIX ownership (uid/gid) and permission-bit emulation on Windows.
 - Transparent POSIX shell-script portability (`#!/bin/sh` scripts are out of
   scope; this is a Rust runtime contract, not a shell compatibility layer).
-- Arbitrary Unix signal delivery beyond process termination
-  (SIGTERM/SIGKILL-equivalent only).
+- Arbitrary Unix signal delivery. `ProcessRunner::run` is synchronous
+  (spawn → capture → wait) and exposes no live handle to signal; `kill`/
+  `terminate` for a running child or PTY session is deferred to a future
+  live-child trait, not promised in this spike (see `PtyControl`'s
+  lifecycle docs in `crates/contract`).
 - Sandboxing/capability security in the WASI sense — this contract targets
   real dev-tool filesystem/process access, not a sandbox. (We deliberately
   did not build on WASI/wasmtime for this reason; see PR description.)

@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 /// Stable error surface. Adapters MUST map OS errno/HRESULT into one of
-/// these variants rather than leaking raw `std::io::Error` kinds.
+/// the specific variants below where possible. `Io` is the explicit
+/// fallback category for OS errors with no better match — its `source`
+/// is retained for diagnostics (logging, `Display`) only; callers MUST
+/// match on the variant, never on message text, to stay portable.
 #[derive(Debug, thiserror::Error)]
 pub enum ContractError {
     #[error("path escapes scoped root: {0}")]
@@ -21,8 +24,26 @@ pub enum ContractError {
     PermissionDenied(String),
     #[error("unsupported on this host: {0}")]
     Unsupported(String),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("io error: {source}")]
+    Io {
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+impl From<std::io::Error> for ContractError {
+    /// Categorizes by `ErrorKind` into a stable variant; only errors with
+    /// no better category fall through to `Io`.
+    fn from(err: std::io::Error) -> Self {
+        match err.kind() {
+            std::io::ErrorKind::NotFound => ContractError::NotFound(err.to_string()),
+            std::io::ErrorKind::PermissionDenied => {
+                ContractError::PermissionDenied(err.to_string())
+            }
+            std::io::ErrorKind::Unsupported => ContractError::Unsupported(err.to_string()),
+            _ => ContractError::Io { source: err },
+        }
+    }
 }
 
 pub type Result<T, E = ContractError> = std::result::Result<T, E>;
@@ -32,6 +53,11 @@ pub type Result<T, E = ContractError> = std::result::Result<T, E>;
 /// themselves — that keeps the divergence list in one place (CONTRACT.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
+    /// Conservative baseline, not a hard platform fact: `true` on Unix,
+    /// `false` on Windows. Windows *can* create symlinks under Developer
+    /// Mode or elevated privilege, but this crate does not yet probe for
+    /// that — treat `false` here as "not proven safe to assume," not as
+    /// "impossible on this host."
     pub symlinks: bool,
     pub unix_permissions: bool,
     /// Tracks the known `portable-pty` gap: ConPTY's
@@ -136,6 +162,16 @@ pub struct PtySpawn {
 }
 
 /// Out-of-band control for a live PTY session: resize and wait-for-exit.
+///
+/// Lifecycle, since ownership is split across `PtySpawn`'s three fields:
+/// `reader`, `writer`, and `control` are each independently droppable —
+/// dropping one does not drop or close the others. Dropping `control`
+/// closes the pty master, which hangs up the child (SIGHUP-equivalent on
+/// Unix, the ConPTY-equivalent on Windows) but does **not** explicitly
+/// kill it and does **not** reap it. `wait` is the only way to reap the
+/// child and obtain its exit status; it blocks and has a single owner —
+/// there is no way for more than one caller to await it. There is no
+/// `kill`/`terminate` method in this spike (see CONTRACT.md).
 pub trait PtyControl: Send {
     fn resize(&mut self, cols: u16, rows: u16) -> Result<()>;
     fn wait(&mut self) -> Result<i32>;
@@ -186,5 +222,32 @@ mod tests {
         let spec = ProcessSpec::new("echo").arg("a").arg("b");
         assert_eq!(spec.args, vec!["a".to_string(), "b".to_string()]);
         assert!(spec.inherit_env);
+    }
+
+    #[test]
+    fn io_errors_categorize_into_stable_variants() {
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert!(matches!(
+            ContractError::from(not_found),
+            ContractError::NotFound(_)
+        ));
+
+        let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            ContractError::from(denied),
+            ContractError::PermissionDenied(_)
+        ));
+
+        let unsupported = std::io::Error::from(std::io::ErrorKind::Unsupported);
+        assert!(matches!(
+            ContractError::from(unsupported),
+            ContractError::Unsupported(_)
+        ));
+
+        // No specific category: falls through to `Io`, source retained.
+        let other = std::io::Error::from(std::io::ErrorKind::Other);
+        let mapped = ContractError::from(other);
+        assert!(matches!(mapped, ContractError::Io { .. }));
+        assert!(std::error::Error::source(&mapped).is_some());
     }
 }
