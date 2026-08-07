@@ -8,7 +8,13 @@
 //!   rules:
 //!     - 'mcp.tool.name == "echo"'
 //!     - 'jwt.sub == "test-user" && mcp.tool.name == "get-sum"'
+//!     - 'mcp.prompt.name == "summarize"'
+//!     - 'mcp.resource.name.startsWith("memo:")'
 //! ```
+//!
+//! Tools, prompts and resources are all gated the same way, and exactly one of
+//! `mcp.tool`, `mcp.prompt` and `mcp.resource` is bound per call — see
+//! [`Subject`], which is where that decision does the most work.
 //!
 //! # The name a rule sees is the unqualified one
 //!
@@ -92,13 +98,68 @@ impl Rule {
     }
 }
 
+/// What kind of thing a rule is being asked about.
+///
+/// Exactly one of `mcp.tool`, `mcp.prompt` and `mcp.resource` is bound for any
+/// one call, which is upstream's shape and it carries real weight: on a
+/// `prompts/get`, the expression `mcp.tool.name == "echo"` does not resolve, so
+/// it reads as **false** rather than as "not about tools, ignore me".
+///
+/// The consequence is worth stating plainly, because it is the one that
+/// surprises people. A rule set written entirely as tool `allow` rules is an
+/// allow-list that nothing in the prompt or resource space can satisfy, so it
+/// refuses every prompt and resource. That is the safe direction — a rule set
+/// that had never heard of prompts should not wave them through — but it does
+/// mean adding prompts to a target behind an existing tool allow-list takes an
+/// explicit rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subject<'a> {
+    /// A tool, by its own name on its target.
+    Tool(&'a str),
+    /// A prompt, by its own name on its target.
+    Prompt(&'a str),
+    /// A resource, by its URI as its target publishes it.
+    ///
+    /// Bound as `mcp.resource.name`, not `.uri` — upstream names the field for
+    /// the shape it shares with tools and prompts rather than for what a
+    /// resource happens to call its identifier.
+    Resource(&'a str),
+}
+
+impl<'a> Subject<'a> {
+    /// The CEL key this subject binds under.
+    fn key(&self) -> &'static str {
+        match self {
+            Subject::Tool(_) => "tool",
+            Subject::Prompt(_) => "prompt",
+            Subject::Resource(_) => "resource",
+        }
+    }
+
+    /// The name or URI itself.
+    fn name(&self) -> &'a str {
+        match self {
+            Subject::Tool(name) | Subject::Prompt(name) | Subject::Resource(name) => name,
+        }
+    }
+
+    /// What to call this in an error a caller will read.
+    pub fn noun(&self) -> &'static str {
+        match self {
+            Subject::Tool(_) => "tool",
+            Subject::Prompt(_) => "prompt",
+            Subject::Resource(_) => "resource",
+        }
+    }
+}
+
 /// What a rule is evaluated against.
 #[derive(Debug, Clone, Copy)]
-pub struct ToolCall<'a> {
-    /// The target the tool belongs to.
+pub struct Call<'a> {
+    /// The target the subject belongs to.
     pub target: &'a str,
-    /// The tool's own name on that target, unqualified.
-    pub tool: &'a str,
+    /// What is being accessed.
+    pub subject: Subject<'a>,
     /// Claims from the verified token, absent when the route has no `jwtAuth`.
     pub claims: Option<&'a serde_json::Value>,
 }
@@ -160,7 +221,7 @@ impl RuleSet {
     ///    A set of pure `deny` rules is a deny-list, so what it does not name
     ///    is permitted; the moment one `allow` exists the set becomes an
     ///    allow-list and an unmatched call is refused.
-    pub fn permits(&self, call: ToolCall<'_>) -> bool {
+    pub fn permits(&self, call: Call<'_>) -> bool {
         if self.is_empty() {
             return true;
         }
@@ -190,10 +251,15 @@ impl RuleSet {
     /// so `jwt.sub == "x"` fails to resolve and reads as false. Binding null
     /// would make `jwt.sub` an error too, but leaving it out also keeps
     /// `has(jwt)` honest.
-    fn context(call: ToolCall<'_>) -> Option<Context<'static>> {
+    fn context(call: Call<'_>) -> Option<Context<'static>> {
         let mut context = Context::default();
+        // Only the subject's own key is bound. A tool rule asked about a prompt
+        // finds no `mcp.tool`, fails to resolve, and reads as false.
         let mcp = serde_json::json!({
-            "tool": { "name": call.tool, "target": call.target },
+            call.subject.key(): {
+                "name": call.subject.name(),
+                "target": call.target,
+            },
         });
         context.add_variable("mcp", mcp).ok()?;
         if let Some(claims) = call.claims {
@@ -208,7 +274,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn rules(rules: Vec<AuthorizationRule>) -> RuleSet {
+    pub(super) fn rules(rules: Vec<AuthorizationRule>) -> RuleSet {
         RuleSet::new(&rules, "test").expect("rules should compile")
     }
 
@@ -216,15 +282,19 @@ mod tests {
         AuthorizationRule::Allow(expression.to_string())
     }
 
-    fn call<'a>(
-        target: &'a str,
-        tool: &'a str,
-        claims: Option<&'a serde_json::Value>,
-    ) -> ToolCall<'a> {
-        ToolCall {
+    fn call<'a>(target: &'a str, tool: &'a str, claims: Option<&'a serde_json::Value>) -> Call<'a> {
+        Call {
             target,
-            tool,
+            subject: Subject::Tool(tool),
             claims,
+        }
+    }
+
+    pub(super) fn about<'a>(target: &'a str, subject: Subject<'a>) -> Call<'a> {
+        Call {
+            target,
+            subject,
+            claims: None,
         }
     }
 
@@ -375,5 +445,154 @@ mod tests {
             err.to_string().contains("mcpAuthorization.rules[0]"),
             "got: {err}"
         );
+    }
+}
+
+#[cfg(test)]
+mod subject_tests {
+    use super::tests::*;
+    use super::*;
+    use serde_json::json;
+
+    fn deny(expression: &str) -> AuthorizationRule {
+        AuthorizationRule::Deny(expression.to_string())
+    }
+
+    fn require(expression: &str) -> AuthorizationRule {
+        AuthorizationRule::Require(expression.to_string())
+    }
+
+    #[test]
+    fn a_prompt_rule_gates_prompts() {
+        let set = rules(vec![AuthorizationRule::Allow(
+            r#"mcp.prompt.name == "summarize""#.into(),
+        )]);
+        assert!(set.permits(about("alpha", Subject::Prompt("summarize"))));
+        assert!(!set.permits(about("alpha", Subject::Prompt("leak"))));
+    }
+
+    #[test]
+    fn a_resource_rule_matches_on_the_uri() {
+        // `mcp.resource.name` holds the URI. Upstream names the field for the
+        // shape it shares with tools and prompts, not for what a resource
+        // calls its identifier.
+        let set = rules(vec![AuthorizationRule::Allow(
+            r#"mcp.resource.name.startsWith("memo:")"#.into(),
+        )]);
+        assert!(set.permits(about("alpha", Subject::Resource("memo:insights"))));
+        assert!(!set.permits(about("alpha", Subject::Resource("file:///etc/passwd"))));
+    }
+
+    #[test]
+    fn a_rule_sees_the_unqualified_name_for_every_subject() {
+        // Same split as tools: the pair before federation joins them.
+        let set = rules(vec![AuthorizationRule::Allow(
+            r#"mcp.prompt.target == "alpha" && mcp.prompt.name == "summarize""#.into(),
+        )]);
+        assert!(set.permits(about("alpha", Subject::Prompt("summarize"))));
+        assert!(
+            !set.permits(about("alpha", Subject::Prompt("alpha_summarize"))),
+            "a rule written against the federated name must not fire"
+        );
+    }
+
+    #[test]
+    fn only_the_subjects_own_key_is_bound() {
+        // The decision that carries the most weight. On a prompt call
+        // `mcp.tool` does not resolve, so a tool rule reads as false rather
+        // than as "not about tools, ignore me".
+        let set = rules(vec![AuthorizationRule::Allow(
+            r#"mcp.tool.name == "echo""#.into(),
+        )]);
+        assert!(set.permits(about("alpha", Subject::Tool("echo"))));
+        assert!(!set.permits(about("alpha", Subject::Prompt("echo"))));
+        assert!(!set.permits(about("alpha", Subject::Resource("echo"))));
+    }
+
+    #[test]
+    fn a_tool_allow_list_refuses_prompts_and_resources() {
+        // The consequence of the above, and the one that surprises people:
+        // adding prompts to a target behind an existing tool allow-list takes
+        // an explicit rule. It is the safe direction -- a rule set that had
+        // never heard of prompts should not wave them through -- but it is a
+        // real behaviour change and it is pinned here.
+        let set = rules(vec![AuthorizationRule::Allow(
+            r#"mcp.tool.name == "echo""#.into(),
+        )]);
+        assert!(!set.permits(about("alpha", Subject::Prompt("anything"))));
+        assert!(!set.permits(about("alpha", Subject::Resource("memo:x"))));
+    }
+
+    #[test]
+    fn a_pure_deny_list_still_permits_other_subjects() {
+        // The mirror image: a deny-list names what is refused, so a prompt it
+        // does not name survives. Nothing here depends on subject kind, which
+        // is the point.
+        let set = rules(vec![deny(r#"mcp.tool.name == "delete""#)]);
+        assert!(set.permits(about("alpha", Subject::Prompt("anything"))));
+        assert!(set.permits(about("alpha", Subject::Resource("memo:x"))));
+        assert!(!set.permits(about("alpha", Subject::Tool("delete"))));
+    }
+
+    #[test]
+    fn subjects_can_be_mixed_in_one_rule_set() {
+        let set = rules(vec![
+            AuthorizationRule::Allow(r#"mcp.tool.name == "echo""#.into()),
+            AuthorizationRule::Allow(r#"mcp.prompt.name == "summarize""#.into()),
+            AuthorizationRule::Allow(r#"mcp.resource.name == "memo:insights""#.into()),
+        ]);
+        assert!(set.permits(about("alpha", Subject::Tool("echo"))));
+        assert!(set.permits(about("alpha", Subject::Prompt("summarize"))));
+        assert!(set.permits(about("alpha", Subject::Resource("memo:insights"))));
+        assert!(!set.permits(about("alpha", Subject::Tool("summarize"))));
+    }
+
+    #[test]
+    fn a_require_applies_across_every_subject() {
+        // A require is the way to write a rule that is genuinely about the
+        // caller rather than about one kind of thing.
+        let set = rules(vec![require(r#"jwt.role == "admin""#)]);
+        let admin = json!({"role": "admin"});
+        let viewer = json!({"role": "viewer"});
+
+        for subject in [
+            Subject::Tool("echo"),
+            Subject::Prompt("summarize"),
+            Subject::Resource("memo:x"),
+        ] {
+            assert!(set.permits(Call {
+                target: "alpha",
+                subject,
+                claims: Some(&admin),
+            }));
+            assert!(!set.permits(Call {
+                target: "alpha",
+                subject,
+                claims: Some(&viewer),
+            }));
+            assert!(
+                !set.permits(Call {
+                    target: "alpha",
+                    subject,
+                    claims: None,
+                }),
+                "an unevaluable require refuses, for every subject"
+            );
+        }
+    }
+
+    #[test]
+    fn a_deny_that_cannot_be_evaluated_still_permits() {
+        // Unchanged by widening the subject, and worth pinning again here:
+        // this is why the docs recommend `require` over `deny`.
+        let set = rules(vec![deny(r#"jwt.role == "banned""#)]);
+        assert!(set.permits(about("alpha", Subject::Prompt("summarize"))));
+    }
+
+    #[test]
+    fn a_subject_names_itself_for_error_messages() {
+        assert_eq!(Subject::Tool("x").noun(), "tool");
+        assert_eq!(Subject::Prompt("x").noun(), "prompt");
+        assert_eq!(Subject::Resource("x").noun(), "resource");
     }
 }

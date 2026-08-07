@@ -19,8 +19,11 @@ use agentgateway_config::{McpAuthorization, McpBackend, McpGuardrails};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        GetPromptRequestParams, GetPromptResponse, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, Prompt,
+        ReadResourceRequestParams, ReadResourceResponse, Resource, ResourceContents,
+        ResourceTemplate, ServerCapabilities, ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -31,13 +34,18 @@ use crate::{
     guardrails::{CallContext, Guardrails, GuardrailsError, Outcome},
     mutating_client::HeaderOverride,
     naming::{Resolution, ToolNamer},
-    rules::{RuleError, RuleSet, ToolCall},
+    rules::{Call, RuleError, RuleSet, Subject},
     target::Target,
 };
 
 /// JSON-RPC method names the guardrail chain is keyed on.
 const TOOLS_CALL: &str = "tools/call";
 const TOOLS_LIST: &str = "tools/list";
+const PROMPTS_LIST: &str = "prompts/list";
+const PROMPTS_GET: &str = "prompts/get";
+const RESOURCES_LIST: &str = "resources/list";
+const RESOURCES_TEMPLATES_LIST: &str = "resources/templates/list";
+const RESOURCES_READ: &str = "resources/read";
 
 /// The verified token's claims, carried on the HTTP request.
 ///
@@ -90,6 +98,12 @@ struct Inner {
     /// Federated name to target name. Only consulted in passthrough mode,
     /// where the name carries no target to resolve from.
     index: RwLock<HashMap<String, String>>,
+    /// The same, for prompts. Kept apart from the tool index because a target
+    /// may export a prompt and a tool of the same name, and they route
+    /// independently.
+    prompt_index: RwLock<HashMap<String, String>>,
+    /// The same, for resource URIs.
+    resource_index: RwLock<HashMap<String, String>>,
 }
 
 impl std::fmt::Debug for Federation {
@@ -161,6 +175,8 @@ impl Federation {
                 targets,
                 degraded,
                 index: RwLock::new(HashMap::new()),
+                prompt_index: RwLock::new(HashMap::new()),
+                resource_index: RwLock::new(HashMap::new()),
             }),
         };
 
@@ -297,9 +313,30 @@ fn claims(context: &RequestContext<RoleServer>) -> Option<&serde_json::Value> {
 
 impl ServerHandler for Federation {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            rmcp::model::Implementation::new("rusty-agent-gateway", env!("CARGO_PKG_VERSION")),
-        )
+        // Advertise a capability only when some target actually has it.
+        // Claiming prompts the federation cannot serve would have clients
+        // calling `prompts/list` to be told the method does not exist.
+        // Filled in field by field rather than through the typestate builder,
+        // whose chained methods cannot be applied conditionally.
+        let mut capabilities = ServerCapabilities::default();
+        capabilities.tools = Some(Default::default());
+        capabilities.prompts = self
+            .inner
+            .targets
+            .iter()
+            .any(Target::serves_prompts)
+            .then(Default::default);
+        capabilities.resources = self
+            .inner
+            .targets
+            .iter()
+            .any(Target::serves_resources)
+            .then(Default::default);
+
+        ServerInfo::new(capabilities).with_server_info(rmcp::model::Implementation::new(
+            "rusty-agent-gateway",
+            env!("CARGO_PKG_VERSION"),
+        ))
     }
 
     async fn list_tools(
@@ -373,9 +410,9 @@ impl ServerHandler for Federation {
                 // in it -- `call_tool` re-checks every gate.
                 index.insert(federated.clone(), target.name.clone());
 
-                if !self.inner.rules.permits(ToolCall {
+                if !self.inner.rules.permits(Call {
                     target: &target.name,
-                    tool: &tool.name,
+                    subject: Subject::Tool(&tool.name),
                     claims,
                 }) {
                     continue;
@@ -427,9 +464,9 @@ impl ServerHandler for Federation {
         // they are written against the tool's own name and its target -- see
         // the module docs on `rules`. Like every other gate this runs on the
         // call, not only on the listing.
-        if !self.inner.rules.permits(ToolCall {
+        if !self.inner.rules.permits(Call {
             target: &target.name,
-            tool: &tool,
+            subject: Subject::Tool(&tool),
             claims: claims(&context),
         }) {
             return Err(McpError::invalid_request(
@@ -544,6 +581,488 @@ impl ServerHandler for Federation {
         };
 
         Ok(CallToolResponse::Complete(result))
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        let claims = claims(&context);
+        let targets: Vec<&Target> = self
+            .inner
+            .targets
+            .iter()
+            .filter(|t| t.serves_prompts())
+            .collect();
+        let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+
+        let headers = self
+            .guard_request(PROMPTS_LIST, &backends, None, &context)
+            .await?;
+
+        let mut prompts: Vec<Prompt> = Vec::new();
+        let mut index = HashMap::new();
+
+        for target in targets {
+            let Some(upstream) = self
+                .with_timeout(target.prompts(&headers), target, "prompts")
+                .await
+            else {
+                continue;
+            };
+
+            for mut prompt in upstream {
+                let federated = self.inner.namer.qualify(&target.name, &prompt.name);
+
+                // Indexed before the caller-dependent gate, for the same
+                // reason as tools: `rules` can answer differently per caller,
+                // and an index built from one caller's view would delete the
+                // routing another caller needs.
+                index.insert(federated.clone(), target.name.clone());
+
+                if !self.inner.rules.permits(Call {
+                    target: &target.name,
+                    subject: Subject::Prompt(&prompt.name),
+                    claims,
+                }) {
+                    continue;
+                }
+
+                prompt.name = federated;
+                prompts.push(prompt);
+            }
+        }
+
+        *self.inner.prompt_index.write().await = index;
+
+        let listing = ListPromptsResult {
+            prompts,
+            ..Default::default()
+        };
+        self.guard_response(PROMPTS_LIST, &backends, &listing, &context)
+            .await
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
+        let federated = request.name.clone();
+
+        let Some((target, name)) = self.route_prompt(&federated).await else {
+            return Err(McpError::invalid_params(
+                format!("unknown prompt `{federated}`"),
+                None,
+            ));
+        };
+
+        // Checked on the fetch, not only on the listing. Nothing stops a
+        // client asking for a name it was never shown.
+        self.permit(&target.name, Subject::Prompt(&name), &federated, &context)?;
+
+        let mut params = request;
+        params.name = name;
+
+        let backends = vec![target.name.clone()];
+        let headers = self
+            .guard_request_json(PROMPTS_GET, &backends, &params, &context)
+            .await?;
+        let (params, headers) = (headers.body.unwrap_or(params), headers.headers);
+
+        let result = self
+            .with_timeout(target.get_prompt(params, &headers), target, "prompts/get")
+            .await
+            .ok_or_else(|| {
+                McpError::internal_error(format!("fetching `{federated}` failed"), None)
+            })?;
+
+        let result = self
+            .guard_response(PROMPTS_GET, &backends, &result, &context)
+            .await?;
+
+        Ok(GetPromptResponse::Complete(result))
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let claims = claims(&context);
+        let targets: Vec<&Target> = self
+            .inner
+            .targets
+            .iter()
+            .filter(|t| t.serves_resources())
+            .collect();
+        let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+
+        let headers = self
+            .guard_request(RESOURCES_LIST, &backends, None, &context)
+            .await?;
+
+        let mut resources: Vec<Resource> = Vec::new();
+        let mut index = HashMap::new();
+
+        for target in targets {
+            let Some(upstream) = self
+                .with_timeout(target.resources(&headers), target, "resources")
+                .await
+            else {
+                continue;
+            };
+
+            for mut resource in upstream {
+                let federated = self.inner.namer.qualify_uri(&target.name, &resource.uri);
+                index.insert(federated.clone(), target.name.clone());
+
+                if !self.inner.rules.permits(Call {
+                    target: &target.name,
+                    subject: Subject::Resource(&resource.uri),
+                    claims,
+                }) {
+                    continue;
+                }
+
+                resource.uri = federated;
+                resources.push(resource);
+            }
+        }
+
+        *self.inner.resource_index.write().await = index;
+
+        let listing = ListResourcesResult {
+            resources,
+            ..Default::default()
+        };
+        self.guard_response(RESOURCES_LIST, &backends, &listing, &context)
+            .await
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let claims = claims(&context);
+        let targets: Vec<&Target> = self
+            .inner
+            .targets
+            .iter()
+            .filter(|t| t.serves_resources())
+            .collect();
+        let backends: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+
+        let headers = self
+            .guard_request(RESOURCES_TEMPLATES_LIST, &backends, None, &context)
+            .await?;
+
+        let mut templates: Vec<ResourceTemplate> = Vec::new();
+
+        for target in targets {
+            let Some(upstream) = self
+                .with_timeout(
+                    target.resource_templates(&headers),
+                    target,
+                    "resources/templates",
+                )
+                .await
+            else {
+                continue;
+            };
+
+            for mut template in upstream {
+                // A template is gated on its `uriTemplate`, which is what
+                // upstream matches too -- a rule that permits a template
+                // permits the shape, and each concrete read is gated again on
+                // its own URI when it arrives.
+                if !self.inner.rules.permits(Call {
+                    target: &target.name,
+                    subject: Subject::Resource(&template.uri_template),
+                    claims,
+                }) {
+                    continue;
+                }
+
+                template.uri_template = self
+                    .inner
+                    .namer
+                    .qualify_uri(&target.name, &template.uri_template);
+                templates.push(template);
+            }
+        }
+
+        let listing = ListResourceTemplatesResult {
+            resource_templates: templates,
+            ..Default::default()
+        };
+        self.guard_response(RESOURCES_TEMPLATES_LIST, &backends, &listing, &context)
+            .await
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        let federated = request.uri.clone();
+
+        let Some((target, uri)) = self.route_resource(&federated).await else {
+            return Err(McpError::invalid_params(
+                format!("unknown resource `{federated}`"),
+                None,
+            ));
+        };
+
+        self.permit(&target.name, Subject::Resource(&uri), &federated, &context)?;
+
+        let mut params = request;
+        params.uri = uri;
+
+        let backends = vec![target.name.clone()];
+        let headers = self
+            .guard_request_json(RESOURCES_READ, &backends, &params, &context)
+            .await?;
+        let (mut params, headers) = (headers.body.unwrap_or(params), headers.headers);
+
+        // The upstream knows its own URI, never the federated one. A guardrail
+        // that rewrote the params could have put the federated form back.
+        params.uri = strip_prefix(&self.inner.namer, &target.name, params.uri);
+
+        let mut result = self
+            .with_timeout(
+                target.read_resource(params, &headers),
+                target,
+                "resources/read",
+            )
+            .await
+            .ok_or_else(|| {
+                McpError::internal_error(format!("reading `{federated}` failed"), None)
+            })?;
+
+        // Contents come back carrying the target's own URIs, which no client
+        // could read back to us. Re-qualify them so the round trip closes.
+        for content in &mut result.contents {
+            let uri = match content {
+                ResourceContents::TextResourceContents { uri, .. }
+                | ResourceContents::BlobResourceContents { uri, .. } => uri,
+                // `ResourceContents` is non-exhaustive upstream. A variant this
+                // build has not seen is passed through rather than guessed at.
+                _ => continue,
+            };
+            *uri = self.inner.namer.qualify_uri(&target.name, uri);
+        }
+
+        let result = self
+            .guard_response(RESOURCES_READ, &backends, &result, &context)
+            .await?;
+
+        Ok(ReadResourceResponse::Complete(result))
+    }
+}
+
+/// Drop a target's own prefix from a URI, if it carries one.
+fn strip_prefix(namer: &ToolNamer, target: &str, uri: String) -> String {
+    match namer.resolve_uri(&uri) {
+        Resolution::Qualified {
+            target: owner,
+            tool,
+        } if owner == target => tool.to_string(),
+        _ => uri,
+    }
+}
+
+/// A guardrail's request-phase answer, ready to use.
+struct Guarded<T> {
+    /// The rewritten body, when a processor sent one.
+    body: Option<T>,
+    /// Header changes for the upstream call.
+    headers: HeaderOverride,
+}
+
+impl Federation {
+    /// Route a federated prompt name to its target and the target's own name.
+    async fn route_prompt(&self, federated: &str) -> Option<(&Target, String)> {
+        match self.inner.namer.resolve(federated) {
+            Resolution::Qualified { target, tool } => {
+                let name = tool.to_string();
+                self.target(target).map(|t| (t, name))
+            }
+            Resolution::Unqualified(name) => {
+                let owner = self.inner.prompt_index.read().await.get(name).cloned()?;
+                self.target(&owner).map(|t| (t, name.to_string()))
+            }
+        }
+    }
+
+    /// Route a federated resource URI to its target and the target's own URI.
+    async fn route_resource(&self, federated: &str) -> Option<(&Target, String)> {
+        match self.inner.namer.resolve_uri(federated) {
+            Resolution::Qualified { target, tool } => {
+                let uri = tool.to_string();
+                self.target(target).map(|t| (t, uri))
+            }
+            Resolution::Unqualified(uri) => {
+                let owner = self.inner.resource_index.read().await.get(uri).cloned()?;
+                self.target(&owner).map(|t| (t, uri.to_string()))
+            }
+        }
+    }
+
+    /// Apply the route's rules to one subject, or produce the refusal.
+    fn permit(
+        &self,
+        target: &str,
+        subject: Subject<'_>,
+        federated: &str,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<(), McpError> {
+        if self.inner.rules.permits(Call {
+            target,
+            subject,
+            claims: claims(context),
+        }) {
+            return Ok(());
+        }
+        Err(McpError::invalid_request(
+            format!(
+                "{} `{federated}` is not permitted on this route",
+                subject.noun()
+            ),
+            None,
+        ))
+    }
+
+    /// Bound an upstream call by the backend budget, logging what gave out.
+    async fn with_timeout<T, E: std::fmt::Display>(
+        &self,
+        call: impl std::future::Future<Output = Result<T, E>>,
+        target: &Target,
+        what: &str,
+    ) -> Option<T> {
+        let result = match self.inner.backend_timeout {
+            Some(budget) => match tokio::time::timeout(budget, call).await {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        target = %target.name,
+                        what,
+                        timeout_ms = budget.as_millis() as u64,
+                        "an upstream call exceeded the backend budget"
+                    );
+                    return None;
+                }
+            },
+            None => call.await,
+        };
+
+        match result {
+            Ok(value) => Some(value),
+            Err(err) => {
+                // One unhealthy target must not blank the whole listing.
+                tracing::warn!(target = %target.name, what, %err, "an upstream call failed");
+                None
+            }
+        }
+    }
+
+    /// Run the request phase for a method that carries no params.
+    async fn guard_request(
+        &self,
+        method: &str,
+        backends: &[String],
+        params: Option<&[u8]>,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<HeaderOverride, McpError> {
+        if !self.inner.guardrails.runs_request(method) {
+            return Ok(HeaderOverride::default());
+        }
+
+        let decision = self
+            .inner
+            .guardrails
+            .check_request(
+                CallContext {
+                    method,
+                    headers: request_headers(context),
+                    claims: claims(context),
+                },
+                backends,
+                params,
+            )
+            .await;
+
+        match decision.outcome {
+            Outcome::Reject {
+                code,
+                message,
+                data,
+            } => Err(mcp_error(code, message, data)),
+            _ => Ok(decision.headers.into()),
+        }
+    }
+
+    /// The same, for a method whose params a processor may rewrite.
+    async fn guard_request_json<T>(
+        &self,
+        method: &str,
+        backends: &[String],
+        params: &T,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Guarded<T>, McpError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        if !self.inner.guardrails.runs_request(method) {
+            return Ok(Guarded {
+                body: None,
+                headers: HeaderOverride::default(),
+            });
+        }
+
+        let encoded = serde_json::to_vec(params).unwrap_or_default();
+        let decision = self
+            .inner
+            .guardrails
+            .check_request(
+                CallContext {
+                    method,
+                    headers: request_headers(context),
+                    claims: claims(context),
+                },
+                backends,
+                Some(&encoded),
+            )
+            .await;
+
+        let body = match decision.outcome {
+            Outcome::Pass => None,
+            Outcome::Mutated(raw) => match serde_json::from_slice(&raw) {
+                Ok(rewritten) => Some(rewritten),
+                // A processor that returns something unusable is a processor
+                // that failed, so it takes the same path as one that could not
+                // be reached rather than being ignored.
+                Err(err) => {
+                    tracing::warn!(method, %err, "a guardrail rewrote a request into something unusable");
+                    return Err(McpError::internal_error(
+                        "mcpGuardrails returned an unusable request".to_string(),
+                        None,
+                    ));
+                }
+            },
+            Outcome::Reject {
+                code,
+                message,
+                data,
+            } => return Err(mcp_error(code, message, data)),
+        };
+
+        Ok(Guarded {
+            body,
+            headers: decision.headers.into(),
+        })
     }
 }
 

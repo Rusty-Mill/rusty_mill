@@ -77,8 +77,18 @@ binds:
                 # A bare string is an allow. Prefer `require` to `deny`: an
                 # expression that cannot be evaluated counts as false, which
                 # refuses for `require` and permits for `deny`.
+                # Rules cover prompts and resources too. Note that exactly
+                # one of mcp.tool / mcp.prompt / mcp.resource is bound per
+                # call: on a prompts/get, `mcp.tool.name == "echo"` does not
+                # resolve and reads as false. So a rule set of only tool
+                # allows is an allow-list that refuses every prompt and
+                # resource -- safe, but it takes an explicit rule to open up.
                 rules:
                   - 'mcp.tool.name == "echo"'
+                  - 'mcp.prompt.name == "summarize"'
+                  # A resource matches on its target's own URI, before the
+                  # gateway widens the scheme to `alpha+memo:insights`.
+                  - 'mcp.resource.name.startsWith("memo:")'
                   - require: 'jwt.iss == "https://auth.example.com"'
             backends:
               - mcp:

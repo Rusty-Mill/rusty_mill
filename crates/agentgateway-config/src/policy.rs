@@ -154,8 +154,8 @@ impl McpGuardrails {
             if has_usable_pattern && !reaches_something {
                 findings.push(format!(
                     "{at}.methods: matches no method this gateway serves, so this processor \
-                     never runs; only {} are served",
-                    crate::MCP_SERVED_METHODS.join(" and ")
+                     never runs; served methods are {}",
+                    crate::MCP_SERVED_METHODS.join(", ")
                 ));
             }
         }
