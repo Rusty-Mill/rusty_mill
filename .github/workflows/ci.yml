@@ -108,6 +108,11 @@ jobs:
       - name: Client and gRPC, no server
         run: cargo check --features client,grpc --all-targets
 
+      # `discover_and_verify` lives in `client`, gated `#[cfg(feature =
+      # "signing")]` - this is what exercises that intersection on its own.
+      - name: Client and signing
+        run: cargo check --features client,signing --all-targets
+
       # A `required-features` gate that asks for MORE than its target needs
       # is invisible to compilation: cargo silently drops the target and the
       # suite reports success by not existing. Naming each suite under the
@@ -130,3 +135,4 @@ jobs:
           cargo test --features grpc,server --test mtls_proxy_header_grpc -- --list
           cargo test --features client,server --test multi_turn_history -- --list
           cargo test --features client,server --test content_type_validation -- --list
+          cargo test --features client,grpc,signing,server --test client_jws_verification -- --list

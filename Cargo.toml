@@ -182,5 +182,10 @@ name = "content_type_validation"
 path = "tests/content_type_validation.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "client_jws_verification"
+path = "tests/client_jws_verification.rs"
+required-features = ["client", "grpc", "signing", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
