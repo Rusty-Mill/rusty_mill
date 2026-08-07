@@ -183,9 +183,26 @@ pub(crate) async fn authenticate_against(
             Err(e) => last_err = Some(e),
         }
     }
-    Err(last_err.unwrap_or_else(|| {
-        A2aError::Unauthenticated(
-            "no credentials found matching any declared security requirement".to_string(),
-        )
-    }))
+    Err(last_err.unwrap_or_else(|| A2aError::Unauthenticated(challenge_message(requirements))))
+}
+
+/// Spec Section 3.3.2 (SHOULD): "include authentication challenge
+/// information in the error response" - names which scheme(s) would have
+/// satisfied at least one alternative, so a caller that got no credentials
+/// extracted at all (the only case this builds the message for - see
+/// [`authenticate_against`]) knows what to retry with instead of having to
+/// re-fetch and re-parse the Agent Card.
+fn challenge_message(requirements: &[SecurityRequirement]) -> String {
+    let alternatives: Vec<String> = requirements
+        .iter()
+        .map(|r| {
+            let mut names: Vec<&str> = r.schemes.keys().map(String::as_str).collect();
+            names.sort_unstable();
+            names.join("+")
+        })
+        .collect();
+    format!(
+        "no credentials found matching any declared security requirement (expected one of: {})",
+        alternatives.join(", ")
+    )
 }

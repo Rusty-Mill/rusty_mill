@@ -67,6 +67,11 @@ impl EventSink {
     /// for this invocation, no task is created and `SendMessage` returns
     /// this message directly.
     pub fn message(&self, message: Message) {
+        // Spec Section 4.1.4: "For server messages, contextId MUST be
+        // provided" - `taskId` is deliberately left alone (not backfilled)
+        // here: this call, by definition, produces a task-less reply, so
+        // stamping a `taskId` on it would claim a task that doesn't exist.
+        let message = self.stamp_context_id(message);
         let _ = self.tx.send(StreamResponse::Message { message });
     }
 
@@ -78,6 +83,10 @@ impl EventSink {
     /// Transitions the task to `state`, attaching a status message (e.g.
     /// an explanation of why the task failed, or what input is required).
     pub fn status_with_message(&self, state: TaskState, message: Option<Message>) {
+        // Spec Section 4.1.4: "For server messages, contextId MUST be
+        // provided, and taskId only if a task was created" - a status
+        // update always means a task now exists, so both are backfilled.
+        let message = message.map(|m| self.stamp_task_id(self.stamp_context_id(m)));
         let event = TaskStatusUpdateEvent {
             task_id: self.task_id.clone(),
             context_id: self.context_id.clone(),
@@ -89,6 +98,25 @@ impl EventSink {
             metadata: None,
         };
         let _ = self.tx.send(event.into());
+    }
+
+    /// Sets `message.contextId` to this invocation's `contextId` if the
+    /// caller didn't already set one - see [`EventSink::message`]/
+    /// [`EventSink::status_with_message`].
+    fn stamp_context_id(&self, mut message: Message) -> Message {
+        if message.context_id.is_none() {
+            message.context_id = Some(self.context_id.clone());
+        }
+        message
+    }
+
+    /// Sets `message.taskId` to this invocation's `taskId` if the caller
+    /// didn't already set one - see [`EventSink::status_with_message`].
+    fn stamp_task_id(&self, mut message: Message) -> Message {
+        if message.task_id.is_none() {
+            message.task_id = Some(self.task_id.clone());
+        }
+        message
     }
 
     /// Publishes a complete artifact (equivalent to

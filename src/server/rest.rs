@@ -38,7 +38,9 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::{JsonRejection, QueryRejection};
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -128,6 +130,36 @@ fn rest_ok<T: serde::Serialize>(value: &T) -> Response {
     a2a_json(StatusCode::OK, value)
 }
 
+const CACHE_CONTROL_VALUE: &str = "public, max-age=300";
+
+/// Like [`rest_ok`], but with `ETag`/`Cache-Control` headers (spec Section
+/// 13.3, SHOULD), and honoring a matching `If-None-Match` with a bare
+/// `304` - see [`super::router`]'s `agent_card_handler`, which does the
+/// same for the base Agent Card.
+fn rest_ok_cached<T: serde::Serialize>(value: &T, etag: &str, if_none_match: Option<&str>) -> Response {
+    if if_none_match == Some(etag) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [
+                (axum::http::header::ETAG, etag.to_string()),
+                (axum::http::header::CACHE_CONTROL, CACHE_CONTROL_VALUE.to_string()),
+            ],
+        )
+            .into_response();
+    }
+    let body = serde_json::to_vec(value).unwrap_or_default();
+    (
+        StatusCode::OK,
+        [
+            (axum::http::header::CONTENT_TYPE, A2A_JSON.to_string()),
+            (axum::http::header::ETAG, etag.to_string()),
+            (axum::http::header::CACHE_CONTROL, CACHE_CONTROL_VALUE.to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// Validates the `A2A-Version` header (spec Section 3.2.6 / 3.6.2), then
 /// enforces `AgentCard.capabilities.extensions[].required` (spec Section
 /// 3.2.6 / 5.6) from the `A2A-Extensions` header, then extracts
@@ -164,6 +196,59 @@ async fn require_auth(
         .await
         .map(|_| ())
         .map_err(rest_error)
+}
+
+/// Like [`axum::Json`], but a rejection (malformed JSON, or JSON that
+/// doesn't match `T`'s shape) is reported through [`rest_error`] - the
+/// `google.rpc.Status` JSON shape (spec Section 11.6) - instead of
+/// `axum`'s own plain-text rejection response, which every other error
+/// this binding can produce is deliberately *not* shaped like.
+struct A2aJson<T>(T);
+
+#[async_trait::async_trait]
+impl<T, S> FromRequest<S> for A2aJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> std::result::Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(A2aJson(value)),
+            Err(rejection) => Err(rest_error(json_rejection_to_a2a(rejection))),
+        }
+    }
+}
+
+fn json_rejection_to_a2a(rejection: JsonRejection) -> A2aError {
+    A2aError::InvalidParams(rejection.body_text())
+}
+
+/// Like [`axum::extract::Query`], but a rejection (a query parameter that
+/// doesn't parse into `T`'s shape, e.g. `pageSize=notanumber`) is reported
+/// through [`rest_error`] instead of `axum`'s own plain-text rejection
+/// response - see [`A2aJson`].
+struct A2aQuery<T>(T);
+
+#[async_trait::async_trait]
+impl<T, S> FromRequestParts<S> for A2aQuery<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> std::result::Result<Self, Self::Rejection> {
+        match Query::<T>::from_request_parts(parts, state).await {
+            Ok(Query(value)) => Ok(A2aQuery(value)),
+            Err(rejection) => Err(rest_error(query_rejection_to_a2a(rejection))),
+        }
+    }
+}
+
+fn query_rejection_to_a2a(rejection: QueryRejection) -> A2aError {
+    A2aError::InvalidParams(rejection.body_text())
 }
 
 /// SSE for the REST binding carries the raw `StreamResponse` object
@@ -203,7 +288,7 @@ async fn message_action(
     State(engine): State<Arc<Engine>>,
     Path(action): Path<String>,
     headers: HeaderMap,
-    Json(req): Json<SendMessageRequest>,
+    A2aJson(req): A2aJson<SendMessageRequest>,
 ) -> Response {
     message_action_impl(engine, None, action, headers, req).await
 }
@@ -215,7 +300,7 @@ async fn message_action_tenant(
     State(engine): State<Arc<Engine>>,
     Path((tenant, action)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(req): Json<SendMessageRequest>,
+    A2aJson(req): A2aJson<SendMessageRequest>,
 ) -> Response {
     message_action_impl(engine, Some(tenant), action, headers, req).await
 }
@@ -262,7 +347,7 @@ async fn get_task_or_subscribe(
     State(engine): State<Arc<Engine>>,
     Path(id_and_action): Path<String>,
     headers: HeaderMap,
-    Query(query): Query<GetTaskQuery>,
+    A2aQuery(query): A2aQuery<GetTaskQuery>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     let tenant = raw_query.get("tenant").cloned();
@@ -275,7 +360,7 @@ async fn get_task_or_subscribe_tenant(
     State(engine): State<Arc<Engine>>,
     Path((tenant, id_and_action)): Path<(String, String)>,
     headers: HeaderMap,
-    Query(query): Query<GetTaskQuery>,
+    A2aQuery(query): A2aQuery<GetTaskQuery>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     get_task_or_subscribe_impl(engine, Some(tenant), id_and_action, headers, query, raw_query).await
@@ -325,7 +410,7 @@ async fn get_task_or_subscribe_impl(
 async fn list_tasks(
     State(engine): State<Arc<Engine>>,
     headers: HeaderMap,
-    Query(req): Query<ListTasksRequest>,
+    A2aQuery(req): A2aQuery<ListTasksRequest>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     list_tasks_impl(engine, None, headers, req, raw_query).await
@@ -336,7 +421,7 @@ async fn list_tasks_tenant(
     State(engine): State<Arc<Engine>>,
     Path(tenant): Path<String>,
     headers: HeaderMap,
-    Query(req): Query<ListTasksRequest>,
+    A2aQuery(req): A2aQuery<ListTasksRequest>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     list_tasks_impl(engine, Some(tenant), headers, req, raw_query).await
@@ -439,7 +524,7 @@ async fn create_push_notification_config(
     State(engine): State<Arc<Engine>>,
     Path(task_id): Path<String>,
     headers: HeaderMap,
-    Json(config): Json<TaskPushNotificationConfig>,
+    A2aJson(config): A2aJson<TaskPushNotificationConfig>,
 ) -> Response {
     create_push_notification_config_impl(engine, None, task_id, headers, config).await
 }
@@ -450,7 +535,7 @@ async fn create_push_notification_config_tenant(
     State(engine): State<Arc<Engine>>,
     Path((tenant, task_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(config): Json<TaskPushNotificationConfig>,
+    A2aJson(config): A2aJson<TaskPushNotificationConfig>,
 ) -> Response {
     create_push_notification_config_impl(engine, Some(tenant), task_id, headers, config).await
 }
@@ -533,7 +618,7 @@ async fn list_push_notification_configs(
     State(engine): State<Arc<Engine>>,
     Path(task_id): Path<String>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    A2aQuery(query): A2aQuery<PageQuery>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     let tenant = raw_query.get("tenant").cloned();
@@ -546,7 +631,7 @@ async fn list_push_notification_configs_tenant(
     State(engine): State<Arc<Engine>>,
     Path((tenant, task_id)): Path<(String, String)>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    A2aQuery(query): A2aQuery<PageQuery>,
     Query(raw_query): Query<HashMap<String, String>>,
 ) -> Response {
     list_push_notification_configs_impl(engine, Some(tenant), task_id, headers, query, raw_query).await
@@ -661,7 +746,15 @@ async fn get_extended_agent_card_impl(engine: Arc<Engine>, headers: HeaderMap) -
         engine.mtls_header(),
     );
     match engine.get_extended_agent_card(&credentials).await {
-        Ok(card) => rest_ok(&card),
+        Ok(card) => match engine.extended_card_etag() {
+            Some(etag) => {
+                let if_none_match = headers
+                    .get(axum::http::header::IF_NONE_MATCH)
+                    .and_then(|v| v.to_str().ok());
+                rest_ok_cached(&card, etag, if_none_match)
+            }
+            None => rest_ok(&card),
+        },
         Err(e) => rest_error(e),
     }
 }

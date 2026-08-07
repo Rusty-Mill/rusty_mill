@@ -113,6 +113,30 @@ async fn unauthenticated_json_rpc_request_is_rejected() {
     expect_unauthenticated(err);
 }
 
+/// Spec Section 3.3.2 (SHOULD): "include authentication challenge
+/// information in the error response" - a request with no credentials at
+/// all gets told which scheme(s) it should have sent instead of a bare
+/// "unauthenticated".
+#[tokio::test]
+async fn unauthenticated_error_names_the_expected_security_scheme() {
+    let base_url = spawn_secured_server().await;
+    let client = A2aClient::new(format!("{base_url}/"));
+
+    let err = client
+        .send_message(Message::user_text("hi"), None)
+        .await
+        .unwrap_err();
+    match err {
+        ClientError::Protocol(A2aError::Unauthenticated(message)) => {
+            assert!(
+                message.contains("bearer"),
+                "expected the challenge message to name the \"bearer\" scheme, got: {message}"
+            );
+        }
+        other => panic!("expected Unauthenticated, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn wrong_bearer_token_is_rejected() {
     let base_url = spawn_secured_server().await;
