@@ -24,6 +24,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Code, Request, Status};
+use tonic_types::StatusExt;
 
 use crate::error::A2aError;
 
@@ -47,17 +48,37 @@ use crate::types::{
 
 use super::{A2aClient, ClientError, Result};
 
-/// Best-effort mapping from a gRPC status back to an [`A2aError`],
-/// mirroring `jsonrpc_error_to_a2a`/`rest::rest_error_to_a2a` for the gRPC
-/// binding. Unlike those two, a `tonic::Status` this crate's gRPC server
-/// sends carries only a [`Code`] and a message on the wire (no structured
-/// error details), and several distinct `A2aError` variants share the same
-/// gRPC code (spec Section 5.4's "gRPC Status" column) - so this can only
-/// pick one representative variant per code, chosen to match the most
-/// common cause. Codes with no A2A-specific meaning pass through as
-/// [`ClientError::Grpc`] instead of guessing.
+/// Maps a gRPC status back to an [`A2aError`], mirroring
+/// `jsonrpc_error_to_a2a`/`rest::rest_error_to_a2a` for the gRPC binding.
+/// This crate's own gRPC server attaches a `google.rpc.ErrorInfo` detail
+/// (spec Section 10.6) with the exact same `reason` string JSON-RPC/REST
+/// send, so - like `rest::rest_error_to_a2a` - the `reason` is tried first
+/// and reconstructs the precise variant. A peer that sends no such detail
+/// (an older version of this crate, or a different SDK) falls back to a
+/// best-effort guess from the bare [`Code`] alone: several distinct
+/// `A2aError` variants share the same gRPC code (spec Section 5.4's "gRPC
+/// Status" column), so this can only pick one representative variant per
+/// code. Codes with no A2A-specific meaning pass through as
+/// [`ClientError::Grpc`] instead of guessing either way.
 fn status_to_client_error(status: Status) -> ClientError {
     let message = status.message().to_string();
+    if let Some(reason) = status.get_error_details().error_info().map(|i| i.reason.as_str()) {
+        let err = match reason {
+            "TASK_NOT_FOUND" => Some(A2aError::TaskNotFound(message.clone())),
+            "TASK_NOT_CANCELABLE" => Some(A2aError::TaskNotCancelable(message.clone())),
+            "PUSH_NOTIFICATION_NOT_SUPPORTED" => Some(A2aError::PushNotificationNotSupported),
+            "UNSUPPORTED_OPERATION" => Some(A2aError::UnsupportedOperation(message.clone())),
+            "CONTENT_TYPE_NOT_SUPPORTED" => Some(A2aError::ContentTypeNotSupported(message.clone())),
+            "INVALID_AGENT_RESPONSE" => Some(A2aError::InvalidAgentResponse(message.clone())),
+            "EXTENDED_AGENT_CARD_NOT_CONFIGURED" => Some(A2aError::ExtendedAgentCardNotConfigured),
+            "EXTENSION_SUPPORT_REQUIRED" => Some(A2aError::ExtensionSupportRequired(message.clone())),
+            "VERSION_NOT_SUPPORTED" => Some(A2aError::VersionNotSupported(message.clone())),
+            _ => None,
+        };
+        if let Some(err) = err {
+            return ClientError::Protocol(err);
+        }
+    }
     let err = match status.code() {
         Code::NotFound => A2aError::TaskNotFound(message),
         Code::FailedPrecondition => A2aError::TaskNotCancelable(message),

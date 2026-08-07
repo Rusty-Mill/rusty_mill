@@ -43,6 +43,7 @@ tonic = { version = "0.14", optional = true }
 prost = { version = "0.14", optional = true }
 prost-types = { version = "0.14", optional = true }
 tonic-prost = { version = "0.14", optional = true }
+tonic-types = { version = "0.14.6", optional = true }
 
 [features]
 default = []
@@ -73,6 +74,7 @@ grpc = [
   "dep:prost-types",
   "dep:tonic-prost",
   "dep:tonic-prost-build",
+  "dep:tonic-types",
   "dep:tokio",
   "dep:futures-core",
   "dep:futures-util",
@@ -191,6 +193,21 @@ required-features = ["client", "grpc", "signing", "server"]
 name = "terminal_task_rejection"
 path = "tests/terminal_task_rejection.rs"
 required-features = ["client", "server"]
+
+[[test]]
+name = "list_tasks_ordering"
+path = "tests/list_tasks_ordering.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "version_negotiation"
+path = "tests/version_negotiation.rs"
+required-features = ["client", "grpc", "server"]
+
+[[test]]
+name = "grpc_error_details"
+path = "tests/grpc_error_details.rs"
+required-features = ["client", "grpc", "server"]
 
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }

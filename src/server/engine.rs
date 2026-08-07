@@ -852,6 +852,22 @@ pub(crate) fn parse_extensions_header(value: Option<&str>) -> HashSet<String> {
         .collect()
 }
 
+/// Validates the `A2A-Version` service parameter (spec Section 3.2.6 /
+/// 3.6.2): an absent or empty value is treated as version `0.3`; anything
+/// other than exactly [`crate::PROTOCOL_VERSION`] is rejected. Shared by
+/// all three bindings (JSON-RPC reads the `A2A-Version` header, REST the
+/// same, gRPC the lowercased `a2a-version` metadata entry) so version
+/// negotiation behaves identically everywhere - spec Section 5.1's "same
+/// error handling" requirement for every binding an agent exposes.
+pub(crate) fn check_version(value: Option<&str>) -> Result<()> {
+    let version = value.filter(|v| !v.is_empty()).unwrap_or("0.3");
+    if version == crate::PROTOCOL_VERSION {
+        Ok(())
+    } else {
+        Err(A2aError::VersionNotSupported(version.to_string()))
+    }
+}
+
 fn apply_history_length(task: &mut Task, history_length: Option<i32>) {
     if let Some(n) = history_length {
         if n <= 0 {

@@ -31,7 +31,7 @@ use crate::types::{
 };
 
 use super::auth::extract_credentials;
-use super::engine::{parse_extensions_header, Engine};
+use super::engine::{check_version, parse_extensions_header, Engine};
 
 pub(crate) fn build_router(engine: Arc<Engine>) -> Router {
     Router::new()
@@ -42,22 +42,6 @@ pub(crate) fn build_router(engine: Arc<Engine>) -> Router {
 
 async fn agent_card_handler(State(engine): State<Arc<Engine>>) -> impl IntoResponse {
     Json(engine.card().clone())
-}
-
-/// Validates the `A2A-Version` service parameter (spec Section 3.2.6 /
-/// 3.6.2): an absent or empty header is treated as version `0.3`; any
-/// value other than exactly [`crate::PROTOCOL_VERSION`] is rejected.
-fn check_version(headers: &HeaderMap) -> Result<(), A2aError> {
-    let version = headers
-        .get("A2A-Version")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .unwrap_or("0.3");
-    if version == crate::PROTOCOL_VERSION {
-        Ok(())
-    } else {
-        Err(A2aError::VersionNotSupported(version.to_string()))
-    }
 }
 
 async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, body: Bytes) -> Response {
@@ -74,7 +58,8 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
         }
     };
 
-    if let Err(version_err) = check_version(&headers) {
+    let version_header = headers.get("A2A-Version").and_then(|v| v.to_str().ok());
+    if let Err(version_err) = check_version(version_header) {
         return jsonrpc_error_response(envelope.id, version_err);
     }
 
