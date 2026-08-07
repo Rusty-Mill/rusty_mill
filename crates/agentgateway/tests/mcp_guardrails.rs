@@ -36,6 +36,8 @@ enum Script {
     Refuse(&'static str),
     /// Pass, asking for `x-user-id` on the upstream request.
     SetHeaders,
+    /// Pass, attaching a metadata bag.
+    Annotate,
 }
 
 /// What the processor was asked.
@@ -135,7 +137,7 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                                     mcp_error: None,
                                 })
                             }
-                            Script::Pass | Script::SetHeaders => {
+                            Script::Pass | Script::SetHeaders | Script::Annotate => {
                                 request_result::Result::Pass(Default::default())
                             }
                         }),
@@ -148,7 +150,18 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                                 remove: Vec::new(),
                             }
                         }),
-                        ..Default::default()
+                        metadata: matches!(script, Script::Annotate)
+                            .then(|| {
+                                match agentgateway_mcp::to_proto_value(serde_json::json!({
+                                    "classification": "phishing",
+                                }))
+                                .kind
+                                {
+                                    Some(prost_types::value::Kind::StructValue(s)) => Some(s),
+                                    _ => None,
+                                }
+                            })
+                            .flatten(),
                     }
                     .encode_to_vec()
                 } else {
@@ -174,7 +187,7 @@ async fn processor(script: Script) -> (String, Arc<Seen>, CancellationToken) {
                                     mcp_error: None,
                                 })
                             }
-                            Script::Pass | Script::SetHeaders => {
+                            Script::Pass | Script::SetHeaders | Script::Annotate => {
                                 response_result::Result::Pass(Default::default())
                             }
                         }),
@@ -1443,4 +1456,282 @@ async fn the_response_phase_names_what_was_actually_fetched() {
 
     stop.cancel();
     harness.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// `requestHeaderModifier` on the MCP upstream path
+// ---------------------------------------------------------------------------
+
+/// Boot a gateway with an HTTP MCP target, a processor, and a route header
+/// modifier — the combination the templating exists for.
+async fn with_modifier(
+    processor_host: &str,
+    methods: &str,
+    modifier: &str,
+    target_port: u16,
+) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              requestHeaderModifier:
+{modifier}
+              mcpGuardrails:
+                processors:
+                  - host: "{processor_host}"
+                    timeout: 5s
+                    methods: {methods}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    config.validate().expect("config should validate");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    (port, shutdown)
+}
+
+/// Make one `tools/call` through the gateway, asserting it succeeded.
+///
+/// The assertion matters: if the call failed, the last request the target saw
+/// would be the handshake or a listing, and every header assertion below would
+/// be checking the wrong request.
+async fn call_through(port: u16) {
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("alpha_echo".to_string()))
+        .await
+        .expect("the call should succeed");
+    assert!(
+        result
+            .content
+            .iter()
+            .any(|b| b.as_text().is_some_and(|t| t.text == "served")),
+        "and should have reached the HTTP target"
+    );
+
+    let _ = client.cancel().await;
+}
+
+#[tokio::test]
+async fn a_guardrails_value_reaches_the_upstream_as_a_header() {
+    // The whole point: a processor classifies a call in-band, and the MCP
+    // server behind the gateway is told, without speaking to the processor.
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::Annotate).await;
+    let (port, shutdown) = with_modifier(
+        &host,
+        r#"{ "tools/call": request }"#,
+        "                set:\n                  x-classification: '{{mcpGuardrails.classification}}'",
+        target_port,
+    )
+    .await;
+
+    call_through(port).await;
+
+    let seen = target_headers.lock().expect("lock").clone();
+    let last = seen.last().expect("the target should have been called");
+    assert_eq!(
+        last.iter()
+            .find(|(k, _)| k == "x-classification")
+            .map(|(_, v)| v.clone()),
+        Some("phishing".to_string()),
+        "saw {last:?}"
+    );
+
+    // Per call, not per connection: the handshake ran before any processor.
+    let handshake = seen.first().expect("there should be a handshake");
+    assert!(!handshake.iter().any(|(k, _)| k == "x-classification"));
+
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn an_unresolved_template_sends_no_header_at_all() {
+    // Rather than sending `{{mcpGuardrails.absent}}` upstream as though it
+    // were data.
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::Annotate).await;
+    let (port, shutdown) = with_modifier(
+        &host,
+        r#"{ "tools/call": request }"#,
+        "                set:\n                  x-missing: '{{mcpGuardrails.absent}}'\n                  x-static: 'always'",
+        target_port,
+    )
+    .await;
+
+    call_through(port).await;
+
+    let seen = target_headers.lock().expect("lock").clone();
+    let last = seen.last().expect("the target should have been called");
+    assert!(!last.iter().any(|(k, _)| k == "x-missing"), "saw {last:?}");
+    assert!(
+        last.iter().any(|(k, v)| k == "x-static" && v == "always"),
+        "a literal beside it still goes; saw {last:?}"
+    );
+
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_modifier_applies_without_any_guardrail_at_all() {
+    // `requestHeaderModifier` used to parse and do nothing on an MCP route.
+    // A static header must work with no processor in the picture.
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::Pass).await;
+    let (port, shutdown) = with_modifier(
+        &host,
+        r#"{ "prompts/get": request }"#,
+        "                set:\n                  x-gateway: 'rusty'",
+        target_port,
+    )
+    .await;
+
+    call_through(port).await;
+
+    let seen = target_headers.lock().expect("lock").clone();
+    let last = seen.last().expect("the target should have been called");
+    assert!(
+        last.iter().any(|(k, v)| k == "x-gateway" && v == "rusty"),
+        "no processor is keyed on tools/call, and the header still goes: {last:?}"
+    );
+
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn the_route_wins_over_a_processors_header_mutation() {
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::SetHeaders).await;
+    let (port, shutdown) = with_modifier(
+        &host,
+        r#"{ "tools/call": request }"#,
+        "                set:\n                  x-user-id: 'from-config'",
+        target_port,
+    )
+    .await;
+
+    call_through(port).await;
+
+    let seen = target_headers.lock().expect("lock").clone();
+    let last = seen.last().expect("the target should have been called");
+    assert_eq!(
+        last.iter()
+            .find(|(k, _)| k == "x-user-id")
+            .map(|(_, v)| v.clone()),
+        Some("from-config".to_string()),
+        "the processor asked for `u-42`; route configuration is the written \
+         intent and runs last. Saw {last:?}"
+    );
+
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_bad_template_fails_at_startup() {
+    // Rather than a header that silently never resolves, which reads exactly
+    // like a guardrail that never ran.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              requestHeaderModifier:
+                set:
+                  x-c: "{{{{jwt.sub}}}}"
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      stdio:
+                        cmd: "{server}"
+"#,
+        server = mock_server()
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .err()
+        .expect("an unresolvable placeholder should be a startup failure");
+    assert!(
+        err.to_string().contains("mcpGuardrails.<key>"),
+        "got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_startup_warm_up_carries_the_routes_static_headers() {
+    // The gateway lists tools once at startup to build its name index. An
+    // upstream that requires a static header would reject that one request if
+    // the modifier only applied to client calls.
+    let (target_port, target_headers, stop_target) = http_target().await;
+    let (host, _, stop_proc) = processor(Script::Pass).await;
+    let (_port, shutdown) = with_modifier(
+        &host,
+        r#"{ "tools/call": request }"#,
+        "                set:\n                  x-api-key: 'secret'\n                  x-classified: '{{mcpGuardrails.classification}}'",
+        target_port,
+    )
+    .await;
+
+    // Give the warm-up a moment; it runs as the federation comes up.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let seen = target_headers.lock().expect("lock").clone();
+    assert!(
+        seen.iter()
+            .any(|req| req.iter().any(|(k, v)| k == "x-api-key" && v == "secret")),
+        "no warm-up request carried the static header: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|req| req.iter().any(|(k, _)| k == "x-classified")),
+        "and a template finds nothing to resolve against on a warm-up: {seen:?}"
+    );
+
+    shutdown.cancel();
+    stop_proc.cancel();
+    stop_target.cancel();
 }

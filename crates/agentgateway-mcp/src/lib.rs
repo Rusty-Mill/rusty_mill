@@ -18,6 +18,7 @@ mod naming;
 mod rules;
 mod span;
 mod target;
+mod transform;
 
 pub use federation::{Federation, FederationError, TokenClaims};
 pub use gate::{Authorization, GateError, TargetFilter};

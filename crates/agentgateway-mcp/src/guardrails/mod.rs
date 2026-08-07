@@ -234,6 +234,15 @@ impl Annotations {
         self.0.iter().map(|(k, v)| (k.as_str(), v))
     }
 
+    /// Build a bag directly, for tests that need one without a processor.
+    #[cfg(test)]
+    pub(crate) fn for_test(value: serde_json::Value) -> Self {
+        let serde_json::Value::Object(map) = value else {
+            panic!("a metadata bag is an object");
+        };
+        Annotations(map.into_iter().collect())
+    }
+
     /// Fold one processor's answer into the running set.
     ///
     /// Later processors win on a key collision, which is upstream's rule and
