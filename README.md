@@ -558,6 +558,17 @@ A request can also constrain and order the resolved fallback chain with a
   healthy. This is a deterministic ranking, not weighted-random load
   balancing across "healthy" candidates — every request still tries the
   sorted chain in order with fallback, the same as any other `sort` value.
+
+  Automatic, always on regardless of `sort` (except `sort: "uptime"` itself,
+  which already covers this more thoroughly): a candidate whose observed
+  EWMA success rate has dropped below `0.5` is moved after every other
+  candidate as a final pass, on top of whatever ordering (chain config
+  order, or another `sort`) already applied. This is a stable partition,
+  not a ranking — deprioritized candidates keep their relative order among
+  themselves, and everyone else keeps theirs. An unobserved candidate is
+  never deprioritized this way (optimistic until this router has actually
+  seen it fail), unlike `sort: "uptime"`'s own convention of sorting an
+  unobserved entry last too.
 - `sort: "quality"` sorts descending by an operator-declared
   `quality_score` on `[[pricing]]` — an arbitrary scale you define
   yourself (nothing here measures model quality), unranked entries sort
