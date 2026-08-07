@@ -211,6 +211,22 @@ impl Default for MessagePart {
 }
 
 impl MessagePart {
+    /// Roughly how many bytes this part occupies, for stores that bound a run's
+    /// log by size.
+    ///
+    /// The inline content dominates by orders of magnitude — a base64 artifact
+    /// against a few tens of bytes of type and name — so the rest is summed
+    /// plainly rather than modelled. See [`Event::approximate_size`] for why
+    /// this is an estimate rather than a measurement.
+    ///
+    /// [`Event::approximate_size`]: crate::types::Event::approximate_size
+    pub fn approximate_size(&self) -> usize {
+        self.content.as_ref().map_or(0, String::len)
+            + self.content_url.as_ref().map_or(0, String::len)
+            + self.name.as_ref().map_or(0, String::len)
+            + self.content_type.len()
+    }
+
     /// A `text/plain` part with the given inline content.
     pub fn text(content: impl Into<String>) -> Self {
         Self { content: Some(content.into()), ..Default::default() }

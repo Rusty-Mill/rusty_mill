@@ -461,13 +461,26 @@ multi-replica suite, so the choice is about what happens to a run *after* it fin
 | Queries | By run id only | Ordinary SQL: which runs failed today, which agent is busiest, what a session contained |
 | Setup | None | Tables are created on connect |
 
-The default `InMemoryStore` bounds both halves of what it holds: `max_runs` runs (evicting the
-oldest **terminal** ones; active runs are never evicted) and `max_sessions` sessions (evicting the
-least recently *used*, along with its state document). Both default to 1024.
+The default `InMemoryStore` bounds all three dimensions of what it holds: `max_runs` runs
+(evicting the oldest **terminal** ones; active runs are never evicted), `max_sessions` sessions
+(evicting the least recently *used*, along with its state document), and `max_run_event_bytes` of
+any one run's event log. The two counts default to 1024, the log to 4 MiB.
 
 ```rust
-AcpServer::builder().max_runs(4096).max_sessions(4096)
+AcpServer::builder().max_runs(4096).max_sessions(4096).max_run_event_bytes(16 * 1024 * 1024)
 ```
+
+The third is the one the counts do not reach. A streaming agent emits one event per token and a
+non-terminal run is never evicted, so a single long stream was unbounded however low the other
+two were set. It is measured in bytes rather than events because one 5 MB artifact part and fifty
+thousand words are the same problem counted differently, and only the byte figure is the one that
+exhausts a host.
+
+Past the cap the oldest events are dropped — but the log is not a cache. It *is* the run's output,
+and what `Last-Event-ID` replays from, so a client resuming from an event that is gone gets **410
+Gone** naming the earliest index still held, rather than a shorter prefix that reads as complete.
+That is the one thing a bound on this must not do quietly. The event just emitted is always kept,
+so a live tail keeps working even for an agent whose single artifact exceeds the whole limit.
 
 An evicted session is indistinguishable from one that never existed, so an agent's conversation
 silently starts over — the same thing `RedisStore`'s TTL does, and logged at `warn` for exactly

@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::{
     server::store::{
         message_url, state_url, Notification, NotificationStream, RecoveryRecord, SessionRecord,
-        Store, StoreResult, DEFAULT_MAX_RUNS, DEFAULT_MAX_SESSIONS,
+        Store, StoreResult, DEFAULT_MAX_RUNS, DEFAULT_MAX_RUN_EVENT_BYTES, DEFAULT_MAX_SESSIONS,
     },
     types::{Error, Event, Message, Run, RunId, Session, SessionId},
 };
@@ -28,8 +28,34 @@ struct RunEntry {
     /// `None` while only a channel exists — a subscriber can arrive before the
     /// run itself is written.
     run: Option<Run>,
-    events: Vec<Event>,
+    /// The retained tail of the log. A deque because the bound drops from the
+    /// front, and doing that to a `Vec` is a memmove per dropped event.
+    events: VecDeque<Event>,
+    /// The index the next append will be given.
+    ///
+    /// Tracked rather than derived from `events.len()`, which is what it used
+    /// to be: once the front can be dropped the length stops being the count,
+    /// and an index that silently restarts would hand two events the same
+    /// `Last-Event-ID`.
+    next_index: u64,
+    /// The summed [`Event::approximate_size`] of the retained events.
+    bytes: usize,
     notifications: broadcast::Sender<Notification>,
+}
+
+impl RunEntry {
+    fn new(notifications: broadcast::Sender<Notification>, run: Option<Run>) -> Self {
+        Self { run, events: VecDeque::new(), next_index: 0, bytes: 0, notifications }
+    }
+
+    /// The index of the earliest event still held.
+    ///
+    /// Everything below this was dropped by the size bound and is gone; a
+    /// client asking to resume from before it has to be told rather than handed
+    /// a log with a hole in it.
+    fn first_index(&self) -> u64 {
+        self.next_index - self.events.len() as u64
+    }
 }
 
 /// Keeps runs and sessions in process memory.
@@ -80,6 +106,7 @@ pub struct InMemoryStore {
     recovery: RwLock<HashMap<RunId, RecoveryRecord>>,
     max_runs: usize,
     max_sessions: usize,
+    max_run_event_bytes: usize,
 }
 
 /// A session, and when it was last used.
@@ -117,7 +144,24 @@ impl InMemoryStore {
             recovery: RwLock::new(HashMap::new()),
             max_runs: max_runs.max(1),
             max_sessions: max_sessions.max(1),
+            max_run_event_bytes: DEFAULT_MAX_RUN_EVENT_BYTES,
         }
+    }
+
+    /// Bound how much of one run's event log is kept.
+    ///
+    /// Builder-style rather than a third argument to
+    /// [`with_limits`](InMemoryStore::with_limits): three bare `usize`s in a
+    /// row is an invitation to pass them in the wrong order, and the compiler
+    /// would not notice.
+    pub fn with_max_run_event_bytes(mut self, max_run_event_bytes: usize) -> Self {
+        self.max_run_event_bytes = max_run_event_bytes.max(1);
+        self
+    }
+
+    /// The size bound on any one run's event log.
+    pub fn max_run_event_bytes(&self) -> usize {
+        self.max_run_event_bytes
     }
 
     /// How many runs are currently retained.
@@ -193,10 +237,7 @@ impl InMemoryStore {
             Some(entry) => entry.notifications.clone(),
             None => {
                 let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-                runs.insert(
-                    run_id,
-                    RunEntry { run: None, events: Vec::new(), notifications: tx.clone() },
-                );
+                runs.insert(run_id, RunEntry::new(tx.clone(), None));
                 self.order.lock().expect("run order poisoned").push_back(run_id);
                 tx
             }
@@ -229,10 +270,7 @@ impl Store for InMemoryStore {
             Some(entry) => entry.run = Some(run.clone()),
             None => {
                 let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
-                runs.insert(
-                    run.run_id,
-                    RunEntry { run: Some(run.clone()), events: Vec::new(), notifications: tx },
-                );
+                runs.insert(run.run_id, RunEntry::new(tx, Some(run.clone())));
                 self.order.lock().expect("run order poisoned").push_back(run.run_id);
             }
         }
@@ -250,16 +288,42 @@ impl Store for InMemoryStore {
     }
 
     async fn append_event(&self, run_id: RunId, event: &Event) -> StoreResult<u64> {
+        let limit = self.max_run_event_bytes;
         let mut runs = self.runs.write().expect("run map poisoned");
-        match runs.get_mut(&run_id) {
-            // The write lock is what makes the index unique: a concurrent
-            // append cannot observe the same length.
-            Some(entry) => {
-                entry.events.push(event.clone());
-                Ok(entry.events.len() as u64 - 1)
+        let Some(entry) = runs.get_mut(&run_id) else {
+            return Err(Error::not_found(format!("run {run_id} not found")));
+        };
+
+        // The write lock is what makes the index unique: a concurrent append
+        // cannot observe the same counter.
+        let index = entry.next_index;
+        entry.bytes += event.approximate_size();
+        entry.events.push_back(event.clone());
+        entry.next_index += 1;
+
+        // Trimmed after appending, not before, so the event just emitted is
+        // always retained — a log that dropped what it was being given could
+        // not serve even a live tail.
+        let mut dropped = 0u64;
+        while entry.bytes > limit && entry.events.len() > 1 {
+            if let Some(oldest) = entry.events.pop_front() {
+                entry.bytes = entry.bytes.saturating_sub(oldest.approximate_size());
+                dropped += 1;
             }
-            None => Err(Error::not_found(format!("run {run_id} not found"))),
         }
+        if dropped > 0 {
+            // Warn, and once per trim rather than once per event, because the
+            // consequence is only visible to a client that later tries to
+            // resume from what is now gone.
+            tracing::warn!(
+                %run_id,
+                dropped,
+                first_index = entry.first_index(),
+                limit,
+                "dropped the oldest events of a run past the log size bound"
+            );
+        }
+        Ok(index)
     }
 
     async fn events(&self, run_id: RunId) -> StoreResult<Vec<Event>> {
@@ -268,18 +332,29 @@ impl Store for InMemoryStore {
             .read()
             .expect("run map poisoned")
             .get(&run_id)
-            .map(|entry| entry.events.clone())
+            .map(|entry| entry.events.iter().cloned().collect())
             .unwrap_or_default())
     }
 
     async fn events_from(&self, run_id: RunId, from: u64) -> StoreResult<Vec<Event>> {
+        let runs = self.runs.read().expect("run map poisoned");
+        let Some(entry) = runs.get(&run_id) else {
+            return Ok(Vec::new());
+        };
+        // Relative to the earliest event still held, not to zero: with a
+        // trimmed front those stopped being the same number, and skipping by
+        // the absolute index would silently return the wrong events.
+        let skip = from.saturating_sub(entry.first_index()) as usize;
+        Ok(entry.events.iter().skip(skip).cloned().collect())
+    }
+
+    async fn earliest_event(&self, run_id: RunId) -> StoreResult<u64> {
         Ok(self
             .runs
             .read()
             .expect("run map poisoned")
             .get(&run_id)
-            .map(|entry| entry.events.iter().skip(from as usize).cloned().collect())
-            .unwrap_or_default())
+            .map_or(0, RunEntry::first_index))
     }
 
     async fn publish(&self, run_id: RunId, notification: Notification) -> StoreResult<()> {

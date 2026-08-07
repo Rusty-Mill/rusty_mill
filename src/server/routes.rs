@@ -58,6 +58,13 @@ pub(crate) enum ApiError {
     Draining,
     /// This replica is already running as much as it agreed to.
     AtCapacity,
+    /// The events a client asked to resume from have been dropped.
+    EventsGone {
+        /// The index the client asked to resume from.
+        from: u64,
+        /// The earliest index the store still holds.
+        earliest: u64,
+    },
 }
 
 impl From<Error> for ApiError {
@@ -97,6 +104,22 @@ impl IntoResponse for ApiError {
                 StatusCode::TOO_MANY_REQUESTS,
                 [(header::RETRY_AFTER, AT_CAPACITY_RETRY_AFTER_SECS.to_string())],
                 "this replica is already running as many runs as it is configured to",
+            )
+                .into_response(),
+            // 410 rather than 404 or 416: the run is here, and the request was
+            // well formed — what it asked for existed and does not any more,
+            // which is the one thing 410 says exactly. Deliberately *not*
+            // retryable, unlike the two above: reconnecting cannot bring the
+            // events back, and a client that retried would loop.
+            //
+            // Plain text again, for the reason `Draining` gives.
+            ApiError::EventsGone { from, earliest } => (
+                StatusCode::GONE,
+                format!(
+                    "events before {earliest} have been dropped to stay within this \
+                     server's log size limit, so a resume from {from} would skip \
+                     them; re-read the log from {earliest} or start again"
+                ),
             )
                 .into_response(),
         }
@@ -622,6 +645,16 @@ async fn list_run_events(
     // Resume after the last event the client acknowledged; with no header, send
     // the log from the beginning.
     let from = last_event_id(&headers).map_or(0, |last| last + 1);
+
+    // Refused rather than served short. If the store has dropped the events
+    // between `from` and what it still holds, replaying from the earliest
+    // retained one would hand the client a log with a hole in it that reads as
+    // complete — the silent loss this whole path exists to avoid.
+    let earliest = server.store().earliest_event(run_id).await.map_err(ApiError::from)?;
+    if from < earliest {
+        tracing::warn!(%run_id, from, earliest, "refusing to resume from events that were dropped");
+        return Err(ApiError::EventsGone { from, earliest });
+    }
 
     // Subscribe before reading the log. See `event_stream` for why this
     // ordering is what makes the splice gapless.
