@@ -62,6 +62,10 @@ pub struct Policies {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ext_authz: Option<ExtAuthzPolicy>,
 
+    /// External MCP policy processors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_guardrails: Option<McpGuardrails>,
+
     /// Agent-to-agent protocol handling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aPolicy>,
@@ -95,6 +99,191 @@ impl Policies {
                 ));
             }
         }
+
+        if let Some(guardrails) = &self.mcp_guardrails {
+            guardrails.lint(&format!("{at}.policies.mcpGuardrails"), findings);
+        }
+    }
+}
+
+/// External MCP policy processors.
+///
+/// Each processor is an MCP-aware policy service the gateway consults before
+/// forwarding a call and after receiving its result — Envoy's `ext_authz`
+/// shape, moved down to the MCP method layer, and able to rewrite as well as
+/// refuse.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpGuardrails {
+    /// Processors applied to matched methods, in order.
+    ///
+    /// The first to refuse short-circuits the chain.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub processors: Vec<Processor>,
+}
+
+impl McpGuardrails {
+    /// Report processors that parse but cannot run in this build.
+    fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        for (i, processor) in self.processors.iter().enumerate() {
+            let at = format!("{at}.processors[{i}]");
+            if processor.host.is_none() {
+                findings.push(format!(
+                    "{at}: only `host` is supported; `backend` and `service` need a backend \
+                     registry this build does not have, so this processor will not run"
+                ));
+            }
+            for pattern in processor.methods.keys() {
+                if !crate::pattern_is_matchable(pattern) {
+                    findings.push(format!(
+                        "{at}.methods: `{pattern}` can never match; use an exact method, \
+                         `prefix/*`, `*/suffix`, or `*`"
+                    ));
+                }
+            }
+
+            // A processor keyed only on methods this gateway never serves is
+            // indistinguishable, in production, from one that always passes.
+            let reaches_something = crate::MCP_SERVED_METHODS
+                .iter()
+                .any(|method| crate::resolve(method, &processor.methods) != Phase::Off);
+            let has_usable_pattern = processor
+                .methods
+                .keys()
+                .any(|pattern| crate::pattern_is_matchable(pattern));
+            if has_usable_pattern && !reaches_something {
+                findings.push(format!(
+                    "{at}.methods: matches no method this gateway serves, so this processor \
+                     never runs; only {} are served",
+                    crate::MCP_SERVED_METHODS.join(" and ")
+                ));
+            }
+        }
+    }
+}
+
+/// One external policy service in an `mcpGuardrails` chain.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Processor {
+    /// Which methods run through this processor, and at which phase.
+    ///
+    /// An allow-list: a method matching no key bypasses the processor
+    /// entirely. Keys may be exact (`tools/call`), a prefix wildcard
+    /// (`tools/*`), a suffix wildcard (`*/list`), or `*` for everything.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub methods: BTreeMap<String, Phase>,
+
+    /// Discriminator. Only `remote` exists; accepted and ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+
+    /// `host:port` of the policy service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+
+    /// A backend named in the top-level `backends` list. Not supported here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+
+    /// A service named in the top-level `services` list. Not supported here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<serde_json::Value>,
+
+    /// What to do when the processor is unreachable or answers unusably.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_mode: Option<FailureMode>,
+
+    /// Budget for one call to the processor. Defaults to 10s, matching upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<DurationString>,
+
+    /// CEL expressions evaluated per call and sent as `metadata_context`.
+    ///
+    /// One entry per key. The context is `jwt` — the verified token's claims —
+    /// and `request`, carrying `method`, `path` and `headers`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, String>,
+
+    /// Which incoming request headers are forwarded to the processor.
+    #[serde(default, skip_serializing_if = "HeaderFilter::is_default")]
+    pub request_headers: HeaderFilter,
+
+    /// Backend policies used when connecting. Accepted; nothing is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<serde_json::Value>,
+}
+
+/// Which side (or sides) of a call a processor sees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Phase {
+    /// Not consulted.
+    #[default]
+    Off,
+    /// Before the call is forwarded.
+    Request,
+    /// After the result comes back.
+    Response,
+    /// Both.
+    Full,
+}
+
+impl Phase {
+    /// Whether this phase runs before the call is forwarded.
+    pub fn runs_request(self) -> bool {
+        matches!(self, Phase::Request | Phase::Full)
+    }
+
+    /// Whether this phase runs after the result comes back.
+    pub fn runs_response(self) -> bool {
+        matches!(self, Phase::Response | Phase::Full)
+    }
+}
+
+/// What to do when a processor cannot answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FailureMode {
+    /// Refuse the call. The default: a policy service that is down must not
+    /// become an open door.
+    #[default]
+    FailClosed,
+    /// Serve the call anyway.
+    FailOpen,
+}
+
+/// Which request headers a processor is shown.
+///
+/// An empty `allowed` forwards everything, matching upstream — the opposite of
+/// `extAuthz.includeHeaders`, whose empty list forwards nothing. The
+/// difference is upstream's, not a choice made here. `disallowed` always wins.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HeaderFilter {
+    /// Headers to forward; empty forwards all of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+
+    /// Headers to drop, ahead of the allow list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed: Vec<String>,
+}
+
+impl HeaderFilter {
+    fn is_default(&self) -> bool {
+        self.allowed.is_empty() && self.disallowed.is_empty()
+    }
+
+    /// Whether a header is shown to the processor.
+    ///
+    /// Names are compared case-insensitively, since HTTP header names are.
+    pub fn allows(&self, name: &str) -> bool {
+        let matches = |list: &[String]| list.iter().any(|n| n.eq_ignore_ascii_case(name));
+        if matches(&self.disallowed) {
+            return false;
+        }
+        self.allowed.is_empty() || matches(&self.allowed)
     }
 }
 
@@ -510,11 +699,11 @@ impl std::fmt::Display for DurationString {
         if ms == 0 {
             return write!(f, "0s");
         }
-        if ms % 3_600_000 == 0 {
+        if ms.is_multiple_of(3_600_000) {
             write!(f, "{}h", ms / 3_600_000)
-        } else if ms % 60_000 == 0 {
+        } else if ms.is_multiple_of(60_000) {
             write!(f, "{}m", ms / 60_000)
-        } else if ms % 1_000 == 0 {
+        } else if ms.is_multiple_of(1_000) {
             write!(f, "{}s", ms / 1_000)
         } else {
             write!(f, "{ms}ms")

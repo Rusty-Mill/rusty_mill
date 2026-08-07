@@ -481,6 +481,156 @@ binds:
 }
 
 #[test]
+fn guardrails_parse_in_upstreams_shape() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - kind: remote
+                    methods: { "tools/call": request, "*/list": response }
+                    host: 127.0.0.1:9999
+                    failureMode: failOpen
+                    timeout: 2s
+                    metadata:
+                      tenant: 'request.headers["x-tenant"]'
+                    requestHeaders:
+                      allowed: [x-tenant]
+                      disallowed: [authorization]
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let guardrails = config.binds[0].listeners[0].routes[0]
+        .policies
+        .as_ref()
+        .expect("policies should be present")
+        .mcp_guardrails
+        .as_ref()
+        .expect("policy should be present");
+
+    let processor = &guardrails.processors[0];
+    assert_eq!(processor.methods["tools/call"], Phase::Request);
+    assert_eq!(processor.methods["*/list"], Phase::Response);
+    assert_eq!(processor.host.as_deref(), Some("127.0.0.1:9999"));
+    assert_eq!(processor.failure_mode, Some(FailureMode::FailOpen));
+    assert_eq!(
+        processor.timeout.map(Duration::from),
+        Some(Duration::from_secs(2))
+    );
+    assert_eq!(
+        processor.metadata["tenant"],
+        r#"request.headers["x-tenant"]"#
+    );
+    assert_eq!(
+        processor.request_headers.allowed,
+        vec!["x-tenant".to_string()]
+    );
+}
+
+#[test]
+fn a_header_filter_lets_the_deny_list_win_case_insensitively() {
+    let filter = HeaderFilter {
+        allowed: vec!["X-Tenant".into(), "Authorization".into()],
+        disallowed: vec!["authorization".into()],
+    };
+    assert!(filter.allows("x-tenant"));
+    assert!(!filter.allows("AUTHORIZATION"));
+    assert!(
+        !filter.allows("cookie"),
+        "a non-empty allow list excludes the rest"
+    );
+
+    // Empty forwards everything -- upstream's reading, and the opposite of
+    // extAuthz.includeHeaders.
+    assert!(HeaderFilter::default().allows("anything"));
+}
+
+#[test]
+fn lint_reports_guardrails_that_cannot_fire() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - methods: { "prompts/get": full }
+                    host: 127.0.0.1:9999
+                  - methods: { "a*b": full }
+                    host: 127.0.0.1:9999
+                  - methods: { "tools/call": full }
+                    backend: policy-service
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("processors[0]") && f.contains("never runs")),
+        "a processor keyed on an unserved method must be reported: {findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("processors[1]") && f.contains("can never match")),
+        "an unmatchable pattern must be reported: {findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("processors[2]") && f.contains("only `host`")),
+        "a processor this build cannot resolve must be reported: {findings:?}"
+    );
+}
+
+#[test]
+fn a_usable_guardrail_lints_clean() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - methods: { "tools/*": full }
+                    host: 127.0.0.1:9999
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
 fn a_clean_config_lints_clean() {
     let config = Config::from_yaml(UPSTREAM_MCP_EXAMPLE).expect("should parse");
     assert_eq!(

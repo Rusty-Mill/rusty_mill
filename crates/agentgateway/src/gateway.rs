@@ -66,9 +66,14 @@ enum BackendState {
     ///
     /// `a2a` is present when the route carries Agent2Agent traffic, which adds
     /// method gating and agent-card discovery in front of the same proxy.
+    ///
+    /// Both fields are boxed: an agent card and a weighted endpoint ring make
+    /// this several times the size of every other variant, and this enum sits
+    /// inline in each route's state, so the largest variant is what every
+    /// route costs.
     Host {
-        proxy: HostProxy,
-        a2a: Option<A2aGateway>,
+        proxy: Box<HostProxy>,
+        a2a: Option<Box<A2aGateway>>,
     },
     /// An LLM provider behind an OpenAI-compatible API.
     Ai(LlmBackend),
@@ -156,6 +161,7 @@ impl Gateway {
                     let federation = Federation::connect(
                         mcp,
                         route.policies.mcp_authorization.as_ref(),
+                        route.policies.mcp_guardrails.as_ref(),
                         backend_timeout,
                         &at,
                     )
@@ -225,7 +231,10 @@ impl Gateway {
                                 None => None,
                             };
 
-                            BackendState::Host { proxy, a2a }
+                            BackendState::Host {
+                                proxy: Box::new(proxy),
+                                a2a: a2a.map(Box::new),
+                            }
                         }
                     }
                 }

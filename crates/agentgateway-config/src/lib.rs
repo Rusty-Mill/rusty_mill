@@ -34,6 +34,7 @@ mod oneof;
 
 mod backend;
 mod matcher;
+mod methods;
 mod policy;
 
 pub use backend::{
@@ -44,10 +45,12 @@ pub use backend::{
 pub use matcher::{
     HeaderMatch, HeaderMatchValue, PathMatch, QueryMatch, QueryMatchValue, RouteMatch,
 };
+pub use methods::{MCP_SERVED_METHODS, pattern_is_matchable, resolve};
 pub use policy::{
     A2aPolicy, AgentCardPolicy, AuthorizationRule, BackendAuth, CorsPolicy, DurationString,
-    ExtAuthzPolicy, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit, McpAuthorization,
-    PathRewrite, Policies, RateLimitKind, RetryPolicy, TimeoutPolicy, UrlRewrite,
+    ExtAuthzPolicy, FailureMode, HeaderFilter, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit,
+    McpAuthorization, McpGuardrails, PathRewrite, Phase, Policies, Processor, RateLimitKind,
+    RetryPolicy, TimeoutPolicy, UrlRewrite,
 };
 
 use std::path::Path;
