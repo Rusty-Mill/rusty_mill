@@ -15,9 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_config::{
-    HeaderModifier, McpAuthorization, McpBackend, McpGuardrails, PathRewrite, UrlRewrite,
-};
+use agentgateway_config::{HeaderModifier, McpAuthorization, McpBackend, McpGuardrails};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -78,17 +76,6 @@ pub enum FederationError {
     #[error(transparent)]
     Transform(#[from] TransformError),
 
-    /// A route's `urlRewrite.authority` is not one this can dial.
-    #[error("{at}.urlRewrite.authority: `{value}` is not a valid authority{note}")]
-    Authority {
-        /// Where in the configuration it came from.
-        at: String,
-        /// The offending text.
-        value: String,
-        /// Why, when there is more to say than "malformed".
-        note: &'static str,
-    },
-
     /// Every target failed to come up, so there is nothing to serve.
     #[error("no MCP target could be reached; the federation would serve nothing")]
     NoTargets,
@@ -146,24 +133,10 @@ impl Federation {
         authorization: Option<&McpAuthorization>,
         guardrails: Option<&McpGuardrails>,
         request_headers: Option<&HeaderModifier>,
-        url_rewrite: Option<&UrlRewrite>,
+        over: Override,
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
-        // An override only applies where it can be unambiguous: one target,
-        // speaking Streamable HTTP. What this cannot cover is reported by
-        // `Config::lint` rather than guessed at here.
-        let single = url_rewrite.filter(|_| backend.targets.len() == 1);
-        let over = Override {
-            path: single.and_then(|rewrite| match &rewrite.path {
-                Some(PathRewrite::Full(path)) => Some(path.clone()),
-                _ => None,
-            }),
-            authority: match single.and_then(|rewrite| rewrite.authority.as_deref()) {
-                Some(raw) => Some(parse_authority(raw, at)?),
-                None => None,
-            },
-        };
         let transform = match request_headers {
             Some(modifier) => Transform::new(modifier, &format!("{at}.requestHeaderModifier"))?,
             None => Transform::default(),
@@ -989,27 +962,6 @@ impl ServerHandler for Federation {
 
         Ok(ReadResourceResponse::Complete(result))
     }
-}
-
-/// Parse a route's replacement authority.
-///
-/// Userinfo is refused rather than carried through. An authority may legally
-/// hold `user:password@`, but putting credentials in an upstream URI hides
-/// them somewhere nobody thinks to look and sends them on every request;
-/// `backendAuth` is where a credential belongs.
-fn parse_authority(raw: &str, at: &str) -> Result<http::uri::Authority, FederationError> {
-    if raw.contains('@') {
-        return Err(FederationError::Authority {
-            at: at.to_string(),
-            value: raw.to_string(),
-            note: ": userinfo does not belong in an upstream address, use `backendAuth`",
-        });
-    }
-    http::uri::Authority::try_from(raw).map_err(|_| FederationError::Authority {
-        at: at.to_string(),
-        value: raw.to_string(),
-        note: "",
-    })
 }
 
 /// Drop a target's own prefix from a URI, if it carries one.

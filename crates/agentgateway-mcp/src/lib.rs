@@ -30,4 +30,4 @@ pub use guardrails::{
 pub use mutating_client::{HeaderOverride, MutatingClient};
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{Call, RuleError, RuleSet, Subject};
-pub use target::{Target, TargetError};
+pub use target::{Override, Target, TargetError};

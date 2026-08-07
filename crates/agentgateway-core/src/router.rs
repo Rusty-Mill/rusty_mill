@@ -329,6 +329,20 @@ pub struct RouteMatcher {
     query: Vec<CompiledQuery>,
 }
 
+impl RouteMatcher {
+    /// The segment prefix this matcher requires, if it matches on one.
+    ///
+    /// A `prefix` URL rewrite replaces whatever the route matched, so a caller
+    /// that needs to resolve one before any request arrives has to be able to
+    /// ask what that would be.
+    pub fn path_prefix(&self) -> Option<&str> {
+        match &self.path {
+            CompiledPath::Prefix(prefix) => Some(prefix),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum CompiledPath {
     Exact(String),

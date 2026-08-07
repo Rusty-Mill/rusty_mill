@@ -168,9 +168,9 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
-- `urlRewrite.path.prefix` on a route with an `mcp` backend, and `authority` or
-  `path.full` where the route has more than one target — reported by `--check`.
-  Over a single `mcp:` target, `authority` and `path.full` *are* applied; see
+- `urlRewrite` where a route has more than one `mcp` target, or a `stdio` one,
+  or uses `path.prefix` without exactly one `pathPrefix` match — reported by
+  `--check`. Over a single `mcp:` target it *is* applied; see
   [Reaching the upstream request](#reaching-the-upstream-request)
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
@@ -647,27 +647,42 @@ the one going back out. CORS is added after the modifier runs, so a route
 cannot accidentally strip the headers that answer a preflight: those are the
 gateway's own protocol rather than the route's payload.
 
-`urlRewrite` cannot mean here what it means on a `host` route, because an MCP
-route terminates the protocol rather than forwarding a request line. What it
-*can* mean is replacing parts of the one address the gateway dials — and both
-`authority` and `path.full` do, where there is a single Streamable HTTP target
-to be unambiguous about:
+`urlRewrite` replaces parts of the one address the gateway dials. All three of
+`authority`, `path.full` and `path.prefix` apply, where there is a single
+Streamable HTTP target to be unambiguous about:
 
 ```yaml
+matches:
+  - path: { pathPrefix: /mcp }
 policies:
   urlRewrite:
     authority: mcp.internal:8443    # replaces the target's host and port
-    path: { full: /rpc }            # replaces its path
+    path: { prefix: /rpc }          # /mcp/v1 -> /rpc/v1
 backends:
   - mcp:
       targets:
         - name: alpha
-          mcp: { host: 127.0.0.1, port: 3001, path: /mcp }
+          mcp: { host: 127.0.0.1, port: 3001, path: /mcp/v1 }
 ```
 
 One target is what makes it well-defined. With two, "the address" has no answer,
 and picking one would be the gateway deciding something the operator did not
 say.
+
+**The path a rewrite acts on is the target's own configured path**, not
+anything derived from the request. An MCP route terminates the protocol and
+dials its session once at startup, long before a request exists, so there is no
+per-request path to rewrite — and `prefix` replaces the route's matched prefix
+at the head of the configured path instead. That is the same operation the
+proxy performs, on the only path this model has, using the same implementation
+so the two cannot drift.
+
+Reusing it brings one behaviour worth knowing: when the configured path does
+**not** start with the matched prefix there is nothing to strip, so the
+replacement lands in front of the whole path. Under a `/mcp` → `/rpc` rewrite,
+a target at `/other` is dialled at `/rpc/other`. A `prefix` that behaved
+differently here than on a `host` route would be a difference nobody could see
+coming from the config, so it behaves the same.
 
 An authority that names **no port keeps the target's own**. The target names a
 port explicitly and the override did not, so dropping to 80 would break a
@@ -684,13 +699,13 @@ It is legal syntax, but a credential in an upstream URI hides somewhere nobody
 thinks to look and is sent on every request. `backendAuth` is where one
 belongs.
 
-The rest is reported by `--check` and at startup rather than quietly ignored:
+What `--check` reports rather than quietly ignoring:
 
 | | Why not |
 | --- | --- |
-| `path.prefix` | The upstream path is the target's own configuration, not something derived from the request, so there is no matched prefix to replace. Use `full`. |
-| `authority` or `path.full`, several targets | "The address" has no answer when there is more than one target. |
-| `authority` or `path.full`, a `stdio` target | A pipe has no address. |
+| Any rewrite, several targets | "The address" has no answer when there is more than one target. |
+| Any rewrite, a `stdio` target | A pipe has no address. |
+| `path.prefix`, not exactly one `pathPrefix` match | Which prefix a request matched is not knowable when the session is dialled. Use `full` to set the path outright. |
 
 ### The span itself
 

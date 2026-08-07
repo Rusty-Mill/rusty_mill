@@ -2251,3 +2251,229 @@ async fn a_malformed_authority_fails_at_startup() {
 
     stop_target.cancel();
 }
+
+// ---------------------------------------------------------------------------
+// `urlRewrite.path.prefix` over a single target
+// ---------------------------------------------------------------------------
+
+/// Boot a gateway matching `route_prefix` with the given rewrite, over one
+/// target configured at `target_path`.
+async fn with_prefix_rewrite(
+    route_prefix: &str,
+    rewrite: &str,
+    target_port: u16,
+    target_path: &str,
+) -> Result<(u16, CancellationToken), String> {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: {route_prefix}
+            policies:
+              urlRewrite:
+                path:
+                  prefix: {rewrite}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: {target_path}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    Ok((port, shutdown))
+}
+
+#[tokio::test]
+async fn a_prefix_rewrite_replaces_the_matched_prefix_of_the_targets_path() {
+    // The target's configured path is `/mcp/v1`; the route matches `/mcp` and
+    // rewrites that prefix to `/rpc`, so the upstream is dialled at `/rpc/v1`.
+    // That is the proxy's own `prefix` operation, applied to the only path an
+    // MCP route has.
+    let (target_port, _headers, paths, stop_target) = http_target_at("/rpc/v1").await;
+
+    let (port, shutdown) = with_prefix_rewrite("/mcp", "/rpc", target_port, "/mcp/v1")
+        .await
+        .expect("the rewrite should have moved the endpoint to /rpc/v1");
+
+    echo_through(port).await;
+
+    let seen = paths.lock().expect("lock").clone();
+    assert!(
+        !seen.is_empty() && seen.iter().all(|p| p == "/rpc/v1"),
+        "{seen:?}"
+    );
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn without_the_prefix_rewrite_the_configured_path_is_used() {
+    // The control: the target is mounted only where the rewrite would put it,
+    // so the same config without the rewrite must fail to come up.
+    let (target_port, _headers, _paths, stop_target) = http_target_at("/rpc/v1").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp/v1
+"#
+    );
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        Gateway::build(&config, None).await.is_err(),
+        "nothing is served at /mcp/v1, so the federation has no reachable target"
+    );
+
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_prefix_rewrite_degenerates_to_a_full_replacement_with_nothing_after_it() {
+    // Target path `/mcp`, route prefix `/mcp`: there is no remainder, so the
+    // replacement stands alone. Worth pinning because it is the common shape
+    // and the one where `prefix` and `full` coincide.
+    let (target_port, _headers, paths, stop_target) = http_target_at("/rpc").await;
+
+    let (port, shutdown) = with_prefix_rewrite("/mcp", "/rpc", target_port, "/mcp")
+        .await
+        .expect("the endpoint should have moved to /rpc");
+
+    echo_through(port).await;
+
+    assert!(
+        paths.lock().expect("lock").iter().all(|p| p == "/rpc"),
+        "{:?}",
+        paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_path_not_carrying_the_prefix_is_prepended_rather_than_replaced() {
+    // The proxy's rule, unchanged, and the one worth knowing about: when the
+    // path does not start with the matched prefix there is nothing to strip,
+    // so the replacement lands in front of the whole path. `/other` under a
+    // `/mcp` -> `/rpc` rewrite becomes `/rpc/other`, not `/other`.
+    //
+    // Reusing the proxy's implementation rather than writing a second one is
+    // what makes that predictable: a `prefix` that behaved differently on an
+    // MCP route than on a `host` route would be a difference nobody could see
+    // coming from the config.
+    let (target_port, _headers, paths, stop_target) = http_target_at("/rpc/other").await;
+
+    let (port, shutdown) = with_prefix_rewrite("/mcp", "/rpc", target_port, "/other")
+        .await
+        .expect("the replacement should have landed in front of the configured path");
+
+    echo_through(port).await;
+
+    assert!(
+        paths
+            .lock()
+            .expect("lock")
+            .iter()
+            .all(|p| p == "/rpc/other"),
+        "{:?}",
+        paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_target.cancel();
+}
+
+#[tokio::test]
+async fn a_prefix_rewrite_is_ignored_when_the_route_matches_several_prefixes() {
+    // Which prefix a request matched is not knowable at startup, so the
+    // target keeps its configured path. `--check` reports the config.
+    let (target_port, _headers, paths, stop_target) = http_target_at("/mcp/v1").await;
+
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+              - path:
+                  pathPrefix: /alt
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp:
+                        host: 127.0.0.1
+                        port: {target_port}
+                        path: /mcp/v1
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    assert!(
+        config.lint().iter().any(|f| f.contains("matches on 2")),
+        "the config should be reported: {:?}",
+        config.lint()
+    );
+
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("the target keeps its configured path, so it is still reachable");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    echo_through(port).await;
+    assert!(
+        paths.lock().expect("lock").iter().all(|p| p == "/mcp/v1"),
+        "{:?}",
+        paths.lock().expect("lock")
+    );
+
+    shutdown.cancel();
+    stop_target.cancel();
+}

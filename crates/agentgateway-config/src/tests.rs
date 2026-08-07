@@ -674,15 +674,77 @@ fn an_authority_rewrite_over_one_mcp_target_lints_clean() {
 }
 
 #[test]
-fn lint_reports_a_prefix_rewrite_on_an_mcp_route() {
-    // The upstream path is the target's own configuration rather than
-    // something derived from the request, so there is no matched prefix.
+fn a_prefix_rewrite_needs_exactly_one_path_prefix_match() {
+    // Which prefix a request matched is not knowable when the target is
+    // dialled, which happens once at startup.
     let findings =
         one_target_with_rewrite("                path:\n                  prefix: /v2").lint();
     assert!(
         findings
             .iter()
-            .any(|f| f.contains("urlRewrite.path.prefix") && f.contains("use `full`")),
+            .any(|f| f.contains("path.prefix") && f.contains("matches on 0")),
+        "a route with no pathPrefix match cannot resolve one: {findings:?}"
+    );
+}
+
+#[test]
+fn a_prefix_rewrite_over_one_matched_prefix_lints_clean() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
+fn a_prefix_rewrite_over_two_matched_prefixes_is_reported() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+              - path:
+                  pathPrefix: /rpc
+            policies:
+              urlRewrite:
+                path:
+                  prefix: /internal
+            backends:
+              - mcp:
+                  targets:
+                    - name: t
+                      mcp:
+                        host: http://localhost:3001/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings.iter().any(|f| f.contains("matches on 2")),
         "{findings:?}"
     );
 }
