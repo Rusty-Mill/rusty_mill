@@ -145,6 +145,22 @@ impl Event {
     ///
     /// Counted as the payload plus a fixed allowance for the envelope, so a
     /// flood of tiny events is bounded rather than treated as free.
+    ///
+    /// # What a `run.*` event is *not* charged for
+    ///
+    /// Its `output`, which is the whole of what the run has produced. Charging
+    /// it here would be counting the same bytes twice — the output already
+    /// lives on the run itself, outside the log — and the effect was worse than
+    /// the double count: a run whose output exceeded the limit blew the entire
+    /// budget on its terminal event, and the rule that keeps the newest event
+    /// evicted everything else to make room. A sixty-part run collapsed to a
+    /// single retained event, so every resume was refused and the bound turned
+    /// "this log is long" into "this stream cannot be resumed at all" for
+    /// exactly the runs it was written to protect.
+    ///
+    /// So a run snapshot is charged for what is genuinely its own and small:
+    /// the error message and the await request. The bound is on what the log
+    /// uniquely holds.
     pub fn approximate_size(&self) -> usize {
         /// Enough to cover the `type` discriminator, the JSON punctuation and
         /// the `Vec`'s own slot, so empty events are not free.
@@ -155,19 +171,17 @@ impl Event {
             Event::MessageCreated { message } | Event::MessageCompleted { message } => {
                 message.parts.iter().map(MessagePart::approximate_size).sum()
             }
-            // A run snapshot's own size is dominated by its output, which is a
-            // message list like any other.
             Event::RunCreated { run }
             | Event::RunInProgress { run }
             | Event::RunAwaiting { run }
             | Event::RunCompleted { run }
             | Event::RunFailed { run }
-            | Event::RunCancelled { run } => run
-                .output
-                .iter()
-                .flat_map(|message| message.parts.iter())
-                .map(MessagePart::approximate_size)
-                .sum(),
+            | Event::RunCancelled { run } => {
+                run.error.as_ref().map_or(0, |error| error.message.len())
+                    + run.await_request.as_ref().map_or(0, |request| {
+                        serde_json::to_string(request.as_value()).map_or(0, |json| json.len())
+                    })
+            }
             // Serialised, because an agent-defined payload has no structure to
             // walk and is the one case that can be arbitrarily large without
             // going through a message part.
