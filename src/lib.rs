@@ -391,6 +391,24 @@ pub mod net;
 // child's terminal. Starts with the pseudoconsole lifecycle itself. Not
 // re-exported at the crate root, for the same reason as the others above
 // — reach it via `rusty_win32::conpty::*`.
+// Round 3, driven by rustils' `platform-windows` needing bindings this
+// crate did not yet have (its `track-w` backend, D-15 in that repo).
+// Three modules rather than additions to `security`, because "who may
+// touch this object" (ACLs/SIDs, advapi32), "give me unpredictable
+// bytes" (CNG, bcrypt), "hold this secret for me" (Credential Manager,
+// advapi32) and "whom does this machine trust" (crypt32) are four
+// different jobs that happen to share a security-shaped word. Merging
+// them would have produced one module with three error conventions —
+// `crypto` in particular returns `NTSTATUS`, a number space
+// `Win32Error` cannot faithfully represent (see its own module docs).
+// Not re-exported at the crate root, same as the other multi-item
+// modules above.
+#[cfg(windows)]
+pub mod certstore;
+#[cfg(windows)]
+pub mod credential;
+pub mod crypto;
+
 #[cfg(windows)]
 pub mod conpty;
 #[cfg(windows)]

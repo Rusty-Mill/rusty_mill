@@ -4,6 +4,47 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Added
+- **Three new modules and two `net` additions, driven by rustils' need for
+  bindings this crate did not have** (its `platform-windows` `track-w`
+  backend, D-15 there). Every one is a binding this crate was missing, not
+  a rework of something it had:
+  - `crypto` — `BCryptGenRandom` via the system-preferred RNG
+    (`crypto::random_bytes`), Windows' `getrandom(2)`. Returns
+    `Result<usize, NtStatus>`, the one wrapper in this crate that does not
+    return `Win32Error`: `BCryptGenRandom` reports an `NTSTATUS`, a
+    number space `Win32Error` cannot faithfully hold, and unlike `conpty`'s
+    `HRESULT`s there is no embedded Win32 code to recover. The module's
+    own docs carry the full reasoning.
+  - `credential` — Credential Manager (`CredReadW`/`CredWriteW`/
+    `CredFree`) scoped to `CRED_TYPE_GENERIC`. `read` copies the secret
+    out and `CredFree`s before returning, so the raw `CREDENTIALW` never
+    crosses the module boundary and no caller inherits a free it can
+    forget. A missing target is `Ok(None)`, not an error.
+  - `certstore` — system certificate stores (`CertOpenSystemStoreW`/
+    `CertEnumCertificatesInStore`/`CertCloseStore`), read-only, with
+    `certstore::root_certificates()` as the "what does this machine
+    trust" one-liner. `Store` closes on drop; enumeration copies DER out
+    rather than handing back store-owned contexts. The AuthRoot
+    lazy-population caveat is documented rather than hidden.
+  - `net::set_nonblocking` — `ioctlsocket(FIONBIO)`, Winsock's
+    `fcntl(O_NONBLOCK)`. Set-only, because Winsock offers no way to query
+    the current mode — stated as an OS limitation rather than left as an
+    apparent omission.
+  - `net` AF_UNIX support — `AddressFamily::Unix`, `Protocol::Unspecified`,
+    `UnixSocketAddr`, and `bind_unix`/`connect_unix`/`accept_unix`/
+    `local_addr_unix`. A separate address type rather than a third
+    `SocketAddr` variant: `sockaddr_un` is 110 bytes against
+    `sockaddr_in6`'s 28, and folding it in would have quadrupled every
+    IPv4 address this module passes around to serve a family that shares
+    no address-handling code with the IP ones.
+
+  `CREDENTIALW`, `CERT_CONTEXT` and `sockaddr_un` layouts were
+  transcribed from the Windows metadata and pinned with
+  `size_of`/`align_of`/`offset_of` compile-time asserts, so a
+  mistranscription fails the build rather than corrupting memory at
+  runtime.
+
 ### Changed
 - **Manifest compatibility, so rustils can adopt this crate as a
   dependency.** `edition` dropped from 2024 to 2021 and `rust-version =
