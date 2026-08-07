@@ -71,7 +71,9 @@ impl Harness {
         let addr: SocketAddr = format!("127.0.0.1:{port}")
             .parse()
             .expect("address should parse");
-        serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        // The returned future only joins the accept loops; these tests drive
+        // the gateway over MCP and cancel it directly.
+        let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
             .await
             .expect("gateway should bind");
 

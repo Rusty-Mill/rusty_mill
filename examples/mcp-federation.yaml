@@ -43,6 +43,27 @@ binds:
                 allowOrigins: ["*"]
                 allowHeaders: [mcp-protocol-version, content-type, cache-control]
                 exposeHeaders: ["Mcp-Session-Id"]
+              # An MCP-aware policy service, consulted over gRPC. Unlike the
+              # gates above it can rewrite as well as refuse -- redacting a
+              # secret out of a result is not a yes/no answer.
+              #
+              # `methods` is an allow-list; a method matching no key bypasses
+              # the processor. failureMode defaults to failClosed, so a
+              # processor that is down refuses rather than waving calls
+              # through. Note requestHeaders: an empty `allowed` forwards
+              # every header, which is the opposite of extAuthz.includeHeaders.
+              mcpGuardrails:
+                processors:
+                  - kind: remote
+                    host: guardrail.internal:9000
+                    timeout: 5s
+                    methods:
+                      tools/call: full
+                      "*/list": response
+                    metadata:
+                      tenant: 'request.headers["x-tenant"]'
+                    requestHeaders:
+                      allowed: [x-tenant]
               mcpAuthorization:
                 # Deny wins over allow, and an empty allow list means
                 # "everything not denied". These match the *federated* name.

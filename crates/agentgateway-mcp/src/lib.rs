@@ -12,12 +12,18 @@
 
 mod federation;
 mod gate;
+mod guardrails;
 mod naming;
 mod rules;
 mod target;
 
 pub use federation::{Federation, FederationError, TokenClaims};
 pub use gate::{Authorization, GateError, TargetFilter};
+pub use guardrails::{
+    AuthorizationError, CallContext, Guardrails, GuardrailsError, McpHeader, McpRequest,
+    McpRequestResult, McpResponse, McpResponseResult, Outcome, authorization_error, request_result,
+    response_result,
+};
 pub use naming::{Resolution, ToolNamer};
 pub use rules::{RuleError, RuleSet, ToolCall};
 pub use target::{Target, TargetError};

@@ -59,7 +59,7 @@ tool's own name.
 | `agentgateway-config` | The configuration model. Wire-compatible with agentgateway's local config. |
 | `agentgateway-core` | Route matching (Gateway API precedence), hostname patterns, CORS. |
 | `agentgateway-auth` | The `jwtAuth` and `extAuthz` policies. |
-| `agentgateway-mcp` | MCP federation: target connections, name qualification, tool gates, CEL rules. |
+| `agentgateway-mcp` | MCP federation: targets, name qualification, tool gates, CEL rules, guardrails. |
 | `agentgateway-proxy` | HTTP reverse proxying for `host` backends. |
 | `agentgateway-tls` | TLS termination, over [`rusty_tls`][rusty_tls]. |
 | `agentgateway-llm` | The LLM gateway: an OpenAI-compatible front end over providers. |
@@ -121,6 +121,8 @@ Implemented and tested:
   name qualification, per-target `filters`, route-level `mcpAuthorization` —
   both the `allowTools`/`denyTools` lists and upstream's CEL `rules`, see
   [Tool authorization](#tool-authorization)
+- `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
+  well as refuse — see [Guardrails](#guardrails)
 - `host` backends: HTTP reverse proxying with weighted load balancing,
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
 - `retry` with backoff, and `localRateLimit` token buckets — see
@@ -148,6 +150,8 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 
 - `extAuthz.includeBody`: the authorizer sees the method, path and allow-listed
   headers, never the body
+- `mcpGuardrails` processors naming `backend:` or `service:` rather than
+  `host:`, and `headerMutation` in a processor's answer
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -314,6 +318,103 @@ supported, and there is a test for each pinning the difference down.
 An expression that does not compile is a startup failure, not a skipped rule —
 otherwise a typo in an `allow` silently serves nothing and a typo in a `deny`
 silently refuses nothing.
+
+## Guardrails
+
+An `mcpGuardrails` processor is an MCP-aware policy service the gateway
+consults over gRPC — Envoy's `ext_authz` shape moved down to the MCP method
+layer, with one addition that changes what it is for: **a processor can rewrite
+as well as refuse.** Redacting a secret out of a tool result is not something a
+yes/no answer can do.
+
+```yaml
+policies:
+  mcpGuardrails:
+    processors:
+      - kind: remote
+        host: guardrail.internal:9000
+        timeout: 5s
+        methods:
+          tools/call: full        # both phases
+          "*/list": response      # results only
+        failureMode: failClosed   # the default
+        metadata:
+          tenant: 'request.headers["x-tenant"]'
+        requestHeaders:
+          allowed: [x-tenant]
+```
+
+The wire protocol is upstream's `agentgateway.dev.ext_mcp` — `CheckRequest` and
+`CheckResponse`, each answering pass, a replacement body, or a refusal.
+`proto/ext_mcp.proto` in `agentgateway-mcp` is upstream's schema, unchanged. The
+messages are written by hand rather than generated: `tonic-build` would put
+`protoc` in everyone's build for eight small messages, and the field numbers are
+pinned against encoded bytes in a test rather than against the declarations.
+
+### What is hooked
+
+This gateway serves `tools/list` and `tools/call`, so those are the two methods
+there is anything to hook. A processor keyed only on `prompts/*` or
+`resources/read` is reported by `--check` and at startup, because a guardrail
+that never fires looks exactly like one that always passes.
+
+`tools/call` runs both phases. `tools/list` fans out, so its request phase runs
+once for the whole client call and carries no params — a processor can refuse
+there but has nothing to rewrite, and filtering a catalogue is response-phase
+work. An upstream *error* skips the response phase entirely: there is no result
+to inspect, and asking a guardrail to approve a failure is not a question it can
+answer.
+
+Processors see the **unmuxed** name — a call to `alpha_echo` arrives as
+`{"name": "echo"}` with `service_names: ["alpha"]`, which is what the upstream
+will actually receive.
+
+### A chain is a pipeline, not a vote
+
+Processors run in configuration order, and each one sees what the previous one
+produced. A redactor followed by a validator should see redacted input. The
+first refusal ends the chain — the processors after it are not consulted, and
+neither is the upstream.
+
+### Method matching
+
+`methods` is an allow-list from pattern to phase (`off`, `request`, `response`,
+`full`); a method matching no key bypasses the processor. When several patterns
+match, the most specific wins: an exact name, then a prefix wildcard
+(`tools/*`), then a suffix wildcard (`*/list`), then `*`. Within one kind the
+longer pattern wins, and remaining ties break alphabetically so resolution never
+depends on map ordering. A pattern that can never match — `a*b`, `**` — is
+reported rather than accepted.
+
+### Failing closed
+
+A processor that cannot be reached, exceeds its budget (10s by default), or
+answers something unparseable **refuses the call**. `failureMode: failOpen`
+reverses that but has to be asked for, for the same reason as `extAuthz`: a
+policy service that is down must not silently become an open door.
+
+A refusal carries the processor's own reason and code — `permissionDenied`
+becomes JSON-RPC `-32001`, `resourceExhausted` `-32003`, `invalid` `-32600`, and
+anything else `-32603`. (`-32002` is skipped: `rmcp` already assigns it to
+`RESOURCE_NOT_FOUND`.)
+
+### Header and metadata context
+
+`requestHeaders` bounds what the processor is shown. Note the default: an empty
+`allowed` forwards **every** header, which is upstream's reading and the
+opposite of `extAuthz.includeHeaders`. `disallowed` always wins, and both match
+case-insensitively.
+
+`metadata` is a map of CEL expressions evaluated per call and sent as
+`metadata_context`. The context is `jwt` — the verified token's claims — and
+`request`, carrying `method` and `headers`. An expression that cannot be
+evaluated is dropped rather than failing the call: metadata is context for the
+processor, not a decision, and a missing claim should not take a guardrail
+offline. One that does not *compile* is a startup failure.
+
+`headerMutation` in a processor's answer is accepted on the wire and not
+applied; this gateway does not rewrite the upstream HTTP request from a
+processor's response.
 
 ## Proxying
 

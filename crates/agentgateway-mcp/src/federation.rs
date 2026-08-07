@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_config::{McpAuthorization, McpBackend};
+use agentgateway_config::{McpAuthorization, McpBackend, McpGuardrails};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     model::{
@@ -28,10 +28,15 @@ use tokio::sync::RwLock;
 
 use crate::{
     gate::{Authorization, GateError},
+    guardrails::{CallContext, Guardrails, GuardrailsError, Outcome},
     naming::{Resolution, ToolNamer},
     rules::{RuleError, RuleSet, ToolCall},
     target::Target,
 };
+
+/// JSON-RPC method names the guardrail chain is keyed on.
+const TOOLS_CALL: &str = "tools/call";
+const TOOLS_LIST: &str = "tools/list";
 
 /// The verified token's claims, carried on the HTTP request.
 ///
@@ -52,6 +57,10 @@ pub enum FederationError {
     #[error(transparent)]
     Rules(#[from] RuleError),
 
+    /// A guardrail processor could not be configured.
+    #[error(transparent)]
+    Guardrails(#[from] GuardrailsError),
+
     /// Every target failed to come up, so there is nothing to serve.
     #[error("no MCP target could be reached; the federation would serve nothing")]
     NoTargets,
@@ -67,6 +76,7 @@ struct Inner {
     namer: ToolNamer,
     authorization: Authorization,
     rules: RuleSet,
+    guardrails: Guardrails,
     /// Budget for a single upstream call.
     ///
     /// This is the timeout that actually bounds a tool call. A route's
@@ -98,9 +108,15 @@ impl Federation {
     pub async fn connect(
         backend: &McpBackend,
         authorization: Option<&McpAuthorization>,
+        guardrails: Option<&McpGuardrails>,
         backend_timeout: Option<Duration>,
         at: &str,
     ) -> Result<Self, FederationError> {
+        let guardrails = match guardrails {
+            Some(policy) => Guardrails::new(policy, &format!("{at}.mcpGuardrails"))?,
+            None => Guardrails::default(),
+        };
+
         let at_policy = format!("{at}.mcpAuthorization");
         let (authorization, rules) = match authorization {
             Some(policy) => (
@@ -139,6 +155,7 @@ impl Federation {
                 namer,
                 authorization,
                 rules,
+                guardrails,
                 backend_timeout,
                 targets,
                 degraded,
@@ -281,6 +298,39 @@ impl ServerHandler for Federation {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let claims = claims(&context);
+        let backends: Vec<String> = self
+            .inner
+            .targets
+            .iter()
+            .map(|target| target.name.clone())
+            .collect();
+
+        // `tools/list` fans out, so the request phase runs once for the whole
+        // client call rather than once per target. It carries no params, so a
+        // processor can refuse here but has nothing to rewrite -- filtering a
+        // catalogue is response-phase work.
+        if self.inner.guardrails.runs_request(TOOLS_LIST)
+            && let Outcome::Reject {
+                code,
+                message,
+                data,
+            } = self
+                .inner
+                .guardrails
+                .check_request(
+                    CallContext {
+                        method: TOOLS_LIST,
+                        headers: request_headers(&context),
+                        claims,
+                    },
+                    &backends,
+                    None,
+                )
+                .await
+        {
+            return Err(mcp_error(code, message, data));
+        }
+
         let mut tools: Vec<Tool> = Vec::new();
         let mut index = HashMap::new();
 
@@ -319,10 +369,15 @@ impl ServerHandler for Federation {
 
         *self.inner.index.write().await = index;
 
-        Ok(ListToolsResult {
+        // The response phase sees the merged catalogue, after the gates have
+        // had their say -- so a processor filtering the listing is refining
+        // what the route already permits rather than widening it.
+        let listing = ListToolsResult {
             tools,
             ..Default::default()
-        })
+        };
+        self.guard_response(TOOLS_LIST, &backends, &listing, &context)
+            .await
     }
 
     async fn call_tool(
@@ -373,7 +428,49 @@ impl ServerHandler for Federation {
         }
 
         let mut params = request;
-        params.name = tool.into();
+        params.name = tool.clone().into();
+
+        // Guardrails run last of the gates: a processor is consulted only
+        // about calls that were otherwise going to happen, and it sees the
+        // unmuxed name the upstream will actually receive.
+        let backends = vec![target.name.clone()];
+        if self.inner.guardrails.runs_request(TOOLS_CALL) {
+            let encoded = serde_json::to_vec(&params).unwrap_or_default();
+            match self
+                .inner
+                .guardrails
+                .check_request(
+                    CallContext {
+                        method: TOOLS_CALL,
+                        headers: request_headers(&context),
+                        claims: claims(&context),
+                    },
+                    &backends,
+                    Some(&encoded),
+                )
+                .await
+            {
+                Outcome::Pass => {}
+                Outcome::Mutated(body) => match serde_json::from_slice(&body) {
+                    Ok(rewritten) => params = rewritten,
+                    // A processor that returns something unusable is a
+                    // processor that failed, so it takes the same path as one
+                    // that could not be reached rather than being ignored.
+                    Err(err) => {
+                        tracing::warn!(%err, "a guardrail rewrote tools/call into something unusable");
+                        return Err(McpError::internal_error(
+                            "mcpGuardrails returned an unusable request".to_string(),
+                            None,
+                        ));
+                    }
+                },
+                Outcome::Reject {
+                    code,
+                    message,
+                    data,
+                } => return Err(mcp_error(code, message, data)),
+            }
+        }
 
         let call = target.call(params);
         let result = match self.inner.backend_timeout {
@@ -401,15 +498,96 @@ impl ServerHandler for Federation {
             None => call.await,
         };
 
-        match result {
-            Ok(result) => Ok(CallToolResponse::Complete(result)),
+        // An upstream failure skips the response phase. There is no result to
+        // inspect, and asking a guardrail to approve a failure is not a
+        // question it can answer.
+        let result = match result {
+            Ok(result) => result,
             Err(err) => {
                 tracing::warn!(target = %target.name, tool = %federated, %err, "tool call failed");
-                Err(McpError::internal_error(
+                return Err(McpError::internal_error(
                     format!("calling `{federated}` failed: {err}"),
                     None,
-                ))
+                ));
             }
+        };
+
+        let result = match self
+            .guard_response(TOOLS_CALL, &backends, &result, &context)
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => return Err(err),
+        };
+
+        Ok(CallToolResponse::Complete(result))
+    }
+}
+
+/// Run the response phase over a value, returning it possibly rewritten.
+impl Federation {
+    async fn guard_response<T>(
+        &self,
+        method: &str,
+        backends: &[String],
+        value: &T,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<T, McpError>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone,
+    {
+        if !self.inner.guardrails.runs_response(method) {
+            return Ok(value.clone());
         }
+
+        let encoded = serde_json::to_vec(value).unwrap_or_default();
+        match self
+            .inner
+            .guardrails
+            .check_response(
+                CallContext {
+                    method,
+                    headers: request_headers(context),
+                    claims: claims(context),
+                },
+                backends,
+                &encoded,
+            )
+            .await
+        {
+            Outcome::Pass => Ok(value.clone()),
+            Outcome::Mutated(body) => serde_json::from_slice(&body).map_err(|err| {
+                tracing::warn!(method, %err, "a guardrail rewrote a result into something unusable");
+                McpError::internal_error(
+                    "mcpGuardrails returned an unusable result".to_string(),
+                    None,
+                )
+            }),
+            Outcome::Reject {
+                code,
+                message,
+                data,
+            } => Err(mcp_error(code, message, data)),
+        }
+    }
+}
+
+/// The HTTP headers carrying this MCP call, or an empty map for stdio.
+fn request_headers(context: &RequestContext<RoleServer>) -> &http::HeaderMap {
+    static EMPTY: std::sync::LazyLock<http::HeaderMap> =
+        std::sync::LazyLock::new(http::HeaderMap::new);
+    context
+        .extensions
+        .get::<http::request::Parts>()
+        .map(|parts| &parts.headers)
+        .unwrap_or(&EMPTY)
+}
+
+/// Build a JSON-RPC error from a guardrail's refusal.
+fn mcp_error(code: i32, message: String, data: Option<serde_json::Value>) -> McpError {
+    McpError {
+        code: rmcp::model::ErrorCode(code),
+        message: message.into(),
+        data,
     }
 }
