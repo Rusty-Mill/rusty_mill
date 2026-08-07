@@ -45,7 +45,10 @@ binds:
                 exposeHeaders: ["Mcp-Session-Id"]
               # An MCP-aware policy service, consulted over gRPC. Unlike the
               # gates above it can rewrite as well as refuse -- redacting a
-              # secret out of a result is not a yes/no answer.
+              # secret out of a result is not a yes/no answer. Its answer can
+              # also carry a headerMutation, which changes the headers of the
+              # upstream call itself; that only lands on `mcp:` targets, since
+              # a stdio target has no HTTP request to change.
               #
               # `methods` is an allow-list; a method matching no key bypasses
               # the processor. failureMode defaults to failClosed, so a

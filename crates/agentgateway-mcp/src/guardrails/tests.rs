@@ -13,7 +13,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
-use wire::Pass;
+use wire::{HeaderMutation, Pass};
 
 /// What a scripted processor should answer.
 #[derive(Clone)]
@@ -25,6 +25,8 @@ enum Script {
     Refuse(authorization_error::Code, &'static str),
     /// Never answer, so the caller's budget has to end the call.
     Hang,
+    /// Pass, but ask for these header changes on the upstream call.
+    Headers(Vec<(&'static str, &'static str)>, Vec<&'static str>),
 }
 
 /// What the processor was asked, recorded for assertions.
@@ -133,6 +135,19 @@ async fn processor(script: Script) -> (String, Arc<Mutex<Seen>>, CancellationTok
                             }
                             _ => request_result::Result::Pass(Pass {}),
                         }),
+                        header_mutation: match &script {
+                            Script::Headers(set, remove) => Some(HeaderMutation {
+                                set: set
+                                    .iter()
+                                    .map(|(k, v)| McpHeader {
+                                        key: (*k).to_string(),
+                                        value: v.as_bytes().to_vec(),
+                                    })
+                                    .collect(),
+                                remove: remove.iter().map(|n| (*n).to_string()).collect(),
+                            }),
+                            _ => None,
+                        },
                         ..Default::default()
                     }
                     .encode_to_vec()
@@ -220,7 +235,8 @@ async fn a_passing_processor_leaves_the_call_alone() {
             &["alpha".into()],
             Some(br#"{"name":"echo"}"#),
         )
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(outcome, Outcome::Pass);
     let seen = seen.lock().expect("lock");
@@ -250,7 +266,8 @@ async fn a_processor_can_rewrite_the_request() {
             &["alpha".into()],
             Some(br#"{"name":"echo","args":{"secret":"x"}}"#),
         )
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(
         outcome,
@@ -273,7 +290,8 @@ async fn a_refusal_carries_the_processors_reason_and_code() {
 
     let outcome = chain
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(
         outcome,
@@ -333,7 +351,8 @@ async fn the_first_refusal_ends_the_chain() {
 
     let outcome = chain
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     assert!(matches!(outcome, Outcome::Reject { .. }));
     assert_eq!(
@@ -401,7 +420,8 @@ async fn a_rewrite_of_a_request_with_no_params_is_discarded() {
 
     let outcome = chain
         .check_request(call("tools/list"), &["alpha".into()], None)
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(outcome, Outcome::Pass);
     stop.cancel();
@@ -422,7 +442,8 @@ async fn an_unreachable_processor_refuses_by_default() {
 
     let outcome = chain
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     match outcome {
         Outcome::Reject { code, .. } => assert_eq!(code, INTERNAL_ERROR),
@@ -441,7 +462,8 @@ async fn failing_open_has_to_be_asked_for() {
 
     let outcome = chain(vec![config])
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(outcome, Outcome::Pass);
 }
@@ -455,7 +477,8 @@ async fn a_hanging_processor_hits_its_budget_and_refuses() {
     let started = std::time::Instant::now();
     let outcome = chain(vec![config])
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     assert!(matches!(outcome, Outcome::Reject { .. }));
     assert!(
@@ -630,7 +653,8 @@ async fn a_metadata_expression_that_cannot_be_evaluated_is_skipped_not_fatal() {
 
     let outcome = chain(vec![config])
         .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
-        .await;
+        .await
+        .outcome;
 
     assert_eq!(outcome, Outcome::Pass);
     let seen = seen.lock().expect("lock");
@@ -676,4 +700,185 @@ fn a_metadata_expression_that_does_not_compile_fails_at_startup() {
     )
     .expect_err("should not compile");
     assert!(err.to_string().contains("metadata.tenant"), "got: {err}");
+}
+
+/// One processor's answer, folded into a running set.
+fn changes(set: &[(&str, &str)], remove: &[&str]) -> HeaderChanges {
+    let mut changes = HeaderChanges::default();
+    changes.merge(HeaderMutation {
+        set: set
+            .iter()
+            .map(|(k, v)| McpHeader {
+                key: (*k).to_string(),
+                value: v.as_bytes().to_vec(),
+            })
+            .collect(),
+        remove: remove.iter().map(|n| (*n).to_string()).collect(),
+    });
+    changes
+}
+
+fn set_of(changes: &HeaderChanges) -> Vec<(String, String)> {
+    changes
+        .set()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_set_and_a_remove_survive_the_merge() {
+    let changes = changes(&[("x-user-id", "u-1")], &["x-internal"]);
+    assert_eq!(set_of(&changes), vec![("x-user-id".into(), "u-1".into())]);
+    assert_eq!(
+        changes
+            .remove()
+            .iter()
+            .map(|n| n.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x-internal"]
+    );
+}
+
+#[test]
+fn repeated_set_entries_for_one_name_form_a_list() {
+    // The protocol says they replace the existing header as a list, and a
+    // comma-separated field line is how HTTP spells that.
+    let changes = changes(&[("x-scope", "read"), ("x-scope", "write")], &[]);
+    assert_eq!(
+        set_of(&changes),
+        vec![("x-scope".into(), "read, write".into())]
+    );
+}
+
+#[test]
+fn a_later_processor_overwrites_an_earlier_one() {
+    // Each processor's mutation is applied in turn to the same map, so the
+    // first entry of a later one overwrites rather than appending to what a
+    // previous processor left behind.
+    let mut changes = changes(&[("x-user-id", "u-1")], &[]);
+    changes.merge(HeaderMutation {
+        set: vec![McpHeader {
+            key: "x-user-id".into(),
+            value: b"u-2".to_vec(),
+        }],
+        remove: Vec::new(),
+    });
+    assert_eq!(set_of(&changes), vec![("x-user-id".into(), "u-2".into())]);
+}
+
+#[test]
+fn a_later_remove_cancels_an_earlier_set_and_the_other_way_round() {
+    let mut changes = changes(&[("x-user-id", "u-1")], &[]);
+    changes.merge(HeaderMutation {
+        set: Vec::new(),
+        remove: vec!["x-user-id".into()],
+    });
+    assert!(changes.set().is_empty());
+    assert_eq!(changes.remove().len(), 1);
+
+    changes.merge(HeaderMutation {
+        set: vec![McpHeader {
+            key: "x-user-id".into(),
+            value: b"u-3".to_vec(),
+        }],
+        remove: Vec::new(),
+    });
+    assert_eq!(set_of(&changes), vec![("x-user-id".into(), "u-3".into())]);
+    assert!(changes.remove().is_empty());
+}
+
+#[test]
+fn a_header_http_cannot_represent_is_skipped_not_fatal() {
+    // A malformed header is a bug in the processor. Refusing every request
+    // because of one is a worse outcome than dropping it and saying so.
+    let changes = changes(&[("not a header", "x"), ("x-fine", "yes")], &["also bad"]);
+    assert_eq!(set_of(&changes), vec![("x-fine".into(), "yes".into())]);
+    assert!(changes.remove().is_empty());
+}
+
+#[test]
+fn a_skipped_first_entry_does_not_turn_a_later_one_into_an_append() {
+    // The value must be `u-2`, not `, u-2`: `written` is marked only after a
+    // successful write.
+    let changes = changes(&[("x-user-id", "u-\u{7f}bad"), ("x-user-id", "u-2")], &[]);
+    assert_eq!(set_of(&changes), vec![("x-user-id".into(), "u-2".into())]);
+}
+
+#[tokio::test]
+async fn a_header_mutation_reaches_the_caller_of_the_chain() {
+    let (host, _, stop) = processor(Script::Headers(vec![("x-user-id", "u-42")], vec![])).await;
+    let chain = chain(vec![processor_config(
+        &host,
+        &[("tools/call", Phase::Request)],
+    )]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    assert_eq!(decision.outcome, Outcome::Pass);
+    assert_eq!(
+        set_of(&decision.headers),
+        vec![("x-user-id".to_string(), "u-42".to_string())]
+    );
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn a_refusal_carries_no_header_changes() {
+    // A request that never happens should leave no trace on the one that
+    // replaces it.
+    let (setter, _, stop_a) = processor(Script::Headers(vec![("x-user-id", "u-42")], vec![])).await;
+    let (refuser, _, stop_b) = processor(Script::Refuse(
+        authorization_error::Code::PermissionDenied,
+        "no",
+    ))
+    .await;
+
+    let chain = chain(vec![
+        processor_config(&setter, &[("tools/call", Phase::Request)]),
+        processor_config(&refuser, &[("tools/call", Phase::Request)]),
+    ]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    assert!(matches!(decision.outcome, Outcome::Reject { .. }));
+    assert!(decision.headers.is_empty());
+    stop_a.cancel();
+    stop_b.cancel();
+}
+
+#[tokio::test]
+async fn header_changes_from_several_processors_accumulate() {
+    let (first, _, stop_a) = processor(Script::Headers(vec![("x-user-id", "u-1")], vec![])).await;
+    let (second, _, stop_b) = processor(Script::Headers(vec![("x-tenant", "acme")], vec![])).await;
+
+    let chain = chain(vec![
+        processor_config(&first, &[("tools/call", Phase::Request)]),
+        processor_config(&second, &[("tools/call", Phase::Request)]),
+    ]);
+
+    let decision = chain
+        .check_request(call("tools/call"), &["alpha".into()], Some(b"{}"))
+        .await;
+
+    let mut set = set_of(&decision.headers);
+    set.sort();
+    assert_eq!(
+        set,
+        vec![
+            ("x-tenant".to_string(), "acme".to_string()),
+            ("x-user-id".to_string(), "u-1".to_string()),
+        ]
+    );
+    stop_a.cancel();
+    stop_b.cancel();
 }

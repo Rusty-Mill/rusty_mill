@@ -131,6 +131,7 @@ dependencies = [
  "prost",
  "prost-types",
  "regex",
+ "reqwest",
  "rmcp",
  "serde",
  "serde_json",

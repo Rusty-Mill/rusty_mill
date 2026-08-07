@@ -9,11 +9,18 @@
 use agentgateway_config::{McpTarget, McpTargetKind};
 use rmcp::{
     RoleClient, ServiceExt,
+    model::{CallToolRequest, ClientRequest, GetExtensions, ListToolsRequest, ServerResult},
     service::RunningService,
-    transport::{StreamableHttpClientTransport, TokioChildProcess},
+    transport::{
+        StreamableHttpClientTransport, TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig,
+    },
 };
 
-use crate::gate::{GateError, TargetFilter};
+use crate::{
+    gate::{GateError, TargetFilter},
+    mutating_client::{HeaderOverride, MutatingClient},
+};
 
 /// Failure to bring up a target.
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +68,12 @@ pub struct Target {
     pub name: String,
     /// Which of its tools are federated.
     pub filter: TargetFilter,
+    /// Whether this target speaks HTTP, and so has headers to mutate.
+    ///
+    /// A `stdio` target talks over a pipe. A guardrail's `headerMutation`
+    /// aimed at one has nowhere to land, and is dropped rather than quietly
+    /// appearing somewhere else.
+    pub http: bool,
     service: RunningService<RoleClient, ()>,
 }
 
@@ -107,7 +120,12 @@ impl Target {
             }
             McpTargetKind::Mcp(http) => {
                 let uri = format!("http://{}:{}{}", http.host, http.port, http.path);
-                let transport = StreamableHttpClientTransport::from_uri(uri);
+                // `MutatingClient` rather than a bare `reqwest::Client`, so a
+                // guardrail's `headerMutation` can reach the outgoing request.
+                let transport = StreamableHttpClientTransport::with_client(
+                    MutatingClient::default(),
+                    StreamableHttpClientTransportConfig::with_uri(uri),
+                );
                 ().serve(transport)
                     .await
                     .map_err(|source| TargetError::Handshake {
@@ -123,13 +141,30 @@ impl Target {
         Ok(Target {
             name,
             filter,
+            http: matches!(config.kind, McpTargetKind::Mcp(_)),
             service,
         })
     }
 
     /// The tools this target exports, after its filters.
-    pub async fn tools(&self) -> Result<Vec<rmcp::model::Tool>, rmcp::service::ServiceError> {
-        let tools = self.service.list_all_tools().await?;
+    ///
+    /// `headers` are a guardrail's changes to the upstream HTTP request, and
+    /// are ignored for a `stdio` target.
+    pub async fn tools(
+        &self,
+        headers: &HeaderOverride,
+    ) -> Result<Vec<rmcp::model::Tool>, rmcp::service::ServiceError> {
+        let mut request = ClientRequest::ListToolsRequest(ListToolsRequest::default());
+        self.attach(&mut request, headers);
+
+        let tools = match self.service.send_request(request).await? {
+            ServerResult::ListToolsResult(result) => result.tools,
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for tools/list");
+                Vec::new()
+            }
+        };
+
         Ok(tools
             .into_iter()
             .filter(|tool| self.filter.permits(&tool.name))
@@ -137,11 +172,43 @@ impl Target {
     }
 
     /// Forward a tool call upstream.
+    ///
+    /// `headers` are a guardrail's changes to the upstream HTTP request, and
+    /// are ignored for a `stdio` target.
     pub async fn call(
         &self,
         params: rmcp::model::CallToolRequestParams,
+        headers: &HeaderOverride,
     ) -> Result<rmcp::model::CallToolResult, rmcp::service::ServiceError> {
-        self.service.call_tool(params).await
+        let mut request = ClientRequest::CallToolRequest(CallToolRequest::new(params));
+        self.attach(&mut request, headers);
+
+        match self.service.send_request(request).await? {
+            ServerResult::CallToolResult(result) => Ok(result),
+            other => {
+                tracing::warn!(target = %self.name, ?other, "unexpected result for tools/call");
+                Err(rmcp::service::ServiceError::UnexpectedResponse)
+            }
+        }
+    }
+
+    /// Put a guardrail's header changes where the transport will find them.
+    ///
+    /// `rmcp` carries request extensions in memory down to the transport, so
+    /// this is how a per-call header reaches a connection whose own headers
+    /// were fixed when it was dialled.
+    fn attach(&self, request: &mut ClientRequest, headers: &HeaderOverride) {
+        if headers.is_empty() {
+            return;
+        }
+        if !self.http {
+            tracing::debug!(
+                target = %self.name,
+                "a guardrail asked to change headers on a stdio target; there are none"
+            );
+            return;
+        }
+        request.extensions_mut().insert(headers.clone());
     }
 
     /// Close the connection, terminating the subprocess for stdio targets.

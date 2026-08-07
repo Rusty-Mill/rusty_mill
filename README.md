@@ -151,7 +151,7 @@ Parses but is **not** enforced — reported by `--check` and at startup:
 - `extAuthz.includeBody`: the authorizer sees the method, path and allow-listed
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
-  `host:`, and `headerMutation` in a processor's answer
+  `host:`
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -412,9 +412,36 @@ evaluated is dropped rather than failing the call: metadata is context for the
 processor, not a decision, and a missing claim should not take a guardrail
 offline. One that does not *compile* is a startup failure.
 
-`headerMutation` in a processor's answer is accepted on the wire and not
-applied; this gateway does not rewrite the upstream HTTP request from a
-processor's response.
+### `headerMutation`
+
+A processor's request-phase answer can also change the headers of the upstream
+HTTP request that carries the call — which is how a guardrail passes a resolved
+identity to the MCP server behind it:
+
+```
+McpRequestResult.header_mutation = { set: [{key: "x-user-id", value: "u-42"}] }
+```
+
+It is a **per-call** change, not a connection one. The connection to a target is
+dialled once at startup and shared, so the change rides in the request's
+extensions, which `rmcp` carries in memory from the peer down to the transport.
+The handshake, which happened before any processor was consulted, never carries
+it.
+
+Only `mcp:` targets have headers to change. A `stdio` target speaks over a pipe,
+so a mutation aimed at one is logged and dropped rather than failing the call.
+For `tools/list`, which fans out, the change applies to every target's request —
+there is one client call and several upstream ones, and singling one out would
+be arbitrary.
+
+Changes accumulate across the chain: a later processor setting a name an earlier
+one set wins, a later `remove` cancels an earlier `set`, and vice versa. Within
+one processor's answer, repeated `set` entries for one name are joined with
+`", "` — the protocol says they form a list replacing the header, and a single
+comma-separated field line is how HTTP spells that. A name or value HTTP cannot
+represent is skipped with a warning rather than failing the call. A refusal
+carries no header changes at all: a request that never happens should leave no
+trace on the one that replaces it.
 
 ## Proxying
 

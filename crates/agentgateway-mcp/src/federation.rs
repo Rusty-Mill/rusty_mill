@@ -29,6 +29,7 @@ use tokio::sync::RwLock;
 use crate::{
     gate::{Authorization, GateError},
     guardrails::{CallContext, Guardrails, GuardrailsError, Outcome},
+    mutating_client::HeaderOverride,
     naming::{Resolution, ToolNamer},
     rules::{RuleError, RuleSet, ToolCall},
     target::Target,
@@ -202,7 +203,12 @@ impl Federation {
         let mut per_target: Vec<(String, Vec<String>)> = Vec::new();
 
         for target in &self.inner.targets {
-            if let Some(tools) = self.list_with_timeout(target).await {
+            // Startup warm-up, not a client call, so no processor was asked
+            // and there is nothing to mutate.
+            if let Some(tools) = self
+                .list_with_timeout(target, &HeaderOverride::default())
+                .await
+            {
                 let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
                 for name in &names {
                     index.insert(
@@ -227,8 +233,12 @@ impl Federation {
     ///
     /// A target that hangs would otherwise hold up every `tools/list`, turning
     /// one sick server into a broken catalogue for all of them.
-    async fn list_with_timeout(&self, target: &Target) -> Option<Vec<Tool>> {
-        let listing = target.tools();
+    async fn list_with_timeout(
+        &self,
+        target: &Target,
+        headers: &HeaderOverride,
+    ) -> Option<Vec<Tool>> {
+        let listing = target.tools(headers);
         let result = match self.inner.backend_timeout {
             Some(budget) => match tokio::time::timeout(budget, listing).await {
                 Ok(result) => result,
@@ -309,12 +319,9 @@ impl ServerHandler for Federation {
         // client call rather than once per target. It carries no params, so a
         // processor can refuse here but has nothing to rewrite -- filtering a
         // catalogue is response-phase work.
-        if self.inner.guardrails.runs_request(TOOLS_LIST)
-            && let Outcome::Reject {
-                code,
-                message,
-                data,
-            } = self
+        let mut upstream_headers = HeaderOverride::default();
+        if self.inner.guardrails.runs_request(TOOLS_LIST) {
+            let decision = self
                 .inner
                 .guardrails
                 .check_request(
@@ -326,16 +333,28 @@ impl ServerHandler for Federation {
                     &backends,
                     None,
                 )
-                .await
-        {
-            return Err(mcp_error(code, message, data));
+                .await;
+
+            if let Outcome::Reject {
+                code,
+                message,
+                data,
+            } = decision.outcome
+            {
+                return Err(mcp_error(code, message, data));
+            }
+
+            // `tools/list` fans out, so a header change applies to every
+            // target's request -- there is one client call and several
+            // upstream ones, and singling one out would be arbitrary.
+            upstream_headers = decision.headers.into();
         }
 
         let mut tools: Vec<Tool> = Vec::new();
         let mut index = HashMap::new();
 
         for target in &self.inner.targets {
-            let upstream = match self.list_with_timeout(target).await {
+            let upstream = match self.list_with_timeout(target, &upstream_headers).await {
                 Some(tools) => tools,
                 // One unhealthy target must not blank the whole catalogue.
                 None => continue,
@@ -434,9 +453,10 @@ impl ServerHandler for Federation {
         // about calls that were otherwise going to happen, and it sees the
         // unmuxed name the upstream will actually receive.
         let backends = vec![target.name.clone()];
+        let mut upstream_headers = HeaderOverride::default();
         if self.inner.guardrails.runs_request(TOOLS_CALL) {
             let encoded = serde_json::to_vec(&params).unwrap_or_default();
-            match self
+            let decision = self
                 .inner
                 .guardrails
                 .check_request(
@@ -448,8 +468,9 @@ impl ServerHandler for Federation {
                     &backends,
                     Some(&encoded),
                 )
-                .await
-            {
+                .await;
+
+            match decision.outcome {
                 Outcome::Pass => {}
                 Outcome::Mutated(body) => match serde_json::from_slice(&body) {
                     Ok(rewritten) => params = rewritten,
@@ -470,9 +491,11 @@ impl ServerHandler for Federation {
                     data,
                 } => return Err(mcp_error(code, message, data)),
             }
+
+            upstream_headers = decision.headers.into();
         }
 
-        let call = target.call(params);
+        let call = target.call(params, &upstream_headers);
         let result = match self.inner.backend_timeout {
             Some(budget) => match tokio::time::timeout(budget, call).await {
                 Ok(result) => result,
