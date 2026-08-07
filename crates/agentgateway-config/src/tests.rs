@@ -664,13 +664,12 @@ fn a_full_path_rewrite_over_one_mcp_target_lints_clean() {
 }
 
 #[test]
-fn lint_reports_an_authority_rewrite_on_an_mcp_route() {
-    // A target names its own host and port; there is no authority here for a
-    // route-level policy to replace.
-    let findings = one_target_with_rewrite("                authority: elsewhere:8080").lint();
-    assert!(
-        findings.iter().any(|f| f.contains("urlRewrite.authority")),
-        "{findings:?}"
+fn an_authority_rewrite_over_one_mcp_target_lints_clean() {
+    // Same reasoning as `path.full`: one target, so there is no ambiguity
+    // about whose address is meant.
+    assert_eq!(
+        one_target_with_rewrite("                authority: elsewhere:8080").lint(),
+        Vec::<String>::new()
     );
 }
 
@@ -723,6 +722,39 @@ binds:
 }
 
 #[test]
+fn lint_names_both_overrides_when_both_are_set() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              urlRewrite:
+                authority: elsewhere:8080
+                path:
+                  full: /rpc
+            backends:
+              - mcp:
+                  targets:
+                    - name: a
+                      mcp:
+                        host: http://localhost:3001/mcp
+                    - name: b
+                      mcp:
+                        host: http://localhost:3002/mcp
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings.iter().any(|f| f.contains("path and authority")),
+        "the finding should name what is actually being overridden: {findings:?}"
+    );
+}
+
+#[test]
 fn lint_reports_a_path_rewrite_over_a_stdio_target() {
     let config = Config::from_yaml(
         r#"
@@ -748,7 +780,7 @@ binds:
     assert!(
         findings
             .iter()
-            .any(|f| f.contains("only an `mcp:` target has a path")),
+            .any(|f| f.contains("only an `mcp:` target has an address")),
         "{findings:?}"
     );
 }

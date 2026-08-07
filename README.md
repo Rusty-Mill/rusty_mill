@@ -168,10 +168,10 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
-- `urlRewrite.authority` and `urlRewrite.path.prefix` on a route with an `mcp`
-  backend, and `path.full` where the route has more than one target — all
-  reported by `--check`; `path.full` over a single `mcp:` target *is* applied,
-  see [Reaching the upstream request](#reaching-the-upstream-request)
+- `urlRewrite.path.prefix` on a route with an `mcp` backend, and `authority` or
+  `path.full` where the route has more than one target — reported by `--check`.
+  Over a single `mcp:` target, `authority` and `path.full` *are* applied; see
+  [Reaching the upstream request](#reaching-the-upstream-request)
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
@@ -647,14 +647,17 @@ the one going back out. CORS is added after the modifier runs, so a route
 cannot accidentally strip the headers that answer a preflight: those are the
 gateway's own protocol rather than the route's payload.
 
-`urlRewrite` mostly cannot apply here, and the one part that can is narrow.
-
-**`path.full` overrides a single target's path:**
+`urlRewrite` cannot mean here what it means on a `host` route, because an MCP
+route terminates the protocol rather than forwarding a request line. What it
+*can* mean is replacing parts of the one address the gateway dials — and both
+`authority` and `path.full` do, where there is a single Streamable HTTP target
+to be unambiguous about:
 
 ```yaml
 policies:
   urlRewrite:
-    path: { full: /rpc }        # the target below is reached at /rpc
+    authority: mcp.internal:8443    # replaces the target's host and port
+    path: { full: /rpc }            # replaces its path
 backends:
   - mcp:
       targets:
@@ -662,23 +665,32 @@ backends:
           mcp: { host: 127.0.0.1, port: 3001, path: /mcp }
 ```
 
-One target means there is no ambiguity about whose path is meant, which is the
-whole reason it is allowed there and nowhere else.
+One target is what makes it well-defined. With two, "the address" has no answer,
+and picking one would be the gateway deciding something the operator did not
+say.
 
-Everything else about `urlRewrite` is reported by `--check` and at startup
-rather than quietly ignored:
+An authority that names **no port keeps the target's own**. The target names a
+port explicitly and the override did not, so dropping to 80 would break a
+config that only meant to move hosts. Write `host:port` to move both.
+
+An authority carrying userinfo is a **startup failure**:
+
+```
+route #0.urlRewrite.authority: `admin:hunter2@10.0.0.1:8080` is not a valid
+authority: userinfo does not belong in an upstream address, use `backendAuth`
+```
+
+It is legal syntax, but a credential in an upstream URI hides somewhere nobody
+thinks to look and is sent on every request. `backendAuth` is where one
+belongs.
+
+The rest is reported by `--check` and at startup rather than quietly ignored:
 
 | | Why not |
 | --- | --- |
-| `authority` | An `mcp:` target names its own host and port. There is no authority here for a route-level policy to replace. |
 | `path.prefix` | The upstream path is the target's own configuration, not something derived from the request, so there is no matched prefix to replace. Use `full`. |
-| `path.full`, several targets | "The path" has no answer when there is more than one target. |
-| `path.full`, a `stdio` target | A pipe has no path. |
-
-The underlying reason is that an MCP route terminates the protocol rather than
-forwarding a request line: the gateway opens its own session to each target at
-the address that target names. A path is the one piece of that address a route
-can sensibly speak for, and only when there is exactly one target to speak for.
+| `authority` or `path.full`, several targets | "The address" has no answer when there is more than one target. |
+| `authority` or `path.full`, a `stdio` target | A pipe has no address. |
 
 ### The span itself
 

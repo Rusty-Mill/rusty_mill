@@ -365,10 +365,10 @@ impl Route {
     /// Report a `urlRewrite` that cannot act on this route's backends.
     ///
     /// An `mcp` backend terminates the protocol rather than forwarding a
-    /// request line, so most of what `urlRewrite` describes has nothing to act
-    /// on. The one exception is a *single* Streamable HTTP target, whose path
-    /// `path.full` overrides — with one target there is no ambiguity about
-    /// whose path is meant.
+    /// request line, so `urlRewrite` cannot mean here what it means on a
+    /// `host` route. What it *can* mean is replacing parts of the one address
+    /// the gateway dials: `path.full` and `authority` both do, and both only
+    /// where there is a single Streamable HTTP target to be unambiguous about.
     fn lint_url_rewrite(&self, policies: &Policies, at: &str, findings: &mut Vec<String>) {
         let Some(rewrite) = &policies.url_rewrite else {
             return;
@@ -387,38 +387,43 @@ impl Route {
 
         let at = format!("{at}.policies.urlRewrite");
 
-        if rewrite.authority.is_some() {
+        if let Some(PathRewrite::Prefix(_)) = &rewrite.path {
             findings.push(format!(
-                "{at}.authority: an `mcp` target names its own host and port, so there is \
-                 no authority here for a route-level policy to replace"
-            ));
-        }
-
-        match &rewrite.path {
-            None => {}
-            Some(PathRewrite::Prefix(_)) => findings.push(format!(
                 "{at}.path.prefix: the upstream path of an `mcp` target is its own \
                  configuration rather than something derived from the request, so there is \
                  no matched prefix to replace; use `full`"
-            )),
-            Some(PathRewrite::Full(_)) => {
-                let targets: usize = mcp.iter().map(|b| b.targets.len()).sum();
-                if targets != 1 {
-                    findings.push(format!(
-                        "{at}.path: overriding a target's path needs exactly one target to \
-                         be unambiguous, and this route has {targets}"
-                    ));
-                } else if !mcp
-                    .iter()
-                    .flat_map(|b| &b.targets)
-                    .any(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
-                {
-                    findings.push(format!(
-                        "{at}.path: only an `mcp:` target has a path to override; a `stdio` \
-                         target speaks over a pipe"
-                    ));
-                }
-            }
+            ));
+        }
+
+        // `path.full` and `authority` both replace part of the single address
+        // the gateway dials, so they stand or fall together.
+        let overrides: Vec<&str> = [
+            matches!(rewrite.path, Some(PathRewrite::Full(_))).then_some("path"),
+            rewrite.authority.is_some().then_some("authority"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if overrides.is_empty() {
+            return;
+        }
+        let named = overrides.join(" and ");
+
+        let targets: usize = mcp.iter().map(|b| b.targets.len()).sum();
+        if targets != 1 {
+            findings.push(format!(
+                "{at}: overriding a target's {named} needs exactly one target to be \
+                 unambiguous, and this route has {targets}"
+            ));
+        } else if !mcp
+            .iter()
+            .flat_map(|b| &b.targets)
+            .any(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
+        {
+            findings.push(format!(
+                "{at}: only an `mcp:` target has an address to override; a `stdio` target \
+                 speaks over a pipe"
+            ));
         }
     }
 
