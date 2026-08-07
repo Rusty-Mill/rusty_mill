@@ -106,6 +106,7 @@ name = "agentgateway-llm"
 version = "0.1.0"
 dependencies = [
  "agentgateway-config",
+ "agentgateway-core",
  "async-stream",
  "bytes",
  "futures-util",
@@ -153,6 +154,7 @@ name = "agentgateway-proxy"
 version = "0.1.0"
 dependencies = [
  "agentgateway-config",
+ "agentgateway-core",
  "bytes",
  "http",
  "http-body",

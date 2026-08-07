@@ -11,7 +11,9 @@
 
 use std::net::IpAddr;
 
-use agentgateway_config::{BackendAuth, HeaderModifier, PathRewrite, UrlRewrite};
+use agentgateway_config::{BackendAuth, PathRewrite, UrlRewrite};
+// Re-exported so the proxy's own callers need not learn where these moved.
+pub use agentgateway_core::{HeaderError, Headers};
 use http::{HeaderMap, HeaderName, HeaderValue, Uri, header, uri::Authority, uri::PathAndQuery};
 
 /// The scheme a client used to reach the gateway.
@@ -35,18 +37,6 @@ impl Scheme {
             Scheme::Https => "https",
         }
     }
-}
-
-/// A header name or value in the configuration that HTTP cannot represent.
-#[derive(Debug, thiserror::Error)]
-#[error("{at}: `{value}` is not a valid HTTP {kind}")]
-pub struct HeaderError {
-    /// Where in the configuration it came from.
-    pub at: String,
-    /// The offending text.
-    pub value: String,
-    /// `header name` or `header value`.
-    pub kind: &'static str,
 }
 
 /// Headers that describe a single connection, not the message.
@@ -83,72 +73,6 @@ pub fn strip_hop_by_hop(headers: &mut HeaderMap) {
 
     for name in HOP_BY_HOP.iter().chain(named.iter()) {
         headers.remove(name);
-    }
-}
-
-/// A compiled [`HeaderModifier`].
-#[derive(Debug, Clone, Default)]
-pub struct Headers {
-    add: Vec<(HeaderName, HeaderValue)>,
-    set: Vec<(HeaderName, HeaderValue)>,
-    remove: Vec<HeaderName>,
-}
-
-impl Headers {
-    /// Compile a modifier, reporting the first name or value HTTP rejects.
-    pub fn new(modifier: &HeaderModifier, at: &str) -> Result<Self, HeaderError> {
-        let pair =
-            |name: &String, value: &String| -> Result<(HeaderName, HeaderValue), HeaderError> {
-                let header = HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
-                    at: at.to_string(),
-                    value: name.clone(),
-                    kind: "header name",
-                })?;
-                let value = HeaderValue::try_from(value.as_str()).map_err(|_| HeaderError {
-                    at: at.to_string(),
-                    value: value.clone(),
-                    kind: "header value",
-                })?;
-                Ok((header, value))
-            };
-
-        let mut add = Vec::with_capacity(modifier.add.len());
-        for (name, value) in &modifier.add {
-            add.push(pair(name, value)?);
-        }
-        let mut set = Vec::with_capacity(modifier.set.len());
-        for (name, value) in &modifier.set {
-            set.push(pair(name, value)?);
-        }
-        let mut remove = Vec::with_capacity(modifier.remove.len());
-        for name in &modifier.remove {
-            remove.push(
-                HeaderName::try_from(name.as_str()).map_err(|_| HeaderError {
-                    at: at.to_string(),
-                    value: name.clone(),
-                    kind: "header name",
-                })?,
-            );
-        }
-
-        Ok(Headers { add, set, remove })
-    }
-
-    /// Apply the modifier.
-    ///
-    /// Order follows Gateway API: `set` replaces, `add` appends, `remove`
-    /// wins over both. Removing last means a config that both sets and removes
-    /// a header removes it, which is the reading that fails safe.
-    pub fn apply(&self, headers: &mut HeaderMap) {
-        for (name, value) in &self.set {
-            headers.insert(name, value.clone());
-        }
-        for (name, value) in &self.add {
-            headers.append(name, value.clone());
-        }
-        for name in &self.remove {
-            headers.remove(name);
-        }
     }
 }
 
@@ -318,7 +242,6 @@ pub fn apply_backend_auth(headers: &mut HeaderMap, auth: Option<&BackendAuth>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
         let mut map = HeaderMap::new();
@@ -371,62 +294,6 @@ mod tests {
         );
         assert!(map.get("x-hop").is_none());
         assert!(map.get("x-keep").is_some());
-    }
-
-    fn modifier(add: &[(&str, &str)], set: &[(&str, &str)], remove: &[&str]) -> HeaderModifier {
-        HeaderModifier {
-            add: add
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>(),
-            set: set
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>(),
-            remove: remove.iter().map(|r| r.to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn set_replaces_and_add_appends() {
-        let compiled = Headers::new(
-            &modifier(&[("x-multi", "second")], &[("x-one", "new")], &[]),
-            "test",
-        )
-        .expect("should compile");
-
-        let mut map = headers(&[("x-one", "old"), ("x-multi", "first")]);
-        compiled.apply(&mut map);
-
-        assert_eq!(map.get_all("x-one").iter().count(), 1);
-        assert_eq!(map.get("x-one").and_then(|v| v.to_str().ok()), Some("new"));
-        assert_eq!(
-            map.get_all("x-multi").iter().count(),
-            2,
-            "add appends rather than replacing"
-        );
-    }
-
-    #[test]
-    fn remove_wins_over_set() {
-        // A config that both sets and removes a header should end up without
-        // it: that is the reading that fails safe.
-        let compiled = Headers::new(
-            &modifier(&[], &[("x-secret", "value")], &["x-secret"]),
-            "test",
-        )
-        .expect("should compile");
-
-        let mut map = HeaderMap::new();
-        compiled.apply(&mut map);
-        assert!(map.get("x-secret").is_none());
-    }
-
-    #[test]
-    fn an_invalid_header_name_fails_to_compile() {
-        let err = Headers::new(&modifier(&[], &[("not a header", "v")], &[]), "route[0]")
-            .expect_err("should not compile");
-        assert!(err.to_string().contains("route[0]"), "got: {err}");
     }
 
     fn rewrite(authority: Option<&str>, path: Option<PathRewrite>) -> Rewrite {

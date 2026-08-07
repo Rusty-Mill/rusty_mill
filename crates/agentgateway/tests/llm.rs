@@ -511,15 +511,7 @@ async fn a_response_modifier_reaches_an_ai_completion() {
     )
     .await;
 
-    let response = reqwest::Client::new()
-        .post(format!("{url}/v1/chat/completions"))
-        .json(&serde_json::json!({
-            "model": "gpt-4o",
-            "messages": [{"role": "user", "content": "hi"}],
-        }))
-        .send()
-        .await
-        .expect("the gateway should answer");
+    let response = post(&url, &chat_request()).await;
     assert!(response.status().is_success(), "{}", response.status());
 
     let headers: Vec<(String, String)> = response
@@ -540,4 +532,160 @@ async fn a_response_modifier_reaches_an_ai_completion() {
     );
 
     shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_modifier_reaches_the_model_provider() {
+    // The request an `ai` route sends is built by the LLM crate rather than
+    // forwarded through the `host` proxy, so this modifier used to parse and
+    // then do nothing at all.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        "              requestHeaderModifier:\n                set:\n                  x-tenant: acme\n                add:\n                  x-scope: models",
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    assert!(
+        seen.headers
+            .iter()
+            .any(|(k, v)| k == "x-tenant" && v == "acme"),
+        "saw {:?}",
+        seen.headers
+    );
+    assert!(
+        seen.headers
+            .iter()
+            .any(|(k, v)| k == "x-scope" && v == "models"),
+        "saw {:?}",
+        seen.headers
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_modifier_can_take_back_the_provider_credential() {
+    // The modifier runs after the provider's own headers, matching the `host`
+    // proxy's ordering with `backendAuth`: a route that names a header means
+    // it. Removing `authorization` is how an operator says "this route does
+    // not hand a key to the provider", which is worth being able to say.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        "              requestHeaderModifier:\n                remove: [authorization]",
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    assert!(
+        !seen.headers.iter().any(|(k, _)| k == "authorization"),
+        "saw {:?}",
+        seen.headers
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_modifier_can_replace_a_header_the_provider_set() {
+    // `set` on `authorization` replaces the credential rather than appending a
+    // second one, which is what a comma-joined value would do to a provider.
+    let (provider_port, seen) = provider(anthropic_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "anthropic",
+        provider_port,
+        "",
+        "              requestHeaderModifier:\n                set:\n                  x-api-key: from-config",
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let keys: Vec<&(String, String)> = seen
+        .headers
+        .iter()
+        .filter(|(k, _)| k == "x-api-key")
+        .collect();
+    assert_eq!(keys.len(), 1, "saw {:?}", seen.headers);
+    assert_eq!(
+        keys[0].1, "from-config",
+        "the route's value wins over the provider's `backendAuth.key`"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn add_appends_to_a_header_the_provider_set_rather_than_replacing_it() {
+    // The distinction between `set` and `add` on a name that is already taken.
+    // Unlike the MCP path, which has one value per name to give the transport,
+    // an `ai` request is a real `HeaderMap` and can carry both field lines.
+    let (provider_port, seen) = provider(anthropic_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "anthropic",
+        provider_port,
+        "",
+        "              requestHeaderModifier:\n                add:\n                  x-api-key: second",
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let keys: Vec<&str> = seen
+        .headers
+        .iter()
+        .filter(|(k, _)| k == "x-api-key")
+        .map(|(_, v)| v.as_str())
+        .collect();
+    assert_eq!(keys, vec!["test-key", "second"], "saw {:?}", seen.headers);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_modifier_http_rejects_fails_an_ai_route_at_startup() {
+    // Rather than dropping the header at runtime on every call, where nobody
+    // would see it.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              requestHeaderModifier:
+                set:
+                  "not a name": v
+              backendAuth:
+                key: test-key
+            backends:
+              - ai:
+                  provider:
+                    openAI: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an unrepresentable header name should not start");
+    assert!(
+        err.to_string().contains("header name"),
+        "the error should say what was wrong: {err}"
+    );
 }

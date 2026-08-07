@@ -6,11 +6,13 @@
 //! work that could have been done at startup.
 
 mod cors;
+mod headers;
 mod hostname;
 mod ratelimit;
 mod router;
 
 pub use cors::{CorsDecision, CorsMatcher};
+pub use headers::{HeaderError, Headers};
 pub use hostname::HostnamePattern;
 pub use ratelimit::{RateLimitError, RateLimiter, RetryAfter};
 pub use router::{

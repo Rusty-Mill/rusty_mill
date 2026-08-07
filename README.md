@@ -630,6 +630,45 @@ nothing has classified anything at that point.
 Only `mcp:` targets, for the same reason as `headerMutation`: a `stdio` target
 speaks over a pipe and has no headers.
 
+### The same modifier on an `ai` or `a2a` route
+
+`requestHeaderModifier` applies to the request that leaves the gateway on
+**every** backend kind, not only `host` and `mcp`:
+
+```yaml
+policies:
+  requestHeaderModifier:
+    set: { x-tenant: acme }
+    add: { x-scope: models }
+    remove: [authorization]
+backends:
+  - ai:
+      provider:
+        openAI: {}
+```
+
+An `a2a` route already had this, because it dispatches through the same `host`
+proxy — including on the path where the policy has to buffer the body to read
+the JSON-RPC method out of it. There are tests for both now, since "it already
+works" is the claim worth checking rather than assuming.
+
+An `ai` route did not. The request that reaches a model provider is *built* by
+the gateway rather than forwarded — a translated body, the provider's own
+endpoint, a credential from `backendAuth.key` — so nothing was ever going to
+apply a route's modifier to it, and it parsed and did nothing.
+
+It runs **after** the provider's own headers, the same ordering the `host`
+proxy uses for `backendAuth`: a route that names a header means it, even one
+the gateway put there. That is what makes `remove: [authorization]` say
+something useful — this route does not hand a key to the provider — and it is
+worth being able to say. `set` on a name the provider took replaces it; `add`
+appends a second field line, which here it genuinely can, unlike the MCP path
+where one value per name crosses to the transport.
+
+A name or value HTTP cannot represent fails the route at **startup**, next to
+the `ai` provider errors, rather than dropping a header on every call where
+nobody would see it.
+
 ### Response headers, and the one policy that cannot apply
 
 `responseHeaderModifier` applies to whatever the route's backend produced, on
