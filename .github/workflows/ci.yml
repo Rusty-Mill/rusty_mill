@@ -147,3 +147,4 @@ jobs:
           cargo test --features client,server --test extended_agent_card_auth -- --list
           cargo test --features client,server --test input_validation -- --list
           cargo test --features client,server --test server_message_ids -- --list
+          cargo test --features client,server --test task_authorization_scoping -- --list

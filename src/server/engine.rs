@@ -20,6 +20,14 @@ use uuid::Uuid;
 /// many *live* events already drops some regardless.
 const EVENT_LOG_CAPACITY: usize = 256;
 
+/// Bounds how many internal [`TaskStore::list`] pages
+/// [`Engine::list_tasks`] will fetch while filtering out
+/// caller-unauthorized tasks (spec Section 13.1) to fill one
+/// caller-requested page - without a cap, a tenant with many tasks
+/// invisible to this particular caller could turn one `ListTasks` call
+/// into an unbounded scan.
+const MAX_LIST_TASKS_STORE_PAGES: usize = 20;
+
 /// A task's assigned sequence number alongside its event, per the
 /// [`Engine`] docs on `event_logs`/`next_seq`.
 type SeqEvent = (u64, StreamResponse);
@@ -191,6 +199,26 @@ impl Engine {
             .map(Some)
     }
 
+    /// Enforces [`AuthVerifier::authorize_task`] (spec Section 13.1) for
+    /// `task`, if both a verifier is configured and `auth` is `Some` (i.e.
+    /// this request actually authenticated against a non-empty
+    /// `securityRequirements` - see [`Engine::authenticate`]). A `None`
+    /// `auth` (a public agent, or no [`AuthVerifier`] configured at all)
+    /// has no caller identity to scope by, so this is a no-op in that
+    /// case - the existing tenant-based namespace isolation is all such
+    /// an agent has, same as before this method existed.
+    async fn authorize_task(
+        &self,
+        auth: Option<&AuthContext>,
+        tenant: Option<&str>,
+        task: &Task,
+    ) -> Result<()> {
+        match (auth, self.auth_verifier.as_deref()) {
+            (Some(context), Some(verifier)) => verifier.authorize_task(context, tenant, task).await,
+            _ => Ok(()),
+        }
+    }
+
     fn require_streaming(&self) -> Result<()> {
         if self.card.capabilities.streaming == Some(true) {
             Ok(())
@@ -268,6 +296,7 @@ impl Engine {
     async fn start_execution(
         &self,
         req: &SendMessageRequest,
+        auth: Option<&AuthContext>,
     ) -> Result<(Started, broadcast::Receiver<SeqEvent>)> {
         // Spec Section 5.7: "Arrays marked as required MUST contain at
         // least one element... implementations SHOULD validate these
@@ -285,8 +314,14 @@ impl Engine {
             self.resolve_ids(req.tenant.as_deref(), &req.message).await?;
 
         // Spec Sections 3.1.1/3.1.2: "Messages sent to Tasks that are in a
-        // terminal state... cannot accept further messages."
+        // terminal state... cannot accept further messages." Spec Section
+        // 13.1: a continuation turn is still "touching" an existing task,
+        // same as GetTask/CancelTask/etc - authorizing it here closes off
+        // what would otherwise be an easy bypass around every other
+        // task-scoping check in this file (message your way into someone
+        // else's task instead of looking it up first).
         if let Some(task) = &existing_task {
+            self.authorize_task(auth, req.tenant.as_deref(), task).await?;
             if task.status.state.is_terminal() {
                 return Err(A2aError::UnsupportedOperation(format!(
                     "task {} is already in a terminal state and cannot accept further messages",
@@ -502,7 +537,11 @@ impl Engine {
     /// affected by this flag).
     ///
     /// [`SendMessageConfiguration`]: crate::types::SendMessageConfiguration
-    pub async fn send_message(&self, req: SendMessageRequest) -> Result<SendMessageResult> {
+    pub async fn send_message(
+        &self,
+        req: SendMessageRequest,
+        auth: Option<&AuthContext>,
+    ) -> Result<SendMessageResult> {
         let wait_for_final = !req
             .configuration
             .as_ref()
@@ -514,7 +553,7 @@ impl Engine {
             apply_history_length(&mut task, history_length);
             Ok(SendMessageResult::Task { task })
         };
-        let (started, mut rx) = self.start_execution(&req).await?;
+        let (started, mut rx) = self.start_execution(&req, auth).await?;
         loop {
             match rx.recv().await {
                 Ok((_, StreamResponse::Message { message })) => {
@@ -568,9 +607,10 @@ impl Engine {
     pub async fn send_streaming_message(
         &self,
         req: SendMessageRequest,
+        auth: Option<&AuthContext>,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamResponse> + Send>>> {
         self.require_streaming()?;
-        let (_, rx) = self.start_execution(&req).await?;
+        let (_, rx) = self.start_execution(&req, auth).await?;
         Ok(Box::pin(stream_through_close(rx)))
     }
 
@@ -594,6 +634,7 @@ impl Engine {
         &self,
         req: SubscribeToTaskRequest,
         since_seq: Option<u64>,
+        auth: Option<&AuthContext>,
     ) -> Result<Pin<Box<dyn Stream<Item = (u64, StreamResponse)> + Send>>> {
         self.require_streaming()?;
         let task = self
@@ -601,6 +642,7 @@ impl Engine {
             .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
+        self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
         if task.status.state.is_terminal() {
             return Err(A2aError::UnsupportedOperation(format!(
                 "task {} is already in a terminal state",
@@ -659,27 +701,91 @@ impl Engine {
     }
 
     /// `GetTask` (spec Section 3.1.3).
-    pub async fn get_task(&self, req: GetTaskRequest) -> Result<Task> {
+    pub async fn get_task(&self, req: GetTaskRequest, auth: Option<&AuthContext>) -> Result<Task> {
         validate_history_length(req.history_length)?;
         let mut task = self
             .store
             .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
+        self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
         apply_history_length(&mut task, req.history_length);
         Ok(task)
     }
 
-    /// `ListTasks` (spec Section 3.1.4).
-    pub async fn list_tasks(&self, req: ListTasksRequest) -> Result<ListTasksResponse> {
+    /// `ListTasks` (spec Section 3.1.4). Also covers spec Section 13.1's
+    /// "MUST only return tasks visible to the authenticated client, even
+    /// when `contextId` or other filter parameters are not specified": a
+    /// task [`AuthVerifier::authorize_task`] rejects is silently dropped
+    /// from the page rather than failing the whole call, which can mean
+    /// fetching more than one [`TaskStore::list`] page (bounded by
+    /// `MAX_LIST_TASKS_STORE_PAGES`) to fill a `page_size`-sized
+    /// authorized result. `total_size` reports the store's own
+    /// pre-authorization-filter count - computing an authorized-only
+    /// total would mean scanning the whole tenant on every call, so this
+    /// is a deliberate, documented approximation when scoping is active.
+    pub async fn list_tasks(
+        &self,
+        req: ListTasksRequest,
+        auth: Option<&AuthContext>,
+    ) -> Result<ListTasksResponse> {
         let page_size = validate_page_size(req.page_size)?;
         validate_history_length(req.history_length)?;
-        let (mut tasks, next_page_token, total) = self.store.list(req.tenant.as_deref(), &req).await;
-        for t in &mut tasks {
+
+        let mut authorized: Vec<Task> = Vec::new();
+        let mut cursor = req.page_token.clone();
+        let mut total: i64 = 0;
+        let mut next_page_token = String::new();
+
+        for _ in 0..MAX_LIST_TASKS_STORE_PAGES {
+            let mut page_req = req.clone();
+            page_req.page_size = Some(page_size);
+            page_req.page_token = cursor.clone();
+            let (page, store_next_token, store_total) =
+                self.store.list(req.tenant.as_deref(), &page_req).await;
+            total = store_total;
+
+            // `TaskStore::list`'s own `page_token` convention is "resume
+            // starting AT (inclusive of) this id" - so the resume point
+            // once a page fills the caller's quota mid-page must be the
+            // *next* item after the one that filled it, not that item's
+            // own id (which would duplicate it onto the following page).
+            let mut filled_at = None;
+            let mut iter = page.into_iter().peekable();
+            while let Some(task) = iter.next() {
+                if self
+                    .authorize_task(auth, req.tenant.as_deref(), &task)
+                    .await
+                    .is_ok()
+                {
+                    authorized.push(task);
+                    if authorized.len() == page_size as usize {
+                        filled_at = Some(match iter.peek() {
+                            Some(next) => next.id.clone(),
+                            None => store_next_token.clone(),
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if let Some(resume) = filled_at {
+                next_page_token = resume;
+                break;
+            }
+            if store_next_token.is_empty() {
+                next_page_token = String::new();
+                break;
+            }
+            next_page_token = store_next_token.clone();
+            cursor = Some(store_next_token);
+        }
+
+        for t in &mut authorized {
             apply_history_length(t, req.history_length);
         }
         Ok(ListTasksResponse {
-            tasks,
+            tasks: authorized,
             next_page_token,
             page_size,
             total_size: total as i32,
@@ -687,12 +793,13 @@ impl Engine {
     }
 
     /// `CancelTask` (spec Section 3.1.5).
-    pub async fn cancel_task(&self, req: CancelTaskRequest) -> Result<Task> {
+    pub async fn cancel_task(&self, req: CancelTaskRequest, auth: Option<&AuthContext>) -> Result<Task> {
         let task = self
             .store
             .get(req.tenant.as_deref(), &req.id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(req.id.clone()))?;
+        self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
         if task.status.state.is_terminal() {
             return Err(A2aError::TaskNotCancelable(req.id.clone()));
         }
@@ -791,6 +898,7 @@ impl Engine {
     pub async fn create_push_notification_config(
         &self,
         config: TaskPushNotificationConfig,
+        auth: Option<&AuthContext>,
     ) -> Result<TaskPushNotificationConfig> {
         self.require_push_notifications()?;
         self.push_notifier
@@ -802,23 +910,35 @@ impl Engine {
             .clone()
             .ok_or_else(|| A2aError::InvalidParams("taskId is required".to_string()))?;
         let tenant = config.tenant.clone();
-        self.store
+        let task = self
+            .store
             .get(tenant.as_deref(), &task_id)
             .await
             .ok_or_else(|| A2aError::TaskNotFound(task_id.clone()))?;
+        self.authorize_task(auth, tenant.as_deref(), &task).await?;
         Ok(self.store.put_push_config(tenant.as_deref(), config).await)
     }
 
-    /// `GetTaskPushNotificationConfig` (spec Section 3.1.8).
+    /// `GetTaskPushNotificationConfig` (spec Section 3.1.8). Spec Section
+    /// 13.1 scoping is applied only once the config itself is confirmed
+    /// to exist (rather than fetching the parent task first) so a
+    /// nonexistent config keeps failing exactly as before - there being
+    /// nothing to protect isn't a scoping decision.
     pub async fn get_push_notification_config(
         &self,
         req: GetTaskPushNotificationConfigRequest,
+        auth: Option<&AuthContext>,
     ) -> Result<TaskPushNotificationConfig> {
         self.require_push_notifications()?;
-        self.store
+        let config = self
+            .store
             .get_push_config(req.tenant.as_deref(), &req.task_id, &req.id)
             .await
-            .ok_or_else(|| A2aError::TaskNotFound(format!("push notification config {}", req.id)))
+            .ok_or_else(|| A2aError::TaskNotFound(format!("push notification config {}", req.id)))?;
+        if let Some(task) = self.store.get(req.tenant.as_deref(), &req.task_id).await {
+            self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
+        }
+        Ok(config)
     }
 
     /// `ListTaskPushNotificationConfigs` (spec Section 3.1.9). Paginates
@@ -828,11 +948,21 @@ impl Engine {
     /// `list_push_configs` already exists as an unpaginated "every config
     /// for this task" query for [`notify_push_configs`]'s webhook fan-out,
     /// and the number of configs on one task is expected to be small.
+    /// Spec Section 13.1 scoping: if the parent task exists, it's
+    /// authorized once up front (rather than per-config, since every
+    /// config on one task shares the same task-level visibility); a
+    /// nonexistent task is left to fall through to its prior behavior of
+    /// an empty list rather than a new `TaskNotFound` this method never
+    /// raised before.
     pub async fn list_push_notification_configs(
         &self,
         req: ListTaskPushNotificationConfigsRequest,
+        auth: Option<&AuthContext>,
     ) -> Result<ListTaskPushNotificationConfigsResponse> {
         self.require_push_notifications()?;
+        if let Some(task) = self.store.get(req.tenant.as_deref(), &req.task_id).await {
+            self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
+        }
         let mut configs = self
             .store
             .list_push_configs(req.tenant.as_deref(), &req.task_id)
@@ -862,12 +992,19 @@ impl Engine {
         })
     }
 
-    /// `DeleteTaskPushNotificationConfig` (spec Section 3.1.10).
+    /// `DeleteTaskPushNotificationConfig` (spec Section 3.1.10). Spec
+    /// Section 13.1 scoping is checked before the delete is performed
+    /// (not after), so an unauthorized caller can't remove someone
+    /// else's config even transiently.
     pub async fn delete_push_notification_config(
         &self,
         req: DeleteTaskPushNotificationConfigRequest,
+        auth: Option<&AuthContext>,
     ) -> Result<()> {
         self.require_push_notifications()?;
+        if let Some(task) = self.store.get(req.tenant.as_deref(), &req.task_id).await {
+            self.authorize_task(auth, req.tenant.as_deref(), &task).await?;
+        }
         if self
             .store
             .delete_push_config(req.tenant.as_deref(), &req.task_id, &req.id)

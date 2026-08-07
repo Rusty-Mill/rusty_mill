@@ -18,7 +18,7 @@ use futures_core::Stream;
 use futures_util::StreamExt;
 use tonic::{Request, Response, Status};
 
-use super::auth::{extract_credentials, Credentials};
+use super::auth::{extract_credentials, AuthContext, Credentials};
 use super::engine::{check_version, parse_extensions_header, Engine};
 use crate::grpc_convert::*;
 use pb::a2a_service_server::A2aService;
@@ -86,14 +86,13 @@ impl GrpcService {
     /// Validates the protocol version, enforces required extensions, then
     /// `AgentCard.securityRequirements` (spec Section 4.5), against
     /// `request`'s metadata.
-    async fn authenticate<T>(&self, request: &Request<T>) -> Result<(), Status> {
+    async fn authenticate<T>(&self, request: &Request<T>) -> Result<Option<AuthContext>, Status> {
         self.check_version(request)?;
         self.check_required_extensions(request)?;
         let credentials = self.credentials(request);
         self.engine
             .authenticate(&credentials)
             .await
-            .map(|_| ())
             .map_err(a2a_error_to_status)
     }
 }
@@ -106,9 +105,13 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SendMessageRequest>,
     ) -> Result<Response<pb::SendMessageResponse>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_send_message_request_to_ours(request.into_inner())?;
-        let result = self.engine.send_message(req).await.map_err(a2a_error_to_status)?;
+        let result = self
+            .engine
+            .send_message(req, auth.as_ref())
+            .await
+            .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_send_result_to_pb(result)))
     }
 
@@ -118,11 +121,11 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SendMessageRequest>,
     ) -> Result<Response<Self::SendStreamingMessageStream>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_send_message_request_to_ours(request.into_inner())?;
         let stream = self
             .engine
-            .send_streaming_message(req)
+            .send_streaming_message(req, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         let mapped = stream.map(|item| Ok(our_stream_response_to_pb(item)));
@@ -130,9 +133,13 @@ impl A2aService for GrpcService {
     }
 
     async fn get_task(&self, request: Request<pb::GetTaskRequest>) -> Result<Response<pb::Task>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_get_task_request_to_ours(request.into_inner());
-        let task = self.engine.get_task(req).await.map_err(a2a_error_to_status)?;
+        let task = self
+            .engine
+            .get_task(req, auth.as_ref())
+            .await
+            .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_task_to_pb(task)))
     }
 
@@ -140,9 +147,13 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::ListTasksRequest>,
     ) -> Result<Response<pb::ListTasksResponse>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_list_tasks_request_to_ours(request.into_inner());
-        let res = self.engine.list_tasks(req).await.map_err(a2a_error_to_status)?;
+        let res = self
+            .engine
+            .list_tasks(req, auth.as_ref())
+            .await
+            .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_list_tasks_response_to_pb(res)))
     }
 
@@ -150,9 +161,13 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::CancelTaskRequest>,
     ) -> Result<Response<pb::Task>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_cancel_task_request_to_ours(request.into_inner());
-        let task = self.engine.cancel_task(req).await.map_err(a2a_error_to_status)?;
+        let task = self
+            .engine
+            .cancel_task(req, auth.as_ref())
+            .await
+            .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_task_to_pb(task)))
     }
 
@@ -162,7 +177,7 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::SubscribeToTaskRequest>,
     ) -> Result<Response<Self::SubscribeToTaskStream>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_subscribe_to_task_request_to_ours(request.into_inner());
         // The canonical `SubscribeToTaskRequest` has no resume-point
         // field (unlike SSE's `Last-Event-ID`, which the JSON-RPC/REST
@@ -171,7 +186,7 @@ impl A2aService for GrpcService {
         // continues live - see `Engine::subscribe_to_task`.
         let stream = self
             .engine
-            .subscribe_to_task(req, None)
+            .subscribe_to_task(req, None, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         let mapped = stream.map(|(_, item)| Ok(our_stream_response_to_pb(item)));
@@ -182,11 +197,11 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::TaskPushNotificationConfig>,
     ) -> Result<Response<pb::TaskPushNotificationConfig>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let config = pb_push_config_to_ours(request.into_inner());
         let created = self
             .engine
-            .create_push_notification_config(config)
+            .create_push_notification_config(config, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_push_config_to_pb(created)))
@@ -196,11 +211,11 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::GetTaskPushNotificationConfigRequest>,
     ) -> Result<Response<pb::TaskPushNotificationConfig>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_get_push_notification_config_request_to_ours(request.into_inner());
         let config = self
             .engine
-            .get_push_notification_config(req)
+            .get_push_notification_config(req, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_push_config_to_pb(config)))
@@ -210,11 +225,11 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::ListTaskPushNotificationConfigsRequest>,
     ) -> Result<Response<pb::ListTaskPushNotificationConfigsResponse>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_list_push_notification_configs_request_to_ours(request.into_inner());
         let res = self
             .engine
-            .list_push_notification_configs(req)
+            .list_push_notification_configs(req, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         Ok(Response::new(our_list_push_notification_configs_response_to_pb(
@@ -241,10 +256,10 @@ impl A2aService for GrpcService {
         &self,
         request: Request<pb::DeleteTaskPushNotificationConfigRequest>,
     ) -> Result<Response<()>, Status> {
-        self.authenticate(&request).await?;
+        let auth = self.authenticate(&request).await?;
         let req = pb_delete_push_notification_config_request_to_ours(request.into_inner());
         self.engine
-            .delete_push_notification_config(req)
+            .delete_push_notification_config(req, auth.as_ref())
             .await
             .map_err(a2a_error_to_status)?;
         Ok(Response::new(()))
