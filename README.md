@@ -108,12 +108,28 @@ So CI generates the project and builds, lints and tests it on every pull
 request, against the working tree rather than the published tag. A library
 change that breaks the template fails the PR that made it.
 
-It has a blind spot worth knowing: because it rewrites the dependency to a
-path, it never exercises the **git** dependency, which is how everyone else
-consumes this. That is exactly where the `{{project-name}}` manifest noise
-above hid — found only once v0.4.0 existed to depend on. `check-template.sh`
-now asserts that `template/Cargo.toml` does not exist, so that specific failure
-cannot come back.
+It has a blind spot by design: because it rewrites the dependency to a **path**
+so a library change fails the PR that made it, the **git** dependency every
+real consumer uses is never resolved. That is exactly where the
+`{{project-name}}` manifest noise above hid — found only once v0.4.0 existed to
+depend on.
+
+`check-published-tag.sh` closes it, and runs automatically on every tag push:
+
+```bash
+./scripts/check-published-tag.sh v0.5.0
+```
+
+It runs the documented `cargo generate --git … --tag <tag> template`, leaves
+the git dependency exactly as the template ships it, and builds and tests the
+result.
+
+The important part is what it counts as failure. **The v0.4.0 build succeeded**
+— it just printed an error while doing so, which is invisible to an exit code.
+So the check scans what cargo actually printed and fails on an error line even
+when the command returned zero. That behaviour is proven twice over: a
+`--self-test` on synthetic output, and the fact that pointing it at `v0.4.0`
+still reproduces the original failure while `v0.5.0` passes.
 
 `check-versions.sh` separately asserts that every `tag = "vX.Y.Z"` in the docs
 and the template names the current crate version — which is exactly the failure
