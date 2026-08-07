@@ -382,6 +382,7 @@ policies:
         timeout: 5s
         methods:
           tools/call: full        # both phases
+          "prompts/*": full       # a whole namespace
           "*/list": response      # results only
         failureMode: failClosed   # the default
         metadata:
@@ -399,9 +400,17 @@ pinned against encoded bytes in a test rather than against the declarations.
 
 ### What is hooked
 
-This gateway serves `tools/list`, `tools/call`, `prompts/list`, `prompts/get`,
-`resources/list`, `resources/templates/list` and `resources/read`, and a
-processor can hook any of them. A processor keyed only on methods this gateway does
+A processor can hook any of the seven methods this gateway serves:
+
+| Method | Request phase sees | Response phase sees |
+| --- | --- | --- |
+| `tools/list` | nothing to rewrite | the merged catalogue |
+| `tools/call` | `{"name": "echo", …}` | the `CallToolResult` |
+| `prompts/list` | nothing to rewrite | the merged listing |
+| `prompts/get` | `{"name": "summarize"}` | the `GetPromptResult` |
+| `resources/list` | nothing to rewrite | the merged listing |
+| `resources/templates/list` | nothing to rewrite | the merged listing |
+| `resources/read` | `{"uri": "memo:insights"}` | the `ReadResourceResult` | A processor keyed only on methods this gateway does
 not serve — `logging/setLevel`, `completion/complete` — is reported by `--check`
 and at startup, because a guardrail that never fires looks exactly like one that
 always passes.
@@ -409,14 +418,41 @@ always passes.
 The single-target methods — `tools/call`, `prompts/get`, `resources/read` — run
 both phases. The `*/list` methods fan out, so their request phase runs once for
 the whole client call and carries no params: a processor can refuse there but
-has nothing to rewrite, and filtering a catalogue is response-phase work. An upstream *error* skips the response phase entirely: there is no result
+has nothing to rewrite, and filtering a catalogue is response-phase work.
+
+Guardrails run **after** `mcpAuthorization`, so a processor is only consulted
+about calls the route was otherwise going to serve — a guardrail should not be
+billed for traffic already refused. An upstream *error* skips the response phase entirely: there is no result
 to inspect, and asking a guardrail to approve a failure is not a question it can
 answer.
 
-Processors see the **unmuxed** name — a call to `alpha_echo` arrives as
-`{"name": "echo"}` with `service_names: ["alpha"]`, which is what the upstream
-will actually receive. The same holds for a resource: `alpha+memo:insights`
-arrives as `{"uri": "memo:insights"}`.
+### The two phases do not see the same names
+
+On the **request** side a processor sees the **unmuxed** identifier — what the
+upstream will actually receive. `alpha_echo` arrives as `{"name": "echo"}` with
+`service_names: ["alpha"]`, and `alpha+memo:insights` arrives as
+`{"uri": "memo:insights"}`.
+
+On the **response** side it sees what the *client* will get, which for
+resources means the federated form: a `resources/read` result reaches the
+response phase with its contents already re-qualified to
+`alpha+memo:insights`, and a `resources/list` carries federated URIs
+throughout.
+
+The asymmetry is not an oversight — each phase shows the form that is
+actionable at that point — but a filter written against one form will silently
+not match the other, so it is worth knowing which side you are on. Tools never
+made this visible because a `CallToolResult` carries no names.
+
+A request-phase rewrite that hands back the federated URI it saw on a listing
+is unwrapped rather than passed through to fail, since the upstream only knows
+its own URIs.
+
+Note also that a rewrite is **not re-authorized**: a processor that rewrites
+`{"name": "summarize"}` to `{"name": "leak"}` gets `leak`, even where a rule or
+an `allowTools` entry would have refused it. That is upstream's contract —
+"the gateway does not re-run other RBAC on the mutated request" — and it means
+a processor with rewrite authority is as trusted as the policy itself.
 
 ### A chain is a pipeline, not a vote
 

@@ -19,7 +19,9 @@ use agentgateway_mcp::{
 };
 use prost::Message as _;
 use rmcp::{
-    ServiceExt, model::CallToolRequestParams, service::RunningService,
+    ServiceExt,
+    model::{CallToolRequestParams, GetPromptRequestParams, ReadResourceRequestParams},
+    service::RunningService,
     transport::StreamableHttpClientTransport,
 };
 use tokio_util::sync::CancellationToken;
@@ -219,6 +221,8 @@ binds:
                         env:
                           MOCK_LABEL: alpha
                           MOCK_TOOLS: "echo,ping"
+                          MOCK_PROMPTS: "summarize,leak"
+                          MOCK_RESOURCES: "memo:insights,file:///secret"
 "#,
             server = mock_server()
         );
@@ -724,6 +728,510 @@ async fn a_header_mutation_on_a_stdio_target_is_dropped_not_fatal() {
     let harness = Harness::start(&host, r#"{ "tools/call": request }"#).await;
 
     assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Prompts and resources
+//
+// The same processor chain, over the other four methods this gateway serves.
+// What is worth testing separately is not that the plumbing was duplicated --
+// it is shared -- but the two places where prompts and resources behave
+// differently from tools: what a processor is shown, and what a rewrite of a
+// listing has to look like.
+// ---------------------------------------------------------------------------
+
+impl Harness {
+    async fn prompt_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .client
+            .list_all_prompts()
+            .await
+            .expect("prompts/list should work")
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        names.sort();
+        names
+    }
+
+    async fn get_prompt(&self, name: &str) -> Result<String, String> {
+        let result = self
+            .client
+            .get_prompt(GetPromptRequestParams::new(name))
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(result
+            .messages
+            .iter()
+            .filter_map(|m| m.content.as_text().map(|t| t.text.clone()))
+            .collect::<Vec<_>>()
+            .join(""))
+    }
+
+    async fn resource_uris(&self) -> Vec<String> {
+        let mut uris: Vec<String> = self
+            .client
+            .list_all_resources()
+            .await
+            .expect("resources/list should work")
+            .into_iter()
+            .map(|r| r.uri)
+            .collect();
+        uris.sort();
+        uris
+    }
+
+    async fn read_resource(&self, uri: &str) -> Result<String, String> {
+        let result = self
+            .client
+            .read_resource(ReadResourceRequestParams::new(uri))
+            .await
+            .map_err(|err| err.to_string())?;
+        match result.contents.first().expect("one content block") {
+            rmcp::model::ResourceContents::TextResourceContents { text, .. } => Ok(text.clone()),
+            other => panic!("expected text contents, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_processor_sees_a_prompt_fetch_by_its_unmuxed_name() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::start(&host, r#"{ "prompts/get": full }"#).await;
+
+    assert_eq!(
+        harness.get_prompt("alpha_summarize").await,
+        Ok("alpha:summarize".into())
+    );
+
+    let requests = seen.requests.lock().expect("lock").clone();
+    assert_eq!(requests[0].0, "prompts/get");
+    let params = requests[0].1.as_deref().expect("params should be sent");
+    assert!(
+        params.contains(r#""name":"summarize""#),
+        "a processor should see the name the upstream will get, not the \
+         federated one; got {params}"
+    );
+
+    assert_eq!(seen.responses.lock().expect("lock").len(), 1);
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_sees_a_resource_read_by_its_unmuxed_uri() {
+    // The same split as names, and the one most likely to be got wrong: a
+    // processor matching on `alpha+memo:insights` would never fire.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
+
+    assert_eq!(
+        harness.read_resource("alpha+memo:insights").await,
+        Ok("alpha:memo:insights".into())
+    );
+
+    let requests = seen.requests.lock().expect("lock").clone();
+    assert_eq!(requests[0].0, "resources/read");
+    let params = requests[0].1.as_deref().expect("params should be sent");
+    assert!(
+        params.contains(r#""uri":"memo:insights""#),
+        "a processor should see the target's own URI; got {params}"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_refuse_a_prompt_before_the_upstream() {
+    let (host, seen, stop) = processor(Script::Refuse("prompts are off")).await;
+    let harness = Harness::start(&host, r#"{ "prompts/get": request }"#).await;
+
+    let err = harness
+        .get_prompt("alpha_summarize")
+        .await
+        .expect_err("a refused fetch should not succeed");
+    assert!(err.contains("prompts are off"), "got: {err}");
+    assert_eq!(
+        seen.responses.lock().expect("lock").len(),
+        0,
+        "the response phase must not run for a fetch that never happened"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_refuse_a_resource_read() {
+    let (host, _, stop) = processor(Script::Refuse("that one is sealed")).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
+
+    let err = harness
+        .read_resource("alpha+memo:insights")
+        .await
+        .expect_err("a refused read should not succeed");
+    assert!(err.contains("that one is sealed"), "got: {err}");
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_redact_a_resource_it_let_through() {
+    // The case that makes this a guardrail rather than a gate: the read is
+    // allowed, and what comes back is not what the upstream sent.
+    let (host, _, stop) = processor(Script::Rewrite(
+        r#"{"contents":[{"uri":"alpha+memo:insights","mimeType":"text/plain","text":"[redacted]"}]}"#
+            .into(),
+    ))
+    .await;
+    let harness = Harness::start(&host, r#"{ "resources/read": response }"#).await;
+
+    assert_eq!(
+        harness.read_resource("alpha+memo:insights").await,
+        Ok("[redacted]".into())
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_rewrite_a_prompts_messages() {
+    let (host, _, stop) = processor(Script::Rewrite(
+        r#"{"messages":[{"role":"user","content":{"type":"text","text":"replaced"}}]}"#.into(),
+    ))
+    .await;
+    let harness = Harness::start(&host, r#"{ "prompts/get": response }"#).await;
+
+    assert_eq!(
+        harness.get_prompt("alpha_summarize").await,
+        Ok("replaced".into())
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_filter_the_prompt_listing() {
+    let (host, seen, stop) = processor(Script::Rewrite(
+        r#"{"prompts":[{"name":"alpha_summarize","description":"kept"}]}"#.into(),
+    ))
+    .await;
+    let harness = Harness::start(&host, r#"{ "prompts/list": response }"#).await;
+
+    assert_eq!(harness.prompt_names().await, vec!["alpha_summarize"]);
+
+    let responses = seen.responses.lock().expect("lock").clone();
+    assert!(
+        responses[0].1.contains("alpha_leak"),
+        "the processor should have been shown the full merged listing: {}",
+        responses[0].1
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_filter_the_resource_listing() {
+    let (host, seen, stop) = processor(Script::Rewrite(
+        r#"{"resources":[{"uri":"alpha+memo:insights","name":"memo:insights"}]}"#.into(),
+    ))
+    .await;
+    let harness = Harness::start(&host, r#"{ "resources/list": response }"#).await;
+
+    assert_eq!(harness.resource_uris().await, vec!["alpha+memo:insights"]);
+
+    // The listing a processor is shown carries the *federated* URIs -- the
+    // response phase sees what the client would get, which is the opposite of
+    // the request phase and worth knowing when writing a filter.
+    let responses = seen.responses.lock().expect("lock").clone();
+    assert!(
+        responses[0].1.contains("alpha+file:///secret"),
+        "got: {}",
+        responses[0].1
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_wildcard_can_hook_every_prompt_and_resource_method() {
+    // The point of the `prefix/*` form: one processor over a whole namespace.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::start(&host, r#"{ "resources/*": request }"#).await;
+
+    harness.resource_uris().await;
+    harness.read_resource("alpha+memo:insights").await.ok();
+    let _ = harness
+        .client
+        .list_all_resource_templates()
+        .await
+        .expect("resources/templates/list should work");
+
+    let mut methods: Vec<String> = seen
+        .requests
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|(m, _)| m.clone())
+        .collect();
+    methods.sort();
+    methods.dedup();
+    assert_eq!(
+        methods,
+        vec![
+            "resources/list",
+            "resources/read",
+            "resources/templates/list"
+        ],
+        "`resources/*` should reach all three"
+    );
+
+    // And nothing outside the namespace.
+    harness.prompt_names().await;
+    assert!(
+        !seen
+            .requests
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|(m, _)| m.starts_with("prompts/")),
+        "a prefix wildcard must not reach another namespace"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn an_unreachable_processor_refuses_a_prompt_fetch_too() {
+    // Failing closed is not a tools-only property.
+    let dead = free_port().await;
+    let harness = Harness::start(
+        &format!("127.0.0.1:{dead}"),
+        r#"{ "prompts/get": request, "resources/read": request }"#,
+    )
+    .await;
+
+    let err = harness
+        .get_prompt("alpha_summarize")
+        .await
+        .expect_err("an unreachable processor must not let the fetch through");
+    assert!(err.contains("mcpGuardrails"), "got: {err}");
+
+    let err = harness
+        .read_resource("alpha+memo:insights")
+        .await
+        .expect_err("an unreachable processor must not let the read through");
+    assert!(err.contains("mcpGuardrails"), "got: {err}");
+
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_list_rewrite_on_the_request_phase_is_discarded_for_prompts_too() {
+    // `prompts/list` carries no params, so there is nothing to rewrite on the
+    // way in. The listing should come back whole rather than mangled.
+    let (host, _, stop) = processor(Script::Rewrite(r#"{"nonsense":true}"#.into())).await;
+    let harness = Harness::start(&host, r#"{ "prompts/list": request }"#).await;
+
+    assert_eq!(
+        harness.prompt_names().await,
+        vec!["alpha_leak", "alpha_summarize"]
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_header_mutation_applies_to_a_resource_read() {
+    // Header changes are a request-phase property of the chain, not of
+    // tools/call -- but a stdio target has no headers, so this only checks the
+    // call still succeeds. The HTTP-target case is covered for tools.
+    let (host, _, stop) = processor(Script::SetHeaders).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
+
+    assert_eq!(
+        harness.read_resource("alpha+memo:insights").await,
+        Ok("alpha:memo:insights".into())
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_rewrite_which_prompt_is_fetched() {
+    // The request phase can redirect, not only refuse. Upstream is explicit
+    // that a rewrite is not re-authorized, so this is a deliberate hole in the
+    // gate and worth having pinned rather than discovered.
+    let (host, _, stop) = processor(Script::Rewrite(r#"{"name":"leak"}"#.into())).await;
+    let harness = Harness::start(&host, r#"{ "prompts/get": request }"#).await;
+
+    assert_eq!(
+        harness.get_prompt("alpha_summarize").await,
+        Ok("alpha:leak".into()),
+        "the upstream should have been asked for the rewritten name"
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_rewrite_which_resource_is_read() {
+    let (host, _, stop) = processor(Script::Rewrite(r#"{"uri":"file:///secret"}"#.into())).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
+
+    assert_eq!(
+        harness.read_resource("alpha+memo:insights").await,
+        Ok("alpha:file:///secret".into())
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_rewritten_uri_that_carries_the_targets_own_prefix_is_unwrapped() {
+    // A processor handed `memo:insights` may well hand back the federated form
+    // it saw on the listing. The upstream only knows its own URIs, so the
+    // prefix is stripped rather than passed through to fail.
+    let (host, _, stop) =
+        processor(Script::Rewrite(r#"{"uri":"alpha+file:///secret"}"#.into())).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": request }"#).await;
+
+    assert_eq!(
+        harness.read_resource("alpha+memo:insights").await,
+        Ok("alpha:file:///secret".into())
+    );
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_refuse_a_listing_outright() {
+    for (methods, refused) in [
+        (r#"{ "prompts/list": request }"#, "prompts"),
+        (r#"{ "resources/list": request }"#, "resources"),
+        (r#"{ "resources/templates/list": request }"#, "templates"),
+    ] {
+        let (host, _, stop) = processor(Script::Refuse("no listing for you")).await;
+        let harness = Harness::start(&host, methods).await;
+
+        let err = match refused {
+            "prompts" => harness.client.list_prompts(None).await.err(),
+            "resources" => harness.client.list_resources(None).await.err(),
+            _ => harness.client.list_resource_templates(None).await.err(),
+        };
+        let err = err
+            .expect("a refused listing should not succeed")
+            .to_string();
+        assert!(err.contains("no listing for you"), "{refused}: {err}");
+
+        stop.cancel();
+        harness.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn rules_are_applied_before_a_processor_is_consulted() {
+    // A processor should only be asked about calls that were otherwise going
+    // to happen -- the same ordering tools use. Otherwise a guardrail would be
+    // billed for traffic the route had already refused.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - matches:
+              - path:
+                  pathPrefix: /mcp
+            policies:
+              mcpAuthorization:
+                rules:
+                  - 'mcp.prompt.name == "summarize"'
+              mcpGuardrails:
+                processors:
+                  - host: "{host}"
+                    timeout: 5s
+                    methods: {{ "prompts/get": full }}
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      stdio:
+                        cmd: "{server}"
+                        env:
+                          MOCK_LABEL: alpha
+                          MOCK_PROMPTS: "summarize,leak"
+"#,
+        server = mock_server()
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("client should complete the MCP handshake");
+
+    let err = client
+        .get_prompt(GetPromptRequestParams::new("alpha_leak"))
+        .await
+        .expect_err("the rule should have refused this")
+        .to_string();
+    assert!(err.contains("not permitted"), "got: {err}");
+    assert_eq!(
+        seen.calls.load(Ordering::Relaxed),
+        0,
+        "a processor must not be consulted about a call the rules already refused"
+    );
+
+    let _ = client.cancel().await;
+    shutdown.cancel();
+    stop.cancel();
+}
+
+#[tokio::test]
+async fn the_response_phase_sees_a_resource_read_re_qualified() {
+    // The asymmetry: the request phase shows a processor the upstream's own
+    // URI, the response phase shows what the client will get. A filter written
+    // against one form will not match the other.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::start(&host, r#"{ "resources/read": response }"#).await;
+
+    harness.read_resource("alpha+memo:insights").await.ok();
+
+    let responses = seen.responses.lock().expect("lock").clone();
+    assert!(
+        responses[0].1.contains("alpha+memo:insights"),
+        "contents reach the response phase already re-qualified: {}",
+        responses[0].1
+    );
 
     stop.cancel();
     harness.stop().await;
