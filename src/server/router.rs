@@ -31,7 +31,7 @@ use crate::types::{
 };
 
 use super::auth::extract_credentials;
-use super::engine::Engine;
+use super::engine::{parse_extensions_header, Engine};
 
 pub(crate) fn build_router(engine: Arc<Engine>) -> Router {
     Router::new()
@@ -76,6 +76,12 @@ async fn jsonrpc_handler(State(engine): State<Arc<Engine>>, headers: HeaderMap, 
 
     if let Err(version_err) = check_version(&headers) {
         return jsonrpc_error_response(envelope.id, version_err);
+    }
+
+    let declared_extensions =
+        parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
+    if let Err(ext_err) = engine.check_required_extensions(&declared_extensions) {
+        return jsonrpc_error_response(envelope.id, ext_err);
     }
 
     let credentials = extract_credentials(

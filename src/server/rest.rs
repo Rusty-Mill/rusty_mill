@@ -45,7 +45,7 @@ use crate::types::{
 };
 
 use super::auth::extract_credentials;
-use super::engine::Engine;
+use super::engine::{parse_extensions_header, Engine};
 
 const A2A_JSON: &str = "application/a2a+json";
 
@@ -99,15 +99,23 @@ fn rest_ok<T: serde::Serialize>(value: &T) -> Response {
     a2a_json(StatusCode::OK, value)
 }
 
-/// Extracts credentials for `AgentCard.securitySchemes` from `headers`
-/// (and `query`, where the route has a meaningful query string) and
-/// enforces `AgentCard.securityRequirements` (spec Section 4.5) against
-/// them, returning an error [`Response`] ready to `return` on failure.
+/// Enforces `AgentCard.capabilities.extensions[].required` (spec Section
+/// 3.2.6 / 5.6) from the `A2A-Extensions` header, then extracts
+/// credentials for `AgentCard.securitySchemes` from `headers` (and
+/// `query`, where the route has a meaningful query string) and enforces
+/// `AgentCard.securityRequirements` (spec Section 4.5) against them.
+/// Returns an error [`Response`] ready to `return` on failure.
 async fn require_auth(
     engine: &Engine,
     headers: &HeaderMap,
     query: &HashMap<String, String>,
 ) -> Result<(), Response> {
+    let declared_extensions =
+        parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
+    engine
+        .check_required_extensions(&declared_extensions)
+        .map_err(rest_error)?;
+
     let credentials = extract_credentials(
         &engine.card().security_schemes,
         |name| {
@@ -339,6 +347,11 @@ async fn delete_push_notification_config(
 
 /// `GET /extendedAgentCard` (spec Section 11.3.4).
 async fn get_extended_agent_card(State(engine): State<Arc<Engine>>, headers: HeaderMap) -> Response {
+    let declared_extensions =
+        parse_extensions_header(headers.get("A2A-Extensions").and_then(|v| v.to_str().ok()));
+    if let Err(e) = engine.check_required_extensions(&declared_extensions) {
+        return rest_error(e);
+    }
     let credentials = extract_credentials(
         &engine.card().security_schemes,
         |name| {

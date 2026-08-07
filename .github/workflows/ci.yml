@@ -111,4 +111,5 @@ jobs:
         run: |
           cargo test --features client,server --test integration -- --list
           cargo test --features client,server --test security_and_push_notifications -- --list
+          cargo test --features client,server --test history_length_and_extensions -- --list
           cargo test --features grpc,server --test grpc_integration -- --list
