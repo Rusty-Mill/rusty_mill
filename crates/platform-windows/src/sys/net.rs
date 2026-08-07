@@ -32,6 +32,8 @@ use std::time::Duration;
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
 
 use crate::ffi::win32_surface as w;
+#[cfg(feature = "track-w")]
+use crate::sys::errmap;
 use crate::util::wide::to_wide_nul;
 
 fn ensure_wsa_started() {
@@ -292,6 +294,22 @@ pub fn tcp_accept(listen_sock: &OwnedSocket) -> Result<(OwnedSocket, SocketAddr)
 /// `ioctlsocket(FIONBIO, ...)` (rustils#59) — Winsock's equivalent of
 /// `fcntl(F_SETFL, O_NONBLOCK)`. Additive: existing blocking callers
 /// are unaffected unless they opt in.
+///
+/// Track W (D-15): `rusty_win32::net::set_nonblocking`, added upstream
+/// for this migration — the donor had the whole TCP/UDP socket surface
+/// but no blocking-mode control, since its own consumer never needed
+/// one. Same `ioctlsocket(FIONBIO)` call, same set-only limitation
+/// (Winsock offers no way to *read* the current mode, which the donor
+/// documents rather than leaving as an apparent omission).
+#[cfg(feature = "track-w")]
+pub fn set_nonblocking(sock: &OwnedSocket, nonblocking: bool) -> Result<()> {
+    // SAFETY: `sock` is caller-owned and valid for the life of the `&`
+    // borrow — `set_nonblocking`'s whole safety contract.
+    unsafe { rusty_win32::net::set_nonblocking(sock.raw(), nonblocking) }
+        .map_err(|e| errmap::trackw_err("ioctlsocket(FIONBIO)", e))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn set_nonblocking(sock: &OwnedSocket, nonblocking: bool) -> Result<()> {
     let mut mode: u32 = u32::from(nonblocking);
     // SAFETY: `sock` is caller-owned and valid; `&mut mode` is a valid

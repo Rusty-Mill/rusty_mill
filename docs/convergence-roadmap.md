@@ -176,12 +176,52 @@ claim can't be verified from this repo's Linux-host workflow. Worth
 distinguishing from `CreateProcessW` above, which is closed *permanently*:
 a migration list needs both verbs.
 
-**Track W's migration list is now empty.** What remains on windows-sys in
-both configurations is either permanently closed (`CreateProcessW`), held
-pending better evidence (`reopen`), or has no donor binding at all
-(`sys::nt`, `sys::net`, `sys::security`, `sys::fileio`'s directory
-enumeration and NT-relative opens). Any future slice starts by adding a
-binding upstream, not by picking from what is already there.
+**Track W's migration list is now empty** *of families the donor could
+already serve*. What remains on windows-sys in both configurations is
+either permanently closed (`CreateProcessW`), held pending better
+evidence (`reopen`), or has no donor binding. Any future slice starts by
+adding a binding upstream, not by picking from what is already there.
+
+> **Correction, 2026-08-07.** The sentence above originally listed
+> `sys::net` among the families with "no donor binding at all". That was
+> wrong: rusty_win32 has had a full TCP/UDP socket surface
+> (`socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`/`sendto`/
+> `recvfrom`/`local_addr`/`peer_addr`/`set_sockopt`) since its round-2
+> subsystems landed. The claim was made from the shape of the *remaining
+> windows-sys calls* rather than from reading the donor, and it would
+> have sent the next reader looking upstream for work already done.
+> `sys::security` was correctly listed — that module's donor namesake is
+> the ACL/SID surface, which shares nothing with CSPRNG, Credential
+> Manager or certificate stores.
+
+### Slice 4 (2026-08-07) — bindings added upstream, security migrated
+
+The first slice to run in the other direction: instead of picking from
+what the donor had, it added what the donor lacked.
+
+**Landed upstream** (rusty_win32): `crypto` (`BCryptGenRandom`),
+`credential` (Credential Manager, `CRED_TYPE_GENERIC`), `certstore`
+(system certificate stores, read-only), `net::set_nonblocking`
+(`ioctlsocket(FIONBIO)`), and AF_UNIX support in `net`
+(`AddressFamily::Unix`, `UnixSocketAddr`, `bind_unix`/`connect_unix`/
+`accept_unix`/`local_addr_unix`).
+
+**Landed here:** `sys::security` migrated in full — all three families
+(`fill_random`, `credential_set`/`credential_get`, `load_anchors`), to
+the point where the module's `windows-sys` import is itself
+`cfg(not(track-w))`. Plus `sys::net::set_nonblocking`.
+
+**Not landed here, and not blocked either:** the rest of `sys::net` —
+`socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`/`sendto`/
+`recvfrom`/`local_addr`/`peer_addr`, and the AF_UNIX paths the new
+upstream bindings were added for. The bindings exist and the mapping is
+understood; what makes this its own slice rather than a tail on this one
+is an address-conversion layer: this crate speaks `std::net::SocketAddr`
+and raw `SOCKADDR_IN`/`SOCKADDR_IN6`, the donor speaks its own
+`SocketAddr` enum and `UnixSocketAddr`, and every one of those calls
+crosses that boundary. It is mechanical but it is not small, and doing
+it half-attentively in the margin of another slice is how a transposed
+tuple (see `docs/learning/005-…`) gets shipped. Next slice.
 
 ---
 
