@@ -35,6 +35,12 @@ postgres-store = ["server", "dep:sqlx"]
 # for. Whichever layers are on contribute their own; the server-side store
 # decorator lives under `server` and is gated on both.
 metrics = ["dep:metrics"]
+# A conformance suite for third-party `Store` implementations.
+#
+# Off by default and test-only in spirit, but shipped in the library rather than
+# in `tests/`: a backend written outside this crate cannot reach `tests/`, which
+# is the whole reason it exists.
+store-testkit = ["server"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

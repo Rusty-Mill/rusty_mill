@@ -788,6 +788,33 @@ trait documents the invariants a backend may rely on and the two it must provide
 the multi-replica test suite runs unchanged against each of them — which is the check
 that the contract is real rather than a description of whichever backend came first.
 
+Then check it, with the `store-testkit` feature:
+
+```rust,ignore
+use std::sync::Arc;
+use rusty_acp::server::store::{testkit, Store};
+
+#[tokio::test]
+async fn my_backend_satisfies_the_contract() {
+    let report = testkit::verify(|| async {
+        Arc::new(MyStore::connect().await.unwrap()) as Arc<dyn Store>
+    })
+    .await;
+    assert!(report.is_ok(), "{report}");
+}
+```
+
+Sixteen checks against the trait directly — no HTTP listener, no client. The ones worth
+knowing about are the ones a plausible implementation gets wrong: indices stay dense and
+unique under eight concurrent appends, exactly one of eight claimants wins a lease, an
+unrenewed lease lapses, a published event reaches *every* live subscriber rather than
+one. The closure is a factory rather than a store because several checks need two
+independent handles, and because a fresh namespace per check stops one failure
+cascading.
+
+Nothing short-circuits: every check runs and the `Report` names each failure, because
+they usually cluster and one answer at a time is a slow way to find that out.
+
 [ha]: https://agentcommunicationprotocol.dev/how-to/high-availability
 
 ## Protocol coverage
@@ -912,7 +939,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-163 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+293 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
@@ -929,7 +956,13 @@ That approach earned its keep here: adding the Postgres backend, where every wri
 network round-trip rather than a memory write, surfaced three ordering bugs that every
 backend had and neither of the fast ones ever exposed.
 
-The multi-replica suite runs against **all three** backends. The Redis and Postgres halves are
+The store conformance kit runs against all three too, and that was worth doing inward as much
+as outward: before it existed the store-level invariants were checked in `postgres_store.rs`,
+which is to say for Postgres only, because that is when they came up. Holding the other two to
+the same contract immediately found that a Redis lease TTL was truncated to whole seconds —
+so a 1500ms lease expired after one, and could lapse under a replica that was still renewing it.
+
+Both suites run against **all three** backends. The Redis and Postgres halves are
 skipped unless their URLs are set; when one *is* set, an unreachable backend fails the run
 rather than quietly skipping — a suite that silently tests nothing is worse than one that is
 honestly absent:
