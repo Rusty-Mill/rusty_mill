@@ -54,6 +54,10 @@ struct Started {
 
 pub struct Engine {
     card: AgentCard,
+    /// A quoted `ETag` value for `card` (spec Section 8.6.1, SHOULD),
+    /// precomputed once here since `card` never changes after
+    /// construction - see [`Engine::agent_card_etag`].
+    agent_card_etag: String,
     extended_card: Option<AgentCard>,
     executor: Arc<dyn AgentExecutor>,
     store: Arc<dyn TaskStore>,
@@ -76,8 +80,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn new(card: AgentCard, executor: Arc<dyn AgentExecutor>, store: Arc<dyn TaskStore>) -> Self {
+        // Quoted per RFC 7232's ETag syntax; `version` is the field spec
+        // Section 8.6.1 itself suggests deriving it from. A literal `"`
+        // in `version` would otherwise produce a malformed ETag value.
+        let agent_card_etag = format!("\"{}\"", card.version.replace('"', "'"));
         Engine {
             card,
+            agent_card_etag,
             extended_card: None,
             executor,
             store,
@@ -103,8 +112,18 @@ impl Engine {
         self.mtls_header = Some(header_name);
     }
 
+    pub(crate) fn set_webhook_ssrf_protection(&mut self, enabled: bool) {
+        self.push_notifier.set_ssrf_protection(enabled);
+    }
+
     pub fn card(&self) -> &AgentCard {
         &self.card
+    }
+
+    /// The `ETag` value for `card()` (spec Section 8.6.1) - see
+    /// [`Engine::new`].
+    pub(crate) fn agent_card_etag(&self) -> &str {
+        &self.agent_card_etag
     }
 
     /// The header/metadata key name `mtls` security scheme credentials are
@@ -283,6 +302,10 @@ impl Engine {
                 .and_then(|c| c.task_push_notification_config.clone())
             {
                 self.require_push_notifications()?;
+                self.push_notifier
+                    .check_webhook_url(&config.url)
+                    .await
+                    .map_err(A2aError::InvalidParams)?;
                 config.task_id = Some(task_id.clone());
                 config.tenant = req.tenant.clone();
                 self.store.put_push_config(req.tenant.as_deref(), config).await;
@@ -734,6 +757,10 @@ impl Engine {
         config: TaskPushNotificationConfig,
     ) -> Result<TaskPushNotificationConfig> {
         self.require_push_notifications()?;
+        self.push_notifier
+            .check_webhook_url(&config.url)
+            .await
+            .map_err(A2aError::InvalidParams)?;
         let task_id = config
             .task_id
             .clone()

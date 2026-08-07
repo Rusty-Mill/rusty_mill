@@ -214,5 +214,20 @@ name = "auth_required_continuation"
 path = "tests/auth_required_continuation.rs"
 required-features = ["client", "server"]
 
+[[test]]
+name = "webhook_ssrf_protection"
+path = "tests/webhook_ssrf_protection.rs"
+required-features = ["client", "server"]
+
+[[test]]
+name = "agent_card_caching"
+path = "tests/agent_card_caching.rs"
+required-features = ["server"]
+
+[[test]]
+name = "webhook_retry"
+path = "tests/webhook_retry.rs"
+required-features = ["client", "server"]
+
 [build-dependencies]
 tonic-prost-build = { version = "0.14", optional = true }
