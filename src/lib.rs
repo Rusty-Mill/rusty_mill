@@ -7,8 +7,11 @@
 //! - [`types`]: the complete A2A protocol data model (`Task`, `Message`,
 //!   `AgentCard`, ...), transliterated from the normative
 //!   `specification/a2a.proto`.
-//! - [`client`] (feature `client`): an async client for calling A2A agents
-//!   over the JSON-RPC 2.0 protocol binding, including SSE streaming.
+//! - [`client`] (feature `client`): async clients for calling A2A agents.
+//!   [`client::A2aClient`] speaks JSON-RPC 2.0 (including SSE streaming);
+//!   [`client::RestClient`] speaks HTTP+JSON/REST; [`client::GrpcClient`]
+//!   (feature `client` + `grpc`) speaks gRPC - all three share the same
+//!   method names and signatures.
 //! - [`server`] (feature `server`): an [`axum`]-based server harness for
 //!   implementing an A2A agent: implement [`server::AgentExecutor`] and get
 //!   agent-card discovery, task lifecycle management, and streaming for
@@ -27,13 +30,19 @@
 //! gRPC via `server::AgentServices::grpc_service`/`serve_grpc` (feature
 //! `grpc`, compiled from the vendored `spec/a2a.proto` by `build.rs`;
 //! requires a `protoc` binary on `PATH`). All bindings share one task
-//! store and executor. The client only speaks JSON-RPC so far. Per spec
-//! Section 5.1, an agent only needs to support the protocols it declares
-//! in its `AgentCard`, so any subset is spec-compliant.
+//! store and executor. The client implements all three too, as three
+//! separate types (see [`client`] above) rather than one that speaks
+//! whichever binding a server happens to prefer. Per spec Section 5.1, an
+//! agent only needs to support the protocols it declares in its
+//! `AgentCard`, so any subset is spec-compliant.
 #[cfg(feature = "client")]
 pub mod client;
 mod codec;
 pub mod error;
+#[cfg(feature = "grpc")]
+mod grpc_convert;
+#[cfg(feature = "grpc")]
+pub mod pb;
 #[cfg(feature = "server")]
 pub mod server;
 #[cfg(feature = "signing")]

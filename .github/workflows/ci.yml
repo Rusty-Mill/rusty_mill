@@ -103,6 +103,11 @@ jobs:
       - name: gRPC and server, no client
         run: cargo check --features grpc,server --all-targets
 
+      # The client's gRPC transport (`client::grpc`) needs the `pb` module
+      # reachable without `server` - this is what actually exercises that.
+      - name: Client and gRPC, no server
+        run: cargo check --features client,grpc --all-targets
+
       # A `required-features` gate that asks for MORE than its target needs
       # is invisible to compilation: cargo silently drops the target and the
       # suite reports success by not existing. Naming each suite under the
@@ -118,3 +123,5 @@ jobs:
           cargo test --features grpc,server --test subscribe_replay_grpc -- --list
           cargo test --features client,server --test tenant_isolation -- --list
           cargo test --features grpc,server --test tenant_isolation_grpc -- --list
+          cargo test --features client,server --test rest_client -- --list
+          cargo test --features client,grpc,server --test grpc_client -- --list
