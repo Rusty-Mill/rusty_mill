@@ -380,9 +380,16 @@ follow them across servers. Put credentials on the `reqwest::Client` and they tr
 whatever it fetches:
 
 ```rust
+use rusty_acp::reqwest;
+
 let http = reqwest::Client::builder().default_headers(headers).build()?;
 let client = AcpClient::with_http_client("http://localhost:8000", http)?;
 ```
+
+`reqwest` is re-exported for this, so there is no second dependency to add and no version to match
+by hand — get that wrong and the error is a mismatch between two types with the same name. It does
+pin you to this crate's `reqwest` major version, which is the constraint that already existed,
+now stated rather than discovered.
 
 A scheme scoped to the *caller* rather than the *resource* — one-time nonces, per-replica
 secrets, tokens audience-bound to a single host — breaks as soon as a session's URLs point at a

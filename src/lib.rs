@@ -93,6 +93,40 @@ pub mod types;
 #[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod client;
 
+/// The `reqwest` this crate was built against.
+///
+/// [`AcpClient::with_http_client`](client::AcpClient::with_http_client) and
+/// [`AcpClientBuilder::http_client`](client::AcpClientBuilder::http_client)
+/// take a [`reqwest::Client`], which is the documented way to carry
+/// credentials. Building one from your own `reqwest` dependency only works if
+/// it resolves to this exact crate; when it does not, the error is a mismatch
+/// between two types with the same name, which is among the less pleasant
+/// things the compiler has to say.
+///
+/// Going through this re-export makes that impossible:
+///
+/// ```
+/// use rusty_acp::client::AcpClient;
+/// use rusty_acp::reqwest;
+///
+/// # fn build() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut headers = reqwest::header::HeaderMap::new();
+/// headers.insert("authorization", "Bearer hunter2".parse()?);
+/// let http = reqwest::Client::builder().default_headers(headers).build()?;
+///
+/// let client = AcpClient::with_http_client("http://localhost:8000", http)?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// This does pin you to this crate's `reqwest` major version, which is the
+/// point rather than a side effect: the constraint already exists, and today it
+/// is discovered at the type error rather than stated.
+#[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
+pub use reqwest;
+
 #[cfg(feature = "server")]
 #[cfg_attr(docsrs, doc(cfg(feature = "server")))]
 pub mod server;
