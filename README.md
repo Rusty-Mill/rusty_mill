@@ -168,9 +168,10 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
-- `urlRewrite` where a route has more than one `mcp` target, or a `stdio` one,
-  or uses `path.prefix` without exactly one `pathPrefix` match — reported by
-  `--check`. Over a single `mcp:` target it *is* applied; see
+- `urlRewrite.authority` where a route has more than one `mcp:` target, and any
+  rewrite aimed only at `stdio` targets or using `path.prefix` without exactly
+  one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
+  whole federation; see
   [Reaching the upstream request](#reaching-the-upstream-request)
 - `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
@@ -665,9 +666,29 @@ backends:
           mcp: { host: 127.0.0.1, port: 3001, path: /mcp/v1 }
 ```
 
-One target is what makes it well-defined. With two, "the address" has no answer,
-and picking one would be the gateway deciding something the operator did not
-say.
+A **path** rewrite works across any number of targets. It transforms each
+target's own configured path and leaves its host alone, so a federation of
+servers that agree on a path layout moves together:
+
+```yaml
+policies:
+  urlRewrite:
+    path: { prefix: /rpc }
+backends:
+  - mcp:
+      targets:
+        - name: alpha
+          mcp: { host: a.internal, port: 3001, path: /mcp/a }   # -> /rpc/a
+        - name: beta
+          mcp: { host: b.internal, port: 3001, path: /mcp/b }   # -> /rpc/b
+```
+
+An **authority** does not generalise the same way, and this is the one place
+the line is drawn rather than moved. Pointed at several targets it would make
+them all the same server — not a redirect but a collapse, since a target's
+address is exactly what distinguishes it from the others. Over a single target
+it is a redirect and applies; over several it is reported and the path half of
+the same rewrite still runs.
 
 **The path a rewrite acts on is the target's own configured path**, not
 anything derived from the request. An MCP route terminates the protocol and
@@ -703,8 +724,8 @@ What `--check` reports rather than quietly ignoring:
 
 | | Why not |
 | --- | --- |
-| Any rewrite, several targets | "The address" has no answer when there is more than one target. |
-| Any rewrite, a `stdio` target | A pipe has no address. |
+| `authority`, several targets | It would point them all at one server rather than redirecting them. |
+| A rewrite where no target is `mcp:` | A pipe has no address. |
 | `path.prefix`, not exactly one `pathPrefix` match | Which prefix a request matched is not knowable when the session is dialled. Use `full` to set the path outright. |
 
 ### The span itself

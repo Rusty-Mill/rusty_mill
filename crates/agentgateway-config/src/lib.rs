@@ -386,6 +386,11 @@ impl Route {
         }
 
         let at = format!("{at}.policies.urlRewrite");
+        let targets: Vec<&McpTarget> = mcp.iter().flat_map(|b| &b.targets).collect();
+        let addressable = targets
+            .iter()
+            .filter(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
+            .count();
 
         // A `prefix` rewrite replaces whatever the route matched. Which prefix
         // a request matched is not knowable when the target is dialled, which
@@ -405,34 +410,29 @@ impl Route {
             }
         }
 
-        // All three replace part of the single address the gateway dials, so
-        // they stand or fall together on the target conditions.
-        let overrides: Vec<&str> = [
-            rewrite.path.is_some().then_some("path"),
-            rewrite.authority.is_some().then_some("authority"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if overrides.is_empty() {
-            return;
-        }
-        let named = overrides.join(" and ");
-
-        let targets: usize = mcp.iter().map(|b| b.targets.len()).sum();
-        if targets != 1 {
+        // A path rewrite transforms each target's own path and leaves its host
+        // alone, so it generalises across a federation. An authority does not:
+        // pointed at several targets it would make them all the same server,
+        // and a target's address is what distinguishes it from the others.
+        if rewrite.authority.is_some() && targets.len() != 1 {
             findings.push(format!(
-                "{at}: overriding a target's {named} needs exactly one target to be \
-                 unambiguous, and this route has {targets}"
+                "{at}.authority: replacing the address of {} targets would point them all at \
+                 one server rather than redirecting them, so it applies only to a federation \
+                 with a single target",
+                targets.len()
             ));
-        } else if !mcp
-            .iter()
-            .flat_map(|b| &b.targets)
-            .any(|t| matches!(t.kind, McpTargetKind::Mcp(_)))
-        {
+        }
+
+        if rewrite.path.is_some() && addressable == 0 {
             findings.push(format!(
-                "{at}: only an `mcp:` target has an address to override; a `stdio` target \
-                 speaks over a pipe"
+                "{at}.path: no target here has a path to rewrite; a `stdio` target speaks \
+                 over a pipe"
+            ));
+        }
+        if rewrite.authority.is_some() && targets.len() == 1 && addressable == 0 {
+            findings.push(format!(
+                "{at}.authority: only an `mcp:` target has an address to override; a `stdio` \
+                 target speaks over a pipe"
             ));
         }
     }

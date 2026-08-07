@@ -70,11 +70,28 @@ fn mock_server() -> String {
     path.display().to_string()
 }
 
+/// A port nothing in this binary has been handed yet.
+///
+/// Binding to port 0 and dropping the listener leaves a window in which the
+/// same port can be handed out twice, and two tests racing for it fail with
+/// `Address already in use`. Remembering what has been issued closes the
+/// window between tests, which is where the collisions actually came from.
 async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("should bind");
-    listener.local_addr().expect("should have an addr").port()
+    use std::collections::HashSet;
+    use std::sync::{LazyLock, Mutex};
+    static ISSUED: LazyLock<Mutex<HashSet<u16>>> = LazyLock::new(Default::default);
+
+    for _ in 0..64 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind");
+        let port = listener.local_addr().expect("should have an addr").port();
+        drop(listener);
+        if ISSUED.lock().expect("lock").insert(port) {
+            return port;
+        }
+    }
+    panic!("could not find a port this binary has not already used");
 }
 
 const CONFIG: &str = r#"
