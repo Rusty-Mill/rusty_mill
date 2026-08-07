@@ -75,4 +75,9 @@ pub struct AppState {
     /// caller's *rate*, this bounds the *total in-flight count* across
     /// every caller and route.
     pub concurrency_limiter: Option<Arc<Semaphore>>,
+    /// Browser-origin allowlist for CORS (`server.cors_allowed_origins`).
+    /// `None` means the any-origin behavior from before this field
+    /// existed; `Some` (even an empty list) restricts `build_app`'s
+    /// `CorsLayer` to exactly these origins.
+    pub cors_allowed_origins: Option<Vec<String>>,
 }

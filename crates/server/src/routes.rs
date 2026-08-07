@@ -385,6 +385,7 @@ mod tests {
             mcp: None,
             mcp_path: "/mcp".to_string(),
             concurrency_limiter: None,
+            cors_allowed_origins: None,
         }
     }
 

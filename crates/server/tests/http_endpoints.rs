@@ -90,6 +90,7 @@ async fn spawn_app(config_toml: &str) -> String {
         mcp,
         mcp_path,
         concurrency_limiter,
+        cors_allowed_origins: config.server.cors_allowed_origins.clone(),
     };
 
     let app = build_app(state);
@@ -3301,4 +3302,99 @@ async fn max_concurrent_requests_unset_never_sheds() {
         .unwrap();
 
     assert_eq!(resp.status(), 200);
+}
+
+// --- CORS -------------------------------------------------------------
+
+#[tokio::test]
+async fn cors_is_permissive_by_default_when_cors_allowed_origins_is_unset() {
+    let base_url = spawn_app("providers = {}").await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .header("Origin", "https://anywhere.example")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("*")
+    );
+}
+
+#[tokio::test]
+async fn cors_reflects_an_allowlisted_origin() {
+    let config = r#"
+        providers = {}
+
+        [server]
+        cors_allowed_origins = ["https://allowed.example"]
+    "#;
+    let base_url = spawn_app(config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .header("Origin", "https://allowed.example")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("https://allowed.example")
+    );
+}
+
+#[tokio::test]
+async fn cors_omits_the_header_for_an_origin_not_on_the_allowlist() {
+    let config = r#"
+        providers = {}
+
+        [server]
+        cors_allowed_origins = ["https://allowed.example"]
+    "#;
+    let base_url = spawn_app(config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .header("Origin", "https://not-allowed.example")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert!(resp.headers().get("access-control-allow-origin").is_none());
+}
+
+#[tokio::test]
+async fn cors_skips_an_invalid_allowlist_entry_but_keeps_the_valid_ones() {
+    let config = r#"
+        providers = {}
+
+        [server]
+        cors_allowed_origins = ["https://bad\nexample", "https://allowed.example"]
+    "#;
+    let base_url = spawn_app(config).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/health"))
+        .header("Origin", "https://allowed.example")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("access-control-allow-origin")
+            .map(|v| v.to_str().unwrap()),
+        Some("https://allowed.example")
+    );
 }

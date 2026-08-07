@@ -60,6 +60,16 @@ pub struct ServerConfig {
     /// or local resources with no backpressure. Unset means no cap.
     #[serde(default)]
     pub max_concurrent_requests: Option<usize>,
+    /// Restricts CORS to an explicit browser-origin allowlist instead of
+    /// the default any-origin behavior. Unset preserves today's behavior
+    /// unchanged -- this is opt-in hardening, not a default flip, so an
+    /// existing deployment isn't silently broken by upgrading. Each entry
+    /// must parse as a valid `Origin` header value (`scheme://host[:port]`,
+    /// no path); an entry that doesn't parse is skipped with a startup
+    /// warning rather than failing the whole list, same soft-failure
+    /// posture as an invalid `[[guardrails]]` pattern.
+    #[serde(default)]
+    pub cors_allowed_origins: Option<Vec<String>>,
 }
 
 impl Default for ServerConfig {
@@ -72,6 +82,7 @@ impl Default for ServerConfig {
             default_rate_limit_rpm: None,
             admin_key_env: None,
             max_concurrent_requests: None,
+            cors_allowed_origins: None,
         }
     }
 }

@@ -5,6 +5,8 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `server.cors_allowed_origins` — restricts CORS to an explicit browser-
+  origin allowlist. Unset preserves the existing any-origin behavior.
 - `docs/PROVIDERS.md` + curated commented-out provider presets in
   `config.example.toml` (~20 more OpenAI-wire-compatible backends).
 - `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-declared,

@@ -1076,6 +1076,17 @@ rather than queuing — a caller waiting behind a long queue at an already-
 saturated server is worse than one told plainly to retry. Unset (the
 default) means no cap, same as before this existed.
 
+## CORS
+
+By default every route allows any browser origin (`Access-Control-Allow-Origin: *`) — the same behavior this router has always had. Set `server.cors_allowed_origins` to restrict that to an explicit allowlist instead:
+
+```toml
+[server]
+cors_allowed_origins = ["https://my-dashboard.example", "https://app.example.com"]
+```
+
+An origin not on the list gets no `Access-Control-Allow-Origin` header at all (the browser blocks the response from being read by page JS), same as any other CORS-restricted API. Only origin is restricted — methods and headers stay wildcard either way, since there's no cookie-based/credentialed auth here for that to be unsafe with (bearer tokens go in `Authorization`, not a cookie jar). An entry that doesn't parse as a valid `Origin` header value is skipped with a startup warning rather than failing the whole list, logged the same way an invalid `[[guardrails]]` pattern is.
+
 ## Request body size limit
 
 `server.max_body_bytes` caps an inbound request body, in bytes, rejected
