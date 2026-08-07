@@ -12,7 +12,12 @@ use rusty_mcp::limits::LimitsLayer;
 #[command(name = "agentgateway", version, about)]
 struct Cli {
     /// Path to the configuration file.
-    #[arg(short, long, env = "AGENTGATEWAY_CONFIG", default_value = "config.yaml")]
+    #[arg(
+        short,
+        long,
+        env = "AGENTGATEWAY_CONFIG",
+        default_value = "config.yaml"
+    )]
     file: String,
 
     /// Address to bind listeners on, as a host. Ports come from the config.

@@ -104,7 +104,9 @@ async fn a_retryable_status_is_retried_until_it_succeeds() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(
         response.status(),
         200,
@@ -134,7 +136,9 @@ async fn attempts_bounds_the_retries_and_the_last_failure_is_returned() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(
         response.status(),
         503,
@@ -164,7 +168,9 @@ async fn a_status_not_listed_is_not_retried() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(response.status(), 500);
     assert_eq!(
         up.hits.load(Ordering::Relaxed),
@@ -190,7 +196,9 @@ async fn a_successful_response_is_never_retried() {
     ))
     .await;
 
-    reqwest::get(format!("{base}/")).await.expect("should answer");
+    reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(up.hits.load(Ordering::Relaxed), 1);
 
     shutdown.cancel();
@@ -215,8 +223,14 @@ async fn a_retry_tries_a_different_endpoint() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/")).await.expect("should answer");
-    assert_eq!(response.status(), 200, "the retry landed on the healthy one");
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
+    assert_eq!(
+        response.status(),
+        200,
+        "the retry landed on the healthy one"
+    );
     assert_eq!(bad.hits.load(Ordering::Relaxed), 1);
     assert_eq!(good.hits.load(Ordering::Relaxed), 1);
 
@@ -241,7 +255,9 @@ async fn a_connect_failure_is_retried_onto_a_live_endpoint() {
     ))
     .await;
 
-    let response = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(response.status(), 200);
     assert_eq!(live.hits.load(Ordering::Relaxed), 1);
 
@@ -321,11 +337,15 @@ async fn requests_over_the_rate_limit_get_429_with_retry_after() {
     .await;
 
     for i in 0..2 {
-        let response = reqwest::get(format!("{base}/")).await.expect("should answer");
+        let response = reqwest::get(format!("{base}/"))
+            .await
+            .expect("should answer");
         assert_eq!(response.status(), 200, "request {i} is inside the burst");
     }
 
-    let limited = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let limited = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(limited.status(), 429);
     assert_eq!(
         limited
@@ -370,10 +390,14 @@ async fn a_rate_limited_request_is_refused_before_authentication() {
 
     // The first request is inside the limit, so it reaches auth and is refused
     // there for having no token.
-    let first = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let first = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(first.status(), 401);
 
-    let second = reqwest::get(format!("{base}/")).await.expect("should answer");
+    let second = reqwest::get(format!("{base}/"))
+        .await
+        .expect("should answer");
     assert_eq!(
         second.status(),
         429,

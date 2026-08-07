@@ -10,8 +10,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::service::TowerToHyperService;
 use hyper_util::server::conn::auto::Builder as ConnBuilder;
+use hyper_util::service::TowerToHyperService;
 use rusty_mcp::limits::LimitsLayer;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -137,10 +137,12 @@ async fn accept_loop(
                             return;
                         }
                     };
-                    serve_connection(tls, gateway, port, Scheme::Https, peer, limits, shutdown).await;
+                    serve_connection(tls, gateway, port, Scheme::Https, peer, limits, shutdown)
+                        .await;
                 }
                 None => {
-                    serve_connection(stream, gateway, port, Scheme::Http, peer, limits, shutdown).await;
+                    serve_connection(stream, gateway, port, Scheme::Http, peer, limits, shutdown)
+                        .await;
                 }
             }
         });

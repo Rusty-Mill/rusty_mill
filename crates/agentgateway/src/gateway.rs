@@ -15,10 +15,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use agentgateway_auth::{AuthRejection, JwtAuthenticator};
+use agentgateway_a2a::{A2aGateway, Decision};
+use agentgateway_auth::{AuthRejection, Authorization, ExtAuthz, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
 use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
-use agentgateway_a2a::{A2aGateway, Decision};
 use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Federation;
 use agentgateway_proxy::{HostProxy, RequestBody, Scheme};
@@ -50,6 +50,7 @@ struct RouteState {
     cors: Option<CorsMatcher>,
     rate_limit: Option<RateLimiter>,
     jwt: Option<JwtAuthenticator>,
+    ext_authz: Option<ExtAuthz>,
     /// Budget for producing a response on this route.
     timeout: Option<Duration>,
     backend: BackendState,
@@ -103,6 +104,7 @@ impl Gateway {
             cors: None,
             rate_limit: None,
             jwt: None,
+            ext_authz: None,
             timeout: None,
             backend: BackendState::Unsupported("route has no backend".into()),
         });
@@ -121,6 +123,11 @@ impl Gateway {
             // request into a 503.
             let jwt = match route.policies.jwt_auth.as_ref() {
                 Some(policy) => Some(JwtAuthenticator::new(policy, &at)?),
+                None => None,
+            };
+
+            let ext_authz = match route.policies.ext_authz.as_ref() {
+                Some(policy) => Some(ExtAuthz::new(policy, &at)?),
                 None => None,
             };
 
@@ -242,12 +249,17 @@ impl Gateway {
                 cors,
                 rate_limit,
                 jwt,
+                ext_authz,
                 timeout,
                 backend,
             };
         }
 
-        Ok(Gateway { router, routes, tls })
+        Ok(Gateway {
+            router,
+            routes,
+            tls,
+        })
     }
 
     /// The TLS terminator for `port`, if that bind terminates TLS.
@@ -317,6 +329,35 @@ impl Gateway {
             && let Err(rejection) = jwt.authenticate(request.headers()).await
         {
             return Ok(with_cors(reject(&rejection), cors_headers));
+        }
+
+        // External authorization runs last of the gates, so it is asked only
+        // about requests that got past the cheap local ones -- and so an
+        // authorizer can see the identity `jwtAuth` just verified.
+        let mut request = request;
+        if let Some(authz) = &state.ext_authz {
+            let decision = authz
+                .check(request.method(), request.uri().path(), request.headers())
+                .await;
+            match decision {
+                Authorization::Allow(headers) => {
+                    // Whatever the authorizer resolved -- a user id, a tenant
+                    // -- travels on to the upstream.
+                    for (name, value) in headers {
+                        request.headers_mut().insert(name, value);
+                    }
+                }
+                Authorization::Deny {
+                    status,
+                    headers,
+                    body,
+                } => {
+                    tracing::info!(route = ?selection.route.name, %status, "external authorization denied");
+                    let mut response = status_bytes(status, Bytes::from(body));
+                    response.headers_mut().extend(headers);
+                    return Ok(with_cors(response, cors_headers));
+                }
+            }
         }
 
         let call = self.dispatch(state, &selection, peer, scheme, request);
@@ -473,13 +514,13 @@ fn kind_name(target: &BackendTarget) -> &'static str {
     }
 }
 
+/// A response carrying the authorizer's own body, whatever it was.
+fn status_bytes(code: StatusCode, body: Bytes) -> Response {
+    (code, body).into_response()
+}
+
 fn json(code: StatusCode, body: Bytes) -> Response {
-    (
-        code,
-        [(header::CONTENT_TYPE, "application/json")],
-        body,
-    )
-        .into_response()
+    (code, [(header::CONTENT_TYPE, "application/json")], body).into_response()
 }
 
 fn status(code: StatusCode, message: &str) -> Response {

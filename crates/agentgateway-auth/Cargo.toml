@@ -17,6 +17,7 @@ agentgateway-config = { workspace = true }
 rusty-mcp = { git = "https://github.com/baileyrd/rusty_mcp", tag = "v0.4.1", default-features = false, features = ["jwt"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto", "use_pem"] }
 http = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

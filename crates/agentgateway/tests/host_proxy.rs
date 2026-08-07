@@ -222,7 +222,10 @@ async fn traffic_is_split_across_backends_by_weight() {
     }
 
     assert_eq!(
-        (a.hits.load(Ordering::Relaxed), b.hits.load(Ordering::Relaxed)),
+        (
+            a.hits.load(Ordering::Relaxed),
+            b.hits.load(Ordering::Relaxed)
+        ),
         (10, 30),
         "a 1:3 split over 40 requests should land exactly"
     );

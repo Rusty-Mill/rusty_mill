@@ -60,7 +60,7 @@ pub struct Policies {
 
     /// External authorization service.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ext_authz: Option<BTreeMap<String, serde_json::Value>>,
+    pub ext_authz: Option<ExtAuthzPolicy>,
 
     /// Agent-to-agent protocol handling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,7 +74,12 @@ pub struct Policies {
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
         let unimplemented: [(&str, bool); 4] = [
-            ("extAuthz", self.ext_authz.is_some()),
+            (
+                "extAuthz.includeBody",
+                self.ext_authz
+                    .as_ref()
+                    .is_some_and(|e| e.include_body.is_some()),
+            ),
             ("ai", self.ai.is_some()),
             (
                 "mcpAuthorization.rules",
@@ -97,6 +102,54 @@ impl Policies {
             }
         }
     }
+}
+
+/// An external authorization service consulted before a request is served.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtAuthzPolicy {
+    /// Base URL of the authorization service.
+    ///
+    /// The original request path is appended, so the service sees the path
+    /// being authorized and can route on it — the same shape as Envoy's
+    /// `http_service` with a `path_prefix`.
+    pub target: String,
+
+    /// Budget for the authorization call. Defaults to 250ms.
+    ///
+    /// Short on purpose: this sits in front of every request on the route, so
+    /// a slow authorizer is a slow gateway.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<DurationString>,
+
+    /// Request headers forwarded to the authorizer.
+    ///
+    /// An allow-list rather than everything: the authorizer has no need for
+    /// the cookies and payload headers of every request, and sending them
+    /// widens what a compromised authorizer can read.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_headers: Vec<String>,
+
+    /// Headers from the authorizer's response copied onto the upstream
+    /// request — how an authorizer passes down a resolved identity.
+    ///
+    /// Also an allow-list: without one, an authorizer could set any header the
+    /// upstream trusts, which turns an authorization service into an
+    /// impersonation service.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_upstream_headers: Vec<String>,
+
+    /// Whether to serve the request when the authorizer cannot be reached.
+    ///
+    /// Defaults to `false`. An authorization service that is down must not
+    /// become an open door, so this has to be opted into deliberately.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_open: Option<bool>,
+
+    /// Bytes of the request body to forward. Accepted for compatibility;
+    /// [`Policies::lint`] reports that this build does not send a body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_body: Option<usize>,
 }
 
 /// Agent-to-agent protocol handling.

@@ -91,9 +91,10 @@ binds:
 
     let shutdown = CancellationToken::new();
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
-    let _serving = serve::run_with_shutdown_and_limits(gateway, vec![addr], shutdown.clone(), limits)
-        .await
-        .expect("gateway should bind");
+    let _serving =
+        serve::run_with_shutdown_and_limits(gateway, vec![addr], shutdown.clone(), limits)
+            .await
+            .expect("gateway should bind");
 
     (format!("http://127.0.0.1:{port}/mcp"), shutdown)
 }
@@ -163,8 +164,7 @@ fn sse_data(body: &str) -> String {
 
 #[tokio::test]
 async fn a_backend_timeout_cuts_off_a_slow_tool_call() {
-    let policies =
-        "            policies:\n              timeout:\n                backendRequestTimeout: 200ms";
+    let policies = "            policies:\n              timeout:\n                backendRequestTimeout: 200ms";
     let (url, shutdown) = start(policies, "", 5_000).await;
     let session = open_session(&url).await;
 

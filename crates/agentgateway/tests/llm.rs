@@ -88,7 +88,11 @@ async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) 
 }
 
 /// Boot a gateway with one `ai` route pointed at the mock provider.
-async fn start(provider_kind: &str, provider_port: u16, extra: &str) -> (String, CancellationToken) {
+async fn start(
+    provider_kind: &str,
+    provider_port: u16,
+    extra: &str,
+) -> (String, CancellationToken) {
     let port = free_port().await;
     let yaml = format!(
         r#"
@@ -121,7 +125,10 @@ binds:
         .await
         .expect("gateway should bind");
 
-    (format!("http://127.0.0.1:{port}/v1/chat/completions"), shutdown)
+    (
+        format!("http://127.0.0.1:{port}/v1/chat/completions"),
+        shutdown,
+    )
 }
 
 fn chat_request() -> Value {
@@ -183,7 +190,10 @@ async fn an_openai_request_reaches_the_provider_unchanged() {
 
     let seen = seen.lock().expect("lock");
     let sent = seen.body.clone().expect("the provider should see a body");
-    assert_eq!(sent["tools"], body["tools"], "tool definitions must survive");
+    assert_eq!(
+        sent["tools"], body["tools"],
+        "tool definitions must survive"
+    );
     assert_eq!(sent["response_format"], body["response_format"]);
     assert_eq!(seen.path, "/v1/chat/completions");
 
@@ -235,7 +245,10 @@ async fn an_anthropic_request_is_translated_to_the_messages_api() {
     );
 
     let key = seen.headers.iter().find(|(n, _)| n == "x-api-key");
-    assert!(key.is_some(), "Anthropic uses x-api-key, not a bearer token");
+    assert!(
+        key.is_some(),
+        "Anthropic uses x-api-key, not a bearer token"
+    );
     assert!(
         seen.headers.iter().any(|(n, _)| n == "anthropic-version"),
         "the version header is required on every request"
@@ -262,7 +275,10 @@ async fn an_anthropic_response_comes_back_in_openai_shape() {
     assert_eq!(body["choices"][0]["message"]["role"], "assistant");
     assert_eq!(body["choices"][0]["finish_reason"], "stop");
     assert_eq!(body["usage"]["prompt_tokens"], 8);
-    assert_eq!(body["usage"]["total_tokens"], 10, "Anthropic sends no total");
+    assert_eq!(
+        body["usage"]["total_tokens"], 10,
+        "Anthropic sends no total"
+    );
 
     shutdown.cancel();
 }

@@ -45,7 +45,8 @@ pub use matcher::{
     HeaderMatch, HeaderMatchValue, PathMatch, QueryMatch, QueryMatchValue, RouteMatch,
 };
 pub use policy::{
-    A2aPolicy, AgentCardPolicy, BackendAuth, CorsPolicy, DurationString, HeaderModifier, JwtAuth,
+    A2aPolicy, AgentCardPolicy, BackendAuth, CorsPolicy, DurationString, ExtAuthzPolicy,
+    HeaderModifier, JwtAuth,
     JwtSource, LocalRateLimit, McpAuthorization, PathRewrite, Policies, RateLimitKind, RetryPolicy,
     TimeoutPolicy, UrlRewrite,
 };
