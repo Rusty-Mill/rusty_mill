@@ -117,6 +117,10 @@ pub struct AiPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_caching: Option<PromptCaching>,
 
+    /// Content rules applied to the prompt and to what comes back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_guard: Option<PromptGuard>,
+
     /// Everything else upstream accepts.
     ///
     /// Kept so an upstream config loads, and so the lint can name the exact
@@ -130,7 +134,154 @@ impl AiPolicy {
         for key in self.rest.keys() {
             findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
         }
+        if let Some(guard) = &self.prompt_guard {
+            guard.lint(&format!("{at}.promptGuard"), findings);
+        }
     }
+}
+
+/// Content rules applied to the prompt and to what comes back.
+///
+/// Each phase is a list because a route usually wants several unrelated rules
+/// — one for credentials, one for personal data — and each carries its own
+/// refusal. The first rule to refuse ends the request.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptGuard {
+    /// Rules applied to the prompt before it is sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request: Vec<GuardRule>,
+
+    /// Rules applied to what the provider answered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response: Vec<GuardRule>,
+}
+
+impl PromptGuard {
+    pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        for (phase, rules) in [("request", &self.request), ("response", &self.response)] {
+            for (i, rule) in rules.iter().enumerate() {
+                rule.lint(&format!("{at}.{phase}[{i}]"), findings);
+            }
+        }
+    }
+}
+
+/// One rule in a `promptGuard` phase.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardRule {
+    /// Patterns matched against the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex: Option<RegexGuard>,
+
+    /// What to answer with when this rule refuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<Rejection>,
+
+    /// Other rule kinds upstream accepts, such as `webhook` and
+    /// `openAIModeration`.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+impl GuardRule {
+    pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        for key in self.rest.keys() {
+            findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
+        }
+    }
+}
+
+/// Patterns matched against the text of a prompt or an answer.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegexGuard {
+    /// What to do when a rule matches.
+    #[serde(default)]
+    pub action: GuardAction,
+
+    /// The patterns. Any one matching is a match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<GuardPattern>,
+}
+
+/// What to do when a `regex` rule matches.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GuardAction {
+    /// Refuse, and answer with the rule's `rejection`.
+    #[default]
+    Reject,
+    /// Replace the matched text and carry on.
+    Mask,
+}
+
+one_of_enum! {
+    /// One pattern in a `regex` rule.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum GuardPattern {
+        /// A regular expression written by the operator.
+        "pattern" => Pattern(String),
+
+        /// One of the shapes this build already knows.
+        "builtin" => Builtin(Builtin),
+    }
+}
+
+/// A pattern this build ships rather than asking an operator to write.
+///
+/// These are the ones everybody writes the same way and gets subtly wrong the
+/// same way, so shipping them beats every config carrying its own attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Builtin {
+    /// An email address.
+    Email,
+    /// A telephone number.
+    PhoneNumber,
+    /// A US Social Security number.
+    Ssn,
+    /// A payment card number.
+    CreditCard,
+    /// A Canadian Social Insurance Number.
+    CaSin,
+}
+
+/// What to answer with when a guard rule refuses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rejection {
+    /// Status to answer with.
+    #[serde(default = "default_rejection_status")]
+    pub status: u16,
+
+    /// Headers on the refusal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HeaderModifier>,
+
+    /// The body to answer with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+impl Default for Rejection {
+    fn default() -> Self {
+        Rejection {
+            status: default_rejection_status(),
+            headers: None,
+            body: None,
+        }
+    }
+}
+
+/// The status a refusal uses when the rule does not name one.
+///
+/// `400`, not `403`: a content rule decides the request is unacceptable *for
+/// this route*, which is what a bad request means. `403` would say the caller
+/// lacks permission, sending them to check credentials that are fine.
+fn default_rejection_status() -> u16 {
+    400
 }
 
 /// Messages added to every conversation on a route.

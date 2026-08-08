@@ -47,10 +47,12 @@ pub use matcher::{
 };
 pub use methods::{MCP_SERVED_METHODS, pattern_is_matchable, resolve};
 pub use policy::{
-    A2aPolicy, AgentCardPolicy, AiPolicy, AuthorizationRule, BackendAuth, CorsPolicy,
-    DurationString, ExtAuthzPolicy, FailureMode, HeaderFilter, HeaderModifier, JwtAuth, JwtSource,
-    LocalRateLimit, McpAuthorization, McpGuardrails, PathRewrite, Phase, Policies, Processor,
-    PromptCaching, PromptMessage, Prompts, RateLimitKind, RetryPolicy, TimeoutPolicy, UrlRewrite,
+    A2aPolicy, AgentCardPolicy, AiPolicy, AuthorizationRule, BackendAuth, Builtin, CorsPolicy,
+    DurationString, ExtAuthzPolicy, FailureMode, GuardAction, GuardPattern, GuardRule,
+    HeaderFilter, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit, McpAuthorization,
+    McpGuardrails, PathRewrite, Phase, Policies, Processor, PromptCaching, PromptGuard,
+    PromptMessage, Prompts, RateLimitKind, RegexGuard, Rejection, RetryPolicy, TimeoutPolicy,
+    UrlRewrite,
 };
 
 use std::path::Path;

@@ -146,7 +146,7 @@ Implemented and tested:
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
   and tool calling included, with the `ai` policy's `modelAliases`, `prompts`,
-  `defaults`, `overrides` and `promptCaching` — see
+  `defaults`, `overrides`, `promptCaching` and `promptGuard.regex` — see
   [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
@@ -167,8 +167,8 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
-- `ai.promptGuard` and `ai.routes`, named one at a time rather than as the
-  whole of `ai` — see
+- `ai.routes`, and the `promptGuard` rule kinds other than `regex` — named one
+  at a time rather than as the whole of `ai` — see
   [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet)
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
@@ -1284,19 +1284,91 @@ prompt and the conversation in what Anthropic caches, so a breakpoint there
 covers the least that changes between calls — the cheapest one to set and the
 likeliest to hit.
 
+### Prompt guards
+
+Content rules over what a caller sends and what comes back:
+
+```yaml
+policies:
+  ai:
+    promptGuard:
+      request:
+        - regex:
+            action: reject
+            rules:
+              - pattern: "password[=:]\\s*\\S+"
+          rejection:
+            status: 422
+            body: '{"error": {"message": "no credentials, please"}}'
+      response:
+        - regex:
+            action: mask
+            rules:
+              - builtin: phoneNumber
+```
+
+A rule either **rejects** — the request stops and the operator's own body goes
+back — or **masks**, replacing what matched and carrying on. Rules run in order
+and the first refusal ends it, so a list can be read top to bottom. A refusal
+with no `status` is a **400**: a content rule decides the request is
+unacceptable *for this route*, which is what a bad request means; `403` would
+send someone to check credentials that are fine.
+
+Builtins are `email`, `phoneNumber`, `ssn`, `creditCard` and `caSin`, and each
+says what it found — `<PHONE_NUMBER>`, `<SSN>`. A pattern you write yourself
+becomes `<masked>`, because there is nothing more specific to say about it. A
+pattern that does not compile is a **startup failure**, since the alternative
+is a rule that silently never fires — which reads exactly like content nobody
+sent.
+
+Request rules scan what the *caller* sent, before `prompts` add anything: an
+operator refusing their own system prompt would be a strange thing to arrange.
+Every message is scanned, not just the last, because a credential three turns
+back is still on its way to the provider. A tool call's arguments are
+deliberately **not** scanned — they are a structured object built from a schema
+the operator wrote, and masking inside one produces JSON that no longer matches
+the tool it will be called with.
+
+#### A response rule buffers a streamed answer
+
+This costs something a caller will notice, so it is worth being plain about.
+
+A pattern can straddle a chunk boundary: `"call 555-"` arrives, then
+`"867-5309"`. Scanning each chunk alone misses that, and by the time the second
+shows what the first started, the first is already at the client and cannot be
+recalled.
+
+A sliding window — hold back the last N bytes, scan across the join — keeps the
+stream, but has to pick N, and a regex has no general longest-match bound:
+`\d+` runs past any window. The failure would be a **silent leak of exactly
+the thing the rule exists to catch**, which is worse than an obvious cost.
+
+So a route with a response rule collects the whole answer, checks it, and then
+sends it — as one content chunk, since after masking it is no longer the text
+the provider chunked and inventing boundaries for it would be making something
+up. A **request** rule costs a stream nothing, and only `response` triggers
+this. Startup logs it on the route that has it.
+
+A refusal on the response side is an ordinary JSON error rather than an event
+stream: nothing has gone out yet, so the client can still be told plainly.
+Guarding also gives up the byte-for-byte OpenAI passthrough, since rewriting
+means re-serializing — the cost of asking for the answer to be inspected.
+
 ### What the `ai` policy does not do yet
 
 `--check` names the sub-policies one at a time rather than reporting `ai` as a
 whole:
 
 ```
-warning: ...policies.ai.promptGuard: parsed but not enforced by this build
 warning: ...policies.ai.routes: parsed but not enforced by this build
+warning: ...policies.ai.promptGuard.request[0].webhook: parsed but not enforced
 ```
 
 One finding for the whole policy was accurate while none of it was implemented
 and would be a lie now — an operator who reads "not enforced", then watches
-their `prompts` work, has no idea what else is being ignored.
+their `prompts` work, has no idea what else is being ignored. That granularity
+goes all the way down: a `regex` rule beside a `webhook` one in the same list
+reports only the `webhook`.
 
 ## TLS
 

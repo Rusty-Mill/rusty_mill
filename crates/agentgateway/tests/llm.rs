@@ -1577,3 +1577,367 @@ async fn openai_tool_definitions_still_pass_through_untouched() {
 
     shutdown.cancel();
 }
+
+/// A guard that refuses a prompt carrying a password.
+const REJECT_CREDENTIALS: &str = concat!(
+    "              ai:\n",
+    "                promptGuard:\n",
+    "                  request:\n",
+    "                    - regex:\n",
+    "                        action: reject\n",
+    "                        rules:\n",
+    "                          - pattern: \"password[=:]\\\\s*\\\\S+\"\n",
+    "                      rejection:\n",
+    "                        status: 422\n",
+    "                        body: '{\"error\":{\"message\":\"no credentials\"}}'\n",
+);
+
+#[tokio::test]
+async fn a_prompt_guard_refuses_before_the_provider_is_called() {
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", REJECT_CREDENTIALS).await;
+
+    let mut body = chat_request();
+    body["messages"] = json!([{"role": "user", "content": "my password= hunter2"}]);
+    let response = post(&url, &body).await;
+
+    assert_eq!(response.status(), 422);
+    let answer: Value = response.json().await.expect("should be JSON");
+    assert_eq!(
+        answer["error"]["message"], "no credentials",
+        "the operator's own body, not ours"
+    );
+    assert!(
+        seen.lock().expect("lock").body.is_none(),
+        "a refused prompt must not reach the provider"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_prompt_the_guard_permits_reaches_the_provider_unchanged() {
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", REJECT_CREDENTIALS).await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["messages"][1]["content"], "Hello");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_mask_rule_rewrites_the_prompt_and_lets_it_through() {
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptGuard:\n",
+            "                  request:\n",
+            "                    - regex:\n",
+            "                        action: mask\n",
+            "                        rules:\n",
+            "                          - builtin: email\n",
+        ),
+    )
+    .await;
+
+    let mut body = chat_request();
+    body["messages"] = json!([{"role": "user", "content": "write to a.b@example.com"}]);
+    let response = post(&url, &body).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(
+        sent["messages"][0]["content"], "write to <EMAIL>",
+        "a builtin says what it found: {sent}"
+    );
+
+    shutdown.cancel();
+}
+
+/// An OpenAI reply carrying a phone number.
+fn leaky_reply() -> Value {
+    let mut reply = openai_reply();
+    reply["choices"][0]["message"]["content"] = json!("you can call 555-867-5309 today");
+    reply
+}
+
+/// A guard that masks phone numbers in the answer.
+const MASK_RESPONSE: &str = concat!(
+    "              ai:\n",
+    "                promptGuard:\n",
+    "                  response:\n",
+    "                    - regex:\n",
+    "                        action: mask\n",
+    "                        rules:\n",
+    "                          - builtin: phoneNumber\n",
+);
+
+#[tokio::test]
+async fn a_response_guard_masks_a_buffered_answer() {
+    let (provider_port, _seen) = provider(leaky_reply(), None).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", MASK_RESPONSE).await;
+
+    let response = post(&url, &chat_request()).await;
+    let answer: Value = response.json().await.expect("should be JSON");
+    assert_eq!(
+        answer["choices"][0]["message"]["content"], "you can call <PHONE_NUMBER> today",
+        "{answer}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_guard_catches_a_pattern_split_across_stream_chunks() {
+    // The whole reason a response rule buffers: scanning each chunk on its own
+    // would miss this, and the first half is already at the client by the time
+    // the second shows what it started.
+    let stream = format!(
+        "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}],
+        }),
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "call 555-"}, "finish_reason": null}],
+        }),
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "867-5309"}, "finish_reason": "stop"}],
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", MASK_RESPONSE).await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let response = post(&url, &body).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    let text = response.text().await.expect("should read the stream");
+
+    assert!(
+        text.contains("<PHONE_NUMBER>"),
+        "the number spanned two chunks and must still be caught: {text}"
+    );
+    assert!(
+        !text.contains("867-5309"),
+        "no part of it may survive: {text}"
+    );
+    assert!(
+        text.ends_with("data: [DONE]\n\n"),
+        "still a stream a client can read: {text}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_guarded_stream_sends_the_masked_text_as_one_chunk() {
+    // After masking it is no longer the text the provider chunked, and
+    // inventing boundaries for it would be making something up.
+    let stream = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "one "}, "finish_reason": null}],
+        }),
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "two"}, "finish_reason": "stop"}],
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", MASK_RESPONSE).await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let text = post(&url, &body)
+        .await
+        .text()
+        .await
+        .expect("should read the stream");
+
+    let contents: Vec<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(contents, vec!["one two".to_string()], "{text}");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_response_guard_can_refuse_a_stream_before_anything_is_sent() {
+    // Nothing has gone out yet, so the client can still be told plainly --
+    // an ordinary JSON error rather than an event stream carrying a refusal.
+    let stream = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "the ssn is 123-45-6789"}},],
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptGuard:\n",
+            "                  response:\n",
+            "                    - regex:\n",
+            "                        action: reject\n",
+            "                        rules:\n",
+            "                          - builtin: ssn\n",
+            "                      rejection:\n",
+            "                        status: 502\n",
+        ),
+    )
+    .await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let response = post(&url, &body).await;
+    assert_eq!(response.status(), 502);
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("application/json")),
+        "a refusal is not an event stream"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_route_with_only_a_request_guard_still_streams_chunk_by_chunk() {
+    // A request rule costs a stream nothing, and it would be a poor trade if
+    // it did.
+    let stream = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "one "}, "finish_reason": null}],
+        }),
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "two"}, "finish_reason": "stop"}],
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", REJECT_CREDENTIALS).await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let text = post(&url, &body)
+        .await
+        .text()
+        .await
+        .expect("should read the stream");
+
+    let contents: Vec<String> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str::<Value>(payload).ok())
+        .filter_map(|chunk| {
+            chunk["choices"][0]["delta"]["content"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        contents,
+        vec!["one ".to_string(), "two".to_string()],
+        "two chunks, as the provider sent them: {text}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_pattern_that_does_not_compile_fails_an_ai_route_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              backendAuth:
+                key: test-key
+              ai:
+                promptGuard:
+                  request:
+                    - regex:
+                        action: reject
+                        rules:
+                          - pattern: "["
+            backends:
+              - ai:
+                  provider:
+                    openAI: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("a rule that can never fire should not start");
+    assert!(err.to_string().contains("regular expression"), "got: {err}");
+}
+
+#[tokio::test]
+async fn a_guarded_stream_does_not_re_emit_the_done_sentinel_as_a_chunk() {
+    // `data: [DONE]` is not JSON and parses to null. Collecting it with the
+    // chunks would hand a client `data: null` before the real sentinel.
+    let stream = format!(
+        "data: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "c1", "object": "chat.completion.chunk", "created": 1, "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": "stop"}],
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", MASK_RESPONSE).await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let text = post(&url, &body)
+        .await
+        .text()
+        .await
+        .expect("should read the stream");
+
+    assert!(!text.contains("data: null"), "{text}");
+    assert_eq!(
+        text.matches("data: [DONE]").count(),
+        1,
+        "exactly one sentinel: {text}"
+    );
+
+    shutdown.cancel();
+}
