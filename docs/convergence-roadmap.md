@@ -310,6 +310,16 @@ has deliberately never made.
 > every `w::` call reachable under `track-w` and diffing that against
 > the donor's public surface — mechanically, not from this document.
 
+**Slice 6 (2026-08-08) — `sys::csignals` migrated.** rustils#107 closed:
+`install()` routes through `console::install_ctrl_handler` under
+`track-w`. No rev bump needed — the binding already existed at the
+pinned rev. One detail worth carrying forward: the callback fn item
+(`record`) had to become a *safe* `extern "system" fn` rather than
+`unsafe extern "system" fn`, because windows-sys' `PHANDLER_ROUTINE` and
+the donor's own `HandlerRoutine` disagree on that marker, and only a
+safe fn item coerces to both an unsafe and a safe fn-pointer type. #108
+(`sys::proc`'s pipe/handle helpers) and #109 (`sys::pty`) remain open.
+
 ---
 
 ## Phase 2 — Terminal slice 2 (D9, remaining facets)

@@ -68,8 +68,9 @@ surface where every admitted symbol is listed and justified.
   migrated call-by-call and **still in progress**: `sys::fileio::read`/
   `write`, `sys::proc`'s wait/job/terminate families (`sys::pty` sharing
   the job half), `sys::console`/`sys::handle`, `sys::security` (in full),
-  and `sys::net` (in full). Three families remain migratable and are
-  tracked as rustils#107 (`sys::csignals`), #108 (`sys::proc`'s pipe/
+  `sys::net` (in full), and `sys::csignals` (`install()`, rustils#107 —
+  the donor's own Phase 1, the binding it was created for). Two families
+  remain migratable and are tracked as rustils#108 (`sys::proc`'s pipe/
   handle helpers) and #109 (`sys::pty`'s ConPTY surface) — an earlier
   version of this line said "complete", which was true of the migration
   list in `docs/convergence-roadmap.md` §1d and false of the codebase.

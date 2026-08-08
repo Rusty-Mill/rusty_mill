@@ -20,6 +20,28 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.5
+
+- **Track W: `sys::csignals` migrated (D-15).** Closes rustils#107.
+  `install()` now routes through `rusty_win32::console::install_ctrl_handler`
+  under `track-w` — the donor's own **Phase 1**, the binding it was
+  created for, and the sharpest of the three families #110's audit found
+  unmigrated. No rev bump needed: `install_ctrl_handler` already existed
+  at the currently-pinned rev.
+
+  The one thing worth a careful look: `record`, the `SetConsoleCtrlHandler`
+  callback, changed from `unsafe extern "system" fn` to a **safe**
+  `extern "system" fn`. Its body only ever touched an atomic, so it never
+  needed the marker on its own account — but the two donor call shapes
+  disagree on it. windows-sys' `PHANDLER_ROUTINE` wants
+  `Option<unsafe extern "system" fn(u32) -> BOOL>`; the donor's own
+  `HandlerRoutine` wants a safe `extern "system" fn(u32) -> i32`. Rust's
+  ordinary safe-to-unsafe function-pointer coercion is what lets one `fn`
+  item satisfy both — declaring it unsafe would have blocked the `track-w`
+  arm outright, since a safe fn pointer type accepts no `unsafe fn` item.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.4
 
 - **Correction (2026-08-08): Track W was not complete at 0.25.4.** The
