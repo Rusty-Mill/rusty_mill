@@ -167,8 +167,8 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
-- `ai.routes`, and the `promptGuard` rule kinds other than `regex` — named one
-  at a time rather than as the whole of `ai` — see
+- `ai.routes`, and `promptGuard.openAIModeration` — named one at a time rather
+  than as the whole of `ai` — see
   [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet)
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
@@ -1329,6 +1329,73 @@ deliberately **not** scanned — they are a structured object built from a schem
 the operator wrote, and masking inside one produces JSON that no longer matches
 the tool it will be called with.
 
+#### Asking a service instead of a pattern
+
+```yaml
+policies:
+  ai:
+    promptGuard:
+      request:
+        - webhook:
+            target:
+              host: guard.internal:9000
+            headers:
+              ":path": '"/api/guardrails/request"'
+              x-tenant: 'request.headers["x-tenant"]'
+              x-user: jwt.sub
+            forwardHeaderMatches: [x-trace]
+            failureMode: failClosed
+```
+
+Where `regex` decides from a pattern written down in advance, a `webhook` asks
+something that can change its mind — a classifier, a policy service, a model.
+
+**The wire contract is upstream's, read from upstream's source.** It is not in
+agentgateway's published documentation: the guardrail pages describe how to
+*configure* a webhook and link to an API reference that does not render. The
+shapes come from `crates/agentgateway/src/llm/policy/webhook.rs` in the
+upstream repository, so an existing webhook works here unchanged — guessing
+would have quietly broken the one thing this project is for.
+
+The gateway `POST`s to `/request` and `/response`, with the conversation or the
+answer:
+
+```json
+{"body": {"messages": [{"role": "user", "content": "..."}]}}
+{"body": {"choices": [{"message": {"role": "assistant", "content": "..."}}]}}
+```
+
+and reads back one `action`, told apart by **shape** rather than a tag, because
+upstream's enum is untagged:
+
+```json
+{"action": {"reason": "..."}}                               // pass
+{"action": {"body": {"messages": [...]}, "reason": "..."}}  // mask
+{"action": {"body": "text", "status_code": 403}}            // reject
+```
+
+A `mask` carries an *object* body and a `reject` a *string* one, so the two
+cannot be confused; `pass` is what is left. A mask this build cannot read is a
+**refusal**, not a pass — the webhook asked for a rewrite and did not say to
+what, and serving the original would serve exactly the text it objected to.
+
+**It fails closed.** Unreachable, timed out, a non-2xx answer, or a body with
+no `action` all refuse unless `failureMode: failOpen` says otherwise; a content
+control that waves traffic through when its service is down is not one. The
+refusal is a **503**, not a 400: nothing decided the content was unacceptable,
+and saying so would send someone to inspect a prompt that is fine.
+
+Header expressions are CEL over the **caller's** request — `request.headers`,
+`jwt.*` (the claims `jwtAuth` verified, which a caller cannot forge), and
+`llmRequest.*`. Setting `:path` moves the call. An expression that resolves to
+nothing sends **no header** rather than an empty one, since an empty `x-tenant`
+claims there is no tenant. `forwardHeaderMatches` is an allow-list and empty
+forwards nothing — the opposite of `mcpGuardrails`, and deliberate: the body
+already carries the prompt, so headers are extra reach rather than the point.
+
+Rules run in order, so putting a cheap `regex` rule above a webhook saves the
+network call when it refuses.
+
 #### A response rule buffers a streamed answer
 
 This costs something a caller will notice, so it is worth being plain about.
@@ -1361,14 +1428,15 @@ whole:
 
 ```
 warning: ...policies.ai.routes: parsed but not enforced by this build
-warning: ...policies.ai.promptGuard.request[0].webhook: parsed but not enforced
+warning: ...policies.ai.promptGuard.request[0].openAIModeration: parsed but not
+         enforced by this build
 ```
 
 One finding for the whole policy was accurate while none of it was implemented
 and would be a lie now — an operator who reads "not enforced", then watches
 their `prompts` work, has no idea what else is being ignored. That granularity
-goes all the way down: a `regex` rule beside a `webhook` one in the same list
-reports only the `webhook`.
+goes all the way down: an `openAIModeration` rule beside a `regex` one in the
+same list reports only the moderation.
 
 ## TLS
 

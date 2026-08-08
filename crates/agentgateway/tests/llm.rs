@@ -1941,3 +1941,387 @@ async fn a_guarded_stream_does_not_re_emit_the_done_sentinel_as_a_chunk() {
 
     shutdown.cancel();
 }
+
+/// A guard webhook answering from a script.
+///
+/// `answers` is consulted per path, so one fixture serves both phases.
+async fn guard_webhook(
+    request_action: Value,
+    response_action: Value,
+) -> (u16, Arc<Mutex<Vec<(String, Value, Vec<(String, String)>)>>>) {
+    use axum::{Router, extract::Request, routing::any};
+
+    let port = free_port().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        let request_action = request_action.clone();
+        let response_action = response_action.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let headers: Vec<(String, String)> = request
+                .headers()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_string(),
+                        v.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect();
+            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            if let Ok(mut seen) = recorder.lock() {
+                seen.push((path.clone(), body, headers));
+            }
+
+            let action = if path.contains("response") {
+                response_action
+            } else {
+                request_action
+            };
+            axum::Json(json!({"action": action}))
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("webhook should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (port, seen)
+}
+
+fn webhook_policy(port: u16, phase: &str) -> String {
+    format!(
+        concat!(
+            "              ai:\n",
+            "                promptGuard:\n",
+            "                  {phase}:\n",
+            "                    - webhook:\n",
+            "                        target:\n",
+            "                          host: \"127.0.0.1:{port}\"\n",
+        ),
+        phase = phase,
+        port = port
+    )
+}
+
+#[tokio::test]
+async fn a_webhook_sees_the_conversation_in_upstreams_shape() {
+    let (webhook_port, seen) = guard_webhook(json!({"reason": "fine"}), json!({})).await;
+    let (provider_port, _p) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &webhook_policy(webhook_port, "request"),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let (path, body, _headers) = seen.first().expect("the webhook should be asked");
+    assert_eq!(path, "/request", "upstream's default path");
+    let messages = body["body"]["messages"]
+        .as_array()
+        .expect("upstream's shape: {body}");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[1]["content"], "Hello");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_webhook_refusal_stops_the_request() {
+    let (webhook_port, _seen) = guard_webhook(
+        json!({"body": "blocked by policy", "status_code": 451}),
+        json!({}),
+    )
+    .await;
+    let (provider_port, provider_seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &webhook_policy(webhook_port, "request"),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status(), 451);
+    assert_eq!(
+        response.text().await.expect("a body"),
+        "blocked by policy",
+        "the webhook's own message"
+    );
+    assert!(
+        provider_seen.lock().expect("lock").body.is_none(),
+        "a refused prompt must not reach the provider"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_webhook_mask_rewrites_the_prompt_it_was_shown() {
+    let (webhook_port, _seen) = guard_webhook(
+        json!({"body": {"messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "REDACTED"},
+        ]}}),
+        json!({}),
+    )
+    .await;
+    let (provider_port, provider_seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &webhook_policy(webhook_port, "request"),
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = provider_seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["messages"][1]["content"], "REDACTED", "{sent}");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_webhook_guards_the_answer_too() {
+    let (webhook_port, seen) = guard_webhook(
+        json!({}),
+        json!({"body": {"choices": [
+            {"message": {"role": "assistant", "content": "cleaned up"}}
+        ]}}),
+    )
+    .await;
+    let (provider_port, _p) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &webhook_policy(webhook_port, "response"),
+    )
+    .await;
+
+    let answer: Value = post(&url, &chat_request())
+        .await
+        .json()
+        .await
+        .expect("should be JSON");
+    assert_eq!(answer["choices"][0]["message"]["content"], "cleaned up");
+
+    let seen = seen.lock().expect("lock");
+    let (path, body, _headers) = seen.first().expect("the webhook should be asked");
+    assert_eq!(path, "/response");
+    assert_eq!(
+        body["body"]["choices"][0]["message"]["content"], "Hi",
+        "it was shown what the provider actually said: {body}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_webhook_that_cannot_be_reached_refuses_by_default() {
+    // A content control that waves traffic through when its service is down
+    // is not a content control.
+    let dead = free_port().await;
+    let (provider_port, provider_seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &webhook_policy(dead, "request"),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(
+        response.status(),
+        503,
+        "nothing decided the content was unacceptable, so not a 400"
+    );
+    assert!(provider_seen.lock().expect("lock").body.is_none());
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn failing_open_has_to_be_asked_for() {
+    let dead = free_port().await;
+    let (provider_port, provider_seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &format!(
+            concat!(
+                "              ai:\n",
+                "                promptGuard:\n",
+                "                  request:\n",
+                "                    - webhook:\n",
+                "                        target:\n",
+                "                          host: \"127.0.0.1:{dead}\"\n",
+                "                        failureMode: failOpen\n",
+            ),
+            dead = dead
+        ),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(
+        provider_seen.lock().expect("lock").body.is_some(),
+        "failing open means the call goes through"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn header_expressions_read_the_callers_request_and_can_move_the_path() {
+    let (webhook_port, seen) = guard_webhook(json!({}), json!({})).await;
+    let (provider_port, _p) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &format!(
+            concat!(
+                "              ai:\n",
+                "                promptGuard:\n",
+                "                  request:\n",
+                "                    - webhook:\n",
+                "                        target:\n",
+                "                          host: \"127.0.0.1:{port}\"\n",
+                "                        headers:\n",
+                "                          \":path\": '\"/api/guardrails/request\"'\n",
+                "                          x-tenant: 'request.headers[\"x-tenant\"]'\n",
+                "                        forwardHeaderMatches: [x-trace]\n",
+            ),
+            port = webhook_port
+        ),
+    )
+    .await;
+
+    reqwest::Client::new()
+        .post(&url)
+        .header("x-tenant", "acme")
+        .header("x-trace", "abc123")
+        .header("x-secret", "do-not-forward")
+        .json(&chat_request())
+        .send()
+        .await
+        .expect("the gateway should answer");
+
+    let seen = seen.lock().expect("lock");
+    let (path, _body, headers) = seen.first().expect("the webhook should be asked");
+    assert_eq!(path, "/api/guardrails/request", "`:path` moved it");
+    assert!(
+        headers.iter().any(|(k, v)| k == "x-tenant" && v == "acme"),
+        "a CEL header read the caller's own: {headers:?}"
+    );
+    assert!(
+        headers.iter().any(|(k, v)| k == "x-trace" && v == "abc123"),
+        "forwardHeaderMatches carried it: {headers:?}"
+    );
+    assert!(
+        !headers.iter().any(|(k, _)| k == "x-secret"),
+        "and an empty list forwards nothing else: {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_regex_rule_above_a_webhook_can_refuse_without_the_network_call() {
+    // Rules run in order, so a cheap local rule placed first saves the call.
+    let (webhook_port, seen) = guard_webhook(json!({}), json!({})).await;
+    let (provider_port, _p) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &format!(
+            concat!(
+                "              ai:\n",
+                "                promptGuard:\n",
+                "                  request:\n",
+                "                    - regex:\n",
+                "                        action: reject\n",
+                "                        rules:\n",
+                "                          - pattern: forbidden\n",
+                "                    - webhook:\n",
+                "                        target:\n",
+                "                          host: \"127.0.0.1:{port}\"\n",
+            ),
+            port = webhook_port
+        ),
+    )
+    .await;
+
+    let mut body = chat_request();
+    body["messages"] = json!([{"role": "user", "content": "this is forbidden"}]);
+    let response = post(&url, &body).await;
+    assert_eq!(response.status(), 400);
+    assert!(
+        seen.lock().expect("lock").is_empty(),
+        "the webhook was never called"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_header_expression_can_read_the_request_the_caller_wrote() {
+    // `llmRequest.*` only exists once the body is parsed, so the context has
+    // to be completed after that rather than built complete.
+    let (webhook_port, seen) = guard_webhook(json!({}), json!({})).await;
+    let (provider_port, _p) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &format!(
+            concat!(
+                "              ai:\n",
+                "                promptGuard:\n",
+                "                  request:\n",
+                "                    - webhook:\n",
+                "                        target:\n",
+                "                          host: \"127.0.0.1:{port}\"\n",
+                "                        headers:\n",
+                "                          x-model: llmRequest.model\n",
+            ),
+            port = webhook_port
+        ),
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let (_path, _body, headers) = seen.first().expect("the webhook should be asked");
+    assert!(
+        headers.iter().any(|(k, v)| k == "x-model" && v == "gpt-4o"),
+        "saw {headers:?}"
+    );
+
+    shutdown.cancel();
+}

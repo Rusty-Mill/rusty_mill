@@ -175,14 +175,60 @@ pub struct GuardRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regex: Option<RegexGuard>,
 
+    /// An external service asked about the text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook: Option<GuardWebhook>,
+
     /// What to answer with when this rule refuses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection: Option<Rejection>,
 
-    /// Other rule kinds upstream accepts, such as `webhook` and
-    /// `openAIModeration`.
+    /// Other rule kinds upstream accepts, such as `openAIModeration`.
     #[serde(flatten)]
     pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+/// An external service asked whether text may pass.
+///
+/// Where `regex` decides from a pattern written down in advance, this asks
+/// something that can change its mind — a classifier, a policy service, a
+/// model. The wire contract is upstream's: `POST /request` and `POST
+/// /response`, each answered with one of pass, mask or reject.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardWebhook {
+    /// Where to send it.
+    pub target: WebhookTarget,
+
+    /// Headers computed from CEL and set on the webhook request.
+    ///
+    /// Keys may be header names or the `:path`, `:method` and `:authority`
+    /// pseudo-headers; setting `:path` replaces the default `/request` and
+    /// `/response`. Expressions read the *client's* request, so `request.*`
+    /// and `jwt.*` mean what the caller sent rather than what is being built.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+
+    /// Which of the caller's own headers travel to the webhook.
+    ///
+    /// Empty forwards none. That is the opposite of `mcpGuardrails`, and
+    /// deliberate: this body already carries the prompt, so a header list is
+    /// extra reach rather than the point of the call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forward_header_matches: Vec<String>,
+
+    /// What to do when the webhook cannot be reached.
+    #[serde(default)]
+    pub failure_mode: FailureMode,
+}
+
+/// Where a guard webhook lives.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookTarget {
+    /// `host:port`, as upstream spells it.
+    #[serde(default)]
+    pub host: String,
 }
 
 impl GuardRule {

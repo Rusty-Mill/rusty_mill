@@ -109,6 +109,7 @@ dependencies = [
  "agentgateway-core",
  "async-stream",
  "bytes",
+ "cel",
  "futures-util",
  "http",
  "http-body",

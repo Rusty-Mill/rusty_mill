@@ -38,7 +38,7 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use serde_json::Value;
 
-use guard::{Decision, Guard};
+use guard::{Decision, Guard, webhook::Context as GuardContext};
 pub use provider::{Provider, ProviderError};
 use shape::{Shape, caching::Caching};
 use stream::{ChunkTranslator, EventParser};
@@ -349,6 +349,11 @@ impl LlmBackend {
         B: http_body::Body<Data = Bytes> + Send + 'static,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        // Snapshotted before the body is taken, because that is the only
+        // moment the caller's headers and the claims `jwtAuth` verified both
+        // still exist. A `promptGuard` webhook's header expressions read them.
+        let context = self.guard_context(&request);
+
         let collected =
             match http_body_util::Limited::new(request.into_body(), MAX_REQUEST_BYTES as usize)
                 .collect()
@@ -373,11 +378,20 @@ impl LlmBackend {
             }
         };
 
+        // `llmRequest.*` is the request as the caller wrote it, which only
+        // exists once the body is parsed -- so the context is completed here
+        // rather than built complete. Cloning costs an allocation, and only a
+        // route with a webhook rule pays it.
+        let context = match self.guard.as_ref().is_some_and(Guard::calls_out) {
+            true => context.with_llm_request(body.clone()),
+            false => context,
+        };
+
         // Before shaping, so a rule scans what the *caller* sent rather than
         // what the operator's own `prompts` added. An operator refusing their
         // own system prompt would be a strange thing to arrange.
         if let Some(guard) = &self.guard {
-            match guard.check_request(&mut body) {
+            match guard.check_request(&mut body, &context).await {
                 Decision::Rejected(rejection) => {
                     tracing::info!(
                         provider = self.provider.name(),
@@ -497,8 +511,11 @@ impl LlmBackend {
         let guards_response = self.guard.as_ref().is_some_and(Guard::guards_response);
         match (streaming, guards_response) {
             (true, false) => self.stream(response, status, &model),
-            (true, true) => self.guarded_stream(response, status, &model).await,
-            (false, _) => self.buffered(response, status, &model).await,
+            (true, true) => {
+                self.guarded_stream(response, status, &model, &context)
+                    .await
+            }
+            (false, _) => self.buffered(response, status, &model, &context).await,
         }
     }
 
@@ -507,6 +524,7 @@ impl LlmBackend {
         response: reqwest::Response,
         status: StatusCode,
         model: &str,
+        context: &GuardContext,
     ) -> Response<LlmBody> {
         let bytes = match response.bytes().await {
             Ok(bytes) => bytes,
@@ -540,7 +558,7 @@ impl LlmBackend {
         // to be inspected, and it only applies where a rule was configured.
         if let Some(guard) = &self.guard {
             let mut text = answer_text(&body).unwrap_or_default();
-            match guard.check_text(&mut text) {
+            match guard.check_text(&mut text, context).await {
                 Decision::Rejected(rejection) => {
                     tracing::info!(
                         provider = self.provider.name(),
@@ -577,6 +595,7 @@ impl LlmBackend {
         response: reqwest::Response,
         status: StatusCode,
         model: &str,
+        context: &GuardContext,
     ) -> Response<LlmBody> {
         let bytes = match response.bytes().await {
             Ok(bytes) => bytes,
@@ -617,7 +636,7 @@ impl LlmBackend {
 
         let mut text: String = chunks.iter().filter_map(chunk_text).collect();
         if let Some(guard) = &self.guard {
-            match guard.check_text(&mut text) {
+            match guard.check_text(&mut text, context).await {
                 Decision::Rejected(rejection) => {
                     tracing::info!(
                         provider = self.provider.name(),
@@ -823,6 +842,39 @@ fn settle(
         limiter.charge(usage.total());
     }
 }
+
+impl LlmBackend {
+    /// What a `promptGuard` webhook's header expressions may read.
+    ///
+    /// Only built when a route has a webhook rule: snapshotting headers costs
+    /// an allocation per request, and most routes have nothing to read them.
+    fn guard_context<B>(&self, request: &Request<B>) -> GuardContext {
+        if !self.guard.as_ref().is_some_and(Guard::calls_out) {
+            return GuardContext::default();
+        }
+        let headers = request
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+            })
+            .collect();
+        // The claims `jwtAuth` verified, which the gateway put here. A caller
+        // cannot forge them by sending a header.
+        let claims = request
+            .extensions()
+            .get::<TokenClaims>()
+            .map(|c| c.0.clone());
+        GuardContext::new(headers, claims)
+    }
+}
+
+/// The claims a verified token carried, as the gateway stores them.
+///
+/// Declared here rather than depended on, so this crate does not take the MCP
+/// crate for one type it only reads.
+#[derive(Debug, Clone)]
+pub struct TokenClaims(pub Value);
 
 /// The assistant's own text in an OpenAI-shaped response.
 fn answer_text(body: &Value) -> Option<String> {

@@ -16,6 +16,7 @@ workspace = true
 agentgateway-config = { workspace = true }
 agentgateway-core = { workspace = true }
 regex = { workspace = true }
+cel = { workspace = true }
 http = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
