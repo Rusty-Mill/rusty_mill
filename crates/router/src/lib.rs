@@ -70,6 +70,41 @@ pub struct ProviderStats {
     pub uptime: Option<f64>,
 }
 
+/// Which candidate actually served a request and how the router got
+/// there -- what `rp-server` surfaces as the `X-RP-Decision`/
+/// `X-RP-Fallback-Attempts` response headers, from `Router::dispatch_traced`/
+/// `dispatch_stream_traced`. Not part of `ChatResponse` itself (headers
+/// only, no wire-shape change) -- see those methods' doc comments for how
+/// each field is derived.
+#[derive(Debug, Clone)]
+pub struct DispatchTrace {
+    /// `"direct"` (a literal "provider/model" request or route alias
+    /// resolving through no `[[routes]]` entry at all), `"fallback"` (a
+    /// configured route alias, or the request's own ad-hoc `models`
+    /// fallback list), or `"fusion"` (`strategy = "fusion"` engaged).
+    pub strategy: &'static str,
+    /// The provider that actually served the request -- not necessarily
+    /// the first entry in the resolved chain, if earlier candidates
+    /// failed, timed out, or were filtered out first.
+    pub provider: String,
+    pub model: String,
+    /// Wall-clock time this specific `dispatch_traced`/`dispatch_stream_traced`
+    /// call took, from entry to the response (or, for streaming, the
+    /// point a candidate's stream was established) being ready --
+    /// includes any same-provider retries and fallen-through candidates,
+    /// not just the winning attempt's own latency.
+    pub latency_ms: u64,
+    /// How many chain candidates the router had to move through before
+    /// landing on the one that served the request -- `1` when the first
+    /// candidate tried succeeded outright, higher once earlier ones
+    /// failed/were skipped and it fell through. For `strategy = "fusion"`
+    /// this is the panel size instead (every candidate is dispatched
+    /// concurrently, not tried in sequence, so "how many were tried" is
+    /// the more meaningful number than "how many failed first"). `0` for
+    /// a response cache hit -- nothing was actually dispatched.
+    pub fallback_attempts: u32,
+}
+
 /// Max number of individual request records `GenerationCache` retains for
 /// `GET /v1/generation?id=` lookups before evicting the oldest -- a
 /// recent-history cache, not a durable audit log, so an unbounded size
@@ -2314,36 +2349,104 @@ impl Router {
     /// `"exact"`, never both at once -- see `Router::from_config`), and
     /// inserts a successful response into it afterward.
     pub async fn dispatch(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
+        self.dispatch_traced(req).await.map(|(resp, _trace)| resp)
+    }
+
+    /// `"direct"` for a literal "provider/model" request (or one that
+    /// resolves through no `[[routes]]` entry at all), `"fallback"` for a
+    /// configured route alias or the request's own ad-hoc `models`
+    /// fallback list, `"fusion"` when `strategy = "fusion"` will actually
+    /// engage -- mirrors the exact gating condition `dispatch_uncached`
+    /// uses to decide whether to call `dispatch_fusion`, so this always
+    /// agrees with what actually happens.
+    fn dispatch_strategy(&self, target_model: &str, req: &ChatRequest) -> &'static str {
+        let has_ad_hoc_fallbacks = req.models.as_ref().is_some_and(|m| !m.is_empty());
+        if has_ad_hoc_fallbacks {
+            return "fallback";
+        }
+        if req.tools.is_none() && self.fusion_routes.contains_key(target_model) {
+            return "fusion";
+        }
+        if self.routes.contains_key(target_model) {
+            return "fallback";
+        }
+        "direct"
+    }
+
+    /// Same as `dispatch`, but also returns a [`DispatchTrace`] describing
+    /// which strategy/candidate actually served the request -- what
+    /// `rp-server` surfaces as the `X-RP-Decision`/`X-RP-Fallback-Attempts`
+    /// response headers. A cache hit (semantic or exact) still returns a
+    /// trace: the cached response's own `model` still identifies which
+    /// candidate originally produced it, just with `fallback_attempts: 0`
+    /// since nothing was actually dispatched this time.
+    pub async fn dispatch_traced(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(ChatResponse, DispatchTrace), RouterError> {
+        let started_at = Instant::now();
+        let (target_model, _) = self.resolve_target_model(req);
+        let strategy = self.dispatch_strategy(&target_model, req);
+
         if !req.is_streaming() {
             if let Some(semantic) = self.semantic_cache.clone() {
                 if let Some(resp) = self.semantic_cache_get(req, &semantic).await {
-                    return Ok(resp);
+                    let trace = self.build_trace(strategy, &resp, 0, started_at);
+                    return Ok((resp, trace));
                 }
-                let resp = self.dispatch_uncached(req).await?;
+                let (resp, attempts) = self.dispatch_uncached(req).await?;
                 self.semantic_cache_insert(req, &semantic, resp.clone())
                     .await;
-                return Ok(resp);
+                let trace = self.build_trace(strategy, &resp, attempts, started_at);
+                return Ok((resp, trace));
             }
         }
 
         let cache_key = self.cache_key_for(req);
         if let Some(key) = cache_key {
             if let Some(resp) = self.cache_get(key) {
-                return Ok(resp);
+                let trace = self.build_trace(strategy, &resp, 0, started_at);
+                return Ok((resp, trace));
             }
         }
-        let resp = self.dispatch_uncached(req).await?;
+        let (resp, attempts) = self.dispatch_uncached(req).await?;
         if let Some(key) = cache_key {
             self.cache_insert(key, resp.clone());
         }
-        Ok(resp)
+        let trace = self.build_trace(strategy, &resp, attempts, started_at);
+        Ok((resp, trace))
+    }
+
+    fn build_trace(
+        &self,
+        strategy: &'static str,
+        resp: &ChatResponse,
+        fallback_attempts: u32,
+        started_at: Instant,
+    ) -> DispatchTrace {
+        let (provider, model) = resp
+            .model
+            .split_once('/')
+            .unwrap_or(("", resp.model.as_str()));
+        DispatchTrace {
+            strategy,
+            provider: provider.to_string(),
+            model: model.to_string(),
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            fallback_attempts,
+        }
     }
 
     /// The actual chain-resolution-and-dispatch logic, shared by every
     /// `dispatch` cache path (semantic, exact, or neither) -- none of
     /// those need their own copy of fallback/retry/instrumentation, only
-    /// a different cache check wrapped around this.
-    async fn dispatch_uncached(&self, req: &ChatRequest) -> Result<ChatResponse, RouterError> {
+    /// a different cache check wrapped around this. The returned `u32` is
+    /// how many chain candidates were tried before the one that
+    /// succeeded -- see `DispatchTrace::fallback_attempts`.
+    async fn dispatch_uncached(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(ChatResponse, u32), RouterError> {
         let (target_model, was_auto_routed) = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
         let auto_price_prefs = self.auto_routed_price_preference(req, was_auto_routed);
@@ -2364,13 +2467,19 @@ impl Router {
         let no_ad_hoc_fallbacks = req.models.as_ref().map(Vec::is_empty).unwrap_or(true);
         if no_ad_hoc_fallbacks && req.tools.is_none() {
             if let Some(fusion) = self.fusion_routes.get(&target_model) {
-                return self.dispatch_fusion(req, fusion, chain).await;
+                let panel_size = chain.len() as u32;
+                return self
+                    .dispatch_fusion(req, fusion, chain)
+                    .await
+                    .map(|resp| (resp, panel_size));
             }
         }
 
         let mut last_err: Option<RouterError> = None;
+        let mut attempts: u32 = 0;
 
         for (provider_name, model_name) in &chain {
+            attempts += 1;
             let provider = match self.get_provider(provider_name) {
                 Ok(p) => p,
                 Err(e) => {
@@ -2474,7 +2583,7 @@ impl Router {
                     }
 
                     cache_reasoning_for_replay(&self.reasoning_replay, &resp);
-                    return Ok(resp);
+                    return Ok((resp, attempts));
                 }
                 Err(e) if e.is_retryable() => {
                     tracing::warn!(provider = %provider_name, model = %model_name, "provider failed, falling back: {e}");
@@ -2667,14 +2776,17 @@ impl Router {
         Ok(final_resp)
     }
 
-    /// `strategy = "fusion"` has no streaming form -- synthesizing one
-    /// answer from a panel is fundamentally a whole-response operation, not
-    /// something that can be streamed incrementally. A streaming request
-    /// against a fusion-configured alias is therefore never routed into
-    /// `dispatch_fusion`; it falls through to the ordinary sequential
-    /// `chain` loop below unchanged, the same bypass `dispatch_uncached`
-    /// gives a tool-calling request.
-    pub async fn dispatch_stream(&self, req: &ChatRequest) -> Result<ChatStream, RouterError> {
+    /// Resolves `req.model` to a provider chain and dispatches, exactly
+    /// like `dispatch_stream` -- see that method's doc comment for the
+    /// `strategy = "fusion"` bypass. Also returns the winning candidate's
+    /// `(provider, model)` and how many candidates were tried, since a
+    /// stream's chunks don't carry that on their own the way a
+    /// non-streaming `ChatResponse.model` does -- `dispatch_stream_traced`
+    /// uses this to build a `DispatchTrace` before any chunk is read.
+    async fn dispatch_stream_uncached(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(ChatStream, String, String, u32), RouterError> {
         let (target_model, was_auto_routed) = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
         let auto_price_prefs = self.auto_routed_price_preference(req, was_auto_routed);
@@ -2683,8 +2795,10 @@ impl Router {
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
         let chain = self.apply_request_budget(&target_model, chain, req)?;
         let mut last_err: Option<RouterError> = None;
+        let mut attempts: u32 = 0;
 
         for (provider_name, model_name) in &chain {
+            attempts += 1;
             let provider = match self.get_provider(provider_name) {
                 Ok(p) => p,
                 Err(e) => {
@@ -2746,11 +2860,17 @@ impl Router {
                         .record_attempt(provider_name, model_name, "success");
                     tracing::debug!(provider = %provider_name, model = %model_name, elapsed_ms, "recorded latency (time to first byte)");
 
-                    return Ok(self.instrument_stream(
+                    let instrumented = self.instrument_stream(
                         provider_name.clone(),
                         model_name.clone(),
                         started_at,
                         stream,
+                    );
+                    return Ok((
+                        instrumented,
+                        provider_name.clone(),
+                        model_name.clone(),
+                        attempts,
                     ));
                 }
                 Err(e) if e.is_retryable() => {
@@ -2770,6 +2890,43 @@ impl Router {
         }
 
         Err(last_err.unwrap_or_else(|| RouterError::InvalidModel(target_model.clone())))
+    }
+
+    /// `strategy = "fusion"` has no streaming form -- synthesizing one
+    /// answer from a panel is fundamentally a whole-response operation, not
+    /// something that can be streamed incrementally. A streaming request
+    /// against a fusion-configured alias therefore never routes into
+    /// `dispatch_fusion`; `dispatch_stream_uncached`'s ordinary sequential
+    /// `chain` loop handles it unchanged, the same bypass `dispatch_uncached`
+    /// gives a tool-calling request.
+    pub async fn dispatch_stream(&self, req: &ChatRequest) -> Result<ChatStream, RouterError> {
+        self.dispatch_stream_uncached(req)
+            .await
+            .map(|(stream, _provider, _model, _attempts)| stream)
+    }
+
+    /// Same as `dispatch_stream`, but also returns a [`DispatchTrace`] --
+    /// see `dispatch_traced`'s doc comment. Unlike the non-streaming case,
+    /// the winning candidate is already known synchronously by the time
+    /// this returns (established before any chunk is produced), so the
+    /// trace's headers can be set on the initial HTTP response rather than
+    /// needing anything after the stream completes.
+    pub async fn dispatch_stream_traced(
+        &self,
+        req: &ChatRequest,
+    ) -> Result<(ChatStream, DispatchTrace), RouterError> {
+        let started_at = Instant::now();
+        let (target_model, _) = self.resolve_target_model(req);
+        let strategy = self.dispatch_strategy(&target_model, req);
+        let (stream, provider, model, attempts) = self.dispatch_stream_uncached(req).await?;
+        let trace = DispatchTrace {
+            strategy,
+            provider,
+            model,
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            fallback_attempts: attempts,
+        };
+        Ok((stream, trace))
     }
 
     /// Resolves `req.model` to a provider chain and dispatches, falling
@@ -8039,6 +8196,219 @@ mod tests {
         assert_eq!(stats.requests, 3);
         assert_eq!(stats.prompt_tokens, 3);
         assert_eq!(stats.completion_tokens, 3);
+    }
+
+    // --- dispatch_traced / dispatch_stream_traced (DispatchTrace) --------------
+
+    #[tokio::test]
+    async fn dispatch_traced_reports_direct_strategy_and_one_attempt_for_a_literal_provider_model()
+    {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls,
+        });
+        let router = test_router(vec![("anthropic", mock)], vec![], vec![], vec![], vec![]);
+
+        let (resp, trace) = router
+            .dispatch_traced(&test_request("anthropic/m1"))
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(resp.model, "anthropic/m1");
+        assert_eq!(trace.strategy, "direct");
+        assert_eq!(trace.provider, "anthropic");
+        assert_eq!(trace.model, "m1");
+        assert_eq!(trace.fallback_attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_traced_reports_fallback_strategy_for_a_route_alias() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls,
+        });
+        let router = test_router(
+            vec![("anthropic", mock)],
+            vec![("smart", vec!["anthropic/m1"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let (_resp, trace) = router
+            .dispatch_traced(&test_request("smart"))
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(trace.strategy, "fallback");
+        assert_eq!(trace.provider, "anthropic");
+        assert_eq!(trace.fallback_attempts, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_traced_counts_every_candidate_tried_when_the_chain_falls_through() {
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::FailRetryable,
+            calls: calls_a,
+        });
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(MockProvider {
+            name: "b".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_b,
+        });
+        let router = test_router(
+            vec![("a", a), ("b", b)],
+            vec![("smart", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let (resp, trace) = router
+            .dispatch_traced(&test_request("smart"))
+            .await
+            .expect("dispatch should fall through to the second candidate and succeed");
+
+        assert_eq!(resp.model, "b/m2");
+        assert_eq!(trace.provider, "b");
+        assert_eq!(
+            trace.fallback_attempts, 2,
+            "both a (which failed) and b (which succeeded) count as tried"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_traced_reports_fusion_strategy_with_the_panel_size_as_attempts() {
+        let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
+        let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
+        let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));
+        let router = test_router(
+            vec![
+                ("a", a as Arc<dyn Provider>),
+                ("b", b as Arc<dyn Provider>),
+                ("j", judge as Arc<dyn Provider>),
+            ],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let (_resp, trace) = router
+            .dispatch_traced(&test_request("panel"))
+            .await
+            .expect("fusion dispatch should succeed");
+
+        assert_eq!(trace.strategy, "fusion");
+        assert_eq!(trace.provider, "j");
+        assert_eq!(
+            trace.fallback_attempts, 2,
+            "the panel size (2 candidates), not a sequential fallback count"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_traced_reports_fallback_strategy_for_an_ad_hoc_models_list_even_on_a_fusion_alias(
+    ) {
+        // req.models is a per-request override with no coherent "panel" of
+        // its own -- see dispatch_uncached's fusion gate -- so it's
+        // "fallback" even when the base alias is itself fusion-configured.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls,
+        });
+        let router = test_router(
+            vec![("a", mock)],
+            vec![("panel", vec!["a/m1"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+        let mut req = test_request("a/m1");
+        req.models = Some(vec!["a/m1".to_string()]);
+
+        let (_resp, trace) = router
+            .dispatch_traced(&req)
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(trace.strategy, "fallback");
+    }
+
+    #[tokio::test]
+    async fn dispatch_traced_on_a_semantic_cache_hit_reports_zero_fallback_attempts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock = Arc::new(MockProvider {
+            name: "anthropic".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls.clone(),
+        });
+        let router = router_with_semantic_cache(vec![("anthropic", mock)]);
+        let req = test_request("anthropic/m1");
+
+        let (first_resp, first_trace) = router
+            .dispatch_traced(&req)
+            .await
+            .expect("the first call should actually dispatch");
+        assert_eq!(first_trace.fallback_attempts, 1);
+
+        let (second_resp, second_trace) = router
+            .dispatch_traced(&req)
+            .await
+            .expect("the second call should hit the semantic cache");
+        assert_eq!(
+            second_resp.id, first_resp.id,
+            "the cached response is served on the second call"
+        );
+        assert_eq!(second_trace.provider, "anthropic");
+        assert_eq!(
+            second_trace.fallback_attempts, 0,
+            "a cache hit doesn't dispatch anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_stream_traced_reports_the_winning_candidate_before_any_chunk_is_read() {
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::FailRetryable,
+            calls: calls_a,
+        });
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(MockProvider {
+            name: "b".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_b,
+        });
+        let router = test_router(
+            vec![("a", a), ("b", b)],
+            vec![("smart", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let (_stream, trace) = router
+            .dispatch_stream_traced(&test_request("smart"))
+            .await
+            .expect("dispatch should fall through to the second candidate and succeed");
+
+        assert_eq!(trace.strategy, "fallback");
+        assert_eq!(trace.provider, "b");
+        assert_eq!(trace.model, "m2");
+        assert_eq!(trace.fallback_attempts, 2);
     }
 
     // --- cache ---------------------------------------------------------------
