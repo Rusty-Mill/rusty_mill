@@ -68,12 +68,13 @@ surface where every admitted symbol is listed and justified.
   migrated call-by-call and **still in progress**: `sys::fileio::read`/
   `write`, `sys::proc`'s wait/job/terminate families (`sys::pty` sharing
   the job half), `sys::console`/`sys::handle`, `sys::security` (in full),
-  `sys::net` (in full), and `sys::csignals` (`install()`, rustils#107 —
-  the donor's own Phase 1, the binding it was created for). Two families
-  remain migratable and are tracked as rustils#108 (`sys::proc`'s pipe/
-  handle helpers) and #109 (`sys::pty`'s ConPTY surface) — an earlier
-  version of this line said "complete", which was true of the migration
-  list in `docs/convergence-roadmap.md` §1d and false of the codebase.
+  `sys::net` (in full), `sys::csignals` (`install()`, rustils#107 — the
+  donor's own Phase 1, the binding it was created for), and `sys::proc`'s
+  pipe/handle helpers (`make_pipe`/`inheritable_dup_of_std`, #108). One
+  family remains migratable, tracked as rustils#109 (`sys::pty`'s ConPTY
+  surface) — an earlier version of this line said "complete", which was
+  true of the migration list in `docs/convergence-roadmap.md` §1d and
+  false of the codebase.
   Two exclusions are deliberate and different in kind — `CreateProcessW`
   is struck against the donor's *current shape* (its `spawn_suspended`
   has no per-spawn std-handle override, no working directory, and a

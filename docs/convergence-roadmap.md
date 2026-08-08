@@ -317,8 +317,18 @@ pinned rev. One detail worth carrying forward: the callback fn item
 (`record`) had to become a *safe* `extern "system" fn` rather than
 `unsafe extern "system" fn`, because windows-sys' `PHANDLER_ROUTINE` and
 the donor's own `HandlerRoutine` disagree on that marker, and only a
-safe fn item coerces to both an unsafe and a safe fn-pointer type. #108
-(`sys::proc`'s pipe/handle helpers) and #109 (`sys::pty`) remain open.
+safe fn item coerces to both an unsafe and a safe fn-pointer type.
+
+**Slice 7 (2026-08-08) — `sys::proc`'s pipe/handle helpers migrated.**
+rustils#108 closed: `make_pipe` (`handle::create_pipe` +
+`set_inheritable`) and `inheritable_dup_of_std` (`handle::get_std_handle`
++ `handle::duplicate`, called raw rather than through the already-migrated
+`sys::handle::duplicate`, which needs an `&OwnedWinHandle` this call site
+never has). Worth carrying forward: the donor's `create_pipe` makes
+*neither* end inheritable by design, the opposite starting point from
+this crate's own `bInheritHandle = 1`-then-clear-the-parent approach —
+both land on the same final state (child inheritable, parent not), just
+reached from different directions. #109 (`sys::pty`) remains open.
 
 ---
 

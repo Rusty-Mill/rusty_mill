@@ -20,6 +20,37 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.6
+
+- **Track W: `sys::proc`'s pipe/handle helpers migrated (D-15).** Closes
+  rustils#108. `make_pipe` (`handle::create_pipe` + `set_inheritable`)
+  and `inheritable_dup_of_std` (`handle::get_std_handle` +
+  `handle::duplicate`, called on the raw handle directly rather than
+  through the already-migrated `sys::handle::duplicate`, which takes
+  `&OwnedWinHandle` — this process never owns the original std-slot
+  handle, only the duplicate it mints).
+
+  **The donor's `create_pipe` and this crate's own pipe creation start
+  from opposite inheritability defaults and land in the same place.**
+  windows-sys' `SECURITY_ATTRIBUTES.bInheritHandle = 1` makes *both*
+  pipe ends inheritable, then the parent end is explicitly cleared. The
+  donor's `create_pipe` makes *neither* end inheritable, by its own
+  documented design ("pass whichever end a child needs through
+  `set_inheritable` first") — so the track-w arm marks the *child* end
+  up instead of marking the parent end down. Same final state (child
+  inheritable, parent not) reached from opposite starting points; no
+  race in either arm, since every handle is fully configured before
+  `spawn`'s eventual `CreateProcessW` call, the only point inheritance
+  is consulted.
+
+  A local `std_handle_raw` two-arms `GetStdHandle`'s `NULL`/
+  `INVALID_HANDLE_VALUE` fold — the same shape `sys::console::std_handle`
+  already uses, kept as a separate copy since the two are keyed
+  differently (`TermStream` there, a raw slot constant here) and neither
+  module needs the other's private primitive for three lines.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.5
 
 - **Track W: `sys::csignals` migrated (D-15).** Closes rustils#107.
