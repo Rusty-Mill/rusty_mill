@@ -122,6 +122,50 @@ impl GenerationCache {
     }
 }
 
+/// Max number of tool-call reasoning traces `ReasoningReplayCache` retains
+/// -- same bound and eviction policy as `GENERATION_CACHE_CAPACITY`.
+const REASONING_REPLAY_CACHE_CAPACITY: usize = 1000;
+
+/// Fixed-capacity, insertion-order-evicting cache of an assistant turn's
+/// reasoning trace, keyed by each `tool_call_id` that turn invoked. Some
+/// OpenAI-compatible reasoning models (DeepSeek-reasoner, Kimi-K-series,
+/// QwQ, GLM-thinking) reject a tool-continuation turn whose assistant
+/// message is missing the reasoning behind the tool call it made -- but
+/// most client SDKs strip `reasoning`/`reasoning_content` before sending
+/// the next request. `Router::maybe_apply_reasoning_replay` looks this up
+/// by the tool_call_id a `role: "tool"` reply answers and re-injects it
+/// into the preceding assistant message, transparent to the caller. Only
+/// populated from non-streaming responses (`dispatch`) -- a streaming
+/// response's tool_calls/reasoning arrive as incremental deltas this
+/// router doesn't reassemble into a full message anywhere else either, so
+/// populating this cache from a stream would need new accumulation logic
+/// disproportionate to this cache's job; replay itself (the read side)
+/// still applies to a streaming request if an earlier non-streaming turn
+/// already populated an entry.
+#[derive(Debug, Default)]
+struct ReasoningReplayCache {
+    order: std::collections::VecDeque<String>,
+    by_tool_call_id: HashMap<String, String>,
+}
+
+impl ReasoningReplayCache {
+    fn insert(&mut self, tool_call_id: String, reasoning: String) {
+        if !self.by_tool_call_id.contains_key(&tool_call_id) {
+            self.order.push_back(tool_call_id.clone());
+            if self.order.len() > REASONING_REPLAY_CACHE_CAPACITY {
+                if let Some(oldest) = self.order.pop_front() {
+                    self.by_tool_call_id.remove(&oldest);
+                }
+            }
+        }
+        self.by_tool_call_id.insert(tool_call_id, reasoning);
+    }
+
+    fn get(&self, tool_call_id: &str) -> Option<String> {
+        self.by_tool_call_id.get(tool_call_id).cloned()
+    }
+}
+
 /// Cumulative request/token/cost counters for one "provider/model", as
 /// returned by `GET /v1/usage`.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -407,6 +451,54 @@ fn maybe_apply_rtk(req: &ChatRequest) -> Option<ChatRequest> {
     changed.then_some(compressed)
 }
 
+/// Re-injects a cached reasoning trace (see `ReasoningReplayCache`) into
+/// any assistant message in `req` that invoked tool_calls but carries no
+/// `reasoning` of its own -- looked up by the message's first
+/// `tool_calls[].id`, since every tool_call in one assistant turn shares
+/// the single reasoning trace that led to it. Returns `None` (send `req`
+/// unmodified) when there's nothing to inject, same "`None` means no-op"
+/// convention as `maybe_apply_rtk`/`maybe_apply_middle_out`.
+fn maybe_apply_reasoning_replay(
+    req: &ChatRequest,
+    cache: &RwLock<ReasoningReplayCache>,
+) -> Option<ChatRequest> {
+    let mut replayed: Option<ChatRequest> = None;
+    for (i, message) in req.messages.iter().enumerate() {
+        if message.reasoning.is_some() {
+            continue;
+        }
+        let Some(first_call) = message.tool_calls.as_ref().and_then(|calls| calls.first()) else {
+            continue;
+        };
+        let Some(reasoning) = cache.read().unwrap().get(&first_call.id) else {
+            continue;
+        };
+        replayed.get_or_insert_with(|| req.clone()).messages[i].reasoning = Some(reasoning);
+    }
+    replayed
+}
+
+/// After a successful non-streaming response, caches its assistant
+/// message's reasoning trace against every tool_call_id it invoked -- see
+/// `ReasoningReplayCache`. A no-op for a response with no reasoning, no
+/// tool_calls, or neither.
+fn cache_reasoning_for_replay(cache: &RwLock<ReasoningReplayCache>, resp: &ChatResponse) {
+    for choice in &resp.choices {
+        let (Some(reasoning), Some(tool_calls)) =
+            (&choice.message.reasoning, &choice.message.tool_calls)
+        else {
+            continue;
+        };
+        if tool_calls.is_empty() {
+            continue;
+        }
+        let mut guard = cache.write().unwrap();
+        for tool_call in tool_calls {
+            guard.insert(tool_call.id.clone(), reasoning.clone());
+        }
+    }
+}
+
 /// Flattens a request's messages into one string for the semantic cache
 /// to embed: `"<role>: <text>\n"` per message, non-text content (image/
 /// audio/file parts) dropped the same way `MessageContent::as_plain_text`
@@ -488,6 +580,11 @@ pub struct Router {
     /// `usage`) -- this is a short-lived "what did my last request cost"
     /// lookup, not a durable audit log.
     generations: Arc<RwLock<GenerationCache>>,
+    /// See `ReasoningReplayCache` -- populated after a non-streaming
+    /// response with tool_calls + reasoning, consulted before every
+    /// dispatch (streaming or not) to re-inject a cached trace into a
+    /// tool-continuation turn that's missing it.
+    reasoning_replay: Arc<RwLock<ReasoningReplayCache>>,
     /// Prometheus counters/histograms/gauges for `GET /metrics`, updated at
     /// the same points as `latency`/`throughput`/`usage` above. Always
     /// per-process, even when `persistence` is configured — Prometheus
@@ -1014,6 +1111,7 @@ impl Router {
             usage: Arc::new(RwLock::new(usage)),
             persistence,
             generations: Arc::new(RwLock::new(GenerationCache::default())),
+            reasoning_replay: Arc::new(RwLock::new(ReasoningReplayCache::default())),
             metrics,
             provider_rpm,
             outbound_limiter: RateLimiter::new(),
@@ -2108,12 +2206,20 @@ impl Router {
                 continue;
             }
 
-            // "rtk" (tool-output compression) applies first, so
+            // Reasoning replay applies first -- it only ever touches an
+            // assistant message's `reasoning` field, orthogonal to rtk/
+            // middle-out's own targets (tool-message text, overall size),
+            // so order between them doesn't matter, but it needs to run
+            // before either clones `req` so the injected reasoning survives
+            // into whichever of them actually sends the request.
+            let replayed_req = maybe_apply_reasoning_replay(req, &self.reasoning_replay);
+            let replay_base = replayed_req.as_ref().unwrap_or(req);
+            // "rtk" (tool-output compression) applies next, so
             // "middle-out"'s token-budget estimate reflects the already-
             // shrunk tool messages rather than their raw size -- both
             // transforms compose when a request sets both.
-            let rtk_req = maybe_apply_rtk(req);
-            let base_req = rtk_req.as_ref().unwrap_or(req);
+            let rtk_req = maybe_apply_rtk(replay_base);
+            let base_req = rtk_req.as_ref().unwrap_or(replay_base);
             let truncated_req =
                 maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
             let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
@@ -2183,6 +2289,7 @@ impl Router {
                         });
                     }
 
+                    cache_reasoning_for_replay(&self.reasoning_replay, &resp);
                     return Ok(resp);
                 }
                 Err(e) if e.is_retryable() => {
@@ -2233,12 +2340,20 @@ impl Router {
                 continue;
             }
 
-            // "rtk" (tool-output compression) applies first, so
+            // Reasoning replay applies first -- see the matching comment in
+            // `dispatch_uncached`. A streamed response's own tool_calls/
+            // reasoning aren't reassembled to populate the cache (see
+            // `ReasoningReplayCache`'s doc comment), but replay itself
+            // still applies here if an earlier non-streaming turn already
+            // populated an entry this request's tool-continuation needs.
+            let replayed_req = maybe_apply_reasoning_replay(req, &self.reasoning_replay);
+            let replay_base = replayed_req.as_ref().unwrap_or(req);
+            // "rtk" (tool-output compression) applies next, so
             // "middle-out"'s token-budget estimate reflects the already-
             // shrunk tool messages rather than their raw size -- both
             // transforms compose when a request sets both.
-            let rtk_req = maybe_apply_rtk(req);
-            let base_req = rtk_req.as_ref().unwrap_or(req);
+            let rtk_req = maybe_apply_rtk(replay_base);
+            let base_req = rtk_req.as_ref().unwrap_or(replay_base);
             let truncated_req =
                 maybe_apply_middle_out(base_req, provider_name, model_name, &self.pricing);
             let req_to_send = truncated_req.as_ref().unwrap_or(base_req);
@@ -2416,6 +2531,7 @@ mod tests {
             usage: Arc::new(RwLock::new(HashMap::new())),
             persistence: None,
             generations: Arc::new(RwLock::new(GenerationCache::default())),
+            reasoning_replay: Arc::new(RwLock::new(ReasoningReplayCache::default())),
             metrics: Metrics::new(),
             provider_rpm: provider_rpm
                 .into_iter()
@@ -2790,6 +2906,69 @@ mod tests {
                 model: format!("{}/{model}", self.name),
                 usage: None,
             })
+        }
+    }
+
+    /// A `Provider` that records every request it's dispatched (so a test
+    /// can assert on what the router actually sent) and returns canned
+    /// responses in order -- falling back to a plain "ok" once the queue
+    /// is empty. Used to prove reasoning replay's cache-then-inject
+    /// wiring end-to-end through `Router::dispatch`, not just its pure
+    /// helper functions in isolation.
+    struct ReqCapturingProvider {
+        name: String,
+        responses: Mutex<std::collections::VecDeque<ChatResponse>>,
+        seen_requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    #[async_trait]
+    impl Provider for ReqCapturingProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn chat(
+            &self,
+            req: &ChatRequest,
+            model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<ChatResponse, ProviderError> {
+            self.seen_requests.lock().unwrap().push(req.clone());
+            let canned = self.responses.lock().unwrap().pop_front();
+            Ok(canned.unwrap_or(ChatResponse {
+                id: "test-id".to_string(),
+                object: "chat.completion",
+                created: 0,
+                model: format!("{}/{model}", self.name),
+                choices: vec![Choice {
+                    index: 0,
+                    message: ChatMessage::assistant("ok"),
+                    finish_reason: Some("stop".to_string()),
+                    logprobs: None,
+                }],
+                usage: None,
+                cost_usd: None,
+            }))
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            _model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<ChatStream, ProviderError> {
+            Ok(Box::pin(stream::empty::<Result<ChatChunk, ProviderError>>()))
+        }
+
+        async fn embeddings(
+            &self,
+            _req: &EmbeddingsRequest,
+            _model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<EmbeddingsResponse, ProviderError> {
+            Err(ProviderError::UnsupportedFeature(
+                "ReqCapturingProvider doesn't support embeddings".to_string(),
+            ))
         }
     }
 
@@ -6283,6 +6462,227 @@ mod tests {
             .await
             .expect("dispatch should succeed with both transforms requested");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // --- reasoning replay -----------------------------------------------------
+
+    fn assistant_with_tool_call(tool_call_id: &str, reasoning: Option<&str>) -> ChatMessage {
+        ChatMessage {
+            role: rp_core::Role::Assistant,
+            content: None,
+            name: None,
+            tool_calls: Some(vec![rp_core::ToolCall {
+                id: tool_call_id.to_string(),
+                kind: "function".to_string(),
+                function: rp_core::FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning: reasoning.map(str::to_string),
+            cache_control: None,
+        }
+    }
+
+    fn tool_reply(tool_call_id: &str) -> ChatMessage {
+        ChatMessage {
+            role: rp_core::Role::Tool,
+            content: Some(rp_core::MessageContent::text("68F, sunny")),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some(tool_call_id.to_string()),
+            reasoning: None,
+            cache_control: None,
+        }
+    }
+
+    #[test]
+    fn maybe_apply_reasoning_replay_is_none_without_a_matching_cache_entry() {
+        let cache = RwLock::new(ReasoningReplayCache::default());
+        let mut req = test_request("openai/gpt-4o-mini");
+        req.messages = vec![
+            msg("user", 10),
+            assistant_with_tool_call("call_1", None),
+            tool_reply("call_1"),
+        ];
+        assert!(maybe_apply_reasoning_replay(&req, &cache).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_reasoning_replay_is_none_for_a_message_with_no_tool_calls() {
+        let mut cache = ReasoningReplayCache::default();
+        cache.insert("call_1".to_string(), "because X".to_string());
+        let cache = RwLock::new(cache);
+        let req = test_request("openai/gpt-4o-mini"); // just a plain user message
+        assert!(maybe_apply_reasoning_replay(&req, &cache).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_reasoning_replay_leaves_a_message_that_already_has_reasoning_alone() {
+        let mut cache = ReasoningReplayCache::default();
+        cache.insert("call_1".to_string(), "cached reasoning".to_string());
+        let cache = RwLock::new(cache);
+        let mut req = test_request("openai/gpt-4o-mini");
+        req.messages = vec![assistant_with_tool_call(
+            "call_1",
+            Some("original reasoning"),
+        )];
+
+        // Not injected -- the message already carries its own, presumably
+        // more accurate, reasoning; the cache exists for messages missing
+        // it entirely, not to override one that's already there.
+        assert!(maybe_apply_reasoning_replay(&req, &cache).is_none());
+    }
+
+    #[test]
+    fn maybe_apply_reasoning_replay_injects_a_cached_trace_by_tool_call_id() {
+        let mut cache = ReasoningReplayCache::default();
+        cache.insert(
+            "call_1".to_string(),
+            "I should check the weather".to_string(),
+        );
+        let cache = RwLock::new(cache);
+        let mut req = test_request("openai/gpt-4o-mini");
+        req.messages = vec![
+            msg("user", 10),
+            assistant_with_tool_call("call_1", None),
+            tool_reply("call_1"),
+        ];
+
+        let replayed =
+            maybe_apply_reasoning_replay(&req, &cache).expect("should inject the cached reasoning");
+        assert_eq!(
+            replayed.messages[1].reasoning.as_deref(),
+            Some("I should check the weather")
+        );
+        // Untouched messages are left exactly as they were.
+        assert_eq!(replayed.messages[0].content, req.messages[0].content);
+        assert!(replayed.messages[2].reasoning.is_none());
+    }
+
+    fn response_with_tool_calls_and_reasoning(
+        tool_call_ids: &[&str],
+        reasoning: Option<&str>,
+    ) -> ChatResponse {
+        ChatResponse {
+            id: "test-id".to_string(),
+            object: "chat.completion",
+            created: 0,
+            model: "openai/gpt-4o-mini".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: ChatMessage {
+                    role: rp_core::Role::Assistant,
+                    content: None,
+                    name: None,
+                    tool_calls: (!tool_call_ids.is_empty()).then(|| {
+                        tool_call_ids
+                            .iter()
+                            .map(|id| rp_core::ToolCall {
+                                id: id.to_string(),
+                                kind: "function".to_string(),
+                                function: rp_core::FunctionCall {
+                                    name: "get_weather".to_string(),
+                                    arguments: "{}".to_string(),
+                                },
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: None,
+                    reasoning: reasoning.map(str::to_string),
+                    cache_control: None,
+                },
+                finish_reason: Some("tool_calls".to_string()),
+                logprobs: None,
+            }],
+            usage: None,
+            cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn cache_reasoning_for_replay_is_a_no_op_without_tool_calls() {
+        let cache = RwLock::new(ReasoningReplayCache::default());
+        let resp = response_with_tool_calls_and_reasoning(&[], Some("some reasoning"));
+        cache_reasoning_for_replay(&cache, &resp);
+        assert!(cache.read().unwrap().get("call_1").is_none());
+    }
+
+    #[test]
+    fn cache_reasoning_for_replay_is_a_no_op_without_reasoning() {
+        let cache = RwLock::new(ReasoningReplayCache::default());
+        let resp = response_with_tool_calls_and_reasoning(&["call_1"], None);
+        cache_reasoning_for_replay(&cache, &resp);
+        assert!(cache.read().unwrap().get("call_1").is_none());
+    }
+
+    #[test]
+    fn cache_reasoning_for_replay_populates_every_tool_call_id_in_the_turn() {
+        let cache = RwLock::new(ReasoningReplayCache::default());
+        let resp =
+            response_with_tool_calls_and_reasoning(&["call_1", "call_2"], Some("shared reasoning"));
+        cache_reasoning_for_replay(&cache, &resp);
+        assert_eq!(
+            cache.read().unwrap().get("call_1").as_deref(),
+            Some("shared reasoning")
+        );
+        assert_eq!(
+            cache.read().unwrap().get("call_2").as_deref(),
+            Some("shared reasoning")
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_replays_reasoning_into_a_tool_continuation_turn() {
+        // End-to-end: the first dispatch's response (tool_calls +
+        // reasoning) populates the cache; the second dispatch's assistant
+        // message (as a typical client SDK would send it -- tool_calls
+        // present, reasoning stripped) gets it re-injected before the
+        // provider ever sees it.
+        let provider = Arc::new(ReqCapturingProvider {
+            name: "openai".to_string(),
+            responses: Mutex::new(std::collections::VecDeque::from([
+                response_with_tool_calls_and_reasoning(
+                    &["call_1"],
+                    Some("I should check the weather"),
+                ),
+            ])),
+            seen_requests: Mutex::new(Vec::new()),
+        });
+        let router = test_router(
+            vec![("openai", provider.clone())],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+
+        let mut first_req = test_request("openai/gpt-4o-mini");
+        first_req.messages = vec![msg("user", 10)];
+        router
+            .dispatch(&first_req)
+            .await
+            .expect("first dispatch should succeed");
+
+        let mut second_req = test_request("openai/gpt-4o-mini");
+        second_req.messages = vec![
+            msg("user", 10),
+            assistant_with_tool_call("call_1", None), // client stripped reasoning
+            tool_reply("call_1"),
+        ];
+        router
+            .dispatch(&second_req)
+            .await
+            .expect("second dispatch should succeed");
+
+        let seen = provider.seen_requests.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[1].messages[1].reasoning.as_deref(),
+            Some("I should check the weather"),
+            "the provider should have received the replayed reasoning, not the stripped message"
+        );
     }
 
     // --- active_params / filter_by_required_parameters ------------------------

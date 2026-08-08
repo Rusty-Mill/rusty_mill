@@ -350,6 +350,31 @@ Per-provider translation:
   OpenAI-compatible reasoning models. `effort` maps straight through;
   `max_tokens` has no equivalent on this wire format and is ignored.
 
+#### Reasoning replay for tool-continuation turns
+
+Some OpenAI-compatible reasoning models (DeepSeek-reasoner, Kimi-K-series,
+QwQ, GLM-thinking, and similar) reject a follow-up turn that answers a
+tool call if that turn's assistant message is missing the
+`reasoning_content` behind the decision to call it — but most client
+SDKs strip `reasoning` before sending the next request, since it's meant
+to be read, not replayed. This router closes that gap itself: whenever a
+non-streaming response comes back with both `tool_calls` and `reasoning`,
+it caches the reasoning trace in memory against every `tool_calls[].id`
+in that turn. The next request answering one of those tool calls — even
+with `reasoning` stripped, exactly as a typical client sends it — gets
+the cached trace transparently re-injected into the matching assistant
+message before dispatch, and the OpenAI-compatible adapter sends it under
+the `reasoning_content` key these models expect. A message that already
+carries its own `reasoning` is left alone; a tool call with no cached
+entry (never seen, evicted, or from a provider that never returned
+reasoning) is a no-op, same as today. The cache is bounded (most recent
+1000 tool calls, oldest evicted first) and populated only from
+non-streaming responses — a streaming response's `tool_calls`/`reasoning`
+arrive as incremental deltas this router doesn't reassemble elsewhere
+either, so this doesn't (yet) populate the cache; replay itself still
+applies to a streaming request if an earlier non-streaming turn already
+populated the entry it needs.
+
 ### Prompt caching
 
 A message can mark itself as the end of a cacheable prefix with

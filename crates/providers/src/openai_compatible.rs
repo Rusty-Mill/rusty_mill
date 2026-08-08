@@ -83,10 +83,48 @@ struct WireEmbeddingsUsage {
     total_tokens: u32,
 }
 
+/// A `ChatMessage` re-shaped for the outbound wire: identical except
+/// `reasoning` is renamed to `reasoning_content`, the convention DeepSeek/
+/// Kimi-K-series/QwQ/GLM-thinking and similar OpenAI-compatible reasoning
+/// models use -- distinct from this router's own public `"reasoning"`
+/// field name on `ChatMessage`/`GET .../chat/completions` responses, so
+/// renaming only here keeps the client-facing API shape unchanged. Some of
+/// these models reject a tool-continuation turn whose assistant message is
+/// missing the `reasoning_content` behind the tool call; see
+/// `Router::maybe_apply_reasoning_replay` for how that gets re-populated
+/// even when the calling client stripped it (most client SDKs do).
+#[derive(Serialize)]
+struct WireOutboundMessage<'a> {
+    role: rp_core::Role,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<&'a MessageContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<&'a [ToolCall]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+    #[serde(rename = "reasoning_content", skip_serializing_if = "Option::is_none")]
+    reasoning: Option<&'a str>,
+}
+
+impl<'a> From<&'a ChatMessage> for WireOutboundMessage<'a> {
+    fn from(m: &'a ChatMessage) -> Self {
+        Self {
+            role: m.role,
+            content: m.content.as_ref(),
+            name: m.name.as_deref(),
+            tool_calls: m.tool_calls.as_deref(),
+            tool_call_id: m.tool_call_id.as_deref(),
+            reasoning: m.reasoning.as_deref(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct WireRequest<'a> {
     model: &'a str,
-    messages: &'a [ChatMessage],
+    messages: Vec<WireOutboundMessage<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -142,7 +180,7 @@ impl<'a> WireRequest<'a> {
     fn from_core(req: &'a ChatRequest, model: &'a str, stream: bool) -> Self {
         Self {
             model,
-            messages: &req.messages,
+            messages: req.messages.iter().map(WireOutboundMessage::from).collect(),
             temperature: req.temperature,
             top_p: req.top_p,
             max_tokens: req.max_tokens,

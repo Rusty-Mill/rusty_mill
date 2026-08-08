@@ -1,7 +1,10 @@
 mod common;
 
 use futures_util::StreamExt;
-use rp_core::{EmbeddingsInput, EmbeddingsRequest, Provider, ProviderError, ReasoningConfig};
+use rp_core::{
+    ChatMessage, EmbeddingsInput, EmbeddingsRequest, FunctionCall, MessageContent, Provider,
+    ProviderError, ReasoningConfig, Role, ToolCall,
+};
 use rp_providers::OpenAiCompatibleProvider;
 use serde_json::json;
 use wiremock::matchers::{body_partial_json, header, method, path};
@@ -898,6 +901,80 @@ async fn chat_sends_reasoning_effort_and_parses_reasoning_content() {
         resp.choices[0].message.reasoning.as_deref(),
         Some("Let me work this out.")
     );
+}
+
+#[tokio::test]
+async fn chat_sends_an_inbound_assistant_messages_reasoning_as_reasoning_content_on_the_wire() {
+    // A prior assistant turn's `ChatMessage.reasoning` -- whether the
+    // client echoed it back itself, or `Router::maybe_apply_reasoning_replay`
+    // re-injected it -- must reach the wire under the `reasoning_content`
+    // key these models expect, not this router's own public `"reasoning"`
+    // field name.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(json!({
+            "messages": [
+                {"role": "user", "content": "what's the weather in nyc?"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"nyc\"}"}
+                    }],
+                    "reasoning_content": "I should call get_weather for nyc."
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "68F, sunny"},
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "It's 68F and sunny in NYC."},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 10, "total_tokens": 40}
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new("openai", server.uri(), "test-key");
+    let mut req = common::simple_request("deepseek-reasoner");
+    req.messages = vec![
+        ChatMessage::user("what's the weather in nyc?"),
+        ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            name: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "get_weather".to_string(),
+                    arguments: "{\"city\":\"nyc\"}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+            reasoning: Some("I should call get_weather for nyc.".to_string()),
+            cache_control: None,
+        },
+        ChatMessage {
+            role: Role::Tool,
+            content: Some(MessageContent::text("68F, sunny")),
+            name: None,
+            tool_calls: None,
+            tool_call_id: Some("call_1".to_string()),
+            reasoning: None,
+            cache_control: None,
+        },
+    ];
+
+    provider
+        .chat(&req, "deepseek-reasoner", None)
+        .await
+        .expect("chat should succeed");
 }
 
 #[tokio::test]
