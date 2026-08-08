@@ -1,10 +1,13 @@
 //! Backend destinations.
 //!
 //! A route names one or more backends. Plain HTTP backends (`host`, `service`)
-//! are weighted and load-balanced; an `mcp` backend is different in kind — it
-//! terminates the protocol rather than forwarding it, federating a set of
-//! upstream MCP targets into one server. [`crate::Route::validate`] rejects
-//! mixing the two on a route, because "50% of an MCP session" is not a thing.
+//! are weighted and load-balanced, and may be mixed freely: a `service` is
+//! resolved to addresses at startup, so by the time a request is dialled the
+//! only difference is how many endpoints there are. An `mcp` backend is
+//! different in kind — it terminates the protocol rather than forwarding it,
+//! federating a set of upstream MCP targets into one server.
+//! [`crate::Route::validate`] rejects mixing the two on a route, because "50%
+//! of an MCP session" is not a thing.
 
 use std::collections::BTreeMap;
 
@@ -45,8 +48,8 @@ one_of_enum! {
         /// An LLM provider, exposed behind an OpenAI-compatible API.
         "ai" => Ai(AiBackend),
 
-        /// A destination chosen per-request by an earlier policy.
-        "dynamic" => Dynamic(BTreeMap<String, serde_json::Value>),
+        /// A destination taken from the request itself.
+        "dynamic" => Dynamic(DynamicBackend),
     }
 }
 
@@ -59,17 +62,47 @@ impl BackendTarget {
 
 impl Backend {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        match &self.target {
-            BackendTarget::Dynamic(_) => findings.push(format!(
-                "{at}: `dynamic` backend parsed but dynamic resolution is not implemented yet"
-            )),
-            BackendTarget::Service(_) => findings.push(format!(
-                "{at}: `service` backend parsed but service discovery is not implemented yet; \
-                 use `host` for a literal address"
-            )),
-            BackendTarget::Host(_) | BackendTarget::Mcp(_) | BackendTarget::Ai(_) => {}
+        // Not a finding, a warning about what the configuration *does*: a
+        // `dynamic` backend turns the route into a forward proxy, and that is
+        // worth saying to anyone running `--check` rather than only in the
+        // startup log of a gateway already serving.
+        if let BackendTarget::Dynamic(backend) = &self.target {
+            let chosen = match backend.target.is_some() {
+                true => "an expression over the request",
+                false => "the address the client dialled",
+            };
+            findings.push(format!(
+                "{at}: a `dynamic` backend forwards to {chosen}, so the client chooses the \
+                 upstream; put authentication and authorization in front of this route"
+            ));
+            for key in backend.rest.keys() {
+                findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
+            }
         }
     }
+}
+
+/// A destination taken from the request itself.
+///
+/// The route becomes a forward proxy: the **client** chooses the upstream,
+/// either by addressing the request at it or through whatever `target` reads.
+/// That is what the backend is for, and it is also why a route carrying one
+/// needs authentication in front of it — see the warning logged at startup.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DynamicBackend {
+    /// CEL producing the `host:port` to dial.
+    ///
+    /// Absent, the request's own authority is used, which is the plain
+    /// forward-proxy reading. Present, it is evaluated against the client's
+    /// request — so a header set by a trusted hop can decide the upstream
+    /// instead of the address the client dialled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+
+    /// Everything else upstream accepts.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 /// A control-plane service reference.

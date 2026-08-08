@@ -47,6 +47,16 @@ impl Rewrite {
         self.authority.as_ref()
     }
 
+    /// The same rewrite with its authority dropped.
+    ///
+    /// For a route whose upstream is chosen per request: a forced authority
+    /// there would mean the request never chooses one, which is the opposite
+    /// of what the backend is for. The path half still applies.
+    pub fn without_authority(mut self) -> Self {
+        self.authority = None;
+        self
+    }
+
     /// Rewrite a path, given the route prefix that matched.
     ///
     /// `matched_prefix` is what a `prefix` rewrite replaces; without it the

@@ -18,7 +18,9 @@ use std::time::Duration;
 use agentgateway_a2a::{A2aGateway, Decision};
 use agentgateway_auth::{AuthRejection, Authorization, ExtAuthz, JwtAuthenticator};
 use agentgateway_config::{BackendTarget, Config};
-use agentgateway_core::{CorsDecision, CorsMatcher, RateLimiter, Router};
+use agentgateway_core::{
+    CorsDecision, CorsMatcher, RateLimiter, Registry, Router, resolve_backends,
+};
 use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Override as McpOverride;
 use agentgateway_mcp::{Federation, TokenClaims};
@@ -240,6 +242,9 @@ impl Gateway {
         instruments: Option<Arc<Instruments>>,
     ) -> anyhow::Result<Self> {
         let router = Router::build(config)?;
+        // The inventory a `service` backend resolves against, indexed once for
+        // every route that names one.
+        let registry = Registry::new(&config.services, &config.workloads);
         // Certificates are read here, so a missing or malformed one stops the
         // gateway booting rather than failing every handshake later.
         let tls = TlsBinds::build(config)?;
@@ -344,25 +349,28 @@ impl Gateway {
                         metrics,
                     }
                 }
-                Some(BackendTarget::Host(_)) => {
-                    // A route mixing `host` with a kind we cannot resolve would
-                    // silently drop that share of its traffic onto the hosts,
+                // `host` and `service` are one kind here: both forward bytes,
+                // and a service is resolved to addresses before the proxy sees
+                // it. A route may mix them freely.
+                Some(BackendTarget::Host(_) | BackendTarget::Service(_)) => {
+                    // A route mixing them with a kind we cannot resolve would
+                    // silently drop that share of its traffic onto the rest,
                     // sending it somewhere the operator did not ask for.
-                    match route
-                        .backends
-                        .iter()
-                        .find(|b| !matches!(b.target, BackendTarget::Host(_)))
-                    {
+                    match route.backends.iter().find(|b| {
+                        !matches!(b.target, BackendTarget::Host(_) | BackendTarget::Service(_))
+                    }) {
                         Some(other) => BackendState::Unsupported(format!(
-                            "route mixes `host` with `{}`, which is not served by this build",
+                            "route mixes forwarding backends with `{}`, which is not served by \
+                             this build",
                             kind_name(&other.target)
                         )),
                         None => {
-                            let proxy = HostProxy::new(&route.backends, &route.policies, &at)?;
+                            let resolved = resolve_backends(&route.backends, &registry, &at)?;
+                            let proxy = HostProxy::new(&resolved, &route.policies, &at)?;
                             tracing::info!(
                                 route = %at,
                                 endpoints = proxy.endpoint_count(),
-                                "host backend ready"
+                                "forwarding backend ready"
                             );
 
                             let a2a = match route.policies.a2a.as_ref() {
@@ -427,10 +435,37 @@ impl Gateway {
                     );
                     BackendState::Ai(Box::new(backend))
                 }
-                Some(other) => BackendState::Unsupported(format!(
-                    "backend kind `{}` is not served by this build",
-                    kind_name(other)
-                )),
+                Some(BackendTarget::Dynamic(backend)) => {
+                    // Sole backend only: the others name a fixed address and
+                    // this one names none, so a weight between them would be a
+                    // share of "wherever the client asked for", which is not a
+                    // destination anybody can reason about.
+                    match route.backends.len() {
+                        1 => {
+                            let proxy = HostProxy::dynamic(backend, &route.policies, &at)?;
+                            tracing::warn!(
+                                route = %at,
+                                computed = proxy.is_dynamic(),
+                                "a `dynamic` backend makes this route a forward proxy: the \
+                                 client chooses the upstream, so put authentication and \
+                                 authorization in front of it or anyone who can reach this \
+                                 listener can reach anything the gateway can"
+                            );
+                            BackendState::Host {
+                                proxy: Box::new(proxy),
+                                a2a: None,
+                            }
+                        }
+                        count => BackendState::Unsupported(format!(
+                            "a `dynamic` backend takes its upstream from the request, so it \
+                             cannot be weighted against the {} other backend(s) on this route",
+                            count - 1
+                        )),
+                    }
+                }
+                // Every kind the configuration can name is served now, so
+                // there is no catch-all left: a new one would fail to compile
+                // here rather than reach a client as a 501.
                 None => BackendState::Unsupported("route has no backend".into()),
             };
 

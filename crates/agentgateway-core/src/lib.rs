@@ -9,6 +9,7 @@ mod cors;
 mod headers;
 mod hostname;
 mod ratelimit;
+mod registry;
 mod retry;
 mod rewrite;
 mod router;
@@ -17,6 +18,7 @@ pub use cors::{CorsDecision, CorsMatcher};
 pub use headers::{HeaderError, Headers};
 pub use hostname::HostnamePattern;
 pub use ratelimit::{RateLimitError, RateLimiter, RetryAfter};
+pub use registry::{Endpoint, Registry, RegistryError, resolve_backends};
 pub use retry::Retry;
 pub use rewrite::{Rewrite, RewriteError, parse_authority};
 pub use router::{

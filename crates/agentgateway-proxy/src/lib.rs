@@ -1,8 +1,10 @@
-//! HTTP reverse proxying for `host` backends.
+//! HTTP reverse proxying for `host` and `service` backends.
 //!
-//! A `host` backend is the opposite of an `mcp` one: it forwards bytes rather
-//! than terminating a protocol. That makes it the place where the policies
-//! modelled but unenforced until now finally do something — header modifiers,
+//! Both forward bytes rather than terminating a protocol, which is what makes
+//! them one kind here: a `service` is resolved to addresses before this sees
+//! it, so the only difference by the time a request is dialled is how many
+//! endpoints there are. That makes this the place where the policies modelled
+//! but unenforced until now finally do something — header modifiers,
 //! `urlRewrite`, `backendAuth`, and the per-attempt half of `timeout`.
 //!
 //! The pure parts live in [`transform`] and [`balance`] so the fiddly bits
@@ -10,13 +12,15 @@
 //! selection) are testable without a socket.
 
 mod balance;
+mod dynamic;
 mod retry;
 mod transform;
 
 use std::net::IpAddr;
 use std::time::Duration;
 
-use agentgateway_config::{Backend, BackendAuth, BackendTarget, Policies};
+use agentgateway_config::{BackendAuth, Policies};
+use agentgateway_core::Endpoint;
 use http::{HeaderValue, Request, Response, StatusCode, header};
 use http_body_util::BodyExt as _;
 use hyper::body::Incoming;
@@ -24,6 +28,7 @@ use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
 
 pub use balance::{BalanceError, Endpoints};
+pub use dynamic::{Dynamic, TargetError};
 // Re-exported so the proxy's own callers need not learn where this moved.
 pub use agentgateway_core::Retry;
 pub use retry::{MAX_REPLAY_BYTES, RequestBody};
@@ -43,11 +48,28 @@ pub enum ProxyError {
     /// A rewrite held an invalid authority.
     #[error(transparent)]
     Rewrite(#[from] RewriteError),
+
+    /// A `service` backend named something the inventory does not hold.
+    #[error(transparent)]
+    Registry(#[from] agentgateway_core::RegistryError),
+
+    /// A `dynamic` backend's `target` will not compile.
+    #[error(transparent)]
+    Target(#[from] TargetError),
 }
 
-/// A proxying `host` backend.
+/// Where a route sends a request.
+#[derive(Debug)]
+enum Destination {
+    /// A weighted ring, resolved at startup.
+    Fixed(Endpoints),
+    /// Taken from the request. See [`dynamic`].
+    PerRequest(Dynamic),
+}
+
+/// A proxying `host`, `service` or `dynamic` backend.
 pub struct HostProxy {
-    endpoints: Endpoints,
+    destination: Destination,
     client: Client<HttpConnector, RequestBody>,
     rewrite: Option<Rewrite>,
     request_headers: Option<Headers>,
@@ -60,21 +82,58 @@ pub struct HostProxy {
 impl std::fmt::Debug for HostProxy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HostProxy")
-            .field("endpoints", &self.endpoints)
+            .field("destination", &self.destination)
             .field("timeout", &self.timeout)
             .finish_non_exhaustive()
     }
 }
 
 impl HostProxy {
-    /// Build a proxy for a route's `host` backends.
-    pub fn new(backends: &[Backend], policies: &Policies, at: &str) -> Result<Self, ProxyError> {
-        let hosts = backends.iter().filter_map(|backend| match &backend.target {
-            BackendTarget::Host(host) => Some((host.as_str(), backend.weight)),
-            _ => None,
-        });
-        let endpoints = Endpoints::new(hosts, at)?;
+    /// Build a proxy that takes its destination from each request.
+    ///
+    /// Separate from [`HostProxy::new`] because there is nothing to resolve:
+    /// the address is not in the configuration at all. See [`dynamic`] for what
+    /// that means for anyone deploying one.
+    pub fn dynamic(
+        backend: &agentgateway_config::DynamicBackend,
+        policies: &Policies,
+        at: &str,
+    ) -> Result<Self, ProxyError> {
+        let mut proxy = Self::build(
+            Destination::PerRequest(Dynamic::new(backend, at)?),
+            policies,
+            at,
+        )?;
+        // The rewrite's authority would override the whole point of the
+        // backend, so it is dropped rather than silently winning. A path
+        // rewrite still applies: it does not choose the upstream.
+        if let Some(rewrite) = proxy.rewrite.as_ref()
+            && rewrite.authority().is_some()
+        {
+            tracing::warn!(
+                route = %at,
+                "ignoring `urlRewrite.authority` on a `dynamic` route: the request chooses the \
+                 upstream, and a fixed authority would mean it never does"
+            );
+            proxy.rewrite = proxy.rewrite.take().map(Rewrite::without_authority);
+        }
+        Ok(proxy)
+    }
 
+    /// Build a proxy for a route's already-resolved endpoints.
+    ///
+    /// Resolution happens before this so that a `service` backend's failure to
+    /// resolve is reported as what it is — an inventory problem — rather than
+    /// as an empty endpoint set. See [`agentgateway_core::resolve_backends`].
+    pub fn new(resolved: &[Endpoint], policies: &Policies, at: &str) -> Result<Self, ProxyError> {
+        let hosts = resolved
+            .iter()
+            .map(|endpoint| (endpoint.authority.as_str(), endpoint.weight));
+        Self::build(Destination::Fixed(Endpoints::new(hosts, at)?), policies, at)
+    }
+
+    /// Everything both constructors share: the policies applied per request.
+    fn build(destination: Destination, policies: &Policies, at: &str) -> Result<Self, ProxyError> {
         let rewrite = match policies.url_rewrite.as_ref() {
             Some(rewrite) => Some(Rewrite::new(rewrite, &format!("{at}.urlRewrite"))?),
             None => None,
@@ -99,7 +158,7 @@ impl HostProxy {
             .build(HttpConnector::new());
 
         Ok(HostProxy {
-            endpoints,
+            destination,
             client,
             rewrite,
             request_headers,
@@ -110,8 +169,19 @@ impl HostProxy {
     }
 
     /// How many endpoints can receive traffic.
+    ///
+    /// Zero for a `dynamic` route: its destination is not known until a
+    /// request names one.
     pub fn endpoint_count(&self) -> usize {
-        self.endpoints.len()
+        match &self.destination {
+            Destination::Fixed(endpoints) => endpoints.len(),
+            Destination::PerRequest(_) => 0,
+        }
+    }
+
+    /// Whether this route takes its destination from the request.
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self.destination, Destination::PerRequest(_))
     }
 
     /// Forward a request upstream and return the response.
@@ -182,7 +252,25 @@ impl HostProxy {
             // failed is the least likely way to succeed.
             let authority = match self.rewrite.as_ref().and_then(Rewrite::authority) {
                 Some(forced) => forced.clone(),
-                None => self.endpoints.next().clone(),
+                None => match &self.destination {
+                    Destination::Fixed(endpoints) => endpoints.next().clone(),
+                    // A `dynamic` route has one destination per request, so
+                    // every attempt goes back to the same place -- there is no
+                    // second instance to fail over to, and inventing one would
+                    // mean dialling somewhere the request did not name.
+                    Destination::PerRequest(dynamic) => {
+                        match dynamic.authority(&Request::from_parts(parts.clone(), ())) {
+                            Some(authority) => authority,
+                            None => {
+                                return error(
+                                    StatusCode::BAD_REQUEST,
+                                    "this route takes its upstream from the request, and this \
+                                     request names none",
+                                );
+                            }
+                        }
+                    }
+                },
             };
 
             let uri = match transform::upstream_uri(&parts.uri, &authority, rewritten_path.clone())
