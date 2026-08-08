@@ -23,6 +23,11 @@ pub enum RouterError {
     #[error("request blocked by moderation (flagged categories: {})", .0.join(", "))]
     ModerationFlagged(Vec<String>),
 
+    #[error(
+        "no candidate for \"{0}\" fits provider.max_request_price_usd (${1:.6}) under provider.budget_fallback = \"strict\""
+    )]
+    RequestBudgetExceeded(String, f64),
+
     #[error(transparent)]
     Provider(#[from] ProviderError),
 }
@@ -36,6 +41,7 @@ impl RouterError {
             RouterError::GuardrailBlocked(_) => 400,
             RouterError::UnknownPreset(_) => 400,
             RouterError::ModerationFlagged(_) => 400,
+            RouterError::RequestBudgetExceeded(_, _) => 402,
             RouterError::Provider(e) => e.status_code(),
         }
     }
@@ -102,6 +108,14 @@ mod tests {
         assert_eq!(
             RouterError::ModerationFlagged(vec!["violence".to_string()]).status_code(),
             400
+        );
+    }
+
+    #[test]
+    fn request_budget_exceeded_maps_to_402() {
+        assert_eq!(
+            RouterError::RequestBudgetExceeded("smart".to_string(), 0.01).status_code(),
+            402
         );
     }
 

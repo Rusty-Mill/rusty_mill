@@ -55,6 +55,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   fusion alias with no `judge` configured (a startup warning, not a hard
   failure). Usage/cost accounting covers every contributing panel member
   plus the judge, not just the judge's own call.
+- `provider.max_request_price_usd` + `provider.budget_fallback` — caps a
+  single request's estimated cost (`max_tokens * completion_per_million`
+  per candidate). `budget_fallback: "strict"` (default `"cheapest"`)
+  narrows the chain to only candidates under the cap, `402`-ing if none
+  fit; `"cheapest"` always serves the request, routing to the cheapest
+  fitting candidate or, failing that, the overall cheapest one anyway.
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002); "no MITM-based third-party CLI config

@@ -539,6 +539,29 @@ pub struct ProviderPreferences {
     /// Never logged, persisted, or echoed back in any response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byok: Option<HashMap<String, String>>,
+    /// Caps this request's estimated cost, in USD -- estimated per
+    /// candidate as `max_tokens * completion_ppm` (the same
+    /// `completion_per_million` figure from `[[pricing]]` `max_price`
+    /// reads its own ceiling from), since `max_tokens` is the one lever a
+    /// caller actually controls over a response's worst-case size. Only
+    /// takes effect when the request also sets `max_tokens` -- with no
+    /// cap on completion length there's nothing to estimate a worst case
+    /// against, so this field is silently a no-op on such a request,
+    /// exactly like `require_parameters` is a no-op when nothing in the
+    /// request needs it. A candidate with no `[[pricing]]` entry can't be
+    /// judged against the cap either, same "unverifiable, so not
+    /// eligible" reasoning as `max_price`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_request_price_usd: Option<f64>,
+    /// How to resolve `max_request_price_usd` once at least one candidate
+    /// doesn't fit under it: `"strict"` narrows the chain to just the
+    /// candidates that do fit, failing the request with `402` if none do;
+    /// `"cheapest"` (the default) always serves the request -- dispatching
+    /// to the cheapest candidate that fits, or, if none fit, the overall
+    /// cheapest candidate anyway rather than refusing outright. Any other
+    /// value (or unset) behaves as `"cheapest"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_fallback: Option<String>,
 }
 
 impl ChatRequest {
