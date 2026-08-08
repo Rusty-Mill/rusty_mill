@@ -2250,6 +2250,41 @@ pub unsafe fn local_addr_unix(sock: RawSocket) -> Result<UnixSocketAddr, crate::
     unsafe { UnixSocketAddr::from_raw(buf.as_ptr(), addr_len) }
 }
 
+/// The peer's path on a connected Unix-domain socket — `getpeername`
+/// over a `sockaddr_un` buffer, the [`AddressFamily::Unix`] counterpart
+/// of [`peer_addr`].
+///
+/// On Windows an `accept`ed peer is commonly *unnamed* (family only, no
+/// path): unlike a TCP client's ephemeral port, Windows does not autobind
+/// a connecting `AF_UNIX` socket to a path. That is the OS's own
+/// behavior, surfaced here as an empty [`UnixSocketAddr::path_bytes`]
+/// rather than an error.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, connected
+/// [`AddressFamily::Unix`] socket (from [`accept_unix`]/after
+/// [`connect_unix`]).
+pub unsafe fn peer_addr_unix(sock: RawSocket) -> Result<UnixSocketAddr, crate::error::Win32Error> {
+    let mut buf = [0u8; core::mem::size_of::<SockAddrUn>()];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf`/`addr_len` are a valid buffer and its exact
+    // capacity.
+    let r = unsafe { getpeername(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if r != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `getpeername` filled `buf` with `addr_len`
+    // valid bytes.
+    unsafe { UnixSocketAddr::from_raw(buf.as_ptr(), addr_len) }
+}
+
 #[cfg(all(test, windows))]
 mod unix_tests {
     use super::*;
@@ -2290,5 +2325,119 @@ mod unix_tests {
     fn encoded_len_covers_family_path_and_terminator() {
         let addr = UnixSocketAddr::new(b"abc").expect("valid path");
         assert_eq!(addr.encoded_len(), 2 + 3 + 1);
+    }
+
+    // Every function below this point drives a real listener/client pair
+    // over `AF_UNIX`, so this is the only place `peer_addr_unix` (and,
+    // incidentally, `bind_unix`/`connect_unix`/`accept_unix`/
+    // `local_addr_unix`) actually gets exercised — the address-round-trip
+    // tests above only ever encode and decode bytes.
+
+    fn temp_socket_path(name: &str) -> alloc::string::String {
+        let path = std::env::temp_dir().join(name);
+        alloc::string::String::from(path.to_str().expect("temp path should be valid UTF-8"))
+    }
+
+    #[test]
+    fn peer_addr_unix_reports_the_client_as_unnamed() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+        let path = temp_socket_path("rusty_win32_peer_addr_unix_unnamed.sock");
+        let addr = UnixSocketAddr::new(path.as_bytes()).expect("valid path");
+
+        let listener = socket(
+            AddressFamily::Unix,
+            SocketKind::Stream,
+            Protocol::Unspecified,
+        )
+        .expect("socket should succeed creating an AF_UNIX socket");
+        // SAFETY: `listener` was just created and is closed at scope end
+        // via `close_socket` below.
+        unsafe { bind_unix(listener, &addr) }.expect("bind_unix should succeed on a fresh path");
+        // SAFETY: `listener` is the socket just bound above.
+        unsafe { listen(listener, 1) }.expect("listen should succeed on a bound socket");
+
+        let client = socket(
+            AddressFamily::Unix,
+            SocketKind::Stream,
+            Protocol::Unspecified,
+        )
+        .expect("socket should succeed creating a second AF_UNIX socket");
+        // SAFETY: `client` was just created; `listener` is bound and
+        // listening.
+        unsafe { connect_unix(client, &addr) }.expect("connect_unix should succeed");
+
+        // SAFETY: `listener` is listening and has a pending connection
+        // from `client` above.
+        let (server, _peer_of_accept) =
+            unsafe { accept_unix(listener) }.expect("accept_unix should succeed");
+
+        // The point of this test: Windows does not autobind a connecting
+        // AF_UNIX client to a path (this module's own doc comment on
+        // `peer_addr_unix` records why), so the server's view of its
+        // peer is unnamed — an empty path, not an error.
+        // SAFETY: `server` is the connected socket `accept_unix` returned.
+        let peer = unsafe { peer_addr_unix(server) }.expect("peer_addr_unix should succeed");
+        assert_eq!(
+            peer.path_bytes(),
+            b"",
+            "an AF_UNIX client Windows never autobinds should report as unnamed"
+        );
+
+        // SAFETY: each handle above is open exactly once and closed
+        // exactly once here.
+        unsafe {
+            close_socket(server).expect("closesocket should succeed");
+            close_socket(client).expect("closesocket should succeed");
+            close_socket(listener).expect("closesocket should succeed");
+        }
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
+    }
+
+    #[test]
+    fn peer_addr_unix_matches_local_addr_unix_from_the_other_side() {
+        startup().expect("WSAStartup should succeed requesting Winsock 2.2");
+        let path = temp_socket_path("rusty_win32_peer_addr_unix_matches.sock");
+        let addr = UnixSocketAddr::new(path.as_bytes()).expect("valid path");
+
+        let listener = socket(
+            AddressFamily::Unix,
+            SocketKind::Stream,
+            Protocol::Unspecified,
+        )
+        .expect("socket should succeed");
+        // SAFETY: `listener` was just created.
+        unsafe { bind_unix(listener, &addr) }.expect("bind_unix should succeed");
+        // SAFETY: `listener` is bound above.
+        unsafe { listen(listener, 1) }.expect("listen should succeed");
+
+        let client = socket(
+            AddressFamily::Unix,
+            SocketKind::Stream,
+            Protocol::Unspecified,
+        )
+        .expect("socket should succeed");
+        // SAFETY: `client` was just created; `listener` is listening.
+        unsafe { connect_unix(client, &addr) }.expect("connect_unix should succeed");
+        // SAFETY: `listener` has a pending connection from `client`.
+        let (server, _) = unsafe { accept_unix(listener) }.expect("accept_unix should succeed");
+
+        // The server's local address (what it's bound to) is exactly
+        // what the client sees as its own peer — the two sides of the
+        // same named endpoint.
+        // SAFETY: `server` is a connected, valid socket.
+        let server_local = unsafe { local_addr_unix(server) }.expect("local_addr_unix");
+        // SAFETY: `client` is a connected, valid socket.
+        let client_peer = unsafe { peer_addr_unix(client) }.expect("peer_addr_unix");
+        assert_eq!(server_local.path_bytes(), client_peer.path_bytes());
+        assert_eq!(server_local.path_bytes(), path.as_bytes());
+
+        // SAFETY: each handle above is open exactly once and closed
+        // exactly once here.
+        unsafe {
+            close_socket(server).expect("closesocket should succeed");
+            close_socket(client).expect("closesocket should succeed");
+            close_socket(listener).expect("closesocket should succeed");
+        }
+        cleanup().expect("WSACleanup should succeed matching the startup call above");
     }
 }

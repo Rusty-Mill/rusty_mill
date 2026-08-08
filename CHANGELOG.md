@@ -5,6 +5,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Added
+- `net::peer_addr_unix` — `getpeername` for `AF_UNIX` sockets, the peer
+  counterpart to `net::local_addr_unix` (which had no peer half despite
+  the IP side having both `local_addr`/`peer_addr`). Closes #271, filed
+  after rustils' `sys::net` migration (baileyrd/rustils#106) needed it
+  and had nowhere to get it. Documents the one Windows-specific wrinkle:
+  an `accept`ed `AF_UNIX` peer is commonly *unnamed* (empty path), since
+  Windows — unlike its ephemeral-port behavior for TCP — never autobinds
+  a connecting client. Two new live round-trip tests (bind/listen/
+  connect/accept over a real temp-dir socket path), the only tests in
+  this module's `AF_UNIX` slice that exercise a live listener/client
+  pair rather than just encoding/decoding address bytes.
+
 - **Three new modules and two `net` additions, driven by rustils' need for
   bindings this crate did not have** (its `platform-windows` `track-w`
   backend, D-15 there). Every one is a binding this crate was missing, not

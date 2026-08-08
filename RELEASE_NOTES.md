@@ -6,6 +6,34 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## net: add peer_addr_unix, closing #271
+**2026-08-08** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
+
+- **Added:** `net::peer_addr_unix` — `getpeername` for `AF_UNIX` sockets.
+  `local_addr_unix` (added alongside the rest of the `AF_UNIX` slice)
+  had no peer counterpart, unlike the IP side's `local_addr`/`peer_addr`
+  pair. Filed as #271 by rustils, whose `sys::net` Track W migration
+  (baileyrd/rustils#106) needed exactly this and had no upstream binding
+  to route through.
+- **Behavior worth knowing:** an `accept`ed `AF_UNIX` peer is commonly
+  reported *unnamed* — an empty path, not an error. Windows does not
+  autobind a connecting client to a path the way it assigns an ephemeral
+  port to a TCP client, so unless the client explicitly bound itself
+  first, there is nothing to report. Documented on the function; a new
+  test (`peer_addr_unix_reports_the_client_as_unnamed`) pins the
+  behavior rather than leaving it as an assumption.
+- **Verification:** two new live round-trip tests
+  (`peer_addr_unix_reports_the_client_as_unnamed`,
+  `peer_addr_unix_matches_local_addr_unix_from_the_other_side`) drive a
+  real bind/listen/connect/accept sequence over a `std::env::temp_dir()`
+  path — the first live-socket coverage this module's `AF_UNIX` slice
+  has had; every existing test there only encoded/decoded
+  `UnixSocketAddr` bytes. Both are Windows-only (`cfg(all(test,
+  windows))`), so they run on the `windows-latest` CI job, not the
+  cross-compile pre-check.
+
+---
+
 ## net/security bindings for rustils' track-w backend
 **2026-08-07** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
 
