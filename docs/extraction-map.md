@@ -71,7 +71,9 @@ group-join half, shared with D2 below), `Signal` +
 > create/assign/terminate, process open-by-pid/resume/terminate, and the
 > wait/wait_any set all moved onto the donor (`sys::pty` inherits the job
 > half, sharing that helper). D2's `CreateProcessW` itself is **struck
-> from the Track W list permanently, not deferred**: `spawn_suspended`
+> from the Track W list, not deferred** (against the donor's current
+> shape, and on three independent grounds — the stdio model is only the
+> first; see `docs/convergence-roadmap.md` §1d): `spawn_suspended`
 > encodes rush's std-slot-swap stdio model — the one step 4 of the
 > extraction plan (near the end of this document) records this repo
 > deciding against, and whose rejection is what makes `Stdio::{Null,

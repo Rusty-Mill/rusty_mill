@@ -62,9 +62,12 @@ sees a decision rather than an oversight.
 
 This is a different kind of "didn't migrate" from note 004's
 `CreateProcessW`, and the difference is worth keeping straight.
-`CreateProcessW` is closed permanently — the donor's shape encodes an
-architectural decision this repo made differently, and no rev bump
-changes that. `reopen` is merely *declined for now*, on a risk/benefit
+`CreateProcessW` is closed against the donor's *current shape* — on
+three independent grounds, of which only the first is the architectural
+decision this repo made differently; the other two (no working
+directory, a `&str` command line) are mundane and each fatal on its own.
+No rev bump changes any of them, which is what makes it a closure rather
+than a deferral. `reopen` is merely *declined for now*, on a risk/benefit
 basis, and would be reconsidered the moment the donor grows an explicit
 console-device open. A migration list needs both verbs; collapsing them
 into "not done" loses the information.
