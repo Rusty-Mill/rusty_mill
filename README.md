@@ -648,6 +648,36 @@ A request can also constrain and order the resolved fallback chain with a
   entry and headroom left sorts first, one that's exhausted (`0` left)
   sorts after every candidate with headroom, and one with no
   `[[free_tiers]]` entry at all sorts last of all.
+- `max_request_price_usd` caps this one request's estimated cost, in USD
+  — estimated per candidate as `max_tokens * completion_per_million`
+  (from `[[pricing]]`), since `max_tokens` is the one lever a caller
+  actually controls over a response's worst-case size; `max_price` above
+  is a different axis (a per-million-token ceiling on individual
+  candidates), not a per-request total. Only takes effect when the
+  request also sets `max_tokens` — with nothing bounding completion
+  length there's no worst case to estimate, so this field is silently a
+  no-op otherwise. A candidate with no configured price can't be judged
+  against the cap either, dropped for the same reason an unpriced
+  candidate is under `max_price`.
+- `budget_fallback` controls what happens once `max_request_price_usd`
+  excludes at least one candidate: `"strict"` narrows the chain to just
+  the candidates that fit, failing the request with `402` if none do;
+  `"cheapest"` (the default) always serves the request instead — routing
+  to the cheapest candidate that fits, or, if none fit, the overall
+  cheapest candidate anyway rather than refusing outright. Ignored
+  without `max_request_price_usd` also set.
+
+```jsonc
+{
+  "model": "smart",
+  "max_tokens": 1000,
+  "messages": [{"role": "user", "content": "..."}],
+  "provider": {
+    "max_request_price_usd": 0.01,
+    "budget_fallback": "strict"
+  }
+}
+```
 
 ### Logprobs
 

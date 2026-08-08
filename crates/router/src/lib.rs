@@ -1992,6 +1992,74 @@ impl Router {
         Ok(chain)
     }
 
+    /// Applies `provider.max_request_price_usd`/`provider.budget_fallback`
+    /// -- see their doc comments on `ProviderPreferences`. A no-op when
+    /// either is unset, when `req.max_tokens` is unset (nothing to
+    /// estimate a worst-case completion cost against), or when `chain` is
+    /// already empty (an earlier filter already errors on that).
+    fn apply_request_budget(
+        &self,
+        model: &str,
+        mut chain: Vec<(String, String)>,
+        req: &ChatRequest,
+    ) -> Result<Vec<(String, String)>, RouterError> {
+        let Some(prefs) = req.provider.as_ref() else {
+            return Ok(chain);
+        };
+        let Some(cap) = prefs.max_request_price_usd else {
+            return Ok(chain);
+        };
+        let Some(max_tokens) = req.max_tokens else {
+            return Ok(chain);
+        };
+        if chain.is_empty() {
+            return Ok(chain);
+        }
+
+        let estimated_cost = |entry: &(String, String)| -> Option<f64> {
+            self.pricing
+                .get(&format!("{}/{}", entry.0, entry.1))
+                .map(|rates| max_tokens as f64 * rates.completion_ppm / 1_000_000.0)
+        };
+
+        let fits: Vec<_> = chain
+            .iter()
+            .filter(|entry| estimated_cost(entry).is_some_and(|cost| cost <= cap))
+            .cloned()
+            .collect();
+
+        if !fits.is_empty() {
+            // Both fallback modes prefer the cheapest fitting candidate
+            // first once at least one exists -- "strict" just additionally
+            // drops everything that doesn't fit, where "cheapest" keeps
+            // the rest of the chain available as further fallback.
+            let mut ranked = if prefs.budget_fallback.as_deref() == Some("strict") {
+                fits
+            } else {
+                chain
+            };
+            ranked.sort_by(|a, b| {
+                estimated_cost(a)
+                    .unwrap_or(f64::MAX)
+                    .total_cmp(&estimated_cost(b).unwrap_or(f64::MAX))
+            });
+            return Ok(ranked);
+        }
+
+        // No candidate fits under the cap.
+        if prefs.budget_fallback.as_deref() == Some("strict") {
+            return Err(RouterError::RequestBudgetExceeded(model.to_string(), cap));
+        }
+        // "cheapest" (the default): never hard-fail -- serve via whichever
+        // candidate is the overall cheapest anyway, over budget or not.
+        chain.sort_by(|a, b| {
+            estimated_cost(a)
+                .unwrap_or(f64::MAX)
+                .total_cmp(&estimated_cost(b).unwrap_or(f64::MAX))
+        });
+        Ok(chain)
+    }
+
     fn get_provider(&self, name: &str) -> Result<&Arc<dyn Provider>, RouterError> {
         self.providers
             .get(name)
@@ -2282,6 +2350,7 @@ impl Router {
         let effective_prefs = auto_price_prefs.as_ref().or(req.provider.as_ref());
         let chain = self.apply_preferences(&target_model, chain, effective_prefs)?;
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
+        let chain = self.apply_request_budget(&target_model, chain, req)?;
 
         // strategy = "fusion": dispatch the whole chain (the "panel") in
         // parallel and synthesize via the judge, instead of the ordinary
@@ -2612,6 +2681,7 @@ impl Router {
         let effective_prefs = auto_price_prefs.as_ref().or(req.provider.as_ref());
         let chain = self.apply_preferences(&target_model, chain, effective_prefs)?;
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
+        let chain = self.apply_request_budget(&target_model, chain, req)?;
         let mut last_err: Option<RouterError> = None;
 
         for (provider_name, model_name) in &chain {
@@ -7262,6 +7332,245 @@ mod tests {
             .filter_by_required_parameters("smart", chain(&[("anthropic", "m1")]), &req)
             .unwrap_err();
         assert!(matches!(err, RouterError::NoEligibleProvider(_)));
+    }
+
+    // --- apply_request_budget (provider.max_request_price_usd) -----------------
+
+    #[test]
+    fn apply_request_budget_is_a_no_op_when_max_request_price_usd_is_unset() {
+        let router = test_router(vec![], vec![], vec![("a/m1", 1.0, 100.0)], vec![], vec![]);
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        let result = router
+            .apply_request_budget("smart", chain(&[("a", "m1")]), &req)
+            .unwrap();
+        assert_eq!(result, chain(&[("a", "m1")]));
+    }
+
+    #[test]
+    fn apply_request_budget_is_a_no_op_when_max_tokens_is_unset() {
+        // Nothing to estimate a worst-case completion cost against without
+        // max_tokens -- the cap has no effect on this request, same as
+        // require_parameters being a no-op when nothing needs it.
+        let router = test_router(vec![], vec![], vec![("a/m1", 1.0, 100.0)], vec![], vec![]);
+        let mut req = test_request("smart");
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.000001),
+            ..Default::default()
+        });
+        let result = router
+            .apply_request_budget("smart", chain(&[("a", "m1")]), &req)
+            .unwrap();
+        assert_eq!(result, chain(&[("a", "m1")]));
+    }
+
+    #[test]
+    fn apply_request_budget_with_room_to_spare_keeps_every_candidate_sorted_cheapest_first() {
+        let router = test_router(
+            vec![],
+            vec![],
+            vec![("a/m1", 1.0, 10.0), ("b/m2", 1.0, 5.0)],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        // a/m1: 1000 * 10.0 / 1e6 = $0.01, b/m2: 1000 * 5.0 / 1e6 = $0.005 -- both well under a generous cap.
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(1.0),
+            ..Default::default()
+        });
+        let result = router
+            .apply_request_budget("smart", chain(&[("a", "m1"), ("b", "m2")]), &req)
+            .unwrap();
+        assert_eq!(result, chain(&[("b", "m2"), ("a", "m1")]));
+    }
+
+    #[test]
+    fn apply_request_budget_narrows_the_pool_to_candidates_that_fit_under_the_cap() {
+        let router = test_router(
+            vec![],
+            vec![],
+            vec![
+                ("cheap/m1", 1.0, 1.0),
+                ("mid/m2", 1.0, 5.0),
+                ("pricey/m3", 1.0, 50.0),
+            ],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        // cheap/m1: $0.001, mid/m2: $0.005, pricey/m3: $0.05 -- a $0.01 cap
+        // excludes only pricey/m3.
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.01),
+            budget_fallback: Some("strict".to_string()),
+            ..Default::default()
+        });
+        let result = router
+            .apply_request_budget(
+                "smart",
+                chain(&[("pricey", "m3"), ("mid", "m2"), ("cheap", "m1")]),
+                &req,
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("cheap", "m1"), ("mid", "m2")]));
+    }
+
+    #[test]
+    fn apply_request_budget_strict_mode_errors_with_402_when_nothing_fits() {
+        let router = test_router(vec![], vec![], vec![("a/m1", 1.0, 100.0)], vec![], vec![]);
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.000001),
+            budget_fallback: Some("strict".to_string()),
+            ..Default::default()
+        });
+        let err = router
+            .apply_request_budget("smart", chain(&[("a", "m1")]), &req)
+            .unwrap_err();
+        assert_eq!(err.status_code(), 402);
+        assert!(matches!(
+            err,
+            RouterError::RequestBudgetExceeded(model, cap)
+                if model == "smart" && cap == 0.000001
+        ));
+    }
+
+    #[test]
+    fn apply_request_budget_cheapest_mode_still_serves_the_overall_cheapest_when_nothing_fits() {
+        // "cheapest" is the default -- never a hard failure, unlike
+        // "strict". Every candidate is over budget here, so it serves the
+        // request anyway via whichever one is least over.
+        let router = test_router(
+            vec![],
+            vec![],
+            vec![
+                ("expensive/m1", 1.0, 100.0),
+                ("less_expensive/m2", 1.0, 50.0),
+            ],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.000001),
+            ..Default::default()
+        });
+        let result = router
+            .apply_request_budget(
+                "smart",
+                chain(&[("expensive", "m1"), ("less_expensive", "m2")]),
+                &req,
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            chain(&[("less_expensive", "m2"), ("expensive", "m1")])
+        );
+    }
+
+    #[test]
+    fn apply_request_budget_treats_an_unpriced_candidate_as_not_fitting() {
+        // Same "unverifiable, so not eligible" reasoning as provider.max_price:
+        // a candidate with no [[pricing]] entry can't be judged against
+        // the cap, so it can't be counted as fitting under it.
+        let router = test_router(
+            vec![],
+            vec![],
+            vec![("priced/m1", 1.0, 1.0)],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(1.0),
+            budget_fallback: Some("strict".to_string()),
+            ..Default::default()
+        });
+        let result = router
+            .apply_request_budget(
+                "smart",
+                chain(&[("unpriced", "m2"), ("priced", "m1")]),
+                &req,
+            )
+            .unwrap();
+        assert_eq!(result, chain(&[("priced", "m1")]));
+    }
+
+    #[tokio::test]
+    async fn dispatch_routes_to_the_cheapest_fitting_candidate_under_the_request_budget_cap() {
+        let calls_expensive = Arc::new(AtomicUsize::new(0));
+        let expensive = Arc::new(MockProvider {
+            name: "expensive".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_expensive.clone(),
+        });
+        let calls_cheap = Arc::new(AtomicUsize::new(0));
+        let cheap = Arc::new(MockProvider {
+            name: "cheap".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_cheap.clone(),
+        });
+        let router = test_router(
+            vec![("expensive", expensive), ("cheap", cheap)],
+            vec![("smart", vec!["expensive/m1", "cheap/m2"])],
+            vec![("expensive/m1", 1.0, 50.0), ("cheap/m2", 1.0, 1.0)],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        // expensive/m1: $0.05, cheap/m2: $0.001 -- only cheap/m2 fits under a $0.01 cap.
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.01),
+            ..Default::default()
+        });
+
+        router
+            .dispatch(&req)
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(calls_cheap.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            calls_expensive.load(Ordering::SeqCst),
+            0,
+            "the over-cap candidate should never be tried while a fitting one is available"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_returns_402_in_strict_mode_when_every_candidate_exceeds_the_request_budget_cap(
+    ) {
+        let a = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let router = test_router(
+            vec![("a", a)],
+            vec![("smart", vec!["a/m1"])],
+            vec![("a/m1", 1.0, 100.0)],
+            vec![],
+            vec![],
+        );
+        let mut req = test_request("smart");
+        req.max_tokens = Some(1000);
+        req.provider = Some(ProviderPreferences {
+            max_request_price_usd: Some(0.000001),
+            budget_fallback: Some("strict".to_string()),
+            ..Default::default()
+        });
+
+        let err = router.dispatch(&req).await.unwrap_err();
+
+        assert!(matches!(err, RouterError::RequestBudgetExceeded(_, _)));
+        assert_eq!(err.status_code(), 402);
     }
 
     // --- ewma_record / ewma_lookup --------------------------------------------
