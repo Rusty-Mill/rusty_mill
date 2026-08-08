@@ -11,6 +11,10 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   retry-with-backoff (`retry_backoff_secs`/`retry_backoff_max_secs`/
   `max_retries`) — a `5xx`/network-error delivery now retries instead of
   failing after one attempt; a `4xx` is still treated as permanent.
+- `[[clients]].budget_warning_threshold` — a new `budget_warning`
+  `[webhook]` event fires once a client's spend crosses this fraction of
+  `budget_usd`, ahead of the hard `budget_exceeded` cutoff. Config-only
+  for now, not yet settable via the admin API.
 - `docs/PROVIDERS.md` + curated commented-out provider presets in
   `config.example.toml` (~20 more OpenAI-wire-compatible backends).
 - `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-declared,

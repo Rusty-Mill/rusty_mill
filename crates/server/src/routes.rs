@@ -363,6 +363,7 @@ mod tests {
                 requests_per_minute: *rpm,
                 budget_usd: None,
                 budget_period: BudgetPeriod::default(),
+                budget_warning_threshold: None,
                 organization: None,
                 workspace: None,
                 role: ClientRole::Member,
@@ -696,6 +697,7 @@ mod tests {
             requests_per_minute: 30,
             budget_usd: None,
             budget_period: BudgetPeriod::default(),
+            budget_warning_threshold: None,
             organization: organization.map(str::to_string),
             workspace: None,
             role,
@@ -1398,6 +1400,10 @@ pub async fn admin_create_client(
         requests_per_minute: req.requests_per_minute,
         budget_usd: req.budget_usd,
         budget_period: req.budget_period,
+        // Not settable via the admin API yet -- only through `[[clients]]`
+        // in config.toml. A runtime-provisioned client can still be given
+        // one by adding it to config and restarting.
+        budget_warning_threshold: None,
         organization: req.organization.clone(),
         workspace: req.workspace.clone(),
         role: req.role,

@@ -1118,6 +1118,7 @@ api_key_env = "CLIENT_HERMES_API_KEY"
 requests_per_minute = 60
 budget_usd = 50.0
 budget_period = "monthly"   # or "total" (default) / "daily" / "weekly"
+budget_warning_threshold = 0.8   # optional -- see "Webhook notifications" below
 ```
 
 Spend is tracked from the same `cost_usd` this router already computes for
@@ -1169,24 +1170,32 @@ retry_backoff_max_secs = 30
 max_retries = 3
 ```
 
-This router POSTs a JSON body to `url` on two events:
+This router POSTs a JSON body to `url` on three events:
 
 ```jsonc
+// A client's tracked spend just crossed budget_warning_threshold * budget_usd (if configured).
+{"event": "budget_warning", "client": "hermes", "spent_usd": 41.00, "budget_usd": 50.0, "warning_threshold": 0.8, "period": "monthly"}
 // A client's tracked spend just reached or passed its budget.
 {"event": "budget_exceeded", "client": "hermes", "spent_usd": 51.20, "budget_usd": 50.0, "period": "monthly"}
 // An operator manually reset a client's spend via the admin API.
 {"event": "budget_reset", "client": "hermes", "budget_usd": 50.0, "period": "monthly"}
 ```
 
-`budget_exceeded` fires on the specific request that pushes tracked spend
-from under budget to at-or-over it, not on every subsequent over-budget
-request — the request that crossed it is still charged and let through
-before this fires, same as the `402` only starting on the *next* request.
-Under `[persistence]`, "just crossed" is a best-effort, eventually-consistent
-read-back rather than an atomic check-and-set, so two concurrent requests
-to the same client right at the boundary could both fire (or, rarely,
-neither) — same class of caveat the tracked spend total itself already
-carries. `auth_header_env` names an env var holding the exact value to
+`budget_warning` and `budget_exceeded` both fire on the specific request
+that pushes tracked spend from under the threshold to at-or-over it, not
+on every subsequent request past that point — `budget_warning` is a
+heads-up before the cutoff, not a second limit, and doesn't affect
+whether a request is allowed through (only `budget_usd` itself does
+that). The request that crossed either threshold is still charged and let
+through before the event fires, same as the `402` only starting on the
+*next* request once `budget_usd` itself is crossed. Under `[persistence]`,
+"just crossed" is a best-effort, eventually-consistent read-back rather
+than an atomic check-and-set, so two concurrent requests to the same
+client right at a boundary could both fire (or, rarely, neither) — same
+class of caveat the tracked spend total itself already carries.
+`budget_warning_threshold` isn't settable via the admin API yet — only
+through `[[clients]]` in config.toml. `auth_header_env` names an env var
+holding the exact value to
 send as this POST's `Authorization` header (e.g. `"Bearer <token>"`), so
 the receiver can verify the request came from this router; leaving it
 unset sends no `Authorization` header at all. `signing_secret_env` names
