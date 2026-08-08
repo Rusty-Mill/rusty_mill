@@ -24,6 +24,7 @@ struct Seen {
     body: Option<Value>,
     headers: Vec<(String, String)>,
     path: String,
+    query: Option<String>,
 }
 
 /// A provider that answers with `reply`, recording what it was asked.
@@ -40,6 +41,7 @@ async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) 
         let sse = sse.clone();
         async move {
             let path = request.uri().path().to_string();
+            let query = request.uri().query().map(str::to_string);
             let headers: Vec<(String, String)> = request
                 .headers()
                 .iter()
@@ -59,6 +61,7 @@ async fn provider(reply: Value, sse: Option<String>) -> (u16, Arc<Mutex<Seen>>) 
                 seen.body = serde_json::from_slice(&bytes).ok();
                 seen.headers = headers;
                 seen.path = path;
+                seen.query = query;
             }
 
             match sse {
@@ -2744,32 +2747,235 @@ async fn an_alias_decides_the_gemini_path_too() {
     shutdown.cancel();
 }
 
+/// The frames Gemini's `?alt=sse` stream sends, as one SSE body.
+fn gemini_stream(frames: Vec<Value>) -> String {
+    frames
+        .iter()
+        .map(|frame| format!("data: {frame}\n\n"))
+        .collect()
+}
+
 #[tokio::test]
-async fn streaming_and_tools_are_refused_on_gemini_rather_than_half_served() {
-    // Both are the next slice. Refusing beats answering a streaming request in
-    // one piece, or dropping tools and looking like a model that chose not to
-    // call one.
+async fn a_gemini_stream_is_reframed_as_openai_chunks() {
+    let stream = gemini_stream(vec![
+        json!({"responseId": "resp-1", "modelVersion": "gemini-2.5-flash",
+               "candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}]}}]}),
+        json!({"responseId": "resp-1", "modelVersion": "gemini-2.5-flash",
+               "candidates": [{"content": {"role": "model", "parts": [{"text": " there"}]},
+                               "finishReason": "STOP"}],
+               "usageMetadata": {"promptTokenCount": 8, "candidatesTokenCount": 2}}),
+    ]);
+    let (provider_port, seen) = provider(json!({}), Some(stream)).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let mut asked = gemini_request();
+    asked["stream"] = json!(true);
+    let response = post(&url, &asked).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("text/event-stream")
+    );
+
+    let body = response.text().await.expect("a body");
+    let chunks: Vec<Value> = body
+        .split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).expect("a chunk"))
+        .collect();
+
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(chunks[1]["choices"][0]["delta"]["content"], "Hello");
+    assert_eq!(chunks[2]["choices"][0]["delta"]["content"], " there");
+    assert_eq!(chunks[3]["choices"][0]["finish_reason"], "stop");
+    for chunk in &chunks {
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["id"], "resp-1");
+    }
+    assert!(body.ends_with("data: [DONE]\n\n"), "{body}");
+
+    // The stream is a different method on a different URL, and `alt=sse` is
+    // what makes it a stream at all: without it Gemini answers with a JSON
+    // array of responses rather than server-sent events.
+    let seen = seen.lock().expect("lock");
+    assert_eq!(
+        seen.path,
+        "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+    );
+    assert_eq!(seen.query.as_deref(), Some("alt=sse"));
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_streamed_gemini_call_reaches_the_client_as_tool_call_deltas() {
+    // Gemini sends the call whole rather than as argument fragments, so the
+    // delta carries the entire `arguments` string at once.
+    let stream = gemini_stream(vec![json!({
+        "responseId": "resp-1",
+        "modelVersion": "gemini-2.5-flash",
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "Oslo"}}},
+            ]},
+            "finishReason": "STOP",
+        }],
+    })]);
+    let (provider_port, _seen) = provider(json!({}), Some(stream)).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let mut asked = gemini_request();
+    asked["stream"] = json!(true);
+    let body = post(&url, &asked).await.text().await.expect("a body");
+
+    let chunks: Vec<Value> = body
+        .split("\n\n")
+        .filter_map(|frame| frame.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str(data).expect("a chunk"))
+        .collect();
+
+    let call = &chunks[1]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(call["index"], 0);
+    assert_eq!(call["id"], "call_0");
+    assert_eq!(call["function"]["name"], "get_weather");
+    assert_eq!(call["function"]["arguments"], r#"{"city":"Oslo"}"#);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn tool_definitions_reach_gemini_as_function_declarations() {
     let (provider_port, seen) = provider(gemini_reply(), None).await;
     let (url, shutdown) = start("gemini", provider_port, "").await;
 
-    let mut streamed = gemini_request();
-    streamed["stream"] = json!(true);
-    let response = post(&url, &streamed).await;
-    assert_eq!(response.status().as_u16(), 400);
+    let mut asked = gemini_request();
+    asked["tools"] = json!([{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Look it up",
+            "parameters": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }]);
+    asked["tool_choice"] = json!("auto");
+
+    let response = post(&url, &asked).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let body = seen.body.as_ref().expect("a body");
+    let declaration = &body["tools"][0]["functionDeclarations"][0];
+    assert_eq!(declaration["name"], "get_weather");
+    assert_eq!(declaration["parameters"]["required"], json!(["city"]));
     assert!(
-        response.text().await.expect("a body").contains("streaming"),
-        "the refusal should say what is missing"
+        declaration["parameters"]
+            .get("additionalProperties")
+            .is_none(),
+        "Gemini refuses the whole request over a field it does not know: {body}"
+    );
+    assert_eq!(body["toolConfig"]["functionCallingConfig"]["mode"], "AUTO");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_gemini_tool_call_round_trips() {
+    // The answer's call comes back with an id, and the result the client sends
+    // under that id becomes a `functionResponse` naming the right function.
+    let (provider_port, seen) = provider(
+        json!({
+            "responseId": "resp-1",
+            "modelVersion": "gemini-2.5-flash",
+            "candidates": [{
+                "content": {"role": "model", "parts": [
+                    {"functionCall": {"name": "get_weather", "args": {"city": "Oslo"}}},
+                ]},
+                "finishReason": "STOP",
+            }],
+        }),
+        None,
+    )
+    .await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let mut asked = gemini_request();
+    asked["tools"] = json!([{
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}},
+    }]);
+    let answered: Value = post(&url, &asked).await.json().await.expect("JSON");
+
+    let call = &answered["choices"][0]["message"]["tool_calls"][0];
+    assert_eq!(call["function"]["name"], "get_weather");
+    let call_id = call["id"].as_str().expect("an id").to_string();
+
+    // Now the second leg, as a client would send it back.
+    let mut second = asked.clone();
+    second["messages"] = json!([
+        {"role": "user", "content": "weather in Oslo?"},
+        answered["choices"][0]["message"],
+        {"role": "tool", "tool_call_id": call_id, "content": "{\"temp\": 4}"},
+    ]);
+    let response = post(&url, &second).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let contents = seen.body.as_ref().expect("a body")["contents"]
+        .as_array()
+        .expect("contents")
+        .clone();
+    assert_eq!(contents.len(), 3);
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(
+        contents[1]["parts"][0]["functionCall"]["name"],
+        "get_weather"
+    );
+    assert_eq!(contents[2]["role"], "user", "there is no tool role here");
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"],
+        json!({"name": "get_weather", "response": {"temp": 4}})
     );
 
-    let mut with_tools = gemini_request();
-    with_tools["tools"] = json!([{"type": "function", "function": {"name": "f"}}]);
-    let response = post(&url, &with_tools).await;
-    assert_eq!(response.status().as_u16(), 400);
+    shutdown.cancel();
+}
 
-    assert!(
-        seen.lock().expect("lock").body.is_none(),
-        "neither should have reached the provider"
-    );
+#[tokio::test]
+async fn a_gemini_stream_is_charged_to_the_token_budget() {
+    let stream = gemini_stream(vec![json!({
+        "responseId": "resp-1",
+        "modelVersion": "gemini-2.5-flash",
+        "candidates": [{"content": {"parts": [{"text": "Hi"}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 10},
+    })]);
+    let (provider_port, _seen) = provider(json!({}), Some(stream)).await;
+    let (url, shutdown) = start_with(
+        "gemini",
+        provider_port,
+        "",
+        "              localRateLimit:\n                - type: tokens\n                  maxTokens: 50\n                  tokensPerFill: 50\n                  fillInterval: 60s\n",
+    )
+    .await;
+
+    let mut asked = gemini_request();
+    asked["stream"] = json!(true);
+    let first = post(&url, &asked).await;
+    assert!(first.status().is_success());
+    let _ = first.text().await;
+
+    // The budget is spent by what the stream reported, so the next one is
+    // refused rather than served.
+    let second = post(&url, &asked).await;
+    assert_eq!(second.status().as_u16(), 429);
 
     shutdown.cancel();
 }

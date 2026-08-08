@@ -29,6 +29,8 @@
 //! them over by name would produce a request Gemini accepts and quietly ignores
 //! — worse than one it rejects, because nothing says the settings were lost.
 
+pub mod tools;
+
 use serde_json::{Map, Value, json};
 
 use super::{TranslateError, Usage};
@@ -70,40 +72,12 @@ pub fn to_gemini(body: &Value) -> Result<Value, TranslateError> {
         .and_then(Value::as_array)
         .ok_or(TranslateError::Messages)?;
 
-    // Streaming is a different method on a different URL here, not a field, so
-    // there is nothing to carry over and nothing that half works. Refused for
-    // the same reason tools are: the alternative is a client that asked for a
-    // stream, was answered in one piece, and has to work out why.
-    if super::is_streaming(body) {
-        return Err(TranslateError::Unsupported {
-            provider: "gemini",
-            what: "streaming",
-        });
-    }
-
-    // Tools are refused rather than dropped. A request that asks for them and
-    // gets an ordinary answer looks like a model that chose not to call one,
-    // which is a far more expensive thing to debug than a refusal.
-    for key in ["tools", "tool_choice", "functions"] {
-        if object.get(key).is_some_and(|value| !value.is_null()) {
-            return Err(TranslateError::Unsupported {
-                provider: "gemini",
-                what: "tool calling",
-            });
-        }
-    }
-    if messages
-        .iter()
-        .any(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
-    {
-        return Err(TranslateError::Unsupported {
-            provider: "gemini",
-            what: "tool calling",
-        });
-    }
-
     let mut system = Vec::new();
     let mut contents: Vec<Value> = Vec::new();
+    // Calls are remembered as they go past, because a `functionResponse` names
+    // the function and an OpenAI tool result only carries an id. See
+    // [`tools::Conversation`].
+    let mut conversation = tools::Conversation::default();
 
     for message in messages {
         let role = message
@@ -119,10 +93,26 @@ pub fn to_gemini(body: &Value) -> Result<Value, TranslateError> {
             continue;
         }
 
-        let parts = parts_for(content);
+        let mut parts = parts_for(content);
+        match role {
+            // A call sits beside the model's own words, in the order it
+            // produced them, so the text parts stay and the calls follow.
+            "assistant" => {
+                if let Some(calls) = conversation.calls_in(message) {
+                    parts.extend(calls);
+                }
+            }
+            // Gemini has no tool role: a result is a part in a user turn, and
+            // consecutive results join one because two user turns in a row are
+            // rejected -- which the role-joining below already does.
+            "tool" | "function" => {
+                parts = conversation.result_in(message).into_iter().collect();
+            }
+            _ => {}
+        }
+
         // A turn with nothing in it is dropped rather than sent: Gemini rejects
-        // an empty `parts`, and an assistant turn that only called a tool has
-        // already been refused above.
+        // an empty `parts`.
         if parts.is_empty() {
             continue;
         }
@@ -186,6 +176,13 @@ pub fn to_gemini(body: &Value) -> Result<Value, TranslateError> {
         out.insert("generationConfig".into(), Value::Object(config));
     }
 
+    if let Some(declarations) = object.get("tools").and_then(tools::definitions_for) {
+        out.insert("tools".into(), declarations);
+    }
+    if let Some(choice) = object.get("tool_choice").and_then(tools::choice_for) {
+        out.insert("toolConfig".into(), choice);
+    }
+
     Ok(Value::Object(out))
 }
 
@@ -219,6 +216,22 @@ pub fn from_gemini(body: &Value, created: u64) -> Value {
     let text = candidate.map(text_of).unwrap_or_default();
     let usage = usage(body).unwrap_or_default();
 
+    let mut message = Map::new();
+    message.insert("role".into(), json!("assistant"));
+    // `null` rather than `""` for an answer with no text, matching what OpenAI
+    // itself sends: a client checking for null reads the two differently, and
+    // a turn that only called a tool has no text at all.
+    message.insert(
+        "content".into(),
+        match text.is_empty() {
+            true => Value::Null,
+            false => json!(text),
+        },
+    );
+    if let Some(calls) = candidate.and_then(tools::calls_from) {
+        message.insert("tool_calls".into(), calls);
+    }
+
     json!({
         "id": body.get("responseId").and_then(Value::as_str).unwrap_or("chatcmpl-unknown"),
         "object": "chat.completion",
@@ -226,13 +239,7 @@ pub fn from_gemini(body: &Value, created: u64) -> Value {
         "model": body.get("modelVersion").and_then(Value::as_str).unwrap_or_default(),
         "choices": [{
             "index": 0,
-            "message": {
-                "role": "assistant",
-                // `null` rather than `""` for an answer with no text, matching
-                // what OpenAI itself sends: a client checking for null reads
-                // the two differently.
-                "content": if text.is_empty() { Value::Null } else { json!(text) },
-            },
+            "message": Value::Object(message),
             "finish_reason": finish_reason(
                 candidate.and_then(|c| c.get("finishReason")).and_then(Value::as_str),
             ),

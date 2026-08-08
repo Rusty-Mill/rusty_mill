@@ -45,7 +45,7 @@ use serde_json::Value;
 use guard::{Decision, Guard, webhook::Context as GuardContext};
 pub use provider::{Provider, ProviderError};
 use shape::{Shape, caching::Caching};
-use stream::{ChunkTranslator, EventParser};
+use stream::EventParser;
 use translate::Usage;
 
 /// Largest request body accepted on an `ai` route.
@@ -641,29 +641,29 @@ impl LlmBackend {
             }
         };
 
-        let translating = self.provider.translates_stream();
         let mut parser = EventParser::default();
-        let mut translator = ChunkTranslator::new(now());
+        let mut translator = self.provider.stream_translator(now());
         let mut chunks: Vec<Value> = Vec::new();
         let mut usage = Usage::default();
 
         for (event, data) in parser.push(&bytes) {
-            if translating {
-                chunks.extend(translator.event(&event, &data));
-            } else {
-                // `data: [DONE]` is not JSON and parses to null. It is the
-                // sentinel rather than a chunk, and re-emitting it here would
-                // hand a client `data: null` before the real one.
-                if !data.is_object() {
-                    continue;
+            match &mut translator {
+                Some(translator) => chunks.extend(translator.event(&event, &data)),
+                None => {
+                    // `data: [DONE]` is not JSON and parses to null. It is the
+                    // sentinel rather than a chunk, and re-emitting it here
+                    // would hand a client `data: null` before the real one.
+                    if !data.is_object() {
+                        continue;
+                    }
+                    if let Some(seen) = translate::openai_usage(&data) {
+                        usage = seen;
+                    }
+                    chunks.push(data);
                 }
-                if let Some(seen) = translate::openai_usage(&data) {
-                    usage = seen;
-                }
-                chunks.push(data);
             }
         }
-        if translating {
+        if let Some(translator) = &translator {
             usage = translator.usage();
         }
 
@@ -715,7 +715,6 @@ impl LlmBackend {
         status: StatusCode,
         model: &str,
     ) -> Response<LlmBody> {
-        let translating = self.provider.translates_stream();
         let provider = self.provider.name();
         let model = model.to_string();
         // The stream outlives this call, and the usage it will report is what
@@ -723,7 +722,7 @@ impl LlmBackend {
         let tokens = self.tokens.clone();
 
         let mut parser = EventParser::default();
-        let mut translator = ChunkTranslator::new(now());
+        let mut translator = self.provider.stream_translator(now());
         let mut reported = false;
 
         let upstream = response.bytes_stream();
@@ -739,7 +738,7 @@ impl LlmBackend {
                     }
                 };
 
-                if !translating {
+                let Some(translator) = &mut translator else {
                     // OpenAI-compatible: the frames are already what the
                     // client expects, so they go straight through and usage is
                     // read from the trailing chunk if the provider sends one.
@@ -753,7 +752,7 @@ impl LlmBackend {
                     }
                     yield Ok(Frame::data(chunk));
                     continue;
-                }
+                };
 
                 for (event, data) in parser.push(&chunk) {
                     for chunk in translator.event(&event, &data) {
@@ -762,7 +761,7 @@ impl LlmBackend {
                 }
             }
 
-            if translating {
+            if let Some(translator) = &translator {
                 // The sentinel is not a chunk, so the translator does not emit
                 // it; without it an OpenAI client waits for a stream that has
                 // already ended.

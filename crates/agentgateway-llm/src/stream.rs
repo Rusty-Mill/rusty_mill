@@ -1,4 +1,11 @@
-//! Translating Anthropic's streaming events into OpenAI chunks.
+//! Translating a provider's streaming events into OpenAI chunks.
+//!
+//! Two providers need it and they need different things, so [`Translator`]
+//! picks between them: [`ChunkTranslator`] for Anthropic's named events, and
+//! [`GeminiTranslator`] for Gemini's whole-response frames. An
+//! OpenAI-compatible stream needs neither and goes through untouched.
+//!
+//! # Anthropic
 //!
 //! The two streams are shaped differently enough that this cannot be a
 //! per-event mapping:
@@ -18,7 +25,7 @@
 //! Usage is accumulated across the stream rather than read from one event,
 //! because neither event carries both halves.
 //!
-//! # Tool calls need a second index
+//! ## Tool calls need a second index
 //!
 //! Anthropic numbers *content blocks*, and text and tool calls share that
 //! numbering. OpenAI numbers *tool calls*, and its text is not in the list at
@@ -27,12 +34,50 @@
 //! block index through would leave a client assembling arguments into a call
 //! that never opened. The translator keeps its own count and a map from one to
 //! the other.
+//!
+//! # Gemini
+//!
+//! A different problem: its frames are not deltas at all. Each is a whole
+//! `GenerateContentResponse` carrying what was produced since the last, with no
+//! event name, so there is no state machine to run — only the fields OpenAI
+//! repeats on every chunk to remember. See [`GeminiTranslator`], including why
+//! a streamed tool call arrives in one piece rather than as fragments.
 
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use crate::translate::{Usage, finish_reason};
+use crate::translate::{Usage, finish_reason, gemini};
+
+/// The re-framing one provider's stream needs.
+///
+/// A provider whose stream is already OpenAI-shaped has none, and its frames go
+/// through untouched — which is what keeps a passthrough byte-for-byte.
+#[derive(Debug)]
+pub enum Translator {
+    /// Anthropic's named events.
+    Anthropic(ChunkTranslator),
+    /// Gemini's whole-response frames.
+    Gemini(GeminiTranslator),
+}
+
+impl Translator {
+    /// Translate one upstream event into zero or more OpenAI chunks.
+    pub fn event(&mut self, event: &str, data: &Value) -> Vec<Value> {
+        match self {
+            Translator::Anthropic(inner) => inner.event(event, data),
+            Translator::Gemini(inner) => inner.event(data),
+        }
+    }
+
+    /// Token usage seen so far.
+    pub fn usage(&self) -> Usage {
+        match self {
+            Translator::Anthropic(inner) => inner.usage(),
+            Translator::Gemini(inner) => inner.usage(),
+        }
+    }
+}
 
 /// Turns an Anthropic event stream into OpenAI chunks.
 #[derive(Debug, Default)]
@@ -196,6 +241,133 @@ impl ChunkTranslator {
     /// OpenAI announces the assistant role once, in its own chunk, before any
     /// content -- and a response that opens with a tool call rather than text
     /// still has to announce it.
+    fn announce_role(&mut self) -> Vec<Value> {
+        if self.role_sent {
+            return Vec::new();
+        }
+        self.role_sent = true;
+        vec![self.chunk(json!({"role": "assistant"}), Value::Null)]
+    }
+
+    fn chunk(&self, delta: Value, finish: Value) -> Value {
+        json!({
+            "id": self.id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        })
+    }
+}
+
+/// Turns a Gemini `streamGenerateContent` stream into OpenAI chunks.
+///
+/// Gemini's frames are not deltas of a message the way Anthropic's are: each
+/// one is a whole `GenerateContentResponse` carrying the parts produced since
+/// the last, with no event name at all. So this reads the same shape
+/// [`gemini::from_gemini`] does, one frame at a time, and the state it keeps is
+/// only what OpenAI repeats on every chunk.
+///
+/// # A streamed tool call arrives whole
+///
+/// Anthropic and OpenAI both stream a call's arguments as fragments a client
+/// concatenates. Gemini sends the `functionCall` complete, in one frame. The
+/// chunks here therefore carry the entire `arguments` string at once, which is
+/// valid — concatenating one fragment gives the same result — but it is a real
+/// difference in what goes over the wire, and worth knowing before reading a
+/// packet capture and wondering where the deltas went.
+///
+/// Ids are made up, positionally, exactly as [`gemini::tools::calls_from`] does
+/// for a buffered answer: Gemini sends none, and a client needs one to answer
+/// the call under.
+#[derive(Debug, Default)]
+pub struct GeminiTranslator {
+    id: String,
+    model: String,
+    role_sent: bool,
+    created: u64,
+    usage: Usage,
+    /// How many calls have opened, which is the next one's OpenAI index.
+    calls: u64,
+}
+
+impl GeminiTranslator {
+    /// A translator stamping `created` on every chunk.
+    pub fn new(created: u64) -> Self {
+        GeminiTranslator {
+            created,
+            ..Default::default()
+        }
+    }
+
+    /// Token usage seen so far.
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Translate one Gemini frame into zero or more OpenAI chunks.
+    pub fn event(&mut self, data: &Value) -> Vec<Value> {
+        // The id and model repeat on every frame, and the first one to carry
+        // them is where they are taken from -- a later frame that omits them
+        // must not blank what a client has already been told.
+        if let Some(id) = data.get("responseId").and_then(Value::as_str) {
+            self.id = id.to_string();
+        }
+        if let Some(model) = data.get("modelVersion").and_then(Value::as_str) {
+            self.model = model.to_string();
+        }
+        // `usageMetadata` is cumulative rather than incremental, so the latest
+        // frame to carry one replaces what came before rather than adding to
+        // it. Summing would bill a long answer several times over.
+        if let Some(usage) = gemini::usage(data) {
+            self.usage = usage;
+        }
+
+        let Some(candidate) = data
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+        else {
+            return Vec::new();
+        };
+
+        let mut chunks = Vec::new();
+        let parts = candidate
+            .get("content")
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array);
+
+        for part in parts.into_iter().flatten() {
+            if let Some(call) = part.get("functionCall") {
+                let index = self.calls;
+                self.calls += 1;
+                chunks.extend(self.announce_role());
+                let mut delta = gemini::tools::call_at(index, call);
+                if let Some(object) = delta.as_object_mut() {
+                    object.insert("index".into(), json!(index));
+                }
+                chunks.push(self.chunk(json!({"tool_calls": [delta]}), Value::Null));
+                continue;
+            }
+            // An empty text part is a frame with nothing in it, which Gemini
+            // does send; forwarding it would be an empty chunk on the wire.
+            if let Some(text) = part.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                chunks.extend(self.announce_role());
+                chunks.push(self.chunk(json!({"content": text}), Value::Null));
+            }
+        }
+
+        // The last frame carries the reason, which is how an OpenAI client
+        // learns the turn is over.
+        if let Some(reason) = candidate.get("finishReason").and_then(Value::as_str) {
+            chunks.push(self.chunk(json!({}), gemini::finish_reason(Some(reason))));
+        }
+
+        chunks
+    }
+
     fn announce_role(&mut self) -> Vec<Value> {
         if self.role_sent {
             return Vec::new();
@@ -603,5 +775,171 @@ mod tests {
         let chunks = translate(tool_call_events());
         let last = chunks.last().expect("a final chunk");
         assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
+    }
+}
+
+#[cfg(test)]
+mod gemini_tests {
+    use super::*;
+
+    /// One Gemini frame, as `?alt=sse` delivers it: a whole response.
+    fn frame(parts: Value, finish: Option<&str>) -> Value {
+        let mut candidate = json!({"content": {"role": "model", "parts": parts}, "index": 0});
+        if let Some(finish) = finish {
+            candidate["finishReason"] = json!(finish);
+        }
+        json!({
+            "responseId": "resp-1",
+            "modelVersion": "gemini-2.5-flash",
+            "candidates": [candidate],
+        })
+    }
+
+    fn translate(frames: Vec<Value>) -> (Vec<Value>, Usage) {
+        let mut translator = GeminiTranslator::new(1_700_000_000);
+        let chunks = frames
+            .iter()
+            .flat_map(|frame| translator.event(frame))
+            .collect();
+        (chunks, translator.usage())
+    }
+
+    #[test]
+    fn the_first_text_frame_announces_the_role_once() {
+        let (chunks, _) = translate(vec![
+            frame(json!([{"text": "Hi"}]), None),
+            frame(json!([{"text": " there"}]), None),
+        ]);
+
+        assert_eq!(chunks.len(), 3, "a role chunk then two content chunks");
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(chunks[1]["choices"][0]["delta"]["content"], "Hi");
+        assert_eq!(chunks[2]["choices"][0]["delta"]["content"], " there");
+        assert!(chunks[2]["choices"][0]["delta"].get("role").is_none());
+    }
+
+    #[test]
+    fn every_chunk_repeats_the_id_and_model() {
+        let (chunks, _) = translate(vec![frame(json!([{"text": "Hi"}]), None)]);
+        for chunk in chunks {
+            assert_eq!(chunk["id"], "resp-1");
+            assert_eq!(chunk["model"], "gemini-2.5-flash");
+            assert_eq!(chunk["object"], "chat.completion.chunk");
+            assert_eq!(chunk["created"], 1_700_000_000u64);
+        }
+    }
+
+    #[test]
+    fn a_later_frame_that_omits_the_id_does_not_blank_it() {
+        // Gemini repeats them, but a client has already been told, and an
+        // empty id mid-stream is worse than a repeated one.
+        let mut translator = GeminiTranslator::new(1);
+        translator.event(&frame(json!([{"text": "a"}]), None));
+        let chunks = translator.event(&json!({"candidates": [
+            {"content": {"parts": [{"text": "b"}]}},
+        ]}));
+        assert_eq!(chunks[0]["id"], "resp-1");
+        assert_eq!(chunks[0]["model"], "gemini-2.5-flash");
+    }
+
+    #[test]
+    fn the_finish_reason_arrives_on_its_own_final_chunk() {
+        let (chunks, _) = translate(vec![
+            frame(json!([{"text": "Hi"}]), None),
+            frame(json!([]), Some("MAX_TOKENS")),
+        ]);
+        let last = chunks.last().expect("a final chunk");
+        assert_eq!(last["choices"][0]["finish_reason"], "length");
+        assert_eq!(last["choices"][0]["delta"], json!({}));
+    }
+
+    #[test]
+    fn a_refusal_reaches_the_client_as_content_filter() {
+        let (chunks, _) = translate(vec![frame(json!([]), Some("SAFETY"))]);
+        assert_eq!(chunks[0]["choices"][0]["finish_reason"], "content_filter");
+    }
+
+    #[test]
+    fn usage_is_replaced_rather_than_summed() {
+        // `usageMetadata` is cumulative, and adding it up would bill a long
+        // answer several times over.
+        let mut translator = GeminiTranslator::new(1);
+        for total in [2u64, 5, 9] {
+            translator.event(&json!({
+                "candidates": [{"content": {"parts": [{"text": "x"}]}}],
+                "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": total},
+            }));
+        }
+        assert_eq!(
+            translator.usage(),
+            Usage {
+                prompt: 12,
+                completion: 9
+            }
+        );
+    }
+
+    #[test]
+    fn a_streamed_call_carries_its_whole_arguments_at_once() {
+        // Gemini sends the call complete rather than as fragments. A client
+        // concatenating one fragment gets the same string.
+        let (chunks, _) = translate(vec![frame(
+            json!([{"functionCall": {"name": "get_weather", "args": {"city": "Oslo"}}}]),
+            Some("STOP"),
+        )]);
+
+        let call = &chunks[1]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(call["index"], 0);
+        assert_eq!(call["id"], "call_0");
+        assert_eq!(call["type"], "function");
+        assert_eq!(call["function"]["name"], "get_weather");
+        assert_eq!(call["function"]["arguments"], r#"{"city":"Oslo"}"#);
+        assert_eq!(
+            chunks.last().expect("last")["choices"][0]["finish_reason"],
+            "stop"
+        );
+    }
+
+    #[test]
+    fn the_role_is_announced_even_when_a_stream_opens_with_a_call() {
+        let (chunks, _) = translate(vec![frame(
+            json!([{"functionCall": {"name": "f", "args": {}}}]),
+            None,
+        )]);
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    }
+
+    #[test]
+    fn two_calls_get_their_own_indices_across_frames() {
+        let (chunks, _) = translate(vec![
+            frame(json!([{"functionCall": {"name": "one", "args": {}}}]), None),
+            frame(json!([{"functionCall": {"name": "two", "args": {}}}]), None),
+        ]);
+        let indices: Vec<u64> = chunks
+            .iter()
+            .filter_map(|chunk| chunk["choices"][0]["delta"]["tool_calls"][0]["index"].as_u64())
+            .collect();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn a_frame_with_nothing_in_it_produces_no_chunk() {
+        // Gemini does send them, and an empty chunk on the wire is noise.
+        let (chunks, _) = translate(vec![
+            json!({"candidates": []}),
+            json!({"usageMetadata": {"promptTokenCount": 3}}),
+            frame(json!([{"text": ""}]), None),
+        ]);
+        assert!(chunks.is_empty(), "{chunks:?}");
+    }
+
+    #[test]
+    fn the_parser_hands_gemini_frames_over_with_no_event_name() {
+        // Gemini's SSE carries `data:` only, where Anthropic names each event.
+        let mut parser = EventParser::default();
+        let events = parser.push(b"data: {\"candidates\": [{\"index\": 0}]}\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "", "no event name");
+        assert_eq!(events[0].1["candidates"][0]["index"], 0);
     }
 }

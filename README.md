@@ -145,7 +145,7 @@ Implemented and tested:
   requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI, Anthropic and Gemini,
-  with streaming and tool calling on the first two, and with the `ai` policy's
+  streaming and tool calling included on all three, with the `ai` policy's
   `modelAliases`, `prompts`, `defaults`, `overrides`, `promptCaching`, and
   `promptGuard`'s `regex`, `webhook` and `openAIModeration` rules — see
   [The LLM gateway](#the-llm-gateway)
@@ -197,9 +197,6 @@ Not supported at all:
   provider that loads and never answers is worse than one that refuses to load.
   An OpenAI-compatible endpoint in front of them works today via `openAI` with
   a `hostOverride`.
-- Streaming and tool calling **on a Gemini route** — refused with a 400 rather
-  than half served, see
-  [Gemini names the model in the URL](#gemini-names-the-model-in-the-url)
 
 ## Authentication
 
@@ -1156,7 +1153,7 @@ Anthropic gets a real translation, because three differences bite:
 - **Tool calling is spelled differently at every step**, which is its own
   section below.
 
-Gemini gets one too, and differs in a way the other two do not: see
+Gemini gets one too, and differs in ways the other two do not: see
 [Gemini names the model in the URL](#gemini-names-the-model-in-the-url).
 
 ### Gemini names the model in the URL
@@ -1203,11 +1200,66 @@ The rest is rearrangement, in the same spirit as Anthropic's:
   `file_data` and never a URL to fetch, so an OpenAI `image_url` has no honest
   translation. Text parts carry across.
 
-**Streaming and tool calling are refused with a 400 on a Gemini route in this
-build** — streaming is a different method on a different URL there, and tools
-are their own translation. Both are refused rather than half served: a client
-that asked for a stream and got one lump, or asked for tools and got an
-ordinary answer, has to work out why.
+#### A Gemini stream is a different method, and its frames are whole
+
+`stream: true` is not a field there. It is `:streamGenerateContent?alt=sse` — a
+different URL, and without `alt=sse` the API answers with a JSON *array* of
+responses rather than server-sent events.
+
+The frames themselves are not deltas. Anthropic sends named events carrying
+fragments of a message; Gemini sends a whole `GenerateContentResponse` each
+time, with no event name, holding what was produced since the last one. So it
+gets a translator of its own, and the only state that translator keeps is what
+OpenAI repeats on every chunk — the id, the model, and whether the assistant
+role has been announced.
+
+**A streamed tool call arrives in one piece.** Anthropic and OpenAI both send a
+call's arguments as fragments the client concatenates; Gemini sends the
+`functionCall` complete. So the chunks here carry the entire `arguments` string
+at once. That is valid — concatenating one fragment gives the same result — but
+it is a real difference in what goes over the wire, worth knowing before
+reading a packet capture and wondering where the deltas went.
+
+`usageMetadata` is cumulative rather than incremental, so the latest frame to
+carry one replaces what came before. Summing them would bill a long answer
+several times over.
+
+#### Tool calling on Gemini
+
+The same four legs [Tool calling](#tool-calling) below describes for Anthropic,
+with two problems that side does not have.
+
+**A result is matched by name, not by id.** OpenAI's tool result carries a
+`tool_call_id` and no name; Anthropic's `tool_result` carries the same id, so
+that leg is a rename. Gemini's `functionResponse` carries the **function's
+name**, and the call it answers carries no id at all. So the messages are
+walked in order, remembering each call's id and name as they go. A result whose
+id was never announced is dropped rather than sent under a guessed name — a
+`functionResponse` naming the wrong function is answered as though the wrong
+tool ran.
+
+The ids in that conversation are ones this gateway made up, positionally
+(`call_0`, `call_1`), because Gemini sends none and an OpenAI client needs one
+to answer under. A client that echoes back what it was given round-trips
+exactly.
+
+**A parameter schema has to be cut down.** Gemini's `Schema` is a subset of
+JSON Schema and its parser *rejects* fields it does not know rather than
+ignoring them. An OpenAI tool definition written for strict mode carries
+`additionalProperties: false`, which on its own fails the whole request with
+`Unknown name "additionalProperties"`. So the schema is filtered to the fields
+Gemini defines, recursively — a nested object's rejected field fails the request
+exactly as an outer one does — and `$schema`, `$ref`, `oneOf`, `allOf` and
+`const` go the same way.
+
+The filter is an allow-list rather than a deny-list because the two failures are
+not symmetric: a dropped constraint loosens validation the model was going to
+treat as advice anyway, while one kept unknown field refuses the call outright.
+
+Everything else is a rename: `functionDeclarations` inside a `tools` wrapper —
+Gemini's `tools` is a list of *kinds* of tool, not of functions — and
+`tool_choice` becomes `toolConfig.functionCallingConfig`, where naming a single
+function is `ANY` narrowed to it with `allowedFunctionNames`.
 
 ### Tool calling
 
