@@ -2586,3 +2586,190 @@ binds:
         .map(|_| ())
         .expect("a rule with its own OpenAI key should start");
 }
+
+fn gemini_reply() -> Value {
+    json!({
+        "responseId": "resp-1",
+        "modelVersion": "gemini-2.5-flash",
+        "candidates": [{
+            "content": {"role": "model", "parts": [{"text": "Hi"}]},
+            "finishReason": "STOP",
+            "index": 0,
+        }],
+        "usageMetadata": {
+            "promptTokenCount": 8,
+            "candidatesTokenCount": 2,
+            "totalTokenCount": 10,
+        },
+    })
+}
+
+fn gemini_request() -> Value {
+    json!({
+        "model": "gemini-2.5-flash",
+        "messages": [
+            {"role": "system", "content": "Be brief."},
+            {"role": "user", "content": "Hello"},
+        ],
+        "temperature": 0.2,
+    })
+}
+
+#[tokio::test]
+async fn a_gemini_request_names_the_model_and_the_method_in_the_path() {
+    // Unlike the other two providers, the address depends on the request.
+    let (provider_port, seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let response = post(&url, &gemini_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    assert_eq!(
+        seen.path, "/v1beta/models/gemini-2.5-flash:generateContent",
+        "the base is the endpoint; the rest is built per request"
+    );
+    assert!(
+        seen.headers
+            .iter()
+            .any(|(name, value)| name == "x-goog-api-key" && value == "test-key"),
+        "the key belongs in a header, not the query string: {:?}",
+        seen.headers
+    );
+    assert!(
+        !seen.headers.iter().any(|(name, _)| name == "authorization"),
+        "a bearer token is not how Gemini is called: {:?}",
+        seen.headers
+    );
+
+    let body = seen.body.as_ref().expect("a body");
+    assert_eq!(body["contents"][0]["role"], "user");
+    assert_eq!(body["contents"][0]["parts"][0]["text"], "Hello");
+    assert_eq!(body["systemInstruction"]["parts"][0]["text"], "Be brief.");
+    assert_eq!(body["generationConfig"]["temperature"], 0.2);
+    assert!(
+        body.get("model").is_none() && body.get("messages").is_none(),
+        "Gemini rejects fields it does not know: {body}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_gemini_response_comes_back_in_openai_shape() {
+    let (provider_port, _seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let answered: Value = post(&url, &gemini_request())
+        .await
+        .json()
+        .await
+        .expect("a JSON answer");
+
+    assert_eq!(answered["object"], "chat.completion");
+    assert_eq!(answered["id"], "resp-1");
+    assert_eq!(answered["model"], "gemini-2.5-flash");
+    assert_eq!(answered["choices"][0]["message"]["role"], "assistant");
+    assert_eq!(answered["choices"][0]["message"]["content"], "Hi");
+    assert_eq!(answered["choices"][0]["finish_reason"], "stop");
+    assert_eq!(answered["usage"]["prompt_tokens"], 8);
+    assert_eq!(answered["usage"]["completion_tokens"], 2);
+    assert_eq!(answered["usage"]["total_tokens"], 10);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_model_name_that_would_choose_another_endpoint_never_leaves_the_gateway() {
+    // The one place a client's string reaches a URL the gateway signs with its
+    // own key.
+    let (provider_port, seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let mut hostile = gemini_request();
+    hostile["model"] = json!("../../v1beta/tunedModels/private");
+    let response = post(&url, &hostile).await;
+
+    assert_eq!(response.status().as_u16(), 400);
+    assert!(
+        seen.lock().expect("lock").body.is_none(),
+        "nothing should have been dialled"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_forced_model_decides_the_gemini_path() {
+    // The URL is built after the whole policy chain has had its say, so the
+    // backend's own model is what ends up in it.
+    let (provider_port, seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start(
+        "gemini",
+        provider_port,
+        "                      model: gemini-2.5-pro",
+    )
+    .await;
+
+    let response = post(&url, &gemini_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        seen.lock().expect("lock").path,
+        "/v1beta/models/gemini-2.5-pro:generateContent"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_alias_decides_the_gemini_path_too() {
+    let (provider_port, seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "gemini",
+        provider_port,
+        "",
+        "              ai:\n                modelAliases:\n                  fast: gemini-2.5-flash-lite\n",
+    )
+    .await;
+
+    let mut asked = gemini_request();
+    asked["model"] = json!("fast");
+    let response = post(&url, &asked).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        seen.lock().expect("lock").path,
+        "/v1beta/models/gemini-2.5-flash-lite:generateContent"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn streaming_and_tools_are_refused_on_gemini_rather_than_half_served() {
+    // Both are the next slice. Refusing beats answering a streaming request in
+    // one piece, or dropping tools and looking like a model that chose not to
+    // call one.
+    let (provider_port, seen) = provider(gemini_reply(), None).await;
+    let (url, shutdown) = start("gemini", provider_port, "").await;
+
+    let mut streamed = gemini_request();
+    streamed["stream"] = json!(true);
+    let response = post(&url, &streamed).await;
+    assert_eq!(response.status().as_u16(), 400);
+    assert!(
+        response.text().await.expect("a body").contains("streaming"),
+        "the refusal should say what is missing"
+    );
+
+    let mut with_tools = gemini_request();
+    with_tools["tools"] = json!([{"type": "function", "function": {"name": "f"}}]);
+    let response = post(&url, &with_tools).await;
+    assert_eq!(response.status().as_u16(), 400);
+
+    assert!(
+        seen.lock().expect("lock").body.is_none(),
+        "neither should have reached the provider"
+    );
+
+    shutdown.cancel();
+}

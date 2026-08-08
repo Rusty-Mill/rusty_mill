@@ -15,7 +15,8 @@ pub enum ProviderError {
     /// The provider itself is not implemented here.
     #[error(
         "{at}: the `{provider}` provider is not served by this build; \
-         `openAI` (or any OpenAI-compatible endpoint via `hostOverride`) and `anthropic` are"
+         `openAI` (or any OpenAI-compatible endpoint via `hostOverride`), `anthropic` and \
+         `gemini` are"
     )]
     Unsupported {
         /// Where in the configuration it came from.
@@ -48,6 +49,8 @@ pub enum Provider {
     OpenAi(Settings),
     /// Anthropic's Messages API.
     Anthropic(Settings),
+    /// Google's Gemini API.
+    Gemini(Settings),
 }
 
 /// Settings shared by every provider.
@@ -86,10 +89,11 @@ impl Provider {
         match provider {
             AiProvider::OpenAi(params) => Ok(Provider::OpenAi(settings(params)?)),
             AiProvider::Anthropic(params) => Ok(Provider::Anthropic(settings(params)?)),
-            // Gemini, Vertex and Bedrock each need their own request shape and,
-            // for the latter two, a signing scheme. Refusing at startup beats
-            // accepting the config and failing every request.
-            AiProvider::Gemini(_) => unsupported("gemini"),
+            AiProvider::Gemini(params) => Ok(Provider::Gemini(settings(params)?)),
+            // Vertex and Bedrock speak Gemini-like and Anthropic-like shapes
+            // respectively, but sign with cloud credentials rather than an API
+            // key -- a different kind of work from a translation. Refusing at
+            // startup beats accepting the config and failing every request.
             AiProvider::Vertex(_) => unsupported("vertex"),
             AiProvider::Bedrock(_) => unsupported("bedrock"),
         }
@@ -100,12 +104,15 @@ impl Provider {
         match self {
             Provider::OpenAi(_) => "openai",
             Provider::Anthropic(_) => "anthropic",
+            Provider::Gemini(_) => "gemini",
         }
     }
 
     fn settings(&self) -> &Settings {
         match self {
-            Provider::OpenAi(settings) | Provider::Anthropic(settings) => settings,
+            Provider::OpenAi(settings)
+            | Provider::Anthropic(settings)
+            | Provider::Gemini(settings) => settings,
         }
     }
 
@@ -134,6 +141,41 @@ impl Provider {
                     .trim_end_matches('/');
                 format!("{base}/v1/messages")
             }
+            // The base only: Gemini names the model and the method in the path,
+            // so the rest of the URL is a function of the request and is built
+            // per call. See `request_url`.
+            Provider::Gemini(_) => {
+                let base = settings
+                    .host
+                    .as_deref()
+                    .unwrap_or("https://generativelanguage.googleapis.com")
+                    .trim_end_matches('/');
+                format!("{base}/v1beta")
+            }
+        }
+    }
+
+    /// The URL one request goes to.
+    ///
+    /// For OpenAI and Anthropic this is the endpoint resolved at startup: the
+    /// model is a body field and a stream is the same URL with `stream: true`,
+    /// so nothing about the address depends on the request.
+    ///
+    /// Gemini names both in the path — `models/{model}:generateContent`, or
+    /// `:streamGenerateContent?alt=sse` — so its URL cannot be known until the
+    /// caller's model has been resolved. `model` has been through
+    /// [`translate::gemini::model_path`] by then, which is what keeps a
+    /// client-controlled string from choosing the method.
+    pub fn request_url(&self, endpoint: &str, model_path: &str, streaming: bool) -> String {
+        match self {
+            Provider::OpenAi(_) | Provider::Anthropic(_) => endpoint.to_string(),
+            Provider::Gemini(_) => {
+                let method = match streaming {
+                    true => "streamGenerateContent?alt=sse",
+                    false => "generateContent",
+                };
+                format!("{endpoint}/{model_path}:{method}")
+            }
         }
     }
 
@@ -154,15 +196,20 @@ impl Provider {
                     .trim_end_matches('/');
                 Some(format!("{base}/v1/moderations"))
             }
-            Provider::Anthropic(_) => None,
+            Provider::Anthropic(_) | Provider::Gemini(_) => None,
         }
     }
 
     /// Headers carrying the provider credential.
     ///
-    /// The two providers spell this differently, and Anthropic additionally
-    /// requires a version header on every request — omitting it is rejected,
-    /// not defaulted.
+    /// Each provider spells this differently. Anthropic additionally requires
+    /// a version header on every request — omitting it is rejected, not
+    /// defaulted.
+    ///
+    /// Gemini also accepts its key as a `?key=` query parameter, and this uses
+    /// the header instead: a credential in a URL is written to every access log
+    /// between here and Google, and to this gateway's own if a request is ever
+    /// traced.
     pub fn auth_headers(&self, key: Option<&str>) -> Vec<(&'static str, String)> {
         let mut headers = Vec::new();
         match self {
@@ -177,6 +224,11 @@ impl Provider {
                 }
                 headers.push(("anthropic-version", ANTHROPIC_VERSION.to_string()));
             }
+            Provider::Gemini(_) => {
+                if let Some(key) = key {
+                    headers.push(("x-goog-api-key", key.to_string()));
+                }
+            }
         }
         headers
     }
@@ -188,6 +240,7 @@ impl Provider {
             // fields this crate does not know about intact.
             Provider::OpenAi(_) => Ok(body.clone()),
             Provider::Anthropic(_) => translate::to_anthropic(body),
+            Provider::Gemini(_) => translate::gemini::to_gemini(body),
         }
     }
 
@@ -199,6 +252,7 @@ impl Provider {
         match self {
             Provider::OpenAi(_) => None,
             Provider::Anthropic(_) => Some(translate::from_anthropic(body, created)),
+            Provider::Gemini(_) => Some(translate::gemini::from_gemini(body, created)),
         }
     }
 
@@ -207,7 +261,16 @@ impl Provider {
         match self {
             Provider::OpenAi(_) => translate::openai_usage(body),
             Provider::Anthropic(_) => translate::anthropic_usage(body),
+            Provider::Gemini(_) => translate::gemini::usage(body),
         }
+    }
+
+    /// Whether this provider's URL names the model.
+    ///
+    /// True only for Gemini, and it is why the address is built per request
+    /// rather than resolved once at startup.
+    pub fn needs_model_in_path(&self) -> bool {
+        matches!(self, Provider::Gemini(_))
     }
 
     /// Whether a streamed response needs re-framing.
@@ -219,7 +282,10 @@ impl Provider {
     ///
     /// Anthropic does, as `cache_control` on a content block. OpenAI caches
     /// long prefixes by itself and takes no configuration for it, so marking
-    /// one there would be a field nobody reads.
+    /// one there would be a field nobody reads. Gemini caches through an API of
+    /// its own — content is uploaded, given a handle and referenced by
+    /// `cachedContent` — which is not a breakpoint in a request and cannot be
+    /// driven from this policy.
     pub fn caches_explicitly(&self) -> bool {
         matches!(self, Provider::Anthropic(_))
     }
@@ -327,8 +393,9 @@ mod tests {
 
     #[test]
     fn unimplemented_providers_fail_at_startup() {
+        // Vertex and Bedrock sign with cloud credentials rather than an API
+        // key, which is a different kind of work from a translation.
         for provider in [
-            AiProvider::Gemini(params(None, None)),
             AiProvider::Vertex(params(None, None)),
             AiProvider::Bedrock(params(None, None)),
         ] {
@@ -336,6 +403,71 @@ mod tests {
                 .expect_err("should not be served by this build");
             assert!(err.to_string().contains("binds[0]"), "got: {err}");
         }
+    }
+
+    #[test]
+    fn gemini_builds_its_url_from_the_request() {
+        // The model and the method are both in the path, so unlike the other
+        // two providers the address is not knowable until the caller has asked
+        // for something.
+        let gemini = Provider::new(&AiProvider::Gemini(params(None, None)), "t").expect("ok");
+        assert_eq!(
+            gemini.endpoint(),
+            "https://generativelanguage.googleapis.com/v1beta",
+            "the base only"
+        );
+        assert!(gemini.needs_model_in_path());
+        assert_eq!(
+            gemini.request_url(&gemini.endpoint(), "models/gemini-2.5-flash", false),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        );
+        assert_eq!(
+            gemini.request_url(&gemini.endpoint(), "models/gemini-2.5-flash", true),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+        );
+
+        let hosted = Provider::new(
+            &AiProvider::Gemini(params(None, Some("https://proxy.internal/"))),
+            "t",
+        )
+        .expect("ok");
+        assert_eq!(hosted.endpoint(), "https://proxy.internal/v1beta");
+    }
+
+    #[test]
+    fn a_request_url_is_the_endpoint_itself_for_the_other_providers() {
+        for provider in [
+            AiProvider::OpenAi(params(None, None)),
+            AiProvider::Anthropic(params(None, None)),
+        ] {
+            let provider = Provider::new(&provider, "t").expect("ok");
+            assert!(!provider.needs_model_in_path());
+            assert_eq!(
+                provider.request_url("https://example.test/v1/x", "models/ignored", true),
+                "https://example.test/v1/x",
+                "the model is a body field and a stream is the same URL"
+            );
+        }
+    }
+
+    #[test]
+    fn geminis_key_goes_in_a_header_rather_than_the_query_string() {
+        // A credential in a URL is written to every access log between here
+        // and Google.
+        let gemini = Provider::new(&AiProvider::Gemini(params(None, None)), "t").expect("ok");
+        assert_eq!(
+            gemini.auth_headers(Some("k")),
+            vec![("x-goog-api-key", "k".to_string())]
+        );
+        assert!(gemini.auth_headers(None).is_empty());
+    }
+
+    #[test]
+    fn gemini_lends_no_moderation_endpoint() {
+        // Its key is not an OpenAI credential; see `guard::moderation`.
+        let gemini = Provider::new(&AiProvider::Gemini(params(None, None)), "t").expect("ok");
+        assert!(gemini.moderation_endpoint().is_none());
+        assert!(!gemini.caches_explicitly());
     }
 
     #[test]

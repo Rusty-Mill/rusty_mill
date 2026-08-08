@@ -1,7 +1,11 @@
-//! Translating between the OpenAI chat-completions wire format and
-//! Anthropic's Messages API.
+//! Translating between the OpenAI chat-completions wire format and the shapes
+//! other providers speak.
 //!
-//! # Why only Anthropic needs types
+//! Anthropic's Messages API is here; Gemini's `generateContent` is in
+//! [`gemini`], because it differs in more than field names — the model is in
+//! the URL rather than the body, and streaming is a different method.
+//!
+//! # Why only a translated provider needs types
 //!
 //! For an OpenAI-compatible provider the gateway forwards the request body
 //! essentially unchanged, so it works on the raw JSON and never builds a typed
@@ -27,6 +31,8 @@
 //!   OpenAI calls `stop`, and a client switching providers should not have to
 //!   learn both.
 
+pub mod gemini;
+
 use serde_json::{Map, Value, json};
 
 use crate::tools;
@@ -49,6 +55,25 @@ pub enum TranslateError {
     /// `messages` was missing or not an array.
     #[error("`messages` is missing or not an array")]
     Messages,
+
+    /// The caller named a model that cannot go in a URL path.
+    #[error(
+        "`{model}` is not a usable model name: Gemini names the model in the request path, so \
+         it may hold only letters, digits, dots, dashes and underscores"
+    )]
+    ModelName {
+        /// What the caller asked for.
+        model: String,
+    },
+
+    /// Something this build cannot express for the provider in front of it.
+    #[error("{what} is not implemented for the `{provider}` provider in this build")]
+    Unsupported {
+        /// The provider that cannot express it.
+        provider: &'static str,
+        /// What was asked for.
+        what: &'static str,
+    },
 }
 
 /// Token counts, however the provider spelled them.
