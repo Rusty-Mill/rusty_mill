@@ -33,15 +33,17 @@
 mod oneof;
 
 mod backend;
+mod inventory;
 mod matcher;
 mod methods;
 mod policy;
 
 pub use backend::{
-    AiBackend, AiProvider, AiProviderParams, Backend, BackendTarget, FilterAction, McpBackend,
-    McpTarget, McpTargetKind, NameMode, ServiceRef, SseTarget, StdioTarget, StreamableHttpTarget,
-    ToolFilter,
+    AiBackend, AiProvider, AiProviderParams, Backend, BackendTarget, DynamicBackend, FilterAction,
+    McpBackend, McpTarget, McpTargetKind, NameMode, ServiceRef, SseTarget, StdioTarget,
+    StreamableHttpTarget, ToolFilter,
 };
+pub use inventory::{Health, Service, ServicePorts, Workload};
 pub use matcher::{
     HeaderMatch, HeaderMatchValue, PathMatch, QueryMatch, QueryMatchValue, RouteMatch,
 };
@@ -96,6 +98,17 @@ pub struct Config {
     /// Workload identity and telemetry settings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<GlobalConfig>,
+
+    /// Services a `service` backend resolves against.
+    ///
+    /// The inventory a control plane would otherwise supply, written down. See
+    /// [`inventory`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<Service>,
+
+    /// The instances backing those services.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workloads: Vec<Workload>,
 }
 
 impl Config {
@@ -147,6 +160,7 @@ impl Config {
     /// startup rather than pretending full coverage.
     pub fn lint(&self) -> Vec<String> {
         let mut findings = Vec::new();
+        inventory::lint(&self.services, &self.workloads, &mut findings);
         for (b, bind) in self.binds.iter().enumerate() {
             for (l, listener) in bind.listeners.iter().enumerate() {
                 let at = format!("binds[{b}].listeners[{l}]");

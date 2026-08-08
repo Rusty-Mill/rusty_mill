@@ -66,6 +66,11 @@ async fn upstream(name: &'static str) -> Upstream {
 
 /// Boot a gateway from a route body, returning its base URL.
 async fn start(route: &str) -> (String, CancellationToken) {
+    start_with_inventory(route, "").await
+}
+
+/// The same, with a `services:`/`workloads:` inventory spliced in.
+async fn start_with_inventory(route: &str, inventory: &str) -> (String, CancellationToken) {
     let port = free_port().await;
     let yaml = format!(
         r#"
@@ -74,6 +79,7 @@ binds:
     listeners:
       - routes:
 {route}
+{inventory}
 "#
     );
 
@@ -431,9 +437,7 @@ async fn a_route_mixing_host_with_an_unsupported_kind_is_refused() {
             backends:
               - host: "127.0.0.1:{}"
                 weight: 1
-              - service:
-                  name: other
-                  port: 80
+              - dynamic: {{}}
                 weight: 1"#,
         up.port
     ))
@@ -450,4 +454,351 @@ async fn a_route_mixing_host_with_an_unsupported_kind_is_refused() {
     );
 
     shutdown.cancel();
+}
+
+/// An inventory naming `echo` backed by the given upstream ports.
+fn inventory(ports: &[u16]) -> String {
+    let mut yaml = String::from(
+        "services:\n  - name: echo\n    namespace: default\n    ports:\n      80: 0\nworkloads:\n",
+    );
+    // The service port map is rewritten per workload below, so the service's
+    // own target port is never the one used; `0` here would be a bug if it
+    // ever were, which is the point of writing it down.
+    for (index, port) in ports.iter().enumerate() {
+        yaml.push_str(&format!(
+            "  - name: echo-{index}\n    namespace: default\n    workloadIps: [\"127.0.0.1\"]\n    \
+             services:\n      \"default/echo\":\n        80: {port}\n"
+        ));
+    }
+    yaml
+}
+
+#[tokio::test]
+async fn a_service_backend_reaches_the_workload_behind_it() {
+    let up = upstream("service").await;
+    let (base, shutdown) = start_with_inventory(
+        r#"          - name: by-service
+            backends:
+              - service:
+                  name: echo
+                  port: 80"#,
+        &inventory(&[up.port]),
+    )
+    .await;
+
+    let answered = get(&format!("{base}/hello")).await;
+    assert_eq!(answered["upstream"], "service");
+    assert_eq!(answered["path"], "/hello");
+    assert_eq!(up.hits.load(Ordering::Relaxed), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_service_spreads_traffic_across_its_workloads() {
+    let one = upstream("one").await;
+    let two = upstream("two").await;
+    let (base, shutdown) = start_with_inventory(
+        r#"          - name: by-service
+            backends:
+              - service:
+                  name: echo
+                  port: 80"#,
+        &inventory(&[one.port, two.port]),
+    )
+    .await;
+
+    for _ in 0..10 {
+        let _ = get(&format!("{base}/")).await;
+    }
+    assert_eq!(one.hits.load(Ordering::Relaxed), 5);
+    assert_eq!(two.hits.load(Ordering::Relaxed), 5);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_service_beside_a_host_gets_half_the_traffic_not_two_thirds() {
+    // The reason the weights are scaled rather than repeated per workload.
+    let one = upstream("service-one").await;
+    let two = upstream("service-two").await;
+    let literal = upstream("literal").await;
+
+    let (base, shutdown) = start_with_inventory(
+        &format!(
+            r#"          - name: mixed
+            backends:
+              - service:
+                  name: echo
+                  port: 80
+                weight: 1
+              - host: "127.0.0.1:{}"
+                weight: 1"#,
+            literal.port
+        ),
+        &inventory(&[one.port, two.port]),
+    )
+    .await;
+
+    for _ in 0..12 {
+        let _ = get(&format!("{base}/")).await;
+    }
+
+    let service_hits = one.hits.load(Ordering::Relaxed) + two.hits.load(Ordering::Relaxed);
+    assert_eq!(service_hits, 6, "half the route, split two ways");
+    assert_eq!(literal.hits.load(Ordering::Relaxed), 6);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_unhealthy_workload_receives_nothing() {
+    let good = upstream("good").await;
+    let bad = upstream("bad").await;
+    let (base, shutdown) = start_with_inventory(
+        r#"          - name: by-service
+            backends:
+              - service:
+                  name: echo
+                  port: 80"#,
+        &format!(
+            "services:\n  - name: echo\n    namespace: default\nworkloads:\n\
+             \x20 - name: good\n    workloadIps: [\"127.0.0.1\"]\n    services:\n      \
+             \"default/echo\":\n        80: {}\n\
+             \x20 - name: bad\n    workloadIps: [\"127.0.0.1\"]\n    status: unhealthy\n    \
+             services:\n      \"default/echo\":\n        80: {}\n",
+            good.port, bad.port
+        ),
+    )
+    .await;
+
+    for _ in 0..4 {
+        let _ = get(&format!("{base}/")).await;
+    }
+    assert_eq!(good.hits.load(Ordering::Relaxed), 4);
+    assert_eq!(bad.hits.load(Ordering::Relaxed), 0);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_service_the_inventory_does_not_hold_fails_at_startup() {
+    // A route that could never serve a request is a typo in a file-driven
+    // inventory, not a cluster in flux.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - service:
+                  name: missing
+                  port: 80
+services:
+  - name: echo
+    namespace: default
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an unresolvable service should not start");
+    assert!(err.to_string().contains("missing"), "got: {err}");
+    assert!(
+        err.to_string().contains("default/echo"),
+        "the error should say what the inventory does hold: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_dynamic_route_dials_the_address_the_client_asked_for() {
+    // The plain forward-proxy reading: the request's own authority.
+    let up = upstream("chosen").await;
+    let (base, shutdown) = start(
+        r#"          - name: forward
+            backends:
+              - dynamic: {}"#,
+    )
+    .await;
+
+    // `Host` names the upstream; the gateway is reached by address.
+    let answered: Value = reqwest::Client::new()
+        .get(format!("{base}/hello"))
+        .header("host", format!("127.0.0.1:{}", up.port))
+        .send()
+        .await
+        .expect("the gateway should answer")
+        .json()
+        .await
+        .expect("upstream should answer with JSON");
+
+    assert_eq!(answered["upstream"], "chosen");
+    assert_eq!(answered["path"], "/hello");
+    assert_eq!(up.hits.load(Ordering::Relaxed), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_dynamic_target_expression_decides_instead() {
+    // Where the address the client dialled is not the one to use: a trusted
+    // hop's header picks the upstream.
+    let asked = upstream("asked-for").await;
+    let computed = upstream("computed").await;
+    let (base, shutdown) = start(&format!(
+        r#"          - name: forward
+            backends:
+              - dynamic:
+                  target: '"127.0.0.1:{}"'"#,
+        computed.port
+    ))
+    .await;
+
+    let answered: Value = reqwest::Client::new()
+        .get(format!("{base}/"))
+        .header("host", format!("127.0.0.1:{}", asked.port))
+        .send()
+        .await
+        .expect("the gateway should answer")
+        .json()
+        .await
+        .expect("upstream should answer with JSON");
+
+    assert_eq!(answered["upstream"], "computed");
+    assert_eq!(
+        asked.hits.load(Ordering::Relaxed),
+        0,
+        "the expression decides, not the address the client dialled"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_dynamic_expression_reading_a_header_chooses_per_request() {
+    let one = upstream("one").await;
+    let two = upstream("two").await;
+    let (base, shutdown) = start(
+        r#"          - name: forward
+            backends:
+              - dynamic:
+                  target: 'request.headers["x-upstream"]'"#,
+    )
+    .await;
+
+    for (port, expected) in [(one.port, "one"), (two.port, "two")] {
+        let answered: Value = reqwest::Client::new()
+            .get(format!("{base}/"))
+            .header("x-upstream", format!("127.0.0.1:{port}"))
+            .send()
+            .await
+            .expect("the gateway should answer")
+            .json()
+            .await
+            .expect("upstream should answer with JSON");
+        assert_eq!(answered["upstream"], expected);
+    }
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_dynamic_request_naming_nowhere_is_refused() {
+    let (base, shutdown) = start(
+        r#"          - name: forward
+            backends:
+              - dynamic:
+                  target: 'request.headers["x-upstream"]'"#,
+    )
+    .await;
+
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("the gateway should answer");
+    assert_eq!(response.status(), 400, "no guess is made");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_dynamic_backend_cannot_be_weighted_against_a_fixed_one() {
+    // A share of "wherever the client asked for" is not a destination anyone
+    // can reason about.
+    let up = upstream("fixed").await;
+    let (base, shutdown) = start(&format!(
+        r#"          - name: mixed
+            backends:
+              - host: "127.0.0.1:{}"
+                weight: 1
+              - dynamic: {{}}
+                weight: 1"#,
+        up.port
+    ))
+    .await;
+
+    let response = reqwest::get(format!("{base}/"))
+        .await
+        .expect("the gateway should answer");
+    assert_eq!(response.status(), 501);
+    assert_eq!(up.hits.load(Ordering::Relaxed), 0);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_dynamic_target_that_does_not_compile_fails_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - backends:
+              - dynamic:
+                  target: "this is not cel"
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an expression that cannot be compiled should not start");
+    assert!(err.to_string().contains("CEL"), "got: {err}");
+}
+
+#[tokio::test]
+async fn check_says_a_dynamic_route_lets_the_client_choose() {
+    // Worth saying to anyone running `--check`, not only in the startup log of
+    // a gateway already serving.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - dynamic: {}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("client chooses the upstream")),
+        "{findings:?}"
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("the address the client dialled")),
+        "{findings:?}"
+    );
 }

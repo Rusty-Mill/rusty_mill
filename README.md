@@ -139,8 +139,11 @@ Implemented and tested:
   lists and upstream's CEL `rules`, see [Authorization](#authorization)
 - `mcpGuardrails`: external MCP policy processors over gRPC, able to rewrite as
   well as refuse — see [Guardrails](#guardrails)
-- `host` backends: HTTP reverse proxying with weighted load balancing,
-  `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
+- `host` and `service` backends: HTTP reverse proxying with weighted load
+  balancing, `urlRewrite`, header modifiers and `backendAuth`, over literal
+  addresses or a written-down service inventory — see [Proxying](#proxying)
+- `dynamic` backends: a forward proxy whose upstream comes from the request —
+  see [The client picks the upstream](#the-client-picks-the-upstream)
 - `retry` with backoff, and `localRateLimit` token buckets counting either
   requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
@@ -180,7 +183,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
   whole federation; see
   [Reaching the upstream request](#reaching-the-upstream-request)
-- `service` backends (service discovery), `dynamic` backends
 - SNI: one certificate per port. Two listeners on one port with different
   certificates is a startup error rather than a guess
 - `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
@@ -1039,6 +1041,114 @@ answers, so `backendRequestTimeout` genuinely bounds the wait here.
 A route mixing `host` with a backend kind this build cannot serve is refused
 rather than served: silently dropping the unsupported share onto the hosts
 would send traffic somewhere the operator never asked for.
+
+### Naming a service instead of an address
+
+Upstream learns services and their endpoints from a control plane, and its
+local configuration file can carry that same inventory written down by hand.
+That is the half a file-driven gateway can serve, and it is what `service`
+backends resolve against:
+
+```yaml
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - backends:
+              - service:
+                  name: default/echo.default.svc.cluster.local
+                  port: 80
+
+services:
+  - name: echo
+    namespace: default
+    hostname: echo.default.svc.cluster.local
+    ports:
+      80: 8080              # asked for : listened on
+
+workloads:
+  - name: echo-1
+    namespace: default
+    workloadIps: ["10.0.0.1"]
+    services:
+      "default/echo.default.svc.cluster.local": {}
+  - name: echo-2
+    namespace: default
+    workloadIps: ["10.0.0.2"]
+    services:
+      "default/echo.default.svc.cluster.local": {}
+```
+
+The two lists are **joined rather than nested**, exactly as a control plane
+sends them: a service declares a hostname and its ports, and a workload claims
+membership. Nothing in a service names its endpoints, which is what lets
+instances come and go without rewriting it.
+
+A backend may name a service three ways — the full `namespace/hostname`, the
+hostname, or the short name — most specific first. A short name two namespaces
+share is reported as **ambiguous** rather than resolved by sort order.
+
+Ports are mapped twice: the service maps the port a caller asks for onto the
+port a workload listens on, and a workload's own entry may map it again,
+because one instance in a set can differ from the rest. The workload's answer
+wins where it has one.
+
+**Weights are split, not repeated.** A route sending half its traffic to a
+service and half to a host means half, however many instances the service has —
+so every backend's weight is scaled by the least common multiple of the
+endpoint counts and divided by its own. Giving each instance the backend's
+weight would make a three-instance service take three quarters. Weight `0`
+still drains, since scaling must not lift a drained backend back in.
+
+An unhealthy workload is left out of the set. A service nothing healthy backs
+is a **startup failure**: a route pointed at one would answer every call with
+an error, and in a file-driven inventory nothing is going to come along and
+fill it in. So is a service the inventory does not hold, and the error names
+what it does hold.
+
+Everything else a control plane sends — `vips`, `waypoint`, `locality`,
+`subjectAltNames`, `loadBalancer` — describes a mesh this gateway is not part
+of. It parses so an upstream file loads, and `--check` names it.
+
+### The client picks the upstream
+
+A `dynamic` backend has no address in the configuration at all. The route
+becomes a forward proxy:
+
+```yaml
+backends:
+  - dynamic: {}                                     # the request's own authority
+  - dynamic:
+      target: 'request.headers["x-upstream"]'       # or CEL over the request
+```
+
+This is worth stating plainly, because it is the whole feature and also its
+whole risk. With no `target`, the route dials whatever authority the request
+carries — so **anyone who can reach the listener can make the gateway open a
+connection anywhere the gateway can**, from the gateway's own network position.
+That is a forward proxy, which is a legitimate thing to run and a catastrophic
+thing to run open. A route carrying one is logged at startup and reported by
+`--check`, and both say to put authentication and authorization in front of it.
+
+A `target` expression moves the decision; it does not remove it. The expression
+reads the client's request too, so pointing it at a header only helps if a hop
+the operator trusts is the one setting that header and a policy strips whatever
+the client sent. It may read `request.headers`, `request.method`,
+`request.path` and `request.authority`, and must produce a `host:port` string —
+anything else, or a request naming nowhere at all, is a **400** rather than a
+guess. An expression that does not compile is a startup failure, since falling
+back to the request's authority would quietly choose a different upstream.
+
+Two things follow from having no fixed address. A `dynamic` backend cannot be
+weighted against one that has one — a share of "wherever the client asked for"
+is not a destination anyone can reason about — so it must be the only backend
+on its route. And `urlRewrite.authority` is ignored with a warning: a forced
+authority would mean the request never chooses one, which is the opposite of
+the point. A path rewrite still applies.
+
+Retries go back to the same place, because there is no second instance to fail
+over to and inventing one would mean dialling somewhere the request did not
+name.
 
 ## Agent-to-agent
 
