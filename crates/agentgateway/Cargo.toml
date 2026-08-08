@@ -81,6 +81,9 @@ rsa = "0.9"
 rand = "0.8"
 tempfile = "3"
 rcgen = "0.13"
+# `flock`, for the port bands in tests/common. A safe wrapper, which matters
+# here: the workspace forbids `unsafe`, tests included.
+rustix = { version = "1", features = ["fs"] }
 # `http2` is dev-only: the scripted gRPC processor in `mcp_guardrails.rs`
 # is the only thing here that serves h2. The gateway is a gRPC *client*.
 axum = { workspace = true, features = ["json", "tokio", "http1", "http2"] }
