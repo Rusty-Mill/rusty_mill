@@ -77,7 +77,7 @@ pub struct Policies {
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 3] = [
+        let unimplemented: [(&str, bool); 2] = [
             (
                 "extAuthz.includeBody",
                 self.ext_authz
@@ -85,12 +85,6 @@ impl Policies {
                     .is_some_and(|e| e.include_body.is_some()),
             ),
             ("ai", self.ai.is_some()),
-            (
-                "localRateLimit[type=tokens]",
-                self.local_rate_limit
-                    .iter()
-                    .any(|limit| limit.kind == RateLimitKind::Tokens),
-            ),
         ];
         for (name, present) in unimplemented {
             if present {

@@ -873,6 +873,93 @@ binds:
 }
 
 #[test]
+fn a_token_rate_limit_on_an_ai_route_is_not_reported() {
+    // It is charged the count the provider reports, so it applies there.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              localRateLimit:
+                - maxTokens: 100000
+                  tokensPerFill: 100000
+                  fillInterval: 1h
+                  type: tokens
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
+fn a_token_rate_limit_anywhere_else_is_reported() {
+    // Nothing there reports a token count, so the bucket would sit full and
+    // refuse nothing -- a rate limit that looks like protection and is not.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              localRateLimit:
+                - maxTokens: 100000
+                  tokensPerFill: 100000
+                  fillInterval: 1h
+                  type: tokens
+            backends:
+              - host: "10.0.0.1:8080"
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("localRateLimit[type=tokens]") && f.contains("never be spent")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_request_limit_beside_a_token_limit_on_an_ai_route_is_fine() {
+    // The two kinds coexist: requests are charged before dispatch, tokens
+    // after the provider answers.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              localRateLimit:
+                - maxTokens: 60
+                  tokensPerFill: 60
+                  fillInterval: 60s
+                - maxTokens: 100000
+                  tokensPerFill: 100000
+                  fillInterval: 1h
+                  type: tokens
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
 fn retry_on_an_mcp_route_is_reported_rather_than_invented() {
     // An MCP route holds a session rather than making a request it could make
     // again: `codes` names statuses nothing there returns, and replaying a

@@ -535,11 +535,40 @@ impl Route {
         ));
     }
 
+    /// Report a `type: tokens` limit on a route with nothing to count.
+    ///
+    /// A token bucket of this kind is charged the token count a model provider
+    /// reports, which only an `ai` backend ever sees. Anywhere else the limit
+    /// would never be charged, so it would sit at full capacity and refuse
+    /// nothing — a rate limit that looks like protection and is not.
+    fn lint_token_rate_limit(&self, policies: &Policies, at: &str, findings: &mut Vec<String>) {
+        let tokens = policies
+            .local_rate_limit
+            .iter()
+            .any(|limit| limit.kind == RateLimitKind::Tokens);
+        if !tokens {
+            return;
+        }
+        if self
+            .backends
+            .iter()
+            .any(|b| matches!(b.target, BackendTarget::Ai(_)))
+        {
+            return;
+        }
+        findings.push(format!(
+            "{at}.policies.localRateLimit[type=tokens]: only an `ai` backend reports a token \
+             count to charge, so this bucket would never be spent; use `type: requests` to \
+             limit this route"
+        ));
+    }
+
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         if let Some(policies) = &self.policies {
             policies.lint(at, findings);
             self.lint_url_rewrite(policies, at, findings);
             self.lint_retry(policies, at, findings);
+            self.lint_token_rate_limit(policies, at, findings);
         }
         self.lint_via(at, findings);
         for (i, backend) in self.backends.iter().enumerate() {

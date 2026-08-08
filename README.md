@@ -141,7 +141,8 @@ Implemented and tested:
   well as refuse — see [Guardrails](#guardrails)
 - `host` backends: HTTP reverse proxying with weighted load balancing,
   `urlRewrite`, header modifiers and `backendAuth` — see [Proxying](#proxying)
-- `retry` with backoff, and `localRateLimit` token buckets — see
+- `retry` with backoff, and `localRateLimit` token buckets counting either
+  requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
   included — see [The LLM gateway](#the-llm-gateway)
@@ -1282,6 +1283,59 @@ costs a signature verification and possibly a JWKS fetch. It runs after the
 CORS preflight branch for the same reason authentication does — a browser
 reports a refused preflight as an opaque CORS error, hiding the 429 the caller
 needs to see.
+
+### Limiting LLM tokens rather than requests
+
+`type: tokens` counts what a model provider reported, not how many calls were
+made. On an `ai` route it is usually the limit that matters: ten requests are
+cheap and one 200k-token context is not.
+
+```yaml
+policies:
+  localRateLimit:
+    - maxTokens: 60            # 60 requests a minute
+      tokensPerFill: 60
+      fillInterval: 60s
+    - maxTokens: 200000        # and 200k LLM tokens an hour
+      tokensPerFill: 200000
+      fillInterval: 1h
+      type: tokens
+backends:
+  - ai:
+      provider:
+        openAI: {}
+```
+
+The two kinds coexist and are charged at different moments, which is the whole
+reason they are separate limiters over the same buckets. A request limit is
+charged **before** dispatch, where it applies to every backend kind. A token
+limit cannot be: **the cost of a call is not knowable until the provider
+reports it.** So a request is admitted while the bucket has anything left, and
+the actual count is charged afterwards.
+
+Two consequences worth stating plainly. **One call can exceed the limit** — the
+budget could have 1 token left and a 50k-token call still goes through. That is
+inherent to charging a cost nobody knew in advance; the bucket is what stops the
+*next* one. And a call that costs more than the bucket held **empties it rather
+than going into debt**, so the overshoot is paid for by the wait until the next
+refill and not carried forward into it. The alternative — reserving an estimate
+up front and reconciling — refuses real traffic on a guess.
+
+Streamed responses are charged too. Usage arrives in the trailing chunk, long
+after the response body has started going back to the client, so the limiter
+travels with the stream. A limit that only applied to buffered responses would
+miss most of the traffic worth limiting.
+
+Anywhere other than an `ai` route, a `type: tokens` limit is **reported**:
+
+```
+warning: ...policies.localRateLimit[type=tokens]: only an `ai` backend reports a
+         token count to charge, so this bucket would never be spent; use
+         `type: requests` to limit this route
+```
+
+It would sit at full capacity and refuse nothing — a rate limit that looks like
+protection and is not.
 
 ## Timeouts
 
