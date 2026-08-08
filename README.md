@@ -183,6 +183,11 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
   whole federation; see
   [Reaching the upstream request](#reaching-the-upstream-request)
+- The mesh-only halves of the service inventory — `vips`, `waypoint`,
+  `locality`, `subjectAltNames`, `loadBalancer`. They describe a mesh this
+  gateway is not part of; what determines routing is implemented. See
+  [Naming a service instead of an
+  address](#naming-a-service-instead-of-an-address)
 
 Not supported at all:
 
