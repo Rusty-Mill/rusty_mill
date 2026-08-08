@@ -119,6 +119,14 @@ async fn accept_loop(
         // appends to.
         let peer = Some(peer.ip());
 
+        // A passthrough port never terminates: it forwards the bytes as they
+        // arrive, which is the whole point of `protocol: TLS` in the Gateway
+        // API's passthrough mode.
+        if let Some(forwarder) = gateway.passthrough(port) {
+            tokio::spawn(async move { forwarder.forward(stream).await });
+            continue;
+        }
+
         let terminator = gateway.tls(port);
         let gateway = Arc::clone(&gateway);
         let shutdown = shutdown.clone();
