@@ -140,17 +140,40 @@ Nine call sites migrated: `create_kill_on_close_job` (`job::create` +
 `WaitForMultipleObjects` call (`process::wait_any`). `sys::pty` inherits
 the job-creation migration, sharing that helper already.
 
-**Closed, not deferred: `CreateProcessW` never migrates.** This is the
-one item on the Track W list that gets struck rather than scheduled, so
-a later slice doesn't reopen it. `rusty_win32::process::spawn_suspended`
-(a) passes a bare zeroed `STARTUPINFOW` and documents the std-slot-swap
-model instead — the model D5 step 4 above records this repo deciding
-*against*, and whose rejection is what makes `Stdio::{Null, Pipe, File}`
-possible; (b) passes `NULL` for `lpCurrentDirectory`; (c) takes `&str`
-where winargv produces `&[u16]`. These are not donor gaps to file
-upstream: a `spawn_suspended` fixed on all three counts would simply be
-this crate's `spawn` living in the other repo. Two correct answers to two
-different consumers' questions — see `docs/learning/004-…`.
+**Closed, not deferred: `CreateProcessW` does not migrate.** Struck
+rather than scheduled, so a later slice doesn't reopen it — but struck on
+a statement about the donor's *current shape*, not a law, and worth
+stating precisely because the shorthand ("rejected architecture") is
+misleading in two ways.
+
+First: **`CreateProcessW` itself is not rejected anywhere.** This crate
+calls it, in both configurations, and always has. What is rejected is
+rush's std-slot-swap *stdio model* — recorded at
+`docs/extraction-map.md:788`, step 4 of the extraction plan ("Decision:
+STARTUPINFO handle lists, not rush's std-slot swap"). The consequence is
+narrower than it sounds: this crate cannot adopt the donor's
+`spawn_suspended` **wrapper**, because that wrapper is built for the
+model this crate turned down.
+
+Second: **that decision is only one of three blockers, and not the
+strongest.** `rusty_win32::process::spawn_suspended`
+
+1. passes a bare zeroed `STARTUPINFOW` and documents the std-slot-swap
+   model instead — the D5 step 4 decision above, and the rejection that
+   makes `Stdio::{Null, Pipe, File}` possible at all;
+2. passes `NULL` for `lpCurrentDirectory`, so `Command::current_dir` has
+   nowhere to go;
+3. takes `&str` where winargv produces `&[u16]` — lossy for unpaired
+   surrogates, through this crate's security boundary.
+
+(2) and (3) are mundane and each independently fatal. Leading with (1)
+because it is the interesting one overstates its load-bearing role.
+
+**Revisit only if all three change** — at which point the argument
+against asking for that upstream is the one in `docs/learning/004-…`: a
+`spawn_suspended` fixed on all three counts would simply be this crate's
+`spawn` living in the other repo. Two correct answers to two different
+consumers' questions, not one crate's gap.
 
 `wait_many`'s 64-handle chunking likewise stays this crate's own; the
 donor's `wait_any` reports `ERROR_INVALID_PARAMETER` past the cap exactly
@@ -173,16 +196,17 @@ only by `FILE_ATTRIBUTE_NORMAL` vs `0`, very probably inert on an
 `OPEN_EXISTING` console-device open — but it backs the `has_console`
 probe, whose last wrong answer cost a CI debugging session, and the
 claim can't be verified from this repo's Linux-host workflow. Worth
-distinguishing from `CreateProcessW` above, which is closed *permanently*:
-a migration list needs both verbs.
+distinguishing from `CreateProcessW` above, which is closed on a
+*structural* reading of the donor rather than on evidence that might
+arrive: a migration list needs both verbs.
 
 **Track W's migration list is now empty** *of the families this document
 had enumerated*. See the second correction below — that list was itself
 incomplete, so this sentence was never the "nothing left to migrate"
 claim it reads as. What remains on windows-sys in both configurations is
-either permanently closed (`CreateProcessW`), held pending better
-evidence (`reopen`), has no donor binding, or — as it turns out — was
-simply never enumerated here.
+either closed against the donor's current shape (`CreateProcessW` — see
+its three reasons below), held pending better evidence (`reopen`), has no
+donor binding, or — as it turns out — was simply never enumerated here.
 
 > **Correction, 2026-08-07.** The sentence above originally listed
 > `sys::net` among the families with "no donor binding at all". That was
@@ -247,8 +271,8 @@ any intervening Winsock call overwrites the slot. Both now branch on the
 
 ~~**Track W is now complete across `platform-windows`.**~~ **It is not
 — see the correction immediately below.** Of the families *this document
-listed*, every one either migrated, is permanently closed
-(`CreateProcessW`), is declined pending evidence (`reopen`), or is a
+listed*, every one either migrated, is closed against the donor's
+current shape (`CreateProcessW`), is declined pending evidence (`reopen`), or is a
 named upstream gap (`unix_peer_addr`) — plus `sys::nt`, which has no
 donor bindings at all and would need an `ntdll` admission rusty_win32
 has deliberately never made.

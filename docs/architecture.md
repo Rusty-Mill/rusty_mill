@@ -74,10 +74,14 @@ surface where every admitted symbol is listed and justified.
   version of this line said "complete", which was true of the migration
   list in `docs/convergence-roadmap.md` §1d and false of the codebase.
   Two exclusions are deliberate and different in kind — `CreateProcessW`
-  is struck *permanently* (the donor's `spawn_suspended` is shaped for a
-  shell that swaps its own std slots, the model D5 records this repo
-  rejecting), while `reopen`'s console-device open is *declined pending
-  evidence*. Everything else still on windows-sys either has no donor
+  is struck against the donor's *current shape* (its `spawn_suspended`
+  has no per-spawn std-handle override, no working directory, and a
+  `&str` command line where winargv produces `&[u16]`; only the first of
+  those relates to the stdio model D5 records this repo rejecting, and
+  the other two are independently fatal), while `reopen`'s console-device
+  open is *declined pending evidence*. Note `CreateProcessW` itself is
+  not rejected anywhere — this crate calls it in both configurations;
+  what cannot be adopted is the donor's `spawn_suspended` wrapper. Everything else still on windows-sys either has no donor
   binding (`sys::nt` above all) or is a named upstream gap
   (`unix_peer_addr`, baileyrd/rusty_win32#271).
   rusty_win32 was already this backend's extraction donor — its typed-
