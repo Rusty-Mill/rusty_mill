@@ -14,12 +14,13 @@ workspace = true
 
 [dependencies]
 agentgateway-config = { workspace = true }
+agentgateway-core = { workspace = true }
 # Pinned to a commit rather than a tag: the async server adapter
 # (`TlsAcceptor::accept_async`) is not in the newest tag, v0.9.0. rusty_tls'
 # own convention is that a bare SHA carries the same guarantee as a tag.
 rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "7ac6956e41635d11d8314dfe637f98df697cdd08", features = ["rusty-tokio"] }
 rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "6d3bb05a45a393e4cf902013b05189dd168f6106" }
-tokio = { workspace = true, features = ["net", "io-util"] }
+tokio = { workspace = true, features = ["net", "io-util", "time"] }
 rustls-pemfile = "2"
 # A direct rustls dependency, against this ecosystem's "consumers import
 # rusty_tls, never rustls" rule -- and the one place it has to be broken.
@@ -34,5 +35,5 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
 rcgen = "0.13"

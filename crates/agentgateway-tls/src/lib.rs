@@ -6,17 +6,17 @@
 //! what [`bridge`] exists to reconcile; that adaptation is copy-free, so the
 //! choice costs dependency weight rather than throughput.
 //!
-//! # What this does not do yet
+//! # One certificate per hostname
 //!
-//! **SNI-based certificate selection.** One certificate is served per bind.
-//! `rusty_tls` exposes a `TlsAcceptor` built from a single certificate chain
-//! and does not surface `rustls`' `ResolvesServerCert`, so two listeners on
-//! one port with different certificates cannot both be honoured — and quietly
-//! serving the first one's certificate to the second one's clients would be a
-//! misconfiguration nobody notices until a browser complains. [`TlsBinds`]
-//! rejects it at startup instead.
+//! Two listeners on one port may hold different certificates, chosen by the
+//! name the client asked for. `rusty_tls` exposes a `TlsAcceptor` built from a
+//! single certificate chain and does not surface `rustls`' `ResolvesServerCert`
+//! — so rather than reaching around it into `rustls`, the name is read off the
+//! ClientHello before the handshake starts and the matching acceptor does the
+//! rest. See [`hello`] for why that is the safe half of the trade.
 
 mod bridge;
+mod hello;
 
 use std::sync::Once;
 
@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use agentgateway_config::{Config, Protocol, TlsConfig};
+use agentgateway_core::HostnamePattern;
 use rusty_tls::TlsAcceptor;
 use tokio::net::TcpStream;
 
@@ -102,25 +103,50 @@ pub enum TlsError {
         protocol: Protocol,
     },
 
-    /// Two listeners on one port want different certificates.
+    /// Two listeners on one port hold certificates and neither can be chosen.
     #[error(
-        "bind on port {port} has listeners with different TLS certificates, which needs \
-         SNI-based selection; this build serves one certificate per port"
+        "bind on port {port} has {count} listeners with different TLS certificates and no \
+         hostname to tell them apart; a client's SNI name is what chooses between them, so \
+         each needs its own `hostname`"
     )]
     Sni {
         /// The port with conflicting certificates.
         port: u16,
+        /// How many certificates are in play.
+        count: usize,
     },
+
+    /// Two listeners on one port claim the same hostname.
+    #[error(
+        "bind on port {port} has two listeners serving `{hostname}` with different \
+         certificates; a client asking for that name could be given either"
+    )]
+    Duplicate {
+        /// The port.
+        port: u16,
+        /// The name claimed twice.
+        hostname: String,
+    },
+}
+
+/// One certificate, and the name it answers to.
+struct Certificate {
+    /// `None` for a listener with no `hostname`, which answers to anything.
+    hostname: Option<HostnamePattern>,
+    acceptor: TlsAcceptor,
 }
 
 /// The TLS terminator for one port.
 pub struct TlsTerminator {
-    acceptor: TlsAcceptor,
+    /// Most specific first, so the first match is the right one.
+    certificates: Vec<Certificate>,
 }
 
 impl std::fmt::Debug for TlsTerminator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TlsTerminator").finish_non_exhaustive()
+        f.debug_struct("TlsTerminator")
+            .field("certificates", &self.certificates.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -130,30 +156,158 @@ impl TlsTerminator {
     /// Read once at startup, so a missing or malformed certificate stops the
     /// gateway booting rather than failing every handshake later.
     pub fn new(tls: &TlsConfig, at: &str) -> Result<Self, TlsError> {
-        install_crypto_provider();
-        let certs = load_certs(&tls.cert, at)?;
-        let key = load_key(&tls.key, at)?;
+        Self::with_hostnames([(None, tls)], at)
+    }
 
-        let acceptor =
-            TlsAcceptor::new_with_alpn(certs, key, ALPN.iter().map(|p| p.to_vec()).collect())
-                .map_err(|source| TlsError::Acceptor {
+    /// The same, for a port serving several certificates by name.
+    fn with_hostnames<'a>(
+        listeners: impl IntoIterator<Item = (Option<&'a str>, &'a TlsConfig)>,
+        at: &str,
+    ) -> Result<Self, TlsError> {
+        install_crypto_provider();
+
+        let mut certificates = Vec::new();
+        for (hostname, tls) in listeners {
+            let certs = load_certs(&tls.cert, at)?;
+            let key = load_key(&tls.key, at)?;
+            let acceptor =
+                TlsAcceptor::new_with_alpn(certs, key, ALPN.iter().map(|p| p.to_vec()).collect())
+                    .map_err(|source| TlsError::Acceptor {
                     at: at.to_string(),
                     source: Box::new(source),
                 })?;
+            certificates.push(Certificate {
+                hostname: hostname.map(HostnamePattern::parse),
+                acceptor,
+            });
+        }
 
-        Ok(TlsTerminator { acceptor })
+        // Exact names before wildcards before the catch-all, so `api.example`
+        // wins over `*.example` for a client that asked for `api.example` --
+        // the same precedence route hostnames follow.
+        certificates.sort_by_key(|certificate| {
+            std::cmp::Reverse(
+                certificate
+                    .hostname
+                    .as_ref()
+                    .map_or(0, HostnamePattern::specificity),
+            )
+        });
+
+        Ok(TlsTerminator { certificates })
     }
 
     /// Complete a TLS handshake on an accepted socket.
+    ///
+    /// The name the client asked for is read from the ClientHello *before* the
+    /// handshake begins, by peeking rather than reading: the bytes stay in the
+    /// socket for `rustls` to parse itself a moment later. See [`hello`].
     pub async fn accept(&self, stream: TcpStream) -> Result<TlsStream, rusty_tls::Error> {
-        let mut tls = self.acceptor.accept_async(ToRusty(stream))?;
+        let acceptor = match self.certificates.len() {
+            // Nothing to choose between, so nothing to peek for.
+            0 | 1 => self.first()?,
+            _ => self.choose(peek_server_name(&stream).await.as_deref()),
+        };
+
+        let mut tls = acceptor.accept_async(ToRusty(stream))?;
         // Drive the handshake here rather than letting the first read do it,
         // so a failed handshake is reported as one instead of surfacing as a
         // confusing empty request.
         tls.complete_handshake().await?;
         Ok(ToTokio(tls))
     }
+
+    /// The only certificate, when there is one to be had.
+    ///
+    /// A terminator is never built empty -- `TlsBinds` does not register a
+    /// port without a certificate -- but returning the handshake's own error
+    /// beats an index that could panic in the accept loop.
+    fn first(&self) -> Result<&TlsAcceptor, rusty_tls::Error> {
+        self.certificates
+            .first()
+            .map(|certificate| &certificate.acceptor)
+            .ok_or_else(|| {
+                rusty_tls::Error::Io(std::io::Error::other(
+                    "no TLS certificate is configured for this port",
+                ))
+            })
+    }
+
+    /// The certificate for a name, or the fallback.
+    ///
+    /// A client that sent no name — every one addressing the gateway by IP —
+    /// and one asking for a name nothing claims both get the first certificate
+    /// rather than a refusal. Refusing would turn a working single-certificate
+    /// deployment into a broken one the moment a second listener was added.
+    fn choose(&self, name: Option<&str>) -> &TlsAcceptor {
+        if let Some(name) = name
+            && let Some(matched) = self.certificates.iter().find(|certificate| {
+                certificate
+                    .hostname
+                    .as_ref()
+                    .is_some_and(|pattern| pattern.matches(name))
+            })
+        {
+            return &matched.acceptor;
+        }
+        self.certificates
+            .first()
+            .map(|certificate| &certificate.acceptor)
+            .expect("`choose` is only reached with several certificates")
+    }
 }
+
+/// Read the ClientHello's server name without consuming it.
+///
+/// `peek` leaves the bytes in the socket, which is what makes this safe to do
+/// in front of a handshake: `rustls` reads the same ClientHello afterwards and
+/// is still the thing that decides whether it is acceptable.
+///
+/// A peer that sends nothing, or never sends a whole ClientHello, ends this
+/// with `None` and gets the default certificate — the same outcome as before
+/// any of this existed.
+///
+/// The wait is bounded because `peek` returns whatever is buffered *now*: a
+/// ClientHello split across two segments arrives in two peeks, and a peer that
+/// sends the first half and stops would otherwise be waited on forever. The
+/// budget is the one this spends looking, not a handshake timeout.
+async fn peek_server_name(stream: &TcpStream) -> Option<String> {
+    tokio::time::timeout(PEEK_BUDGET, async {
+        let mut buffer = vec![0u8; hello::MAX_HELLO];
+        let mut filled = 0;
+
+        loop {
+            let read = stream.peek(&mut buffer[..]).await.ok()?;
+            if read == 0 {
+                // The peer closed. Nothing more is coming.
+                return None;
+            }
+            if read > filled {
+                filled = read;
+                if let Some(name) = hello::server_name(&buffer[..filled]) {
+                    return Some(name);
+                }
+                if filled >= buffer.len() {
+                    return None;
+                }
+                continue;
+            }
+            // No new bytes. `peek` is readable-triggered and the buffered
+            // bytes keep it readable, so polling again immediately would spin
+            // rather than wait -- hence a pause between looks.
+            tokio::time::sleep(PEEK_POLL).await;
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// How long to spend looking for the server name before giving up on it.
+const PEEK_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long to wait when a peek brought nothing new.
+const PEEK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 
 /// The terminators a configuration needs, by port.
 #[derive(Debug, Default)]
@@ -167,7 +321,7 @@ impl TlsBinds {
         let mut ports: BTreeMap<u16, Arc<TlsTerminator>> = BTreeMap::new();
 
         for (b, bind) in config.binds.iter().enumerate() {
-            let mut chosen: Option<&TlsConfig> = None;
+            let mut chosen: Vec<(Option<&str>, &TlsConfig)> = Vec::new();
 
             for (l, listener) in bind.listeners.iter().enumerate() {
                 if !listener.protocol.is_tls() {
@@ -181,20 +335,42 @@ impl TlsBinds {
                     });
                 };
 
-                match chosen {
-                    // Same certificate twice is fine; two different ones on
-                    // one port would need SNI to tell apart.
-                    Some(existing) if existing != tls => {
-                        return Err(TlsError::Sni { port: bind.port });
-                    }
-                    Some(_) => {}
-                    None => chosen = Some(tls),
+                let hostname = listener.hostname.as_deref();
+                // The same certificate twice is one certificate, whatever the
+                // hostnames: there is nothing for a name to choose between.
+                if chosen.iter().any(|(_, existing)| *existing == tls) {
+                    continue;
                 }
+                // Two certificates and the same name is a coin toss at
+                // handshake time, which is exactly the misconfiguration this
+                // used to refuse wholesale.
+                if let Some(hostname) = hostname
+                    && chosen.iter().any(|(name, _)| *name == Some(hostname))
+                {
+                    return Err(TlsError::Duplicate {
+                        port: bind.port,
+                        hostname: hostname.to_string(),
+                    });
+                }
+                chosen.push((hostname, tls));
             }
 
-            if let Some(tls) = chosen {
+            // More than one certificate needs names to choose between them,
+            // and more than one *unnamed* certificate has none: whichever
+            // sorted first would answer for both.
+            if chosen.len() > 1 && chosen.iter().filter(|(name, _)| name.is_none()).count() > 1 {
+                return Err(TlsError::Sni {
+                    port: bind.port,
+                    count: chosen.len(),
+                });
+            }
+
+            if !chosen.is_empty() {
                 let at = format!("binds[{b}]");
-                ports.insert(bind.port, Arc::new(TlsTerminator::new(tls, &at)?));
+                ports.insert(
+                    bind.port,
+                    Arc::new(TlsTerminator::with_hostnames(chosen, &at)?),
+                );
             }
         }
 

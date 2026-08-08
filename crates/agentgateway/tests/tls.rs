@@ -305,10 +305,11 @@ binds:
 }
 
 #[tokio::test]
-async fn two_certificates_on_one_port_are_refused_rather_than_guessed() {
-    // Serving the first listener's certificate to the second listener's
-    // clients is a misconfiguration nobody notices until a browser complains.
-    // SNI-based selection would be the fix; refusing is the honest interim.
+async fn two_named_certificates_on_one_port_are_served_by_name() {
+    // This used to be a startup refusal: without SNI selection, serving the
+    // first listener's certificate to the second listener's clients is a
+    // misconfiguration nobody notices until a browser complains. Named
+    // listeners are told apart now.
     let a = certificate();
     let b = certificate();
     let port = free_port().await;
@@ -339,9 +340,333 @@ binds:
     );
 
     let config = Config::from_yaml(&yaml).expect("should parse");
+    Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect("two named certificates on one port are told apart by SNI");
+}
+
+/// A self-signed cert for `names`, written as PEM.
+fn certificate_for(names: &[&str]) -> Certificate {
+    let issued = rcgen::generate_simple_self_signed(
+        names.iter().map(|n| (*n).to_string()).collect::<Vec<_>>(),
+    )
+    .expect("should generate a certificate");
+    let cert_pem = issued.cert.pem();
+    let key_pem = issued.key_pair.serialize_pem();
+
+    let dir = tempfile::tempdir().expect("should create a temp dir");
+    std::fs::write(dir.path().join("cert.pem"), &cert_pem).expect("should write the cert");
+    std::fs::write(dir.path().join("key.pem"), &key_pem).expect("should write the key");
+
+    Certificate { dir, pem: cert_pem }
+}
+
+/// A client trusting both certificates, resolving every name to the gateway.
+fn client_trusting(certs: &[&Certificate], names: &[&str], port: u16) -> reqwest::Client {
+    // These hostnames are invented, so an ambient `HTTPS_PROXY` would send the
+    // request to a proxy rather than to the gateway under test.
+    let mut builder = reqwest::Client::builder().no_proxy();
+    for cert in certs {
+        builder = builder.add_root_certificate(
+            reqwest::Certificate::from_pem(cert.pem.as_bytes()).expect("PEM should parse"),
+        );
+    }
+    for name in names {
+        builder = builder.resolve(
+            name,
+            format!("127.0.0.1:{port}").parse().expect("should parse"),
+        );
+    }
+    builder.build().expect("client should build")
+}
+
+/// Boot a gateway with two named HTTPS listeners on one port.
+async fn start_two(
+    first: (&str, &Certificate),
+    second: (&str, &Certificate),
+    upstream_port: u16,
+) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - hostname: "{first_name}"
+        protocol: HTTPS
+        tls:
+          cert: "{first_dir}/cert.pem"
+          key: "{first_dir}/key.pem"
+        routes:
+          - name: first
+            backends:
+              - host: "127.0.0.1:{upstream_port}"
+      - hostname: "{second_name}"
+        protocol: HTTPS
+        tls:
+          cert: "{second_dir}/cert.pem"
+          key: "{second_dir}/key.pem"
+        routes:
+          - name: second
+            backends:
+              - host: "127.0.0.1:{upstream_port}"
+"#,
+        first_name = first.0,
+        first_dir = first.1.dir.path().display(),
+        second_name = second.0,
+        second_dir = second.1.dir.path().display(),
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    config.validate().expect("config should validate");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    (port, shutdown)
+}
+
+#[tokio::test]
+async fn each_hostname_is_served_its_own_certificate() {
+    // The name is read off the ClientHello before the handshake starts, so
+    // each client is offered a certificate it trusts and nothing else.
+    let alpha = certificate_for(&["alpha.test"]);
+    let beta = certificate_for(&["beta.test"]);
+    let (upstream_port, hits) = upstream().await;
+    let (port, shutdown) =
+        start_two(("alpha.test", &alpha), ("beta.test", &beta), upstream_port).await;
+
+    // Each client trusts only its own certificate, so a handshake that
+    // succeeds against the other one's would fail here.
+    let for_alpha = client_trusting(&[&alpha], &["alpha.test"], port);
+    let for_beta = client_trusting(&[&beta], &["beta.test"], port);
+
+    let alpha_response = for_alpha
+        .get(format!("https://alpha.test:{port}/"))
+        .send()
+        .await
+        .expect("alpha should be served its own certificate");
+    assert!(alpha_response.status().is_success());
+
+    let beta_response = for_beta
+        .get(format!("https://beta.test:{port}/"))
+        .send()
+        .await
+        .expect("beta should be served its own certificate");
+    assert!(beta_response.status().is_success());
+
+    assert_eq!(hits.load(Ordering::Relaxed), 2);
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_client_trusting_only_one_certificate_cannot_reach_the_other_name() {
+    // The other half of the test above: proves the selection is real rather
+    // than one certificate happening to satisfy both.
+    let alpha = certificate_for(&["alpha.test"]);
+    let beta = certificate_for(&["beta.test"]);
+    let (upstream_port, _hits) = upstream().await;
+    let (port, shutdown) =
+        start_two(("alpha.test", &alpha), ("beta.test", &beta), upstream_port).await;
+
+    let only_alpha = client_trusting(&[&alpha], &["alpha.test", "beta.test"], port);
+    let refused = only_alpha
+        .get(format!("https://beta.test:{port}/"))
+        .send()
+        .await;
+    assert!(
+        refused.is_err(),
+        "beta's certificate is not one this client trusts"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_wildcard_listener_answers_for_a_subdomain() {
+    let exact = certificate_for(&["api.example.test"]);
+    let wildcard = certificate_for(&["*.example.test", "other.example.test"]);
+    let (upstream_port, _hits) = upstream().await;
+    let (port, shutdown) = start_two(
+        ("api.example.test", &exact),
+        ("*.example.test", &wildcard),
+        upstream_port,
+    )
+    .await;
+
+    // The exact name wins over the wildcard, the same precedence route
+    // hostnames follow.
+    let for_exact = client_trusting(&[&exact], &["api.example.test"], port);
+    assert!(
+        for_exact
+            .get(format!("https://api.example.test:{port}/"))
+            .send()
+            .await
+            .expect("the exact listener should answer")
+            .status()
+            .is_success()
+    );
+
+    // A sibling name only the wildcard covers.
+    let for_wildcard = client_trusting(&[&wildcard], &["other.example.test"], port);
+    assert!(
+        for_wildcard
+            .get(format!("https://other.example.test:{port}/"))
+            .send()
+            .await
+            .expect("the wildcard listener should answer")
+            .status()
+            .is_success()
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_name_nothing_claims_falls_back_rather_than_being_refused() {
+    // Refusing would turn a working deployment into a broken one the moment a
+    // second listener was added.
+    let alpha = certificate_for(&["alpha.test", "stranger.test"]);
+    let beta = certificate_for(&["beta.test"]);
+    let (upstream_port, _hits) = upstream().await;
+    let (port, shutdown) =
+        start_two(("alpha.test", &alpha), ("beta.test", &beta), upstream_port).await;
+
+    // The handshake is what this is about: no listener claims the name, so
+    // routing has nothing to match and the status is beside the point.
+    let client = client_trusting(&[&alpha], &["stranger.test"], port);
+    assert!(
+        client
+            .get(format!("https://stranger.test:{port}/"))
+            .send()
+            .await
+            .is_ok(),
+        "the first certificate should have answered the handshake"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn two_unnamed_certificates_on_one_port_still_fail_at_startup() {
+    // A client's SNI name is what chooses between them, and neither claims
+    // one: whichever sorted first would answer for both.
+    let alpha = certificate_for(&["alpha.test"]);
+    let beta = certificate_for(&["beta.test"]);
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - protocol: HTTPS
+        tls:
+          cert: "{a}/cert.pem"
+          key: "{a}/key.pem"
+      - protocol: HTTPS
+        tls:
+          cert: "{b}/cert.pem"
+          key: "{b}/key.pem"
+"#,
+        a = alpha.dir.path().display(),
+        b = beta.dir.path().display(),
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
     let err = Gateway::build(&config, None)
         .await
         .map(|_| ())
-        .expect_err("two certificates on one port needs SNI");
-    assert!(err.to_string().contains("SNI"), "got: {err}");
+        .expect_err("neither certificate can be chosen");
+    assert!(err.to_string().contains("hostname"), "got: {err}");
+}
+
+#[tokio::test]
+async fn two_listeners_claiming_one_name_fail_at_startup() {
+    // A client asking for that name could be given either.
+    let alpha = certificate_for(&["same.test"]);
+    let beta = certificate_for(&["same.test"]);
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - hostname: same.test
+        protocol: HTTPS
+        tls:
+          cert: "{a}/cert.pem"
+          key: "{a}/key.pem"
+      - hostname: same.test
+        protocol: HTTPS
+        tls:
+          cert: "{b}/cert.pem"
+          key: "{b}/key.pem"
+"#,
+        a = alpha.dir.path().display(),
+        b = beta.dir.path().display(),
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("one name cannot choose between two certificates");
+    assert!(err.to_string().contains("same.test"), "got: {err}");
+}
+
+#[tokio::test]
+async fn one_certificate_named_twice_is_still_one_certificate() {
+    // Two listeners sharing a certificate have nothing for a name to choose
+    // between, so this is not the ambiguous case.
+    let shared = certificate_for(&["localhost"]);
+    let (upstream_port, _hits) = upstream().await;
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - protocol: HTTPS
+        tls:
+          cert: "{dir}/cert.pem"
+          key: "{dir}/key.pem"
+        routes:
+          - backends:
+              - host: "127.0.0.1:{upstream_port}"
+      - protocol: HTTPS
+        tls:
+          cert: "{dir}/cert.pem"
+          key: "{dir}/key.pem"
+"#,
+        dir = shared.dir.path().display(),
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("one certificate twice should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    assert!(
+        client(&shared)
+            .get(format!("https://localhost:{port}/"))
+            .send()
+            .await
+            .is_ok(),
+        "one certificate twice should still complete a handshake"
+    );
+
+    shutdown.cancel();
 }
