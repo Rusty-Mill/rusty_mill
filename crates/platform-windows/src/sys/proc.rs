@@ -99,6 +99,39 @@ fn inheritable_nul(read: bool) -> Result<SlotHandle> {
 /// or a reader waits for an EOF that cannot come (extraction map D5).
 /// Returns (child end, parent end); `stdin_slot` decides which side is
 /// which.
+///
+/// Track W (D-15): `rusty_win32::handle::create_pipe` + `set_inheritable`.
+/// The donor's `create_pipe` creates **both** ends non-inheritable by
+/// design (its own doc: "pass whichever end a child needs through
+/// `set_inheritable` first") — the opposite default from the
+/// windows-sys arm's `bInheritHandle = 1` `SECURITY_ATTRIBUTES`, which
+/// makes both ends inheritable and then clears the parent end. Same
+/// final state either way (child inheritable, parent not), reached from
+/// opposite starting points: mark up versus mark down. No race between
+/// creation and the inheritability flip in either arm — every handle
+/// this function returns is fully configured before `spawn` ever calls
+/// `CreateProcessW`, the only point inheritance is actually consulted.
+#[cfg(feature = "track-w")]
+fn make_pipe(stdin_slot: bool) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
+    let (read, write) =
+        rusty_win32::handle::create_pipe().map_err(|e| errmap::trackw_err("CreatePipe", e))?;
+    let read = OwnedWinHandle::from_raw(read)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
+    let write = OwnedWinHandle::from_raw(write)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
+    let (child, parent) = if stdin_slot {
+        (read, write)
+    } else {
+        (write, read)
+    };
+    // SAFETY: `child` is the valid handle `create_pipe` just returned,
+    // still open and owned by this function's `child` local.
+    unsafe { rusty_win32::handle::set_inheritable(child.as_raw(), true) }
+        .map_err(|e| errmap::trackw_err("SetHandleInformation", e))?;
+    Ok((child, parent))
+}
+
+#[cfg(not(feature = "track-w"))]
 fn make_pipe(stdin_slot: bool) -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     let sa = w::SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<w::SECURITY_ATTRIBUTES>() as u32,
@@ -154,10 +187,62 @@ fn inheritable_dup_of_file(file: &dyn platform::fs::File) -> Result<OwnedWinHand
     crate::sys::handle::duplicate(&windows_file.handle, true)
 }
 
-fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
+/// `GetStdHandle` folded to the exact `NULL`/`INVALID_HANDLE_VALUE`
+/// sentinels the raw call itself produces, whichever arm answers.
+///
+/// Track W (D-15): `rusty_win32::handle::get_std_handle`. Same shape
+/// `sys::console::std_handle` already uses for the identical fold, kept
+/// as a separate local copy rather than shared: that helper is keyed by
+/// `TermStream`, this one by the raw `u32` slot constant `spawn` already
+/// has in hand, and neither module has a reason to depend on the other's
+/// private primitive for one three-line function.
+#[cfg(feature = "track-w")]
+fn std_handle_raw(slot: u32) -> w::HANDLE {
+    match rusty_win32::handle::get_std_handle(slot) {
+        Ok(Some(h)) => h,
+        Ok(None) => std::ptr::null_mut(),
+        Err(_) => w::INVALID_HANDLE_VALUE,
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
+fn std_handle_raw(slot: u32) -> w::HANDLE {
     // SAFETY: `GetStdHandle` takes a documented slot constant and has no
     // other preconditions.
-    let current = unsafe { w::GetStdHandle(slot) };
+    unsafe { w::GetStdHandle(slot) }
+}
+
+/// Track W (D-15): `rusty_win32::handle::duplicate`, called on the raw
+/// `current` value directly rather than through `sys::handle::duplicate`
+/// (which takes `&OwnedWinHandle`) — this process doesn't own the
+/// original std-slot handle, only the duplicate this mints, exactly
+/// mirroring the windows-sys arm below, which never closes `current`
+/// either.
+#[cfg(feature = "track-w")]
+fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
+    let current = std_handle_raw(slot);
+    if current.is_null() || current == w::INVALID_HANDLE_VALUE {
+        // No handle in this slot (e.g. a detached process): leave it
+        // empty rather than fail the whole spawn.
+        return Ok(None);
+    }
+    // SAFETY: `current` is a live, currently-open handle in this
+    // process's own std slot — `duplicate`'s whole safety contract.
+    let dup = unsafe { rusty_win32::handle::duplicate(current, true) }
+        .map_err(|e| errmap::trackw_err("DuplicateHandle", e))?;
+    match OwnedWinHandle::from_raw(dup) {
+        Some(h) => Ok(Some(SlotHandle::Owned(h))),
+        None => Err(PlatformError::new(
+            ErrorKind::Other,
+            OsCode::None,
+            "DuplicateHandle",
+        )),
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
+fn inheritable_dup_of_std(slot: u32) -> Result<Option<SlotHandle>> {
+    let current = std_handle_raw(slot);
     if current.is_null() || current == w::INVALID_HANDLE_VALUE {
         // No handle in this slot (e.g. a detached process): leave it
         // empty rather than fail the whole spawn.

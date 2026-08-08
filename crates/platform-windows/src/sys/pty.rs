@@ -55,6 +55,26 @@ use crate::sys::handle::{self, OwnedWinHandle};
 use crate::sys::proc;
 use crate::util::wide::to_wide_nul;
 
+/// Track W (D-15): `rusty_win32::handle::create_pipe`. Direct match, no
+/// `set_inheritable` dance needed the way `sys::proc::make_pipe`'s
+/// migration needed one — the donor's `create_pipe` already creates
+/// *both* ends non-inheritable by default, exactly what the windows-sys
+/// arm below achieves by passing null `SECURITY_ATTRIBUTES` (Windows'
+/// own default). ConPTY never needs either end inheritable in the first
+/// place, unlike a spawned child's stdio pipes — see this function's own
+/// prior doc note on that.
+#[cfg(feature = "track-w")]
+fn create_pipe_pair() -> Result<(OwnedWinHandle, OwnedWinHandle)> {
+    let (read, write) =
+        rusty_win32::handle::create_pipe().map_err(|e| errmap::trackw_err("CreatePipe", e))?;
+    let read = OwnedWinHandle::from_raw(read)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
+    let write = OwnedWinHandle::from_raw(write)
+        .ok_or_else(|| PlatformError::new(ErrorKind::Other, OsCode::None, "CreatePipe"))?;
+    Ok((read, write))
+}
+
+#[cfg(not(feature = "track-w"))]
 fn create_pipe_pair() -> Result<(OwnedWinHandle, OwnedWinHandle)> {
     let mut read: w::HANDLE = std::ptr::null_mut();
     let mut write: w::HANDLE = std::ptr::null_mut();
@@ -85,30 +105,69 @@ pub fn create_pty(size: WinSize) -> Result<(w::HPCON, OwnedWinHandle, OwnedWinHa
     let (conpty_input, master_input) = create_pipe_pair()?;
     let (master_output, conpty_output) = create_pipe_pair()?;
 
+    let result = create_pseudo_console(&conpty_input, &conpty_output, size);
+    // conhost duplicates what it needs internally — these ends close now
+    // regardless of outcome, matching Microsoft's own ConPTY sample.
+    // Preserved across the Track W split below: `result` is computed
+    // first and only inspected after both drops run.
+    drop(conpty_input);
+    drop(conpty_output);
+    let hpc = result?;
+
+    Ok((hpc, master_input, master_output))
+}
+
+/// `CreatePseudoConsole` — Track W (D-15):
+/// `rusty_win32::conpty::create_with_flags(.., 0)` (the flags-taking
+/// sibling of `create`, requesting no optional behavior — same as this
+/// crate's own hardcoded `dwFlags = 0`).
+///
+/// Two boundary conversions, neither a reinterpretation of anything: the
+/// donor's `Coord` (`x`/`y`, lowercase) versus this crate's `w::COORD`
+/// (`X`/`Y`) are the same two `i16` fields under different field-name
+/// conventions; the donor's `Hpcon` (`*mut c_void`) versus this crate's
+/// `w::HPCON` (`isize`) are the OS's single pointer-sized opaque handle
+/// value in two different Rust types. `input`/`output` need no
+/// conversion at all — the donor's `RawHandle` and this crate's
+/// `w::HANDLE` are both bare `*mut c_void`.
+#[cfg(feature = "track-w")]
+fn create_pseudo_console(
+    input: &OwnedWinHandle,
+    output: &OwnedWinHandle,
+    size: WinSize,
+) -> Result<w::HPCON> {
+    let coord = rusty_win32::console::Coord {
+        x: size.cols as i16,
+        y: size.rows as i16,
+    };
+    // SAFETY: `input`/`output` are valid, open pipe handles for the
+    // duration of this call — `create_with_flags`'s whole safety
+    // contract.
+    let hpc = unsafe {
+        rusty_win32::conpty::create_with_flags(input.as_raw(), output.as_raw(), coord, 0)
+    }
+    .map_err(|e| errmap::trackw_err("CreatePseudoConsole", e))?;
+    Ok(hpc as w::HPCON)
+}
+
+#[cfg(not(feature = "track-w"))]
+fn create_pseudo_console(
+    input: &OwnedWinHandle,
+    output: &OwnedWinHandle,
+    size: WinSize,
+) -> Result<w::HPCON> {
     let coord = w::COORD {
         X: size.cols as i16,
         Y: size.rows as i16,
     };
     let mut hpc: w::HPCON = 0;
-    // SAFETY: `conpty_input`/`conpty_output` are valid open pipe handles
-    // for the duration of this call; `hpc` is a valid out-pointer.
-    let hr = unsafe {
-        w::CreatePseudoConsole(
-            coord,
-            conpty_input.as_raw(),
-            conpty_output.as_raw(),
-            0,
-            &mut hpc,
-        )
-    };
-    // conhost duplicates what it needs internally — these ends close now
-    // regardless of outcome, matching Microsoft's own ConPTY sample.
-    drop(conpty_input);
-    drop(conpty_output);
+    // SAFETY: `input`/`output` are valid open pipe handles for the
+    // duration of this call; `hpc` is a valid out-pointer.
+    let hr = unsafe { w::CreatePseudoConsole(coord, input.as_raw(), output.as_raw(), 0, &mut hpc) };
     if hr < 0 {
         return Err(errmap::hresult_err(hr, "CreatePseudoConsole"));
     }
-    Ok((hpc, master_input, master_output))
+    Ok(hpc)
 }
 
 /// Spawn `command_line` (winargv-built, not yet NUL-terminated) attached
@@ -128,6 +187,50 @@ pub fn create_pty(size: WinSize) -> Result<(w::HPCON, OwnedWinHandle, OwnedWinHa
 /// children — a real, deliberate scope reduction from
 /// `platform::pty::Pty::spawn`'s stated contract, not silently missing.
 /// Returns `(process, pid)`.
+///
+/// **Stays on windows-sys in both Track W configurations (D-15).** The
+/// attribute-list trio (`InitializeProcThreadAttributeList`/
+/// `UpdateProcThreadAttribute`/`DeleteProcThreadAttributeList`) and the
+/// `CreateProcessW` call below are the two pieces `sys::pty` could not
+/// migrate when the rest of this module did (rustils#109); both are
+/// closed against the donor's *current shape*, on concrete grounds, not
+/// deferred:
+///
+/// - **`AttributeList`'s raw pointer is unreachable.** The donor's
+///   `conpty::AttributeList` covers `init`/`update`/`delete`/`Drop`
+///   correctly, but the one accessor that would let a caller outside
+///   `rusty_win32` embed it into a `STARTUPINFOEXW` —
+///   `AttributeList::as_mut_ptr` — is `pub(crate)`, not `pub`. This is a
+///   genuine upstream gap, not a design mismatch: were it `pub`, the
+///   attribute-list trio above would migrate cleanly, since
+///   `spawn_suspended_with_pseudoconsole` already proves the sequence
+///   works. Nothing to file against *this* crate; it is rusty_win32's
+///   own visibility to widen if a future slice wants it.
+/// - **`CreateProcessW` itself has the same three blockers `sys::proc::
+///   spawn`'s own doc comment records** (no per-spawn std-handle
+///   override, no `lpCurrentDirectory`, `&str` where winargv produces
+///   `&[u16]`) **plus a fourth, specific to this call site**: the donor's
+///   `spawn_suspended_with_pseudoconsole` hardcodes `CREATE_SUSPENDED`
+///   with no accompanying `resume()` call or suspended-thread handle in
+///   its return type, where this function deliberately spawns running
+///   (see the `CREATE_SUSPENDED` comment further down, in this
+///   function's own body) — adopting it would mean either restructuring
+///   this function's contract to expose a resume step, or discarding the
+///   donor's own thread handle and silently leaking a suspended child if
+///   nothing ever resumes it.
+/// - **Most load-bearing of all**: this function's `STARTF_USESTDHANDLES`
+///   fix (below, in its own extensively-commented body) is a real
+///   Windows kernel workaround this crate discovered through live CI
+///   failures against `microsoft/terminal` discussion #15814, not
+///   documented anywhere Microsoft ships. The donor's
+///   `spawn_suspended_with_pseudoconsole` predates that discovery and
+///   does not have it. Adopting the donor's `CreateProcessW` sequence
+///   as-is would very likely **reintroduce** the exact bug this function
+///   exists to avoid — a live console-handle leak from a CI runner's own
+///   redirected stdio into every ConPTY-hosted child, silent until a
+///   test actually reads output and times out. This is not a preference
+///   difference like the other three; it is a correctness regression
+///   this repo has already paid to find once.
 pub fn spawn_attached(
     hpc: w::HPCON,
     command_line: &[u16],
@@ -335,6 +438,23 @@ pub fn spawn_attached(
 }
 
 /// `ResizePseudoConsole` — `TIOCSWINSZ`'s ConPTY counterpart.
+///
+/// Track W (D-15): `rusty_win32::conpty::resize`. Same `Coord`/`Hpcon`
+/// boundary conversions as [`create_pseudo_console`].
+#[cfg(feature = "track-w")]
+pub fn resize(hpc: w::HPCON, size: WinSize) -> Result<()> {
+    let coord = rusty_win32::console::Coord {
+        x: size.cols as i16,
+        y: size.rows as i16,
+    };
+    // SAFETY: `hpc` is a valid, live pseudo console handle owned by the
+    // caller for the duration of this call — `resize`'s whole safety
+    // contract.
+    unsafe { rusty_win32::conpty::resize(hpc as rusty_win32::conpty::Hpcon, coord) }
+        .map_err(|e| errmap::trackw_err("ResizePseudoConsole", e))
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn resize(hpc: w::HPCON, size: WinSize) -> Result<()> {
     let coord = w::COORD {
         X: size.cols as i16,
@@ -349,6 +469,28 @@ pub fn resize(hpc: w::HPCON, size: WinSize) -> Result<()> {
     Ok(())
 }
 
+/// `ClosePseudoConsole` — Track W (D-15): `rusty_win32::conpty::close`.
+/// Shared by [`spawn_exit_watcher`] and [`close`] so the boundary
+/// conversion lives once.
+///
+/// # Safety
+///
+/// `hpc` must be a currently-open, valid pseudo console handle, not
+/// already closed.
+#[cfg(feature = "track-w")]
+unsafe fn close_pseudo_console(hpc: w::HPCON) {
+    // SAFETY: forwards this function's own safety contract; `hpc as
+    // Hpcon` is the same boundary conversion [`create_pseudo_console`]
+    // documents, applied in the other direction.
+    unsafe { rusty_win32::conpty::close(hpc as rusty_win32::conpty::Hpcon) }
+}
+
+#[cfg(not(feature = "track-w"))]
+unsafe fn close_pseudo_console(hpc: w::HPCON) {
+    // SAFETY: forwards this function's own safety contract.
+    unsafe { w::ClosePseudoConsole(hpc) }
+}
+
 /// Poll (via `PeekNamedPipe`, non-blocking) until `output` has data
 /// ready to read without blocking, the pipe reports broken (the
 /// subsequent `ReadFile` would return `Ok(0)`), or `budget` elapses.
@@ -360,6 +502,31 @@ pub fn resize(hpc: w::HPCON, size: WinSize) -> Result<()> {
 /// why) can gate a `ReadFile` call itself without this module or
 /// [`PtyMaster::read`](platform::pty::PtyMaster::read) needing to grow
 /// a timeout parameter neither's contract otherwise calls for.
+///
+/// Track W (D-15): `rusty_win32::handle::pipe_bytes_available` reports a
+/// `PeekNamedPipe` failure as `Err` rather than the raw call's `ok == 0`;
+/// folded back to the identical `true` result either way — a broken pipe
+/// is exactly the "a following `ReadFile` returns promptly" case this
+/// function's own contract already documents, whichever arm answers.
+#[cfg(feature = "track-w")]
+pub fn wait_readable(output: &OwnedWinHandle, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        // SAFETY: `output` is a valid open pipe handle for the duration
+        // of this call.
+        match unsafe { rusty_win32::handle::pipe_bytes_available(output.as_raw()) } {
+            Ok(available) if available > 0 => return true,
+            Err(_) => return true,
+            Ok(_) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn wait_readable(output: &OwnedWinHandle, budget: std::time::Duration) -> bool {
     let deadline = std::time::Instant::now() + budget;
     loop {
@@ -448,11 +615,18 @@ pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<A
         return;
     };
     std::thread::spawn(move || {
-        // SAFETY: `dup` is a valid process handle, owned by this thread
-        // alone for the duration of the wait.
-        unsafe {
-            w::WaitForSingleObject(dup.as_raw(), w::INFINITE);
-        }
+        // The wait itself reuses `sys::proc::wait` (already Track W
+        // migrated, D-15 slice 2) rather than a raw `WaitForSingleObject`
+        // of its own — the two-armed dispatch already lives there, and
+        // this call site never looks at the `Result`: like the original
+        // bare `WaitForSingleObject`, only "the process is no longer
+        // running" matters, not why or with what exit code. (This
+        // corrects a mapping error in the issue that requested this
+        // migration, rustils#109, which had proposed
+        // `console::wait_readable` here — that function waits on a
+        // console *input* handle, not a process handle; there never was
+        // a fit.)
+        let _ = proc::wait(&dup);
         if closed
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
@@ -462,7 +636,7 @@ pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<A
             // most once across both this thread and `WindowsPtyMaster`'s
             // own `Drop`.
             unsafe {
-                w::ClosePseudoConsole(hpc);
+                close_pseudo_console(hpc);
             }
         }
     });
@@ -485,6 +659,50 @@ pub fn spawn_exit_watcher(process: &OwnedWinHandle, hpc: w::HPCON, closed: Arc<A
 /// and draining first is what keeps this `ClosePseudoConsole` call from
 /// deadlocking against conhost's writer if the caller never emptied the
 /// pipe (`dropping_an_undrained_master_does_not_deadlock`).
+///
+/// Track W (D-15): the drain loop's two calls become
+/// `rusty_win32::handle::pipe_bytes_available` and
+/// `rusty_win32::console::read` — the same two functions
+/// [`wait_readable`] and [`spawn_exit_watcher`]'s sibling code already
+/// route through — and the final `ClosePseudoConsole` goes through the
+/// shared [`close_pseudo_console`].
+#[cfg(feature = "track-w")]
+pub fn close(hpc: w::HPCON, output: &OwnedWinHandle) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut buf = [0u8; 4096];
+    loop {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        // SAFETY: `output` is a valid open pipe handle for the duration
+        // of this call.
+        let available = match unsafe { rusty_win32::handle::pipe_bytes_available(output.as_raw()) }
+        {
+            Ok(n) => n,
+            // Broken pipe (conhost's write end already closed) or any
+            // other failure — nothing left to drain either way.
+            Err(_) => break,
+        };
+        if available == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            continue;
+        }
+        // SAFETY: `output` is a valid open pipe handle for the duration
+        // of this call; `buf` is a valid writable region the donor
+        // derives its own length from.
+        if unsafe { rusty_win32::console::read(output.as_raw(), &mut buf) }.is_err() {
+            break;
+        }
+    }
+    // SAFETY: `hpc` is a valid, live pseudo console handle; closed
+    // exactly once here (the sole caller, `WindowsPtyMaster::drop`,
+    // never calls this twice).
+    unsafe {
+        close_pseudo_console(hpc);
+    }
+}
+
+#[cfg(not(feature = "track-w"))]
 pub fn close(hpc: w::HPCON, output: &OwnedWinHandle) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     let mut buf = [0u8; 4096];
@@ -536,6 +754,6 @@ pub fn close(hpc: w::HPCON, output: &OwnedWinHandle) {
     // exactly once here (the sole caller, `WindowsPtyMaster::drop`,
     // never calls this twice).
     unsafe {
-        w::ClosePseudoConsole(hpc);
+        close_pseudo_console(hpc);
     }
 }

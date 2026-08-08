@@ -20,7 +20,7 @@ members = [
 # rule: docs/versioning.md §2 (any public API change bumps the middle
 # component; nothing else does). See CHANGELOG.md for what each bump
 # was.
-version = "0.25.4"
+version = "0.25.7"
 edition = "2021"
 rust-version = "1.75"
 repository = "https://github.com/baileyrd/rustils"

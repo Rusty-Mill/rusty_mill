@@ -20,6 +20,125 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.7
+
+- **Track W: `sys::pty` migrated, partially — closes rustils#109 (D-15).**
+  Everything the ConPTY lifecycle and its I/O touch: `create_pipe_pair`
+  (`handle::create_pipe`, a direct match — the donor already creates
+  both ends non-inheritable by default, same as this crate's own null
+  `SECURITY_ATTRIBUTES`, so unlike `sys::proc::make_pipe` no
+  `set_inheritable` dance is needed), `create_pty`'s
+  `CreatePseudoConsole` (`conpty::create_with_flags`), `resize`
+  (`conpty::resize`), `close`'s drain loop
+  (`handle::pipe_bytes_available` + `console::read`) and its final
+  `ClosePseudoConsole`, and `spawn_exit_watcher`'s `ClosePseudoConsole`
+  — the last two sharing one new `close_pseudo_console` helper.
+
+  `spawn_exit_watcher`'s wait step no longer has its own
+  `WaitForSingleObject` at all: it now calls `sys::proc::wait` (already
+  migrated, slice 2/#103), discarding the `Result` exactly as the
+  original discarded `WaitForSingleObject`'s. This corrects a mapping
+  error in #109 itself, which had proposed routing this through
+  `console::wait_readable` — that function waits on a console *input*
+  handle, not a process handle; there was never a fit.
+
+  Two boundary conversions recur throughout: the donor's `Coord`
+  (`x`/`y`) against this crate's `w::COORD` (`X`/`Y`) are the same two
+  `i16` fields under different naming conventions, and the donor's
+  `Hpcon` (`*mut c_void`) against this crate's `w::HPCON` (`isize`) are
+  the OS's one pointer-sized opaque handle value in two Rust types — a
+  plain `as` cast at the boundary either way, not a reinterpretation.
+
+  **`spawn_attached`'s `CreateProcessW` and its
+  `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/
+  `DeleteProcThreadAttributeList` trio stay on windows-sys.** Not a
+  deferral — closed against the donor's current shape, on grounds
+  precise enough to act on:
+  - The donor's `conpty::AttributeList` covers the whole lifecycle
+    correctly, but its one pointer accessor
+    (`AttributeList::as_mut_ptr`) is `pub(crate)`, unreachable from
+    outside rusty_win32. A genuine upstream gap, not a design mismatch —
+    filed as baileyrd/rusty_win32#272.
+  - `spawn_suspended_with_pseudoconsole` carries the same three
+    `CreateProcessW` blockers `sys::proc::spawn`'s own doc comment
+    already records (no per-spawn std-handle override, no
+    `lpCurrentDirectory`, `&str` where winargv wants `&[u16]`), plus a
+    fourth specific to this call site: it hardcodes `CREATE_SUSPENDED`
+    with no accompanying resume step, where `spawn_attached`
+    deliberately spawns running.
+  - Most load-bearing: `spawn_attached`'s `STARTF_USESTDHANDLES` fix is
+    a real Windows kernel workaround this repo discovered through live
+    CI failures (`microsoft/terminal` discussion #15814), not present in
+    the donor's `spawn_suspended_with_pseudoconsole`. Adopting the
+    donor's sequence as-is would likely **reintroduce** the exact
+    console-handle leak this function exists to prevent — a correctness
+    regression, not a style preference.
+
+  All 7 existing `tests/pty.rs` tests already exercise every migrated
+  function (`create_pty`, `wait_readable`, `close`, `resize`,
+  `spawn_exit_watcher`); no new tests needed.
+
+  With this, all three families #110's audit found unmigrated are
+  closed (#107, #108, #109) — modulo the two items named above, which
+  are closed against the donor's current shape rather than migrated,
+  and `unix_peer_addr` from slice 5, and `sys::nt`, which has no donor
+  bindings at all.
+
+  `z`, not `y`: no public item's shape changed.
+
+### 0.25.6
+
+- **Track W: `sys::proc`'s pipe/handle helpers migrated (D-15).** Closes
+  rustils#108. `make_pipe` (`handle::create_pipe` + `set_inheritable`)
+  and `inheritable_dup_of_std` (`handle::get_std_handle` +
+  `handle::duplicate`, called on the raw handle directly rather than
+  through the already-migrated `sys::handle::duplicate`, which takes
+  `&OwnedWinHandle` — this process never owns the original std-slot
+  handle, only the duplicate it mints).
+
+  **The donor's `create_pipe` and this crate's own pipe creation start
+  from opposite inheritability defaults and land in the same place.**
+  windows-sys' `SECURITY_ATTRIBUTES.bInheritHandle = 1` makes *both*
+  pipe ends inheritable, then the parent end is explicitly cleared. The
+  donor's `create_pipe` makes *neither* end inheritable, by its own
+  documented design ("pass whichever end a child needs through
+  `set_inheritable` first") — so the track-w arm marks the *child* end
+  up instead of marking the parent end down. Same final state (child
+  inheritable, parent not) reached from opposite starting points; no
+  race in either arm, since every handle is fully configured before
+  `spawn`'s eventual `CreateProcessW` call, the only point inheritance
+  is consulted.
+
+  A local `std_handle_raw` two-arms `GetStdHandle`'s `NULL`/
+  `INVALID_HANDLE_VALUE` fold — the same shape `sys::console::std_handle`
+  already uses, kept as a separate copy since the two are keyed
+  differently (`TermStream` there, a raw slot constant here) and neither
+  module needs the other's private primitive for three lines.
+
+  `z`, not `y`: no public item's shape changed.
+
+### 0.25.5
+
+- **Track W: `sys::csignals` migrated (D-15).** Closes rustils#107.
+  `install()` now routes through `rusty_win32::console::install_ctrl_handler`
+  under `track-w` — the donor's own **Phase 1**, the binding it was
+  created for, and the sharpest of the three families #110's audit found
+  unmigrated. No rev bump needed: `install_ctrl_handler` already existed
+  at the currently-pinned rev.
+
+  The one thing worth a careful look: `record`, the `SetConsoleCtrlHandler`
+  callback, changed from `unsafe extern "system" fn` to a **safe**
+  `extern "system" fn`. Its body only ever touched an atomic, so it never
+  needed the marker on its own account — but the two donor call shapes
+  disagree on it. windows-sys' `PHANDLER_ROUTINE` wants
+  `Option<unsafe extern "system" fn(u32) -> BOOL>`; the donor's own
+  `HandlerRoutine` wants a safe `extern "system" fn(u32) -> i32`. Rust's
+  ordinary safe-to-unsafe function-pointer coercion is what lets one `fn`
+  item satisfy both — declaring it unsafe would have blocked the `track-w`
+  arm outright, since a safe fn pointer type accepts no `unsafe fn` item.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.4
 
 - **Correction (2026-08-08): Track W was not complete at 0.25.4.** The

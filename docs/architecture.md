@@ -65,25 +65,33 @@ surface where every admitted symbol is listed and justified.
 - **platform-windows** — `sys/{nt,proc,fileio,csignals}` + `winargv` over
   two floors: **windows-sys** (default, D-1) and **rusty_win32**'s
   hand-written `extern "system"` declarations behind `track-w` (D-15),
-  migrated call-by-call and **still in progress**: `sys::fileio::read`/
-  `write`, `sys::proc`'s wait/job/terminate families (`sys::pty` sharing
-  the job half), `sys::console`/`sys::handle`, `sys::security` (in full),
-  and `sys::net` (in full). Three families remain migratable and are
-  tracked as rustils#107 (`sys::csignals`), #108 (`sys::proc`'s pipe/
-  handle helpers) and #109 (`sys::pty`'s ConPTY surface) — an earlier
-  version of this line said "complete", which was true of the migration
-  list in `docs/convergence-roadmap.md` §1d and false of the codebase.
-  Two exclusions are deliberate and different in kind — `CreateProcessW`
-  is struck against the donor's *current shape* (its `spawn_suspended`
-  has no per-spawn std-handle override, no working directory, and a
-  `&str` command line where winargv produces `&[u16]`; only the first of
-  those relates to the stdio model D5 records this repo rejecting, and
-  the other two are independently fatal), while `reopen`'s console-device
-  open is *declined pending evidence*. Note `CreateProcessW` itself is
-  not rejected anywhere — this crate calls it in both configurations;
-  what cannot be adopted is the donor's `spawn_suspended` wrapper. Everything else still on windows-sys either has no donor
-  binding (`sys::nt` above all) or is a named upstream gap
-  (`unix_peer_addr`, baileyrd/rusty_win32#271).
+  migrated call-by-call: `sys::fileio::read`/`write`, `sys::proc`'s
+  wait/job/terminate families and pipe/handle helpers (`sys::pty` sharing
+  the job-creation helper), `sys::console`/`sys::handle`, `sys::security`
+  (in full), `sys::net` (in full), `sys::csignals` (`install()` —
+  rusty_win32's own Phase 1, the binding it was created for), and
+  `sys::pty`'s ConPTY lifecycle and I/O. An earlier version of this line
+  said "complete" before any of the last three landed, which was true of
+  the migration list in `docs/convergence-roadmap.md` §1d at the time and
+  false of the codebase — see that document's slice 6–8 entries
+  (rustils#107, #108, #109) for the correction and what each closed.
+
+  What remains on windows-sys in both configurations now falls into four
+  named categories, each with either a citation or a filed issue rather
+  than a bare assertion: **`CreateProcessW`**, closed against the donor's
+  *current shape* at two call sites (`sys::proc::spawn`: no per-spawn
+  std-handle override, no working directory, `&str` where winargv
+  produces `&[u16]`; `sys::pty::spawn_attached`: the same three plus a
+  hardcoded `CREATE_SUSPENDED` with no resume step, and — most load-
+  bearing — the donor's `spawn_suspended_with_pseudoconsole` lacks the
+  `STARTF_USESTDHANDLES` fix this repo found through a live CI bug hunt,
+  so adopting it risks reintroducing that bug rather than merely
+  differing in style); **`reopen`**, declined pending evidence (the
+  console-device open backing `has_console`); two **named upstream
+  gaps** — `unix_peer_addr` (baileyrd/rusty_win32#271) and
+  `AttributeList::as_mut_ptr`'s `pub(crate)` visibility
+  (baileyrd/rusty_win32#272), both fixable and both filed; and
+  **`sys::nt`**, which has no donor bindings at all.
   rusty_win32 was already this backend's extraction donor — its typed-
   handle, `wait_any` and console patterns were mined into `sys/` (see the
   extraction map) — and D-15 turns that one-way flow into a real,
