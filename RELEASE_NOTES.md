@@ -21,8 +21,14 @@ Backfilled from #52 onward. Earlier PRs are recorded in their own descriptions.
 - The generated `ci-rust.yml` was deleted rather than kept. This repo's `ci.yml` already runs 17
   checks across three toolchains against live Redis and Postgres; a second, weaker workflow would
   have been noise.
-- Known gap: `CHANGELOG.md` is seeded but empty, and `docs/adr/` holds only the template. The
-  decisions worth recording are currently in merged PR bodies and module docs.
+- **Fixed:** stale claims across the existing docs, found while checking them against the repo
+  rather than against memory. `CLAUDE.md` said 13 CI checks (17), listed four of eight features
+  in its sweep, named `#7, #8, #9, #11` as "all merges to date", and mentioned only
+  `redis-store` as needing 1.88. README's feature table omitted `store-testkit` entirely — a
+  public feature nothing advertised.
+- Known gap: `CHANGELOG.md` is deliberately a pointer rather than a populated history, and
+  `docs/adr/` has one real entry against a long run of decisions currently recorded only in PR
+  bodies and module docs.
 
 ## PR #86 — Put trace context behind a `trace` feature
 **2026-08-08** · [#86](https://github.com/baileyrd/rusty_acp/pull/86)

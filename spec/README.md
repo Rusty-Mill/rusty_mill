@@ -6,7 +6,7 @@
 It is here so `tests/spec_coverage.rs` can check the README's central claim — *every endpoint
 in the specification is implemented* — against the specification rather than against memory.
 Before this, that claim and the table under it were maintained by hand, and nothing failed when
-they drifted. Something checkable already had: the README said 163 tests while the crate had 295.
+they drifted. Something checkable already had: the README claimed 163 tests when the crate had grown past 290.
 
 ## Why vendored rather than fetched
 
