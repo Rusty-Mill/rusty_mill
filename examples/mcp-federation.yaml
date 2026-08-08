@@ -272,6 +272,17 @@ binds:
                         rules:
                           - builtin: email
                           - builtin: creditCard
+                    # A service that can change its mind, asked after the
+                    # cheap local rules above. Fails closed: unreachable, a
+                    # non-2xx, or an unreadable answer all refuse with 503.
+                    # `:path` moves the call off the default /request.
+                    - webhook:
+                        target:
+                          host: guard.internal:9000
+                        headers:
+                          x-tenant: 'request.headers["x-tenant"]'
+                          x-user: jwt.sub
+                        forwardHeaderMatches: [x-trace]
                 promptCaching:
                   cacheTools: true
                   cacheSystem: true

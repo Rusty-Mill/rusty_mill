@@ -25,6 +25,31 @@ fn guard(request: Vec<GuardRule>, response: Vec<GuardRule>) -> Guard {
         .expect("should be present")
 }
 
+/// Run a check to completion.
+///
+/// A `regex` rule never awaits anything, so a tiny executor beats making every
+/// test in this file async for a future that is always ready on the first
+/// poll.
+fn check_request(guard: &Guard, body: &mut Value) -> Decision {
+    poll(guard.check_request(body, &webhook::Context::default()))
+}
+
+fn check_text(guard: &Guard, text: &mut String) -> Decision {
+    poll(guard.check_text(text, &webhook::Context::default()))
+}
+
+fn poll<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+    let mut future = std::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(value) => value,
+        Poll::Pending => panic!("a regex rule should never await"),
+    }
+}
+
 fn ask(text: &str) -> Value {
     json!({"model": "gpt-4o", "messages": [{"role": "user", "content": text}]})
 }
@@ -68,7 +93,7 @@ fn a_matching_reject_rule_refuses_with_its_own_answer() {
     let guard = guard(vec![refusing], Vec::new());
 
     let mut body = ask("my password= hunter2");
-    match guard.check_request(&mut body) {
+    match check_request(&guard, &mut body) {
         Decision::Rejected(rejection) => {
             assert_eq!(rejection.status, 422);
             assert_eq!(rejection.body.as_deref(), Some("no credentials please"));
@@ -86,7 +111,7 @@ fn a_refusal_without_a_configured_status_is_a_400() {
         vec![rule(GuardAction::Reject, vec![pattern("secret")])],
         Vec::new(),
     );
-    match guard.check_request(&mut ask("the secret is out")) {
+    match check_request(&guard, &mut ask("the secret is out")) {
         Decision::Rejected(rejection) => assert_eq!(rejection.status, 400),
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -99,7 +124,10 @@ fn text_nothing_matches_is_left_exactly_as_it_was() {
         Vec::new(),
     );
     let mut body = ask("nothing to see");
-    assert!(matches!(guard.check_request(&mut body), Decision::Allowed));
+    assert!(matches!(
+        check_request(&guard, &mut body),
+        Decision::Allowed
+    ));
     assert_eq!(content(&body), "nothing to see");
 }
 
@@ -110,7 +138,7 @@ fn a_mask_rule_rewrites_and_lets_the_request_through() {
         Vec::new(),
     );
     let mut body = ask("my password is hunter2, do not tell");
-    assert!(matches!(guard.check_request(&mut body), Decision::Masked));
+    assert!(matches!(check_request(&guard, &mut body), Decision::Masked));
     assert_eq!(content(&body), "my password is <masked>, do not tell");
 }
 
@@ -124,7 +152,7 @@ fn a_builtin_says_what_it_found_and_a_custom_pattern_cannot() {
         Vec::new(),
     );
     let mut body = ask("write to a.b@example.com about ID-77");
-    guard.check_request(&mut body);
+    check_request(&guard, &mut body);
     assert_eq!(content(&body), "write to <EMAIL> about <masked>");
 }
 
@@ -155,7 +183,7 @@ fn every_builtin_matches_the_shape_it_names() {
             Vec::new(),
         );
         let mut body = ask(text);
-        guard.check_request(&mut body);
+        check_request(&guard, &mut body);
         assert!(
             content(&body).contains(token),
             "{kind:?} should have matched `{text}`, got `{}`",
@@ -177,7 +205,7 @@ fn every_message_in_the_conversation_is_scanned_not_just_the_last() {
         {"role": "assistant", "content": "noted"},
         {"role": "user", "content": "what did I say?"},
     ]});
-    guard.check_request(&mut body);
+    check_request(&guard, &mut body);
     assert_eq!(body["messages"][0]["content"], "my password is <masked>");
 }
 
@@ -199,7 +227,7 @@ fn the_first_rule_to_refuse_ends_it() {
     });
     let guard = guard(vec![first, second], Vec::new());
 
-    match guard.check_request(&mut ask("alpha and beta")) {
+    match check_request(&guard, &mut ask("alpha and beta")) {
         Decision::Rejected(rejection) => assert_eq!(rejection.status, 401),
         other => panic!("expected a refusal, got {other:?}"),
     }
@@ -217,7 +245,7 @@ fn a_mask_rule_before_a_reject_rule_can_defuse_it() {
         Vec::new(),
     );
     let mut body = ask("password hunter2");
-    assert!(matches!(guard.check_request(&mut body), Decision::Masked));
+    assert!(matches!(check_request(&guard, &mut body), Decision::Masked));
     assert_eq!(content(&body), "password <masked>");
 }
 
@@ -232,7 +260,7 @@ fn a_structured_content_list_is_left_alone_rather_than_half_scanned() {
     let mut body = json!({"messages": [{"role": "user", "content": [
         {"type": "text", "text": "the secret"},
     ]}]});
-    guard.check_request(&mut body);
+    check_request(&guard, &mut body);
     assert_eq!(body["messages"][0]["content"][0]["text"], "the secret");
 }
 
@@ -246,7 +274,7 @@ fn response_rules_run_on_the_answers_own_text() {
         )],
     );
     let mut text = "you can call 555-867-5309".to_string();
-    assert!(matches!(guard.check_text(&mut text), Decision::Masked));
+    assert!(matches!(check_text(&guard, &mut text), Decision::Masked));
     assert_eq!(text, "you can call <PHONE_NUMBER>");
 }
 
