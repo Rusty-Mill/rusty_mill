@@ -15,6 +15,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `[webhook]` event fires once a client's spend crosses this fraction of
   `budget_usd`, ahead of the hard `budget_exceeded` cutoff. Config-only
   for now, not yet settable via the admin API.
+- Reasoning replay for tool-continuation turns — some OpenAI-compatible
+  reasoning models (DeepSeek-reasoner, Kimi-K-series, QwQ, GLM-thinking)
+  reject a tool-answering turn missing the `reasoning_content` behind the
+  tool call. A non-streaming response's reasoning is now cached in memory
+  by `tool_calls[].id` and transparently re-injected into the matching
+  assistant message on the next request, even when the calling client
+  stripped it (most do).
 - `docs/PROVIDERS.md` + curated commented-out provider presets in
   `config.example.toml` (~20 more OpenAI-wire-compatible backends).
 - `[[free_tiers]]` config + `GET /v1/free-tiers` — operator-declared,
