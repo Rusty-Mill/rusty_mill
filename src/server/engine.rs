@@ -40,11 +40,12 @@ type EventLogs = Arc<Mutex<HashMap<String, VecDeque<SeqEvent>>>>;
 
 use crate::error::{A2aError, Result};
 use crate::types::{
-    AgentCard, CancelTaskRequest, DeleteTaskPushNotificationConfigRequest,
+    AgentCard, AgentInterface, CancelTaskRequest, DeleteTaskPushNotificationConfigRequest,
     GetTaskPushNotificationConfigRequest, GetTaskRequest, ListTaskPushNotificationConfigsRequest,
     ListTaskPushNotificationConfigsResponse, ListTasksRequest, ListTasksResponse, Message, Role,
-    SecurityRequirement, SendMessageRequest, SendMessageResult, StreamResponse, SubscribeToTaskRequest, Task,
-    TaskArtifactUpdateEvent, TaskPushNotificationConfig, TaskState, TaskStatus, TaskStatusUpdateEvent,
+    SecurityRequirement, SecurityScheme, SendMessageRequest, SendMessageResult, StreamResponse,
+    SubscribeToTaskRequest, Task, TaskArtifactUpdateEvent, TaskPushNotificationConfig, TaskState, TaskStatus,
+    TaskStatusUpdateEvent,
 };
 
 use super::auth::{authenticate_against, AuthContext, AuthVerifier, Credentials};
@@ -90,8 +91,55 @@ pub struct Engine {
     next_seq: Arc<AtomicU64>,
 }
 
+/// Names of `apiKey` security schemes in `card` whose `location` is
+/// `"query"` or `"cookie"` while `card` also advertises a non-REST
+/// interface (JSON-RPC or gRPC).
+///
+/// Spec Section 5.1 requires "Equivalent Authentication" across every
+/// binding an `AgentCard` declares, but Sections 7.3/9.2/10.2 only ever
+/// describe JSON-RPC/gRPC credential transport as headers/metadata - a
+/// query- or cookie-located `apiKey` scheme has no defined equivalent
+/// there, so it is realistically only satisfiable over REST.
+fn unsatisfiable_non_rest_api_key_schemes(card: &AgentCard) -> Vec<&str> {
+    let has_non_rest_interface = card
+        .supported_interfaces
+        .iter()
+        .any(|i| i.protocol_binding != AgentInterface::HTTP_JSON);
+    if !has_non_rest_interface {
+        return Vec::new();
+    }
+    card.security_schemes
+        .iter()
+        .filter_map(|(name, scheme)| match scheme {
+            SecurityScheme::ApiKey {
+                api_key_security_scheme,
+            } if matches!(api_key_security_scheme.location.as_str(), "query" | "cookie") => {
+                Some(name.as_str())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Logs a [`tracing::warn!`] for every scheme
+/// [`unsatisfiable_non_rest_api_key_schemes`] flags, so a misconfigured
+/// `AgentCard` fails loud instead of silently leaving JSON-RPC/gRPC
+/// callers unable to ever satisfy that scheme.
+fn warn_about_unsatisfiable_api_key_schemes(card: &AgentCard) {
+    for name in unsatisfiable_non_rest_api_key_schemes(card) {
+        tracing::warn!(
+            scheme_name = name,
+            "AgentCard declares apiKey security scheme {name:?} with a query/cookie location \
+             alongside a non-REST interface (JSON-RPC/gRPC); the A2A spec only defines \
+             header/metadata credential transport for those bindings (Section 5.1), so this \
+             scheme cannot be satisfied there"
+        );
+    }
+}
+
 impl Engine {
     pub fn new(card: AgentCard, executor: Arc<dyn AgentExecutor>, store: Arc<dyn TaskStore>) -> Self {
+        warn_about_unsatisfiable_api_key_schemes(&card);
         // Quoted per RFC 7232's ETag syntax; `version` is the field spec
         // Section 8.6.1 itself suggests deriving it from. A literal `"`
         // in `version` would otherwise produce a malformed ETag value.
@@ -1374,5 +1422,83 @@ fn replay_then_live(
                 Err(broadcast::error::RecvError::Closed) => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::ApiKeySecurityScheme;
+
+    fn sample_card(interfaces: impl IntoIterator<Item = AgentInterface>) -> AgentCard {
+        let mut interfaces = interfaces.into_iter();
+        let first = interfaces.next().expect("at least one interface");
+        let mut card = AgentCard::new(
+            "Test Agent",
+            "An agent used to test binding warnings.",
+            "1.0.0",
+            first,
+        );
+        for interface in interfaces {
+            card = card.with_interface(interface);
+        }
+        card
+    }
+
+    fn api_key_scheme(location: &str) -> SecurityScheme {
+        SecurityScheme::ApiKey {
+            api_key_security_scheme: ApiKeySecurityScheme {
+                description: None,
+                location: location.to_string(),
+                name: "X-Api-Key".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn flags_query_and_cookie_api_key_schemes_alongside_a_non_rest_interface() {
+        let mut card = sample_card([AgentInterface::json_rpc("https://agent.example.com")]);
+        card.security_schemes
+            .insert("queryKey".to_string(), api_key_scheme("query"));
+        card.security_schemes
+            .insert("cookieKey".to_string(), api_key_scheme("cookie"));
+
+        let mut flagged = unsatisfiable_non_rest_api_key_schemes(&card);
+        flagged.sort_unstable();
+        assert_eq!(flagged, ["cookieKey", "queryKey"]);
+    }
+
+    #[test]
+    fn does_not_flag_header_located_api_key_schemes() {
+        let mut card = sample_card([AgentInterface::json_rpc("https://agent.example.com")]);
+        card.security_schemes
+            .insert("headerKey".to_string(), api_key_scheme("header"));
+
+        assert!(unsatisfiable_non_rest_api_key_schemes(&card).is_empty());
+    }
+
+    #[test]
+    fn does_not_flag_query_cookie_api_key_schemes_on_rest_only_agents() {
+        let mut card = sample_card([AgentInterface::http_json("https://agent.example.com")]);
+        card.security_schemes
+            .insert("queryKey".to_string(), api_key_scheme("query"));
+
+        assert!(unsatisfiable_non_rest_api_key_schemes(&card).is_empty());
+    }
+
+    #[test]
+    fn still_flags_query_cookie_api_key_schemes_when_rest_is_also_offered() {
+        let mut card = sample_card([
+            AgentInterface::json_rpc("https://agent.example.com/rpc"),
+            AgentInterface::http_json("https://agent.example.com/rest"),
+        ]);
+        card.security_schemes
+            .insert("queryKey".to_string(), api_key_scheme("query"));
+
+        // Spec Section 5.1 requires equivalent authentication on *every*
+        // declared interface, not merely on at least one - a caller who
+        // picks the JSON-RPC interface still can't satisfy this scheme
+        // there, so offering REST alongside it doesn't clear the warning.
+        assert_eq!(unsatisfiable_non_rest_api_key_schemes(&card), ["queryKey"]);
     }
 }
