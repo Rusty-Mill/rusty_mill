@@ -242,9 +242,7 @@ impl Guard {
                         webhook::Verdict::Mask(replacements) => {
                             // Positional, as upstream's shape is: the webhook
                             // sends back the same list it was given.
-                            for (text, replacement) in
-                                message_texts(body).zip(replacements.into_iter())
-                            {
+                            for (text, replacement) in message_texts(body).zip(replacements) {
                                 *text = replacement;
                             }
                             Decision::Masked
