@@ -214,8 +214,22 @@ impl LlmBackend {
                 .filter(|_| provider.caches_explicitly()),
         );
 
+        // What a moderation rule may borrow: an `openAI` route's own URL and
+        // key. A route on anything else lends nothing, because its key is not
+        // an OpenAI credential -- see `guard::moderation`.
+        let moderation_endpoint = provider.moderation_endpoint();
+        let borrowable =
+            moderation_endpoint
+                .as_deref()
+                .map(|endpoint| guard::moderation::Borrowable {
+                    endpoint,
+                    key: key.as_deref(),
+                });
+
         let guard = Guard::new(
             policies.ai.as_ref().and_then(|ai| ai.prompt_guard.as_ref()),
+            borrowable,
+            provider.name(),
             &format!("{at}.ai.promptGuard"),
         )?;
         if guard.as_ref().is_some_and(Guard::guards_response) {
@@ -382,7 +396,7 @@ impl LlmBackend {
         // exists once the body is parsed -- so the context is completed here
         // rather than built complete. Cloning costs an allocation, and only a
         // route with a webhook rule pays it.
-        let context = match self.guard.as_ref().is_some_and(Guard::calls_out) {
+        let context = match self.guard.as_ref().is_some_and(Guard::needs_context) {
             true => context.with_llm_request(body.clone()),
             false => context,
         };
@@ -849,7 +863,7 @@ impl LlmBackend {
     /// Only built when a route has a webhook rule: snapshotting headers costs
     /// an allocation per request, and most routes have nothing to read them.
     fn guard_context<B>(&self, request: &Request<B>) -> GuardContext {
-        if !self.guard.as_ref().is_some_and(Guard::calls_out) {
+        if !self.guard.as_ref().is_some_and(Guard::needs_context) {
             return GuardContext::default();
         }
         let headers = request

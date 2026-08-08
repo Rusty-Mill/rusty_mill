@@ -146,7 +146,8 @@ Implemented and tested:
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
   and tool calling included, with the `ai` policy's `modelAliases`, `prompts`,
-  `defaults`, `overrides`, `promptCaching` and `promptGuard.regex` — see
+  `defaults`, `overrides`, `promptCaching`, and `promptGuard`'s `regex`,
+  `webhook` and `openAIModeration` rules — see
   [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
@@ -167,9 +168,11 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
-- `ai.routes`, and `promptGuard.openAIModeration` — named one at a time rather
-  than as the whole of `ai` — see
-  [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet)
+- Whatever upstream's `ai` policy grows next: unknown sub-policies are named
+  one at a time rather than as the whole of `ai` — see
+  [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet).
+  Also `promptGuard.response[].openAIModeration`, which upstream's schema does
+  not accept at all: moderation classifies a prompt
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
 - `urlRewrite.authority` where a route has more than one `mcp:` target, and any
@@ -1293,7 +1296,10 @@ likeliest to hit.
 
 ### Prompt guards
 
-Content rules over what a caller sends and what comes back:
+Content rules over what a caller sends and what comes back. Three kinds, in
+increasing order of what they can notice and what they cost: a `regex` pattern
+written down in advance, a `webhook` asking a service the operator runs, and
+`openAIModeration` asking a classifier.
 
 ```yaml
 policies:
@@ -1403,6 +1409,86 @@ already carries the prompt, so headers are extra reach rather than the point.
 Rules run in order, so putting a cheap `regex` rule above a webhook saves the
 network call when it refuses.
 
+#### Asking OpenAI's classifier
+
+```yaml
+policies:
+  ai:
+    promptGuard:
+      request:
+        - openAIModeration:
+            model: omni-moderation-latest    # the default
+          rejection:
+            status: 451
+```
+
+A model trained to recognise categories no pattern describes — harassment,
+self-harm, sexual content, violence. The endpoint answers a verdict per input
+with a `flagged` flag on each, and **any** flag refuses, without looking at
+which category: picking categories apart would be inventing a policy language
+upstream does not have.
+
+It classifies the **prompt only**. Upstream's response guard has no moderation
+variant, and a rule written under `response` is reported by `--check` rather
+than quietly inspecting nothing:
+
+```
+warning: ...promptGuard.response[0].openAIModeration: moderation classifies a
+         prompt, and upstream accepts it on the request phase only, so this
+         rule inspects nothing
+```
+
+The text it is shown is every message's content, in order — including the text
+parts of a multimodal message, which is more than a `regex` rule reads. The two
+differ because this one only *reads*: masking rewrites what it matched, and
+rewriting inside a content part means rebuilding a structure whose other parts
+are images. Reading carries no such risk, and skipping the list form would let
+a prompt evade the rule by spelling itself the other way. A prompt with no text
+at all is allowed without a call, since an empty input list only earns a 400.
+
+It **fails closed**. A classifier that cannot be reached, times out, or answers
+unreadably refuses with a **503** — not the rule's own rejection, because
+nothing decided this prompt was unacceptable and a content refusal would send
+someone to inspect a prompt that is fine. Upstream's moderation carries no
+`failureMode`, unlike a webhook, so there is nothing to configure and no
+fail-open path.
+
+##### Which key it calls with, and where that key travels
+
+A moderation call is an authenticated call to OpenAI, so it needs an OpenAI
+key. Two ways to have one:
+
+```yaml
+- openAIModeration:
+    policies:
+      backendAuth:
+        key: sk-moderation      # its own, and it calls api.openai.com
+```
+
+or nothing at all, in which case the rule borrows the **route's**
+`backendAuth.key` — but only when the route's provider is `openAI`. A route on
+Anthropic has a key too, and borrowing it would send an Anthropic credential to
+OpenAI: a secret handed to a third party by a gateway the operator trusted to
+do the opposite. So a moderation rule on a non-OpenAI route without its own key
+**does not start**:
+
+```
+route[0].ai.promptGuard.request[0].openAIModeration: moderation calls OpenAI
+and has no key to call it with; give the rule a `policies.backendAuth.key`,
+because an `anthropic` route's own key is not an OpenAI credential and sending
+it to OpenAI would hand a secret to a third party
+```
+
+`passthrough` is refused for the same family of reasons the `ai` backend
+refuses it: a client's bearer token is not an OpenAI API key.
+
+A borrowed key travels **no further than the route it came from** — the call
+goes to that route's own base URL, `hostOverride` included, rather than to
+`api.openai.com`. This is a deliberate, narrow divergence from upstream, which
+always calls `api.openai.com`, and it exists for the reason above: a key issued
+for one host should not be sent to another. An operator who wants the real
+OpenAI from a route pointed elsewhere says so by giving the rule its own key.
+
 #### A response rule buffers a streamed answer
 
 This costs something a caller will notice, so it is worth being plain about.
@@ -1435,15 +1521,18 @@ whole:
 
 ```
 warning: ...policies.ai.routes: parsed but not enforced by this build
-warning: ...policies.ai.promptGuard.request[0].openAIModeration: parsed but not
-         enforced by this build
 ```
 
 One finding for the whole policy was accurate while none of it was implemented
 and would be a lie now — an operator who reads "not enforced", then watches
 their `prompts` work, has no idea what else is being ignored. That granularity
-goes all the way down: an `openAIModeration` rule beside a `regex` one in the
-same list reports only the moderation.
+goes all the way down: a rule kind this build does not run, beside a `regex`
+one in the same list, reports only itself.
+
+Every named sub-policy is implemented now. What is left is whatever upstream
+adds next, which lands in the catch-all and is reported by name — and the one
+placement the schema allows but upstream does not, `openAIModeration` under
+`response`.
 
 ## TLS
 

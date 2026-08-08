@@ -161,7 +161,7 @@ impl PromptGuard {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
         for (phase, rules) in [("request", &self.request), ("response", &self.response)] {
             for (i, rule) in rules.iter().enumerate() {
-                rule.lint(&format!("{at}.{phase}[{i}]"), findings);
+                rule.lint(phase, &format!("{at}.{phase}[{i}]"), findings);
             }
         }
     }
@@ -179,11 +179,63 @@ pub struct GuardRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webhook: Option<GuardWebhook>,
 
+    /// OpenAI's moderation endpoint asked about the text.
+    ///
+    /// Spelled `openAIModeration` upstream, with the same capitalisation as
+    /// the `openAI` provider, so the rename is explicit rather than whatever
+    /// `camelCase` would make of the field name.
+    #[serde(
+        default,
+        rename = "openAIModeration",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub open_ai_moderation: Option<Moderation>,
+
     /// What to answer with when this rule refuses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejection: Option<Rejection>,
 
-    /// Other rule kinds upstream accepts, such as `openAIModeration`.
+    /// Other rule kinds upstream accepts.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+/// OpenAI's moderation endpoint asked whether a prompt may pass.
+///
+/// A classifier rather than a pattern or a service of the operator's own: it
+/// answers with a set of categories and one `flagged` verdict, and upstream
+/// refuses the request when anything is flagged.
+///
+/// **Upstream accepts this on the request phase only.** Its response guard has
+/// no moderation variant, so a config naming one under `response` does not
+/// load there; here it parses and [`GuardRule::lint`] reports it, because a
+/// rule that reads as a content control and inspects nothing is the failure
+/// this crate exists to make visible.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Moderation {
+    /// Which moderation model to ask. Defaults to `omni-moderation-latest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+
+    /// Backend policies for the call to the moderation endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policies: Option<ModerationPolicies>,
+}
+
+/// The backend policies a moderation call is made under.
+///
+/// Upstream reuses its whole backend policy type here — TLS, header modifiers,
+/// protocol settings. Only `backendAuth` changes what this build sends, and
+/// the rest is kept so an upstream config loads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModerationPolicies {
+    /// Credential presented to the moderation endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_auth: Option<BackendAuth>,
+
+    /// Everything else upstream accepts here.
     #[serde(flatten)]
     pub rest: BTreeMap<String, serde_json::Value>,
 }
@@ -232,9 +284,20 @@ pub struct WebhookTarget {
 }
 
 impl GuardRule {
-    pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+    pub(crate) fn lint(&self, phase: &str, at: &str, findings: &mut Vec<String>) {
         for key in self.rest.keys() {
             findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
+        }
+
+        // Upstream's response guard has no moderation variant, so a config
+        // naming one here does not load there and there is no behaviour to be
+        // faithful to. Reported rather than refused because that is what this
+        // crate does with everything else it parses and does not run.
+        if self.open_ai_moderation.is_some() && phase == "response" {
+            findings.push(format!(
+                "{at}.openAIModeration: moderation classifies a prompt, and upstream accepts \
+                 it on the request phase only, so this rule inspects nothing"
+            ));
         }
     }
 }

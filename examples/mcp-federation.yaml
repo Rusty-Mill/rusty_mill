@@ -283,6 +283,21 @@ binds:
                           x-tenant: 'request.headers["x-tenant"]'
                           x-user: jwt.sub
                         forwardHeaderMatches: [x-trace]
+                    # OpenAI's classifier, for the categories no pattern
+                    # describes. Any flagged result refuses; it fails closed
+                    # with a 503, and it classifies the prompt only.
+                    #
+                    # The key is spelled out because this route is Anthropic:
+                    # borrowing the route's own key would send an Anthropic
+                    # credential to OpenAI, so the gateway refuses to start
+                    # instead. An `openAI` route can leave this off and lend
+                    # its own key.
+                    - openAIModeration:
+                        policies:
+                          backendAuth:
+                            key: sk-moderation
+                      rejection:
+                        status: 451
                 promptCaching:
                   cacheTools: true
                   cacheSystem: true
