@@ -14,6 +14,7 @@ workspace = true
 
 [dependencies]
 agentgateway-config = { workspace = true }
+agentgateway-core = { workspace = true }
 rmcp = { workspace = true, features = [
     "client",
     "server",

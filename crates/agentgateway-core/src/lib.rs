@@ -5,6 +5,7 @@
 //! and routes get sorted into precedence order, so the request path does no
 //! work that could have been done at startup.
 
+mod balance;
 mod cors;
 mod headers;
 mod hostname;
@@ -14,6 +15,7 @@ mod retry;
 mod rewrite;
 mod router;
 
+pub use balance::{BalanceError, Endpoints};
 pub use cors::{CorsDecision, CorsMatcher};
 pub use headers::{HeaderError, Headers};
 pub use hostname::HostnamePattern;

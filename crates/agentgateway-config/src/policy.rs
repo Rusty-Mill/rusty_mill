@@ -474,11 +474,27 @@ impl McpGuardrails {
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         for (i, processor) in self.processors.iter().enumerate() {
             let at = format!("{at}.processors[{i}]");
-            if processor.host.is_none() {
-                findings.push(format!(
-                    "{at}: only `host` is supported; `backend` and `service` need a backend \
-                     registry this build does not have, so this processor will not run"
-                ));
+            // One of the three, and only one: naming two says two different
+            // things, and picking either would be a guess.
+            let named: Vec<&str> = [
+                processor.host.as_ref().map(|_| "host"),
+                processor.backend.as_ref().map(|_| "backend"),
+                processor.service.as_ref().map(|_| "service"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            match named.len() {
+                0 => findings.push(format!(
+                    "{at}: names no address, so this processor will not run; give it a `host`, \
+                     a `backend` or a `service`"
+                )),
+                1 => {}
+                _ => findings.push(format!(
+                    "{at}: names {} at once, and only `{}` is read; remove the others",
+                    named.join(" and "),
+                    named[0]
+                )),
             }
             for pattern in processor.methods.keys() {
                 if !crate::pattern_is_matchable(pattern) {
@@ -529,13 +545,13 @@ pub struct Processor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<String>,
 
-    /// A backend named in the top-level `backends` list. Not supported here.
+    /// A backend named in the top-level `backends` list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<String>,
 
-    /// A service named in the top-level `services` list. Not supported here.
+    /// A service named in the top-level `services` list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub service: Option<serde_json::Value>,
+    pub service: Option<crate::ServiceRef>,
 
     /// What to do when the processor is unreachable or answers unusably.
     #[serde(default, skip_serializing_if = "Option::is_none")]

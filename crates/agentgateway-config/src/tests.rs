@@ -599,10 +599,8 @@ binds:
         "an unmatchable pattern must be reported: {findings:?}"
     );
     assert!(
-        findings
-            .iter()
-            .any(|f| f.contains("processors[2]") && f.contains("only `host`")),
-        "a processor this build cannot resolve must be reported: {findings:?}"
+        !findings.iter().any(|f| f.contains("processors[2]")),
+        "a processor naming a `backend` resolves now: {findings:?}"
     );
 }
 

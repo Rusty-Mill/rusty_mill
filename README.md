@@ -176,8 +176,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet).
   Also `promptGuard.response[].openAIModeration`, which upstream's schema does
   not accept at all: moderation classifies a prompt
-- `mcpGuardrails` processors naming `backend:` or `service:` rather than
-  `host:`
 - `urlRewrite.authority` where a route has more than one `mcp:` target, and any
   rewrite aimed only at `stdio` targets or using `path.prefix` without exactly
   one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
@@ -423,6 +421,28 @@ consults over gRPC — Envoy's `ext_authz` shape moved down to the MCP method
 layer, with one addition that changes what it is for: **a processor can rewrite
 as well as refuse.** Redacting a secret out of a tool result is not something a
 yes/no answer can do.
+
+A processor names its address one of three ways, and exactly one:
+
+```yaml
+- host: guardrail.internal:9000     # literal
+- backend: guard                    # an entry in the top-level `backends:`
+- service:                          # an entry in the inventory
+    name: guard
+    port: 9000
+```
+
+`backend:` and `service:` resolve through the same registry a `service` backend
+uses — see [Naming a service instead of an
+address](#naming-a-service-instead-of-an-address). A `service` can resolve to
+several instances, so a processor holds a ring rather than an address and
+spreads its calls across them; sending every call to the first would make the
+others decoration. A name that does not resolve is a **startup failure**, since
+a processor that cannot be reached is a guardrail that is not running.
+
+Naming none of the three, or more than one, is reported by `--check`: the first
+is a policy that does not describe a processor, and the second says two
+different things where picking either would be a guess.
 
 ```yaml
 policies:

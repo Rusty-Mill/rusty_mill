@@ -223,6 +223,12 @@ struct Harness {
 impl Harness {
     /// Boot a gateway whose route carries `methods` on one processor at `host`.
     async fn start(host: &str, methods: &str) -> Harness {
+        Harness::start_referring(&format!("host: \"{host}\""), methods, "").await
+    }
+
+    /// The same, with the processor naming its address however `reference`
+    /// spells it, and `extra` appended at the top level.
+    async fn start_referring(reference: &str, methods: &str, extra: &str) -> Harness {
         let port = free_port().await;
         let yaml = format!(
             r#"
@@ -238,7 +244,7 @@ binds:
               mcpGuardrails:
                 processors:
                   - kind: remote
-                    host: "{host}"
+                    {reference}
                     timeout: 5s
                     methods: {methods}
             backends:
@@ -252,6 +258,7 @@ binds:
                           MOCK_TOOLS: "echo,ping"
                           MOCK_PROMPTS: "summarize,leak"
                           MOCK_RESOURCES: "memo:insights,file:///secret"
+{extra}
 "#,
             server = mock_server()
         );
@@ -2948,5 +2955,146 @@ binds:
     assert!(
         err.contains("mcp.via") && err.contains("backendAuth"),
         "and should name the field it came from: {err}"
+    );
+}
+
+#[tokio::test]
+async fn a_processor_can_name_a_backend_instead_of_an_address() {
+    // The address is written once at the top level and referred to by name,
+    // which is what upstream's `backends:` list is for.
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let harness = Harness::start_referring(
+        "backend: guard",
+        r#"{ "tools/call": full }"#,
+        &format!("backends:\n  - name: guard\n    host: \"{host}\""),
+    )
+    .await;
+
+    assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+    assert_eq!(seen.requests.lock().expect("lock").len(), 1);
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_can_name_a_service_instead_of_an_address() {
+    let (host, seen, stop) = processor(Script::Pass).await;
+    let port: u16 = host
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("the processor should have a port");
+
+    let harness = Harness::start_referring(
+        "service:\n                      name: guard\n                      port: 9000",
+        r#"{ "tools/call": full }"#,
+        &format!(
+            "services:\n  - name: guard\n    namespace: default\n    ports:\n      9000: {port}\n\
+             workloads:\n  - name: guard-1\n    namespace: default\n    workloadIps: \
+             [\"127.0.0.1\"]\n    services:\n      \"default/guard\": {{}}\n"
+        ),
+    )
+    .await;
+
+    assert_eq!(harness.call("alpha_echo").await, Ok("alpha:echo".into()));
+    assert_eq!(seen.requests.lock().expect("lock").len(), 1);
+
+    stop.cancel();
+    harness.stop().await;
+}
+
+#[tokio::test]
+async fn a_processor_naming_a_backend_that_does_not_exist_fails_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - backend: missing
+                    methods: {{ "tools/call": full }}
+            backends:
+              - mcp:
+                  targets: []
+backends:
+  - name: guard
+    host: "127.0.0.1:9000"
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an unresolvable processor should not start");
+    assert!(err.to_string().contains("missing"), "got: {err}");
+    assert!(
+        err.to_string().contains("guard"),
+        "the error should name what the list does hold: {err}"
+    );
+}
+
+#[tokio::test]
+async fn check_reports_a_processor_that_names_no_address() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - methods: { "tools/call": full }
+            backends:
+              - mcp:
+                  targets: []
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings.iter().any(|f| f.contains("names no address")),
+        "{findings:?}"
+    );
+}
+
+#[tokio::test]
+async fn check_reports_a_processor_that_names_two_addresses() {
+    // Naming two says two different things, and picking either is a guess.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              mcpGuardrails:
+                processors:
+                  - host: "127.0.0.1:9000"
+                    backend: guard
+                    methods: { "tools/call": full }
+            backends:
+              - mcp:
+                  targets: []
+backends:
+  - name: guard
+    host: "127.0.0.1:9001"
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("host and backend") && f.contains("only `host` is read")),
+        "{findings:?}"
     );
 }

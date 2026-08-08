@@ -244,7 +244,7 @@ impl Gateway {
         let router = Router::build(config)?;
         // The inventory a `service` backend resolves against, indexed once for
         // every route that names one.
-        let registry = Registry::new(&config.services, &config.workloads);
+        let registry = Registry::new(&config.services, &config.workloads, &config.backends);
         // Certificates are read here, so a missing or malformed one stops the
         // gateway booting rather than failing every handshake later.
         let tls = TlsBinds::build(config)?;
@@ -314,6 +314,7 @@ impl Gateway {
                         mcp,
                         route.policies.mcp_authorization.as_ref(),
                         route.policies.mcp_guardrails.as_ref(),
+                        &registry,
                         route.policies.request_header_modifier.as_ref(),
                         mcp_overrides(&route.policies, &route.matches, mcp, &at)?,
                         backend_timeout,
