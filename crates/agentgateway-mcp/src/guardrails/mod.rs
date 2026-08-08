@@ -41,6 +41,7 @@ mod wire;
 use std::time::Duration;
 
 use agentgateway_config::{FailureMode, McpGuardrails, Processor, resolve};
+use agentgateway_core::{Endpoints, Registry};
 use cel::{Context, Program};
 use http::{HeaderMap, HeaderName, HeaderValue};
 
@@ -69,6 +70,10 @@ pub enum GuardrailsError {
         /// The offending text.
         host: String,
     },
+
+    /// A `backend` or `service` reference did not resolve.
+    #[error(transparent)]
+    Registry(#[from] agentgateway_core::RegistryError),
 
     /// A `metadata` expression did not compile.
     #[error("{at}: invalid CEL expression `{expression}`: {source}")]
@@ -321,7 +326,14 @@ pub struct Guardrails {
 
 struct Compiled {
     config: Processor,
-    endpoint: String,
+    /// Where to send a call.
+    ///
+    /// A ring rather than a string because a `service` reference resolves to
+    /// however many instances back it, and sending every call to the first
+    /// would make the other instances decoration.
+    endpoints: Endpoints,
+    /// `http` unless a literal `host` spelled otherwise.
+    scheme: &'static str,
     timeout: Duration,
     fail_open: bool,
     /// `metadata` expressions, compiled once at startup.
@@ -331,44 +343,97 @@ struct Compiled {
 impl std::fmt::Debug for Compiled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Processor")
-            .field("endpoint", &self.endpoint)
+            .field("endpoints", &self.endpoints)
             .field("fail_open", &self.fail_open)
             .finish_non_exhaustive()
     }
 }
 
+/// The address (or addresses) one processor sends to.
+///
+/// `None` when it names none of the three ways, which is a processor that
+/// cannot run and is reported by [`Guardrails::lint`] rather than guessed at.
+fn address_of(
+    processor: &Processor,
+    registry: &Registry,
+    at: &str,
+) -> Result<Option<Vec<String>>, GuardrailsError> {
+    // Most specific first, and only one is read: a processor naming two is
+    // saying two different things, and picking either would be a guess.
+    if let Some(host) = processor.host.as_deref() {
+        return Ok(Some(vec![host.to_string()]));
+    }
+    if let Some(name) = processor.backend.as_deref() {
+        return Ok(Some(vec![registry.backend(name, at)?]));
+    }
+    if let Some(service) = processor.service.as_ref() {
+        return Ok(Some(registry.resolve(service, at)?));
+    }
+    Ok(None)
+}
+
 impl Guardrails {
     /// Compile a route's `mcpGuardrails` policy.
     ///
-    /// Processors naming `backend` or `service` rather than `host` are dropped
-    /// rather than guessed at — this build has no backend registry to resolve
-    /// them against. [`Guardrails::lint`] reports each one, so the drop is
-    /// loud rather than silent.
-    pub fn new(config: &McpGuardrails, at: &str) -> Result<Self, GuardrailsError> {
+    /// A processor names its address one of three ways, and all three end up
+    /// as one endpoint here: `host` is literal, `backend` names an entry in
+    /// the top-level `backends:` list, and `service` names one in the
+    /// inventory. The last of those can resolve to several instances, which is
+    /// why the endpoint is a ring rather than a string — see [`Compiled`].
+    ///
+    /// A processor naming none of the three is dropped, and
+    /// [`Guardrails::lint`] reports it.
+    pub fn new(
+        config: &McpGuardrails,
+        registry: &Registry,
+        at: &str,
+    ) -> Result<Self, GuardrailsError> {
         let mut processors = Vec::new();
 
         for (i, processor) in config.processors.iter().enumerate() {
-            let Some(host) = processor.host.as_deref() else {
+            let at = format!("{at}.processors[{i}]");
+            let Some(addresses) = address_of(processor, registry, &at)? else {
                 continue;
             };
 
-            let endpoint = if host.contains("://") {
-                host.to_string()
-            } else {
-                format!("http://{host}")
-            };
-            if endpoint.parse::<http::Uri>().is_err() {
-                return Err(GuardrailsError::Host {
-                    at: format!("{at}.processors[{i}]"),
-                    host: host.to_string(),
-                });
+            // The scheme is kept beside the ring rather than in it: the ring
+            // holds authorities, and only a literal `host` can carry a scheme
+            // at all -- a `backend` or `service` resolves to a bare address.
+            let mut scheme = "http";
+            let mut authorities = Vec::with_capacity(addresses.len());
+            for address in &addresses {
+                let authority = match address.split_once("://") {
+                    Some((named, rest)) => {
+                        scheme = match named {
+                            "https" => "https",
+                            _ => "http",
+                        };
+                        rest
+                    }
+                    None => address.as_str(),
+                };
+                if format!("{scheme}://{authority}")
+                    .parse::<http::Uri>()
+                    .is_err()
+                {
+                    return Err(GuardrailsError::Host {
+                        at: at.clone(),
+                        host: address.to_string(),
+                    });
+                }
+                authorities.push(authority.trim_end_matches('/').to_string());
             }
+            let endpoints = Endpoints::new(authorities.iter().map(|a| (a.as_str(), 1)), &at)
+                .map_err(|_| GuardrailsError::Host {
+                    at: at.clone(),
+                    host: authorities.join(", "),
+                })?;
 
             let mut metadata = Vec::with_capacity(processor.metadata.len());
             for (key, expression) in &processor.metadata {
                 let program =
                     Program::compile(expression).map_err(|source| GuardrailsError::Metadata {
-                        at: format!("{at}.processors[{i}].metadata.{key}"),
+                        at: format!("{at}.metadata.{key}"),
                         expression: expression.clone(),
                         source: Box::new(source),
                     })?;
@@ -377,7 +442,8 @@ impl Guardrails {
 
             processors.push(Compiled {
                 config: processor.clone(),
-                endpoint,
+                endpoints,
+                scheme,
                 timeout: processor
                     .timeout
                     .map(Duration::from)
@@ -643,7 +709,8 @@ impl Compiled {
     async fn connect(
         &self,
     ) -> Result<wire::client::ExtMcpClient<tonic::transport::Channel>, tonic::Status> {
-        let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+        let endpoint = format!("{}://{}", self.scheme, self.endpoints.next());
+        let channel = tonic::transport::Endpoint::from_shared(endpoint)
             .map_err(|err| tonic::Status::internal(format!("bad processor endpoint: {err}")))?
             .connect_timeout(self.timeout)
             .connect()
@@ -660,7 +727,7 @@ impl Compiled {
     /// processor, which is what `failOpen` means.
     fn on_failure(&self, rpc: &str, status: &tonic::Status) -> Option<Outcome> {
         tracing::warn!(
-            endpoint = %self.endpoint,
+            endpoints = self.endpoints.len(),
             rpc,
             code = ?status.code(),
             message = %status.message(),

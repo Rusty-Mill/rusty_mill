@@ -129,6 +129,7 @@ name = "agentgateway-mcp"
 version = "0.1.0"
 dependencies = [
  "agentgateway-config",
+ "agentgateway-core",
  "axum",
  "cel",
  "http",

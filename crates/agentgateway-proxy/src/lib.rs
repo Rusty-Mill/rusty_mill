@@ -11,7 +11,6 @@
 //! (hop-by-hop headers, forwarded chains, prefix rewriting, weighted
 //! selection) are testable without a socket.
 
-mod balance;
 mod dynamic;
 mod retry;
 mod transform;
@@ -27,7 +26,8 @@ use hyper::body::Incoming;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
 
-pub use balance::{BalanceError, Endpoints};
+// Re-exported so the proxy's own callers need not learn where these moved.
+pub use agentgateway_core::{BalanceError, Endpoints};
 pub use dynamic::{Dynamic, TargetError};
 // Re-exported so the proxy's own callers need not learn where this moved.
 pub use agentgateway_core::Retry;

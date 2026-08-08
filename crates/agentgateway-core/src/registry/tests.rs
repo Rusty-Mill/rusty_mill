@@ -4,11 +4,6 @@ use agentgateway_config::{Config, ServicePorts};
 
 use super::*;
 
-fn inventory(source: &str) -> (Vec<Service>, Vec<Workload>) {
-    let config = Config::from_yaml(source).expect("should parse");
-    (config.services, config.workloads)
-}
-
 /// Two services, one with two instances and one with one.
 const TWO: &str = r#"
 binds:
@@ -44,8 +39,8 @@ workloads:
 "#;
 
 fn registry(source: &str) -> Registry {
-    let (services, workloads) = inventory(source);
-    Registry::new(&services, &workloads)
+    let config = Config::from_yaml(source).expect("should parse");
+    Registry::new(&config.services, &config.workloads, &config.backends)
 }
 
 fn reference(name: &str, port: u16) -> ServiceRef {
@@ -439,6 +434,66 @@ workloads:
 "#,
     );
     assert!(registry.resolve(&reference("echo", 80), "r").is_err());
+}
+
+#[test]
+fn a_named_backend_resolves_to_its_address() {
+    let registry = registry(
+        r#"
+binds:
+  - port: 3000
+    listeners: []
+backends:
+  - name: guard
+    host: guard.internal:9000
+"#,
+    );
+    assert_eq!(
+        registry
+            .backend("guard", "route[0]")
+            .expect("should resolve"),
+        "guard.internal:9000"
+    );
+}
+
+#[test]
+fn an_unknown_backend_names_what_the_list_does_hold() {
+    let registry = registry(
+        r#"
+binds:
+  - port: 3000
+    listeners: []
+backends:
+  - name: guard
+    host: guard.internal:9000
+"#,
+    );
+    let err = registry
+        .backend("nope", "route[0]")
+        .expect_err("should not resolve");
+    assert!(err.to_string().contains("`nope`"), "{err}");
+    assert!(err.to_string().contains("guard"), "{err}");
+}
+
+#[test]
+fn a_backend_with_no_address_cannot_be_dialled() {
+    // An `mcp` or `ai` backend is not an address, and something referring to
+    // one needs to be told so rather than dialling nothing.
+    let registry = registry(
+        r#"
+binds:
+  - port: 3000
+    listeners: []
+backends:
+  - name: federated
+    mcp:
+      targets: []
+"#,
+    );
+    let err = registry
+        .backend("federated", "route[0]")
+        .expect_err("should not resolve");
+    assert!(err.to_string().contains("no `host`"), "{err}");
 }
 
 #[test]

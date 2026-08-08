@@ -43,7 +43,7 @@ pub use backend::{
     McpBackend, McpTarget, McpTargetKind, NameMode, ServiceRef, SseTarget, StdioTarget,
     StreamableHttpTarget, ToolFilter,
 };
-pub use inventory::{Health, Service, ServicePorts, Workload};
+pub use inventory::{Health, NamedBackend, Service, ServicePorts, Workload};
 pub use matcher::{
     HeaderMatch, HeaderMatchValue, PathMatch, QueryMatch, QueryMatchValue, RouteMatch,
 };
@@ -109,6 +109,10 @@ pub struct Config {
     /// The instances backing those services.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workloads: Vec<Workload>,
+
+    /// Backends defined once and referred to by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<NamedBackend>,
 }
 
 impl Config {
@@ -160,7 +164,12 @@ impl Config {
     /// startup rather than pretending full coverage.
     pub fn lint(&self) -> Vec<String> {
         let mut findings = Vec::new();
-        inventory::lint(&self.services, &self.workloads, &mut findings);
+        inventory::lint(
+            &self.services,
+            &self.workloads,
+            &self.backends,
+            &mut findings,
+        );
         for (b, bind) in self.binds.iter().enumerate() {
             for (l, listener) in bind.listeners.iter().enumerate() {
                 let at = format!("binds[{b}].listeners[{l}]");

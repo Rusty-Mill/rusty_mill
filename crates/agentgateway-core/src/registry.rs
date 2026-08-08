@@ -35,7 +35,9 @@
 
 use std::collections::BTreeMap;
 
-use agentgateway_config::{Backend, BackendTarget, Health, Service, ServiceRef, Workload};
+use agentgateway_config::{
+    Backend, BackendTarget, Health, NamedBackend, Service, ServiceRef, Workload,
+};
 
 /// A `service` backend that cannot be resolved.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +87,29 @@ pub enum RegistryError {
         ports: Vec<u16>,
     },
 
+    /// No backend in the list answers to that name.
+    #[error("{at}: no backend named `{name}` in `backends:`{}", known(known_names))]
+    UnknownBackend {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The name that was asked for.
+        name: String,
+        /// What the list does hold.
+        known_names: Vec<String>,
+    },
+
+    /// The named backend has no address to dial.
+    #[error(
+        "{at}: backend `{name}` has no `host`, and only an address can be dialled here; an \
+         `mcp` or `ai` backend is not one"
+    )]
+    BackendKind {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The backend that was found.
+        name: String,
+    },
+
     /// Nothing healthy backs the service.
     #[error(
         "{at}: service `{name}` has no healthy instance backing it, so this route could never \
@@ -98,11 +123,11 @@ pub enum RegistryError {
     },
 }
 
-/// Format the known service names for an error, or nothing when there are none.
+/// Format the known names for an error, or nothing when there are none.
 fn known(names: &[String]) -> String {
     match names.is_empty() {
         true => String::new(),
-        false => format!(". The inventory holds: {}", names.join(", ")),
+        false => format!(". The configuration holds: {}", names.join(", ")),
     }
 }
 
@@ -122,6 +147,8 @@ pub struct Registry {
     services: BTreeMap<String, Service>,
     /// `namespace/hostname` -> the instances that named it.
     endpoints: BTreeMap<String, Vec<Workload>>,
+    /// Name -> the address a top-level `backends:` entry dials.
+    backends: BTreeMap<String, NamedBackend>,
 }
 
 impl Registry {
@@ -129,7 +156,7 @@ impl Registry {
     ///
     /// Unhealthy instances are dropped here rather than at lookup, so
     /// everything downstream sees a set it can send traffic to.
-    pub fn new(services: &[Service], workloads: &[Workload]) -> Self {
+    pub fn new(services: &[Service], workloads: &[Workload], backends: &[NamedBackend]) -> Self {
         let mut endpoints: BTreeMap<String, Vec<Workload>> = BTreeMap::new();
         for workload in workloads {
             if workload.status == Health::Unhealthy || workload.address().is_none() {
@@ -149,12 +176,40 @@ impl Registry {
                 .map(|service| (service.key(), service.clone()))
                 .collect(),
             endpoints,
+            backends: backends
+                .iter()
+                .map(|backend| (backend.name.clone(), backend.clone()))
+                .collect(),
         }
     }
 
-    /// Whether the inventory holds anything at all.
+    /// The address a named backend dials.
+    ///
+    /// Separate from [`Registry::resolve`] because a name in `backends:` is
+    /// one address rather than a set: nothing joins it to an instance list, so
+    /// there is nothing to load balance over.
+    pub fn backend(&self, name: &str, at: &str) -> Result<String, RegistryError> {
+        let backend = self
+            .backends
+            .get(name)
+            .ok_or_else(|| RegistryError::UnknownBackend {
+                at: at.to_string(),
+                name: name.to_string(),
+                known_names: self.backends.keys().cloned().collect(),
+            })?;
+
+        backend
+            .host
+            .clone()
+            .ok_or_else(|| RegistryError::BackendKind {
+                at: at.to_string(),
+                name: name.to_string(),
+            })
+    }
+
+    /// Whether anything can be resolved at all.
     pub fn is_empty(&self) -> bool {
-        self.services.is_empty()
+        self.services.is_empty() && self.backends.is_empty()
     }
 
     /// The addresses behind one `service` backend.

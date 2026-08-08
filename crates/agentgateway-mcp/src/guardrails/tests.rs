@@ -12,6 +12,8 @@ use agentgateway_config::{FailureMode, HeaderFilter, McpGuardrails, Phase, Proce
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+use agentgateway_core::Registry;
+
 use super::*;
 use wire::{HeaderMutation, Pass};
 
@@ -242,7 +244,8 @@ fn about<'a>(method: &'a str, subject: Subject<'a>, target: &'a str) -> CallCont
 }
 
 fn chain(processors: Vec<Processor>) -> Guardrails {
-    Guardrails::new(&McpGuardrails { processors }, "test").expect("should compile")
+    Guardrails::new(&McpGuardrails { processors }, &Registry::default(), "test")
+        .expect("should compile")
 }
 
 use prost::Message as _;
@@ -591,9 +594,10 @@ async fn an_empty_allow_list_forwards_everything() {
 }
 
 #[test]
-fn a_processor_naming_a_backend_is_dropped_and_reported() {
-    // This build has no backend registry to resolve the name against. Dropping
-    // it silently would leave an operator believing a guardrail was running.
+fn a_processor_naming_a_backend_the_registry_does_not_hold_fails_at_startup() {
+    // Dropping it silently would leave an operator believing a guardrail was
+    // running; resolving it to nothing would be the same thing with extra
+    // steps.
     let config = McpGuardrails {
         processors: vec![Processor {
             methods: [("tools/call".to_string(), Phase::Full)].into(),
@@ -602,7 +606,23 @@ fn a_processor_naming_a_backend_is_dropped_and_reported() {
         }],
     };
 
-    let chain = Guardrails::new(&config, "test").expect("should compile");
+    let err =
+        Guardrails::new(&config, &Registry::default(), "test").expect_err("should not compile");
+    assert!(err.to_string().contains("policy-service"), "got: {err}");
+}
+
+#[test]
+fn a_processor_naming_nothing_at_all_is_dropped() {
+    // Reported by `Config::lint` rather than refused: it is a policy that does
+    // not describe a processor, not one describing an unreachable processor.
+    let config = McpGuardrails {
+        processors: vec![Processor {
+            methods: [("tools/call".to_string(), Phase::Full)].into(),
+            ..Default::default()
+        }],
+    };
+
+    let chain = Guardrails::new(&config, &Registry::default(), "test").expect("should compile");
     assert!(chain.is_empty());
     assert!(!chain.runs_request("tools/call"));
 }
@@ -617,7 +637,8 @@ fn a_host_that_is_not_an_address_fails_at_startup() {
         }],
     };
 
-    let err = Guardrails::new(&config, "binds[0]").expect_err("should not compile");
+    let err =
+        Guardrails::new(&config, &Registry::default(), "binds[0]").expect_err("should not compile");
     assert!(
         err.to_string().contains("binds[0].processors[0]"),
         "got: {err}"
@@ -728,6 +749,7 @@ fn a_metadata_expression_that_does_not_compile_fails_at_startup() {
         &McpGuardrails {
             processors: vec![processor],
         },
+        &Registry::default(),
         "binds[0]",
     )
     .expect_err("should not compile");

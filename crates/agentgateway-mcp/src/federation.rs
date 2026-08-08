@@ -128,10 +128,17 @@ impl Federation {
     ///
     /// Returns an error only when no target at all could be reached; partial
     /// failures are recorded in [`Federation::degraded`].
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every one is a distinct piece of a route's configuration, and grouping them \
+                  into a struct would only move the same list somewhere with a name that means \
+                  less than the parameters do"
+    )]
     pub async fn connect(
         backend: &McpBackend,
         authorization: Option<&McpAuthorization>,
         guardrails: Option<&McpGuardrails>,
+        registry: &agentgateway_core::Registry,
         request_headers: Option<&HeaderModifier>,
         overrides: Vec<Override>,
         backend_timeout: Option<Duration>,
@@ -142,7 +149,7 @@ impl Federation {
             None => Transform::default(),
         };
         let guardrails = match guardrails {
-            Some(policy) => Guardrails::new(policy, &format!("{at}.mcpGuardrails"))?,
+            Some(policy) => Guardrails::new(policy, registry, &format!("{at}.mcpGuardrails"))?,
             None => Guardrails::default(),
         };
 

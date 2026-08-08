@@ -39,6 +39,29 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+/// A backend defined once at the top level and referred to by name.
+///
+/// Upstream's `backends:` list, which a policy names rather than repeating an
+/// address. Only a `host` entry means anything to this build: the things that
+/// reference one — an `mcpGuardrails` processor, say — need an address to dial,
+/// and an `mcp` or `ai` backend is not one. The rest parses so an upstream file
+/// loads, and [`lint`] names it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NamedBackend {
+    /// What a policy calls it.
+    #[serde(default)]
+    pub name: String,
+
+    /// `host:port` to dial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+
+    /// Everything else upstream accepts here.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
+}
+
 /// A service the control plane would otherwise supply.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -225,7 +248,21 @@ where
 }
 
 /// Report inventory fields that parse and do not act.
-pub(crate) fn lint(services: &[Service], workloads: &[Workload], findings: &mut Vec<String>) {
+pub(crate) fn lint(
+    services: &[Service],
+    workloads: &[Workload],
+    backends: &[NamedBackend],
+    findings: &mut Vec<String>,
+) {
+    for (i, backend) in backends.iter().enumerate() {
+        if backend.host.is_none() {
+            findings.push(format!(
+                "backends[{i}]: only a `host` backend can be named by a policy, and `{}` has \
+                 none, so anything referring to it will not start",
+                backend.name
+            ));
+        }
+    }
     for (i, service) in services.iter().enumerate() {
         for key in service.rest.keys() {
             findings.push(format!(
