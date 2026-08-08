@@ -23,10 +23,11 @@ mod provider;
 pub mod stream;
 pub mod translate;
 
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use agentgateway_config::{AiBackend, BackendAuth, Policies};
-use agentgateway_core::{Headers, Retry, Rewrite};
+use agentgateway_config::{AiBackend, BackendAuth, Policies, RateLimitKind};
+use agentgateway_core::{Headers, RateLimiter, Retry, RetryAfter, Rewrite};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
@@ -57,6 +58,9 @@ pub enum LlmError {
     /// A route's `urlRewrite` named an authority HTTP cannot represent.
     #[error(transparent)]
     Rewrite(#[from] agentgateway_core::RewriteError),
+    /// A route's `localRateLimit` describes a bucket that cannot work.
+    #[error(transparent)]
+    RateLimit(#[from] agentgateway_core::RateLimitError),
     /// A `urlRewrite` was asked to act on an endpoint that is not a URL.
     #[error(
         "{at}.urlRewrite: `{endpoint}` is not an absolute URL, so there is nothing to rewrite; \
@@ -97,6 +101,12 @@ pub struct LlmBackend {
     /// Consumed only by the `host` proxy before: an `ai` route asking for
     /// three attempts got exactly one. See [`LlmBackend::send`].
     retry: Option<Retry>,
+    /// The route's `localRateLimit` entries of `type: tokens`.
+    ///
+    /// Shared rather than borrowed because a streamed response reports its
+    /// usage from inside a `'static` stream, long after `handle` has returned
+    /// the body.
+    tokens: Option<Arc<RateLimiter>>,
     client: reqwest::Client,
 }
 
@@ -164,6 +174,12 @@ impl LlmBackend {
             .build()
             .unwrap_or_default();
 
+        // Only `type: tokens` here. Request limits are charged before dispatch,
+        // where they apply to every backend kind; these need a token count that
+        // only exists once the provider has answered.
+        let tokens = RateLimiter::for_kind(&policies.local_rate_limit, RateLimitKind::Tokens, at)?
+            .map(Arc::new);
+
         Ok(LlmBackend {
             provider,
             model,
@@ -171,6 +187,7 @@ impl LlmBackend {
             request_headers,
             endpoint,
             retry: policies.retry.as_ref().and_then(Retry::new),
+            tokens,
             client,
         })
     }
@@ -340,6 +357,20 @@ impl LlmBackend {
             modifier.apply(&mut headers);
         }
 
+        // Checked here rather than before dispatch, because what it counts is
+        // a number only this backend ever sees. Nothing is charged yet: the
+        // cost of a call is not knowable until the provider reports it.
+        if let Some(limiter) = &self.tokens
+            && let Err(wait) = limiter.admit()
+        {
+            tracing::info!(
+                provider = self.provider.name(),
+                retry_after_s = wait.seconds(),
+                "refusing a request: the token budget is spent"
+            );
+            return limited(wait);
+        }
+
         // Serialized once rather than per attempt: the body does not change
         // between them, and a retry should cost a request, not a re-encode.
         let payload = match serde_json::to_vec(&upstream_body) {
@@ -401,7 +432,7 @@ impl LlmBackend {
         let translated = self.provider.translate_response(&parsed, now());
 
         if let Some(usage) = self.provider.usage(&parsed) {
-            self.record(model, usage, false);
+            settle(&self.tokens, self.provider.name(), model, usage, false);
         }
 
         let body = match translated {
@@ -423,6 +454,9 @@ impl LlmBackend {
         let translating = self.provider.translates_stream();
         let provider = self.provider.name();
         let model = model.to_string();
+        // The stream outlives this call, and the usage it will report is what
+        // the bucket has to be charged, so the limiter goes in with it.
+        let tokens = self.tokens.clone();
 
         let mut parser = EventParser::default();
         let mut translator = ChunkTranslator::new(now());
@@ -450,7 +484,7 @@ impl LlmBackend {
                             && !reported
                         {
                             reported = true;
-                            record_usage(provider, &model, usage, true);
+                            settle(&tokens, provider, &model, usage, true);
                         }
                     }
                     yield Ok(Frame::data(chunk));
@@ -471,7 +505,7 @@ impl LlmBackend {
                 yield Ok(Frame::data(Bytes::from_static(stream::DONE.as_bytes())));
                 let usage = translator.usage();
                 if usage.total() > 0 {
-                    record_usage(provider, &model, usage, true);
+                    settle(&tokens, provider, &model, usage, true);
                 }
             }
         };
@@ -483,10 +517,6 @@ impl LlmBackend {
             .header(header::CACHE_CONTROL, "no-cache")
             .body(body)
             .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, ""))
-    }
-
-    fn record(&self, model: &str, usage: Usage, streamed: bool) {
-        record_usage(self.provider.name(), model, usage, streamed);
     }
 }
 
@@ -562,6 +592,36 @@ fn resolve_endpoint(
         .build()
         .map(|uri| uri.to_string())
         .map_err(|_| unrewritable())
+}
+
+/// Record what a call cost, and charge it to the route's token budget.
+///
+/// One place for both, because they read the same number and a path that
+/// logged usage without charging it would be a limit that quietly does not
+/// apply to streamed responses — which is most of the traffic worth limiting.
+fn settle(
+    limiter: &Option<Arc<RateLimiter>>,
+    provider: &str,
+    model: &str,
+    usage: Usage,
+    streamed: bool,
+) {
+    record_usage(provider, model, usage, streamed);
+    if let Some(limiter) = limiter {
+        limiter.charge(usage.total());
+    }
+}
+
+/// Refuse a request whose route has spent its token budget.
+fn limited(wait: RetryAfter) -> Response<LlmBody> {
+    let mut response = error(
+        StatusCode::TOO_MANY_REQUESTS,
+        "this route's token budget is spent",
+    );
+    if let Ok(value) = HeaderValue::try_from(wait.seconds().to_string()) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
 }
 
 /// Report token usage.

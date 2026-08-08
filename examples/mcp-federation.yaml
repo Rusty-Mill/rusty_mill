@@ -217,6 +217,18 @@ binds:
                 attempts: 2
                 backoff: 500ms
                 codes: [429, 503]
+              # Both kinds at once. Requests are charged before dispatch; the
+              # token bucket is charged what the provider reported, which is
+              # the limit that matters here -- ten calls are cheap and one
+              # 200k-token context is not.
+              localRateLimit:
+                - maxTokens: 60
+                  tokensPerFill: 60
+                  fillInterval: 60s
+                - maxTokens: 200000
+                  tokensPerFill: 200000
+                  fillInterval: 1h
+                  type: tokens
             backends:
               - ai:
                   provider:

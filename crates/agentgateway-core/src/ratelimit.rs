@@ -96,12 +96,24 @@ impl RateLimiter {
     /// Returns `None` when the route configures none, so the caller can skip
     /// the check rather than take a lock to learn there is nothing to do.
     pub fn new(limits: &[LocalRateLimit], at: &str) -> Result<Option<Self>, RateLimitError> {
-        // `tokens` counts LLM tokens, which needs the LLM gateway to exist
-        // before it can mean anything. Skipping is what `Config::lint`
-        // reports, so it is not silent.
-        let applicable: Vec<&LocalRateLimit> = limits
+        Self::for_kind(limits, RateLimitKind::Requests, at)
+    }
+
+    /// Compile only the limits of one kind.
+    ///
+    /// The two kinds count different things and are charged at different
+    /// moments — a request before it is served, an LLM token only once the
+    /// provider says how many there were — so they are separate limiters over
+    /// the same buckets rather than one limiter that has to ask which it is.
+    pub fn for_kind(
+        limits: &[LocalRateLimit],
+        kind: RateLimitKind,
+        at: &str,
+    ) -> Result<Option<Self>, RateLimitError> {
+        let applicable: Vec<(usize, &LocalRateLimit)> = limits
             .iter()
-            .filter(|limit| limit.kind == RateLimitKind::Requests)
+            .enumerate()
+            .filter(|(_, limit)| limit.kind == kind)
             .collect();
 
         if applicable.is_empty() {
@@ -109,7 +121,10 @@ impl RateLimiter {
         }
 
         let mut compiled = Vec::with_capacity(applicable.len());
-        for (i, limit) in applicable.iter().enumerate() {
+        // The index is the one in the config, not the position among the
+        // limits of this kind: an error naming `localRateLimit[0]` should point
+        // at the entry the operator can go and read.
+        for (i, limit) in applicable.iter().copied() {
             let at = format!("{at}.localRateLimit[{i}]");
             if limit.max_tokens == 0 {
                 return Err(RateLimitError::NoCapacity { at });
@@ -151,36 +166,70 @@ impl RateLimiter {
 
     /// As [`RateLimiter::check`], at an explicit instant.
     pub fn check_at(&self, now: Instant) -> Result<(), RetryAfter> {
-        let mut state = match self.state.lock() {
-            Ok(state) => state,
-            // A panic elsewhere poisoned the lock. Failing open beats failing
-            // every request forever: this limits traffic, it does not secure
-            // anything.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-
-        for (limit, state) in self.limits.iter().zip(state.iter_mut()) {
-            refill(limit, state, now);
-        }
-
+        let mut state = self.locked();
+        refill_all(&self.limits, &mut state, now);
         // Check every bucket before consuming from any: charging a token to
         // the burst bucket and then refusing on the sustained one bills a
         // request that never ran.
-        if let Some(wait) = self
-            .limits
-            .iter()
-            .zip(state.iter())
-            .filter(|(_, state)| state.tokens == 0)
-            .map(|(limit, state)| wait_for_token(limit, state, now))
-            .max()
-        {
-            return Err(RetryAfter(wait));
-        }
+        empty_bucket_wait(&self.limits, &state, now).map_or_else(
+            || {
+                for state in state.iter_mut() {
+                    state.tokens = state.tokens.saturating_sub(1);
+                }
+                Ok(())
+            },
+            Err,
+        )
+    }
 
-        for state in state.iter_mut() {
-            state.tokens = state.tokens.saturating_sub(1);
+    /// Refuse when any bucket is empty, without charging anything.
+    ///
+    /// What a token limit needs, because the cost of a call is not knowable
+    /// until the provider reports it. The alternative — reserving an estimate
+    /// and reconciling — would refuse traffic on a guess.
+    pub fn admit(&self) -> Result<(), RetryAfter> {
+        self.admit_at(Instant::now())
+    }
+
+    /// As [`RateLimiter::admit`], at an explicit instant.
+    pub fn admit_at(&self, now: Instant) -> Result<(), RetryAfter> {
+        let mut state = self.locked();
+        refill_all(&self.limits, &mut state, now);
+        match empty_bucket_wait(&self.limits, &state, now) {
+            Some(wait) => Err(wait),
+            None => Ok(()),
         }
-        Ok(())
+    }
+
+    /// Charge `amount` to every bucket after the fact.
+    ///
+    /// A call that costs more than the bucket had left empties it rather than
+    /// going negative, so the overshoot is paid for by the wait until the next
+    /// refill and not by a debt that outlives it. One call can exceed a limit;
+    /// that is inherent to charging a cost nobody knew in advance, and the
+    /// bucket is what stops the *next* one.
+    pub fn charge(&self, amount: u64) {
+        self.charge_at(Instant::now(), amount);
+    }
+
+    /// As [`RateLimiter::charge`], at an explicit instant.
+    pub fn charge_at(&self, now: Instant, amount: u64) {
+        let mut state = self.locked();
+        refill_all(&self.limits, &mut state, now);
+        for state in state.iter_mut() {
+            state.tokens = state.tokens.saturating_sub(amount);
+        }
+    }
+
+    /// The bucket state, recovering a lock a panic elsewhere poisoned.
+    ///
+    /// Failing open beats failing every request forever: this limits traffic,
+    /// it does not secure anything.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Vec<State>> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Tokens left in each bucket, for tests and a health endpoint.
@@ -190,6 +239,26 @@ impl RateLimiter {
             Err(poisoned) => poisoned.into_inner().iter().map(|s| s.tokens).collect(),
         }
     }
+}
+
+fn refill_all(limits: &[Limit], state: &mut [State], now: Instant) {
+    for (limit, state) in limits.iter().zip(state.iter_mut()) {
+        refill(limit, state, now);
+    }
+}
+
+/// The longest wait across the empty buckets, or `None` if all have a token.
+///
+/// The longest, because coming back when the *shortest* refills would just be
+/// refused again by the others.
+fn empty_bucket_wait(limits: &[Limit], state: &[State], now: Instant) -> Option<RetryAfter> {
+    limits
+        .iter()
+        .zip(state.iter())
+        .filter(|(_, state)| state.tokens == 0)
+        .map(|(limit, state)| wait_for_token(limit, state, now))
+        .max()
+        .map(RetryAfter)
 }
 
 /// Credit whole elapsed intervals, capped at the bucket's capacity.
@@ -372,6 +441,100 @@ mod tests {
         assert_eq!(RetryAfter(Duration::from_millis(1)).seconds(), 1);
         assert_eq!(RetryAfter(Duration::ZERO).seconds(), 1);
         assert_eq!(RetryAfter(Duration::from_millis(1500)).seconds(), 2);
+    }
+
+    /// A token limiter over the same buckets.
+    fn token_limiter(limits: &[(u64, u64, Duration)]) -> RateLimiter {
+        let config: Vec<LocalRateLimit> = limits
+            .iter()
+            .map(|(max_tokens, tokens_per_fill, interval)| LocalRateLimit {
+                max_tokens: *max_tokens,
+                tokens_per_fill: *tokens_per_fill,
+                fill_interval: DurationString(*interval),
+                kind: RateLimitKind::Tokens,
+            })
+            .collect();
+        RateLimiter::for_kind(&config, RateLimitKind::Tokens, "test")
+            .expect("should compile")
+            .expect("should be present")
+    }
+
+    #[test]
+    fn admitting_does_not_charge() {
+        // The cost of an LLM call is not knowable until the provider reports
+        // it, so admission cannot spend anything.
+        let limiter = token_limiter(&[(1000, 1000, Duration::from_secs(60))]);
+        let now = Instant::now();
+        for _ in 0..5 {
+            assert!(limiter.admit_at(now).is_ok());
+        }
+        assert_eq!(limiter.available(), vec![1000]);
+    }
+
+    #[test]
+    fn charging_spends_the_reported_cost() {
+        let limiter = token_limiter(&[(1000, 1000, Duration::from_secs(60))]);
+        let now = Instant::now();
+        limiter.charge_at(now, 250);
+        assert_eq!(limiter.available(), vec![750]);
+        limiter.charge_at(now, 750);
+        assert_eq!(limiter.available(), vec![0]);
+        assert!(limiter.admit_at(now).is_err(), "an empty bucket refuses");
+    }
+
+    #[test]
+    fn a_call_costing_more_than_the_bucket_had_empties_it_rather_than_going_negative() {
+        // One call can exceed a limit -- inherent to charging a cost nobody
+        // knew in advance. The overshoot is paid for by the wait until the
+        // next refill, not by a debt that outlives it.
+        let limiter = token_limiter(&[(100, 100, Duration::from_secs(1))]);
+        let start = Instant::now();
+        limiter.charge_at(start, 10_000);
+        assert_eq!(limiter.available(), vec![0]);
+
+        let later = start + Duration::from_secs(1);
+        assert!(
+            limiter.admit_at(later).is_ok(),
+            "one interval restores the bucket; the overshoot is not carried forward"
+        );
+    }
+
+    #[test]
+    fn a_token_limiter_still_needs_every_bucket_to_permit() {
+        let limiter = token_limiter(&[
+            (1000, 1000, Duration::from_secs(60)),
+            (100, 100, Duration::from_secs(1)),
+        ]);
+        let now = Instant::now();
+        limiter.charge_at(now, 100);
+        assert_eq!(limiter.available(), vec![900, 0]);
+        assert!(
+            limiter.admit_at(now).is_err(),
+            "the sustained bucket refuses even though the larger one has room"
+        );
+    }
+
+    #[test]
+    fn for_kind_names_the_config_index_not_the_position_among_its_own_kind() {
+        // An error naming `localRateLimit[1]` should point at the entry the
+        // operator can go and read.
+        let config = vec![
+            LocalRateLimit {
+                max_tokens: 10,
+                tokens_per_fill: 10,
+                fill_interval: DurationString(Duration::from_secs(1)),
+                kind: RateLimitKind::Requests,
+            },
+            LocalRateLimit {
+                max_tokens: 0,
+                tokens_per_fill: 1,
+                fill_interval: DurationString(Duration::from_secs(1)),
+                kind: RateLimitKind::Tokens,
+            },
+        ];
+        let err = RateLimiter::for_kind(&config, RateLimitKind::Tokens, "route[0]")
+            .expect_err("should not compile");
+        assert!(err.to_string().contains("localRateLimit[1]"), "got: {err}");
     }
 
     #[test]

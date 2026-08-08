@@ -996,3 +996,141 @@ async fn the_retried_request_still_carries_its_body_and_credential() {
 
     shutdown.cancel();
 }
+
+/// A tiny token budget: the first call fits, the second is refused.
+const TOKEN_LIMIT: &str = "              localRateLimit:\n                - maxTokens: 10\n                  tokensPerFill: 10\n                  fillInterval: 60s\n                  type: tokens";
+
+#[tokio::test]
+async fn a_token_budget_is_charged_by_what_the_provider_reported() {
+    // The mock reply declares 10 total tokens, which is the whole bucket. The
+    // first call is admitted -- nothing is charged up front, because the cost
+    // is not knowable until the provider answers -- and the second is refused.
+    let (provider_port, _seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", TOKEN_LIMIT).await;
+
+    let first = post(&url, &chat_request()).await;
+    assert!(first.status().is_success(), "{}", first.status());
+
+    let second = post(&url, &chat_request()).await;
+    assert_eq!(second.status(), 429);
+    let retry_after = second
+        .headers()
+        .get("retry-after")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .expect("a refusal should say when to come back");
+    assert!(
+        (1..=60).contains(&retry_after),
+        "got Retry-After: {retry_after}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_route_without_a_token_budget_is_never_refused() {
+    let (provider_port, _seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start("openAI", provider_port, "").await;
+
+    for _ in 0..5 {
+        let response = post(&url, &chat_request()).await;
+        assert!(response.status().is_success(), "{}", response.status());
+    }
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_request_limit_and_a_token_limit_coexist_on_one_route() {
+    // Requests are charged before dispatch and tokens after the provider
+    // answers, so a route can carry both without one standing in for the other.
+    let (provider_port, _seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        "              localRateLimit:\n                - maxTokens: 1\n                  tokensPerFill: 1\n                  fillInterval: 60s\n                - maxTokens: 100000\n                  tokensPerFill: 100000\n                  fillInterval: 1h\n                  type: tokens",
+    )
+    .await;
+
+    let first = post(&url, &chat_request()).await;
+    assert!(first.status().is_success(), "{}", first.status());
+
+    let second = post(&url, &chat_request()).await;
+    assert_eq!(
+        second.status(),
+        429,
+        "the request bucket holds one, and the token bucket is nowhere near spent"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_streamed_response_is_charged_too() {
+    // Usage arrives in the trailing chunk, long after `handle` returned the
+    // body. A limit that only applied to buffered responses would miss most of
+    // the traffic worth limiting.
+    let stream = format!(
+        "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+        json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+            "model": "gpt-4o",
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}],
+        }),
+        json!({
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 1,
+            "model": "gpt-4o", "choices": [],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10},
+        }),
+    );
+    let (provider_port, _seen) = provider(openai_reply(), Some(stream)).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", TOKEN_LIMIT).await;
+
+    let mut body = chat_request();
+    body["stream"] = json!(true);
+    let first = post(&url, &body).await;
+    assert!(first.status().is_success(), "{}", first.status());
+    // Draining the stream is what delivers the trailing usage chunk.
+    let text = first.text().await.expect("should read the stream");
+    assert!(text.contains("total_tokens"), "got: {text}");
+
+    let second = post(&url, &chat_request()).await;
+    assert_eq!(
+        second.status(),
+        429,
+        "the streamed call's usage should have spent the bucket"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_bucket_that_can_never_refill_fails_an_ai_route_at_startup() {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              localRateLimit:
+                - maxTokens: 100
+                  tokensPerFill: 0
+                  fillInterval: 60s
+                  type: tokens
+            backends:
+              - ai:
+                  provider:
+                    openAI: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("a bucket that drains once and never refills should not start");
+    assert!(err.to_string().contains("never refills"), "got: {err}");
+}
