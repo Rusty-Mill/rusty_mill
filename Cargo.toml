@@ -35,6 +35,14 @@ postgres-store = ["server", "dep:sqlx"]
 # for. Whichever layers are on contribute their own; the server-side store
 # decorator lives under `server` and is gated on both.
 metrics = ["dep:metrics"]
+# W3C trace context: read `traceparent` in, write it out, and record the trace
+# id on the request and run spans.
+#
+# Off by default and dependency-free — it gates *behaviour*, not a build. The
+# reason it is a feature at all is that emitting a header on every outbound
+# request is a decision a deployment should make rather than inherit, and that
+# `rusty_acp::trace` is public API once it exists.
+trace = []
 # A conformance suite for third-party `Store` implementations.
 #
 # Off by default and test-only in spirit, but shipped in the library rather than

@@ -87,7 +87,17 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 
+#[cfg(feature = "trace")]
 pub mod trace;
+
+// Compiled either way so the plumbing that carries a context — the field on the
+// launch spec, the parameter on the run — needs no `cfg` of its own. With the
+// feature off nothing ever constructs one, so every branch that reads it is
+// dead and the compiler removes it. The alternative was a `cfg` cascade through
+// four signatures in two modules to save a type that costs nothing.
+#[cfg(not(feature = "trace"))]
+#[allow(dead_code)]
+mod trace;
 
 pub mod types;
 
