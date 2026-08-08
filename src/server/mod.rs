@@ -1,10 +1,15 @@
-//! An [`axum`]-based harness for implementing an A2A agent server over the
-//! JSON-RPC 2.0 protocol binding (spec Section 9).
+//! An [`axum`]-based harness for implementing an A2A agent server.
 //!
 //! Implement [`AgentExecutor`] to define what your agent does, then hand
 //! it (plus an [`crate::types::AgentCard`] describing it) to
 //! [`AgentServer`] to get task lifecycle management, Server-Sent Events
-//! streaming, and Agent Card discovery for free.
+//! streaming, and Agent Card discovery for free - over the JSON-RPC 2.0
+//! (spec Section 9) and HTTP+JSON/REST (spec Section 11) protocol
+//! bindings at once, from a single [`AgentServer::serve`]/
+//! [`AgentServer::into_router`]. Add the `grpc` feature and call
+//! [`AgentServer::build`] to also serve the same agent state (task store
+//! included) over gRPC (spec Section 10) via the resulting
+//! [`AgentServices`] handle.
 //!
 //! ```no_run
 //! use std::sync::Arc;
@@ -63,14 +68,15 @@ use crate::types::AgentCard;
 use engine::Engine;
 
 /// Wires an [`AgentExecutor`] and a [`TaskStore`] up to the A2A JSON-RPC
-/// protocol binding and produces a ready-to-serve [`axum::Router`].
+/// and HTTP+JSON/REST protocol bindings and produces a ready-to-serve
+/// [`axum::Router`] serving both from one port.
 ///
 /// This is a *builder*: construct it, call the `with_*` setters, then
 /// either use [`AgentServer::into_router`]/[`AgentServer::serve`] directly
-/// for the common single-binding case, or call [`AgentServer::build`] to
-/// get an [`AgentServices`] handle that can serve this same agent state
-/// (task store included) over multiple protocol bindings at once - e.g.
-/// JSON-RPC and gRPC on two different ports.
+/// for that JSON-RPC + REST default, or call [`AgentServer::build`] to
+/// get an [`AgentServices`] handle that can also serve this same agent
+/// state (task store included) over gRPC at once - e.g. JSON-RPC/REST and
+/// gRPC on two different ports.
 pub struct AgentServer {
     engine: Engine,
 }

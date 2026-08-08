@@ -5,8 +5,8 @@
 //! This crate provides:
 //!
 //! - [`types`]: the complete A2A protocol data model (`Task`, `Message`,
-//!   `AgentCard`, ...), transliterated from the normative
-//!   `specification/a2a.proto`.
+//!   `AgentCard`, ...), transliterated from the normative, vendored
+//!   `spec/a2a.proto`.
 //! - [`client`] (feature `client`): async clients for calling A2A agents.
 //!   [`client::A2aClient`] speaks JSON-RPC 2.0 (including SSE streaming);
 //!   [`client::RestClient`] speaks HTTP+JSON/REST; [`client::GrpcClient`]

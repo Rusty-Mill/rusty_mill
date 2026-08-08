@@ -5,6 +5,28 @@ instead, reverse chronological, each linking to its PR.
 
 ---
 
+## PR #30 — Fix stale doc comments describing the crate as JSON-RPC-only
+**2026-08-08** · [#30](https://github.com/baileyrd/rusty_a2a/pull/30)
+
+- **Fixed:** an audit of every module-level doc comment against current
+  code found several left over from before the REST/gRPC bindings
+  existed - `src/server/mod.rs` and `src/client/mod.rs`'s crate-level
+  docs both still described the crate as JSON-RPC-only, when the server
+  actually serves JSON-RPC + REST unconditionally (gRPC on top via
+  `AgentServices`) and the client module has held `RestClient`/
+  `GrpcClient` alongside `A2aClient` for a while. Also fixed two
+  `specification/a2a.proto` path references that should have read
+  `spec/a2a.proto` (this crate's actual vendored path), and a wrong spec
+  section citation for Agent Card signing in `ARCHITECTURE.md` (was 6,
+  is 8.4) introduced in #29.
+- **Known limitation, stated plainly:** `cargo doc --features <partial>`
+  (anything short of `full`) already had unresolved intra-doc-link
+  errors before this change, for unrelated pre-existing reasons (feature-
+  gated items referenced unconditionally elsewhere in the crate) - left
+  alone here since CI's `Docs` job only ever runs `--features full`,
+  which is clean.
+- No code changes; doc comments and `ARCHITECTURE.md` only.
+
 ## PR #29 — Apply standard governance-file scaffolding
 **2026-08-08** · [#29](https://github.com/baileyrd/rusty_a2a/pull/29)
 

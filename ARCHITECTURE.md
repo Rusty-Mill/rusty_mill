@@ -31,10 +31,14 @@ A modular monolith, organized by responsibility rather than by binding:
   adapter, `store.rs` (the `TaskStore` port + its in-memory adapter),
   `auth.rs` (the `AuthVerifier` port), and `push.rs` (webhook delivery).
 - `src/client/` - one module per binding's client adapter.
-- `src/signing.rs` - Agent Card JWS signing/verification (spec Section 6).
+- `src/signing.rs` - Agent Card JWS signing/verification (spec Section 8.4).
 - `src/pb.rs` / `src/grpc_convert.rs` - generated `tonic` types and their
   conversion to/from `src/types/`, isolated so the rest of the crate never
   imports `prost`/`tonic` types directly.
+- `src/error.rs`, `src/codec.rs`, `src/timestamp.rs` - the shared error
+  model (`A2aError`) and wire-format primitives (byte-string encoding,
+  RFC 3339 timestamp (de)serialization) every binding and `src/types/`
+  build on.
 
 There's no forcing function (independent scaling, a team boundary, fault
 isolation) to split any of this into separate services - it's a library
