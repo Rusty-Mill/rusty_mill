@@ -210,6 +210,13 @@ binds:
               urlRewrite:
                 path:
                   prefix: /proxy/v1
+              # An `ai` request is replayable by construction -- it has to be
+              # read to be translated -- so `attempts` always means what it
+              # says here. 429 and 503 are what a provider actually sheds with.
+              retry:
+                attempts: 2
+                backoff: 500ms
+                codes: [429, 503]
             backends:
               - ai:
                   provider:

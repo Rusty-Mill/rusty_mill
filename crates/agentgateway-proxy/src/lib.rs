@@ -24,7 +24,9 @@ use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
 
 pub use balance::{BalanceError, Endpoints};
-pub use retry::{MAX_REPLAY_BYTES, RequestBody, Retry};
+// Re-exported so the proxy's own callers need not learn where this moved.
+pub use agentgateway_core::Retry;
+pub use retry::{MAX_REPLAY_BYTES, RequestBody};
 pub use transform::{HeaderError, Headers, Rewrite, RewriteError, Scheme};
 
 /// Failure to build a proxy from configuration.
