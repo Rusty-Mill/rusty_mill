@@ -20,6 +20,53 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.4
+
+- **Track W slice 5: `sys::net` migrated, completing Track W (D-15).** The
+  socket families slice 4 left for their own pass: `socket`, `bind`,
+  `listen`, `accept`, `connect`, `send`/`recv`, `sendto`/`recvfrom`,
+  `getsockname`/`getpeername`, `setsockopt`, `closesocket`, `WSAStartup`,
+  and the AF_UNIX paths (`bind_unix`/`connect_unix`/`accept_unix`/
+  `local_addr_unix`) the slice-4 upstream bindings were added for.
+
+  Structured as a two-armed **primitive layer** — `raw_socket`,
+  `raw_bind`, `raw_connect`, `raw_accept`, `raw_sock_addr`, `raw_recv`,
+  `raw_send`, `raw_sendto`, `raw_recvfrom`, `set_sockopt`, and the
+  `*_unix` counterparts — so the fifteen public functions above keep a
+  single body each. Same shape `sys::console`'s `get_mode`/`set_mode`
+  pair took in slice 3.
+
+  **The address boundary is why this was its own slice.** This crate
+  speaks `std::net::SocketAddr` and raw `SOCKADDR_IN`/`SOCKADDR_IN6`
+  buffers; the donor speaks its own `SocketAddr` enum and
+  `UnixSocketAddr`. `to_donor_addr`/`from_donor_addr` (and the Unix pair)
+  own that conversion in one place, and both sides pass IP octets
+  verbatim while byte-swapping only the port — so neither double-swaps.
+
+  **Two places this is now more correct, not merely equivalent.**
+  `unix_listen`'s stale-socket retry and `is_stale_socket` both used to
+  re-read `WSAGetLastError` *after* the failing call returned. That was a
+  latent race — any intervening Winsock call overwrites the slot — and
+  both now branch on the mapped `ErrorKind` carried out of the call
+  itself. `docs/learning/003-…`'s lesson landing somewhere it changes
+  behavior rather than merely restating it.
+
+  Error classification is shared, not duplicated: `wsa_kind` is one table
+  both arms run, fed either by `WSAGetLastError` or by the code the donor
+  captured. Deliberately *not* `errmap::trackw_err` — that classifies
+  through the Win32 table, where a Winsock code (10035, 10061, …) means
+  nothing.
+
+  **Two calls stay on windows-sys, both noted in place.** `DeleteFileW`
+  in `unix_listen`'s stale cleanup is a filesystem unlink sitting in a
+  net module, and the donor's `fs::delete_file` takes `&str` where this
+  has an `OsStr` — `sys::fileio` is where a future slice should own it.
+  And `unix_peer_addr`'s `getpeername`: the donor has `local_addr_unix`
+  but no peer counterpart, so this one is a genuine upstream gap rather
+  than a judgment call.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.3
 
 - **Track W slice 4: donor bindings added upstream, `sys::security`
