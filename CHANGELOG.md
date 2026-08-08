@@ -22,7 +22,16 @@ and **`coreutils`**.
 
 ### 0.25.4
 
-- **Track W slice 5: `sys::net` migrated, completing Track W (D-15).** The
+- **Correction (2026-08-08): Track W was not complete at 0.25.4.** The
+  entry below claimed it was. That was true of the migration list in
+  `docs/convergence-roadmap.md` §1d and false of the codebase — the list
+  was built in slice 1 and never re-derived against the donor's surface,
+  so `sys::csignals` (rustils#107), `sys::proc`'s pipe/handle helpers
+  (#108) and `sys::pty`'s ConPTY surface (#109) were never on it. No code
+  is wrong; the claim was. Recorded here rather than edited away, since
+  the same root cause already produced one correction in 0.25.3.
+
+- **Track W slice 5: `sys::net` migrated, ~~completing Track W~~ (D-15).** The
   socket families slice 4 left for their own pass: `socket`, `bind`,
   `listen`, `accept`, `connect`, `send`/`recv`, `sendto`/`recvfrom`,
   `getsockname`/`getpeername`, `setsockopt`, `closesocket`, `WSAStartup`,

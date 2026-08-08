@@ -65,14 +65,21 @@ surface where every admitted symbol is listed and justified.
 - **platform-windows** — `sys/{nt,proc,fileio,csignals}` + `winargv` over
   two floors: **windows-sys** (default, D-1) and **rusty_win32**'s
   hand-written `extern "system"` declarations behind `track-w` (D-15),
-  migrated call-by-call and now complete: `sys::fileio::read`/`write`,
-  `sys::proc`'s wait/job/terminate families (`sys::pty` sharing the job
-  half), and `sys::console`/`sys::handle`. Two exclusions, deliberately
-  different in kind — `CreateProcessW` is struck *permanently* (the
-  donor's `spawn_suspended` is shaped for a shell that swaps its own std
-  slots, the model D5 records this repo rejecting), while `reopen`'s
-  console-device open is *declined pending evidence*. Everything else
-  still on windows-sys simply has no donor binding — `sys::nt` above all.
+  migrated call-by-call and **still in progress**: `sys::fileio::read`/
+  `write`, `sys::proc`'s wait/job/terminate families (`sys::pty` sharing
+  the job half), `sys::console`/`sys::handle`, `sys::security` (in full),
+  and `sys::net` (in full). Three families remain migratable and are
+  tracked as rustils#107 (`sys::csignals`), #108 (`sys::proc`'s pipe/
+  handle helpers) and #109 (`sys::pty`'s ConPTY surface) — an earlier
+  version of this line said "complete", which was true of the migration
+  list in `docs/convergence-roadmap.md` §1d and false of the codebase.
+  Two exclusions are deliberate and different in kind — `CreateProcessW`
+  is struck *permanently* (the donor's `spawn_suspended` is shaped for a
+  shell that swaps its own std slots, the model D5 records this repo
+  rejecting), while `reopen`'s console-device open is *declined pending
+  evidence*. Everything else still on windows-sys either has no donor
+  binding (`sys::nt` above all) or is a named upstream gap
+  (`unix_peer_addr`, baileyrd/rusty_win32#271).
   rusty_win32 was already this backend's extraction donor — its typed-
   handle, `wait_any` and console patterns were mined into `sys/` (see the
   extraction map) — and D-15 turns that one-way flow into a real,

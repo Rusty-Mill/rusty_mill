@@ -176,11 +176,13 @@ claim can't be verified from this repo's Linux-host workflow. Worth
 distinguishing from `CreateProcessW` above, which is closed *permanently*:
 a migration list needs both verbs.
 
-**Track W's migration list is now empty** *of families the donor could
-already serve*. What remains on windows-sys in both configurations is
+**Track W's migration list is now empty** *of the families this document
+had enumerated*. See the second correction below — that list was itself
+incomplete, so this sentence was never the "nothing left to migrate"
+claim it reads as. What remains on windows-sys in both configurations is
 either permanently closed (`CreateProcessW`), held pending better
-evidence (`reopen`), or has no donor binding. Any future slice starts by
-adding a binding upstream, not by picking from what is already there.
+evidence (`reopen`), has no donor binding, or — as it turns out — was
+simply never enumerated here.
 
 > **Correction, 2026-08-07.** The sentence above originally listed
 > `sys::net` among the families with "no donor binding at all". That was
@@ -243,12 +245,46 @@ Two behaviours got *more correct*, not merely equivalent:
 any intervening Winsock call overwrites the slot. Both now branch on the
 `ErrorKind` carried out of the call itself.
 
-**Track W is now complete across `platform-windows`.** Every family
-either migrated, is permanently closed (`CreateProcessW`), is declined
-pending evidence (`reopen`), or is a named upstream gap
-(`unix_peer_addr`) — plus `sys::nt`, which has no donor bindings at all
-and would need an `ntdll` admission rusty_win32 has deliberately never
-made.
+~~**Track W is now complete across `platform-windows`.**~~ **It is not
+— see the correction immediately below.** Of the families *this document
+listed*, every one either migrated, is permanently closed
+(`CreateProcessW`), is declined pending evidence (`reopen`), or is a
+named upstream gap (`unix_peer_addr`) — plus `sys::nt`, which has no
+donor bindings at all and would need an `ntdll` admission rusty_win32
+has deliberately never made.
+
+> **Correction, 2026-08-08 — Track W is *not* complete.** The claim above
+> was wrong, and wrong in an instructive way: it was true of the
+> migration list in §1d and false of the codebase, because the list was
+> built during slice 1 from a survey of the then-known modules and never
+> re-derived against the donor's actual surface. An audit prompted by
+> the question "is there anything left?" found three families that were
+> never on it:
+>
+> - **`sys::csignals`** — still calls `SetConsoleCtrlHandler` directly,
+>   though `console::install_ctrl_handler`/`remove_ctrl_handler` have
+>   existed since rusty_win32's *Phase 1*. The donor's flagship binding,
+>   missed entirely. → rustils#107
+> - **`sys::proc`'s pipe/handle helpers** — `make_pipe` and
+>   `inheritable_dup_of_std` still call `CreatePipe`,
+>   `SetHandleInformation`, `GetStdHandle` and `DuplicateHandle` raw. The
+>   last one bypasses the `sys::handle::duplicate` wrapper slice 3
+>   already migrated. → rustils#108
+> - **`sys::pty`** — the whole ConPTY surface, never audited, against a
+>   donor `conpty` module that covers the lifecycle, the attribute list,
+>   and the pipe/read/wait primitives. → rustils#109
+>
+> Plus the upstream half of `unix_peer_addr`, now filed as
+> baileyrd/rusty_win32#271.
+>
+> The lesson, and the reason this is recorded rather than quietly
+> edited: **a migration list is a claim about a codebase, and it decays
+> the moment it stops being re-derived from one.** Both errors this
+> document has needed correcting (the `sys::net` "no donor binding"
+> claim, and this one) came from reasoning about the list instead of
+> re-reading the two crates. A future slice should start by enumerating
+> every `w::` call reachable under `track-w` and diffing that against
+> the donor's public surface — mechanically, not from this document.
 
 ---
 
