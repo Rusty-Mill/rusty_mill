@@ -1172,3 +1172,182 @@ async fn a_body_buffered_for_ext_authz_still_reaches_the_provider() {
 
     shutdown.cancel();
 }
+
+#[tokio::test]
+async fn an_ai_policy_shapes_the_request_the_provider_sees() {
+    // `modelAliases`, `prompts`, `defaults` and `overrides` all land on the
+    // OpenAI-shaped body before translation, which is the only place a rule
+    // written once means the same thing for every provider.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                modelAliases:\n",
+            "                  fast: gpt-4o-mini\n",
+            "                prompts:\n",
+            "                  prepend:\n",
+            "                    - role: system\n",
+            "                      content: House rules.\n",
+            "                  append:\n",
+            "                    - role: user\n",
+            "                      content: In English.\n",
+            "                defaults:\n",
+            "                  temperature: 0.2\n",
+            "                overrides:\n",
+            "                  max_tokens: 512\n",
+        ),
+    )
+    .await;
+
+    let mut body = chat_request();
+    body["model"] = json!("fast");
+    body["max_tokens"] = json!(999_999);
+    let response = post(&url, &body).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["model"], "gpt-4o-mini", "the alias resolved");
+    assert_eq!(sent["temperature"], 0.2, "a default filled what was absent");
+    assert_eq!(
+        sent["max_tokens"], 512,
+        "an override replaced what the caller sent"
+    );
+
+    let messages = sent["messages"].as_array().expect("an array");
+    assert_eq!(
+        messages.len(),
+        4,
+        "two configured around two of the caller's"
+    );
+    assert_eq!(messages[0]["content"], "House rules.");
+    assert_eq!(messages[3]["content"], "In English.");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_configured_model_still_wins_over_an_alias() {
+    // The backend's own `model:` is backend configuration rather than route
+    // policy -- the most specific statement about where traffic goes.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "                      model: gpt-4o",
+        concat!(
+            "              ai:\n",
+            "                modelAliases:\n",
+            "                  fast: gpt-4o-mini\n",
+        ),
+    )
+    .await;
+
+    let mut body = chat_request();
+    body["model"] = json!("fast");
+    post(&url, &body).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["model"], "gpt-4o");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn prompt_caching_marks_an_anthropic_request() {
+    // A cache breakpoint is an annotation on the *translated* shape, so this
+    // is the one part of the policy that runs after translation.
+    let (provider_port, seen) = provider(anthropic_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "anthropic",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptCaching:\n",
+            "                  cacheSystem: true\n",
+            "                  cacheMessages: true\n",
+        ),
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(
+        sent["system"][0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "the system prompt was promoted to a block and marked: {sent}"
+    );
+    let messages = sent["messages"].as_array().expect("an array");
+    let last = messages.last().expect("at least one turn");
+    assert_eq!(
+        last["content"][0]["cache_control"],
+        json!({"type": "ephemeral"}),
+        "{sent}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn prompt_caching_leaves_an_openai_request_alone() {
+    // OpenAI caches long prefixes by itself and takes no configuration, so a
+    // breakpoint there would be a field nobody reads.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptCaching:\n",
+            "                  cacheSystem: true\n",
+            "                  cacheMessages: true\n",
+        ),
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(
+        sent["messages"][0]["content"], "Be brief.",
+        "untouched: {sent}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_ai_policy_of_only_unimplemented_keys_changes_nothing() {
+    // `promptGuard` is reported by `--check`; it must not quietly alter the
+    // request on the way past.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptGuard:\n",
+            "                  request: []\n",
+        ),
+    )
+    .await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["messages"].as_array().expect("an array").len(), 2);
+    assert_eq!(sent["model"], "gpt-4o");
+
+    shutdown.cancel();
+}

@@ -217,7 +217,12 @@ enum BackendState {
         a2a: Option<Box<A2aGateway>>,
     },
     /// An LLM provider behind an OpenAI-compatible API.
-    Ai(LlmBackend),
+    /// An LLM provider behind an OpenAI-compatible API.
+    ///
+    /// Boxed, like the `host` proxy above: this is much the largest variant,
+    /// and every route pays its size otherwise -- including the ones that are
+    /// a one-word `Unsupported`.
+    Ai(Box<LlmBackend>),
     /// A backend we parsed but cannot serve. The reason is returned to the
     /// client rather than logged and forgotten, so a misconfiguration is
     /// visible from the outside instead of looking like a routing miss.
@@ -420,7 +425,7 @@ impl Gateway {
                         endpoint = backend.endpoint(),
                         "LLM backend ready"
                     );
-                    BackendState::Ai(backend)
+                    BackendState::Ai(Box::new(backend))
                 }
                 Some(other) => BackendState::Unsupported(format!(
                     "backend kind `{}` is not served by this build",

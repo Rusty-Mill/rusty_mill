@@ -235,6 +235,29 @@ binds:
                   tokensPerFill: 200000
                   fillInterval: 1h
                   type: tokens
+              # A stated ladder: an alias resolves what the caller meant, then
+              # prompts shape the conversation, then defaults fill what was
+              # left out, then overrides replace what was set. The backend's
+              # own `model:` below still wins over all of it.
+              ai:
+                modelAliases:
+                  fast: claude-haiku-4-5
+                prompts:
+                  prepend:
+                    - role: system
+                      content: Answer concisely and cite your sources.
+                defaults:
+                  temperature: 0.2
+                overrides:
+                  max_tokens: 2048
+                # Anthropic only -- OpenAI caches long prefixes by itself.
+                # `cacheTools` is deliberately absent: tools are not translated
+                # to Anthropic by this build, so `--check` reports it.
+                promptCaching:
+                  cacheSystem: true
+                  cacheMessages: true
+                  cacheMessageOffset: 1
+                  minTokens: 2048
             backends:
               - ai:
                   provider:
