@@ -181,8 +181,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
   whole federation; see
   [Reaching the upstream request](#reaching-the-upstream-request)
-- SNI: one certificate per port. Two listeners on one port with different
-  certificates is a startup error rather than a guess
 - `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
   forwarded
 
@@ -1795,11 +1793,56 @@ reports `https` for a TLS listener — an upstream generating absolute URLs from
 that header would otherwise emit `http://` links into an `https://` page and
 trip mixed-content blocking.
 
-**One certificate per port.** `rusty_tls` builds its acceptor from a single
-chain and does not surface `rustls`' `ResolvesServerCert`, so SNI-based
-selection is not available. Two listeners on one port with different
-certificates is refused at startup rather than quietly serving the first one's
-certificate to the second one's clients.
+### A certificate per hostname
+
+Two listeners on one port may hold different certificates, chosen by the name
+the client asked for:
+
+```yaml
+binds:
+  - port: 8443
+    listeners:
+      - hostname: api.example.com
+        protocol: HTTPS
+        tls: {cert: /etc/certs/api.crt, key: /etc/certs/api.key}
+        routes: [...]
+      - hostname: "*.internal.example.com"
+        protocol: HTTPS
+        tls: {cert: /etc/certs/internal.crt, key: /etc/certs/internal.key}
+        routes: [...]
+```
+
+**The name is read off the ClientHello rather than resolved by `rustls`.**
+`rusty_tls` builds its acceptor from a single chain and holds its `ServerConfig`
+privately, so there is no `ResolvesServerCert` to install — and reaching around
+the crate into `rustls` to build a config by hand would give up the one thing
+importing it buys, that this gateway is not the consumer in the ecosystem
+rolling its own TLS.
+
+So the first bytes a client sends are **peeked**, not read: the SNI extension is
+plaintext in the ClientHello, because a server cannot decrypt anything before
+it knows which certificate to present. The name chooses the acceptor, and the
+bytes are still in the socket for `rustls` to parse a moment later.
+
+Nothing about that decides whether a handshake succeeds — `rustls` still does
+all of it, on the same bytes. A ClientHello this cannot parse returns no name,
+the default certificate is served, and the handshake works or fails on its own
+merits. That is exactly the behaviour from before selection existed, which is
+what makes a permissive parser the safe choice: every length in the message is
+written by whoever connected, so every read is bounds-checked against the slice
+rather than against the length that preceded it.
+
+Exact names beat wildcards beat the catch-all, the same precedence route
+hostnames follow. A client sending no name at all — every one addressing the
+gateway by IP — and one asking for a name nothing claims both get the first
+certificate rather than a refusal; refusing would turn a working
+single-certificate deployment into a broken one the moment a second listener was
+added.
+
+Two things are still startup errors, because a name cannot choose between them:
+two listeners claiming the *same* hostname with different certificates, and two
+certificates on a port where neither listener names a hostname. The same
+certificate on two listeners is one certificate and is fine.
 
 ## Retries and rate limits
 

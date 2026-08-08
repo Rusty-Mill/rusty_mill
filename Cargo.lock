@@ -177,6 +177,7 @@ name = "agentgateway-tls"
 version = "0.1.0"
 dependencies = [
  "agentgateway-config",
+ "agentgateway-core",
  "rcgen",
  "rustls",
  "rustls-pemfile",
