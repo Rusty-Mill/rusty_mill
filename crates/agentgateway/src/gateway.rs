@@ -10,6 +10,7 @@
 //! rather than per request. A request path that could spawn a subprocess is a
 //! request path that can time out under load.
 
+use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use agentgateway_llm::LlmBackend;
 use agentgateway_mcp::Override as McpOverride;
 use agentgateway_mcp::{Federation, TokenClaims};
 use agentgateway_proxy::{Headers, HostProxy, RequestBody, Rewrite, Scheme};
-use agentgateway_tls::{TlsBinds, TlsTerminator};
+use agentgateway_tls::{Passthrough, TlsBinds, TlsTerminator};
 use axum::body::Body;
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
@@ -46,6 +47,8 @@ pub struct Gateway {
     router: Router,
     routes: Vec<RouteState>,
     tls: TlsBinds,
+    /// Ports that forward connections rather than serving requests on them.
+    passthrough: BTreeMap<u16, Arc<Passthrough>>,
 }
 
 /// Resolve a route's `urlRewrite` into the parts of a single MCP target's
@@ -248,6 +251,24 @@ impl Gateway {
         // Certificates are read here, so a missing or malformed one stops the
         // gateway booting rather than failing every handshake later.
         let tls = TlsBinds::build(config)?;
+
+        // A passthrough port forwards rather than serves, so its routes are
+        // compiled here rather than going through the router at all.
+        let mut passthrough: BTreeMap<u16, Arc<Passthrough>> = BTreeMap::new();
+        for (b, bind) in config.binds.iter().enumerate() {
+            let routes: Vec<agentgateway_config::TcpRoute> = bind
+                .listeners
+                .iter()
+                .filter(|listener| listener.passes_through())
+                .flat_map(|listener| listener.tcp_routes.iter().cloned())
+                .collect();
+            if routes.is_empty() {
+                continue;
+            }
+            let forwarder = Passthrough::new(&routes, &registry, &format!("binds[{b}]"))?;
+            tracing::info!(port = bind.port, "passthrough listener ready");
+            passthrough.insert(bind.port, Arc::new(forwarder));
+        }
         let default_timeout = config
             .config
             .as_ref()
@@ -493,6 +514,7 @@ impl Gateway {
             router,
             routes,
             tls,
+            passthrough,
         })
     }
 
@@ -501,9 +523,24 @@ impl Gateway {
         self.tls.get(port)
     }
 
+    /// The forwarder for `port`, if that bind passes connections through.
+    ///
+    /// A port is one or the other. Terminating some connections on a port and
+    /// forwarding others would mean deciding per connection whether to present
+    /// a certificate, and nothing in the configuration says which.
+    pub fn passthrough(&self, port: u16) -> Option<Arc<Passthrough>> {
+        self.passthrough.get(&port).cloned()
+    }
+
     /// Ports the gateway needs sockets on.
     pub fn ports(&self) -> Vec<u16> {
-        self.router.ports().collect()
+        let mut ports: Vec<u16> = self.router.ports().collect();
+        for port in self.passthrough.keys() {
+            if !ports.contains(port) {
+                ports.push(*port);
+            }
+        }
+        ports
     }
 
     /// Serve one request that arrived on `port`.

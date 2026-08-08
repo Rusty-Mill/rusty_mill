@@ -57,6 +57,7 @@ pub use policy::{
     Rejection, RetryPolicy, TimeoutPolicy, UrlRewrite, WebhookTarget,
 };
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -173,10 +174,39 @@ impl Config {
         for (b, bind) in self.binds.iter().enumerate() {
             for (l, listener) in bind.listeners.iter().enumerate() {
                 let at = format!("binds[{b}].listeners[{l}]");
-                if listener.protocol == Protocol::Tls {
+                if listener.passes_through() {
+                    // Not a gap -- a statement about what a passthrough
+                    // listener cannot do, which is invisible in a file that
+                    // simply has no `policies:` key.
                     findings.push(format!(
-                        "{at}: protocol TLS is terminated as HTTPS by this build; opaque TLS \
-                         passthrough is not implemented"
+                        "{at}: forwards connections without decrypting them, so no route \
+                         policy applies to this traffic -- not `jwtAuth`, `extAuthz`, header \
+                         modifiers or guards; authorization here is whichever names the \
+                         `tcpRoutes` claim"
+                    ));
+                    if !listener.routes.is_empty() {
+                        findings.push(format!(
+                            "{at}.routes: ignored on a listener that also has `tcpRoutes`; a \
+                             port either forwards connections or serves requests on them"
+                        ));
+                    }
+                    if listener.tls.is_some() {
+                        findings.push(format!(
+                            "{at}.tls: ignored on a listener that forwards rather than \
+                             terminates; the certificate a client sees is the upstream's"
+                        ));
+                    }
+                    if !matches!(listener.protocol, Protocol::Tls | Protocol::Tcp) {
+                        findings.push(format!(
+                            "{at}: `tcpRoutes` forwards connections, which protocol {:?} does \
+                             not describe; use TLS or TCP",
+                            listener.protocol
+                        ));
+                    }
+                } else if listener.protocol == Protocol::Tls {
+                    findings.push(format!(
+                        "{at}: protocol TLS with no `tcpRoutes` terminates, the Gateway API's \
+                         `Terminate` mode; add `tcpRoutes` to forward connections instead"
                     ));
                 }
                 for (r, route) in listener.routes.iter().enumerate() {
@@ -321,6 +351,40 @@ pub struct Listener {
     /// Routes evaluated in order for requests arriving here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<Route>,
+
+    /// Connections forwarded without being decrypted.
+    ///
+    /// A listener carrying these passes bytes through rather than terminating
+    /// anything, which is what `protocol: TLS` means in the Gateway API's
+    /// passthrough mode. See [`TcpRoute`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tcp_routes: Vec<TcpRoute>,
+}
+
+/// A route for a connection nobody reads.
+///
+/// There is nothing to match on but the name the client asked for: a path or a
+/// header would have to be decrypted first, and the point of a passthrough
+/// listener is that it is not. So a TCP route is a set of hostnames and the
+/// backends behind them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TcpRoute {
+    /// Optional name, used in logs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// Names this route serves, from the connection's SNI. Empty matches any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hostnames: Vec<String>,
+
+    /// Weighted destinations the connection is spliced to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<Backend>,
+
+    /// Everything else upstream accepts here.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
 }
 
 /// The wire protocol a [`Listener`] speaks.
@@ -341,9 +405,26 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    /// Whether serving this protocol requires terminating or inspecting TLS.
+    /// Whether serving this protocol requires terminating TLS.
+    ///
+    /// `TLS` is in the list because a listener spelling it without
+    /// `tcpRoutes` is asking for termination — the Gateway API's `Terminate`
+    /// mode, and what this gateway did with it before passthrough existed.
+    /// [`Listener::passes_through`] is what tells the two apart.
     pub fn is_tls(self) -> bool {
         matches!(self, Protocol::Https | Protocol::Tls)
+    }
+}
+
+impl Listener {
+    /// Whether this listener forwards connections rather than terminating them.
+    ///
+    /// Carrying `tcpRoutes` is what says so. The protocol alone cannot: `TLS`
+    /// covers both of the Gateway API's modes, and a listener that named one
+    /// with a certificate and HTTP routes has been terminating since before
+    /// passthrough was possible here.
+    pub fn passes_through(&self) -> bool {
+        !self.tcp_routes.is_empty()
     }
 }
 

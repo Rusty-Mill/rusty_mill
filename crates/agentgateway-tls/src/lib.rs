@@ -17,6 +17,7 @@
 
 mod bridge;
 mod hello;
+mod passthrough;
 
 use std::sync::Once;
 
@@ -31,6 +32,7 @@ use rusty_tls::TlsAcceptor;
 use tokio::net::TcpStream;
 
 pub use bridge::{ToRusty, ToTokio};
+pub use passthrough::{Passthrough, PassthroughError};
 
 /// The decrypted stream handed back to `hyper`.
 pub type TlsStream = ToTokio<rusty_tls::AsyncTlsServerStream<ToRusty<TcpStream>>>;
@@ -271,7 +273,7 @@ impl TlsTerminator {
 /// ClientHello split across two segments arrives in two peeks, and a peer that
 /// sends the first half and stops would otherwise be waited on forever. The
 /// budget is the one this spends looking, not a handshake timeout.
-async fn peek_server_name(stream: &TcpStream) -> Option<String> {
+pub(crate) async fn peek_server_name(stream: &TcpStream) -> Option<String> {
     tokio::time::timeout(PEEK_BUDGET, async {
         let mut buffer = vec![0u8; hello::MAX_HELLO];
         let mut filled = 0;
@@ -324,7 +326,10 @@ impl TlsBinds {
             let mut chosen: Vec<(Option<&str>, &TlsConfig)> = Vec::new();
 
             for (l, listener) in bind.listeners.iter().enumerate() {
-                if !listener.protocol.is_tls() {
+                // A passthrough listener presents no certificate: the one a
+                // client validates belongs to the upstream. Requiring one here
+                // would make `protocol: TLS` mean termination and nothing else.
+                if !listener.protocol.is_tls() || listener.passes_through() {
                     continue;
                 }
                 let at = format!("binds[{b}].listeners[{l}]");

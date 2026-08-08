@@ -670,3 +670,208 @@ binds:
 
     shutdown.cancel();
 }
+
+/// A TLS server that terminates with `cert` and answers every request.
+///
+/// The point of a passthrough test: this is the thing holding the private key,
+/// not the gateway.
+async fn tls_upstream(cert: &Certificate, label: &'static str) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - protocol: HTTPS
+        tls:
+          cert: "{dir}/cert.pem"
+          key: "{dir}/key.pem"
+        routes:
+          - backends:
+              - host: "127.0.0.1:{echo}"
+"#,
+        dir = cert.dir.path().display(),
+        echo = upstream_for(label).await,
+    );
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("the upstream gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("the upstream should bind");
+
+    (port, shutdown)
+}
+
+/// A plain HTTP echo reporting `label`, behind the TLS upstream above.
+async fn upstream_for(label: &'static str) -> u16 {
+    use axum::{Router, routing::any};
+
+    let port = free_port().await;
+    let app = Router::new().fallback(any(
+        move || async move { axum::Json(json!({"who": label})) },
+    ));
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("echo should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    port
+}
+
+/// A gateway that forwards by name to the given upstreams.
+async fn start_passthrough(routes: &[(&str, u16)]) -> (u16, CancellationToken) {
+    let port = free_port().await;
+    let mut yaml = format!(
+        "binds:\n  - port: {port}\n    listeners:\n      - protocol: TLS\n        tcpRoutes:\n"
+    );
+    for (hostname, upstream_port) in routes {
+        if hostname.is_empty() {
+            yaml.push_str(&format!(
+                "          - backends:\n              - host: \"127.0.0.1:{upstream_port}\"\n"
+            ));
+        } else {
+            yaml.push_str(&format!(
+                "          - hostnames: [\"{hostname}\"]\n            backends:\n              \
+                 - host: \"127.0.0.1:{upstream_port}\"\n"
+            ));
+        }
+    }
+
+    let config = Config::from_yaml(&yaml).expect("config should parse");
+    let gateway = Gateway::build(&config, None)
+        .await
+        .expect("gateway should build");
+
+    let shutdown = CancellationToken::new();
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("should parse");
+    let _serving = serve::run_with_shutdown(gateway, vec![addr], shutdown.clone())
+        .await
+        .expect("gateway should bind");
+
+    (port, shutdown)
+}
+
+#[tokio::test]
+async fn a_passthrough_listener_forwards_to_the_upstream_holding_the_key() {
+    // The gateway has no certificate at all here: the one the client validates
+    // is the upstream's, which is what makes this passthrough rather than
+    // termination.
+    let cert = certificate_for(&["alpha.test"]);
+    let (upstream_port, upstream_stop) = tls_upstream(&cert, "alpha").await;
+    let (port, shutdown) = start_passthrough(&[("alpha.test", upstream_port)]).await;
+
+    let body: Value = client_trusting(&[&cert], &["alpha.test"], port)
+        .get(format!("https://alpha.test:{port}/"))
+        .send()
+        .await
+        .expect("the connection should be forwarded")
+        .json()
+        .await
+        .expect("the upstream should answer");
+
+    assert_eq!(body["who"], "alpha");
+
+    shutdown.cancel();
+    upstream_stop.cancel();
+}
+
+#[tokio::test]
+async fn each_name_is_forwarded_to_its_own_upstream() {
+    let alpha_cert = certificate_for(&["alpha.test"]);
+    let beta_cert = certificate_for(&["beta.test"]);
+    let (alpha_port, alpha_stop) = tls_upstream(&alpha_cert, "alpha").await;
+    let (beta_port, beta_stop) = tls_upstream(&beta_cert, "beta").await;
+
+    let (port, shutdown) =
+        start_passthrough(&[("alpha.test", alpha_port), ("beta.test", beta_port)]).await;
+
+    for (name, cert, expected) in [
+        ("alpha.test", &alpha_cert, "alpha"),
+        ("beta.test", &beta_cert, "beta"),
+    ] {
+        let body: Value = client_trusting(&[cert], &[name], port)
+            .get(format!("https://{name}:{port}/"))
+            .send()
+            .await
+            .expect("the connection should be forwarded")
+            .json()
+            .await
+            .expect("the upstream should answer");
+        assert_eq!(body["who"], expected);
+    }
+
+    shutdown.cancel();
+    alpha_stop.cancel();
+    beta_stop.cancel();
+}
+
+#[tokio::test]
+async fn a_name_no_route_claims_is_closed() {
+    // Forwarding it to whichever route sorted first would send a connection
+    // somewhere the operator never pointed that name.
+    let cert = certificate_for(&["alpha.test", "stranger.test"]);
+    let (upstream_port, upstream_stop) = tls_upstream(&cert, "alpha").await;
+    let (port, shutdown) = start_passthrough(&[("alpha.test", upstream_port)]).await;
+
+    let refused = client_trusting(&[&cert], &["stranger.test"], port)
+        .get(format!("https://stranger.test:{port}/"))
+        .send()
+        .await;
+    assert!(refused.is_err(), "nothing claims that name");
+
+    shutdown.cancel();
+    upstream_stop.cancel();
+}
+
+#[tokio::test]
+async fn a_catch_all_route_takes_a_name_nothing_else_claims() {
+    let cert = certificate_for(&["alpha.test", "stranger.test"]);
+    let (upstream_port, upstream_stop) = tls_upstream(&cert, "fallback").await;
+    let (port, shutdown) = start_passthrough(&[("", upstream_port)]).await;
+
+    let body: Value = client_trusting(&[&cert], &["stranger.test"], port)
+        .get(format!("https://stranger.test:{port}/"))
+        .send()
+        .await
+        .expect("the catch-all should take it")
+        .json()
+        .await
+        .expect("the upstream should answer");
+    assert_eq!(body["who"], "fallback");
+
+    shutdown.cancel();
+    upstream_stop.cancel();
+}
+
+#[tokio::test]
+async fn check_says_a_passthrough_listener_applies_no_policy() {
+    // Invisible in a file that simply has no `policies:` key.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 8443
+    listeners:
+      - protocol: TLS
+        tcpRoutes:
+          - hostnames: ["alpha.test"]
+            backends:
+              - host: "10.0.0.1:443"
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("without decrypting") && f.contains("no route policy applies")),
+        "{findings:?}"
+    );
+}

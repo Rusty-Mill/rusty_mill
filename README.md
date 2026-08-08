@@ -154,7 +154,9 @@ Implemented and tested:
   [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
-- TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
+- TLS termination with ALPN (`h2` and `http/1.1`), one certificate per
+  hostname, and `protocol: TLS` passthrough that forwards connections without
+  decrypting them — see [TLS](#tls)
 - CORS, including preflight answered at the gateway
 - `jwtAuth`: JWKS-backed JWT validation (`url:` or `file:`), issuer and audience
   binding, RFC 6750 `WWW-Authenticate` challenges
@@ -181,8 +183,6 @@ Parses but is **not** enforced — reported by `--check` and at startup:
   one `pathPrefix` match — reported by `--check`. Path rewrites apply across a
   whole federation; see
   [Reaching the upstream request](#reaching-the-upstream-request)
-- `protocol: TLS` (opaque passthrough) is terminated as HTTPS rather than
-  forwarded
 
 Not supported at all:
 
@@ -1843,6 +1843,59 @@ Two things are still startup errors, because a name cannot choose between them:
 two listeners claiming the *same* hostname with different certificates, and two
 certificates on a port where neither listener names a hostname. The same
 certificate on two listeners is one certificate and is fine.
+
+### Forwarding without terminating
+
+A listener carrying `tcpRoutes` passes connections through instead. Nothing is
+decrypted, no certificate is presented, and the gateway never learns what is
+inside:
+
+```yaml
+binds:
+  - port: 8443
+    listeners:
+      - protocol: TLS
+        tcpRoutes:
+          - hostnames: ["alpha.example.com"]
+            backends:
+              - host: "10.0.0.1:443"
+          - hostnames: ["*.internal.example.com"]
+            backends:
+              - host: "10.0.0.2:443"
+          - backends:                      # the catch-all
+              - host: "10.0.0.9:443"
+```
+
+`tcpRoutes` is what says passthrough, not the protocol: `TLS` covers both of
+the Gateway API's modes, and a listener naming it with a certificate and HTTP
+routes has been terminating since before passthrough was possible here. A
+listener with both is reported by `--check` — a port either forwards
+connections or serves requests on them.
+
+**The only thing such a route can match on is the name.** A path, a method, a
+header: all of them are inside the encryption. So a TCP route is hostnames and
+backends and nothing else, matched from the same peeked ClientHello that
+selects a certificate on a terminating listener. Exact names beat wildcards
+beat the catch-all, and backends are weighted and load-balanced by the same
+ring everything else uses.
+
+A connection carrying no name — a client dialling by IP, or something that is
+not TLS at all — matches only a route with no hostnames. A name nothing claims
+is **closed**, because forwarding it to whichever route sorted first would send
+a connection somewhere the operator never pointed that name.
+
+**This is a different trust boundary, and `--check` says so:**
+
+```
+warning: ...listeners[0]: forwards connections without decrypting them, so no
+         route policy applies to this traffic -- not `jwtAuth`, `extAuthz`,
+         header modifiers or guards; authorization here is whichever names the
+         `tcpRoutes` claim
+```
+
+Every policy in this gateway works because the bytes are in the clear at some
+point, and none of them are here. That is invisible in a file that simply has
+no `policies:` key, which is why it is said out loud rather than left implied.
 
 ## Retries and rate limits
 
