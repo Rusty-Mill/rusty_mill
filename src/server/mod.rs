@@ -107,6 +107,7 @@ use axum::{http::HeaderMap, Router};
 use tokio::sync::watch;
 use tracing::Instrument;
 
+use crate::trace::TraceContext;
 use crate::types::{
     AgentManifest, AgentName, Error, Event, Message, Run, RunCreateRequest, RunId, RunStatus,
     Session, SessionId,
@@ -914,6 +915,7 @@ impl AcpServer {
         slot: Slot,
         request: RunCreateRequest,
         base_url: &str,
+        trace: Option<TraceContext>,
     ) -> Result<(RunId, NotificationStream), Error> {
         let agent =
             self.agents.get(&request.agent_name).cloned().ok_or_else(|| {
@@ -942,6 +944,7 @@ impl AcpServer {
                 // replacement must not, since the run it replaces already did.
                 record_input_in_session: true,
                 replaces: None,
+                trace,
             },
             base_url,
         )
@@ -967,6 +970,7 @@ impl AcpServer {
             attempt,
             record_input_in_session,
             replaces,
+            trace,
         } = spec;
 
         let session_id = session.as_ref().map(|session| session.id);
@@ -1047,7 +1051,7 @@ impl AcpServer {
         self.in_flight.enter(run_id);
         tokio::spawn(async move {
             let tracking = Arc::clone(&server);
-            execute(server, agent, ctx, handle, session_id, base_url).await;
+            execute(server, agent, ctx, handle, session_id, base_url, trace).await;
 
             // Out of the set first, then the count — the same write-before-
             // signal rule as the terminal event. Releasing the slot is what
@@ -1110,6 +1114,8 @@ impl AcpServer {
                     attempt: if record.handed_off { record.attempt } else { record.attempt + 1 },
                     record_input_in_session: false,
                     replaces: Some(abandoned.run_id),
+                    // Recovery: no client called, so there is no trace to join.
+                    trace: None,
                 },
                 &base_url,
             )
@@ -1193,6 +1199,12 @@ struct LaunchSpec {
     attempt: u32,
     record_input_in_session: bool,
     replaces: Option<RunId>,
+    /// The trace this run belongs to, when it was created by a request.
+    ///
+    /// `None` for a replacement started by recovery: no client called, so
+    /// there is no trace to join. Inventing one would put a fabricated id
+    /// beside real ones and read as a call nobody made.
+    trace: Option<TraceContext>,
 }
 
 /// Reject input the agent has not declared it can consume.
@@ -1395,6 +1407,7 @@ async fn execute(
     handle: Arc<RunHandle>,
     session_id: Option<SessionId>,
     base_url: String,
+    trace: Option<TraceContext>,
 ) {
     let run_id = handle.run_id();
 
@@ -1403,6 +1416,11 @@ async fn execute(
         run_id = %run_id,
         agent = %ctx.agent_name(),
         replica = %server.replica_id,
+        // The link across the replica boundary. Recorded as a field rather
+        // than made a child of the request span, because an `async` or
+        // `stream` run outlives the request that created it and cannot be the
+        // child of a span that has already closed.
+        trace_id = tracing::field::Empty,
         // Recorded below rather than inline: most runs have no session, and a
         // field that is sometimes the string "None" is worse than one that is
         // sometimes absent.
@@ -1410,6 +1428,9 @@ async fn execute(
     );
     if let Some(session_id) = session_id {
         span.record("session_id", tracing::field::display(session_id));
+    }
+    if let Some(trace) = trace {
+        span.record("trace_id", tracing::field::display(trace.trace_id()));
     }
 
     run_to_terminal(server, agent, ctx, handle, session_id, base_url, run_id).instrument(span).await

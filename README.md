@@ -1000,7 +1000,7 @@ Two other numbers that shape the API:
 cargo test --all-features
 ```
 
-317 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
+328 tests: wire-format round-trips for every schema, end-to-end coverage of discovery, all three
 run modes, streaming order and aggregation, await/resume, cancellation of both running and
 awaiting runs, session continuity and the error paths — plus a multi-replica suite that starts
 two servers sharing one store and drives a run through one while observing, resuming and
@@ -1040,10 +1040,10 @@ with `-D warnings`, and `cargo package`.
 
 ## Logging
 
-Every run executes inside a `tracing` span carrying the run id, agent name, replica id and
-session id. That matters because an agent's own output comes from inside `agent.run` — without
-the span it interleaves with every other concurrent run and cannot be told apart afterwards.
-With it, anything the agent logs is attributable for free:
+Every request gets an `acp.request` span, and every run an `acp.run` span carrying the run id,
+agent name, replica id and session id. That matters because an agent's own output comes from
+inside `agent.run` — without the span it interleaves with every other concurrent run and cannot
+be told apart afterwards. With it, anything the agent logs is attributable for free:
 
 ```sh
 RUST_LOG=info cargo run --example echo_server
@@ -1060,6 +1060,42 @@ There are deliberately **no per-request spans**. A run outlives the request that
 can be resumed or cancelled through a different request on a different replica, so a request
 span could never cover one. Requests are `tower-http`'s `TraceLayer`, layered on the router like
 any other middleware — the crate does not duplicate it.
+
+### Tracing across replicas
+
+Both spans carry a **`trace_id`**, taken from the W3C `traceparent` header when the caller sends
+one and minted when it does not. The client attaches the header to every outbound request, so the
+two halves of this crate correlate with no configuration at all.
+
+```
+INFO acp.request{method=POST path=/runs trace_id=4bf92f3577b34da6a3ce929d0e0e4736}
+INFO acp.run{run_id=01J.. agent=writer replica=b trace_id=4bf92f3577b34da6a3ce929d0e0e4736}
+```
+
+This is the piece that makes the multi-replica story observable. A run is created through one
+replica, executes on another and is watched through a third; before this every one of those
+produced an unrelated root span, so *what happened to this run and which replica was holding it*
+was the one question the logs could not answer.
+
+`trace_id` is a shared **field**, not a span tree, and that is forced rather than chosen. An
+`async` or `stream` run outlives the request that created it — that is what those modes are for —
+so the run cannot be a child of a span that has already closed. A shared field answers the
+operational question anyway: every line every replica logs about one call carries the same id.
+
+Deliberately no `tracing-opentelemetry`. It would give real parent-child spans and real span
+links, and it would pick the observability ecosystem for everyone depending on this crate — the
+same reason metrics below are a facade rather than an exporter. The header is 55 fixed characters
+and reading it costs nothing.
+
+A caller that already has a trace puts the header on its own `reqwest::Client` and turns this
+crate's off, so exactly one is on the wire:
+
+```rust
+AcpClient::builder(url).without_trace_headers().build()?
+```
+
+A malformed `traceparent` is replaced, not rejected — one broken upstream proxy should not be
+able to take a deployment down over a field nothing depends on.
 
 ### Metrics
 
