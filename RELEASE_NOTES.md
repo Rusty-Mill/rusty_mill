@@ -6,6 +6,40 @@ than by tag — see `CHANGELOG.md` for the `[Unreleased]` rollup once a tag ship
 
 ---
 
+## net/security bindings for rustils' track-w backend
+**2026-08-07** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
+
+- **Added:** `crypto` (`BCryptGenRandom`), `credential` (Credential
+  Manager, `CRED_TYPE_GENERIC`), and `certstore` (system certificate
+  stores, read-only) as three new modules, plus `net::set_nonblocking`
+  (`ioctlsocket(FIONBIO)`) and AF_UNIX support in `net`
+  (`AddressFamily::Unix`, `Protocol::Unspecified`, `UnixSocketAddr`,
+  `bind_unix`/`connect_unix`/`accept_unix`/`local_addr_unix`).
+- **Why:** rustils adopted this crate as its Windows backend behind
+  `platform-windows`'s `track-w` feature and migrated everything it
+  could; what remained on `windows-sys` was blocked on bindings that
+  simply did not exist here. This closes that set. `security` was
+  deliberately not extended — it answers "who may touch this object"
+  (ACLs, SIDs), which is a different job from "give me unpredictable
+  bytes", "hold this secret" and "whom does this machine trust". Three
+  modules, three clear scopes, rather than one with four error
+  conventions.
+- **Note:** `crypto::random_bytes` returns `Result<usize, NtStatus>`, the
+  only wrapper here that does not return `Win32Error`. `BCryptGenRandom`
+  reports an `NTSTATUS`, and unlike `conpty`'s `HRESULT`s (which embed a
+  recoverable Win32 code) there is no faithful conversion without an
+  `ntdll` export this crate does not bind. Returning the raw status typed
+  is honest; widening it into `Win32Error` would have put an NTSTATUS bit
+  pattern into a field documented to hold a Win32 error code.
+- **Verification:** `CREDENTIALW`, `CERT_CONTEXT` and `sockaddr_un`
+  layouts transcribed from the Windows metadata and pinned with
+  `size_of`/`align_of`/`offset_of` compile-time asserts. New unit tests
+  cover the CSPRNG (fills, differs, empty is a no-op), credential
+  round-trip/replace/clean-miss/binary-safety, ROOT-store enumeration
+  (asserting each entry really is a DER SEQUENCE, not merely non-empty),
+  and `UnixSocketAddr` validation. All Windows-only, so the
+  windows-latest job is where they run.
+
 ## manifest: edition 2021 + declared 1.88 MSRV, so rustils can depend on this crate
 **2026-08-07** · branch `claude/rustils-windows-deps-mtimc7` (no PR number yet)
 

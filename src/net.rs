@@ -35,6 +35,7 @@ unsafe extern "system" {
     #[link_name = "socket"]
     fn raw_socket(address_family: i32, kind: i32, protocol: i32) -> usize;
     fn closesocket(sock: usize) -> i32;
+    fn ioctlsocket(sock: usize, cmd: i32, argp: *mut u32) -> i32;
     // Same lowercase-symbol collision as `socket` above -- `bind` would
     // otherwise clash with this module's own `bind` wrapper function.
     #[link_name = "bind"]
@@ -134,13 +135,21 @@ const INVALID_SOCKET: usize = usize::MAX;
 /// `CloseHandle`.
 pub type RawSocket = usize;
 
-/// `AF_INET`/`AF_INET6` — the two address families this module
-/// supports (out of the many `socket` itself accepts: `AF_UNIX`/
-/// `AF_IPX`/`AF_BTH`/… are all out of scope). Verified against
-/// mingw-w64's own `winsock2.h` with a compiled `_Static_assert` probe.
+/// `AF_INET`/`AF_INET6`/`AF_UNIX` — the address families this module
+/// supports (`AF_IPX`/`AF_BTH`/… remain out of scope). The two IP
+/// families were verified against mingw-w64's own `winsock2.h` with a
+/// compiled `_Static_assert` probe.
+///
+/// `Unix` (`AF_UNIX` = 1) arrived later, for Windows 10 1803+'s real
+/// `afunix.h` support: a filesystem-path socket, the same abstraction
+/// Unix domain sockets provide, usable for local IPC without a loopback
+/// port. Its addresses do not fit [`SocketAddr`] — see
+/// [`UnixSocketAddr`] for why that is a separate type rather than a
+/// third variant.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressFamily {
+    Unix = 1,
     Inet = 2,
     Inet6 = 23,
 }
@@ -156,12 +165,19 @@ pub enum SocketKind {
     Dgram = 2,
 }
 
-/// `IPPROTO_TCP`/`IPPROTO_UDP` — the two protocols this module supports.
-/// Verified against mingw-w64's own `winsock2.h` with a compiled
+/// `IPPROTO_TCP`/`IPPROTO_UDP` — the protocols this module supports.
+/// Both verified against mingw-w64's own `winsock2.h` with a compiled
 /// `_Static_assert` probe.
+///
+/// `Unspecified` (`0`) is not a protocol at all but Winsock's "pick the
+/// only sensible one for this family and type" value — required for
+/// [`AddressFamily::Unix`], which has no protocol numbers of its own,
+/// and equally valid for the IP families (where it resolves to TCP for
+/// `Stream` and UDP for `Dgram`).
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
+    Unspecified = 0,
     Tcp = 6,
     Udp = 17,
 }
@@ -1902,5 +1918,377 @@ mod tests {
         // endian-independent sanity check that doesn't rely on assuming
         // the host's own byte order.
         assert_eq!(htonl(0xAABBBBAA), 0xAABBBBAA);
+    }
+}
+
+// --- Non-blocking mode -------------------------------------------------
+
+/// `FIONBIO` — the `ioctlsocket` command selecting blocking vs
+/// non-blocking mode. Winsock defines it as `0x8004667E`; read as the
+/// `i32` the call's parameter actually is, that is a negative value, so
+/// it is written here as the exact bit pattern rather than a decimal
+/// literal that would need a cast to be believed.
+const FIONBIO: i32 = 0x8004_667E_u32 as i32;
+
+/// Switch `sock` between blocking (the default) and non-blocking mode —
+/// `ioctlsocket(FIONBIO)`, Winsock's equivalent of
+/// `fcntl(fd, F_SETFL, O_NONBLOCK)`.
+///
+/// In non-blocking mode a call that would otherwise wait — `accept` with
+/// no pending connection, `recv`/`recvfrom` with nothing queued,
+/// `connect` mid-handshake — returns `WSAEWOULDBLOCK` (10035) instead.
+/// That is an ordinary "not ready yet", not a failure of the socket, and
+/// distinguishing the two is the caller's job: this crate reports it as
+/// the plain [`crate::error::Win32Error`] it is rather than inventing a
+/// separate would-block signal.
+///
+/// There is no read-side counterpart. Winsock provides no way to query a
+/// socket's current blocking mode — `FIONBIO` is set-only, and
+/// `getsockopt` has no equivalent option. A caller that needs to know
+/// must track what it set, which is a real API limitation of the OS and
+/// not an omission here.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid socket from [`socket`].
+pub unsafe fn set_nonblocking(
+    sock: RawSocket,
+    nonblocking: bool,
+) -> Result<(), crate::error::Win32Error> {
+    let mut mode: u32 = u32::from(nonblocking);
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `mode` is a valid, initialized `u32` out-parameter that
+    // `ioctlsocket` reads (and, for `FIONBIO`, only reads) for the
+    // duration of the call.
+    let r = unsafe { ioctlsocket(sock, FIONBIO, &mut mode) };
+    if r != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+// --- AF_UNIX -----------------------------------------------------------
+
+/// `sun_path`'s capacity in `sockaddr_un` — 108 bytes, the same figure
+/// every BSD-derived `sockaddr_un` uses and the one Windows'
+/// `afunix.h` carries. One byte is the NUL terminator, so 107 is the
+/// usable path length; [`UnixSocketAddr::new`] enforces that.
+pub const UNIX_PATH_CAPACITY: usize = 108;
+
+// sockaddr_un: `size_of` 110 (a 2-byte family followed by 108 path
+// bytes), `align_of` 2 — no padding, since every field is byte- or
+// u16-aligned. Pinned by the asserts below so a mistranscription of
+// `afunix.h` cannot survive a build.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockAddrUn {
+    family: u16,
+    path: [u8; UNIX_PATH_CAPACITY],
+}
+
+const _: () = assert!(core::mem::size_of::<SockAddrUn>() == 110);
+const _: () = assert!(core::mem::align_of::<SockAddrUn>() == 2);
+
+/// A Unix-domain socket address: a filesystem path.
+///
+/// Deliberately **not** a third [`SocketAddr`] variant. `sockaddr_un` is
+/// 110 bytes against `sockaddr_in6`'s 28, so folding it in would have
+/// quadrupled the size of every IPv4 address this module passes around,
+/// to serve a family whose calls share no address-handling code with the
+/// IP ones anyway. Two types, each the size of what it describes.
+///
+/// Windows supports only *pathname* addresses here — no Linux-style
+/// abstract namespace (a leading NUL byte), which `afunix.h` does not
+/// implement. A path is stored NUL-terminated exactly as it goes on the
+/// wire.
+#[derive(Clone, Copy)]
+pub struct UnixSocketAddr {
+    raw: SockAddrUn,
+    /// Bytes of `path` in use, excluding the NUL terminator.
+    len: usize,
+}
+
+impl core::fmt::Debug for UnixSocketAddr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("UnixSocketAddr")
+            .field("path", &self.path())
+            .finish()
+    }
+}
+
+impl PartialEq for UnixSocketAddr {
+    fn eq(&self, other: &Self) -> bool {
+        self.path_bytes() == other.path_bytes()
+    }
+}
+
+impl Eq for UnixSocketAddr {}
+
+impl UnixSocketAddr {
+    /// Build an address from a filesystem path.
+    ///
+    /// Takes bytes rather than `&str` because a socket path is a
+    /// filesystem path, and this crate does not get to decide that a
+    /// caller's paths are UTF-8. Rejects an embedded NUL (which would
+    /// silently truncate the path the OS sees) and anything longer than
+    /// 107 bytes, both with `ERROR_INVALID_PARAMETER` — the same code
+    /// Winsock itself reports for a malformed address, rather than a
+    /// bespoke error this crate invents.
+    pub fn new(path: &[u8]) -> Result<Self, crate::error::Win32Error> {
+        if path.is_empty() || path.len() >= UNIX_PATH_CAPACITY || path.contains(&0) {
+            return Err(crate::error::Win32Error::ERROR_INVALID_PARAMETER);
+        }
+        let mut raw = SockAddrUn {
+            family: AddressFamily::Unix as u16,
+            path: [0u8; UNIX_PATH_CAPACITY],
+        };
+        raw.path[..path.len()].copy_from_slice(path);
+        Ok(UnixSocketAddr {
+            raw,
+            len: path.len(),
+        })
+    }
+
+    /// The path bytes, without the NUL terminator.
+    pub fn path_bytes(&self) -> &[u8] {
+        &self.raw.path[..self.len]
+    }
+
+    /// The path as UTF-8, or `None` if it isn't. Convenience over
+    /// [`Self::path_bytes`] for the common case; the bytes stay
+    /// authoritative.
+    pub fn path(&self) -> Option<&str> {
+        core::str::from_utf8(self.path_bytes()).ok()
+    }
+
+    /// The encoded length to pass as Winsock's `namelen`: the family
+    /// field plus the path plus its NUL terminator. Not
+    /// `size_of::<SockAddrUn>()` — Winsock accepts (and `getsockname`
+    /// reports) the used prefix, and passing the full 110 bytes for a
+    /// short path makes the trailing zeros part of the address on some
+    /// paths.
+    fn encoded_len(&self) -> i32 {
+        (core::mem::size_of::<u16>() + self.len + 1) as i32
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        (&self.raw as *const SockAddrUn).cast()
+    }
+
+    /// Decode a Winsock-filled `sockaddr_un` buffer.
+    ///
+    /// # Safety
+    ///
+    /// `buf` must point at `len` valid, initialized bytes that Winsock
+    /// filled with a `sockaddr_un`.
+    unsafe fn from_raw(buf: *const u8, len: i32) -> Result<Self, crate::error::Win32Error> {
+        let len = len.max(0) as usize;
+        if len < core::mem::size_of::<u16>() {
+            return Err(crate::error::Win32Error::ERROR_INVALID_PARAMETER);
+        }
+        // SAFETY: the caller guarantees `len` initialized bytes at `buf`,
+        // and `len >= 2` was just checked, so reading the family field is
+        // in bounds. `read_unaligned` because Winsock makes no alignment
+        // promise about the buffer it filled.
+        let family = unsafe { core::ptr::read_unaligned(buf.cast::<u16>()) };
+        if family != AddressFamily::Unix as u16 {
+            return Err(crate::error::Win32Error::ERROR_INVALID_PARAMETER);
+        }
+        // The path occupies whatever follows the family field, up to the
+        // first NUL. An `accept`ed peer on Windows is commonly reported
+        // as an *unnamed* address (family only, `len == 2`) — that is
+        // normal, not an error, and yields an empty path.
+        let path_len = len - core::mem::size_of::<u16>();
+        // SAFETY: same guarantee as above; `path_len` bytes follow the
+        // 2-byte family field within the caller's `len` bytes.
+        let path = unsafe { core::slice::from_raw_parts(buf.add(2), path_len) };
+        let path = match path.iter().position(|&b| b == 0) {
+            Some(nul) => &path[..nul],
+            None => path,
+        };
+        if path.is_empty() {
+            let mut raw = SockAddrUn {
+                family: AddressFamily::Unix as u16,
+                path: [0u8; UNIX_PATH_CAPACITY],
+            };
+            raw.path[0] = 0;
+            return Ok(UnixSocketAddr { raw, len: 0 });
+        }
+        UnixSocketAddr::new(path)
+    }
+}
+
+/// Bind `sock` to a filesystem path — `bind` with a `sockaddr_un`.
+///
+/// The path must not already exist: Windows, like Unix, creates a
+/// filesystem entry for the socket and refuses to bind over one that is
+/// already there (`ERROR_ADDRESS_ALREADY_ASSOCIATED`/`WSAEADDRINUSE`).
+/// Removing a stale entry left by a crashed process is the caller's
+/// policy decision — this crate will not unlink a path behind a caller's
+/// back, since "stale" is indistinguishable from "in use by a live
+/// server" without probing.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid [`AddressFamily::Unix`] socket
+/// from [`socket`].
+pub unsafe fn bind_unix(
+    sock: RawSocket,
+    addr: &UnixSocketAddr,
+) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `addr` owns a valid `sockaddr_un` and `encoded_len`
+    // names the prefix of it that is in use.
+    let ok = unsafe { raw_bind(sock, addr.as_ptr(), addr.encoded_len()) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Connect `sock` to a bound Unix-domain path — `connect` with a
+/// `sockaddr_un`.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid [`AddressFamily::Unix`] socket
+/// from [`socket`].
+pub unsafe fn connect_unix(
+    sock: RawSocket,
+    addr: &UnixSocketAddr,
+) -> Result<(), crate::error::Win32Error> {
+    // SAFETY: as in `bind_unix` above.
+    let ok = unsafe { raw_connect(sock, addr.as_ptr(), addr.encoded_len()) };
+    if ok != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+/// Accept one incoming Unix-domain connection — `accept` over a
+/// `sockaddr_un` buffer. The [`AddressFamily::Unix`] counterpart of
+/// [`accept`], which sizes its buffer for `sockaddr_in6` and would
+/// truncate a `sockaddr_un`.
+///
+/// The returned peer address is usually *unnamed* (an empty path):
+/// Windows does not autobind a connecting Unix-domain socket to a path
+/// the way it assigns an ephemeral port to a TCP client, so unless the
+/// client explicitly bound itself there is no path to report. That is
+/// the OS's behavior, surfaced rather than papered over with a
+/// synthesized name.
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid, already-[`listen`]-ing
+/// [`AddressFamily::Unix`] socket from [`socket`].
+pub unsafe fn accept_unix(
+    sock: RawSocket,
+) -> Result<(RawSocket, UnixSocketAddr), crate::error::Win32Error> {
+    let mut buf = [0u8; core::mem::size_of::<SockAddrUn>()];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf` is a valid buffer matched by `addr_len` naming its
+    // exact capacity.
+    let new_sock = unsafe { raw_accept(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if new_sock == INVALID_SOCKET {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `accept` guarantees `buf` holds `addr_len`
+    // valid bytes naming the peer's `sockaddr_un`.
+    let peer = unsafe { UnixSocketAddr::from_raw(buf.as_ptr(), addr_len) }?;
+    Ok((new_sock, peer))
+}
+
+/// The local path `sock` is bound to — `getsockname` over a
+/// `sockaddr_un` buffer, the [`AddressFamily::Unix`] counterpart of
+/// [`local_addr`].
+///
+/// # Safety
+///
+/// `sock` must be a currently-open, valid [`AddressFamily::Unix`] socket
+/// from [`socket`].
+pub unsafe fn local_addr_unix(sock: RawSocket) -> Result<UnixSocketAddr, crate::error::Win32Error> {
+    let mut buf = [0u8; core::mem::size_of::<SockAddrUn>()];
+    let mut addr_len: i32 = buf.len() as i32;
+    // SAFETY: `sock` is caller-supplied per this function's own safety
+    // contract; `buf`/`addr_len` are a valid buffer and its exact
+    // capacity.
+    let r = unsafe { getsockname(sock, buf.as_mut_ptr(), &mut addr_len) };
+    if r != 0 {
+        // SAFETY: `WSAGetLastError` takes no arguments; calling it
+        // immediately after a failing Winsock call is documented to
+        // report that same call's error.
+        return Err(crate::error::Win32Error::from_raw(
+            unsafe { WSAGetLastError() } as u32,
+        ));
+    }
+    // SAFETY: a successful `getsockname` filled `buf` with `addr_len`
+    // valid bytes.
+    unsafe { UnixSocketAddr::from_raw(buf.as_ptr(), addr_len) }
+}
+
+#[cfg(all(test, windows))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn an_address_round_trips_its_path() {
+        let addr = UnixSocketAddr::new(b"C:\\Temp\\rusty_win32.sock").expect("valid path");
+        assert_eq!(addr.path_bytes(), b"C:\\Temp\\rusty_win32.sock");
+        assert_eq!(addr.path(), Some("C:\\Temp\\rusty_win32.sock"));
+    }
+
+    #[test]
+    fn an_embedded_nul_is_rejected() {
+        assert_eq!(
+            UnixSocketAddr::new(b"a\0b").unwrap_err(),
+            crate::error::Win32Error::ERROR_INVALID_PARAMETER
+        );
+    }
+
+    #[test]
+    fn an_oversized_path_is_rejected() {
+        let too_long = [b'a'; UNIX_PATH_CAPACITY];
+        assert_eq!(
+            UnixSocketAddr::new(&too_long).unwrap_err(),
+            crate::error::Win32Error::ERROR_INVALID_PARAMETER
+        );
+        // One byte under the capacity leaves room for the NUL and is fine.
+        let longest = [b'a'; UNIX_PATH_CAPACITY - 1];
+        assert!(UnixSocketAddr::new(&longest).is_ok());
+    }
+
+    #[test]
+    fn an_empty_path_is_rejected() {
+        assert!(UnixSocketAddr::new(b"").is_err());
+    }
+
+    #[test]
+    fn encoded_len_covers_family_path_and_terminator() {
+        let addr = UnixSocketAddr::new(b"abc").expect("valid path");
+        assert_eq!(addr.encoded_len(), 2 + 3 + 1);
     }
 }
