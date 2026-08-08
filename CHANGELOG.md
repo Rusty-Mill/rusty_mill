@@ -20,6 +20,72 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.7
+
+- **Track W: `sys::pty` migrated, partially — closes rustils#109 (D-15).**
+  Everything the ConPTY lifecycle and its I/O touch: `create_pipe_pair`
+  (`handle::create_pipe`, a direct match — the donor already creates
+  both ends non-inheritable by default, same as this crate's own null
+  `SECURITY_ATTRIBUTES`, so unlike `sys::proc::make_pipe` no
+  `set_inheritable` dance is needed), `create_pty`'s
+  `CreatePseudoConsole` (`conpty::create_with_flags`), `resize`
+  (`conpty::resize`), `close`'s drain loop
+  (`handle::pipe_bytes_available` + `console::read`) and its final
+  `ClosePseudoConsole`, and `spawn_exit_watcher`'s `ClosePseudoConsole`
+  — the last two sharing one new `close_pseudo_console` helper.
+
+  `spawn_exit_watcher`'s wait step no longer has its own
+  `WaitForSingleObject` at all: it now calls `sys::proc::wait` (already
+  migrated, slice 2/#103), discarding the `Result` exactly as the
+  original discarded `WaitForSingleObject`'s. This corrects a mapping
+  error in #109 itself, which had proposed routing this through
+  `console::wait_readable` — that function waits on a console *input*
+  handle, not a process handle; there was never a fit.
+
+  Two boundary conversions recur throughout: the donor's `Coord`
+  (`x`/`y`) against this crate's `w::COORD` (`X`/`Y`) are the same two
+  `i16` fields under different naming conventions, and the donor's
+  `Hpcon` (`*mut c_void`) against this crate's `w::HPCON` (`isize`) are
+  the OS's one pointer-sized opaque handle value in two Rust types — a
+  plain `as` cast at the boundary either way, not a reinterpretation.
+
+  **`spawn_attached`'s `CreateProcessW` and its
+  `InitializeProcThreadAttributeList`/`UpdateProcThreadAttribute`/
+  `DeleteProcThreadAttributeList` trio stay on windows-sys.** Not a
+  deferral — closed against the donor's current shape, on grounds
+  precise enough to act on:
+  - The donor's `conpty::AttributeList` covers the whole lifecycle
+    correctly, but its one pointer accessor
+    (`AttributeList::as_mut_ptr`) is `pub(crate)`, unreachable from
+    outside rusty_win32. A genuine upstream gap, not a design mismatch —
+    filed as baileyrd/rusty_win32#272.
+  - `spawn_suspended_with_pseudoconsole` carries the same three
+    `CreateProcessW` blockers `sys::proc::spawn`'s own doc comment
+    already records (no per-spawn std-handle override, no
+    `lpCurrentDirectory`, `&str` where winargv wants `&[u16]`), plus a
+    fourth specific to this call site: it hardcodes `CREATE_SUSPENDED`
+    with no accompanying resume step, where `spawn_attached`
+    deliberately spawns running.
+  - Most load-bearing: `spawn_attached`'s `STARTF_USESTDHANDLES` fix is
+    a real Windows kernel workaround this repo discovered through live
+    CI failures (`microsoft/terminal` discussion #15814), not present in
+    the donor's `spawn_suspended_with_pseudoconsole`. Adopting the
+    donor's sequence as-is would likely **reintroduce** the exact
+    console-handle leak this function exists to prevent — a correctness
+    regression, not a style preference.
+
+  All 7 existing `tests/pty.rs` tests already exercise every migrated
+  function (`create_pty`, `wait_readable`, `close`, `resize`,
+  `spawn_exit_watcher`); no new tests needed.
+
+  With this, all three families #110's audit found unmigrated are
+  closed (#107, #108, #109) — modulo the two items named above, which
+  are closed against the donor's current shape rather than migrated,
+  and `unix_peer_addr` from slice 5, and `sys::nt`, which has no donor
+  bindings at all.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.6
 
 - **Track W: `sys::proc`'s pipe/handle helpers migrated (D-15).** Closes

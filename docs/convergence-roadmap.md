@@ -328,7 +328,43 @@ never has). Worth carrying forward: the donor's `create_pipe` makes
 *neither* end inheritable by design, the opposite starting point from
 this crate's own `bInheritHandle = 1`-then-clear-the-parent approach —
 both land on the same final state (child inheritable, parent not), just
-reached from different directions. #109 (`sys::pty`) remains open.
+reached from different directions.
+
+**Slice 8 (2026-08-08) — `sys::pty` migrated, partially. All three
+families from #110's audit now closed.** rustils#109: the ConPTY
+lifecycle and its I/O (`create_pipe_pair`, `create_pty`, `resize`,
+`close`, `spawn_exit_watcher`) migrated; `spawn_attached`'s
+`CreateProcessW` and its attribute-list trio did not. Two different
+kinds of "did not," both stated precisely rather than left as one
+blanket exclusion:
+
+- The attribute-list trio is blocked by a **fixable upstream gap**, not
+  a design mismatch: `conpty::AttributeList` covers the whole lifecycle,
+  but its pointer accessor is `pub(crate)`. Filed as
+  baileyrd/rusty_win32#272.
+- `CreateProcessW` carries `sys::proc::spawn`'s own three blockers plus
+  a fourth (hardcoded `CREATE_SUSPENDED` with no resume step) — and,
+  most load-bearing, the donor's `spawn_suspended_with_pseudoconsole`
+  lacks the `STARTF_USESTDHANDLES` fix this function needed after a real
+  live-CI bug hunt (`microsoft/terminal` discussion #15814). Adopting it
+  as written would likely reintroduce that bug, not merely differ in
+  style.
+
+`spawn_exit_watcher`'s wait step also stopped needing its own primitive
+entirely: it now calls the already-migrated `sys::proc::wait` and
+discards the result, exactly as it discarded raw `WaitForSingleObject`'s
+before. This corrects #109's own proposed mapping (`console::
+wait_readable`, which waits on a console input handle, not a process
+handle — never a fit).
+
+**Track W's status, precisely:** the three families named unmigrated in
+the #110 correction are now closed. What remains outside `track-w` in
+both configurations is `CreateProcessW` in two call sites (`sys::proc::
+spawn`, `sys::pty::spawn_attached`, each closed on its own stated
+grounds), `reopen` (declined pending evidence), `unix_peer_addr` and the
+attribute-list trio (both named upstream gaps, #271 and #272), and
+`sys::nt` (no donor bindings at all). Every exclusion left has either a
+citation or a filed issue behind it — none is a bare assertion anymore.
 
 ---
 
