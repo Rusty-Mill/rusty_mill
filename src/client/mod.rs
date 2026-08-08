@@ -1,5 +1,11 @@
-//! An async client for calling A2A agents over the JSON-RPC 2.0 protocol
-//! binding (spec Section 9), including SSE streaming.
+//! Async clients for calling A2A agents, one per protocol binding, all
+//! sharing the same method names and signatures: [`A2aClient`] speaks
+//! JSON-RPC 2.0 (spec Section 9, this module), [`RestClient`]
+//! ([`rest`]) speaks HTTP+JSON/REST (spec Section 11), and - with the
+//! `grpc` feature also enabled - [`GrpcClient`] ([`grpc`]) speaks gRPC
+//! (spec Section 10). All three support SSE/streaming and
+//! `*::discover`/`*::from_agent_card` for picking a binding automatically
+//! from an `AgentCard`.
 //!
 //! ```no_run
 //! # async fn run() -> rusty_a2a::client::Result<()> {

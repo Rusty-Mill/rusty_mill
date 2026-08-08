@@ -1,5 +1,5 @@
 //! The A2A protocol data model (spec Section 4), transliterated field-for-
-//! field from the normative `specification/a2a.proto` definition, with
+//! field from the normative, vendored `spec/a2a.proto` definition, with
 //! `camelCase` JSON field naming per spec Section 5.5.
 
 mod agent_card;
