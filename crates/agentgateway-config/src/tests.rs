@@ -1306,9 +1306,9 @@ binds:
 }
 
 #[test]
-fn cache_tools_is_reported_because_there_is_no_tool_block_to_mark() {
-    // This build does not translate `tools` to Anthropic, and the other two
-    // breakpoints working would make this one look like it did too.
+fn every_cache_breakpoint_applies_now_that_tools_are_translated() {
+    // `cacheTools` was reported while `tools` were dropped on the way to
+    // Anthropic, because there was no tool block to mark. There is one now.
     let config = Config::from_yaml(
         r#"
 binds:
@@ -1329,14 +1329,7 @@ binds:
     )
     .expect("should parse");
 
-    let findings = config.lint();
-    assert!(
-        findings
-            .iter()
-            .any(|f| f.contains("promptCaching.cacheTools") && f.contains("no tool block")),
-        "{findings:?}"
-    );
-    assert_eq!(findings.len(), 1, "only that one: {findings:?}");
+    assert_eq!(config.lint(), Vec::<String>::new());
 }
 
 #[test]

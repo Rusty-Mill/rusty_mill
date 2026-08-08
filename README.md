@@ -145,8 +145,9 @@ Implemented and tested:
   requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
-  included, with the `ai` policy's `modelAliases`, `prompts`, `defaults`,
-  `overrides` and `promptCaching` — see [The LLM gateway](#the-llm-gateway)
+  and tool calling included, with the `ai` policy's `modelAliases`, `prompts`,
+  `defaults`, `overrides` and `promptCaching` — see
+  [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
 - TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
@@ -1140,6 +1141,43 @@ Anthropic gets a real translation, because three differences bite:
   than dropped.
 - **Finish reasons use different vocabularies** — `end_turn` is what OpenAI
   calls `stop`. A client switching providers should not have to learn both.
+- **Tool calling is spelled differently at every step**, which is its own
+  section below.
+
+### Tool calling
+
+A tool call is a round trip, and Anthropic spells every leg of it differently:
+
+| | OpenAI | Anthropic |
+| --- | --- | --- |
+| definition | `{type: function, function: {…, parameters}}` | flat, with `input_schema` |
+| choice | `auto` / `none` / `required` / a named function | `{type: auto}` / `{type: none}` / `{type: any}` / `{type: tool, name}` |
+| the call | `tool_calls` beside the assistant's text | a `tool_use` **content block** |
+| the result | a message with `role: "tool"` | a `tool_result` block inside a *user* turn |
+
+All four are translated. Two details are easy to get wrong and are worth
+stating:
+
+**Consecutive tool results join one user turn.** Anthropic rejects two user
+messages in a row, and a model asked to call three tools gets all three answers
+before the conversation moves on.
+
+**`arguments` is a string on one side and an object on the other.** Translating
+either way means parsing or serializing something a *model* produced, so a
+partial or malformed argument string becomes an empty object rather than an
+error — failing a whole conversation over one garbled call is worse than
+forwarding a call the model can be told went wrong.
+
+Streamed calls need a second index. Anthropic numbers *content blocks*, and
+text shares that numbering; OpenAI numbers *tool calls*, and its text is not in
+the list at all. A response whose first block is text and whose second is a
+call has that call at Anthropic index 1 and OpenAI index 0 — passing the block
+index through would leave a client assembling arguments into a call that never
+opened.
+
+Argument fragments are forwarded as they arrive rather than assembled here.
+They are not valid JSON on their own, and holding them back until the call
+closed would defeat the point of streaming it.
 
 ### Streaming
 
@@ -1241,10 +1279,10 @@ cache a short prefix anyway and ignores the marker. That is why the length is
 real tokeniser would mean shipping a vocabulary per model to decide whether to
 add an annotation that is free to get wrong.
 
-`cacheTools` is **reported by `--check`**, not applied. This build does not
-translate `tools` to Anthropic at all, so there is no tool block to mark — and
-with the other two breakpoints working, a silent no-op here would look like it
-had.
+`cacheTools` marks the last tool definition. Tools sit ahead of the system
+prompt and the conversation in what Anthropic caches, so a breakpoint there
+covers the least that changes between calls — the cheapest one to set and the
+likeliest to hit.
 
 ### What the `ai` policy does not do yet
 

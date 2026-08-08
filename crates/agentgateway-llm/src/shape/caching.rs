@@ -34,6 +34,7 @@ const CHARS_PER_TOKEN: u64 = 4;
 pub struct Caching {
     system: bool,
     messages: bool,
+    tools: bool,
     min_tokens: Option<u64>,
     message_offset: usize,
 }
@@ -42,15 +43,13 @@ impl Caching {
     /// Compile a policy, or `None` when it would mark nothing.
     pub fn new(policy: Option<&PromptCaching>) -> Option<Self> {
         let policy = policy?;
-        // `cacheTools` is deliberately absent: this build does not translate
-        // `tools` to Anthropic at all, so there is no tool block to mark.
-        // `Config::lint` says so rather than this silently doing nothing.
-        if !policy.cache_system && !policy.cache_messages {
+        if !policy.cache_system && !policy.cache_messages && !policy.cache_tools {
             return None;
         }
         Some(Caching {
             system: policy.cache_system,
             messages: policy.cache_messages,
+            tools: policy.cache_tools,
             min_tokens: policy.min_tokens,
             message_offset: policy.cache_message_offset.unwrap_or(0),
         })
@@ -82,6 +81,16 @@ impl Caching {
             } else if let Some(blocks) = system.as_array_mut() {
                 mark_last_block(blocks);
             }
+        }
+
+        // Tools sit ahead of the system prompt and the conversation in what
+        // Anthropic caches, so a breakpoint here covers the least that
+        // changes between calls -- which is what makes it the cheapest one to
+        // set and the likeliest to hit.
+        if self.tools
+            && let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut)
+        {
+            mark_last_block(tools);
         }
 
         if self.messages

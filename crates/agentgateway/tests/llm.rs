@@ -1351,3 +1351,229 @@ async fn an_ai_policy_of_only_unimplemented_keys_changes_nothing() {
 
     shutdown.cancel();
 }
+
+/// An OpenAI request that defines a tool and asks the model to use it.
+fn tool_request() -> Value {
+    json!({
+        "model": "claude-sonnet-4",
+        "messages": [{"role": "user", "content": "Weather in Oslo?"}],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Look up the weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
+            },
+        }],
+        "tool_choice": "required",
+    })
+}
+
+/// An Anthropic response that called one.
+fn anthropic_tool_reply() -> Value {
+    json!({
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4",
+        "content": [
+            {"type": "text", "text": "Looking that up."},
+            {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+             "input": {"city": "Oslo"}},
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 20, "output_tokens": 8},
+    })
+}
+
+#[tokio::test]
+async fn tool_definitions_reach_anthropic_instead_of_being_dropped() {
+    // They were dropped entirely, which was worse than unsupported: the
+    // finish-reason mapping already translated `tool_use`, so a client could
+    // be told a tool ran and never be told which.
+    let (provider_port, seen) = provider(anthropic_tool_reply(), None).await;
+    let (url, shutdown) = start("anthropic", provider_port, "").await;
+
+    let response = post(&url, &tool_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    let tools = sent["tools"].as_array().expect("tools should survive");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "get_weather");
+    assert_eq!(
+        tools[0]["input_schema"]["properties"]["city"]["type"], "string",
+        "`parameters` becomes `input_schema`: {sent}"
+    );
+    assert_eq!(
+        sent["tool_choice"],
+        json!({"type": "any"}),
+        "`required` and `any` are the same instruction: {sent}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_tool_call_comes_back_in_openai_shape() {
+    let (provider_port, _seen) = provider(anthropic_tool_reply(), None).await;
+    let (url, shutdown) = start("anthropic", provider_port, "").await;
+
+    let response = post(&url, &tool_request()).await;
+    let body: Value = response.json().await.expect("should be JSON");
+
+    let choice = &body["choices"][0];
+    assert_eq!(choice["finish_reason"], "tool_calls");
+    let calls = choice["message"]["tool_calls"]
+        .as_array()
+        .expect("the call the finish reason claims: {body}");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["id"], "toolu_1");
+    assert_eq!(calls[0]["type"], "function");
+    assert_eq!(calls[0]["function"]["name"], "get_weather");
+    assert_eq!(
+        calls[0]["function"]["arguments"], r#"{"city":"Oslo"}"#,
+        "the input object becomes an argument string: {body}"
+    );
+    assert_eq!(
+        choice["message"]["content"], "Looking that up.",
+        "text beside the call survives"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_tool_result_goes_back_as_part_of_a_user_turn() {
+    // Anthropic has no `tool` role: a result is a block inside a user turn.
+    let (provider_port, seen) = provider(anthropic_reply(), None).await;
+    let (url, shutdown) = start("anthropic", provider_port, "").await;
+
+    let mut body = tool_request();
+    body["messages"] = json!([
+        {"role": "user", "content": "Weather in Oslo?"},
+        {"role": "assistant", "content": null, "tool_calls": [{
+            "id": "toolu_1", "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\":\"Oslo\"}"},
+        }]},
+        {"role": "tool", "tool_call_id": "toolu_1", "content": "17 degrees"},
+        {"role": "tool", "tool_call_id": "toolu_2", "content": "cloudy"},
+    ]);
+    post(&url, &body).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    let turns = sent["messages"].as_array().expect("an array");
+    assert_eq!(
+        turns.len(),
+        3,
+        "two results join one user turn, because Anthropic refuses two in a row: {sent}"
+    );
+    assert_eq!(turns[1]["content"][0]["type"], "tool_use");
+    assert_eq!(turns[2]["role"], "user");
+    let results = turns[2]["content"].as_array().expect("an array");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["type"], "tool_result");
+    assert_eq!(results[0]["tool_use_id"], "toolu_1");
+    assert_eq!(results[1]["content"], "cloudy");
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_streamed_tool_call_is_reframed_as_openai_deltas() {
+    let stream = concat!(
+        "event: message_start\ndata: {\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4\",\"usage\":{\"input_tokens\":9}}}\n\n",
+        "event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n",
+        "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n",
+        "event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Oslo\\\"}\"}}\n\n",
+        "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":4}}\n\n",
+    );
+    let (provider_port, _seen) = provider(anthropic_reply(), Some(stream.to_string())).await;
+    let (url, shutdown) = start("anthropic", provider_port, "").await;
+
+    let mut body = tool_request();
+    body["stream"] = json!(true);
+    let response = post(&url, &body).await;
+    let text = response.text().await.expect("should read the stream");
+
+    let chunks: Vec<Value> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter(|payload| *payload != "[DONE]")
+        .filter_map(|payload| serde_json::from_str(payload).ok())
+        .collect();
+
+    assert_eq!(
+        chunks[0]["choices"][0]["delta"]["role"], "assistant",
+        "the role is announced even when the response opens with a call: {text}"
+    );
+    let opening = &chunks[1]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(opening["index"], 0);
+    assert_eq!(opening["id"], "toolu_1");
+    assert_eq!(opening["function"]["name"], "get_weather");
+
+    let arguments: String = chunks
+        .iter()
+        .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str())
+        .collect();
+    assert_eq!(arguments, r#"{"city":"Oslo"}"#, "{text}");
+
+    assert!(
+        text.ends_with("data: [DONE]\n\n"),
+        "a client waits for the sentinel: {text}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn cache_tools_marks_the_tool_definitions_now_that_they_exist() {
+    let (provider_port, seen) = provider(anthropic_reply(), None).await;
+    let (url, shutdown) = start_with(
+        "anthropic",
+        provider_port,
+        "",
+        concat!(
+            "              ai:\n",
+            "                promptCaching:\n",
+            "                  cacheTools: true\n",
+        ),
+    )
+    .await;
+
+    post(&url, &tool_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    let tools = sent["tools"].as_array().expect("an array");
+    assert_eq!(
+        tools.last().expect("one tool")["cache_control"],
+        json!({"type": "ephemeral"}),
+        "{sent}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn openai_tool_definitions_still_pass_through_untouched() {
+    // The passthrough path must not have picked up a translation it does not
+    // need.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start("openAI", provider_port, "").await;
+
+    let body = tool_request();
+    post(&url, &body).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["tools"], body["tools"], "byte-for-byte: {sent}");
+    assert_eq!(sent["tool_choice"], "required");
+
+    shutdown.cancel();
+}

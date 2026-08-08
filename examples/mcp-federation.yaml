@@ -251,9 +251,10 @@ binds:
                 overrides:
                   max_tokens: 2048
                 # Anthropic only -- OpenAI caches long prefixes by itself.
-                # `cacheTools` is deliberately absent: tools are not translated
-                # to Anthropic by this build, so `--check` reports it.
+                # Tools sit ahead of everything else Anthropic caches, so that
+                # breakpoint is the cheapest to set and the likeliest to hit.
                 promptCaching:
+                  cacheTools: true
                   cacheSystem: true
                   cacheMessages: true
                   cacheMessageOffset: 1

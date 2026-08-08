@@ -130,22 +130,6 @@ impl AiPolicy {
         for key in self.rest.keys() {
             findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
         }
-
-        // A breakpoint needs something to sit on, and this build does not
-        // translate `tools` to Anthropic at all -- so there is no tool block
-        // to mark, and the other two breakpoints working would make this one
-        // look like it did too.
-        if self
-            .prompt_caching
-            .as_ref()
-            .is_some_and(|caching| caching.cache_tools)
-        {
-            findings.push(format!(
-                "{at}.promptCaching.cacheTools: tool definitions are not translated to \
-                 Anthropic by this build, so there is no tool block to place a cache \
-                 breakpoint on; `cacheSystem` and `cacheMessages` do apply"
-            ));
-        }
     }
 }
 
