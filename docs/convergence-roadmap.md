@@ -223,6 +223,33 @@ crosses that boundary. It is mechanical but it is not small, and doing
 it half-attentively in the margin of another slice is how a transposed
 tuple (see `docs/learning/005-…`) gets shipped. Next slice.
 
+### Slice 5 (2026-08-07) — `sys::net` migrated; Track W complete
+
+The address-conversion layer built, and every socket family behind it:
+`socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`/`sendto`/
+`recvfrom`/`getsockname`/`getpeername`/`setsockopt`/`closesocket`/
+`WSAStartup`, plus the AF_UNIX paths. A two-armed primitive layer keeps
+the fifteen public functions single-bodied.
+
+Two calls remain on windows-sys, for different reasons: `DeleteFileW`
+(a filesystem unlink in a net module; the donor's `fs::delete_file`
+takes `&str` where this has an `OsStr` — `sys::fileio`'s business, not
+this module's) and `unix_peer_addr`'s `getpeername` (**a real upstream
+gap**: the donor has `local_addr_unix` but no peer counterpart).
+
+Two behaviours got *more correct*, not merely equivalent:
+`unix_listen`'s stale-socket retry and `is_stale_socket` both re-read
+`WSAGetLastError` after the failing call returned — a latent race, since
+any intervening Winsock call overwrites the slot. Both now branch on the
+`ErrorKind` carried out of the call itself.
+
+**Track W is now complete across `platform-windows`.** Every family
+either migrated, is permanently closed (`CreateProcessW`), is declined
+pending evidence (`reopen`), or is a named upstream gap
+(`unix_peer_addr`) — plus `sys::nt`, which has no donor bindings at all
+and would need an `ntdll` admission rusty_win32 has deliberately never
+made.
+
 ---
 
 ## Phase 2 — Terminal slice 2 (D9, remaining facets)
