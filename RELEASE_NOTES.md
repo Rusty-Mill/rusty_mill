@@ -5,6 +5,20 @@ instead, reverse chronological, each linking to its PR.
 
 ---
 
+## PR #29 — Apply standard governance-file scaffolding
+**2026-08-08** · [#29](https://github.com/baileyrd/rusty_a2a/pull/29)
+
+- **Added:** the standard repo-config file set - PR/issue templates,
+  `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`,
+  this file, `ARCHITECTURE.md` (hand-adapted with a real ports/adapters
+  table and data-flow walkthrough), and an ADR log seed.
+- **Known limitation, stated plainly:** the template `ci-rust.yml` was
+  deliberately skipped - this repo's existing `.github/workflows/ci.yml`
+  already gates on fmt/clippy/test/doc plus 9 feature-combination checks
+  and installs `protoc` for the `grpc` feature, which the generic template
+  doesn't do, so adding it would have introduced a redundant, always-broken
+  second workflow rather than closing a real gap.
+
 ## PR #28 — Warn at startup when an apiKey query/cookie scheme meets a non-REST binding
 **2026-08-08** · [#28](https://github.com/baileyrd/rusty_a2a/pull/28)
 
