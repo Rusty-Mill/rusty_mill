@@ -20,6 +20,48 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.25.3
+
+- **Track W slice 4: donor bindings added upstream, `sys::security`
+  migrated in full (D-15).** The first slice that ran in the other
+  direction — rather than picking from what rusty_win32 already had, it
+  added what rusty_win32 lacked, then consumed it.
+
+  Landed upstream (rusty_win32): `crypto` (`BCryptGenRandom`),
+  `credential` (Credential Manager, `CRED_TYPE_GENERIC`), `certstore`
+  (system certificate stores, read-only), `net::set_nonblocking`
+  (`ioctlsocket(FIONBIO)`), and AF_UNIX support in `net`.
+
+  Landed here: **`sys::security` in full** — `fill_random`
+  (`crypto::random_bytes`), `credential_set`/`credential_get`
+  (`credential::write`/`read`), `load_anchors`
+  (`certstore::root_certificates`). The module is migrated to the point
+  that its `windows-sys` import is now itself `cfg(not(track-w))`. Plus
+  `sys::net::set_nonblocking`.
+
+  Two details worth knowing. **`crypto::random_bytes` returns an
+  `NtStatus`, not a `Win32Error`** — deliberately, upstream: an NTSTATUS
+  has no faithful Win32 representation without `RtlNtStatusToDosError`,
+  so returning it typed is what lets this arm feed the *same* `nt_err`
+  classification the windows-sys arm uses, keeping `PlatformError`
+  bit-identical. And **a non-UTF-8 credential name is now refused with
+  `InvalidInput`** rather than lossily converted: the donor's wrapper
+  takes `&str` where this crate takes `&OsStr`, and a mangled target
+  name would file the secret under a different key than the caller asked
+  for, then fail to find it on read. Windows credential names are UTF-16
+  in the OS and ASCII in every real consumer, so the check should never
+  fire — it exists because the failure mode of assuming is silent.
+
+  **Not migrated, and not blocked:** the rest of `sys::net`
+  (`socket`/`bind`/`listen`/`accept`/`connect`/`send`/`recv`/`sendto`/
+  `recvfrom`/`local_addr`/`peer_addr` and the AF_UNIX paths). The
+  bindings now exist for all of it; what remains is an address-conversion
+  layer between this crate's `std::net::SocketAddr` and the donor's own
+  `SocketAddr`/`UnixSocketAddr`, which every one of those calls crosses.
+  Mechanical but not small — see `docs/convergence-roadmap.md` §1d.
+
+  `z`, not `y`: no public item's shape changed.
+
 ### 0.25.2
 
 - **Track W slice 3: `sys::console` and `sys::handle` (D-15).** The last two
