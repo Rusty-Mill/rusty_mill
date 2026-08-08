@@ -171,6 +171,31 @@ assembled by the client for this one request. A non-empty `models`
 entirely bypasses `[[routes]]` alias lookup, so `model` must itself be a
 direct `"provider/model"` here, not an alias.
 
+Every response (streaming and non-streaming alike) carries two headers
+identifying what actually happened, without a separate
+`GET /v1/generation?id=` round trip:
+
+- `X-RP-Decision: strategy=<direct|fallback|fusion>; provider=<name>;
+  model=<name>; latency_ms=<n>` — `strategy` is `"direct"` for a literal
+  `"provider/model"` request, `"fallback"` for a route alias or the
+  request's own `models` list, `"fusion"` when `strategy = "fusion"`
+  actually engaged (see [Fusion routing](#fusion-routing)). `provider`/
+  `model` reflect the candidate that actually served the request, not
+  necessarily the first (or only) one named — a route alias or fallback
+  chain that fell through to its second entry reports that entry, not the
+  alias itself. `latency_ms` covers this whole call, including any
+  same-provider retries and fallen-through candidates.
+- `X-RP-Fallback-Attempts` — how many chain candidates the router had to
+  move through before landing on the one that served the request (`1` if
+  the first one tried succeeded outright). For `strategy = "fusion"` this
+  is the panel size instead, since every candidate is dispatched
+  concurrently rather than tried in sequence. `0` on a response cache hit
+  — nothing was actually dispatched that time.
+
+For a streaming request, both headers are set on the initial HTTP
+response (the winning candidate is already known before the first chunk
+is produced), not as SSE trailers.
+
 ```sh
 curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \

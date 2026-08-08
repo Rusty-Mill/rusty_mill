@@ -10,7 +10,8 @@ use axum::Json;
 use futures_util::{stream, StreamExt};
 use rp_core::{ChatRequest, EmbeddingsRequest, ModelInfo, RateLimitStatus};
 use rp_router::{
-    BudgetPeriod, ClientConfig, ClientRole, FreeTierStatus, ProviderStats, UsageStats,
+    BudgetPeriod, ClientConfig, ClientRole, DispatchTrace, FreeTierStatus, ProviderStats,
+    UsageStats,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1677,8 +1678,8 @@ async fn chat_completions_dispatch(
     }
 
     if req.is_streaming() {
-        match state.router.dispatch_stream(&req).await {
-            Ok(chunk_stream) => {
+        match state.router.dispatch_stream_traced(&req).await {
+            Ok((chunk_stream, trace)) => {
                 let router = state.router.clone();
                 let events = chunk_stream
                     .map(move |item| {
@@ -1708,15 +1709,17 @@ async fn chat_completions_dispatch(
                     })
                     .chain(stream::once(async { Ok(Event::default().data("[DONE]")) }));
 
-                Sse::new(events)
+                let mut resp = Sse::new(events)
                     .keep_alive(KeepAlive::default())
-                    .into_response()
+                    .into_response();
+                apply_decision_headers(&mut resp, &trace);
+                resp
             }
             Err(e) => router_error_response(e),
         }
     } else {
-        match state.router.dispatch(&req).await {
-            Ok(resp) => {
+        match state.router.dispatch_traced(&req).await {
+            Ok((resp, trace)) => {
                 if let Some(name) = &client_name {
                     if let Some(usage) = &resp.usage {
                         state
@@ -1727,9 +1730,30 @@ async fn chat_completions_dispatch(
                         state.router.record_client_spend(name, cost);
                     }
                 }
-                Json(resp).into_response()
+                let mut http_resp = Json(resp).into_response();
+                apply_decision_headers(&mut http_resp, &trace);
+                http_resp
             }
             Err(e) => router_error_response(e),
         }
+    }
+}
+
+/// Sets `X-RP-Decision` (`strategy=...; provider=...; model=...;
+/// latency_ms=...`) and `X-RP-Fallback-Attempts` on `resp` from `trace` --
+/// see `DispatchTrace`'s doc comment for what each field means. Tells a
+/// caller which concrete provider/model actually served an alias/chain
+/// request, and how many candidates it took, without a separate
+/// `GET /v1/generation?id=` round trip.
+fn apply_decision_headers(resp: &mut Response, trace: &DispatchTrace) {
+    let decision = format!(
+        "strategy={}; provider={}; model={}; latency_ms={}",
+        trace.strategy, trace.provider, trace.model, trace.latency_ms
+    );
+    if let Ok(value) = HeaderValue::from_str(&decision) {
+        resp.headers_mut().insert("x-rp-decision", value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&trace.fallback_attempts.to_string()) {
+        resp.headers_mut().insert("x-rp-fallback-attempts", value);
     }
 }

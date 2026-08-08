@@ -61,6 +61,11 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   narrows the chain to only candidates under the cap, `402`-ing if none
   fit; `"cheapest"` always serves the request, routing to the cheapest
   fitting candidate or, failing that, the overall cheapest one anyway.
+- `X-RP-Decision` (`strategy=...; provider=...; model=...; latency_ms=...`)
+  and `X-RP-Fallback-Attempts` response headers on `/v1/chat/completions`
+  (streaming and non-streaming) — which concrete candidate actually served
+  an alias/chain request, and how many candidates it took, without a
+  separate `GET /v1/generation?id=` round trip.
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002); "no MITM-based third-party CLI config

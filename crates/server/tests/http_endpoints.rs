@@ -1383,6 +1383,251 @@ async fn chat_completions_success_roundtrips_through_a_mocked_provider() {
 }
 
 #[tokio::test]
+async fn chat_completions_sets_decision_headers_for_a_direct_provider_model_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let decision = resp
+        .headers()
+        .get("x-rp-decision")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(decision.contains("strategy=direct"), "{decision}");
+    assert!(decision.contains("provider=openai"), "{decision}");
+    assert!(decision.contains("model=gpt-4o-mini"), "{decision}");
+    assert!(decision.contains("latency_ms="), "{decision}");
+    assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
+}
+
+#[tokio::test]
+async fn chat_completions_sets_decision_headers_for_a_route_alias_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+
+        [[routes]]
+        alias = "smart"
+        chain = ["openai/gpt-4o-mini"]
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "smart",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let decision = resp
+        .headers()
+        .get("x-rp-decision")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    // Reflects the actual dispatched candidate ("openai/gpt-4o-mini"), not
+    // the requested alias ("smart").
+    assert!(decision.contains("strategy=fallback"), "{decision}");
+    assert!(decision.contains("provider=openai"), "{decision}");
+    assert!(decision.contains("model=gpt-4o-mini"), "{decision}");
+    assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
+}
+
+#[tokio::test]
+async fn chat_completions_sets_decision_headers_when_the_chain_falls_through() {
+    // Anthropic is unreachable (connection refused, retryable), so the
+    // chain should fall through to openai -- the decision headers should
+    // reflect openai as the actual server, and 2 attempts.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-abc",
+            "object": "chat.completion",
+            "created": 1700000000,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })))
+        .mount(&server)
+        .await;
+
+    let anthropic_key_var = unique_env_var("ANTHROPIC_KEY");
+    std::env::set_var(&anthropic_key_var, "test-key");
+    let openai_key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&openai_key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.anthropic]
+        kind = "anthropic"
+        base_url = "http://127.0.0.1:1"
+        api_key_env = "{anthropic_key_var}"
+
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{openai_key_var}"
+
+        [[routes]]
+        alias = "smart"
+        chain = ["anthropic/claude-sonnet-5", "openai/gpt-4o-mini"]
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "smart",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let decision = resp
+        .headers()
+        .get("x-rp-decision")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(decision.contains("provider=openai"), "{decision}");
+    assert_eq!(
+        resp.headers().get("x-rp-fallback-attempts").unwrap(),
+        "2",
+        "both the failed anthropic candidate and the succeeding openai one count as tried"
+    );
+}
+
+#[tokio::test]
+async fn chat_completions_sets_decision_headers_on_a_streaming_response() {
+    let server = MockServer::start().await;
+    let sse_body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1,\"total_tokens\":4}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let key_var = unique_env_var("OPENAI_KEY");
+    std::env::set_var(&key_var, "test-key");
+    let config = format!(
+        r#"
+        [providers.openai]
+        kind = "openai"
+        base_url = "{}"
+        api_key_env = "{key_var}"
+        "#,
+        server.uri()
+    );
+    let base_url = spawn_app(&config).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/v1/chat/completions"))
+        .json(&json!({
+            "model": "openai/gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    // The winning candidate is known synchronously before any chunk is
+    // produced, so the decision headers are on the initial response --
+    // no need to wait for the stream to complete.
+    let decision = resp
+        .headers()
+        .get("x-rp-decision")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(decision.contains("strategy=direct"), "{decision}");
+    assert!(decision.contains("provider=openai"), "{decision}");
+    assert!(decision.contains("model=gpt-4o-mini"), "{decision}");
+    assert_eq!(resp.headers().get("x-rp-fallback-attempts").unwrap(), "1");
+}
+
+#[tokio::test]
 async fn chat_completions_uses_a_byok_key_from_the_request_instead_of_the_configured_one() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
