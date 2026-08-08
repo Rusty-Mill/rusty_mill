@@ -165,8 +165,6 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
-- `extAuthz.includeBody`: the authorizer sees the method, path and allow-listed
-  headers, never the body
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
 - `urlRewrite.authority` where a route has more than one `mcp:` target, and any
@@ -268,8 +266,39 @@ unreachable authorizer and takes the fail-closed path.
 
 `extAuthz` runs after `jwtAuth`, so an authorizer configured with
 `includeHeaders: [authorization]` sees a token the gateway has already
-validated. `includeBody` parses but is not enforced — the authorizer never sees
-a request body, so a policy that depends on one will not do what it says.
+validated.
+
+### Showing the authorizer the body
+
+Some decisions need the payload — which tool a JSON-RPC call names, which model
+a completion asks for — and none of that is in a header.
+
+```yaml
+policies:
+  extAuthz:
+    target: http://authz.internal:9000
+    includeBody: 4096
+```
+
+Buffering an arbitrary upload to show someone would turn the gateway into a
+memory limit, so `includeBody` caps it. What happens at the cap is the
+interesting part: **a body over the limit is refused with `413`, not
+truncated.** Sending the first N bytes would ask the authorizer to decide on a
+fragment, and a fragment of JSON does not parse — so it would answer about
+something that was never the request. That is a worse failure than a `413` and
+a much quieter one. It is the same instinct as failing closed on an unreachable
+authorizer: no decision is not the same as yes.
+
+The bound is inclusive, so a config sized to the largest expected payload does
+not refuse it. Nothing is read at all without `includeBody`, so a route that
+does not want this does not pay for it.
+
+The body's `Content-Type` travels with it whether or not `includeHeaders` names
+it, because a payload whose format the authorizer has to guess is not much use.
+
+Reading the body does not consume it: what the authorizer saw is what continues
+upstream, on every backend kind — a proxied `host` request, an `a2a` call, an
+`ai` completion the gateway translates.
 
 ## Authorization
 

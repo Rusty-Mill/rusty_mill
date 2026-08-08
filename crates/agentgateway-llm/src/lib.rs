@@ -32,7 +32,7 @@ use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
 use http_body_util::{BodyExt, StreamBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::Frame;
 use serde_json::Value;
 
 pub use provider::{Provider, ProviderError};
@@ -291,7 +291,15 @@ impl LlmBackend {
     }
 
     /// Serve one OpenAI-compatible request.
-    pub async fn handle(&self, request: Request<Incoming>) -> Response<LlmBody> {
+    ///
+    /// Generic over the body because the gateway may have buffered it already
+    /// — `extAuthz.includeBody` reads it before dispatch — and a signature
+    /// naming hyper's stream would force it back into one it cannot be.
+    pub async fn handle<B>(&self, request: Request<B>) -> Response<LlmBody>
+    where
+        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         let collected =
             match http_body_util::Limited::new(request.into_body(), MAX_REQUEST_BYTES as usize)
                 .collect()

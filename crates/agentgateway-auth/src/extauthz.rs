@@ -24,6 +24,24 @@
 //! authorizer could write any header the upstream trusts — `x-user-id`,
 //! `x-is-admin` — which turns an authorization service into an impersonation
 //! service. Anything not on the list is dropped.
+//!
+//! # `includeBody` is a bound, not a target
+//!
+//! Some decisions need the payload — which tool a JSON-RPC call names, which
+//! model a completion asks for — and none of that is in a header.
+//!
+//! Buffering an arbitrary upload to show someone would turn the gateway into a
+//! memory limit, so `includeBody: N` caps it. What happens at the cap is the
+//! interesting part: a body over `N` is **refused**, not truncated. Sending the
+//! first `N` bytes would ask the authorizer to decide on a fragment, and a
+//! fragment of JSON does not parse — so it would answer about something that
+//! was never the request. That is a worse failure than a `413`, and a quieter
+//! one. Refusing is also the same instinct as failing closed when the
+//! authorizer is unreachable: no decision is not the same as yes.
+//!
+//! The body's `Content-Type` travels with it whether or not `includeHeaders`
+//! names it, because a payload whose type the authorizer has to guess is not
+//! much use.
 
 use std::time::Duration;
 
@@ -79,6 +97,7 @@ pub struct ExtAuthz {
     target: String,
     include: Vec<HeaderName>,
     allowed_upstream: Vec<HeaderName>,
+    include_body: Option<usize>,
     fail_open: bool,
     client: reqwest::Client,
 }
@@ -124,6 +143,7 @@ impl ExtAuthz {
             target,
             include: names(&policy.include_headers, "includeHeaders")?,
             allowed_upstream: names(&policy.allowed_upstream_headers, "allowedUpstreamHeaders")?,
+            include_body: policy.include_body,
             fail_open: policy.fail_open.unwrap_or(false),
             client: reqwest::Client::builder()
                 .timeout(timeout)
@@ -132,12 +152,29 @@ impl ExtAuthz {
         })
     }
 
+    /// The `includeBody` bound, when the route set one.
+    ///
+    /// The caller reads the body, because only it holds one — this type is
+    /// given the bytes rather than the request.
+    pub fn include_body(&self) -> Option<usize> {
+        self.include_body
+    }
+
     /// Ask the authorizer about a request.
     ///
     /// The original method and path are used for the call, so the authorizer
     /// sees what is being authorized and can route on it, rather than having
     /// to read it back out of a header.
-    pub async fn check(&self, method: &Method, path: &str, headers: &HeaderMap) -> Authorization {
+    ///
+    /// `body` is the buffered payload when the route set `includeBody`, and
+    /// `None` otherwise.
+    pub async fn check(
+        &self,
+        method: &Method,
+        path: &str,
+        headers: &HeaderMap,
+        body: Option<&[u8]>,
+    ) -> Authorization {
         let url = format!("{}{}", self.target, path);
         let mut request = self.client.request(method.clone(), &url);
 
@@ -145,6 +182,18 @@ impl ExtAuthz {
             if let Some(value) = headers.get(name) {
                 request = request.header(name, value);
             }
+        }
+
+        if let Some(body) = body {
+            // The type travels with the payload whether or not
+            // `includeHeaders` names it: a body the authorizer has to guess
+            // the format of is not much use.
+            if !self.include.contains(&http::header::CONTENT_TYPE)
+                && let Some(value) = headers.get(http::header::CONTENT_TYPE)
+            {
+                request = request.header(http::header::CONTENT_TYPE, value);
+            }
+            request = request.body(body.to_vec());
         }
 
         let response = match request.send().await {

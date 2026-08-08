@@ -24,6 +24,8 @@ struct Asked {
     method: String,
     path: String,
     headers: Vec<(String, String)>,
+    /// The body the authorizer was shown, empty when it was shown none.
+    body: String,
 }
 
 /// How the authorizer should answer.
@@ -50,20 +52,27 @@ async fn authorizer(verdict: Verdict) -> (u16, Arc<Mutex<Option<Asked>>>, Arc<At
         let counter = Arc::clone(&counter);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
+            let method = request.method().as_str().to_string();
+            let path = request.uri().path().to_string();
+            let headers: Vec<(String, String)> = request
+                .headers()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_string(),
+                        v.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect();
+            let body = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
             if let Ok(mut asked) = recorder.lock() {
                 *asked = Some(Asked {
-                    method: request.method().as_str().to_string(),
-                    path: request.uri().path().to_string(),
-                    headers: request
-                        .headers()
-                        .iter()
-                        .map(|(k, v)| {
-                            (
-                                k.as_str().to_string(),
-                                v.to_str().unwrap_or_default().to_string(),
-                            )
-                        })
-                        .collect(),
+                    method,
+                    path,
+                    headers,
+                    body: String::from_utf8_lossy(&body).into_owned(),
                 });
             }
 
@@ -98,6 +107,24 @@ async fn authorizer(verdict: Verdict) -> (u16, Arc<Mutex<Option<Asked>>>, Arc<At
 
 /// An upstream that echoes the headers it saw.
 async fn upstream() -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>) {
+    upstream_recording(Arc::new(Mutex::new(String::new()))).await
+}
+
+/// The same, also recording the body that reached it.
+async fn upstream_with_body() -> (
+    u16,
+    Arc<AtomicUsize>,
+    Arc<Mutex<Vec<(String, String)>>>,
+    Arc<Mutex<String>>,
+) {
+    let body = Arc::new(Mutex::new(String::new()));
+    let (port, hits, seen) = upstream_recording(Arc::clone(&body)).await;
+    (port, hits, seen, body)
+}
+
+async fn upstream_recording(
+    body_recorder: Arc<Mutex<String>>,
+) -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>) {
     use axum::{Router, extract::Request, routing::any};
 
     let port = free_port().await;
@@ -110,6 +137,7 @@ async fn upstream() -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>
     let app = Router::new().fallback(any(move |request: Request| {
         let counter = Arc::clone(&counter);
         let recorder = Arc::clone(&recorder);
+        let body_recorder = Arc::clone(&body_recorder);
         async move {
             counter.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut seen) = recorder.lock() {
@@ -123,6 +151,12 @@ async fn upstream() -> (u16, Arc<AtomicUsize>, Arc<Mutex<Vec<(String, String)>>>
                         )
                     })
                     .collect();
+            }
+            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            if let Ok(mut recorded) = body_recorder.lock() {
+                *recorded = String::from_utf8_lossy(&bytes).into_owned();
             }
             axum::Json(json!({"served": true}))
         }
@@ -472,4 +506,191 @@ binds:
         .map(|_| ())
         .expect_err("a bare host:port is not a URL");
     assert!(err.to_string().contains("authz:9000"), "got: {err}");
+}
+
+/// A request body big enough to be interesting and small enough to read.
+fn payload() -> Value {
+    json!({"method": "tools/call", "params": {"name": "delete_everything"}})
+}
+
+async fn post(url: &str, body: &Value) -> reqwest::Response {
+    reqwest::Client::new()
+        .post(url)
+        .json(body)
+        .send()
+        .await
+        .expect("request should reach the gateway")
+}
+
+#[tokio::test]
+async fn the_authorizer_sees_the_body_when_the_route_asks_for_it() {
+    // Some decisions need the payload -- which tool a JSON-RPC call names --
+    // and none of that is in a header.
+    let (authz_port, asked, _hits) = authorizer(Verdict::Allow).await;
+    let (upstream_port, upstream_hits, _seen, upstream_body) = upstream_with_body().await;
+    let (url, shutdown) = start(
+        &[
+            format!("target: \"http://127.0.0.1:{authz_port}\""),
+            "includeBody: 4096".to_string(),
+        ],
+        upstream_port,
+    )
+    .await;
+
+    let response = post(&url, &payload()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let asked = asked
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("should be asked");
+    assert_eq!(
+        serde_json::from_str::<Value>(&asked.body).expect("should be JSON"),
+        payload(),
+        "the authorizer should have seen the payload"
+    );
+    assert!(
+        asked
+            .headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v.starts_with("application/json")),
+        "a body whose type the authorizer has to guess is not much use: {:?}",
+        asked.headers
+    );
+
+    // And the body still reached the upstream.
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&upstream_body.lock().expect("lock"))
+            .expect("should be JSON"),
+        payload(),
+        "reading the body for the authorizer must not consume it"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn without_include_body_the_authorizer_is_shown_none() {
+    // Buffering a payload nobody asked to see would make every route pay for
+    // a feature one of them wanted.
+    let (authz_port, asked, _hits) = authorizer(Verdict::Allow).await;
+    let (upstream_port, upstream_hits, _seen, upstream_body) = upstream_with_body().await;
+    let (url, shutdown) = start(
+        &[format!("target: \"http://127.0.0.1:{authz_port}\"")],
+        upstream_port,
+    )
+    .await;
+
+    let response = post(&url, &payload()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let asked = asked
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("should be asked");
+    assert!(asked.body.is_empty(), "saw: {}", asked.body);
+
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(&upstream_body.lock().expect("lock"))
+            .expect("should be JSON"),
+        payload(),
+        "the body still reaches the upstream"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_body_over_the_limit_is_refused_rather_than_truncated() {
+    // Sending the first N bytes would ask the authorizer to decide on a
+    // fragment, and a fragment of JSON does not parse -- so it would answer
+    // about something that was never the request.
+    let (authz_port, _asked, authz_hits) = authorizer(Verdict::Allow).await;
+    let (upstream_port, upstream_hits, _seen, _body) = upstream_with_body().await;
+    let (url, shutdown) = start(
+        &[
+            format!("target: \"http://127.0.0.1:{authz_port}\""),
+            "includeBody: 16".to_string(),
+        ],
+        upstream_port,
+    )
+    .await;
+
+    let response = post(&url, &payload()).await;
+    assert_eq!(response.status(), 413);
+
+    assert_eq!(
+        authz_hits.load(Ordering::Relaxed),
+        0,
+        "the authorizer is not asked about a request it cannot see"
+    );
+    assert_eq!(
+        upstream_hits.load(Ordering::Relaxed),
+        0,
+        "and the request must not reach the upstream unauthorized"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_body_exactly_at_the_limit_is_allowed() {
+    // The bound is inclusive, so a config sized to the largest expected
+    // payload does not refuse it.
+    let (authz_port, asked, _hits) = authorizer(Verdict::Allow).await;
+    let (upstream_port, _hits, _seen, _body) = upstream_with_body().await;
+    let body = json!({"a": "bc"});
+    let size = serde_json::to_vec(&body).expect("should serialize").len();
+    let (url, shutdown) = start(
+        &[
+            format!("target: \"http://127.0.0.1:{authz_port}\""),
+            format!("includeBody: {size}"),
+        ],
+        upstream_port,
+    )
+    .await;
+
+    let response = post(&url, &body).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    let asked = asked
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("should be asked");
+    assert_eq!(
+        serde_json::from_str::<Value>(&asked.body).expect("should be JSON"),
+        body
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn an_authorizer_can_deny_on_what_it_read_in_the_body() {
+    // The point of the whole feature: a refusal that depends on the payload.
+    let (authz_port, _asked, _hits) = authorizer(Verdict::Deny(403)).await;
+    let (upstream_port, upstream_hits, _seen, _body) = upstream_with_body().await;
+    let (url, shutdown) = start(
+        &[
+            format!("target: \"http://127.0.0.1:{authz_port}\""),
+            "includeBody: 4096".to_string(),
+        ],
+        upstream_port,
+    )
+    .await;
+
+    let response = post(&url, &payload()).await;
+    assert_eq!(response.status(), 403);
+    let body: Value = response.json().await.expect("should be JSON");
+    assert_eq!(
+        body["reason"], "not in group",
+        "the authorizer's own reason survives"
+    );
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 0);
+
+    shutdown.cancel();
 }

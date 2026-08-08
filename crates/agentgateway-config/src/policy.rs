@@ -77,15 +77,7 @@ pub struct Policies {
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 2] = [
-            (
-                "extAuthz.includeBody",
-                self.ext_authz
-                    .as_ref()
-                    .is_some_and(|e| e.include_body.is_some()),
-            ),
-            ("ai", self.ai.is_some()),
-        ];
+        let unimplemented: [(&str, bool); 1] = [("ai", self.ai.is_some())];
         for (name, present) in unimplemented {
             if present {
                 findings.push(format!(
@@ -323,8 +315,10 @@ pub struct ExtAuthzPolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_open: Option<bool>,
 
-    /// Bytes of the request body to forward. Accepted for compatibility;
-    /// [`Policies::lint`] reports that this build does not send a body.
+    /// Bytes of the request body to forward to the authorizer.
+    ///
+    /// A bound, not a target: a body larger than this is refused rather than
+    /// truncated, so the authorizer never decides on a fragment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_body: Option<usize>,
 }

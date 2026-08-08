@@ -1134,3 +1134,41 @@ binds:
         .expect_err("a bucket that drains once and never refills should not start");
     assert!(err.to_string().contains("never refills"), "got: {err}");
 }
+
+#[tokio::test]
+async fn a_body_buffered_for_ext_authz_still_reaches_the_provider() {
+    // `extAuthz.includeBody` reads the body before dispatch, so an `ai` route
+    // is handed one that was already consumed once. The translation has to see
+    // the same bytes it would have.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let authz_port = free_port().await;
+    let allow = axum::Router::new().fallback(axum::routing::any(|| async { "" }));
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{authz_port}"))
+        .await
+        .expect("authorizer should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, allow).await;
+    });
+
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &format!(
+            "              extAuthz:\n                target: \"http://127.0.0.1:{authz_port}\"\n                includeBody: 4096"
+        ),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(
+        sent["messages"][1]["content"], "Hello",
+        "reading the body for the authorizer must not consume it"
+    );
+
+    shutdown.cancel();
+}

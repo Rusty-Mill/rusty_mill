@@ -535,16 +535,54 @@ impl Gateway {
         // External authorization runs last of the gates, so it is asked only
         // about requests that got past the cheap local ones -- and so an
         // authorizer can see the identity `jwtAuth` just verified.
+        let (parts, body) = request.into_parts();
+        let mut parts = parts;
+        let mut body = RequestBody::Stream(body);
+
         if let Some(authz) = &state.ext_authz {
+            // Read the body only when the route asked for it. `includeBody` is
+            // a bound and a body over it is refused rather than truncated: a
+            // fragment of JSON does not parse, so the authorizer would answer
+            // about something that was never the request.
+            let buffered = match authz.include_body() {
+                Some(limit) => match collect_limited(body, limit).await {
+                    Ok(bytes) => {
+                        body = RequestBody::Buffered(bytes.clone());
+                        Some(bytes)
+                    }
+                    Err(()) => {
+                        tracing::info!(
+                            route = ?selection.route.name,
+                            limit,
+                            "refusing a request whose body exceeds `extAuthz.includeBody`"
+                        );
+                        return Ok(with_cors(
+                            status(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                "the request body is larger than `extAuthz.includeBody`, and \
+                                 the authorization service is not asked to decide on part of one",
+                            ),
+                            cors_headers,
+                        ));
+                    }
+                },
+                None => None,
+            };
+
             let decision = authz
-                .check(request.method(), request.uri().path(), request.headers())
+                .check(
+                    &parts.method,
+                    parts.uri.path(),
+                    &parts.headers,
+                    buffered.as_deref(),
+                )
                 .await;
             match decision {
                 Authorization::Allow(headers) => {
                     // Whatever the authorizer resolved -- a user id, a tenant
                     // -- travels on to the upstream.
                     for (name, value) in headers {
-                        request.headers_mut().insert(name, value);
+                        parts.headers.insert(name, value);
                     }
                 }
                 Authorization::Deny {
@@ -560,6 +598,7 @@ impl Gateway {
             }
         }
 
+        let request = Request::from_parts(parts, body);
         let call = self.dispatch(state, &selection, peer, scheme, request);
 
         let mut response = match state.timeout {
@@ -592,7 +631,7 @@ impl Gateway {
         selection: &agentgateway_core::Selection<'_>,
         peer: Option<IpAddr>,
         scheme: Scheme,
-        request: Request<hyper::body::Incoming>,
+        request: Request<RequestBody>,
     ) -> Response {
         match &state.backend {
             // `call` takes &mut self, but the service is cheap to clone and
@@ -621,7 +660,7 @@ impl Gateway {
                 let prefix = selection.matched_prefix.as_deref();
 
                 let Some(a2a) = a2a else {
-                    let request = Request::from_parts(parts, RequestBody::Stream(body));
+                    let request = Request::from_parts(parts, body);
                     return proxy
                         .proxy(request, prefix, peer, scheme)
                         .await
@@ -678,6 +717,18 @@ impl Gateway {
             BackendState::Unsupported(reason) => status(StatusCode::NOT_IMPLEMENTED, reason),
         }
     }
+}
+
+/// Read a body, refusing rather than truncating once it passes `limit`.
+///
+/// `Err` means it was too large. Nothing partially read is handed back: the
+/// caller either gets the whole body, which it can forward, or a refusal.
+async fn collect_limited(body: RequestBody, limit: usize) -> Result<Bytes, ()> {
+    http_body_util::Limited::new(body, limit)
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .map_err(|_| ())
 }
 
 fn with_cors(mut response: Response, headers: Option<HeaderMap>) -> Response {

@@ -364,8 +364,8 @@ binds:
 
     let findings = config.lint();
     assert!(
-        findings.iter().any(|f| f.contains("extAuthz.includeBody")),
-        "forwarding a body is not implemented and must be reported: {findings:?}"
+        !findings.iter().any(|f| f.contains("extAuthz.includeBody")),
+        "the body is forwarded to the authorizer now: {findings:?}"
     );
     assert!(
         findings.iter().any(|f| f.contains("policies.ai")),
