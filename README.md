@@ -188,6 +188,13 @@ Not supported at all:
 - The deprecated 2024-11-05 HTTP+SSE target transport (`sse:`). `rmcp` 3.1 has
   no client for it; point the target at the server's Streamable HTTP endpoint
   with `mcp:` instead. Configuring one is a startup error, not a silent skip.
+- The `gemini`, `vertex` and `bedrock` providers. Each speaks its own request
+  shape and its own authentication — Vertex and Bedrock sign with cloud
+  credentials rather than a bearer key — so none of them is a variation on the
+  two that are served. They parse, and naming one is a startup error for the
+  same reason `sse:` is: a provider that loads and never answers is worse than
+  one that refuses to load. An OpenAI-compatible endpoint in front of them
+  works today via `openAI` with a `hostOverride`.
 
 ## Authentication
 
@@ -1750,8 +1757,9 @@ route lookup, a token validation and a JWKS fetch.
 
 One correction worth recording: `limits` is concurrency and timeout shedding,
 **not** a token bucket, so it does not cover `localRateLimit`
-(`maxTokens`/`tokensPerFill`/`fillInterval`). That policy remains unimplemented
-and needs its own bucket.
+(`maxTokens`/`tokensPerFill`/`fillInterval`). That policy needed its own bucket,
+and has one — `agentgateway-core`'s `RateLimiter`, described under
+[Retries and rate limits](#retries-and-rate-limits).
 
 Its lint posture (`missing_docs = warn`, `unsafe_code = forbid`,
 `unwrap_used = warn`) is adopted verbatim in this workspace.
