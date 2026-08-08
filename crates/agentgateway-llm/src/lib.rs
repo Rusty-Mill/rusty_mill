@@ -20,6 +20,7 @@
 //! answer into a long silence followed by a wall of text.
 
 mod provider;
+mod shape;
 pub mod stream;
 pub mod translate;
 
@@ -36,6 +37,7 @@ use hyper::body::Frame;
 use serde_json::Value;
 
 pub use provider::{Provider, ProviderError};
+use shape::{Shape, caching::Caching};
 use stream::{ChunkTranslator, EventParser};
 use translate::Usage;
 
@@ -101,6 +103,17 @@ pub struct LlmBackend {
     /// Consumed only by the `host` proxy before: an `ai` route asking for
     /// three attempts got exactly one. See [`LlmBackend::send`].
     retry: Option<Retry>,
+    /// The route's `ai` policy, applied to the request body.
+    ///
+    /// Runs on the OpenAI-shaped body before translation, which is the only
+    /// place a rule written once means the same thing for every provider.
+    shape: Option<Shape>,
+    /// The route's `ai.promptCaching`, applied after translation.
+    ///
+    /// A cache breakpoint is a provider-specific annotation on a
+    /// provider-specific shape, so unlike the rest of the policy it cannot run
+    /// on the OpenAI body. See [`shape::caching`].
+    caching: Option<Caching>,
     /// The route's `localRateLimit` entries of `type: tokens`.
     ///
     /// Shared rather than borrowed because a streamed response reports its
@@ -180,6 +193,16 @@ impl LlmBackend {
         let tokens = RateLimiter::for_kind(&policies.local_rate_limit, RateLimitKind::Tokens, at)?
             .map(Arc::new);
 
+        // OpenAI caches long prefixes by itself and takes no configuration for
+        // it, so a breakpoint there would be a field nobody reads.
+        let caching = Caching::new(
+            policies
+                .ai
+                .as_ref()
+                .and_then(|ai| ai.prompt_caching.as_ref())
+                .filter(|_| provider.caches_explicitly()),
+        );
+
         Ok(LlmBackend {
             provider,
             model,
@@ -187,6 +210,8 @@ impl LlmBackend {
             request_headers,
             endpoint,
             retry: policies.retry.as_ref().and_then(Retry::new),
+            shape: Shape::new(policies.ai.as_ref()),
+            caching,
             tokens,
             client,
         })
@@ -324,8 +349,16 @@ impl LlmBackend {
             }
         };
 
-        // Configuration wins over the caller: an operator pinning a model is
-        // making a routing decision, not suggesting one.
+        // The route's `ai` policy first: it resolves the name the caller used
+        // and fills in what they left out, so everything below sees a request
+        // as the operator meant it to arrive.
+        if let Some(shape) = &self.shape {
+            shape.apply(&mut body);
+        }
+
+        // Then the backend's own model, which wins over all of it: it is
+        // backend configuration rather than route policy, which makes it the
+        // most specific statement about where this traffic goes.
         if let Some(model) = &self.model {
             translate::set_model(&mut body, model);
         }
@@ -335,7 +368,12 @@ impl LlmBackend {
         let streaming = translate::is_streaming(&body);
 
         let upstream_body = match self.provider.translate_request(&body) {
-            Ok(body) => body,
+            Ok(mut body) => {
+                if let Some(caching) = &self.caching {
+                    caching.apply(&mut body);
+                }
+                body
+            }
             Err(err) => {
                 return error(
                     StatusCode::BAD_REQUEST,

@@ -145,7 +145,8 @@ Implemented and tested:
   requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
 - `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
-  included — see [The LLM gateway](#the-llm-gateway)
+  included, with the `ai` policy's `modelAliases`, `prompts`, `defaults`,
+  `overrides` and `promptCaching` — see [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
 - TLS termination with ALPN (`h2` and `http/1.1`) — see [TLS](#tls)
@@ -165,6 +166,9 @@ Implemented and tested:
 
 Parses but is **not** enforced — reported by `--check` and at startup:
 
+- `ai.promptGuard` and `ai.routes`, named one at a time rather than as the
+  whole of `ai` — see
+  [What the `ai` policy does not do yet](#what-the-ai-policy-does-not-do-yet)
 - `mcpGuardrails` processors naming `backend:` or `service:` rather than
   `host:`
 - `urlRewrite.authority` where a route has more than one `mcp:` target, and any
@@ -1164,6 +1168,97 @@ a client's existing handling works.
 `backendAuth: passthrough` is ignored here: a provider API key is not the
 caller's bearer token, and forwarding one as the other would send a user's
 credential to OpenAI.
+
+### Shaping the request: the `ai` policy
+
+```yaml
+policies:
+  ai:
+    modelAliases:
+      fast: gpt-4o-mini          # a name callers may use
+    prompts:
+      prepend:
+        - role: system
+          content: House rules.  # on every call, whatever the client sent
+    defaults:
+      temperature: 0.2           # only when the caller left it out
+    overrides:
+      max_tokens: 512            # whatever the caller asked for
+```
+
+Four of these can touch the same field, so **which wins is a stated ladder**
+rather than something to discover:
+
+1. `modelAliases` resolves the name the caller used. First, because it is about
+   what the caller *meant* — everything below should see the resolved name.
+2. `prompts` shape the conversation.
+3. `defaults` fill in what the caller left out, and only that.
+4. `overrides` replace what the caller or the defaults set.
+5. The backend's own `model:` still wins over all of it. It is backend
+   configuration rather than route policy — the most specific statement about
+   where traffic goes — and it was already the rule before any of this existed.
+
+Read downwards, each step is "more specific wins", which is the only ordering
+an operator can predict without reading the code.
+
+All of it runs on the **OpenAI-shaped body, before translation**. That is the
+only place a rule written once means the same thing for every provider: after
+translation there is no `messages` array to prepend to, because Anthropic has
+hoisted the system prompt out of it.
+
+Two smaller decisions. An alias is resolved **once**, so `a → b → c` gives `b`;
+a chain would let a config loop, and a gateway that hangs on its own
+configuration is worse than one that stops after a step. And a body with no
+`messages` is **left alone** rather than given some — inventing the array would
+turn a client bug into a request that runs with only the operator's prompt in
+it.
+
+### Prompt caching
+
+```yaml
+policies:
+  ai:
+    promptCaching:
+      cacheSystem: true
+      cacheMessages: true
+      cacheMessageOffset: 1     # behind the turn that changes
+      minTokens: 2048
+```
+
+The one part of the policy that runs *after* translation, because a cache
+breakpoint is a provider-specific annotation on a provider-specific shape —
+Anthropic's `cache_control` on a content block. A string `system` prompt is
+promoted to a block so it can carry one; a list is marked on its last block,
+since the breakpoint covers everything up to where it sits.
+
+**Only Anthropic.** OpenAI caches long prefixes by itself and takes no
+configuration for it, so this is a no-op there rather than an error — a route
+that sets it and later switches provider should not stop starting.
+
+`minTokens` is an optimisation, not a correctness rule: a provider will not
+cache a short prefix anyway and ignores the marker. That is why the length is
+**estimated** at roughly four characters per token rather than tokenised — a
+real tokeniser would mean shipping a vocabulary per model to decide whether to
+add an annotation that is free to get wrong.
+
+`cacheTools` is **reported by `--check`**, not applied. This build does not
+translate `tools` to Anthropic at all, so there is no tool block to mark — and
+with the other two breakpoints working, a silent no-op here would look like it
+had.
+
+### What the `ai` policy does not do yet
+
+`--check` names the sub-policies one at a time rather than reporting `ai` as a
+whole:
+
+```
+warning: ...policies.ai.promptGuard: parsed but not enforced by this build
+warning: ...policies.ai.routes: parsed but not enforced by this build
+```
+
+One finding for the whole policy was accurate while none of it was implemented
+and would be a lie now — an operator who reads "not enforced", then watches
+their `prompts` work, has no idea what else is being ignored.
 
 ## TLS
 

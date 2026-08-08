@@ -70,26 +70,143 @@ pub struct Policies {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub a2a: Option<A2aPolicy>,
 
-    /// LLM-specific policies such as prompt guards and model routing.
+    /// LLM-specific request shaping.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ai: Option<BTreeMap<String, serde_json::Value>>,
+    pub ai: Option<AiPolicy>,
 }
 
 impl Policies {
     pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
-        let unimplemented: [(&str, bool); 1] = [("ai", self.ai.is_some())];
-        for (name, present) in unimplemented {
-            if present {
-                findings.push(format!(
-                    "{at}.policies.{name}: parsed but not enforced by this build"
-                ));
-            }
+        if let Some(ai) = &self.ai {
+            ai.lint(&format!("{at}.policies.ai"), findings);
         }
 
         if let Some(guardrails) = &self.mcp_guardrails {
             guardrails.lint(&format!("{at}.policies.mcpGuardrails"), findings);
         }
     }
+}
+
+/// LLM-specific request shaping.
+///
+/// Everything upstream accepts here parses, and [`AiPolicy::lint`] names the
+/// sub-policies this build does not act on **one at a time**. A single finding
+/// for the whole of `ai` was accurate while none of it was implemented and
+/// would be a lie now: an operator who reads "not enforced" and sees their
+/// `prompts` working has no idea what else is silently ignored.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiPolicy {
+    /// Messages added to every conversation on this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompts: Option<Prompts>,
+
+    /// Request fields used when the caller did not set them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub defaults: BTreeMap<String, serde_json::Value>,
+
+    /// Request fields set whatever the caller asked for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub overrides: BTreeMap<String, serde_json::Value>,
+
+    /// Names a caller may use, mapped to the model actually requested.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_aliases: BTreeMap<String, String>,
+
+    /// Where to place provider cache breakpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_caching: Option<PromptCaching>,
+
+    /// Everything else upstream accepts.
+    ///
+    /// Kept so an upstream config loads, and so the lint can name the exact
+    /// sub-policy rather than the whole of `ai`.
+    #[serde(flatten)]
+    pub rest: BTreeMap<String, serde_json::Value>,
+}
+
+impl AiPolicy {
+    pub(crate) fn lint(&self, at: &str, findings: &mut Vec<String>) {
+        for key in self.rest.keys() {
+            findings.push(format!("{at}.{key}: parsed but not enforced by this build"));
+        }
+
+        // A breakpoint needs something to sit on, and this build does not
+        // translate `tools` to Anthropic at all -- so there is no tool block
+        // to mark, and the other two breakpoints working would make this one
+        // look like it did too.
+        if self
+            .prompt_caching
+            .as_ref()
+            .is_some_and(|caching| caching.cache_tools)
+        {
+            findings.push(format!(
+                "{at}.promptCaching.cacheTools: tool definitions are not translated to \
+                 Anthropic by this build, so there is no tool block to place a cache \
+                 breakpoint on; `cacheSystem` and `cacheMessages` do apply"
+            ));
+        }
+    }
+}
+
+/// Messages added to every conversation on a route.
+///
+/// A system prompt an operator wants on every call, without every client
+/// having to send it — and, prepended, one a client cannot drop by not
+/// sending it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Prompts {
+    /// Messages placed before the caller's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prepend: Vec<PromptMessage>,
+
+    /// Messages placed after the caller's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub append: Vec<PromptMessage>,
+}
+
+/// One message in a `prompts` list.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PromptMessage {
+    /// `system`, `user`, `assistant`, or whatever the provider accepts.
+    pub role: String,
+    /// The message text.
+    pub content: String,
+}
+
+/// Where to place provider cache breakpoints.
+///
+/// Only Anthropic takes these explicitly; OpenAI caches long prefixes on its
+/// own and needs no configuration, so this is a documented no-op there.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptCaching {
+    /// Mark the system prompt cacheable.
+    #[serde(default)]
+    pub cache_system: bool,
+
+    /// Mark the conversation so far cacheable.
+    #[serde(default)]
+    pub cache_messages: bool,
+
+    /// Mark the tool definitions cacheable.
+    #[serde(default)]
+    pub cache_tools: bool,
+
+    /// Skip marking anything when the prompt is shorter than this.
+    ///
+    /// A provider will not cache a short prefix anyway, and a breakpoint it
+    /// ignores costs nothing but noise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_tokens: Option<u64>,
+
+    /// How many messages back from the end to place the message breakpoint.
+    ///
+    /// `0` marks the last message. A conversation that grows by one turn each
+    /// call wants the breakpoint behind the part that changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_message_offset: Option<usize>,
 }
 
 /// External MCP policy processors.

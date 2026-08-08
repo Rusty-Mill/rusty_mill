@@ -193,6 +193,15 @@ impl Provider {
     pub fn translates_stream(&self) -> bool {
         matches!(self, Provider::Anthropic(_))
     }
+
+    /// Whether this provider takes cache breakpoints in the request.
+    ///
+    /// Anthropic does, as `cache_control` on a content block. OpenAI caches
+    /// long prefixes by itself and takes no configuration for it, so marking
+    /// one there would be a field nobody reads.
+    pub fn caches_explicitly(&self) -> bool {
+        matches!(self, Provider::Anthropic(_))
+    }
 }
 
 /// The Messages API version this gateway speaks.

@@ -1250,3 +1250,116 @@ fn an_empty_config_is_rejected() {
         .expect_err("a gateway that listens nowhere is a mistake, not a config");
     assert!(err.to_string().contains("no binds"));
 }
+
+#[test]
+fn an_ai_policy_reports_only_the_sub_policies_it_cannot_act_on() {
+    // A single finding for the whole of `ai` was accurate while none of it was
+    // implemented, and would be a lie now: an operator who reads "not
+    // enforced" and sees their `prompts` working has no idea what else is
+    // silently ignored.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                modelAliases:
+                  fast: gpt-4o-mini
+                prompts:
+                  prepend:
+                    - role: system
+                      content: Be brief.
+                defaults:
+                  temperature: 0.2
+                overrides:
+                  max_tokens: 512
+                promptGuard:
+                  request: []
+                routes: {}
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("policies.ai.promptGuard")),
+        "{findings:?}"
+    );
+    assert!(
+        findings.iter().any(|f| f.contains("policies.ai.routes")),
+        "{findings:?}"
+    );
+    for implemented in ["modelAliases", "prompts", "defaults", "overrides"] {
+        assert!(
+            !findings.iter().any(|f| f.contains(implemented)),
+            "`{implemented}` applies and must not be reported: {findings:?}"
+        );
+    }
+}
+
+#[test]
+fn cache_tools_is_reported_because_there_is_no_tool_block_to_mark() {
+    // This build does not translate `tools` to Anthropic, and the other two
+    // breakpoints working would make this one look like it did too.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                promptCaching:
+                  cacheSystem: true
+                  cacheMessages: true
+                  cacheTools: true
+            backends:
+              - ai:
+                  provider:
+                    anthropic: {}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("promptCaching.cacheTools") && f.contains("no tool block")),
+        "{findings:?}"
+    );
+    assert_eq!(findings.len(), 1, "only that one: {findings:?}");
+}
+
+#[test]
+fn an_ai_policy_this_build_fully_implements_is_silent() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                promptCaching:
+                  cacheSystem: true
+                  minTokens: 2048
+                  cacheMessageOffset: 1
+            backends:
+              - ai:
+                  provider:
+                    anthropic: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
