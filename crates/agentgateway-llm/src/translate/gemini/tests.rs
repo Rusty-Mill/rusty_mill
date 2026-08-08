@@ -165,41 +165,123 @@ fn the_model_and_the_stream_flag_are_left_out_of_the_body() {
 }
 
 #[test]
-fn a_streaming_request_is_refused_rather_than_answered_in_one_piece() {
+fn tool_definitions_and_a_choice_reach_the_request() {
     let mut body = request();
-    body["stream"] = json!(true);
-    let err = to_gemini(&body).expect_err("should not translate");
-    assert!(err.to_string().contains("streaming"), "{err}");
-    assert!(err.to_string().contains("gemini"), "{err}");
+    body["tools"] = json!([{
+        "type": "function",
+        "function": {"name": "get_weather", "parameters": {"type": "object"}},
+    }]);
+    body["tool_choice"] = json!("required");
+
+    let out = to_gemini(&body).expect("should translate");
+    assert_eq!(
+        out["tools"][0]["functionDeclarations"][0]["name"],
+        "get_weather"
+    );
+    assert_eq!(out["toolConfig"]["functionCallingConfig"]["mode"], "ANY");
 }
 
 #[test]
-fn a_request_asking_for_tools_is_refused_rather_than_stripped() {
-    // Dropping them would look like a model that chose not to call one, which
-    // is far more expensive to debug than a refusal.
-    let mut with_tools = request();
-    with_tools["tools"] = json!([{"type": "function", "function": {"name": "f"}}]);
-    assert!(to_gemini(&with_tools).is_err());
-
-    let mut with_choice = request();
-    with_choice["tool_choice"] = json!("auto");
-    assert!(to_gemini(&with_choice).is_err());
-
-    let mut with_result = request();
-    with_result["messages"] = json!([
-        {"role": "user", "content": "weather?"},
-        {"role": "tool", "tool_call_id": "call_1", "content": "sunny"},
-    ]);
-    assert!(to_gemini(&with_result).is_err());
-}
-
-#[test]
-fn a_null_tools_field_is_not_a_request_for_tools() {
-    // Clients that always send the key and leave it null are common, and
-    // refusing them would refuse ordinary traffic.
+fn a_null_tools_field_leaves_the_fields_off() {
+    // Clients that always send the key and leave it null are common, and an
+    // empty `tools` is a statement about tools rather than the absence of one.
     let mut body = request();
     body["tools"] = Value::Null;
-    assert!(to_gemini(&body).is_ok());
+    let out = to_gemini(&body).expect("should translate");
+    assert!(out.get("tools").is_none(), "{out}");
+    assert!(out.get("toolConfig").is_none(), "{out}");
+}
+
+#[test]
+fn a_tool_call_round_trip_keeps_every_leg() {
+    // The assistant's call becomes a `functionCall` part beside its text, and
+    // the result becomes a `functionResponse` in a user turn.
+    let mut body = request();
+    body["messages"] = json!([
+        {"role": "user", "content": "weather in Oslo?"},
+        {"role": "assistant", "content": "Looking that up.", "tool_calls": [{
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "get_weather", "arguments": "{\"city\":\"Oslo\"}"},
+        }]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
+    ]);
+
+    let out = to_gemini(&body).expect("should translate");
+    let contents = out["contents"].as_array().expect("contents");
+    assert_eq!(contents.len(), 3);
+
+    assert_eq!(contents[1]["role"], "model");
+    assert_eq!(contents[1]["parts"][0]["text"], "Looking that up.");
+    assert_eq!(
+        contents[1]["parts"][1]["functionCall"],
+        json!({"name": "get_weather", "args": {"city": "Oslo"}})
+    );
+
+    assert_eq!(contents[2]["role"], "user", "there is no tool role here");
+    assert_eq!(
+        contents[2]["parts"][0]["functionResponse"],
+        json!({"name": "get_weather", "response": {"output": "sunny"}})
+    );
+}
+
+#[test]
+fn two_results_in_a_row_join_one_turn() {
+    // Two user turns in a row are rejected, and a model asked to call two
+    // tools answers both before the conversation moves on.
+    let mut body = request();
+    body["messages"] = json!([
+        {"role": "user", "content": "weather and time?"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_0", "function": {"name": "get_weather", "arguments": "{}"}},
+            {"id": "call_1", "function": {"name": "get_time", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "sunny"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "noon"},
+    ]);
+
+    let out = to_gemini(&body).expect("should translate");
+    let contents = out["contents"].as_array().expect("contents");
+    assert_eq!(contents.len(), 3, "not four: the results share a turn");
+    let parts = contents[2]["parts"].as_array().expect("parts");
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0]["functionResponse"]["name"], "get_weather");
+    assert_eq!(parts[1]["functionResponse"]["name"], "get_time");
+}
+
+#[test]
+fn a_call_comes_back_in_openai_shape() {
+    let answered = json!({
+        "responseId": "resp-1",
+        "modelVersion": "gemini-2.5-flash",
+        "candidates": [{
+            "content": {"role": "model", "parts": [
+                {"text": "Looking that up."},
+                {"functionCall": {"name": "get_weather", "args": {"city": "Oslo"}}},
+            ]},
+            "finishReason": "STOP",
+        }],
+    });
+
+    let out = from_gemini(&answered, 0);
+    let message = &out["choices"][0]["message"];
+    assert_eq!(message["content"], "Looking that up.");
+    assert_eq!(message["tool_calls"][0]["id"], "call_0");
+    assert_eq!(message["tool_calls"][0]["function"]["name"], "get_weather");
+    assert_eq!(
+        message["tool_calls"][0]["function"]["arguments"],
+        r#"{"city":"Oslo"}"#
+    );
+}
+
+#[test]
+fn a_turn_that_only_called_a_tool_has_null_content() {
+    let answered = json!({"candidates": [{"content": {"parts": [
+        {"functionCall": {"name": "f", "args": {}}},
+    ]}}]});
+    let out = from_gemini(&answered, 0);
+    assert_eq!(out["choices"][0]["message"]["content"], Value::Null);
+    assert!(out["choices"][0]["message"]["tool_calls"].is_array());
 }
 
 #[test]

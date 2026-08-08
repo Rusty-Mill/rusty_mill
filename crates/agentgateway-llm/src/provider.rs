@@ -7,6 +7,7 @@
 use agentgateway_config::{AiProvider, AiProviderParams};
 use serde_json::Value;
 
+use crate::stream;
 use crate::translate::{self, TranslateError, Usage};
 
 /// A provider configuration this build cannot serve.
@@ -273,9 +274,20 @@ impl Provider {
         matches!(self, Provider::Gemini(_))
     }
 
-    /// Whether a streamed response needs re-framing.
-    pub fn translates_stream(&self) -> bool {
-        matches!(self, Provider::Anthropic(_))
+    /// The re-framing this provider's stream needs, if any.
+    ///
+    /// `None` for an OpenAI-compatible provider, whose frames already are what
+    /// the client expects and go through untouched.
+    pub fn stream_translator(&self, created: u64) -> Option<stream::Translator> {
+        match self {
+            Provider::OpenAi(_) => None,
+            Provider::Anthropic(_) => Some(stream::Translator::Anthropic(
+                stream::ChunkTranslator::new(created),
+            )),
+            Provider::Gemini(_) => Some(stream::Translator::Gemini(stream::GeminiTranslator::new(
+                created,
+            ))),
+        }
     }
 
     /// Whether this provider takes cache breakpoints in the request.
@@ -388,7 +400,10 @@ mod tests {
                 .is_none(),
             "None means hand back the original bytes"
         );
-        assert!(!provider.translates_stream());
+        assert!(
+            provider.stream_translator(0).is_none(),
+            "an OpenAI-compatible stream is already what the client expects"
+        );
     }
 
     #[test]

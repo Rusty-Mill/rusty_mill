@@ -65,15 +65,6 @@ pub enum TranslateError {
         /// What the caller asked for.
         model: String,
     },
-
-    /// Something this build cannot express for the provider in front of it.
-    #[error("{what} is not implemented for the `{provider}` provider in this build")]
-    Unsupported {
-        /// The provider that cannot express it.
-        provider: &'static str,
-        /// What was asked for.
-        what: &'static str,
-    },
 }
 
 /// Token counts, however the provider spelled them.
