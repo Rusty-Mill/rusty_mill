@@ -1483,6 +1483,50 @@ purely complexity-based, but *within* that tier, cost now breaks the tie
 by default instead of the classifier and pricing staying two disconnected
 mechanisms.
 
+## Fusion routing
+
+`strategy = "fusion"` on a `[[routes]]` alias replaces its default
+sequential-fallback behavior with a parallel panel + judge-synthesis
+dispatch instead:
+
+```toml
+[[routes]]
+alias = "panel"
+chain = ["anthropic/claude-sonnet-5", "openai/gpt-4o", "gemini/gemini-2.5-pro"]
+strategy = "fusion"
+judge = "anthropic/claude-opus-4-8"     # required for fusion to actually engage
+fusion_timeout_secs = 30                 # optional, default shown
+```
+
+`chain` doubles as the fusion "panel" here — every entry is dispatched
+concurrently rather than tried one at a time, and `judge` synthesizes a
+single final answer from whichever candidates responded. Each panel member
+is independently bounded by `fusion_timeout_secs`, so the total wait is
+capped at that duration regardless of panel size — a candidate that's
+still slow when its own timeout expires, or that errors outright, is
+simply absent from what reaches the judge rather than blocking everyone
+else; the request only fails if *every* candidate does. The judge sees
+each surviving answer under an anonymized `"Candidate 1"`/`"Candidate 2"`
+label, not the provider/model that produced it, so synthesis goes by the
+answers' merits rather than any name the judge might otherwise recognize
+and favor.
+
+A tool-calling request (`tools` set) bypasses fusion entirely and falls
+through to ordinary sequential-chain dispatch instead — a judge doing
+plain-text synthesis can't meaningfully merge structured `tool_calls` from
+multiple candidates. The same is true of a streaming request, since
+synthesizing one answer from a panel is inherently a whole-response
+operation with no incremental form. `[[routes]]` alias with
+`strategy = "fusion"` but no `judge` set is a soft misconfiguration, not a
+startup failure: it logs a warning and dispatches that alias exactly like
+an ordinary `strategy = "fallback"` chain instead.
+
+`GET /v1/usage`/`GET /metrics`/`GET /v1/generation?id=` all reflect the
+full cost of a fusion request — every panel member that actually
+responded plus the judge each get their own usage/cost entry, and the
+final response returned to the caller carries the summed usage/cost
+across all of them, not just the judge's own call.
+
 ## BYOK (bring your own key)
 
 A request can supply its own API key for a configured provider, used for

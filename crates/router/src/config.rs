@@ -140,12 +140,49 @@ pub struct ProviderConfig {
     pub requests_per_minute: Option<u32>,
 }
 
+fn default_fusion_timeout_secs() -> u64 {
+    30
+}
+
+/// How a `[[routes]]` alias resolves a request. `Fallback` (the default)
+/// is today's only behavior: try `chain` in order, falling back to the
+/// next entry on a retryable error. `Fusion` dispatches every entry in
+/// `chain` (the "panel") in parallel and synthesizes one final answer via
+/// `judge` -- see `RouteAlias::judge`/`fusion_timeout_secs`.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum RouteStrategy {
+    #[default]
+    Fallback,
+    Fusion,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct RouteAlias {
     pub alias: String,
     /// Ordered "provider/model" fallback chain, e.g.
-    /// ["anthropic/claude-sonnet-5", "openai/gpt-4o"].
+    /// ["anthropic/claude-sonnet-5", "openai/gpt-4o"] -- or, under
+    /// `strategy = "fusion"`, the panel of candidates dispatched in
+    /// parallel rather than tried in sequence.
     pub chain: Vec<String>,
+    #[serde(default)]
+    pub strategy: RouteStrategy,
+    /// Required when `strategy = "fusion"`: the "provider/model" that
+    /// synthesizes the panel's answers into one final response. Ignored
+    /// under the default `"fallback"` strategy. A `"fusion"` alias with
+    /// no `judge` set falls back to ordinary sequential-chain behavior
+    /// (logged as a startup warning) rather than refusing to start --
+    /// same soft-failure posture as an invalid `[[guardrails]]` pattern.
+    #[serde(default)]
+    pub judge: Option<String>,
+    /// How long to wait for the panel to respond before synthesizing from
+    /// whichever candidates already have, under `strategy = "fusion"`.
+    /// Each panel member is dispatched concurrently and independently
+    /// timed out at this value, so the total wait is bounded by this
+    /// duration regardless of panel size -- not `duration * panel_size`.
+    /// Ignored under the default `"fallback"` strategy.
+    #[serde(default = "default_fusion_timeout_secs")]
+    pub fusion_timeout_secs: u64,
 }
 
 /// Prompt/completion token pricing for one "provider/model" entry, used
@@ -1089,6 +1126,43 @@ mod tests {
             "#,
         );
         assert!(missing_chain.is_err());
+    }
+
+    #[test]
+    fn route_alias_strategy_defaults_to_fallback() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[routes]]
+            alias = "smart"
+            chain = ["a/m1"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.routes[0].strategy, RouteStrategy::Fallback);
+        assert_eq!(config.routes[0].judge, None);
+        assert_eq!(config.routes[0].fusion_timeout_secs, 30);
+    }
+
+    #[test]
+    fn route_alias_strategy_fusion_parses_judge_and_timeout() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[routes]]
+            alias = "panel"
+            chain = ["a/m1", "b/m2"]
+            strategy = "fusion"
+            judge = "c/m3"
+            fusion_timeout_secs = 10
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.routes[0].strategy, RouteStrategy::Fusion);
+        assert_eq!(config.routes[0].judge.as_deref(), Some("c/m3"));
+        assert_eq!(config.routes[0].fusion_timeout_secs, 10);
     }
 
     #[test]

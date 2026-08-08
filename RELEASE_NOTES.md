@@ -24,6 +24,31 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #147 — Add strategy = "fusion" routing: parallel panel + judge synthesis
+**2026-08-08** · [#147](https://github.com/baileyrd/rusty_provider/pull/147)
+
+- **Added:** a new `[[routes]]` dispatch mode, `strategy = "fusion"`,
+  alongside the default sequential fallback. `chain` doubles as the
+  "panel" -- every entry is dispatched concurrently instead of tried one
+  at a time, and a designated `judge` model synthesizes one final answer
+  from whichever candidates responded within `fusion_timeout_secs` (each
+  panel member independently timed out, so the total wait doesn't scale
+  with panel size). Panel answers reach the judge under an anonymized
+  `"Candidate 1"`/`"Candidate 2"` label rather than by provider/model. A
+  tool-calling or streaming request bypasses fusion entirely and falls
+  back to ordinary sequential dispatch, as does a fusion alias with no
+  `judge` configured (a startup warning, not a hard failure).
+  Usage/cost accounting (`GET /v1/usage`/`GET /metrics`/
+  `GET /v1/generation?id=`) covers every contributing panel member plus
+  the judge, not just the judge's own call.
+- 9 new tests in `rp-router` covering config parsing, panel synthesis
+  (including the anonymized-label prompt and summed usage), a slow panel
+  member timing out without blocking the request, the tool-call bypass at
+  both the request-gate and defense-in-depth level, and full cost/usage
+  accounting; full workspace suite passing.
+
+---
+
 ## PR #133 — Add rp-cli setup: static config-file rewriting for third-party CLI tools
 **2026-08-07** · [#133](https://github.com/baileyrd/rusty_provider/pull/133)
 
