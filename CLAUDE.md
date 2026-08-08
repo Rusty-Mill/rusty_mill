@@ -8,9 +8,9 @@ it does; this file is about how to change it.
 
 Every change goes through a pull request — no direct pushes to `main`.
 
-- **Merge with a merge commit, never squash.** All merges to date (#7, #8, #9, #11) are
-  merge commits; keep that consistent.
-- **Merge only when CI is green** — all 13 checks, not just the fast ones.
+- **Merge with a merge commit, never squash.** Every merge to date is a merge commit; keep
+  that consistent. Full history is preserved deliberately.
+- **Merge only when CI is green** — all 17 checks, not just the fast ones.
 - **Sync `main` and delete the branch** after merging.
 - A merged PR is finished. Follow-up work starts a fresh branch off the new `main` rather
   than stacking commits on merged history.
@@ -27,29 +27,40 @@ cargo clippy --all-features --all-targets -- -D warnings
 cargo test --all-features
 cargo test --all-features --all-targets
 cargo test --all-features --doc
-cargo build --no-default-features                              # and per feature:
-cargo build --no-default-features --features client            # server, redis-store,
-cargo build --no-default-features --features well-known        # types-only
-cargo +1.86 test                                               # MSRV
-cargo package
+cargo build --no-default-features                               # types only, then each alone:
+for f in client server redis-store postgres-store \
+         well-known metrics store-testkit trace; do
+  cargo build --no-default-features --features "$f"
+done
+cargo +1.86 test                                                # MSRV
+cargo package --all-features
 RUSTDOCFLAGS="-D warnings --cfg docsrs" cargo +nightly doc --all-features --no-deps
 ```
 
-CI runs the same set across stable, beta and 1.86.
+CI runs the same set across stable, beta and 1.86, and builds every feature alone.
 
-### Redis
+**Check exit status per step.** Piping each command into `grep` makes the pipeline report
+`grep`'s status, so `set -e` never fires and a failed step prints as a pass — that mistake
+was made again while writing this sweep, and it swallowed a clippy error and two failing
+Redis tests before it was caught.
 
-The multi-replica suite runs against both backends. The Redis half **skips** unless
-`ACP_TEST_REDIS_URL` is set — and when it is set, an unreachable Redis fails the run
-rather than quietly skipping.
+### Redis and Postgres
+
+The multi-replica suite, the store conformance kit and the shared-log tests all run against
+**all three** backends. The Redis and Postgres halves **skip** unless their URLs are set —
+and when one *is* set, an unreachable backend fails the run rather than quietly skipping.
 
 ```sh
 redis-server --daemonize yes --port 6379
-ACP_TEST_REDIS_URL=redis://127.0.0.1:6379 cargo test --all-features
+ACP_TEST_REDIS_URL=redis://127.0.0.1:6379 \
+ACP_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/acp_test \
+  cargo test --all-features
 ```
 
-Run it. Several bugs have only ever shown up on the Redis half, because its round-trips
-are slow enough to lose races the in-memory store wins by microseconds.
+Run them. Several bugs have only ever shown up on the shared halves, because the round-trips
+are slow enough to lose races the in-memory store wins by microseconds — and the conformance
+kit found a Redis lease TTL truncated to whole seconds the first time all three were held to
+one contract.
 
 ## Testing concurrency
 
@@ -87,9 +98,19 @@ The crate is not on crates.io and is not going there. Depend on it from git. Don
 release workflow, a `documentation = "https://docs.rs/..."` link, or a version-based
 install snippet.
 
-MSRV is **1.86**. The optional `redis-store` feature needs 1.88, since the `redis` crate's
-floor is higher — an optional dependency does not raise the MSRV for everyone else, so
-`rust-version` stays at 1.86.
+MSRV is **1.86**. The optional `redis-store` and `postgres-store` features need 1.88, since
+the `redis` and `sqlx` crates have higher floors — an optional dependency does not raise the
+MSRV for everyone else, so `rust-version` stays at 1.86.
+
+## Two checks that will fail if you are careless
+
+- **`tests/spec_coverage.rs`** reads the vendored ACP document in `spec/`. Add a route that
+  is neither in the specification nor in its `EXTENSIONS` list and it fails, naming the
+  route. Rename or drop a spec route and it fails too. The README's coverage table is
+  checked against the same document.
+- **`src/server/store/testkit.rs`** is public API behind `store-testkit` — a third-party
+  backend runs it against itself. Changing what the `Store` trait requires means changing a
+  contract other people are held to, not just this crate's own code.
 
 ## Prose
 

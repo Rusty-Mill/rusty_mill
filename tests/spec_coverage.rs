@@ -5,7 +5,7 @@
 //! That sentence and the table under it were maintained by hand, the document
 //! was not in the repository, and no test read it — so nothing failed when the
 //! two drifted. A checkable claim beside it already had drifted: the README
-//! said 163 tests while the crate had grown to 295.
+//! claimed 163 tests when the crate had grown past 290.
 //!
 //! `tests/types.rs` checks that what this crate serializes it can deserialize,
 //! which is a real property and **not this one**. A field named consistently

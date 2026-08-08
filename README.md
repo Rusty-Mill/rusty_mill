@@ -20,6 +20,7 @@ The crate gives you three layers, each usable on its own:
 | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
 | metrics | `metrics` | Records run, lease, store and client metrics through the [`metrics`] facade. Implies neither layer. |
 | trace context | `trace` | Reads and writes W3C `traceparent`, so one call correlates across replicas. Implies neither layer. |
+| store conformance kit | `store-testkit` | A suite a third-party `Store` can run against itself. Implies `server`. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
 TypeScript, LangChain or CrewAI one.
@@ -52,6 +53,9 @@ rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["postgr
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["well-known"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["metrics"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["trace"] }
+
+# writing your own Store backend
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["store-testkit"] }
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
@@ -1010,10 +1014,12 @@ cancelling it through the other — including killing a replica's whole runtime 
 asserting the run gets reaped rather than hanging, and that a replayable one is replaced
 by a fresh linked run.
 
-Four suites deliberately avoid racing what they test, since the gaps they cover are
-microseconds wide and would otherwise pass by luck: `ordering.rs`, `resumption.rs`,
-`reaping.rs` and `cancellation_handoff.rs` each wrap the store in a decorator that makes the
-window wide and fixed, so a violation fails every time rather than occasionally.
+Several suites deliberately avoid racing what they test, since the gaps they cover would
+otherwise pass by luck on a quiet machine and fail on a loaded runner. `ordering.rs`,
+`resumption.rs`, `reaping.rs` and `cancellation_handoff.rs` each wrap the store in a decorator
+that makes the window wide and fixed. `drain_terminal.rs` and `history_fetch.rs` do the same
+thing from the other side — a fixed delay per operation, so the shapes being compared are
+*seconds* apart and the assertion sits in the middle of that gulf rather than near an edge.
 
 That approach earned its keep here: adding the Postgres backend, where every write is a
 network round-trip rather than a memory write, surfaced three ordering bugs that every
@@ -1037,8 +1043,8 @@ ACP_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/acp_test \
 ```
 
 CI runs the suite on stable, beta and the 1.86 MSRV against real Redis and Postgres services, plus
-`rustfmt`, `clippy -D warnings`, each feature combination built alone, a nightly `cargo doc`
-with `-D warnings`, and `cargo package`.
+`rustfmt`, `clippy -D warnings`, each of the eight features built alone, a nightly `cargo doc`
+with `-D warnings`, and `cargo package` — seventeen checks in all.
 
 ## Logging
 
