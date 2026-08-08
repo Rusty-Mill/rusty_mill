@@ -16,13 +16,15 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
+      # rust-toolchain.toml pins the version; rustup installs it (and the
+      # components it names) on first use, so local and CI check the same thing.
       - name: Install Rust toolchain
-        run: rustup component add rustfmt clippy
+        run: rustup show active-toolchain
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
