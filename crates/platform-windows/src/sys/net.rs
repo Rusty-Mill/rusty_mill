@@ -43,8 +43,23 @@ fn ensure_wsa_started() {
         // all-zeroes is a valid (if meaningless) value; `WSAStartup`
         // overwrites it on success.
         let mut data: w::WSADATA = unsafe { std::mem::zeroed() };
+        // Track W (D-15): `rusty_win32::net::startup`, which requests the
+        // same Winsock 2.2 and owns its own `WSADATA` — this arm's
+        // `data` local is therefore unused there, kept declared rather
+        // than cfg-split because zeroing a POD struct costs nothing and
+        // splitting a `Once` body twice for it would obscure the one
+        // thing this function is about.
+        #[cfg(feature = "track-w")]
+        let r = {
+            let _ = &mut data;
+            match rusty_win32::net::startup() {
+                Ok(()) => 0,
+                Err(e) => e.code() as i32,
+            }
+        };
         // SAFETY: `data` is a valid out-pointer; `0x0202` requests
         // Winsock 2.2, the only version this module's calls target.
+        #[cfg(not(feature = "track-w"))]
         let r = unsafe { w::WSAStartup(0x0202, &mut data) };
         // A `WSAStartup` failure here is unrecoverable for this whole
         // module (every socket call needs it); the same "this really
@@ -55,11 +70,15 @@ fn ensure_wsa_started() {
     });
 }
 
-fn wsa_err(op: &'static str) -> PlatformError {
-    // SAFETY: `WSAGetLastError` takes no arguments and has no
-    // preconditions.
-    let code = unsafe { w::WSAGetLastError() };
-    let kind = match code {
+/// Winsock's own error space classified into a portable [`ErrorKind`].
+///
+/// Shared by both Track W arms (D-15): the windows-sys arm reads the code
+/// from `WSAGetLastError`, the track-w arm takes it from the `Win32Error`
+/// the donor already captured — but the *classification* is this one
+/// table either way, which is what keeps `PlatformError` bit-identical
+/// across the two configurations.
+fn wsa_kind(code: i32) -> ErrorKind {
+    match code {
         w::WSAECONNREFUSED => ErrorKind::ConnectionRefused,
         w::WSAECONNRESET => ErrorKind::ConnectionReset,
         w::WSAECONNABORTED => ErrorKind::ConnectionAborted,
@@ -72,14 +91,46 @@ fn wsa_err(op: &'static str) -> PlatformError {
         w::WSAEWOULDBLOCK => ErrorKind::WouldBlock,
         w::WSAEINTR => ErrorKind::Interrupted,
         _ => ErrorKind::Other,
-    };
-    PlatformError::new(kind, OsCode::Win32(code as u32), op)
+    }
+}
+
+/// Error from the calling thread's last Winsock error code.
+fn wsa_err(op: &'static str) -> PlatformError {
+    // SAFETY: `WSAGetLastError` takes no arguments and has no
+    // preconditions.
+    let code = unsafe { w::WSAGetLastError() };
+    PlatformError::new(wsa_kind(code), OsCode::Win32(code as u32), op)
+}
+
+/// Track W error path for Winsock (D-15). The donor's socket wrappers
+/// call `WSAGetLastError` themselves at the only instant it is valid and
+/// hand the code back inside a `Win32Error` — the same lesson note 003
+/// records for `GetLastError`, applied to Winsock's parallel slot. Note
+/// this cannot use `errmap::trackw_err`: that classifies through the
+/// *Win32* table, and a Winsock code (10035, 10061, …) means nothing
+/// there. Same number-space discipline `errmap`'s own module doc insists
+/// on, one space further out.
+#[cfg(feature = "track-w")]
+fn trackw_wsa_err(op: &'static str, e: rusty_win32::error::Win32Error) -> PlatformError {
+    let code = e.code() as i32;
+    PlatformError::new(wsa_kind(code), OsCode::Win32(code as u32), op)
 }
 
 /// An owned Winsock `SOCKET`, closed on drop.
 pub struct OwnedSocket(w::SOCKET);
 
 impl Drop for OwnedSocket {
+    /// Track W (D-15): `rusty_win32::net::close_socket`, whose `Result`
+    /// is discarded for the same reason the windows-sys arm ignores
+    /// `closesocket`'s return — a destructor has nowhere to report to.
+    #[cfg(feature = "track-w")]
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a valid, owned socket not used again after
+        // this call — `close_socket`'s whole contract.
+        let _ = unsafe { rusty_win32::net::close_socket(self.0) };
+    }
+
+    #[cfg(not(feature = "track-w"))]
     fn drop(&mut self) {
         // SAFETY: `self.0` is a valid, owned socket not used again after
         // this call.
@@ -103,6 +154,10 @@ impl OwnedSocket {
 /// byte buffer and its length — the pair `connect`/`bind` want. A plain
 /// byte buffer (not a `sockaddr_storage`-equivalent union type — Winsock
 /// has no single admitted one here) sized to the larger variant.
+// Under `track-w` the donor owns the sockaddr encoding entirely
+// (`to_donor_addr`/`from_donor_addr` above), so this arm's hand-rolled
+// conversion is genuinely unreachable rather than merely unused.
+#[cfg(not(feature = "track-w"))]
 fn to_sockaddr(addr: SocketAddr) -> ([u8; 28], i32) {
     let mut buf = [0u8; 28];
     let len = match addr {
@@ -164,6 +219,10 @@ fn to_sockaddr(addr: SocketAddr) -> ([u8; 28], i32) {
 
 /// Unpack a Winsock-filled address buffer (from `accept`/`getpeername`/
 /// `getsockname`) back into a [`SocketAddr`].
+// Under `track-w` the donor owns the sockaddr encoding entirely
+// (`to_donor_addr`/`from_donor_addr` above), so this arm's hand-rolled
+// conversion is genuinely unreachable rather than merely unused.
+#[cfg(not(feature = "track-w"))]
 fn from_sockaddr(buf: &[u8; 28]) -> Result<SocketAddr> {
     // SAFETY: every variant of the address family union starts with the
     // same `sa_family`/`sin_family`-shaped `u16` at offset 0 — reading
@@ -209,85 +268,281 @@ fn from_sockaddr(buf: &[u8; 28]) -> Result<SocketAddr> {
     }
 }
 
-fn new_tcp_socket(addr: SocketAddr) -> Result<OwnedSocket> {
-    ensure_wsa_started();
-    let family = match addr {
-        SocketAddr::V4(_) => w::AF_INET,
-        SocketAddr::V6(_) => w::AF_INET6,
+// --- Track W primitive layer (D-15) -----------------------------------
+//
+// Every foreign socket call this module makes goes through one of the
+// two-armed helpers below, so the public functions further down keep a
+// single body each. Same shape `sys::console`'s `get_mode`/`set_mode`
+// pair took in slice 3, for the same reason: two-arming fifteen public
+// functions would have doubled the file to say one thing.
+//
+// The address boundary is what makes this slice its own rather than a
+// tail on an earlier one. This crate speaks `std::net::SocketAddr` and
+// raw `SOCKADDR_IN`/`SOCKADDR_IN6` byte buffers; the donor speaks its
+// own `SocketAddr` enum. Every address-taking call crosses that, so the
+// conversion lives here, once, in one direction each way.
+
+/// `std::net::SocketAddr` -> the donor's own address enum.
+///
+/// Note the octets go across verbatim and only the port is byte-order
+/// converted — by the donor, internally. That matches this crate's own
+/// `to_sockaddr` (whose comment makes the same point about
+/// `from_ne_bytes` reproducing the in-memory pattern rather than
+/// converting), so neither side double-swaps.
+#[cfg(feature = "track-w")]
+fn to_donor_addr(addr: SocketAddr) -> rusty_win32::net::SocketAddr {
+    match addr {
+        SocketAddr::V4(v4) => rusty_win32::net::SocketAddr::V4 {
+            ip: v4.ip().octets(),
+            port: v4.port(),
+        },
+        SocketAddr::V6(v6) => rusty_win32::net::SocketAddr::V6 {
+            ip: v6.ip().octets(),
+            port: v6.port(),
+            flow_info: v6.flowinfo(),
+            scope_id: v6.scope_id(),
+        },
+    }
+}
+
+/// The donor's address enum -> `std::net::SocketAddr`.
+#[cfg(feature = "track-w")]
+fn from_donor_addr(addr: rusty_win32::net::SocketAddr) -> SocketAddr {
+    match addr {
+        rusty_win32::net::SocketAddr::V4 { ip, port } => {
+            SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port))
+        }
+        rusty_win32::net::SocketAddr::V6 {
+            ip,
+            port,
+            flow_info,
+            scope_id,
+        } => SocketAddr::V6(SocketAddrV6::new(
+            Ipv6Addr::from(ip),
+            port,
+            flow_info,
+            scope_id,
+        )),
+    }
+}
+
+/// `socket(family, type, protocol)`.
+#[cfg(feature = "track-w")]
+fn raw_socket(v6: bool, stream: bool) -> Result<w::SOCKET> {
+    use rusty_win32::net::{AddressFamily, Protocol, SocketKind};
+    let family = if v6 {
+        AddressFamily::Inet6
+    } else {
+        AddressFamily::Inet
+    };
+    let (kind, proto) = if stream {
+        (SocketKind::Stream, Protocol::Tcp)
+    } else {
+        (SocketKind::Dgram, Protocol::Udp)
+    };
+    rusty_win32::net::socket(family, kind, proto).map_err(|e| trackw_wsa_err("socket", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_socket(v6: bool, stream: bool) -> Result<w::SOCKET> {
+    let family = if v6 { w::AF_INET6 } else { w::AF_INET };
+    let (kind, proto) = if stream {
+        (w::SOCK_STREAM, w::IPPROTO_TCP)
+    } else {
+        (w::SOCK_DGRAM, 0)
     };
     // SAFETY: plain integer arguments, no memory referenced.
-    let sock = unsafe { w::socket(i32::from(family), w::SOCK_STREAM, w::IPPROTO_TCP) };
+    let sock = unsafe { w::socket(i32::from(family), kind, proto) };
     if sock == w::INVALID_SOCKET {
         return Err(wsa_err("socket"));
     }
-    Ok(OwnedSocket(sock))
+    Ok(sock)
+}
+
+/// `connect` to an IP address.
+#[cfg(feature = "track-w")]
+fn raw_connect(sock: w::SOCKET, addr: SocketAddr) -> Result<()> {
+    // SAFETY: `sock` is a valid, freshly created socket owned by the
+    // caller for the duration of this call.
+    unsafe { rusty_win32::net::connect(sock, &to_donor_addr(addr)) }
+        .map_err(|e| trackw_wsa_err("connect", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_connect(sock: w::SOCKET, addr: SocketAddr) -> Result<()> {
+    let (buf, len) = to_sockaddr(addr);
+    // SAFETY: `buf` holds a valid `SOCKADDR_IN`/`SOCKADDR_IN6` for
+    // exactly the first `len` bytes (`to_sockaddr`'s contract); `sock`
+    // is a freshly created, valid socket.
+    let r = unsafe { w::connect(sock, buf.as_ptr().cast::<w::SOCKADDR>(), len) };
+    if r != 0 {
+        return Err(wsa_err("connect"));
+    }
+    Ok(())
+}
+
+/// `bind` to an IP address.
+#[cfg(feature = "track-w")]
+fn raw_bind(sock: w::SOCKET, addr: SocketAddr) -> Result<()> {
+    // SAFETY: as in `raw_connect`.
+    unsafe { rusty_win32::net::bind(sock, &to_donor_addr(addr)) }
+        .map_err(|e| trackw_wsa_err("bind", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_bind(sock: w::SOCKET, addr: SocketAddr) -> Result<()> {
+    let (buf, len) = to_sockaddr(addr);
+    // SAFETY: see `raw_connect`.
+    let r = unsafe { w::bind(sock, buf.as_ptr().cast::<w::SOCKADDR>(), len) };
+    if r != 0 {
+        return Err(wsa_err("bind"));
+    }
+    Ok(())
+}
+
+/// `listen(SOMAXCONN)`.
+#[cfg(feature = "track-w")]
+fn raw_listen(sock: w::SOCKET) -> Result<()> {
+    // SAFETY: `sock` is a valid, bound socket owned by the caller.
+    unsafe { rusty_win32::net::listen(sock, w::SOMAXCONN as i32) }
+        .map_err(|e| trackw_wsa_err("listen", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_listen(sock: w::SOCKET) -> Result<()> {
+    // SAFETY: `sock` is a valid, bound socket.
+    let r = unsafe { w::listen(sock, w::SOMAXCONN as i32) };
+    if r != 0 {
+        return Err(wsa_err("listen"));
+    }
+    Ok(())
+}
+
+/// `accept` on an IP listener.
+#[cfg(feature = "track-w")]
+fn raw_accept(sock: w::SOCKET) -> Result<(w::SOCKET, SocketAddr)> {
+    // SAFETY: `sock` is a valid, listening socket owned by the caller.
+    let (new_sock, peer) =
+        unsafe { rusty_win32::net::accept(sock) }.map_err(|e| trackw_wsa_err("accept", e))?;
+    Ok((new_sock, from_donor_addr(peer)))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_accept(sock: w::SOCKET) -> Result<(w::SOCKET, SocketAddr)> {
+    let mut buf = [0u8; 28];
+    let mut len = buf.len() as i32;
+    // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
+    // Winsock fills; `sock` is a valid, listening socket.
+    let new_sock = unsafe { w::accept(sock, buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
+    if new_sock == w::INVALID_SOCKET {
+        return Err(wsa_err("accept"));
+    }
+    Ok((new_sock, from_sockaddr(&buf)?))
+}
+
+/// `getsockname`/`getpeername` over an IP socket. `peer` selects which.
+#[cfg(feature = "track-w")]
+fn raw_sock_addr(sock: w::SOCKET, peer: bool) -> Result<SocketAddr> {
+    let addr = if peer {
+        // SAFETY: `sock` is a valid socket owned by the caller.
+        unsafe { rusty_win32::net::peer_addr(sock) }
+            .map_err(|e| trackw_wsa_err("getpeername", e))?
+    } else {
+        // SAFETY: same as the `peer_addr` arm above.
+        unsafe { rusty_win32::net::local_addr(sock) }
+            .map_err(|e| trackw_wsa_err("getsockname", e))?
+    };
+    Ok(from_donor_addr(addr))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_sock_addr(sock: w::SOCKET, peer: bool) -> Result<SocketAddr> {
+    let mut buf = [0u8; 28];
+    let mut len = buf.len() as i32;
+    let ptr = buf.as_mut_ptr().cast::<w::SOCKADDR>();
+    let (r, op) = if peer {
+        // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
+        // Winsock fills; `sock` is a valid socket.
+        let r = unsafe { w::getpeername(sock, ptr, &mut len) };
+        (r, "getpeername")
+    } else {
+        // SAFETY: same as the `getpeername` arm above.
+        let r = unsafe { w::getsockname(sock, ptr, &mut len) };
+        (r, "getsockname")
+    };
+    if r != 0 {
+        return Err(wsa_err(op));
+    }
+    from_sockaddr(&buf)
+}
+
+/// `recv`.
+#[cfg(feature = "track-w")]
+fn raw_recv(sock: w::SOCKET, buf: &mut [u8]) -> Result<usize> {
+    // SAFETY: `sock` is a valid socket owned by the caller; the buffer's
+    // pointer/length pair is derived by the donor from `buf` itself.
+    unsafe { rusty_win32::net::recv(sock, buf) }.map_err(|e| trackw_wsa_err("recv", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_recv(sock: w::SOCKET, buf: &mut [u8]) -> Result<usize> {
+    let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
+    // SAFETY: `buf` is a valid writable region of at least `len` bytes
+    // outliving the call; `sock` is caller-owned.
+    let n = unsafe { w::recv(sock, buf.as_mut_ptr().cast(), len, 0) };
+    if n < 0 {
+        return Err(wsa_err("recv"));
+    }
+    Ok(n as usize)
+}
+
+/// `send`.
+#[cfg(feature = "track-w")]
+fn raw_send(sock: w::SOCKET, buf: &[u8]) -> Result<usize> {
+    // SAFETY: as in `raw_recv`.
+    unsafe { rusty_win32::net::send(sock, buf) }.map_err(|e| trackw_wsa_err("send", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_send(sock: w::SOCKET, buf: &[u8]) -> Result<usize> {
+    let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
+    // SAFETY: `buf` is a valid readable region of at least `len` bytes
+    // outliving the call; `sock` is caller-owned.
+    let n = unsafe { w::send(sock, buf.as_ptr().cast(), len, 0) };
+    if n < 0 {
+        return Err(wsa_err("send"));
+    }
+    Ok(n as usize)
+}
+
+fn new_tcp_socket(addr: SocketAddr) -> Result<OwnedSocket> {
+    ensure_wsa_started();
+    Ok(OwnedSocket(raw_socket(
+        matches!(addr, SocketAddr::V6(_)),
+        true,
+    )?))
 }
 
 /// `socket` + `connect`, blocking until the connection completes or
 /// fails.
 pub fn tcp_connect(addr: SocketAddr) -> Result<OwnedSocket> {
     let sock = new_tcp_socket(addr)?;
-    let (buf, len) = to_sockaddr(addr);
-    // SAFETY: `buf` holds a valid `SOCKADDR_IN`/`SOCKADDR_IN6` for
-    // exactly the first `len` bytes (`to_sockaddr`'s contract); `sock`
-    // is a freshly created, valid socket.
-    let r = unsafe { w::connect(sock.raw(), buf.as_ptr().cast::<w::SOCKADDR>(), len) };
-    if r != 0 {
-        return Err(wsa_err("connect"));
-    }
+    raw_connect(sock.raw(), addr)?;
     Ok(sock)
 }
 
 /// `socket` + `SO_REUSEADDR` + `bind` + `listen(SOMAXCONN)`.
 pub fn tcp_listen(addr: SocketAddr) -> Result<OwnedSocket> {
     let sock = new_tcp_socket(addr)?;
-    let reuse: i32 = 1;
-    // SAFETY: `&reuse` is a valid `i32`-sized buffer outliving the call;
-    // `sock` is a valid, freshly created socket.
-    let r = unsafe {
-        w::setsockopt(
-            sock.raw(),
-            w::SOL_SOCKET,
-            w::SO_REUSEADDR,
-            (&reuse as *const i32).cast(),
-            std::mem::size_of::<i32>() as i32,
-        )
-    };
-    if r != 0 {
-        return Err(wsa_err("setsockopt(SO_REUSEADDR)"));
-    }
-
-    let (buf, len) = to_sockaddr(addr);
-    // SAFETY: see `tcp_connect`.
-    let r = unsafe { w::bind(sock.raw(), buf.as_ptr().cast::<w::SOCKADDR>(), len) };
-    if r != 0 {
-        return Err(wsa_err("bind"));
-    }
-    // SAFETY: `sock` is a valid, bound socket.
-    let r = unsafe { w::listen(sock.raw(), w::SOMAXCONN as i32) };
-    if r != 0 {
-        return Err(wsa_err("listen"));
-    }
+    set_sockopt(&sock, SockOpt::ReuseAddr)?;
+    raw_bind(sock.raw(), addr)?;
+    raw_listen(sock.raw())?;
     Ok(sock)
 }
 
 /// `accept`, returning the accepted connection and the peer's address.
 pub fn tcp_accept(listen_sock: &OwnedSocket) -> Result<(OwnedSocket, SocketAddr)> {
-    let mut buf = [0u8; 28];
-    let mut len = buf.len() as i32;
-    // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
-    // Winsock fills; `listen_sock` is a valid, listening socket.
-    let sock = unsafe {
-        w::accept(
-            listen_sock.raw(),
-            buf.as_mut_ptr().cast::<w::SOCKADDR>(),
-            &mut len,
-        )
-    };
-    if sock == w::INVALID_SOCKET {
-        return Err(wsa_err("accept"));
-    }
-    let peer = from_sockaddr(&buf)?;
+    let (sock, peer) = raw_accept(listen_sock.raw())?;
     Ok((OwnedSocket(sock), peer))
 }
 
@@ -322,24 +577,72 @@ pub fn set_nonblocking(sock: &OwnedSocket, nonblocking: bool) -> Result<()> {
     Ok(())
 }
 
-/// `setsockopt(IPPROTO_TCP, TCP_NODELAY, ...)`.
-pub fn set_nodelay(sock: &OwnedSocket, nodelay: bool) -> Result<()> {
-    let value: i32 = i32::from(nodelay);
-    // SAFETY: `&value` is a valid `i32`-sized buffer outliving the call;
-    // `sock` is caller-owned.
+/// The three socket options this backend sets. A closed enum rather
+/// than a `(level, name, value)` triple because that is the shape the
+/// donor's own `set_sockopt` takes, and mirroring it keeps the track-w
+/// arm a one-line map instead of a translation table.
+enum SockOpt {
+    ReuseAddr,
+    NoDelay(bool),
+    RecvTimeoutMillis(u32),
+}
+
+/// `setsockopt` — Track W (D-15): `rusty_win32::net::set_sockopt`.
+#[cfg(feature = "track-w")]
+fn set_sockopt(sock: &OwnedSocket, opt: SockOpt) -> Result<()> {
+    use rusty_win32::net::SockOpt as D;
+    let (donor, op) = match opt {
+        SockOpt::ReuseAddr => (D::ReuseAddr(true), "setsockopt(SO_REUSEADDR)"),
+        SockOpt::NoDelay(on) => (D::TcpNoDelay(on), "setsockopt(TCP_NODELAY)"),
+        SockOpt::RecvTimeoutMillis(ms) => (D::RecvTimeout(ms), "setsockopt(SO_RCVTIMEO)"),
+    };
+    // SAFETY: `sock` is caller-owned and valid for the life of the `&`
+    // borrow; the option carries a plain value, not a pointer.
+    unsafe { rusty_win32::net::set_sockopt(sock.raw(), donor) }.map_err(|e| trackw_wsa_err(op, e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn set_sockopt(sock: &OwnedSocket, opt: SockOpt) -> Result<()> {
+    let (level, name, value, op) = match opt {
+        SockOpt::ReuseAddr => (
+            w::SOL_SOCKET,
+            w::SO_REUSEADDR,
+            1u32,
+            "setsockopt(SO_REUSEADDR)",
+        ),
+        SockOpt::NoDelay(on) => (
+            w::IPPROTO_TCP,
+            w::TCP_NODELAY,
+            u32::from(on),
+            "setsockopt(TCP_NODELAY)",
+        ),
+        SockOpt::RecvTimeoutMillis(ms) => {
+            (w::SOL_SOCKET, w::SO_RCVTIMEO, ms, "setsockopt(SO_RCVTIMEO)")
+        }
+    };
+    // SAFETY: `&value` is a valid 4-byte buffer outliving the call — the
+    // width every one of these three options takes (`SO_REUSEADDR` and
+    // `TCP_NODELAY` as a boolean-valued `int`, `SO_RCVTIMEO` as a
+    // millisecond `DWORD` on Winsock, not a `timeval`); `sock` is
+    // caller-owned.
     let r = unsafe {
         w::setsockopt(
             sock.raw(),
-            w::IPPROTO_TCP,
-            w::TCP_NODELAY,
-            (&value as *const i32).cast(),
-            std::mem::size_of::<i32>() as i32,
+            level,
+            name,
+            (&value as *const u32).cast(),
+            std::mem::size_of::<u32>() as i32,
         )
     };
     if r != 0 {
-        return Err(wsa_err("setsockopt(TCP_NODELAY)"));
+        return Err(wsa_err(op));
     }
     Ok(())
+}
+
+/// `setsockopt(IPPROTO_TCP, TCP_NODELAY, ...)`.
+pub fn set_nodelay(sock: &OwnedSocket, nodelay: bool) -> Result<()> {
+    set_sockopt(sock, SockOpt::NoDelay(nodelay))
 }
 
 /// `setsockopt(SOL_SOCKET, SO_RCVTIMEO, ...)`. Winsock's `SO_RCVTIMEO`
@@ -351,70 +654,27 @@ pub fn set_read_timeout(sock: &OwnedSocket, timeout: Option<Duration>) -> Result
     let millis: u32 = timeout
         .map(|d| u32::try_from(d.as_millis()).unwrap_or(u32::MAX))
         .unwrap_or(0);
-    // SAFETY: `&millis` is a valid `u32`-sized buffer outliving the
-    // call; `sock` is caller-owned.
-    let r = unsafe {
-        w::setsockopt(
-            sock.raw(),
-            w::SOL_SOCKET,
-            w::SO_RCVTIMEO,
-            (&millis as *const u32).cast(),
-            std::mem::size_of::<u32>() as i32,
-        )
-    };
-    if r != 0 {
-        return Err(wsa_err("setsockopt(SO_RCVTIMEO)"));
-    }
-    Ok(())
+    set_sockopt(sock, SockOpt::RecvTimeoutMillis(millis))
 }
 
 /// `getpeername`.
 pub fn peer_addr(sock: &OwnedSocket) -> Result<SocketAddr> {
-    let mut buf = [0u8; 28];
-    let mut len = buf.len() as i32;
-    // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
-    // Winsock fills; `sock` is a valid, connected socket.
-    let r = unsafe { w::getpeername(sock.raw(), buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
-    if r != 0 {
-        return Err(wsa_err("getpeername"));
-    }
-    from_sockaddr(&buf)
+    raw_sock_addr(sock.raw(), true)
 }
 
 /// `getsockname`.
 pub fn local_addr(sock: &OwnedSocket) -> Result<SocketAddr> {
-    let mut buf = [0u8; 28];
-    let mut len = buf.len() as i32;
-    // SAFETY: see `peer_addr`.
-    let r = unsafe { w::getsockname(sock.raw(), buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
-    if r != 0 {
-        return Err(wsa_err("getsockname"));
-    }
-    from_sockaddr(&buf)
+    raw_sock_addr(sock.raw(), false)
 }
 
 /// `recv`.
 pub fn read(sock: &OwnedSocket, buf: &mut [u8]) -> Result<usize> {
-    let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
-    // SAFETY: `buf` is a valid writable region of at least `len` bytes
-    // outliving the call; `sock` is caller-owned.
-    let n = unsafe { w::recv(sock.raw(), buf.as_mut_ptr().cast(), len, 0) };
-    if n < 0 {
-        return Err(wsa_err("recv"));
-    }
-    Ok(n as usize)
+    raw_recv(sock.raw(), buf)
 }
 
 /// `send`.
 pub fn write(sock: &OwnedSocket, buf: &[u8]) -> Result<usize> {
-    let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
-    // SAFETY: `buf` is a valid readable region of at least `len` bytes
-    // outliving the call; `sock` is caller-owned.
-    let n = unsafe { w::send(sock.raw(), buf.as_ptr().cast(), len, 0) };
-    if n < 0 {
-        return Err(wsa_err("send"));
-    }
-    Ok(n as usize)
+    raw_send(sock.raw(), buf)
 }
 
 // --- Unix domain sockets (RFC v2 R5+, D16 follow-on) -----------------
@@ -430,6 +690,10 @@ pub fn write(sock: &OwnedSocket, buf: &[u8]) -> Result<usize> {
 /// `afunix.h`, the same 108 bytes every BSD-derived `sockaddr_un` uses).
 /// One byte of that is reserved for the NUL terminator this module
 /// always writes, so `107` is the longest path actually representable.
+// Under `track-w` the donor owns `sun_path`'s capacity
+// (`rusty_win32::net::UNIX_PATH_CAPACITY`, the same 108) and this
+// constant has no remaining reader.
+#[cfg(not(feature = "track-w"))]
 const UNIX_PATH_CAP: usize = 108;
 
 /// Pack a filesystem [`Path`] into a `SOCKADDR_UN`-shaped byte buffer —
@@ -441,6 +705,10 @@ const UNIX_PATH_CAP: usize = 108;
 /// backend cannot route around, not an implementation shortcut. A path
 /// that is not valid UTF-8, or that does not fit `sun_path` alongside
 /// its NUL terminator, is rejected here, before any socket call.
+// Under `track-w` the donor owns the sockaddr encoding entirely
+// (`to_donor_addr`/`from_donor_addr` above), so this arm's hand-rolled
+// conversion is genuinely unreachable rather than merely unused.
+#[cfg(not(feature = "track-w"))]
 fn to_sockaddr_un(path: &Path) -> Result<[u8; std::mem::size_of::<w::SOCKADDR_UN>()]> {
     let s = path.to_str().ok_or_else(|| {
         PlatformError::new(
@@ -525,34 +793,156 @@ fn from_sockaddr_un(
     Ok(Some(PathBuf::from(s)))
 }
 
-fn new_unix_socket() -> Result<OwnedSocket> {
-    ensure_wsa_started();
+/// A `Path` as the donor's own Unix-domain address type.
+///
+/// Both sides reject a non-UTF-8 path: this crate's `to_sockaddr_un`
+/// does (an `OsStr` reaches `sun_path` as bytes only if it is valid
+/// UTF-8 — Windows `OsStr` is WTF-16 underneath), and the donor's
+/// `UnixSocketAddr::new` takes bytes but is fed them from here. Same
+/// rejection, same `InvalidInput`, arrived at from the two directions.
+#[cfg(feature = "track-w")]
+fn to_donor_unix_addr(path: &Path) -> Result<rusty_win32::net::UnixSocketAddr> {
+    let s = path.to_str().ok_or_else(|| {
+        PlatformError::new(
+            ErrorKind::InvalidInput,
+            OsCode::None,
+            "AF_UNIX path is not valid UTF-8",
+        )
+    })?;
+    rusty_win32::net::UnixSocketAddr::new(s.as_bytes())
+        .map_err(|e| trackw_wsa_err("sockaddr_un", e))
+}
+
+/// The donor's Unix address as a path, or `None` for an unnamed socket.
+#[cfg(feature = "track-w")]
+fn from_donor_unix_addr(addr: &rusty_win32::net::UnixSocketAddr) -> Option<PathBuf> {
+    let bytes = addr.path_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    core::str::from_utf8(bytes).ok().map(PathBuf::from)
+}
+
+/// `socket(AF_UNIX, SOCK_STREAM, 0)`.
+#[cfg(feature = "track-w")]
+fn raw_unix_socket() -> Result<w::SOCKET> {
+    use rusty_win32::net::{AddressFamily, Protocol, SocketKind};
+    rusty_win32::net::socket(
+        AddressFamily::Unix,
+        SocketKind::Stream,
+        Protocol::Unspecified,
+    )
+    .map_err(|e| trackw_wsa_err("socket", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_unix_socket() -> Result<w::SOCKET> {
     // SAFETY: plain integer arguments, no memory referenced.
     let sock = unsafe { w::socket(i32::from(w::AF_UNIX), w::SOCK_STREAM, 0) };
     if sock == w::INVALID_SOCKET {
         return Err(wsa_err("socket"));
     }
-    Ok(OwnedSocket(sock))
+    Ok(sock)
+}
+
+/// `connect` to a Unix-domain path.
+#[cfg(feature = "track-w")]
+fn raw_connect_unix(sock: w::SOCKET, path: &Path) -> Result<()> {
+    let addr = to_donor_unix_addr(path)?;
+    // SAFETY: `sock` is a freshly created, valid AF_UNIX socket owned by
+    // the caller for the duration of this call.
+    unsafe { rusty_win32::net::connect_unix(sock, &addr) }.map_err(|e| trackw_wsa_err("connect", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_connect_unix(sock: w::SOCKET, path: &Path) -> Result<()> {
+    let buf = to_sockaddr_un(path)?;
+    // SAFETY: `buf` holds a valid `SOCKADDR_UN` for its entire length
+    // (`to_sockaddr_un`'s contract); `sock` is a freshly created, valid
+    // socket.
+    let r = unsafe { w::connect(sock, buf.as_ptr().cast::<w::SOCKADDR>(), buf.len() as i32) };
+    if r != 0 {
+        return Err(wsa_err("connect"));
+    }
+    Ok(())
+}
+
+/// `bind` to a Unix-domain path. Reports the raw failure rather than
+/// mapping it, because `unix_listen`'s stale-socket retry has to
+/// distinguish `WSAEADDRINUSE` from everything else.
+#[cfg(feature = "track-w")]
+fn raw_bind_unix(sock: w::SOCKET, path: &Path) -> Result<()> {
+    let addr = to_donor_unix_addr(path)?;
+    // SAFETY: as in `raw_connect_unix`.
+    unsafe { rusty_win32::net::bind_unix(sock, &addr) }.map_err(|e| trackw_wsa_err("bind", e))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_bind_unix(sock: w::SOCKET, path: &Path) -> Result<()> {
+    let buf = to_sockaddr_un(path)?;
+    // SAFETY: see `raw_connect_unix`.
+    let r = unsafe { w::bind(sock, buf.as_ptr().cast::<w::SOCKADDR>(), buf.len() as i32) };
+    if r != 0 {
+        return Err(wsa_err("bind"));
+    }
+    Ok(())
+}
+
+/// `accept` on a Unix-domain listener.
+#[cfg(feature = "track-w")]
+fn raw_accept_unix(sock: w::SOCKET) -> Result<(w::SOCKET, Option<PathBuf>)> {
+    // SAFETY: `sock` is a valid, listening AF_UNIX socket owned by the
+    // caller.
+    let (new_sock, peer) =
+        unsafe { rusty_win32::net::accept_unix(sock) }.map_err(|e| trackw_wsa_err("accept", e))?;
+    Ok((new_sock, from_donor_unix_addr(&peer)))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_accept_unix(sock: w::SOCKET) -> Result<(w::SOCKET, Option<PathBuf>)> {
+    let mut buf = [0u8; std::mem::size_of::<w::SOCKADDR_UN>()];
+    let mut len = buf.len() as i32;
+    // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
+    // Winsock fills; `sock` is a valid, listening socket.
+    let new_sock = unsafe { w::accept(sock, buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
+    if new_sock == w::INVALID_SOCKET {
+        return Err(wsa_err("accept"));
+    }
+    Ok((new_sock, from_sockaddr_un(&buf, len)?))
+}
+
+/// `getsockname` on a Unix-domain socket.
+#[cfg(feature = "track-w")]
+fn raw_local_addr_unix(sock: w::SOCKET) -> Result<Option<PathBuf>> {
+    // SAFETY: `sock` is a valid AF_UNIX socket owned by the caller.
+    let addr = unsafe { rusty_win32::net::local_addr_unix(sock) }
+        .map_err(|e| trackw_wsa_err("getsockname", e))?;
+    Ok(from_donor_unix_addr(&addr))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_local_addr_unix(sock: w::SOCKET) -> Result<Option<PathBuf>> {
+    let mut buf = [0u8; std::mem::size_of::<w::SOCKADDR_UN>()];
+    let mut len = buf.len() as i32;
+    // SAFETY: `buf`/`len` are valid out-params Winsock fills; `sock` is
+    // a valid socket.
+    let r = unsafe { w::getsockname(sock, buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
+    if r != 0 {
+        return Err(wsa_err("getsockname"));
+    }
+    from_sockaddr_un(&buf, len)
+}
+
+fn new_unix_socket() -> Result<OwnedSocket> {
+    ensure_wsa_started();
+    Ok(OwnedSocket(raw_unix_socket()?))
 }
 
 /// `socket` + `connect`, blocking until the connection completes or
 /// fails.
 pub fn unix_connect(path: &Path) -> Result<OwnedSocket> {
     let sock = new_unix_socket()?;
-    let buf = to_sockaddr_un(path)?;
-    // SAFETY: `buf` holds a valid `SOCKADDR_UN` for its entire length
-    // (`to_sockaddr_un`'s contract); `sock` is a freshly created, valid
-    // socket.
-    let r = unsafe {
-        w::connect(
-            sock.raw(),
-            buf.as_ptr().cast::<w::SOCKADDR>(),
-            buf.len() as i32,
-        )
-    };
-    if r != 0 {
-        return Err(wsa_err("connect"));
-    }
+    raw_connect_unix(sock.raw(), path)?;
     Ok(sock)
 }
 
@@ -563,87 +953,65 @@ fn is_stale_socket(path: &Path) -> bool {
     let Ok(probe) = new_unix_socket() else {
         return false;
     };
-    let Ok(buf) = to_sockaddr_un(path) else {
-        return false;
+    let r = match raw_connect_unix(probe.raw(), path) {
+        Ok(()) => 0,
+        // The probe only needs to distinguish "refused" (nothing
+        // listening — stale) from "connected" (a live owner). Any other
+        // failure is neither, and is reported as a nonzero code the
+        // caller's `WSAECONNREFUSED` check below will not match.
+        Err(e) if e.kind == ErrorKind::ConnectionRefused => w::WSAECONNREFUSED,
+        Err(_) => -1,
     };
-    // SAFETY: `buf` holds a valid `SOCKADDR_UN` for its entire length
-    // (`to_sockaddr_un`'s contract); `probe` is a freshly created,
-    // valid, otherwise-unused socket.
-    let r = unsafe {
-        w::connect(
-            probe.raw(),
-            buf.as_ptr().cast::<w::SOCKADDR>(),
-            buf.len() as i32,
-        )
-    };
-    if r == 0 {
-        // A live listener accepted the probe; `probe`'s `Drop` closes
-        // it, ending the connection without disturbing the listener.
-        return false;
-    }
-    // SAFETY: `WSAGetLastError` takes no arguments and has no
-    // preconditions.
-    (unsafe { w::WSAGetLastError() }) == w::WSAECONNREFUSED
+    // A live listener accepting the probe means not stale; `probe`'s
+    // `Drop` closes it, ending the connection without disturbing the
+    // listener. Otherwise stale iff the refusal was `WSAECONNREFUSED`.
+    //
+    // This no longer re-reads `WSAGetLastError` after the fact. That was
+    // already a latent race (any intervening Winsock call overwrites the
+    // slot), and under `track-w` the code has to come from the returned
+    // value anyway — note 003's lesson landing somewhere it changes
+    // behavior rather than merely restating it.
+    r == w::WSAECONNREFUSED
 }
 
 /// `socket` + `bind` (stale-cleanup retried once — see this module's doc
 /// comment) + `listen(SOMAXCONN)`.
 pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
     let sock = new_unix_socket()?;
-    let buf = to_sockaddr_un(path)?;
-    // SAFETY: see `unix_connect`.
-    let mut r = unsafe {
-        w::bind(
-            sock.raw(),
-            buf.as_ptr().cast::<w::SOCKADDR>(),
-            buf.len() as i32,
-        )
+    // The stale-socket retry now branches on the mapped `ErrorKind`
+    // rather than a fresh `WSAGetLastError` read. That is not merely
+    // equivalent, it is *more* correct: re-reading the thread-local
+    // after `bind` returned was already a latent race (any intervening
+    // Winsock call overwrites it), and under `track-w` the code has to
+    // come from the returned value anyway — the donor captured it at the
+    // only instant it was valid. Note 003's lesson, arriving where it
+    // actually changes something.
+    let first = raw_bind_unix(sock.raw(), path);
+    let bound = match first {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind == ErrorKind::AddrInUse && is_stale_socket(path) => {
+            let wide = to_wide_nul(path.as_os_str());
+            // Stays on windows-sys in both configurations: this is a
+            // *filesystem* unlink sitting in a net module, and the
+            // donor's `fs::delete_file` takes `&str` where this has an
+            // `OsStr`. `sys::fileio` is where a future slice should own
+            // it, not here.
+            // SAFETY: `wide` is a valid, NUL-terminated UTF-16 buffer
+            // outliving the call.
+            unsafe { w::DeleteFileW(wide.as_ptr()) };
+            raw_bind_unix(sock.raw(), path)
+        }
+        Err(e) => Err(e),
     };
-    // SAFETY: `WSAGetLastError` takes no arguments and has no
-    // preconditions.
-    if r != 0 && unsafe { w::WSAGetLastError() } == w::WSAEADDRINUSE && is_stale_socket(path) {
-        let wide = to_wide_nul(path.as_os_str());
-        // SAFETY: `wide` is a valid, NUL-terminated UTF-16 buffer
-        // outliving the call.
-        unsafe { w::DeleteFileW(wide.as_ptr()) };
-        // SAFETY: identical call to the one above; retried at most once.
-        r = unsafe {
-            w::bind(
-                sock.raw(),
-                buf.as_ptr().cast::<w::SOCKADDR>(),
-                buf.len() as i32,
-            )
-        };
-    }
-    if r != 0 {
-        return Err(wsa_err("bind"));
-    }
-    // SAFETY: `sock` is a valid, bound socket.
-    let r = unsafe { w::listen(sock.raw(), w::SOMAXCONN as i32) };
-    if r != 0 {
-        return Err(wsa_err("listen"));
-    }
+    bound?;
+    raw_listen(sock.raw())?;
     Ok(sock)
 }
 
 /// `accept`, returning the accepted connection and the peer's path, if
 /// it bound to one.
 pub fn unix_accept(listen_sock: &OwnedSocket) -> Result<(OwnedSocket, Option<PathBuf>)> {
-    let mut buf = [0u8; std::mem::size_of::<w::SOCKADDR_UN>()];
-    let mut len = buf.len() as i32;
-    // SAFETY: `buf`/`len` are valid, exclusively borrowed out-params
-    // Winsock fills; `listen_sock` is a valid, listening socket.
-    let sock = unsafe {
-        w::accept(
-            listen_sock.raw(),
-            buf.as_mut_ptr().cast::<w::SOCKADDR>(),
-            &mut len,
-        )
-    };
-    if sock == w::INVALID_SOCKET {
-        return Err(wsa_err("accept"));
-    }
-    let peer = from_sockaddr_un(&buf, len)?;
+    let (sock, peer) = raw_accept_unix(listen_sock.raw())?;
     Ok((OwnedSocket(sock), peer))
 }
 
@@ -663,14 +1031,7 @@ pub fn unix_peer_addr(sock: &OwnedSocket) -> Result<Option<PathBuf>> {
 
 /// `getsockname`. `Ok(None)` when the socket is not bound to a path.
 pub fn unix_local_addr(sock: &OwnedSocket) -> Result<Option<PathBuf>> {
-    let mut buf = [0u8; std::mem::size_of::<w::SOCKADDR_UN>()];
-    let mut len = buf.len() as i32;
-    // SAFETY: see `unix_peer_addr`.
-    let r = unsafe { w::getsockname(sock.raw(), buf.as_mut_ptr().cast::<w::SOCKADDR>(), &mut len) };
-    if r != 0 {
-        return Err(wsa_err("getsockname"));
-    }
-    from_sockaddr_un(&buf, len)
+    raw_local_addr_unix(sock.raw())
 }
 
 // --- UDP datagram sockets (D16 final slice) --------------------------
@@ -681,37 +1042,17 @@ pub fn unix_local_addr(sock: &OwnedSocket) -> Result<Option<PathBuf>> {
 // `getsockname` with nothing TCP-specific about it — reused as-is for
 // UDP rather than duplicated.
 
-fn new_udp_socket(addr: SocketAddr) -> Result<OwnedSocket> {
-    ensure_wsa_started();
-    let family = match addr {
-        SocketAddr::V4(_) => w::AF_INET,
-        SocketAddr::V6(_) => w::AF_INET6,
-    };
-    // SAFETY: plain integer arguments, no memory referenced.
-    let sock = unsafe { w::socket(i32::from(family), w::SOCK_DGRAM, 0) };
-    if sock == w::INVALID_SOCKET {
-        return Err(wsa_err("socket"));
-    }
-    Ok(OwnedSocket(sock))
+/// `sendto`.
+#[cfg(feature = "track-w")]
+fn raw_sendto(sock: w::SOCKET, buf: &[u8], addr: SocketAddr) -> Result<usize> {
+    // SAFETY: `sock` is a valid socket owned by the caller; the buffer's
+    // pointer/length pair is derived by the donor from `buf` itself.
+    unsafe { rusty_win32::net::sendto(sock, buf, &to_donor_addr(addr)) }
+        .map_err(|e| trackw_wsa_err("sendto", e))
 }
 
-/// `socket` + `bind`. No `listen`/`accept` — UDP has neither.
-pub fn udp_bind(addr: SocketAddr) -> Result<OwnedSocket> {
-    let sock = new_udp_socket(addr)?;
-    let (buf, len) = to_sockaddr(addr);
-    // SAFETY: `buf` holds a valid `SOCKADDR_IN`/`SOCKADDR_IN6` for
-    // exactly the first `len` bytes (`to_sockaddr`'s contract); `sock`
-    // is a freshly created, valid socket.
-    let r = unsafe { w::bind(sock.raw(), buf.as_ptr().cast::<w::SOCKADDR>(), len) };
-    if r != 0 {
-        return Err(wsa_err("bind"));
-    }
-    Ok(sock)
-}
-
-/// `sendto`, one datagram per call — fire-and-forget, no handshake to
-/// fail if nothing is listening at `addr`.
-pub fn udp_send_to(sock: &OwnedSocket, buf: &[u8], addr: SocketAddr) -> Result<usize> {
+#[cfg(not(feature = "track-w"))]
+fn raw_sendto(sock: w::SOCKET, buf: &[u8], addr: SocketAddr) -> Result<usize> {
     let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
     let (addr_buf, addr_len) = to_sockaddr(addr);
     // SAFETY: `buf` is valid for `len` bytes for the call's duration;
@@ -719,7 +1060,7 @@ pub fn udp_send_to(sock: &OwnedSocket, buf: &[u8], addr: SocketAddr) -> Result<u
     // `sock` is caller-owned.
     let n = unsafe {
         w::sendto(
-            sock.raw(),
+            sock,
             buf.as_ptr(),
             len,
             0,
@@ -733,12 +1074,17 @@ pub fn udp_send_to(sock: &OwnedSocket, buf: &[u8], addr: SocketAddr) -> Result<u
     Ok(n as usize)
 }
 
-/// `recvfrom`, blocking until one datagram arrives. A datagram larger
-/// than `buf` is truncated to `buf`'s length, matching `WSARecvFrom`'s
-/// own truncation behavior for `SOCK_DGRAM` — not detected or reported
-/// here, since Winsock gives no signal distinguishing "exactly
-/// `buf.len()` bytes arrived" from "more arrived and got truncated".
-pub fn udp_recv_from(sock: &OwnedSocket, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+/// `recvfrom`.
+#[cfg(feature = "track-w")]
+fn raw_recvfrom(sock: w::SOCKET, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+    // SAFETY: as in `raw_sendto`.
+    let (n, peer) = unsafe { rusty_win32::net::recvfrom(sock, buf) }
+        .map_err(|e| trackw_wsa_err("recvfrom", e))?;
+    Ok((n, from_donor_addr(peer)))
+}
+
+#[cfg(not(feature = "track-w"))]
+fn raw_recvfrom(sock: w::SOCKET, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
     let len = i32::try_from(buf.len()).unwrap_or(i32::MAX);
     let mut addr_buf = [0u8; 28];
     let mut addr_len = addr_buf.len() as i32;
@@ -747,7 +1093,7 @@ pub fn udp_recv_from(sock: &OwnedSocket, buf: &mut [u8]) -> Result<(usize, Socke
     // Winsock fills; `sock` is caller-owned.
     let n = unsafe {
         w::recvfrom(
-            sock.raw(),
+            sock,
             buf.as_mut_ptr(),
             len,
             0,
@@ -758,6 +1104,35 @@ pub fn udp_recv_from(sock: &OwnedSocket, buf: &mut [u8]) -> Result<(usize, Socke
     if n < 0 {
         return Err(wsa_err("recvfrom"));
     }
-    let peer = from_sockaddr(&addr_buf)?;
-    Ok((n as usize, peer))
+    Ok((n as usize, from_sockaddr(&addr_buf)?))
+}
+
+fn new_udp_socket(addr: SocketAddr) -> Result<OwnedSocket> {
+    ensure_wsa_started();
+    Ok(OwnedSocket(raw_socket(
+        matches!(addr, SocketAddr::V6(_)),
+        false,
+    )?))
+}
+
+/// `socket` + `bind`. No `listen`/`accept` — UDP has neither.
+pub fn udp_bind(addr: SocketAddr) -> Result<OwnedSocket> {
+    let sock = new_udp_socket(addr)?;
+    raw_bind(sock.raw(), addr)?;
+    Ok(sock)
+}
+
+/// `sendto`, one datagram per call — fire-and-forget, no handshake to
+/// fail if nothing is listening at `addr`.
+pub fn udp_send_to(sock: &OwnedSocket, buf: &[u8], addr: SocketAddr) -> Result<usize> {
+    raw_sendto(sock.raw(), buf, addr)
+}
+
+/// `recvfrom`, blocking until one datagram arrives. A datagram larger
+/// than `buf` is truncated to `buf`'s length, matching `WSARecvFrom`'s
+/// own truncation behavior for `SOCK_DGRAM` — not detected or reported
+/// here, since Winsock gives no signal distinguishing "exactly
+/// `buf.len()` bytes arrived" from "more arrived and got truncated".
+pub fn udp_recv_from(sock: &OwnedSocket, buf: &mut [u8]) -> Result<(usize, SocketAddr)> {
+    raw_recvfrom(sock.raw(), buf)
 }
