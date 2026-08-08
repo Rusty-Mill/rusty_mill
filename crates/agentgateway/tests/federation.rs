@@ -35,16 +35,8 @@ fn mock_server() -> String {
     path.display().to_string()
 }
 
-/// Claim a free port by binding and releasing it.
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("should bind an ephemeral port");
-    listener
-        .local_addr()
-        .expect("bound socket should have an address")
-        .port()
-}
+mod common;
+use common::free_port;
 
 struct Harness {
     client: RunningService<rmcp::RoleClient, ()>,
