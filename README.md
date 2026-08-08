@@ -19,6 +19,7 @@ The crate gives you three layers, each usable on its own:
 | `rusty_acp::server::store` | `postgres-store` | A Postgres-backed store: the same, with history that outlives a key expiry and is queryable. |
 | open discovery | `well-known` | Serves agent metadata as YAML at `/.well-known/agent.yml`. |
 | metrics | `metrics` | Records run, lease, store and client metrics through the [`metrics`] facade. Implies neither layer. |
+| trace context | `trace` | Reads and writes W3C `traceparent`, so one call correlates across replicas. Implies neither layer. |
 
 Both directions speak the same protocol, so a Rust agent is a drop-in peer for a Python (BeeAI),
 TypeScript, LangChain or CrewAI one.
@@ -50,6 +51,7 @@ rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["redis-
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["postgres-store"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["well-known"] }
 rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["metrics"] }
+rusty-acp = { git = "https://github.com/baileyrd/rusty_acp", features = ["trace"] }
 ```
 
 Minimum supported Rust version is **1.86**, verified in CI on every change. The optional
@@ -1063,8 +1065,8 @@ any other middleware — the crate does not duplicate it.
 
 ### Tracing across replicas
 
-Both spans carry a **`trace_id`**, taken from the W3C `traceparent` header when the caller sends
-one and minted when it does not. The client attaches the header to every outbound request, so the
+With the `trace` feature, both spans carry a **`trace_id`**, taken from the W3C `traceparent`
+header when the caller sends one and minted when it does not. The client attaches the header to every outbound request, so the
 two halves of this crate correlate with no configuration at all.
 
 ```
@@ -1096,6 +1098,10 @@ AcpClient::builder(url).without_trace_headers().build()?
 
 A malformed `traceparent` is replaced, not rejected — one broken upstream proxy should not be
 able to take a deployment down over a field nothing depends on.
+
+Off by default, like `metrics`, and for the same reason rather than a dependency: it gates
+behaviour, not a build. Emitting a header on every outbound request is a decision a deployment
+should make rather than inherit.
 
 ### Metrics
 

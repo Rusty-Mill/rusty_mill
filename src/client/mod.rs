@@ -28,8 +28,10 @@ use futures_util::{Stream, StreamExt, TryStreamExt};
 use reqwest::{Client, Method, RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
+#[cfg(feature = "trace")]
+use crate::trace::{TraceContext, TRACEPARENT_HEADER};
+
 use crate::{
-    trace::{TraceContext, TRACEPARENT_HEADER},
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, Event, Message, Run, RunCreateRequest,
         RunEventsListResponse, RunId, RunMode, RunResumeRequest, Session, SessionId,
@@ -303,6 +305,7 @@ pub struct AcpClient {
     base_url: String,
     reconnect: ReconnectPolicy,
     retry: RetryPolicy,
+    #[cfg(feature = "trace")]
     send_trace_headers: bool,
 }
 
@@ -320,6 +323,7 @@ impl AcpClient {
             timeout: None,
             reconnect: ReconnectPolicy::default(),
             retry: RetryPolicy::default(),
+            #[cfg(feature = "trace")]
             send_trace_headers: true,
         }
     }
@@ -366,11 +370,11 @@ impl AcpClient {
     /// [`without_trace_headers`](AcpClientBuilder::without_trace_headers), so
     /// there is exactly one `traceparent` on the wire rather than two.
     fn traced(&self, request: RequestBuilder) -> RequestBuilder {
-        if !self.send_trace_headers {
-            return request;
+        #[cfg(feature = "trace")]
+        if self.send_trace_headers {
+            return request.header(TRACEPARENT_HEADER, TraceContext::mint().to_string());
         }
-        let context = TraceContext::mint();
-        request.header(TRACEPARENT_HEADER, context.to_string())
+        request
     }
 
     /// The retry policy in force.
@@ -970,6 +974,7 @@ pub struct AcpClientBuilder {
     timeout: Option<Duration>,
     reconnect: ReconnectPolicy,
     retry: RetryPolicy,
+    #[cfg(feature = "trace")]
     send_trace_headers: bool,
 }
 
@@ -1037,6 +1042,7 @@ impl AcpClientBuilder {
     /// Turning it off and setting nothing in its place costs the correlation:
     /// the server mints a trace per request either way, so the ids exist, but
     /// nothing ties this client's own logging to them.
+    #[cfg(feature = "trace")]
     pub fn without_trace_headers(mut self) -> Self {
         self.send_trace_headers = false;
         self
@@ -1073,6 +1079,7 @@ impl AcpClientBuilder {
             base_url,
             reconnect: self.reconnect,
             retry: self.retry,
+            #[cfg(feature = "trace")]
             send_trace_headers: self.send_trace_headers,
         })
     }

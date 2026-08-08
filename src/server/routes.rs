@@ -6,12 +6,15 @@
 
 use std::{convert::Infallible, sync::Arc};
 
+#[cfg(feature = "trace")]
+use crate::trace::TRACEPARENT_HEADER;
+#[cfg(feature = "trace")]
+use axum::middleware::{from_fn, Next};
 use axum::{
     extract::{
         rejection::JsonRejection, DefaultBodyLimit, FromRequest, Path, Query, Request, State,
     },
     http::{header, HeaderMap, StatusCode},
-    middleware::{from_fn, Next},
     response::{
         sse::{Event as SseEvent, KeepAlive, Sse},
         IntoResponse, Response,
@@ -28,7 +31,7 @@ use crate::{
         store::{Notification, NotificationStream},
         AcpServer,
     },
-    trace::{TraceContext, TRACEPARENT_HEADER},
+    trace::TraceContext,
     types::{
         AgentManifest, AgentName, AgentsListResponse, Error, ErrorCode, Event, Message, Run,
         RunCreateRequest, RunEventsListResponse, RunId, RunMode, RunResumeRequest, RunStatus,
@@ -195,15 +198,17 @@ pub(crate) fn router(server: Arc<AcpServer>) -> Router {
     // Layered on the whole router rather than on `POST /runs` alone. The
     // submission is the only endpoint expected to carry a large body, but a
     // limit that only guards the endpoint you thought of is not a limit.
-    router
-        .layer(DefaultBodyLimit::max(server.max_request_bytes()))
-        // Outermost, so the span covers the body limit's own rejection too: a
-        // 413 is a thing an operator wants to find by trace id as much as a
-        // success is.
-        .layer(from_fn(trace_context))
-        .with_state(server)
+    let router = router.layer(DefaultBodyLimit::max(server.max_request_bytes()));
+
+    // Outermost, so the span covers the body limit's own rejection too: a 413
+    // is a thing an operator wants to find by trace id as much as a success is.
+    #[cfg(feature = "trace")]
+    let router = router.layer(from_fn(trace_context));
+
+    router.with_state(server)
 }
 
+#[cfg(feature = "trace")]
 /// Give every request a span carrying the trace it belongs to.
 ///
 /// Before this there were no request spans at all — #16 added `acp.run` and the

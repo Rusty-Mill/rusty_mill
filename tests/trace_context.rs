@@ -14,7 +14,7 @@
 //! 2. The client emits a header the server accepts, so the two halves of this
 //!    crate agree without anyone configuring anything.
 
-#![cfg(all(feature = "server", feature = "client"))]
+#![cfg(all(feature = "server", feature = "client", feature = "trace"))]
 
 use std::sync::{Arc, Mutex};
 
