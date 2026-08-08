@@ -873,6 +873,84 @@ binds:
 }
 
 #[test]
+fn retry_on_an_mcp_route_is_reported_rather_than_invented() {
+    // An MCP route holds a session rather than making a request it could make
+    // again: `codes` names statuses nothing there returns, and replaying a
+    // `tools/call` after an ambiguous transport error runs the tool twice.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              retry:
+                attempts: 2
+                codes: [503]
+            backends:
+              - mcp:
+                  targets:
+                    - name: alpha
+                      mcp: {host: 127.0.0.1, port: 3001, path: /mcp}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("policies.retry") && f.contains("tools/call")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn retry_on_an_ai_route_is_not_reported() {
+    // It applies there now, so there is nothing to warn about.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              retry:
+                attempts: 2
+                codes: [429, 503]
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
+fn retry_on_a_host_route_is_not_reported() {
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              retry:
+                attempts: 2
+                codes: [503]
+            backends:
+              - host: "10.0.0.1:8080"
+"#,
+    )
+    .expect("should parse");
+
+    assert_eq!(config.lint(), Vec::<String>::new());
+}
+
+#[test]
 fn a_prefix_rewrite_on_an_ai_route_needs_one_matched_prefix() {
     // An `ai` route resolves one endpoint at startup, before any request
     // exists, so it faces the same question an `mcp` target does: which prefix

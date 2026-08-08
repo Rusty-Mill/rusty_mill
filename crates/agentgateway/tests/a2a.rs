@@ -764,3 +764,133 @@ async fn a_path_rewrite_does_not_move_agent_card_discovery() {
 
     shutdown.cancel();
 }
+
+/// An agent that answers `status` for its first `failures` JSON-RPC calls,
+/// then succeeds. Its card is always served.
+async fn flaky_agent(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
+    use axum::{Router, extract::Request, routing::any};
+
+    let port = free_port().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+
+    let app = Router::new().fallback(any(move |request: Request| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let path = request.uri().path().to_string();
+            if request.method() == axum::http::Method::GET
+                && path.ends_with("/.well-known/agent-card.json")
+            {
+                return axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        agent_card(
+                            "Flaky",
+                            &format!("http://127.0.0.1:{port}"),
+                            &["echo"],
+                            true,
+                        )
+                        .to_string(),
+                    ))
+                    .expect("response should build");
+            }
+
+            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            let seen = counter.fetch_add(1, Ordering::Relaxed);
+            if seen < failures {
+                return axum::response::Response::builder()
+                    .status(status)
+                    .body(axum::body::Body::from("upstream is unwell"))
+                    .expect("response should build");
+            }
+
+            // Echo the method back so a replayed body can be checked.
+            let method = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|call| call["method"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            axum::response::Response::builder()
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true, "saw": method}})
+                        .to_string(),
+                ))
+                .expect("response should build")
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("agent should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (port, calls)
+}
+
+const RETRY: &str =
+    "              retry:\n                attempts: 2\n                codes: [503]";
+
+#[tokio::test]
+async fn a_listed_status_is_retried_on_an_a2a_route() {
+    // An `a2a` route dispatches through the `host` proxy, which has always
+    // retried. Asserted rather than assumed.
+    let (port, calls) = flaky_agent(2, 503).await;
+    let (url, shutdown) = start_with(
+        "                allowMethods: [\"message/send\"]",
+        &[port],
+        RETRY,
+    )
+    .await;
+
+    let response = call(&url, "message/send").await;
+    assert_eq!(response["result"]["ok"], true, "{response}");
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_retried_a2a_call_replays_the_body_the_policy_had_to_buffer() {
+    // Gating reads the method out of the body, so the proxy is handed an
+    // already-buffered request -- replayable by construction. An attempt after
+    // the first must not arrive empty.
+    let (port, calls) = flaky_agent(1, 503).await;
+    let (url, shutdown) = start_with(
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[port],
+        RETRY,
+    )
+    .await;
+
+    let response = call(&url, "message/send").await;
+    assert_eq!(
+        response["result"]["saw"], "message/send",
+        "the replayed attempt carried the same body: {response}"
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_refused_a2a_method_is_never_retried_because_it_is_never_sent() {
+    // The refusal is the gateway's own response, produced before dispatch, so
+    // there is no upstream attempt for a retry policy to repeat.
+    let (port, calls) = flaky_agent(0, 503).await;
+    let (url, shutdown) = start_with(
+        "                denyMethods: [\"^tasks/cancel$\"]",
+        &[port],
+        RETRY,
+    )
+    .await;
+
+    let response = call(&url, "tasks/cancel").await;
+    assert_eq!(response["error"]["code"], -32011);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    shutdown.cancel();
+}

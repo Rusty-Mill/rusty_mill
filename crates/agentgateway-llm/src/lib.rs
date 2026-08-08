@@ -26,7 +26,7 @@ pub mod translate;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use agentgateway_config::{AiBackend, BackendAuth, Policies};
-use agentgateway_core::{Headers, Rewrite};
+use agentgateway_core::{Headers, Retry, Rewrite};
 use bytes::Bytes;
 use futures_util::StreamExt as _;
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode, Uri, header};
@@ -92,6 +92,11 @@ pub struct LlmBackend {
     /// backend and so is a rewrite of it, so there is nothing per-request to
     /// decide and no string to rebuild on every call.
     endpoint: String,
+    /// The route's `retry`, applied to the provider request.
+    ///
+    /// Consumed only by the `host` proxy before: an `ai` route asking for
+    /// three attempts got exactly one. See [`LlmBackend::send`].
+    retry: Option<Retry>,
     client: reqwest::Client,
 }
 
@@ -165,6 +170,7 @@ impl LlmBackend {
             key,
             request_headers,
             endpoint,
+            retry: policies.retry.as_ref().and_then(Retry::new),
             client,
         })
     }
@@ -177,6 +183,94 @@ impl LlmBackend {
     /// The URL this backend will POST to.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Send the translated request, retrying if the route asked for it.
+    ///
+    /// An `ai` request is replayable by construction. The proxy has to decide
+    /// whether a body can be buffered, and refuses to retry when it cannot;
+    /// here the body was already read and translated before anything could be
+    /// sent, so the question never arises and `attempts` always means what it
+    /// says.
+    ///
+    /// What is retried is the same on both paths, from the same policy: a
+    /// listed status, or a connect failure. Not a timeout and not any other
+    /// transport error — those may have reached the provider and been billed,
+    /// with only the response lost, and replaying would pay for the tokens
+    /// twice.
+    ///
+    /// Streaming is unaffected: the decision is made on the response head,
+    /// which arrives before the first token, so a retried stream has not
+    /// started coming back yet.
+    ///
+    /// `Err` carries the response to return when no attempt produced one.
+    async fn send(
+        &self,
+        headers: HeaderMap,
+        payload: Bytes,
+    ) -> Result<reqwest::Response, Response<LlmBody>> {
+        let attempts = self.retry.as_ref().map_or(1, Retry::max_attempts);
+        let mut last = None;
+
+        for attempt in 0..attempts {
+            if attempt > 0
+                && let Some(retry) = &self.retry
+                && let Some(wait) = retry.backoff(attempt)
+            {
+                tokio::time::sleep(wait).await;
+            }
+
+            let sending = self
+                .client
+                .post(&self.endpoint)
+                .headers(headers.clone())
+                .body(payload.clone());
+
+            let retryable_left = attempt + 1 < attempts;
+            match sending.send().await {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let retry_this = retryable_left
+                        && self
+                            .retry
+                            .as_ref()
+                            .is_some_and(|retry| retry.retries_status(status));
+                    if !retry_this {
+                        return Ok(response);
+                    }
+                    tracing::debug!(
+                        provider = self.provider.name(),
+                        status,
+                        attempt = attempt + 1,
+                        "retrying a provider response"
+                    );
+                    last = Some(response);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        provider = self.provider.name(),
+                        %err,
+                        "provider request failed"
+                    );
+                    if !(retryable_left && err.is_connect()) {
+                        return Err(error(
+                            StatusCode::BAD_GATEWAY,
+                            "the model provider could not be reached",
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Every attempt was retryable and none broke the pattern. The last
+        // response is the provider's own answer, and passing it through beats
+        // inventing a gateway error that hides what the provider said.
+        last.ok_or_else(|| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                "the model provider could not be reached",
+            )
+        })
     }
 
     /// Serve one OpenAI-compatible request.
@@ -246,21 +340,21 @@ impl LlmBackend {
             modifier.apply(&mut headers);
         }
 
-        let upstream = self
-            .client
-            .post(&self.endpoint)
-            .headers(headers)
-            .json(&upstream_body);
-
-        let response = match upstream.send().await {
-            Ok(response) => response,
+        // Serialized once rather than per attempt: the body does not change
+        // between them, and a retry should cost a request, not a re-encode.
+        let payload = match serde_json::to_vec(&upstream_body) {
+            Ok(payload) => Bytes::from(payload),
             Err(err) => {
-                tracing::warn!(provider = self.provider.name(), %err, "provider request failed");
                 return error(
-                    StatusCode::BAD_GATEWAY,
-                    "the model provider could not be reached",
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("the translated request could not be serialized: {err}"),
                 );
             }
+        };
+
+        let response = match self.send(headers, payload).await {
+            Ok(response) => response,
+            Err(unreachable) => return unreachable,
         };
 
         let status =

@@ -505,10 +505,41 @@ impl Route {
         }
     }
 
+    /// Report a `retry` on a route that terminates MCP.
+    ///
+    /// Retry applies wherever the gateway makes an HTTP request it could make
+    /// again — a proxied upstream, an `a2a` agent, an `ai` provider. An MCP
+    /// route makes no such request: it holds a session and sends a JSON-RPC
+    /// message over it.
+    ///
+    /// Two things follow, and both are reasons not to quietly invent a meaning
+    /// for the field. `codes` are HTTP statuses, and there is no HTTP response
+    /// at that layer to read one from. And the safety rule the other paths rely
+    /// on — only a *connect* failure is known never to have reached the
+    /// upstream — has no equivalent: a transport error on an established
+    /// session covers both "never sent" and "sent, reply lost". Replaying a
+    /// `tools/call` under that ambiguity is how a tool whose whole purpose is a
+    /// side effect performs it twice.
+    fn lint_retry(&self, policies: &Policies, at: &str, findings: &mut Vec<String>) {
+        if policies.retry.is_none() {
+            return;
+        }
+        if !self.backends.iter().any(|b| b.target.is_mcp()) {
+            return;
+        }
+        findings.push(format!(
+            "{at}.policies.retry: an `mcp` backend holds a session rather than making a \
+             request it could make again, so `codes` names statuses nothing here returns, and \
+             replaying a `tools/call` after an ambiguous transport error would run the tool \
+             twice; it is not applied"
+        ));
+    }
+
     fn lint(&self, at: &str, findings: &mut Vec<String>) {
         if let Some(policies) = &self.policies {
             policies.lint(at, findings);
             self.lint_url_rewrite(policies, at, findings);
+            self.lint_retry(policies, at, findings);
         }
         self.lint_via(at, findings);
         for (i, backend) in self.backends.iter().enumerate() {

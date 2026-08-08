@@ -8,6 +8,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use agentgateway::{Gateway, serve};
 use agentgateway_config::Config;
@@ -861,4 +862,158 @@ binds:
         err.to_string().contains("backendAuth"),
         "the error should say where a credential belongs: {err}"
     );
+}
+
+/// A provider that answers `status` for its first `failures` calls, then
+/// succeeds, counting every call it received.
+async fn flaky_provider(failures: usize, status: u16) -> (u16, Arc<AtomicUsize>) {
+    use axum::{Router, extract::Request, routing::any};
+
+    let port = free_port().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+
+    let app = Router::new().fallback(any(move |request: Request| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
+            let seen = counter.fetch_add(1, Ordering::Relaxed);
+            if seen < failures {
+                return axum::response::Response::builder()
+                    .status(status)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"error": {"message": "try again"}}).to_string(),
+                    ))
+                    .expect("response should build");
+            }
+            axum::response::Response::builder()
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(openai_reply().to_string()))
+                .expect("response should build")
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("provider should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (port, calls)
+}
+
+/// Retry two listed statuses, with no backoff so the tests stay fast.
+const RETRY: &str =
+    "              retry:\n                attempts: 2\n                codes: [429, 503]";
+
+#[tokio::test]
+async fn a_listed_status_is_retried_on_an_ai_route() {
+    // An `ai` route asking for three attempts used to get exactly one: the
+    // policy was consumed only by the `host` proxy.
+    let (provider_port, calls) = flaky_provider(2, 429).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", RETRY).await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        3,
+        "two retries after the first try is three attempts"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_status_the_route_did_not_list_is_not_retried() {
+    // Nothing is retried on status unless `codes` names it: the provider
+    // answered, so it certainly saw the request.
+    let (provider_port, calls) = flaky_provider(2, 500).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", RETRY).await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status(), 500);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_route_without_a_retry_policy_makes_one_attempt() {
+    let (provider_port, calls) = flaky_provider(2, 429).await;
+    let (url, shutdown) = start("openAI", provider_port, "").await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status(), 429);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn exhausting_the_attempts_returns_the_providers_own_last_answer() {
+    // Rather than a gateway error that hides what the provider said. The
+    // message is the useful part.
+    let (provider_port, calls) = flaky_provider(99, 503).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", RETRY).await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status(), 503);
+    let body: Value = response.json().await.expect("should be JSON");
+    assert_eq!(
+        body["error"]["message"], "try again",
+        "the provider's own body survives: {body}"
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 3);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_connect_failure_is_retried_but_a_provider_that_never_comes_up_still_fails() {
+    // A connect failure never reached the provider, so replaying it cannot
+    // duplicate work -- the one transport error that is safe to repeat.
+    let dead = free_port().await;
+    let (url, shutdown) = start_with("openAI", dead, "", RETRY).await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(
+        response.status(),
+        502,
+        "the gateway is fine, the provider is not"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_retried_request_still_carries_its_body_and_credential() {
+    // The body is serialized once and replayed, so an attempt after the first
+    // must not arrive empty or unauthenticated.
+    let (provider_port, seen) = provider(openai_reply(), None).await;
+    let (url, shutdown) = start_with("openAI", provider_port, "", RETRY).await;
+
+    post(&url, &chat_request()).await;
+
+    let seen = seen.lock().expect("lock");
+    let sent = seen.body.clone().expect("the provider should see a body");
+    assert_eq!(sent["messages"][1]["content"], "Hello");
+    assert!(
+        seen.headers
+            .iter()
+            .any(|(k, v)| k == "content-type" && v.starts_with("application/json")),
+        "saw {:?}",
+        seen.headers
+    );
+    assert!(
+        seen.headers
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == "Bearer test-key"),
+        "saw {:?}",
+        seen.headers
+    );
+
+    shutdown.cancel();
 }

@@ -1205,6 +1205,60 @@ leave a stream that can be neither replayed nor forwarded. Requests with a
 `Content-Length` inside the limit get retries; chunked or oversized ones are
 streamed straight through and simply do not.
 
+### Which backends retry
+
+`retry` used to be consumed only by the `host` proxy, so an `ai` route asking
+for three attempts got exactly one.
+
+An **`ai`** route retries now, on the same policy and the same rules — a listed
+status, or a connect failure, and nothing else. Buffering is not a question
+there: an `ai` request has to be read to be translated, so it is replayable by
+construction and `attempts` always means what it says. The body is serialized
+once and replayed, so a retry costs a request rather than a re-encode.
+
+```yaml
+policies:
+  retry:
+    attempts: 2
+    backoff: 500ms
+    codes: [429, 503]     # the two a model provider actually sheds with
+  backendAuth:
+    key: sk-...
+backends:
+  - ai:
+      provider:
+        openAI: {}
+```
+
+Streaming is unaffected. The retry decision is made on the response head, which
+arrives before the first token, so a stream that gets retried has not started
+coming back yet. Exhausting the attempts returns **the provider's own last
+answer**, not a gateway error — the message is the useful part, and rewriting
+"rate limit exceeded" into "bad gateway" costs an afternoon.
+
+An **`a2a`** route already retried, through the same proxy. It is also always
+replayable, for a different reason: the policy has to buffer the body to read
+the JSON-RPC method out of it, so by the time the proxy sees the request it is
+buffered whatever its size. A refused method is never retried at all, because
+it was never sent — the refusal is the gateway's own response.
+
+An **`mcp`** route is reported rather than retried:
+
+```
+warning: ...policies.retry: an `mcp` backend holds a session rather than making
+         a request it could make again, so `codes` names statuses nothing here
+         returns, and replaying a `tools/call` after an ambiguous transport
+         error would run the tool twice; it is not applied
+```
+
+Both halves of that matter. `codes` are HTTP statuses, and an MCP route sends a
+JSON-RPC message over a session it already holds — there is no HTTP response at
+that layer to read one from. And the safety rule everything else leans on, that
+a *connect* failure is the one error known never to have reached the upstream,
+has no equivalent: a transport error on an established session covers both
+"never sent" and "sent, reply lost". Retrying under that ambiguity is how a tool
+whose entire purpose is a side effect performs it twice.
+
 ### Rate limits
 
 Several limits on one route must *all* permit a request, which is how burst and
