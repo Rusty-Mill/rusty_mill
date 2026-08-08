@@ -2335,6 +2335,16 @@ mod unix_tests {
 
     fn temp_socket_path(name: &str) -> alloc::string::String {
         let path = std::env::temp_dir().join(name);
+        // Windows doesn't unlink an `AF_UNIX` bind's backing file on
+        // close (unlike a Linux `unlink(2)`-then-exit shell), and this
+        // module's own `bind_unix` doesn't paper over that — `sys::net`'s
+        // stale-socket retry (see this crate's rustils consumer) is
+        // deliberately a caller-side concern, not this crate's. This
+        // CI's own two `cargo test` invocations against the same runner
+        // (no-default-features, then `--features std`) are exactly that
+        // caller: without this, the second run's bind_unix fails
+        // `WSAEADDRINUSE` on the first run's leftover file.
+        let _ = std::fs::remove_file(&path);
         alloc::string::String::from(path.to_str().expect("temp path should be valid UTF-8"))
     }
 
