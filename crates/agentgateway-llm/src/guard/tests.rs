@@ -20,9 +20,14 @@ fn pattern(source: &str) -> GuardPattern {
 }
 
 fn guard(request: Vec<GuardRule>, response: Vec<GuardRule>) -> Guard {
-    Guard::new(Some(&PromptGuard { request, response }), "t")
-        .expect("should compile")
-        .expect("should be present")
+    Guard::new(
+        Some(&PromptGuard { request, response }),
+        None,
+        "openai",
+        "t",
+    )
+    .expect("should compile")
+    .expect("should be present")
 }
 
 /// Run a check to completion.
@@ -62,7 +67,7 @@ fn content(body: &Value) -> &str {
 fn a_policy_with_no_regex_rule_compiles_to_nothing() {
     // A `webhook` rule lands in the catch-all and is reported by the lint; it
     // must not make the request path scan for patterns it does not have.
-    assert!(Guard::new(None, "t").expect("ok").is_none());
+    assert!(Guard::new(None, None, "openai", "t").expect("ok").is_none());
     let webhook = GuardRule {
         rest: [("webhook".to_string(), json!({"target": {}}))]
             .into_iter()
@@ -75,6 +80,8 @@ fn a_policy_with_no_regex_rule_compiles_to_nothing() {
                 request: vec![webhook],
                 response: Vec::new(),
             }),
+            None,
+            "openai",
             "t"
         )
         .expect("ok")
@@ -305,6 +312,8 @@ fn a_pattern_that_does_not_compile_fails_at_startup() {
             request: vec![rule(GuardAction::Reject, vec![pattern("[")])],
             response: Vec::new(),
         }),
+        None,
+        "openai",
         "route[0].ai.promptGuard",
     )
     .expect_err("should not compile");

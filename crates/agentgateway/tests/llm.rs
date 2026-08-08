@@ -2325,3 +2325,264 @@ async fn a_header_expression_can_read_the_request_the_caller_wrote() {
 
     shutdown.cancel();
 }
+
+/// A provider that also answers OpenAI's moderation endpoint.
+///
+/// One server for both, because a moderation rule with no key of its own calls
+/// the route's own host rather than `api.openai.com` — which is the behaviour
+/// under test as much as the verdict is.
+async fn moderating_provider(
+    flagged: bool,
+    moderation_status: u16,
+) -> (u16, Arc<Mutex<Vec<(Value, Vec<(String, String)>)>>>) {
+    use axum::{Router, extract::Request, routing::any};
+
+    let port = free_port().await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+
+    let app = Router::new().fallback(any(move |request: Request| {
+        let recorder = Arc::clone(&recorder);
+        async move {
+            let path = request.uri().path().to_string();
+            let headers: Vec<(String, String)> = request
+                .headers()
+                .iter()
+                .map(|(k, v)| {
+                    (
+                        k.as_str().to_string(),
+                        v.to_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect();
+            let bytes = axum::body::to_bytes(request.into_body(), 1 << 20)
+                .await
+                .unwrap_or_default();
+            let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+            if !path.contains("moderations") {
+                return axum::response::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(openai_reply().to_string()))
+                    .expect("response should build");
+            }
+
+            if let Ok(mut seen) = recorder.lock() {
+                seen.push((body, headers));
+            }
+            axum::response::Response::builder()
+                .status(moderation_status)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"id": "modr-1", "model": "omni-moderation-latest",
+                           "results": [{"flagged": flagged, "categories": {"violence": flagged}}]})
+                    .to_string(),
+                ))
+                .expect("response should build")
+        }
+    }));
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+        .await
+        .expect("provider should bind");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    (port, seen)
+}
+
+/// A `promptGuard` with one moderation rule, indented for `start_with`.
+///
+/// `rejection` is given as bare `key: value` lines and indented here, so a
+/// test says what it wants rather than counting spaces.
+fn moderation_policy(phase: &str, rejection: &[&str]) -> String {
+    let mut lines = vec![
+        "              ai:".to_string(),
+        "                promptGuard:".to_string(),
+        format!("                  {phase}:"),
+        "                    - openAIModeration: {}".to_string(),
+    ];
+    if !rejection.is_empty() {
+        lines.push("                      rejection:".to_string());
+        lines.extend(
+            rejection
+                .iter()
+                .map(|line| format!("                        {line}")),
+        );
+    }
+    lines.join("\n")
+}
+
+#[tokio::test]
+async fn a_flagged_prompt_is_refused_before_the_provider_is_called() {
+    let (provider_port, seen) = moderating_provider(true, 200).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &moderation_policy("request", &["status: 451", "body: this prompt was refused"]),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status().as_u16(), 451);
+    assert_eq!(
+        response.text().await.expect("a body"),
+        "this prompt was refused"
+    );
+
+    // The classifier was asked, and the chat endpoint never was: a refused
+    // prompt costs nothing at the provider.
+    assert_eq!(seen.lock().expect("lock").len(), 1);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn the_classifier_is_shown_every_message_and_paid_for_with_the_routes_key() {
+    // A borrowed key travels only as far as the route it came from, so the
+    // call lands on this same stub rather than on `api.openai.com`.
+    let (provider_port, seen) = moderating_provider(false, 200).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &moderation_policy("request", &[]),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+
+    let seen = seen.lock().expect("lock");
+    let (body, headers) = seen.first().expect("the classifier should be asked");
+    assert_eq!(
+        body["input"],
+        json!(["Be brief.", "Hello"]),
+        "every message, in order: {body}"
+    );
+    assert_eq!(
+        body["model"], "omni-moderation-latest",
+        "upstream's default classifier"
+    );
+    assert!(
+        headers
+            .iter()
+            .any(|(name, value)| name == "authorization" && value == "Bearer test-key"),
+        "the route's own key: {headers:?}"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_classifier_that_cannot_be_reached_refuses_the_request() {
+    // Fails closed, and with a 503 rather than the rule's own rejection:
+    // nothing decided this prompt was unacceptable.
+    let (provider_port, _seen) = moderating_provider(false, 500).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &moderation_policy("request", &["status: 451"]),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert_eq!(response.status().as_u16(), 503);
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_moderation_rule_on_the_response_phase_inspects_nothing() {
+    // Upstream's response guard has no moderation variant. `--check` reports
+    // the rule; the request itself is served as though it were not there.
+    let (provider_port, seen) = moderating_provider(true, 200).await;
+    let (url, shutdown) = start_with(
+        "openAI",
+        provider_port,
+        "",
+        &moderation_policy("response", &[]),
+    )
+    .await;
+
+    let response = post(&url, &chat_request()).await;
+    assert!(response.status().is_success(), "{}", response.status());
+    assert!(
+        seen.lock().expect("lock").is_empty(),
+        "the classifier must not be called for an answer"
+    );
+
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn a_moderation_rule_on_an_anthropic_route_fails_at_startup() {
+    // The failure this refusal exists to prevent: borrowing the route's key
+    // would send an Anthropic credential to OpenAI.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              backendAuth:
+                key: sk-ant-secret
+              ai:
+                promptGuard:
+                  request:
+                    - openAIModeration: {{}}
+            backends:
+              - ai:
+                  provider:
+                    anthropic: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    let err = Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect_err("an Anthropic key must not be lent to OpenAI");
+    assert!(err.to_string().contains("anthropic"), "got: {err}");
+    assert!(err.to_string().contains("third party"), "got: {err}");
+}
+
+#[tokio::test]
+async fn a_moderation_rule_with_its_own_key_serves_an_anthropic_route() {
+    // The other half of the rule above: a key of its own is an OpenAI key, so
+    // there is nothing to refuse.
+    let port = free_port().await;
+    let yaml = format!(
+        r#"
+binds:
+  - port: {port}
+    listeners:
+      - routes:
+          - policies:
+              backendAuth:
+                key: sk-ant-secret
+              ai:
+                promptGuard:
+                  request:
+                    - openAIModeration:
+                        policies:
+                          backendAuth:
+                            key: sk-moderation
+            backends:
+              - ai:
+                  provider:
+                    anthropic: {{}}
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).expect("should parse");
+    Gateway::build(&config, None)
+        .await
+        .map(|_| ())
+        .expect("a rule with its own OpenAI key should start");
+}

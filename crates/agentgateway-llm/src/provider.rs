@@ -137,6 +137,27 @@ impl Provider {
         }
     }
 
+    /// The moderation URL a `promptGuard` rule may borrow, when this provider
+    /// has one to lend.
+    ///
+    /// Only OpenAI: the endpoint is OpenAI's, and a key issued for another
+    /// provider is not a credential for it. `hostOverride` is carried along,
+    /// because a borrowed key should not travel further than the host it was
+    /// configured for. See [`crate::guard::moderation`].
+    pub fn moderation_endpoint(&self) -> Option<String> {
+        match self {
+            Provider::OpenAi(settings) => {
+                let base = settings
+                    .host
+                    .as_deref()
+                    .unwrap_or("https://api.openai.com")
+                    .trim_end_matches('/');
+                Some(format!("{base}/v1/moderations"))
+            }
+            Provider::Anthropic(_) => None,
+        }
+    }
+
     /// Headers carrying the provider credential.
     ///
     /// The two providers spell this differently, and Anthropic additionally

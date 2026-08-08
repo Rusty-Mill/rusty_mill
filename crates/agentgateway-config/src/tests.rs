@@ -1356,3 +1356,149 @@ binds:
 
     assert_eq!(config.lint(), Vec::<String>::new());
 }
+
+#[test]
+fn a_moderation_rule_parses_in_the_shape_upstream_writes_it() {
+    // `openAIModeration` keeps upstream's capitalisation, and its credential
+    // sits under `policies.backendAuth` because upstream reuses its whole
+    // backend policy type for the call.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                promptGuard:
+                  request:
+                    - openAIModeration:
+                        model: text-moderation-stable
+                        policies:
+                          backendAuth:
+                            key: sk-moderation
+                      rejection:
+                        status: 451
+                        body: not allowed here
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    let rule = &config.binds[0].listeners[0].routes[0]
+        .policies
+        .as_ref()
+        .expect("policies")
+        .ai
+        .as_ref()
+        .expect("ai")
+        .prompt_guard
+        .as_ref()
+        .expect("promptGuard")
+        .request[0];
+    let moderation = rule.open_ai_moderation.as_ref().expect("openAIModeration");
+    assert_eq!(moderation.model.as_deref(), Some("text-moderation-stable"));
+    assert!(matches!(
+        moderation
+            .policies
+            .as_ref()
+            .and_then(|policies| policies.backend_auth.as_ref()),
+        Some(BackendAuth::Key(key)) if key == "sk-moderation"
+    ));
+    assert_eq!(rule.rejection.as_ref().expect("rejection").status, 451);
+
+    // It applies now, so it is no longer one of the keys the lint names.
+    assert!(
+        !config.lint().iter().any(|f| f.contains("openAIModeration")),
+        "{:?}",
+        config.lint()
+    );
+}
+
+#[test]
+fn a_moderation_rule_on_the_response_phase_is_reported() {
+    // Upstream's response guard has no moderation variant: a config naming one
+    // there does not load upstream at all, so there is no behaviour to be
+    // faithful to and nothing here inspects the answer.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                promptGuard:
+                  response:
+                    - openAIModeration: {}
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    let findings = config.lint();
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.contains("response[0].openAIModeration")
+                && f.contains("request phase only")),
+        "{findings:?}"
+    );
+}
+
+#[test]
+fn a_moderation_rule_keeps_the_backend_policies_it_does_not_read() {
+    // Only `backendAuth` changes what this build sends. The rest is kept so an
+    // upstream config loads rather than being rejected key by key.
+    let config = Config::from_yaml(
+        r#"
+binds:
+  - port: 3000
+    listeners:
+      - routes:
+          - policies:
+              ai:
+                promptGuard:
+                  request:
+                    - openAIModeration:
+                        policies:
+                          backendTLS:
+                            insecure: true
+                          requestHeaderModifier:
+                            add:
+                              x-trace: "1"
+            backends:
+              - ai:
+                  provider:
+                    openAI: {}
+"#,
+    )
+    .expect("should parse");
+
+    let policies = config.binds[0].listeners[0].routes[0]
+        .policies
+        .as_ref()
+        .expect("policies")
+        .ai
+        .as_ref()
+        .expect("ai")
+        .prompt_guard
+        .as_ref()
+        .expect("promptGuard")
+        .request[0]
+        .open_ai_moderation
+        .as_ref()
+        .expect("openAIModeration")
+        .policies
+        .as_ref()
+        .expect("policies");
+    assert!(policies.backend_auth.is_none());
+    assert!(policies.rest.contains_key("backendTLS"));
+    assert!(policies.rest.contains_key("requestHeaderModifier"));
+}

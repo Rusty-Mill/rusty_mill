@@ -50,9 +50,9 @@ pub use policy::{
     A2aPolicy, AgentCardPolicy, AiPolicy, AuthorizationRule, BackendAuth, Builtin, CorsPolicy,
     DurationString, ExtAuthzPolicy, FailureMode, GuardAction, GuardPattern, GuardRule,
     GuardWebhook, HeaderFilter, HeaderModifier, JwtAuth, JwtSource, LocalRateLimit,
-    McpAuthorization, McpGuardrails, PathRewrite, Phase, Policies, Processor, PromptCaching,
-    PromptGuard, PromptMessage, Prompts, RateLimitKind, RegexGuard, Rejection, RetryPolicy,
-    TimeoutPolicy, UrlRewrite, WebhookTarget,
+    McpAuthorization, McpGuardrails, Moderation, ModerationPolicies, PathRewrite, Phase, Policies,
+    Processor, PromptCaching, PromptGuard, PromptMessage, Prompts, RateLimitKind, RegexGuard,
+    Rejection, RetryPolicy, TimeoutPolicy, UrlRewrite, WebhookTarget,
 };
 
 use std::path::Path;

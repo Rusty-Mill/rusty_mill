@@ -37,22 +37,29 @@
 //! asking for the rule; `--check` and the startup log both say so, rather than
 //! leaving someone to notice their stream became one lump.
 
+pub mod moderation;
 pub mod webhook;
 
 use agentgateway_config::{Builtin, GuardAction, GuardPattern, GuardRule, PromptGuard, RegexGuard};
 use regex::RegexSet;
 use serde_json::Value;
 
-/// A pattern that would not compile.
+/// A rule that cannot be compiled.
 #[derive(Debug, thiserror::Error)]
-#[error("{at}: `{pattern}` is not a valid regular expression: {reason}")]
-pub struct GuardError {
-    /// Where in the configuration it came from.
-    pub at: String,
-    /// The offending pattern.
-    pub pattern: String,
-    /// What the engine said.
-    pub reason: String,
+pub enum GuardError {
+    /// A pattern that would not compile.
+    #[error("{at}: `{pattern}` is not a valid regular expression: {reason}")]
+    Pattern {
+        /// Where in the configuration it came from.
+        at: String,
+        /// The offending pattern.
+        pattern: String,
+        /// What the engine said.
+        reason: String,
+    },
+    /// A moderation rule with no OpenAI key to call with.
+    #[error(transparent)]
+    Credential(#[from] moderation::CredentialError),
 }
 
 /// The text a builtin matches, and the token it is replaced with.
@@ -97,6 +104,8 @@ enum Rule {
     Patterns(Patterns),
     /// A service that can change its mind.
     Webhook(webhook::Webhook),
+    /// OpenAI's classifier.
+    Moderation(moderation::Moderation),
 }
 
 /// A compiled `regex` rule.
@@ -142,12 +151,33 @@ pub struct Guard {
 
 impl Guard {
     /// Compile a policy, or `None` when it has no rule this build acts on.
-    pub fn new(policy: Option<&PromptGuard>, at: &str) -> Result<Option<Self>, GuardError> {
+    ///
+    /// `route` is what a moderation rule may borrow a credential from, and is
+    /// `None` for a route whose provider is not `openAI`; `provider` names
+    /// that provider so a refusal can say which one it was. See
+    /// [`moderation`].
+    pub fn new(
+        policy: Option<&PromptGuard>,
+        route: Option<moderation::Borrowable<'_>>,
+        provider: &'static str,
+        at: &str,
+    ) -> Result<Option<Self>, GuardError> {
         let Some(policy) = policy else {
             return Ok(None);
         };
-        let request = compile(&policy.request, &format!("{at}.request"))?;
-        let response = compile(&policy.response, &format!("{at}.response"))?;
+        let request = compile(
+            &policy.request,
+            Some(Moderating {
+                borrowable: route,
+                provider,
+            }),
+            &format!("{at}.request"),
+        )?;
+        // `None`: moderation classifies a prompt, upstream's response guard has
+        // no variant for it, and a rule written here is skipped rather than
+        // refused -- `Config::lint` is what reports it, as it does for every
+        // other thing this build parses and does not run.
+        let response = compile(&policy.response, None, &format!("{at}.response"))?;
         if request.is_empty() && response.is_empty() {
             return Ok(None);
         }
@@ -159,12 +189,13 @@ impl Guard {
         !self.response.is_empty()
     }
 
-    /// Whether any rule here talks to something outside the process.
+    /// Whether any rule here reads the caller's headers and claims.
     ///
-    /// Only a webhook needs the caller's headers and claims snapshotted, and
-    /// snapshotting costs an allocation per request — so a route of pure
-    /// `regex` rules does not pay for a context nothing will read.
-    pub fn calls_out(&self) -> bool {
+    /// Only a webhook does: its header expressions are CEL over the client's
+    /// own request. Snapshotting that costs an allocation per request, so a
+    /// route of `regex` or moderation rules does not pay for a context nothing
+    /// will read — moderation calls out too, but sends only the prompt.
+    pub fn needs_context(&self) -> bool {
         self.request
             .iter()
             .chain(self.response.iter())
@@ -193,6 +224,13 @@ impl Guard {
                         }
                     }
                     outcome
+                }
+                Rule::Moderation(moderation) => {
+                    match moderation.check(moderation::inputs(body)).await {
+                        Decision::Rejected(rejection) => return Decision::Rejected(rejection),
+                        // The endpoint classifies; it never rewrites.
+                        Decision::Masked | Decision::Allowed => Decision::Allowed,
+                    }
                 }
                 Rule::Webhook(webhook) => {
                     let messages = messages_for(body);
@@ -227,6 +265,8 @@ impl Guard {
         for rule in &self.response {
             let outcome = match rule {
                 Rule::Patterns(patterns) => patterns.apply(text),
+                // Never compiled into this phase; see `Guard::new`.
+                Rule::Moderation(_) => Decision::Allowed,
                 Rule::Webhook(webhook) => match webhook.check_answer(text, context).await {
                     webhook::Verdict::Pass => Decision::Allowed,
                     webhook::Verdict::Reject(rejection) => return Decision::Rejected(rejection),
@@ -304,7 +344,22 @@ fn message_texts(body: &mut Value) -> impl Iterator<Item = &mut String> {
         })
 }
 
-fn compile(rules: &[GuardRule], at: &str) -> Result<Vec<Rule>, GuardError> {
+/// What a phase needs to compile a moderation rule.
+///
+/// `None` where a phase does not moderate at all, which is the response phase.
+#[derive(Debug, Clone, Copy)]
+struct Moderating<'a> {
+    /// What the route lends, when it is an `openAI` one.
+    borrowable: Option<moderation::Borrowable<'a>>,
+    /// The route's provider, so a refusal can name it.
+    provider: &'static str,
+}
+
+fn compile(
+    rules: &[GuardRule],
+    moderating: Option<Moderating<'_>>,
+    at: &str,
+) -> Result<Vec<Rule>, GuardError> {
     let mut compiled = Vec::new();
     for (i, rule) in rules.iter().enumerate() {
         if let Some(regex) = rule.regex.as_ref() {
@@ -316,6 +371,22 @@ fn compile(rules: &[GuardRule], at: &str) -> Result<Vec<Rule>, GuardError> {
         }
         if let Some(config) = rule.webhook.as_ref() {
             compiled.push(Rule::Webhook(webhook::Webhook::new(config)));
+        }
+        if let Some(config) = rule.open_ai_moderation.as_ref()
+            && let Some(moderating) = moderating
+        {
+            let rejection = rule.rejection.clone().unwrap_or_default();
+            compiled.push(Rule::Moderation(moderation::Moderation::new(
+                config,
+                Rejection {
+                    status: rejection.status,
+                    headers: rejection.headers,
+                    body: rejection.body,
+                },
+                moderating.borrowable,
+                moderating.provider,
+                &format!("{at}[{i}].openAIModeration"),
+            )?));
         }
         // Anything else is a rule kind `Config::lint` reports.
     }
@@ -341,7 +412,7 @@ fn compile_one(
         // A pattern that does not compile is a startup failure. The
         // alternative is a rule that silently never fires, which reads exactly
         // like content nobody sent.
-        let compiled = regex::Regex::new(&source).map_err(|err| GuardError {
+        let compiled = regex::Regex::new(&source).map_err(|err| GuardError::Pattern {
             at: at.to_string(),
             pattern: source.clone(),
             reason: err.to_string(),
@@ -350,7 +421,7 @@ fn compile_one(
         sources.push(source);
     }
 
-    let set = RegexSet::new(&sources).map_err(|err| GuardError {
+    let set = RegexSet::new(&sources).map_err(|err| GuardError::Pattern {
         at: at.to_string(),
         pattern: sources.join(", "),
         reason: err.to_string(),
