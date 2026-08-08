@@ -23,8 +23,8 @@ pub use config::{
     AutoRoutingConfig, BudgetPeriod, CacheConfig, CacheMode, ClientConfig, ClientRole, Config,
     FreeTierEntry, GuardrailAction, GuardrailConfig, JwtConfig, McpConfig, McpUpstreamConfig,
     McpUpstreamTransport, ModerationConfig, PersistenceBackend, PersistenceConfig, PostgresTlsMode,
-    PresetConfig, PricingEntry, ProviderConfig, ProviderKind, RouteAlias, ServerConfig,
-    WebSearchConfig, WebhookConfig,
+    PresetConfig, PricingEntry, ProviderConfig, ProviderKind, RouteAlias, RouteStrategy,
+    ServerConfig, WebSearchConfig, WebhookConfig,
 };
 pub use error::RouterError;
 pub use free_tiers::FreeTierStatus;
@@ -164,6 +164,15 @@ impl ReasoningReplayCache {
     fn get(&self, tool_call_id: &str) -> Option<String> {
         self.by_tool_call_id.get(tool_call_id).cloned()
     }
+}
+
+/// Resolved `strategy = "fusion"` settings for one `[[routes]]` alias --
+/// see `RouteAlias::judge`/`fusion_timeout_secs`. Only constructed for an
+/// alias whose `judge` actually resolved; see `Router::dispatch_fusion`.
+#[derive(Debug, Clone)]
+struct FusionConfig {
+    judge: String,
+    timeout: Duration,
 }
 
 /// Cumulative request/token/cost counters for one "provider/model", as
@@ -538,6 +547,13 @@ pub struct Router {
     /// which wire format a provider speaks, not on its specific model.
     provider_kinds: HashMap<String, ProviderKind>,
     routes: HashMap<String, Vec<String>>,
+    /// `[[routes]]` alias -> its resolved `strategy = "fusion"` settings,
+    /// for every alias that has one (i.e. `strategy = "fusion"` *and* a
+    /// resolvable `judge`). An alias absent here always uses ordinary
+    /// sequential-chain dispatch, whatever its configured `strategy` --
+    /// see `RouteAlias::judge`'s doc comment for why a fusion alias with
+    /// no judge degrades this way instead of refusing to start.
+    fusion_routes: HashMap<String, FusionConfig>,
     /// "provider/model" -> per-million-token USD rates.
     pricing: Arc<HashMap<String, PriceRates>>,
     /// Provider names with `zdr = true` in config.
@@ -758,6 +774,65 @@ fn record_usage(
     cost
 }
 
+/// Adds two `Usage` totals together, for `dispatch_fusion`'s final response
+/// -- the caller sees one combined `usage` across every panel member that
+/// answered plus the judge, not just the judge's own token count.
+fn sum_usage(a: Usage, b: Usage) -> Usage {
+    Usage {
+        prompt_tokens: a.prompt_tokens + b.prompt_tokens,
+        completion_tokens: a.completion_tokens + b.completion_tokens,
+        total_tokens: a.total_tokens + b.total_tokens,
+        cached_tokens: match (a.cached_tokens, b.cached_tokens) {
+            (Some(x), Some(y)) => Some(x + y),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        },
+        cache_creation_tokens: match (a.cache_creation_tokens, b.cache_creation_tokens) {
+            (Some(x), Some(y)) => Some(x + y),
+            (Some(x), None) | (None, Some(x)) => Some(x),
+            (None, None) => None,
+        },
+    }
+}
+
+/// Builds the judge's synthesis request for `strategy = "fusion"`: the
+/// original conversation plus one appended user turn listing every panel
+/// candidate's answer, asking the judge to synthesize a single final
+/// response. Candidates are labeled anonymously ("Candidate 1", "Candidate
+/// 2", ...) rather than by provider/model, so the judge synthesizes on the
+/// answers' merits rather than any name it might otherwise recognize and
+/// favor/penalize. `tools`/`tool_choice` are explicitly cleared -- fusion
+/// never reaches this point for a tool-calling original request (see
+/// `dispatch_uncached`'s and `dispatch_fusion`'s own bypasses), but a judge
+/// re-inspecting a plain-text synthesis prompt for tool calls would be a
+/// category error regardless, so the request makes that explicit rather
+/// than relying on the caller having already stripped them.
+fn build_judge_request(
+    req: &ChatRequest,
+    judge: &str,
+    panel_responses: &[(String, String, ChatResponse)],
+) -> ChatRequest {
+    let mut synthesis_prompt =
+        String::from("Multiple candidate answers were generated for the preceding request. Synthesize them into a single, best final answer. Do not mention that there were multiple candidates.\n");
+    for (i, (_provider_name, _model_name, resp)) in panel_responses.iter().enumerate() {
+        let text = resp
+            .choices
+            .first()
+            .and_then(|c| c.message.content.as_ref())
+            .map(rp_core::MessageContent::as_plain_text)
+            .unwrap_or_default();
+        synthesis_prompt.push_str(&format!("\n--- Candidate {} ---\n{text}\n", i + 1));
+    }
+
+    let mut judge_req = req.clone();
+    judge_req.model = judge.to_string();
+    judge_req.models = None;
+    judge_req.tools = None;
+    judge_req.tool_choice = None;
+    judge_req.messages.push(ChatMessage::user(synthesis_prompt));
+    judge_req
+}
+
 /// Resolve `config.persistence` into a connectable `PersistenceTarget`,
 /// or `None` if the section is absent or missing what its backend needs
 /// (an unset `sqlite_path`/`postgres_url_env`, or a `postgres_url_env`
@@ -923,6 +998,28 @@ impl Router {
             .routes
             .iter()
             .map(|r| (r.alias.clone(), r.chain.clone()))
+            .collect();
+
+        let fusion_routes: HashMap<String, FusionConfig> = config
+            .routes
+            .iter()
+            .filter(|r| r.strategy == RouteStrategy::Fusion)
+            .filter_map(|r| match &r.judge {
+                Some(judge) => Some((
+                    r.alias.clone(),
+                    FusionConfig {
+                        judge: judge.clone(),
+                        timeout: Duration::from_secs(r.fusion_timeout_secs),
+                    },
+                )),
+                None => {
+                    tracing::warn!(
+                        alias = %r.alias,
+                        "route alias has strategy = \"fusion\" but no judge set; falling back to ordinary sequential-chain dispatch"
+                    );
+                    None
+                }
+            })
             .collect();
 
         let pricing = config
@@ -1102,6 +1199,7 @@ impl Router {
             providers,
             provider_kinds,
             routes,
+            fusion_routes,
             pricing: Arc::new(pricing),
             zdr_providers,
             no_training_providers,
@@ -2184,6 +2282,23 @@ impl Router {
         let effective_prefs = auto_price_prefs.as_ref().or(req.provider.as_ref());
         let chain = self.apply_preferences(&target_model, chain, effective_prefs)?;
         let chain = self.filter_by_required_parameters(&target_model, chain, req)?;
+
+        // strategy = "fusion": dispatch the whole chain (the "panel") in
+        // parallel and synthesize via the judge, instead of the ordinary
+        // sequential fallback loop below -- but only when this alias's
+        // own configured chain is actually in play (`req.models` is an
+        // ad-hoc per-request override with no coherent "panel" of its
+        // own) and the request isn't tool-calling (a judge can't
+        // meaningfully merge structured tool_calls from multiple
+        // candidates -- see `dispatch_fusion`'s own defense-in-depth
+        // bypass for the case where a panel member returns one anyway).
+        let no_ad_hoc_fallbacks = req.models.as_ref().map(Vec::is_empty).unwrap_or(true);
+        if no_ad_hoc_fallbacks && req.tools.is_none() {
+            if let Some(fusion) = self.fusion_routes.get(&target_model) {
+                return self.dispatch_fusion(req, fusion, chain).await;
+            }
+        }
+
         let mut last_err: Option<RouterError> = None;
 
         for (provider_name, model_name) in &chain {
@@ -2311,6 +2426,185 @@ impl Router {
         Err(last_err.unwrap_or_else(|| RouterError::InvalidModel(target_model.clone())))
     }
 
+    /// `strategy = "fusion"`: dispatches every `(provider, model)` in
+    /// `panel` concurrently, each independently bounded by
+    /// `fusion.timeout` (so the total wait is bounded by that duration
+    /// regardless of panel size), then synthesizes one final answer via
+    /// `fusion.judge` from whichever candidates responded in time.
+    /// Candidates that fail, time out, are unconfigured, or are outbound-
+    /// rate-limited are simply absent from the panel that reaches the
+    /// judge -- not a dispatch failure by themselves. Failing only if
+    /// *every* candidate does. If any candidate's response carries
+    /// `tool_calls`, synthesis is skipped entirely and that response is
+    /// returned as-is (defense in depth -- the caller in `dispatch_uncached`
+    /// already keeps a tool-calling request from reaching fusion at all,
+    /// since a text-synthesis judge can't meaningfully merge structured
+    /// tool calls from multiple candidates).
+    async fn dispatch_fusion(
+        &self,
+        req: &ChatRequest,
+        fusion: &FusionConfig,
+        panel: Vec<(String, String)>,
+    ) -> Result<ChatResponse, RouterError> {
+        let mut futures = Vec::new();
+        for (provider_name, model_name) in panel {
+            if self.check_outbound_rate_limit(&provider_name).is_err() {
+                self.metrics
+                    .record_attempt(&provider_name, &model_name, "rate_limited");
+                continue;
+            }
+            let Ok(provider) = self.get_provider(&provider_name) else {
+                self.metrics
+                    .record_attempt(&provider_name, &model_name, "not_configured");
+                continue;
+            };
+            let provider = provider.clone();
+            let req_clone = req.clone();
+            let api_key_override = self.byok_key_for(req, &provider_name).map(str::to_string);
+            let timeout = fusion.timeout;
+            futures.push(async move {
+                let result = tokio::time::timeout(
+                    timeout,
+                    retry_same_provider(|| {
+                        provider.chat(&req_clone, &model_name, api_key_override.as_deref())
+                    }),
+                )
+                .await;
+                match result {
+                    Ok(Ok(resp)) => Some((provider_name, model_name, resp)),
+                    Ok(Err(e)) => {
+                        tracing::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate failed: {e}");
+                        None
+                    }
+                    Err(_) => {
+                        tracing::warn!(provider = %provider_name, model = %model_name, "fusion panel candidate timed out");
+                        None
+                    }
+                }
+            });
+        }
+
+        let panel_responses: Vec<(String, String, ChatResponse)> =
+            futures::future::join_all(futures)
+                .await
+                .into_iter()
+                .flatten()
+                .collect();
+
+        if panel_responses.is_empty() {
+            return Err(RouterError::Provider(ProviderError::Upstream {
+                status: 503,
+                message: "fusion panel: every candidate failed, timed out, or was rate-limited"
+                    .to_string(),
+            }));
+        }
+
+        if let Some((provider_name, model_name, resp)) = panel_responses.iter().find(|(_, _, r)| {
+            r.choices
+                .first()
+                .is_some_and(|c| c.message.tool_calls.is_some())
+        }) {
+            self.metrics
+                .record_attempt(provider_name, model_name, "success");
+            return Ok(resp.clone());
+        }
+
+        let mut summed_usage: Option<Usage> = None;
+        let mut summed_cost = 0.0_f64;
+        let mut any_cost = false;
+        let mut record_contribution = |provider: &str, model: &str, usage: &Usage| {
+            let cost = record_usage(
+                &self.usage,
+                self.persistence.as_deref(),
+                &self.pricing,
+                provider,
+                model,
+                usage,
+            );
+            if let Some(cost) = cost {
+                summed_cost += cost;
+                any_cost = true;
+            }
+            self.metrics.record_tokens_and_cost(
+                provider,
+                model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                cost,
+            );
+            summed_usage = Some(match summed_usage.take() {
+                Some(existing) => sum_usage(existing, usage.clone()),
+                None => usage.clone(),
+            });
+        };
+
+        for (provider_name, model_name, resp) in &panel_responses {
+            self.metrics
+                .record_attempt(provider_name, model_name, "success");
+            if let Some(usage) = &resp.usage {
+                record_contribution(provider_name, model_name, usage);
+            }
+        }
+
+        let (judge_provider, judge_model) = fusion
+            .judge
+            .split_once('/')
+            .map(|(p, m)| (p.to_string(), m.to_string()))
+            .ok_or_else(|| RouterError::InvalidModel(fusion.judge.clone()))?;
+        let judge_provider_arc = self.get_provider(&judge_provider)?.clone();
+        let judge_api_key = self.byok_key_for(req, &judge_provider).map(str::to_string);
+        let judge_req = build_judge_request(req, &fusion.judge, &panel_responses);
+
+        let mut final_resp = retry_same_provider(|| {
+            judge_provider_arc.chat(&judge_req, &judge_model, judge_api_key.as_deref())
+        })
+        .await
+        .map_err(|e| {
+            self.metrics
+                .record_attempt(&judge_provider, &judge_model, "error");
+            RouterError::Provider(e)
+        })?;
+        self.metrics
+            .record_attempt(&judge_provider, &judge_model, "success");
+
+        if let Some(judge_usage) = final_resp.usage.clone() {
+            record_contribution(&judge_provider, &judge_model, &judge_usage);
+        }
+        final_resp.usage = summed_usage;
+        final_resp.cost_usd = any_cost.then_some(summed_cost);
+
+        self.record_generation(GenerationRecord {
+            id: final_resp.id.clone(),
+            model: final_resp.model.clone(),
+            created: final_resp.created,
+            prompt_tokens: final_resp
+                .usage
+                .as_ref()
+                .map(|u| u.prompt_tokens as u64)
+                .unwrap_or(0),
+            completion_tokens: final_resp
+                .usage
+                .as_ref()
+                .map(|u| u.completion_tokens as u64)
+                .unwrap_or(0),
+            total_tokens: final_resp
+                .usage
+                .as_ref()
+                .map(|u| u.total_tokens as u64)
+                .unwrap_or(0),
+            cost_usd: final_resp.cost_usd,
+        });
+
+        Ok(final_resp)
+    }
+
+    /// `strategy = "fusion"` has no streaming form -- synthesizing one
+    /// answer from a panel is fundamentally a whole-response operation, not
+    /// something that can be streamed incrementally. A streaming request
+    /// against a fusion-configured alias is therefore never routed into
+    /// `dispatch_fusion`; it falls through to the ordinary sequential
+    /// `chain` loop below unchanged, the same bypass `dispatch_uncached`
+    /// gives a tool-calling request.
     pub async fn dispatch_stream(&self, req: &ChatRequest) -> Result<ChatStream, RouterError> {
         let (target_model, was_auto_routed) = self.resolve_target_model(req);
         let chain = self.resolve_chain(&target_model, req.models.as_deref())?;
@@ -2505,6 +2799,7 @@ mod tests {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v.into_iter().map(String::from).collect()))
                 .collect(),
+            fusion_routes: HashMap::new(),
             pricing: Arc::new(
                 pricing
                     .into_iter()
@@ -2559,6 +2854,27 @@ mod tests {
             .iter()
             .map(|(p, m)| (p.to_string(), m.to_string()))
             .collect()
+    }
+
+    /// Marks `alias` (already present in `router.routes` via `test_router`)
+    /// as `strategy = "fusion"`, judged by `judge` ("provider/model") with
+    /// the given per-panel-member timeout -- `test_router` itself has no
+    /// fusion knowledge, so fusion tests layer it on afterward rather than
+    /// growing every one of its many other call sites a new parameter.
+    fn with_fusion_route(
+        mut router: Router,
+        alias: &str,
+        judge: &str,
+        timeout_secs: u64,
+    ) -> Router {
+        router.fusion_routes.insert(
+            alias.to_string(),
+            FusionConfig {
+                judge: judge.to_string(),
+                timeout: Duration::from_secs(timeout_secs),
+            },
+        );
+        router
     }
 
     fn test_request(model: &str) -> ChatRequest {
@@ -2968,6 +3284,121 @@ mod tests {
         ) -> Result<EmbeddingsResponse, ProviderError> {
             Err(ProviderError::UnsupportedFeature(
                 "ReqCapturingProvider doesn't support embeddings".to_string(),
+            ))
+        }
+    }
+
+    /// A `Provider` for `dispatch_fusion` tests: returns a canned text
+    /// answer (optionally after an artificial delay, to exercise the
+    /// per-panel-member timeout) and records every request it's
+    /// dispatched, the same way `ReqCapturingProvider` does for other
+    /// tests. `with_tool_calls` makes the canned response carry
+    /// `tool_calls` instead of plain text, for the defense-in-depth bypass
+    /// inside `dispatch_fusion` itself.
+    struct FusionCandidateProvider {
+        name: String,
+        text: String,
+        delay: Option<Duration>,
+        usage: Option<Usage>,
+        with_tool_calls: bool,
+        seen_requests: Mutex<Vec<ChatRequest>>,
+    }
+
+    impl FusionCandidateProvider {
+        fn new(name: &str, text: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                text: text.to_string(),
+                delay: None,
+                usage: Some(Usage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: None,
+                    cache_creation_tokens: None,
+                }),
+                with_tool_calls: false,
+                seen_requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.delay = Some(delay);
+            self
+        }
+
+        fn with_tool_calls(mut self) -> Self {
+            self.with_tool_calls = true;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FusionCandidateProvider {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn chat(
+            &self,
+            req: &ChatRequest,
+            _model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<ChatResponse, ProviderError> {
+            self.seen_requests.lock().unwrap().push(req.clone());
+            if let Some(delay) = self.delay {
+                tokio::time::sleep(delay).await;
+            }
+            let message = if self.with_tool_calls {
+                ChatMessage {
+                    role: Role::Assistant,
+                    content: None,
+                    name: None,
+                    tool_calls: Some(vec![rp_core::ToolCall::function(
+                        "call-1",
+                        "some_tool",
+                        "{}",
+                    )]),
+                    tool_call_id: None,
+                    reasoning: None,
+                    cache_control: None,
+                }
+            } else {
+                ChatMessage::assistant(self.text.clone())
+            };
+            Ok(ChatResponse {
+                id: format!("{}-id", self.name),
+                object: "chat.completion",
+                created: 0,
+                model: format!("{}/m", self.name),
+                choices: vec![Choice {
+                    index: 0,
+                    message,
+                    finish_reason: Some("stop".to_string()),
+                    logprobs: None,
+                }],
+                usage: self.usage.clone(),
+                cost_usd: None,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _req: &ChatRequest,
+            _model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<ChatStream, ProviderError> {
+            Ok(Box::pin(stream::empty::<Result<ChatChunk, ProviderError>>()))
+        }
+
+        async fn embeddings(
+            &self,
+            _req: &EmbeddingsRequest,
+            _model: &str,
+            _api_key_override: Option<&str>,
+        ) -> Result<EmbeddingsResponse, ProviderError> {
+            Err(ProviderError::UnsupportedFeature(
+                "FusionCandidateProvider doesn't support embeddings".to_string(),
             ))
         }
     }
@@ -8657,6 +9088,363 @@ mod tests {
             err,
             RouterError::Provider(ProviderError::Upstream { .. })
         ));
+    }
+
+    // --- strategy = "fusion" routing -------------------------------------------
+
+    #[tokio::test]
+    async fn from_config_builds_fusion_routes_for_strategy_fusion_with_a_judge() {
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[routes]]
+            alias = "panel"
+            chain = ["a/m1", "b/m2"]
+            strategy = "fusion"
+            judge = "c/m3"
+            fusion_timeout_secs = 5
+            "#,
+        )
+        .unwrap();
+        let router = Router::from_config(&config).await;
+
+        let fusion = router.fusion_routes.get("panel").unwrap();
+        assert_eq!(fusion.judge, "c/m3");
+        assert_eq!(fusion.timeout, Duration::from_secs(5));
+        // Sequential-chain resolution for the alias is untouched -- fusion
+        // is an alternate dispatch path layered on top, not a replacement
+        // for the chain data itself.
+        assert_eq!(
+            router.resolve_chain("panel", None).unwrap(),
+            chain(&[("a", "m1"), ("b", "m2")])
+        );
+    }
+
+    #[tokio::test]
+    async fn from_config_falls_back_to_sequential_when_fusion_alias_has_no_judge() {
+        // A soft-failure config posture, matching an invalid [[guardrails]]
+        // pattern or a misconfigured [persistence] section elsewhere in
+        // this file: `strategy = "fusion"` with no `judge` set doesn't
+        // refuse to start, it just isn't in `fusion_routes`, so dispatch
+        // falls through to ordinary sequential-chain behavior.
+        let config = Config::from_toml_str(
+            r#"
+            providers = {}
+
+            [[routes]]
+            alias = "panel"
+            chain = ["a/m1", "b/m2"]
+            strategy = "fusion"
+            "#,
+        )
+        .unwrap();
+        let router = Router::from_config(&config).await;
+
+        assert!(router.fusion_routes.is_empty());
+        assert_eq!(
+            router.resolve_chain("panel", None).unwrap(),
+            chain(&[("a", "m1"), ("b", "m2")])
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_fusion_synthesizes_from_the_full_panel() {
+        let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
+        let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
+        let judge = Arc::new(ReqCapturingProvider {
+            name: "j".to_string(),
+            responses: Mutex::new(
+                vec![ChatResponse {
+                    id: "final-id".to_string(),
+                    object: "chat.completion",
+                    created: 0,
+                    model: "j/m3".to_string(),
+                    choices: vec![Choice {
+                        index: 0,
+                        message: ChatMessage::assistant("synthesized answer"),
+                        finish_reason: Some("stop".to_string()),
+                        logprobs: None,
+                    }],
+                    usage: Some(Usage {
+                        prompt_tokens: 20,
+                        completion_tokens: 10,
+                        total_tokens: 30,
+                        cached_tokens: None,
+                        cache_creation_tokens: None,
+                    }),
+                    cost_usd: None,
+                }]
+                .into(),
+            ),
+            seen_requests: Mutex::new(Vec::new()),
+        });
+        let router = test_router(
+            vec![
+                ("a", a as Arc<dyn Provider>),
+                ("b", b as Arc<dyn Provider>),
+                ("j", judge.clone() as Arc<dyn Provider>),
+            ],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let resp = router
+            .dispatch(&test_request("panel"))
+            .await
+            .expect("fusion dispatch should succeed");
+
+        assert_eq!(
+            resp.choices[0].message.content,
+            Some(MessageContent::text("synthesized answer"))
+        );
+        // The judge saw both anonymized candidate answers, not just one.
+        let judge_requests = judge.seen_requests.lock().unwrap();
+        let judge_prompt = judge_requests[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_plain_text();
+        assert!(judge_prompt.contains("answer A"));
+        assert!(judge_prompt.contains("answer B"));
+        assert!(judge_prompt.contains("Candidate 1"));
+        assert!(judge_prompt.contains("Candidate 2"));
+        // Final usage is summed across both panel members and the judge,
+        // not just the judge's own call.
+        let usage = resp
+            .usage
+            .expect("fusion response should carry summed usage");
+        assert_eq!(usage.prompt_tokens, 10 + 10 + 20);
+        assert_eq!(usage.completion_tokens, 5 + 5 + 10);
+        assert_eq!(usage.total_tokens, 15 + 15 + 30);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_fusion_a_slow_panel_member_does_not_block_past_the_timeout() {
+        let fast = Arc::new(FusionCandidateProvider::new("fast", "fast answer"));
+        let slow = Arc::new(
+            FusionCandidateProvider::new("slow", "slow answer").with_delay(Duration::from_secs(60)),
+        );
+        let judge = Arc::new(ReqCapturingProvider {
+            name: "j".to_string(),
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            seen_requests: Mutex::new(Vec::new()),
+        });
+        let router = test_router(
+            vec![
+                ("fast", fast as Arc<dyn Provider>),
+                ("slow", slow as Arc<dyn Provider>),
+                ("j", judge.clone() as Arc<dyn Provider>),
+            ],
+            vec![("panel", vec!["fast/m1", "slow/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        // A 5s per-member timeout, well under the slow candidate's 60s
+        // delay -- if the timeout wrapped the whole join_all instead of
+        // each member individually, this test would hang instead of
+        // returning quickly under tokio's paused/auto-advancing clock.
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let resp = router
+            .dispatch(&test_request("panel"))
+            .await
+            .expect("fusion should synthesize from whichever candidates responded in time");
+
+        let judge_prompt = judge.seen_requests.lock().unwrap()[0]
+            .messages
+            .last()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap()
+            .as_plain_text();
+        assert!(judge_prompt.contains("fast answer"));
+        assert!(
+            !judge_prompt.contains("slow answer"),
+            "the timed-out candidate must not reach the judge"
+        );
+        let _ = resp;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dispatch_fusion_fails_only_when_every_candidate_fails() {
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::FailFatal,
+            calls: calls_a.clone(),
+        });
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(MockProvider {
+            name: "b".to_string(),
+            behavior: MockBehavior::FailFatal,
+            calls: calls_b.clone(),
+        });
+        let router = test_router(
+            vec![("a", a), ("b", b)],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let err = router.dispatch(&test_request("panel")).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            RouterError::Provider(ProviderError::Upstream { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_fusion_returns_a_panel_members_response_directly_when_it_carries_tool_calls()
+    {
+        // Defense in depth: even though `dispatch_uncached` already keeps a
+        // tool-calling *request* out of fusion entirely, a panel member
+        // could in principle still emit tool_calls unprompted. A judge
+        // synthesizing plain text can't meaningfully merge structured tool
+        // calls, so `dispatch_fusion` returns that candidate's response
+        // as-is rather than attempting synthesis.
+        let a = Arc::new(FusionCandidateProvider::new("a", "answer A").with_tool_calls());
+        let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
+        let judge = Arc::new(ReqCapturingProvider {
+            name: "j".to_string(),
+            responses: Mutex::new(std::collections::VecDeque::new()),
+            seen_requests: Mutex::new(Vec::new()),
+        });
+        let router = test_router(
+            vec![
+                ("a", a as Arc<dyn Provider>),
+                ("b", b as Arc<dyn Provider>),
+                ("j", judge.clone() as Arc<dyn Provider>),
+            ],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let resp = router
+            .dispatch(&test_request("panel"))
+            .await
+            .expect("a tool-calling panel member should be returned directly");
+
+        assert!(resp.choices[0].message.tool_calls.is_some());
+        assert!(
+            judge.seen_requests.lock().unwrap().is_empty(),
+            "the judge must never be dispatched when a panel member returns tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_bypasses_fusion_entirely_for_a_tool_calling_request() {
+        // The outer gate in dispatch_uncached: a tool-calling request never
+        // reaches dispatch_fusion at all, so a fusion-configured alias just
+        // falls through to ordinary sequential-chain dispatch -- only the
+        // first candidate in the chain is tried, not the whole panel.
+        let calls_a = Arc::new(AtomicUsize::new(0));
+        let a = Arc::new(MockProvider {
+            name: "a".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_a.clone(),
+        });
+        let calls_b = Arc::new(AtomicUsize::new(0));
+        let b = Arc::new(MockProvider {
+            name: "b".to_string(),
+            behavior: MockBehavior::Succeed,
+            calls: calls_b.clone(),
+        });
+        let router = test_router(
+            vec![("a", a), ("b", b)],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+        let mut req = test_request("panel");
+        req.tools = Some(vec![rp_core::Tool {
+            kind: "function".to_string(),
+            function: rp_core::FunctionDef {
+                name: "some_tool".to_string(),
+                description: None,
+                parameters: None,
+            },
+        }]);
+
+        router
+            .dispatch(&req)
+            .await
+            .expect("dispatch should succeed");
+
+        assert_eq!(
+            calls_a.load(Ordering::SeqCst),
+            1,
+            "only the first chain candidate should be tried -- ordinary sequential dispatch, not the fusion panel"
+        );
+        assert_eq!(
+            calls_b.load(Ordering::SeqCst),
+            0,
+            "the chain's second candidate is never reached once the first succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_fusion_accounts_cost_and_usage_for_every_contributor() {
+        let a = Arc::new(FusionCandidateProvider::new("a", "answer A"));
+        let b = Arc::new(FusionCandidateProvider::new("b", "answer B"));
+        let judge = Arc::new(FusionCandidateProvider::new("j", "synthesized"));
+        let router = test_router(
+            vec![
+                ("a", a as Arc<dyn Provider>),
+                ("b", b as Arc<dyn Provider>),
+                ("j", judge as Arc<dyn Provider>),
+            ],
+            vec![("panel", vec!["a/m1", "b/m2"])],
+            vec![("a/m1", 1.0, 2.0), ("b/m2", 1.0, 2.0), ("j/m3", 1.0, 2.0)],
+            vec![],
+            vec![],
+        );
+        let router = with_fusion_route(router, "panel", "j/m3", 5);
+
+        let resp = router
+            .dispatch(&test_request("panel"))
+            .await
+            .expect("fusion dispatch should succeed");
+
+        // Each of the two panel members and the judge priced at
+        // (10 prompt * $1/M + 5 completion * $2/M) = $0.00002 apiece.
+        let per_contributor_cost = (10.0 * 1.0 + 5.0 * 2.0) / 1_000_000.0;
+        let expected_total = per_contributor_cost * 3.0;
+        assert!(
+            (resp.cost_usd.unwrap() - expected_total).abs() < 1e-12,
+            "final response cost should sum all three contributors, got {:?}",
+            resp.cost_usd
+        );
+
+        let usage = router.usage.read().unwrap();
+        assert_eq!(usage["a/m1"].requests, 1);
+        assert_eq!(usage["b/m2"].requests, 1);
+        assert_eq!(usage["j/m3"].requests, 1);
+        assert!((usage["a/m1"].cost_usd - per_contributor_cost).abs() < 1e-12);
+        assert!((usage["b/m2"].cost_usd - per_contributor_cost).abs() < 1e-12);
+        assert!((usage["j/m3"].cost_usd - per_contributor_cost).abs() < 1e-12);
+
+        // A generation record was written for the final synthesized
+        // response, with the summed token counts.
+        let record = router.generation("j-id").unwrap();
+        assert_eq!(record.prompt_tokens, 30);
+        assert_eq!(record.completion_tokens, 15);
     }
 
     // --- RouterError -----------------------------------------------------------

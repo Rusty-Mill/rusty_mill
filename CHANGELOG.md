@@ -44,6 +44,17 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   with an automatic backup, never writes a literal API key (an env-var
   reference naming `--api-key-env` when the target format supports one).
   Static file rewriting only — no proxy, no traffic interception (ADR-0004).
+- `strategy = "fusion"` on a `[[routes]]` alias — dispatches the alias's
+  `chain` (the "panel") in parallel instead of sequentially, then
+  synthesizes one final answer via a designated `judge` model from
+  whichever candidates responded within `fusion_timeout_secs` (each
+  independently timed out, so the total wait doesn't scale with panel
+  size). Panel answers reach the judge under an anonymized label, not by
+  provider/model. A tool-calling or streaming request bypasses fusion
+  entirely and falls back to ordinary sequential-chain dispatch, as does a
+  fusion alias with no `judge` configured (a startup warning, not a hard
+  failure). Usage/cost accounting covers every contributing panel member
+  plus the judge, not just the judge's own call.
 ### Changed
 - `ARCHITECTURE.md` non-goals: "no dashboard"/"not multi-tenant SaaS"
   softened to "no UI" (ADR-0002); "no MITM-based third-party CLI config
