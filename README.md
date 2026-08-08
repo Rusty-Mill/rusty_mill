@@ -144,10 +144,10 @@ Implemented and tested:
 - `retry` with backoff, and `localRateLimit` token buckets counting either
   requests or LLM tokens — see
   [Retries and rate limits](#retries-and-rate-limits)
-- `ai` backends: an OpenAI-compatible API over OpenAI and Anthropic, streaming
-  and tool calling included, with the `ai` policy's `modelAliases`, `prompts`,
-  `defaults`, `overrides`, `promptCaching`, and `promptGuard`'s `regex`,
-  `webhook` and `openAIModeration` rules — see
+- `ai` backends: an OpenAI-compatible API over OpenAI, Anthropic and Gemini,
+  with streaming and tool calling on the first two, and with the `ai` policy's
+  `modelAliases`, `prompts`, `defaults`, `overrides`, `promptCaching`, and
+  `promptGuard`'s `regex`, `webhook` and `openAIModeration` rules — see
   [The LLM gateway](#the-llm-gateway)
 - `a2a` policies: JSON-RPC method gating and a merged agent card — see
   [Agent-to-agent](#agent-to-agent)
@@ -191,13 +191,15 @@ Not supported at all:
 - The deprecated 2024-11-05 HTTP+SSE target transport (`sse:`). `rmcp` 3.1 has
   no client for it; point the target at the server's Streamable HTTP endpoint
   with `mcp:` instead. Configuring one is a startup error, not a silent skip.
-- The `gemini`, `vertex` and `bedrock` providers. Each speaks its own request
-  shape and its own authentication — Vertex and Bedrock sign with cloud
-  credentials rather than a bearer key — so none of them is a variation on the
-  two that are served. They parse, and naming one is a startup error for the
-  same reason `sse:` is: a provider that loads and never answers is worse than
-  one that refuses to load. An OpenAI-compatible endpoint in front of them
-  works today via `openAI` with a `hostOverride`.
+- The `vertex` and `bedrock` providers. Both sign with cloud credentials rather
+  than an API key, which is a different kind of work from a translation. They
+  parse, and naming one is a startup error for the same reason `sse:` is: a
+  provider that loads and never answers is worse than one that refuses to load.
+  An OpenAI-compatible endpoint in front of them works today via `openAI` with
+  a `hostOverride`.
+- Streaming and tool calling **on a Gemini route** — refused with a 400 rather
+  than half served, see
+  [Gemini names the model in the URL](#gemini-names-the-model-in-the-url)
 
 ## Authentication
 
@@ -1130,7 +1132,7 @@ A client POSTs an ordinary OpenAI chat-completions request and gets an OpenAI
 response back, whichever provider actually served it. Switching provider is a
 configuration edit rather than a client change — which is the entire point.
 
-### Only Anthropic is translated
+### What gets translated
 
 For an OpenAI-compatible provider the body is forwarded essentially unchanged:
 only `model` is overridden and the credential swapped. That is deliberate. A
@@ -1153,6 +1155,59 @@ Anthropic gets a real translation, because three differences bite:
   calls `stop`. A client switching providers should not have to learn both.
 - **Tool calling is spelled differently at every step**, which is its own
   section below.
+
+Gemini gets one too, and differs in a way the other two do not: see
+[Gemini names the model in the URL](#gemini-names-the-model-in-the-url).
+
+### Gemini names the model in the URL
+
+```yaml
+backends:
+  - ai:
+      provider:
+        gemini: {}
+```
+
+OpenAI and Anthropic both name the model in the request body, so the address a
+route dials is fixed and is resolved once at startup. Gemini puts it in the
+path — `/v1beta/models/{model}:generateContent` — which makes the URL a
+function of what the caller asked for, built after the route's `modelAliases`,
+`defaults` and the backend's own `model` have all had their say.
+
+That means a **client-controlled string ends up in a URL this gateway signs
+with its own key**, so it is checked rather than trusted. A name may hold
+letters, digits, dots, dashes and underscores, with an optional `models/`
+prefix, and anything else is a 400 that never leaves the gateway. A `model` of
+`../../v1beta/tunedModels/private` would otherwise point an authenticated call
+at an endpoint nobody configured.
+
+The credential goes in `x-goog-api-key` rather than the `?key=` query parameter
+the API also accepts. A credential in a URL is written to every access log
+between here and Google, and to this gateway's own if a request is ever traced.
+
+The rest is rearrangement, in the same spirit as Anthropic's:
+
+- **A turn is `parts`**, even when it is one string, and the roles are `user`
+  and `model` rather than `user` and `assistant`. Two turns of one role in a
+  row are joined, because Gemini rejects them and a caller that sent two user
+  messages meant both.
+- **The system prompt is `systemInstruction`**, with no role of its own.
+- **Sampling settings live in `generationConfig`** — `maxOutputTokens`, `topP`,
+  `stopSequences`. Carried over by name they would produce a request Gemini
+  accepts and quietly ignores, which is worse than one it rejects.
+- **Refusal finish reasons become `content_filter`.** `SAFETY`, `BLOCKLIST`,
+  `PROHIBITED_CONTENT` and `RECITATION` have no OpenAI equivalent, and
+  reporting them as a clean `stop` would tell a client the model finished its
+  thought when it was cut off.
+- **An image part is dropped.** Gemini takes bytes as `inline_data` or a URI as
+  `file_data` and never a URL to fetch, so an OpenAI `image_url` has no honest
+  translation. Text parts carry across.
+
+**Streaming and tool calling are refused with a 400 on a Gemini route in this
+build** — streaming is a different method on a different URL there, and tools
+are their own translation. Both are refused rather than half served: a client
+that asked for a stream and got one lump, or asked for tools and got an
+ordinary answer, has to work out why.
 
 ### Tool calling
 

@@ -9,8 +9,12 @@
 //! For an OpenAI-compatible provider the body is forwarded essentially
 //! unchanged — only `model` is overridden and credentials swapped — so tool
 //! definitions, `response_format` and anything else this crate has never heard
-//! of survive intact. Anthropic gets a real translation, in [`translate`] and
-//! [`stream`], because the shapes genuinely differ.
+//! of survive intact. Anthropic and Gemini get real translations, in
+//! [`translate`] and [`stream`], because the shapes genuinely differ.
+//!
+//! Gemini differs in one more way worth knowing up front: it names the model
+//! and the method in the URL rather than the body, so its address is built per
+//! request from what the caller asked for. See [`translate::gemini`].
 //!
 //! # Requests are buffered, responses are not
 //!
@@ -98,11 +102,12 @@ pub struct LlmBackend {
     /// forwarded, so nothing else would ever apply it: an `ai` route's
     /// modifier used to parse and do nothing.
     request_headers: Option<Headers>,
-    /// The URL this backend POSTs to, with the route's `urlRewrite` applied.
+    /// The provider's endpoint, with the route's `urlRewrite` applied.
     ///
-    /// Resolved once: the provider's endpoint is fixed for the life of the
-    /// backend and so is a rewrite of it, so there is nothing per-request to
-    /// decide and no string to rebuild on every call.
+    /// Resolved once, because a rewrite of a fixed address is itself fixed.
+    /// For OpenAI and Anthropic this is the whole URL a request goes to. For
+    /// Gemini it is the base, and the model and method are appended per
+    /// request — see [`Provider::request_url`].
     endpoint: String,
     /// The route's `retry`, applied to the provider request.
     ///
@@ -286,6 +291,7 @@ impl LlmBackend {
     /// `Err` carries the response to return when no attempt produced one.
     async fn send(
         &self,
+        url: &str,
         headers: HeaderMap,
         payload: Bytes,
     ) -> Result<reqwest::Response, Response<LlmBody>> {
@@ -302,7 +308,7 @@ impl LlmBackend {
 
             let sending = self
                 .client
-                .post(&self.endpoint)
+                .post(url)
                 .headers(headers.clone())
                 .body(payload.clone());
 
@@ -452,6 +458,19 @@ impl LlmBackend {
             }
         };
 
+        // Only Gemini's URL depends on the request, and only after the model
+        // has been resolved: the caller's name, the route's aliases and the
+        // backend's own override have all had their say by here. Checked
+        // rather than interpolated, because it is a client-controlled string
+        // going into a URL this gateway signs with its own key.
+        let url = match self.provider.needs_model_in_path() {
+            false => self.endpoint.clone(),
+            true => match translate::gemini::model_path(&model) {
+                Ok(path) => self.provider.request_url(&self.endpoint, &path, streaming),
+                Err(err) => return error(StatusCode::BAD_REQUEST, &err.to_string()),
+            },
+        };
+
         let mut headers = HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
@@ -499,7 +518,7 @@ impl LlmBackend {
             }
         };
 
-        let response = match self.send(headers, payload).await {
+        let response = match self.send(&url, headers, payload).await {
             Ok(response) => response,
             Err(unreachable) => return unreachable,
         };
@@ -792,6 +811,11 @@ impl LlmBackend {
 /// replaces that, which is how an Azure-style or gateway-mounted deployment is
 /// reached, and `prefix` transforms it against the route's own matched prefix,
 /// exactly as an `mcp` target's configured path is transformed.
+///
+/// On a Gemini route the endpoint is only the base, `/v1beta`, since the model
+/// and method are appended per request. A rewrite therefore acts on that base
+/// and the request's own suffix still follows it, which is what makes pointing
+/// a Gemini route at a proxy work.
 fn resolve_endpoint(
     provider: &Provider,
     policies: &Policies,
