@@ -24,6 +24,31 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #149 — Add routing-decision trace headers (X-RP-Decision / X-RP-Fallback-Attempts)
+**2026-08-08** · [#149](https://github.com/baileyrd/rusty_provider/pull/149)
+
+- **Added:** `/v1/chat/completions` responses (streaming and
+  non-streaming) now carry `X-RP-Decision` (`strategy=<direct|fallback|
+  fusion>; provider=...; model=...; latency_ms=...`) and
+  `X-RP-Fallback-Attempts` -- which concrete provider/model actually
+  served an alias/chain request, and how many candidates it took, without
+  a separate `GET /v1/generation?id=` round trip. `provider`/`model`
+  reflect the actual dispatched candidate, not just the requested alias.
+  Streaming sets both on the initial HTTP response, not as trailers,
+  since the winning candidate is known before the first chunk is
+  produced.
+- `Router::dispatch`/`dispatch_stream` keep their existing signatures;
+  each gained a `_traced` sibling (`dispatch_traced`/
+  `dispatch_stream_traced`) returning the new `DispatchTrace` alongside
+  the response.
+- 8 new tests in `rp-router` (strategy classification, attempt counting,
+  fusion panel size, cache-hit zero-attempts, streaming trace-before-first-
+  chunk) plus 4 full-HTTP-round-trip tests in `rp-server` (direct
+  request, route alias, chain fallthrough, streaming); full workspace
+  suite passing.
+
+---
+
 ## PR #148 — Add provider.max_request_price_usd + budget_fallback per-request cap
 **2026-08-08** · [#148](https://github.com/baileyrd/rusty_provider/pull/148)
 
