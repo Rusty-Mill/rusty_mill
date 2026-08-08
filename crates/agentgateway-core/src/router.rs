@@ -215,10 +215,10 @@ impl CompiledListener {
             }
         }
 
-        // Descending: the most specific entry is examined first. `sort_by` is
-        // stable, so entries of equal precedence keep configuration order,
+        // Descending: the most specific entry is examined first. `sort_by_key`
+        // is stable, so entries of equal precedence keep configuration order,
         // which is the documented tiebreak of last resort.
-        order.sort_by(|a, b| b.precedence.cmp(&a.precedence));
+        order.sort_by_key(|entry| std::cmp::Reverse(entry.precedence));
 
         Ok(CompiledListener {
             name: listener.name.clone(),
