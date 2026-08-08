@@ -24,6 +24,29 @@ entries are tracked by PR rather than by release.
 
 ---
 
+## PR #148 — Add provider.max_request_price_usd + budget_fallback per-request cap
+**2026-08-08** · [#148](https://github.com/baileyrd/rusty_provider/pull/148)
+
+- **Added:** `provider.max_request_price_usd` caps a single request's
+  estimated cost, in USD -- estimated per candidate as
+  `max_tokens * completion_per_million` from `[[pricing]]`, a different
+  axis from the existing `provider.max_price` (a per-million-token
+  ceiling on individual candidates, not a per-request total). Only takes
+  effect when the request also sets `max_tokens`. `provider.budget_fallback`
+  controls what happens once at least one candidate doesn't fit:
+  `"strict"` narrows the chain to just the candidates that do, failing
+  with `402` if none do; `"cheapest"` (the default) always serves the
+  request -- routing to the cheapest fitting candidate, or, if none fit,
+  the overall cheapest candidate anyway.
+- 10 new tests in `rp-router` (plus 1 in the `error.rs` status-code
+  suite) covering the no-op cases, a generous cap keeping the full chain
+  sorted cheapest-first, a cap narrowing the pool, both fallback modes
+  when nothing fits, an unpriced candidate treated as ineligible, and two
+  end-to-end `dispatch()` tests proving the wiring; full workspace suite
+  passing.
+
+---
+
 ## PR #147 — Add strategy = "fusion" routing: parallel panel + judge synthesis
 **2026-08-08** · [#147](https://github.com/baileyrd/rusty_provider/pull/147)
 
