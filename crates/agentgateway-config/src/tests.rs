@@ -368,8 +368,8 @@ binds:
         "the body is forwarded to the authorizer now: {findings:?}"
     );
     assert!(
-        findings.iter().any(|f| f.contains("policies.ai")),
-        "ai policies are not enforced and must be reported: {findings:?}"
+        !findings.iter().any(|f| f.contains("promptGuard")),
+        "a regex guard applies now: {findings:?}"
     );
     assert!(
         !findings
@@ -1288,16 +1288,16 @@ binds:
 
     let findings = config.lint();
     assert!(
-        findings
-            .iter()
-            .any(|f| f.contains("policies.ai.promptGuard")),
-        "{findings:?}"
-    );
-    assert!(
         findings.iter().any(|f| f.contains("policies.ai.routes")),
         "{findings:?}"
     );
-    for implemented in ["modelAliases", "prompts", "defaults", "overrides"] {
+    for implemented in [
+        "modelAliases",
+        "prompts",
+        "defaults",
+        "overrides",
+        "promptGuard",
+    ] {
         assert!(
             !findings.iter().any(|f| f.contains(implemented)),
             "`{implemented}` applies and must not be reported: {findings:?}"

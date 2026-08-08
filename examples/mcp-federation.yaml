@@ -253,6 +253,25 @@ binds:
                 # Anthropic only -- OpenAI caches long prefixes by itself.
                 # Tools sit ahead of everything else Anthropic caches, so that
                 # breakpoint is the cheapest to set and the likeliest to hit.
+                # Content rules. A `reject` stops the request and answers with
+                # the operator's own body; a `mask` rewrites and carries on.
+                # A response rule buffers a streamed answer -- a pattern can
+                # straddle a chunk boundary, and text already sent cannot be
+                # recalled -- so only put one here if that trade is worth it.
+                promptGuard:
+                  request:
+                    - regex:
+                        action: reject
+                        rules:
+                          - pattern: "password[=:]\\s*\\S+"
+                      rejection:
+                        status: 422
+                        body: '{"error": {"message": "no credentials, please"}}'
+                    - regex:
+                        action: mask
+                        rules:
+                          - builtin: email
+                          - builtin: creditCard
                 promptCaching:
                   cacheTools: true
                   cacheSystem: true

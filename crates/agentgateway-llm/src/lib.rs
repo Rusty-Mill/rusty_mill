@@ -19,6 +19,7 @@
 //! most wants incrementally, and collecting it would turn a token-by-token
 //! answer into a long silence followed by a wall of text.
 
+pub mod guard;
 mod provider;
 mod shape;
 pub mod stream;
@@ -37,6 +38,7 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use serde_json::Value;
 
+use guard::{Decision, Guard};
 pub use provider::{Provider, ProviderError};
 use shape::{Shape, caching::Caching};
 use stream::{ChunkTranslator, EventParser};
@@ -64,6 +66,9 @@ pub enum LlmError {
     /// A route's `localRateLimit` describes a bucket that cannot work.
     #[error(transparent)]
     RateLimit(#[from] agentgateway_core::RateLimitError),
+    /// A route's `promptGuard` holds a pattern that will not compile.
+    #[error(transparent)]
+    Guard(#[from] guard::GuardError),
     /// A `urlRewrite` was asked to act on an endpoint that is not a URL.
     #[error(
         "{at}.urlRewrite: `{endpoint}` is not an absolute URL, so there is nothing to rewrite; \
@@ -115,6 +120,11 @@ pub struct LlmBackend {
     /// provider-specific shape, so unlike the rest of the policy it cannot run
     /// on the OpenAI body. See [`shape::caching`].
     caching: Option<Caching>,
+    /// The route's `ai.promptGuard`, applied to the prompt and the answer.
+    ///
+    /// A response rule makes a streamed answer buffer; see [`guard`] for why
+    /// that is the only honest option.
+    guard: Option<Guard>,
     /// The route's `localRateLimit` entries of `type: tokens`.
     ///
     /// Shared rather than borrowed because a streamed response reports its
@@ -204,6 +214,18 @@ impl LlmBackend {
                 .filter(|_| provider.caches_explicitly()),
         );
 
+        let guard = Guard::new(
+            policies.ai.as_ref().and_then(|ai| ai.prompt_guard.as_ref()),
+            &format!("{at}.ai.promptGuard"),
+        )?;
+        if guard.as_ref().is_some_and(Guard::guards_response) {
+            tracing::info!(
+                route = %at,
+                "a `promptGuard` response rule buffers streamed answers on this route: a \
+                 pattern can straddle a chunk boundary, and text already sent cannot be recalled"
+            );
+        }
+
         Ok(LlmBackend {
             provider,
             model,
@@ -213,6 +235,7 @@ impl LlmBackend {
             retry: policies.retry.as_ref().and_then(Retry::new),
             shape: Shape::new(policies.ai.as_ref()),
             caching,
+            guard,
             tokens,
             client,
         })
@@ -350,6 +373,24 @@ impl LlmBackend {
             }
         };
 
+        // Before shaping, so a rule scans what the *caller* sent rather than
+        // what the operator's own `prompts` added. An operator refusing their
+        // own system prompt would be a strange thing to arrange.
+        if let Some(guard) = &self.guard {
+            match guard.check_request(&mut body) {
+                Decision::Rejected(rejection) => {
+                    tracing::info!(
+                        provider = self.provider.name(),
+                        status = rejection.status,
+                        "refusing a request: a `promptGuard` rule matched"
+                    );
+                    return refuse(&rejection);
+                }
+                Decision::Masked => tracing::debug!("masked the prompt"),
+                Decision::Allowed => {}
+            }
+        }
+
         // The route's `ai` policy first: it resolves the name the caller used
         // and fills in what they left out, so everything below sees a request
         // as the operator meant it to arrive.
@@ -451,10 +492,13 @@ impl LlmBackend {
             return raw(status, body);
         }
 
-        if streaming {
-            self.stream(response, status, &model)
-        } else {
-            self.buffered(response, status, &model).await
+        // A response rule buffers a streamed answer. See `guard` for why a
+        // sliding window would be a silent leak rather than a smaller cost.
+        let guards_response = self.guard.as_ref().is_some_and(Guard::guards_response);
+        match (streaming, guards_response) {
+            (true, false) => self.stream(response, status, &model),
+            (true, true) => self.guarded_stream(response, status, &model).await,
+            (false, _) => self.buffered(response, status, &model).await,
         }
     }
 
@@ -482,14 +526,135 @@ impl LlmBackend {
             settle(&self.tokens, self.provider.name(), model, usage, false);
         }
 
-        let body = match translated {
-            Some(value) => Bytes::from(value.to_string()),
+        let mut body = match translated {
+            Some(value) => value,
             // OpenAI-compatible: hand back exactly what arrived rather than
             // re-serializing a parse of it, so nothing is lost in the round
             // trip.
-            None => bytes,
+            None if !self.guards_response() => return raw(status, bytes),
+            None => parsed,
         };
-        raw(status, body)
+
+        // Rewriting means re-serializing, so a guarded route gives up the
+        // byte-for-byte passthrough. That is the cost of asking for the answer
+        // to be inspected, and it only applies where a rule was configured.
+        if let Some(guard) = &self.guard {
+            let mut text = answer_text(&body).unwrap_or_default();
+            match guard.check_text(&mut text) {
+                Decision::Rejected(rejection) => {
+                    tracing::info!(
+                        provider = self.provider.name(),
+                        status = rejection.status,
+                        "refusing an answer: a `promptGuard` rule matched"
+                    );
+                    return refuse(&rejection);
+                }
+                Decision::Masked => set_answer_text(&mut body, text),
+                Decision::Allowed => {}
+            }
+        }
+
+        raw(status, Bytes::from(body.to_string()))
+    }
+
+    /// Whether a response rule exists on this route.
+    fn guards_response(&self) -> bool {
+        self.guard.as_ref().is_some_and(Guard::guards_response)
+    }
+
+    /// Serve a streamed answer that has to be inspected before it goes out.
+    ///
+    /// The whole thing is collected, translated into the chunks a client would
+    /// have seen, checked, and then sent. The text is emitted as **one**
+    /// content chunk, because after masking it is no longer the text the
+    /// provider chunked and pretending otherwise would mean inventing
+    /// boundaries.
+    ///
+    /// A refusal here is an ordinary JSON error rather than an event stream:
+    /// nothing has been sent yet, so the client can still be told plainly.
+    async fn guarded_stream(
+        &self,
+        response: reqwest::Response,
+        status: StatusCode,
+        model: &str,
+    ) -> Response<LlmBody> {
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(%err, "reading the provider response failed");
+                return error(
+                    StatusCode::BAD_GATEWAY,
+                    "the provider response was truncated",
+                );
+            }
+        };
+
+        let translating = self.provider.translates_stream();
+        let mut parser = EventParser::default();
+        let mut translator = ChunkTranslator::new(now());
+        let mut chunks: Vec<Value> = Vec::new();
+        let mut usage = Usage::default();
+
+        for (event, data) in parser.push(&bytes) {
+            if translating {
+                chunks.extend(translator.event(&event, &data));
+            } else {
+                // `data: [DONE]` is not JSON and parses to null. It is the
+                // sentinel rather than a chunk, and re-emitting it here would
+                // hand a client `data: null` before the real one.
+                if !data.is_object() {
+                    continue;
+                }
+                if let Some(seen) = translate::openai_usage(&data) {
+                    usage = seen;
+                }
+                chunks.push(data);
+            }
+        }
+        if translating {
+            usage = translator.usage();
+        }
+
+        let mut text: String = chunks.iter().filter_map(chunk_text).collect();
+        if let Some(guard) = &self.guard {
+            match guard.check_text(&mut text) {
+                Decision::Rejected(rejection) => {
+                    tracing::info!(
+                        provider = self.provider.name(),
+                        status = rejection.status,
+                        "refusing a streamed answer: a `promptGuard` rule matched"
+                    );
+                    return refuse(&rejection);
+                }
+                Decision::Masked | Decision::Allowed => {}
+            }
+        }
+
+        if usage.total() > 0 {
+            settle(&self.tokens, self.provider.name(), model, usage, true);
+        }
+
+        let mut body = String::new();
+        let mut text = Some(text);
+        for mut chunk in chunks {
+            if chunk_text(&chunk).is_some() {
+                match text.take() {
+                    // The first content chunk carries all of it.
+                    Some(whole) => set_chunk_text(&mut chunk, whole),
+                    // The rest carried text that is now in that one.
+                    None => continue,
+                }
+            }
+            body.push_str(&stream::frame(&chunk));
+        }
+        body.push_str(stream::DONE);
+
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "text/event-stream")
+            .header(header::CACHE_CONTROL, "no-cache")
+            .body(full(Bytes::from(body)))
+            .unwrap_or_else(|_| error(StatusCode::INTERNAL_SERVER_ERROR, ""))
     }
 
     fn stream(
@@ -657,6 +822,69 @@ fn settle(
     if let Some(limiter) = limiter {
         limiter.charge(usage.total());
     }
+}
+
+/// The assistant's own text in an OpenAI-shaped response.
+fn answer_text(body: &Value) -> Option<String> {
+    body.get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Put rewritten text back where [`answer_text`] found it.
+fn set_answer_text(body: &mut Value, text: String) {
+    if let Some(content) = body
+        .get_mut("choices")
+        .and_then(|choices| choices.get_mut(0))
+        .and_then(|choice| choice.get_mut("message"))
+        .and_then(|message| message.get_mut("content"))
+    {
+        *content = Value::String(text);
+    }
+}
+
+/// The text a streamed chunk carries, if it carries any.
+fn chunk_text(chunk: &Value) -> Option<&str> {
+    chunk
+        .get("choices")?
+        .get(0)?
+        .get("delta")?
+        .get("content")?
+        .as_str()
+}
+
+/// Put rewritten text back where [`chunk_text`] found it.
+fn set_chunk_text(chunk: &mut Value, text: String) {
+    if let Some(content) = chunk
+        .get_mut("choices")
+        .and_then(|choices| choices.get_mut(0))
+        .and_then(|choice| choice.get_mut("delta"))
+        .and_then(|delta| delta.get_mut("content"))
+    {
+        *content = Value::String(text);
+    }
+}
+
+/// Answer with what a `promptGuard` rule said to answer with.
+///
+/// A rule with no body of its own gets this crate's OpenAI error envelope, so
+/// a client's existing error handling still works rather than seeing an empty
+/// response it has to guess about.
+fn refuse(rejection: &guard::Rejection) -> Response<LlmBody> {
+    let status = StatusCode::from_u16(rejection.status).unwrap_or(StatusCode::UNPROCESSABLE_ENTITY);
+    let mut response = match &rejection.body {
+        Some(body) => raw(status, Bytes::from(body.clone())),
+        None => error(status, "this request was refused by a content rule"),
+    };
+    if let Some(modifier) = &rejection.headers
+        && let Ok(headers) = Headers::new(modifier, "promptGuard.rejection.headers")
+    {
+        headers.apply(response.headers_mut());
+    }
+    response
 }
 
 /// Refuse a request whose route has spent its token budget.

@@ -114,6 +114,7 @@ dependencies = [
  "http-body",
  "http-body-util",
  "hyper",
+ "regex",
  "reqwest",
  "serde_json",
  "thiserror 2.0.19",
