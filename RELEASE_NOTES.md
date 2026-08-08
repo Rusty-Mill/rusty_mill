@@ -6,6 +6,25 @@ limitations plainly rather than leaving them implied.
 
 ---
 
+## PR #44 — Apply the standard governance file set
+**2026-08-08** · [#44](https://github.com/baileyrd/rusty_agent_gateway/pull/44)
+
+- **Added:** PR and issue templates, CONTRIBUTING, CODE_OF_CONDUCT, SECURITY,
+  CHANGELOG, this file, ARCHITECTURE, an ADR seed, and a Rust CI workflow. The repo
+  audit went from 1/10 to 10/10 plus CI.
+- **Changed:** README was deliberately left alone. The existing one is the repo's
+  real documentation; the template would have been a downgrade.
+- ARCHITECTURE records that this repo *deviates from the ports-and-adapters
+  default* — there are no `trait` ports, every extension point is a closed enum
+  matched exhaustively. Said out loud because a reader would otherwise infer it
+  from the absence of traits and assume it was an oversight.
+- The CI workflow's three commands were run locally before it shipped, so it
+  arrives green rather than red on its first PR.
+- **Known limitation:** `SECURITY.md` still carries the placeholder contact —
+  publishing an address into a repo is outward-facing and was not chosen
+  unprompted. CI also gates nothing until it is set as a required status check in
+  branch protection.
+
 ## PR #43 — Name the inventory's mesh-only fields in the scope list
 **2026-08-08** · [#43](https://github.com/baileyrd/rusty_agent_gateway/pull/43)
 
