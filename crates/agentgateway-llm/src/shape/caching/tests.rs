@@ -34,15 +34,43 @@ fn request() -> Value {
 fn a_policy_that_would_mark_nothing_compiles_to_nothing() {
     assert!(Caching::new(None).is_none());
     assert!(Caching::new(Some(&policy(false, false))).is_none());
+    let mut only_tools = policy(false, false);
+    only_tools.cache_tools = true;
+    assert!(
+        Caching::new(Some(&only_tools)).is_some(),
+        "`cacheTools` alone is now something to do"
+    );
 }
 
 #[test]
-fn cache_tools_alone_compiles_to_nothing() {
-    // This build does not translate `tools` to Anthropic, so there is no tool
-    // block to mark. `Config::lint` says so rather than this pretending.
-    let mut policy = policy(false, false);
-    policy.cache_tools = true;
-    assert!(Caching::new(Some(&policy)).is_none());
+fn a_tool_definition_can_carry_a_breakpoint() {
+    // Tools sit ahead of everything else Anthropic caches, so this is the
+    // cheapest breakpoint to set and the likeliest to hit.
+    let mut configured = policy(false, false);
+    configured.cache_tools = true;
+    let caching = caching(configured);
+
+    let mut body = request();
+    body["tools"] = json!([
+        {"name": "one", "input_schema": {}},
+        {"name": "two", "input_schema": {}},
+    ]);
+    caching.apply(&mut body);
+
+    let tools = body["tools"].as_array().expect("an array");
+    assert!(tools[0].get("cache_control").is_none());
+    assert_eq!(tools[1]["cache_control"], json!({"type": "ephemeral"}));
+}
+
+#[test]
+fn a_request_with_no_tools_is_left_alone() {
+    let mut configured = policy(false, false);
+    configured.cache_tools = true;
+    let caching = caching(configured);
+
+    let mut body = request();
+    caching.apply(&mut body);
+    assert!(body.get("tools").is_none(), "{body}");
 }
 
 #[test]

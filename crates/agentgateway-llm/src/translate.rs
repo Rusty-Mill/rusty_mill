@@ -29,6 +29,8 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::tools;
+
 /// Anthropic rejects a request without `max_tokens`, so one has to be chosen
 /// when the caller did not.
 ///
@@ -109,9 +111,29 @@ pub fn to_anthropic(body: &Value) -> Result<Value, TranslateError> {
                     system.push(text.to_string());
                 }
             }
-            // Anthropic has no `tool` role in this shape; treating it as a
-            // user turn keeps the transcript intact rather than losing it.
-            "assistant" => turns.push(json!({"role": "assistant", "content": content})),
+            "assistant" => {
+                // An assistant turn that called a tool becomes a list of
+                // content blocks rather than a string: for Anthropic the call
+                // lives *in* the content, beside whatever the model said.
+                let content = tools::assistant_to_anthropic(message).unwrap_or(content);
+                turns.push(json!({"role": "assistant", "content": content}));
+            }
+            // Anthropic has no `tool` role: a result is a block inside a user
+            // turn. Consecutive results join one turn, because two user
+            // messages in a row are rejected -- and a model asked to call three
+            // tools answers all three before the conversation moves on.
+            "tool" => {
+                let block = tools::result_to_anthropic(message);
+                match turns.last_mut().filter(|last| is_tool_result_turn(last)) {
+                    Some(last) => {
+                        if let Some(blocks) = last.get_mut("content").and_then(Value::as_array_mut)
+                        {
+                            blocks.push(block);
+                        }
+                    }
+                    None => turns.push(json!({"role": "user", "content": [block]})),
+                }
+            }
             _ => turns.push(json!({"role": "user", "content": content})),
         }
     }
@@ -148,7 +170,41 @@ pub fn to_anthropic(body: &Value) -> Result<Value, TranslateError> {
         out.insert("stop_sequences".into(), sequences);
     }
 
+    // Tools were dropped here entirely until now, which was worse than not
+    // supporting them: `finish_reason` already translated `tool_use`, so a
+    // client could be told a tool ran and never be told which.
+    if let Some(tools) = object
+        .get("tools")
+        .and_then(tools::definitions_to_anthropic)
+    {
+        out.insert("tools".into(), tools);
+    }
+    if let Some(choice) = object
+        .get("tool_choice")
+        .and_then(tools::choice_to_anthropic)
+    {
+        out.insert("tool_choice".into(), choice);
+    }
+
     Ok(Value::Object(out))
+}
+
+/// Whether this turn is a user message made only of tool results.
+///
+/// Anthropic rejects two user turns in a row, so consecutive results have to
+/// join one — but only when the previous turn *is* one, or a result would be
+/// appended to an ordinary question.
+fn is_tool_result_turn(turn: &Value) -> bool {
+    turn.get("role").and_then(Value::as_str) == Some("user")
+        && turn
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|blocks| {
+                !blocks.is_empty()
+                    && blocks.iter().all(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    })
+            })
 }
 
 /// Convert an Anthropic Messages response into an OpenAI one.
@@ -168,6 +224,23 @@ pub fn from_anthropic(body: &Value, created: u64) -> Value {
 
     let usage = anthropic_usage(body).unwrap_or_default();
 
+    let mut message = Map::new();
+    message.insert("role".into(), json!("assistant"));
+    // `null` rather than `""` when the model only called a tool: OpenAI's own
+    // responses do that, and a client checking `content` for emptiness reads
+    // the two the same way while one checking for null does not.
+    message.insert(
+        "content".into(),
+        if text.is_empty() {
+            Value::Null
+        } else {
+            json!(text)
+        },
+    );
+    if let Some(calls) = body.get("content").and_then(tools::calls_from_anthropic) {
+        message.insert("tool_calls".into(), calls);
+    }
+
     json!({
         "id": body.get("id").and_then(Value::as_str).unwrap_or("chatcmpl-unknown"),
         "object": "chat.completion",
@@ -175,7 +248,7 @@ pub fn from_anthropic(body: &Value, created: u64) -> Value {
         "model": body.get("model").and_then(Value::as_str).unwrap_or_default(),
         "choices": [{
             "index": 0,
-            "message": {"role": "assistant", "content": text},
+            "message": Value::Object(message),
             "finish_reason": finish_reason(body.get("stop_reason").and_then(Value::as_str)),
         }],
         "usage": {

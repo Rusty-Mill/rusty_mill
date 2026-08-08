@@ -22,6 +22,7 @@
 mod provider;
 mod shape;
 pub mod stream;
+pub mod tools;
 pub mod translate;
 
 use std::sync::Arc;

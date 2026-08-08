@@ -17,6 +17,18 @@
 //!
 //! Usage is accumulated across the stream rather than read from one event,
 //! because neither event carries both halves.
+//!
+//! # Tool calls need a second index
+//!
+//! Anthropic numbers *content blocks*, and text and tool calls share that
+//! numbering. OpenAI numbers *tool calls*, and its text is not in the list at
+//! all. So a response whose first block is text and whose second is a tool
+//! call has that call at Anthropic index 1 and OpenAI index 0 — passing the
+//! block index through would leave a client assembling arguments into a call
+//! that never opened. The translator keeps its own count and a map from one to
+//! the other.
+
+use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
@@ -30,6 +42,11 @@ pub struct ChunkTranslator {
     role_sent: bool,
     created: u64,
     usage: Usage,
+    /// Anthropic content-block index -> OpenAI tool-call index.
+    ///
+    /// See the module docs: the two number different things, and a client
+    /// assembling arguments keys on OpenAI's.
+    tool_indices: BTreeMap<u64, u64>,
 }
 
 impl ChunkTranslator {
@@ -81,22 +98,71 @@ impl ChunkTranslator {
                 Vec::new()
             }
 
-            "content_block_delta" => {
-                let Some(text) = data
-                    .get("delta")
-                    .and_then(|d| d.get("text"))
-                    .and_then(Value::as_str)
-                else {
+            // A tool call opens here rather than in a delta, and it is the
+            // only place its id and name are ever sent. A text block opening
+            // has nothing to say.
+            "content_block_start" => {
+                let block = data.get("content_block").unwrap_or(&Value::Null);
+                if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                    return Vec::new();
+                }
+                let Some(block_index) = data.get("index").and_then(Value::as_u64) else {
                     return Vec::new();
                 };
 
-                let mut chunks = Vec::new();
-                // OpenAI announces the assistant role once, in its own chunk,
-                // before any content.
-                if !self.role_sent {
-                    self.role_sent = true;
-                    chunks.push(self.chunk(json!({"role": "assistant"}), Value::Null));
+                let call_index = self.tool_indices.len() as u64;
+                self.tool_indices.insert(block_index, call_index);
+
+                let mut chunks = self.announce_role();
+                // Arguments open empty and arrive as deltas, which is what an
+                // OpenAI client expects: it concatenates them itself.
+                chunks.push(self.chunk(
+                    json!({"tool_calls": [{
+                        "index": call_index,
+                        "id": block.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name").and_then(Value::as_str).unwrap_or_default(),
+                            "arguments": "",
+                        },
+                    }]}),
+                    Value::Null,
+                ));
+                chunks
+            }
+
+            "content_block_delta" => {
+                let delta = data.get("delta").unwrap_or(&Value::Null);
+
+                // A tool call's arguments arrive as `input_json_delta`
+                // fragments, which are not valid JSON on their own -- they are
+                // pieces of a string the client concatenates.
+                if let Some(partial) = delta.get("partial_json").and_then(Value::as_str) {
+                    let Some(call_index) = data
+                        .get("index")
+                        .and_then(Value::as_u64)
+                        .and_then(|block| self.tool_indices.get(&block).copied())
+                    else {
+                        // A fragment for a call that never opened would be
+                        // assembled into the wrong one, so it is dropped.
+                        return Vec::new();
+                    };
+                    let mut chunks = self.announce_role();
+                    chunks.push(self.chunk(
+                        json!({"tool_calls": [{
+                            "index": call_index,
+                            "function": {"arguments": partial},
+                        }]}),
+                        Value::Null,
+                    ));
+                    return chunks;
                 }
+
+                let Some(text) = delta.get("text").and_then(Value::as_str) else {
+                    return Vec::new();
+                };
+
+                let mut chunks = self.announce_role();
                 chunks.push(self.chunk(json!({"content": text}), Value::Null));
                 chunks
             }
@@ -118,12 +184,24 @@ impl ChunkTranslator {
                 vec![self.chunk(json!({}), finish_reason(reason))]
             }
 
-            // `message_stop`, `content_block_start`, `content_block_stop` and
-            // `ping` have nothing to say in OpenAI's format. The `[DONE]`
-            // sentinel is the caller's to emit once the stream ends, since it
-            // is not a chunk.
+            // `message_stop`, `content_block_stop` and `ping` have nothing to
+            // say in OpenAI's format. The `[DONE]` sentinel is the caller's to
+            // emit once the stream ends, since it is not a chunk.
             _ => Vec::new(),
         }
+    }
+
+    /// The role chunk, if it has not been sent yet.
+    ///
+    /// OpenAI announces the assistant role once, in its own chunk, before any
+    /// content -- and a response that opens with a tool call rather than text
+    /// still has to announce it.
+    fn announce_role(&mut self) -> Vec<Value> {
+        if self.role_sent {
+            return Vec::new();
+        }
+        self.role_sent = true;
+        vec![self.chunk(json!({"role": "assistant"}), Value::Null)]
     }
 
     fn chunk(&self, delta: Value, finish: Value) -> Value {
@@ -361,5 +439,169 @@ mod tests {
     fn a_frame_is_terminated_the_way_sse_requires() {
         assert_eq!(frame(&json!({"a": 1})), "data: {\"a\":1}\n\n");
         assert!(DONE.ends_with("\n\n"));
+    }
+
+    /// The events Anthropic sends for one tool call, in order.
+    fn tool_call_events() -> Vec<(&'static str, Value)> {
+        vec![
+            (
+                "message_start",
+                json!({"message": {"id": "msg_1", "model": "claude-sonnet-4",
+                                   "usage": {"input_tokens": 10}}}),
+            ),
+            (
+                "content_block_start",
+                json!({"index": 0, "content_block": {
+                    "type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"index": 0, "delta": {
+                    "type": "input_json_delta", "partial_json": "{\"city\":"}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"index": 0, "delta": {
+                    "type": "input_json_delta", "partial_json": "\"Oslo\"}"}}),
+            ),
+            (
+                "message_delta",
+                json!({"delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 5}}),
+            ),
+        ]
+    }
+
+    fn translate(events: Vec<(&str, Value)>) -> Vec<Value> {
+        let mut translator = ChunkTranslator::new(1);
+        events
+            .iter()
+            .flat_map(|(event, data)| translator.event(event, data))
+            .collect()
+    }
+
+    #[test]
+    fn a_streamed_tool_call_opens_with_its_id_and_name() {
+        // The only place either is ever sent.
+        let chunks = translate(tool_call_events());
+        let opening = &chunks[1]["choices"][0]["delta"]["tool_calls"][0];
+        assert_eq!(opening["index"], 0);
+        assert_eq!(opening["id"], "toolu_1");
+        assert_eq!(opening["type"], "function");
+        assert_eq!(opening["function"]["name"], "get_weather");
+        assert_eq!(
+            opening["function"]["arguments"], "",
+            "arguments open empty and arrive as deltas"
+        );
+    }
+
+    #[test]
+    fn the_role_is_announced_even_when_a_response_opens_with_a_tool_call() {
+        let chunks = translate(tool_call_events());
+        assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|c| c["choices"][0]["delta"].get("role").is_some())
+                .count(),
+            1,
+            "and only once"
+        );
+    }
+
+    #[test]
+    fn argument_fragments_are_forwarded_for_the_client_to_concatenate() {
+        // They are not valid JSON on their own; assembling them here would
+        // mean holding the whole call back until it closed.
+        let chunks = translate(tool_call_events());
+        let arguments: String = chunks
+            .iter()
+            .filter_map(|c| {
+                c["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str()
+            })
+            .collect();
+        assert_eq!(arguments, r#"{"city":"Oslo"}"#);
+    }
+
+    #[test]
+    fn a_tool_call_after_text_is_numbered_by_call_not_by_content_block() {
+        // Anthropic numbers content blocks and text shares the numbering;
+        // OpenAI numbers only tool calls. Passing the block index through
+        // would leave a client assembling arguments into a call that never
+        // opened.
+        let chunks = translate(vec![
+            (
+                "message_start",
+                json!({"message": {"id": "msg_1", "model": "m"}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"index": 0, "delta": {"text": "Looking that up."}}),
+            ),
+            (
+                "content_block_start",
+                json!({"index": 1, "content_block": {
+                    "type": "tool_use", "id": "toolu_1", "name": "f", "input": {}}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"index": 1, "delta": {"partial_json": "{}"}}),
+            ),
+        ]);
+
+        let calls: Vec<&Value> = chunks
+            .iter()
+            .filter(|c| c["choices"][0]["delta"].get("tool_calls").is_some())
+            .collect();
+        assert_eq!(calls.len(), 2);
+        for call in calls {
+            assert_eq!(
+                call["choices"][0]["delta"]["tool_calls"][0]["index"], 0,
+                "the first tool call is OpenAI index 0 even at block index 1"
+            );
+        }
+    }
+
+    #[test]
+    fn two_tool_calls_get_their_own_indices() {
+        let chunks = translate(vec![
+            (
+                "content_block_start",
+                json!({"index": 0, "content_block": {
+                    "type": "tool_use", "id": "a", "name": "one", "input": {}}}),
+            ),
+            (
+                "content_block_start",
+                json!({"index": 1, "content_block": {
+                    "type": "tool_use", "id": "b", "name": "two", "input": {}}}),
+            ),
+            (
+                "content_block_delta",
+                json!({"index": 1, "delta": {"partial_json": "{}"}}),
+            ),
+        ]);
+
+        let indices: Vec<u64> = chunks
+            .iter()
+            .filter_map(|c| c["choices"][0]["delta"]["tool_calls"][0]["index"].as_u64())
+            .collect();
+        assert_eq!(indices, vec![0, 1, 1]);
+    }
+
+    #[test]
+    fn a_fragment_for_a_call_that_never_opened_is_dropped() {
+        // Forwarding it would have the client assemble arguments into the
+        // wrong call.
+        let chunks = translate(vec![(
+            "content_block_delta",
+            json!({"index": 7, "delta": {"partial_json": "{}"}}),
+        )]);
+        assert!(chunks.is_empty(), "{chunks:?}");
+    }
+
+    #[test]
+    fn a_tool_use_stop_reason_reaches_the_client_as_tool_calls() {
+        let chunks = translate(tool_call_events());
+        let last = chunks.last().expect("a final chunk");
+        assert_eq!(last["choices"][0]["finish_reason"], "tool_calls");
     }
 }
