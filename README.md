@@ -2238,13 +2238,22 @@ The one real friction is strictness, described under
 the proto specifies, which is right for an agent and wrong for a gateway
 aggregating third-party cards. Hence the lenient parse here.
 
-## Tests
+## Building and testing
+
+The toolchain is pinned in `rust-toolchain.toml`, so rustup installs the right
+version on first use and a local check and CI check the same thing. That pin
+exists because they once did not: clippy 1.97 rejected code 1.94 accepted, so a
+clean local run passed while CI failed on the same commit twice running.
+
+The three commands CI runs, which are the three worth running before a push:
 
 ```bash
-cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 ```
 
-226 tests. The config tests are anchored on YAML taken verbatim from
+832 tests. The config tests are anchored on YAML taken verbatim from
 agentgateway's documentation — if upstream examples stop parsing, compatibility
 has regressed. The federation tests are genuinely end-to-end: a real `rmcp`
 client, over a real socket, through the gateway, into real subprocess MCP
@@ -2275,6 +2284,17 @@ apart from "retried and got the same answer".
 The rate limiter takes time as a parameter rather than reading a clock, so its
 tests drive time instead of sleeping. A rate limiter tested with `sleep` is one
 tested at a single resolution, on one machine, when CI was not busy.
+
+The TLS tests generate a certificate per name and give each client only its own,
+so a handshake that succeeds for the wrong reason still fails the test. The
+ClientHello parser is tested by truncating a valid message at every byte offset
+and asserting that none of them parse or panic — every length in that message is
+written by whoever connected. Those tests also disable proxy autodetection: the
+hostnames are invented, and an ambient `HTTPS_PROXY` would send the request
+somewhere other than the gateway under test.
+
+Ports come from a `flock`-claimed band rather than a pid-derived one, so two
+test binaries cannot collide however their process ids fall.
 
 [agentgateway]: https://agentgateway.dev
 [rusty_mcp]: https://github.com/baileyrd/rusty_mcp
