@@ -18,8 +18,20 @@ limitations plainly rather than leaving them implied.
   default* — there are no `trait` ports, every extension point is a closed enum
   matched exhaustively. Said out loud because a reader would otherwise infer it
   from the absence of traits and assume it was an oversight.
-- The CI workflow's three commands were run locally before it shipped, so it
-  arrives green rather than red on its first PR.
+- **Fixed:** two clippy errors CI caught, and then the reason it caught them.
+  `unnecessary_sort_by` in `router.rs` and `useless_conversion` in `guard.rs` are
+  both rejected by clippy 1.97 on the runner and accepted by 1.94 in the
+  development sandbox — so "clippy clean" locally said nothing about CI, and the
+  workflow went red twice before going green.
+- **Added:** `rust-toolchain.toml` pinning 1.97.0 with its components, which is
+  the actual fix. Running CI's commands under the pin found the second error
+  before it was pushed rather than after. Also bumped `actions/checkout` and
+  `actions/cache` to v5, which the runner warned were being forced off deprecated
+  Node 20.
+- **Correction to an earlier claim in this entry:** the workflow was described as
+  arriving green because its three commands passed locally. That was a weaker
+  check than it sounded — same commands, different toolchain — and it was wrong.
+  CI run 4 is the first green one.
 - **Known limitation:** `SECURITY.md` still carries the placeholder contact —
   publishing an address into a repo is outward-facing and was not chosen
   unprompted. CI also gates nothing until it is set as a required status check in

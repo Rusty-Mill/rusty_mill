@@ -28,6 +28,14 @@ by category for a reader who wants the shape of a release rather than its histor
 - Weighted traffic splitting across a `service` backend's instances — weights are
   divided, not repeated per instance
 - Flaky cross-binary test port allocation
+- Two clippy errors (`unnecessary_sort_by`, `useless_conversion`) that the
+  development sandbox's older toolchain did not emit
+
+### Infrastructure
+- `rust-toolchain.toml` pins 1.97.0, so a local check and CI check the same thing.
+  Added after a clean local run passed while CI failed on the same commit
+- GitHub Actions CI running fmt, clippy under `-D warnings`, and the full test
+  suite. Not yet a required status check, so it reports rather than gates
 
 ### Security
 - A moderation key is never sent to a host it was not issued for; the gateway

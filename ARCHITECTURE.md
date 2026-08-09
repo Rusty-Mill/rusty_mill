@@ -30,6 +30,9 @@ gateway whose failure mode is *routing traffic somewhere nobody asked for*, that
 is the trade worth making — `gateway.rs` deliberately has no catch-all arm, so an
 unhandled backend kind cannot reach a client as a 501.
 
+Recorded in full, with the alternatives, as
+[ADR-0003](./docs/adr/0003-closed-enums-at-extension-points.md).
+
 | Seam | Variants / implementations | Notes |
 | ---- | -------------------------- | ----- |
 | `BackendTarget` (config) → `BackendState` (runtime) | `host`, `service`, `mcp`, `ai`, `dynamic` | The dispatch point for a route's destination. No catch-all arm: a new kind is a compile error, not a 501 |
@@ -37,7 +40,7 @@ unhandled backend kind cannot reach a client as a 501.
 | `Protocol` + `Listener::passes_through()` | `HTTP`, `HTTPS`, `TLS` (terminate), `TLS`+`tcpRoutes` (forward), `TCP`, `HBONE` | `tcpRoutes` decides passthrough, not the protocol: `TLS` covers both Gateway API modes |
 | `Registry` | services + workloads + named backends, from the config file | The one resolver. Backends, guardrails processors and TCP routes all resolve names through it |
 | `Endpoints` | weighted round-robin ring | Shared by host proxying, guardrails processors and TLS passthrough. Deterministic, not random — see below |
-| `TlsTerminator` certificates | one per listener hostname | Selected by peeking the ClientHello's SNI, because `rusty_tls` exposes no `ResolvesServerCert` |
+| `TlsTerminator` certificates | one per listener hostname | Selected by peeking the ClientHello's SNI, because `rusty_tls` exposes no `ResolvesServerCert` ([ADR-0002](./docs/adr/0002-sni-by-peeking-the-clienthello.md)) |
 
 **Crate seams** carry the rest of the structure. `agentgateway-config` owns
 parsing, typing and linting and depends on nothing else; `agentgateway-core` owns
@@ -96,9 +99,12 @@ wrong:
 ## Key decisions
 
 See [docs/adr/](./docs/adr/) for the record of individual decisions and their
-tradeoffs.
+tradeoffs — [ADR-0002](./docs/adr/0002-sni-by-peeking-the-clienthello.md) on
+reading SNI off the wire, [ADR-0003](./docs/adr/0003-closed-enums-at-extension-points.md)
+on enums rather than traits.
 
-Three that shape everything else, recorded here because they predate the ADR log:
+Three more shape everything else, recorded here because they predate the ADR log
+and are cross-cutting rather than single decisions:
 
 1. **Parse everything upstream accepts; enforce what this build can.** A key that
    parses and does nothing is reported by `--check` rather than silently ignored
@@ -110,6 +116,13 @@ Three that shape everything else, recorded here because they predate the ADR log
 3. **Import `rusty_tls`, never `rustls`.** One documented exception (installing
    the crypto provider, which `rusty_tls` does not do). SNI selection was built
    by reading the ClientHello off the wire specifically to avoid a second.
+
+## Development
+
+The toolchain is pinned in `rust-toolchain.toml` so a local check and CI check
+the same thing; CONTRIBUTING has the commands. CI runs fmt, clippy under
+`-D warnings`, and the full suite on every PR — it reports but does not yet gate,
+since it is not a required status check.
 
 ## Non-goals
 
