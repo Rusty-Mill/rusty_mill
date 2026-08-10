@@ -18,6 +18,15 @@ convenience.
 - `open` with `truncate` on an existing file leaves it zero-length.
 - Reads and writes are byte-faithful: no encoding validation or conversion
   anywhere in the stack; names are `OsStr` and may be non-UTF-8 on unix.
+  **Live-verified** (Rusty-Mill `RT-001` follow-up, closing the gap the
+  `TRIAL-0002` comparison record disclosed as untested): `open`,
+  `create_dir`, `rename`, and `symlink`/`read_link` round-trip a
+  non-UTF-8 byte sequence exactly, pinned by
+  `crates/platform-linux/tests/non_utf8_paths.rs`. The equivalent
+  Windows hard case — a lone (unpaired) UTF-16 surrogate, which NTFS
+  permits and a plain Rust `String` cannot represent at all — round-trips
+  through `open`, `create_dir`, and `rename`, pinned by
+  `crates/platform-windows/tests/lone_surrogate_paths.rs`.
 - `metadata` on a missing entry fails `NotFound` and carries the path.
 - `remove_dir` on a non-empty directory fails `DirectoryNotEmpty`.
 - `remove_file` on a directory fails `IsADirectory`; `remove_dir` on a file
