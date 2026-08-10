@@ -998,6 +998,87 @@ fn windows_stdio_file_refuses_a_foreign_backend_file() {
     assert_eq!(e.kind, platform::error::ErrorKind::Unsupported);
 }
 
+/// R2-equivalent containment (`docs/behavior/fs.md`, `docs/
+/// divergences.md` #013): `open_dir` now rejects a reparse point sitting
+/// in an intermediate path component instead of silently following it —
+/// `sys::nt::open_relative_r2`'s `OBJ_DONT_REPARSE`, previously
+/// unrequested (plain `open_relative` follows every reparse point
+/// transparently, like the Linux R1 baseline it mirrors). Skips honestly
+/// (matching `assert_fs_behavior`'s own symlink block) when the test
+/// process lacks `SeCreateSymbolicLinkPrivilege` — nothing to prove
+/// about reparse-point rejection if no reparse point can be created at
+/// all in this environment.
+#[test]
+fn windows_open_dir_rejects_a_reparse_point_in_an_intermediate_component() {
+    let tmp = std::env::temp_dir().join(format!("rustils-r2-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mk tempdir");
+    let root = platform_windows::WindowsDir::open_ambient(&tmp).expect("open ambient");
+
+    root.create_dir(OsStr::new("target")).expect("mkdir target");
+    root.create_dir(OsStr::new("target/leaf"))
+        .expect("mkdir target/leaf");
+    match root.symlink(OsStr::new("target"), OsStr::new("link")) {
+        Ok(()) => {
+            let e = root
+                .open_dir(OsStr::new("link/leaf"))
+                .err()
+                .expect("an intermediate reparse point must now be rejected under R2");
+            assert_eq!(e.kind, ErrorKind::FilesystemLoop);
+
+            // Sanity: the real, non-symlinked path still works.
+            root.open_dir(OsStr::new("target/leaf"))
+                .expect("the real, non-symlinked path must still open");
+        }
+        Err(e) if e.to_string().contains("1314") || e.to_string().contains("privilege") => {
+            println!(
+                "Skipping reparse-point containment test: SeCreateSymbolicLinkPrivilege \
+                 (Win32 1314) not held by current user process"
+            );
+        }
+        Err(e) => panic!("symlink failed with unexpected error: {:?}", e),
+    }
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// R2-equivalent containment, `create_dir`'s side: creating
+/// `"link/newdir"` through an intermediate reparse point is rejected the
+/// same way `open_dir` rejects it above, rather than silently creating
+/// the directory on the other side of the link.
+#[test]
+fn windows_create_dir_rejects_a_reparse_point_in_an_intermediate_component() {
+    let tmp = std::env::temp_dir().join(format!("rustils-r2-mkdir-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mk tempdir");
+    let root = platform_windows::WindowsDir::open_ambient(&tmp).expect("open ambient");
+
+    root.create_dir(OsStr::new("target")).expect("mkdir target");
+    match root.symlink(OsStr::new("target"), OsStr::new("link")) {
+        Ok(()) => {
+            let e = root
+                .create_dir(OsStr::new("link/newdir"))
+                .expect_err("an intermediate reparse point must now be rejected under R2");
+            assert_eq!(e.kind, ErrorKind::FilesystemLoop);
+            assert!(
+                root.metadata(OsStr::new("target/newdir")).is_err(),
+                "the directory must not have been created on the other side of the link"
+            );
+
+            // A single-component create_dir is unaffected.
+            root.create_dir(OsStr::new("plain"))
+                .expect("plain mkdir still works");
+        }
+        Err(e) if e.to_string().contains("1314") || e.to_string().contains("privilege") => {
+            println!(
+                "Skipping reparse-point containment test: SeCreateSymbolicLinkPrivilege \
+                 (Win32 1314) not held by current user process"
+            );
+        }
+        Err(e) => panic!("symlink failed with unexpected error: {:?}", e),
+    }
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 /// Tun surface (RFC v2 R5+, D14): `wintun` has no backend yet — no
 /// Windows consumer has named itself (rusty_tail's `ts-tun`, the only
 /// named consumer for this surface, is Linux-only). `create` reports

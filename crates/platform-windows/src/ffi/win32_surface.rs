@@ -10,6 +10,12 @@ pub use windows_sys::Win32::Foundation::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SHARING_VIOLATION,
     STATUS_SUCCESS, UNICODE_STRING,
 };
+// R2-equivalent containment (Rusty-Mill fs slice): `NtCreateFile`'s
+// documented failure when `OBJ_DONT_REPARSE` (`nt_surface`'s own
+// admission) rejects a reparse point encountered during resolution —
+// the NT counterpart of Linux `openat2`'s `ELOOP`/`ErrorKind::
+// FilesystemLoop`, mapped the same way in `sys::errmap::kind_of_ntstatus`.
+pub use windows_sys::Win32::Foundation::STATUS_REPARSE_POINT_ENCOUNTERED;
 pub use windows_sys::Win32::Foundation::{
     DuplicateHandle, SetHandleInformation, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE,
     HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,

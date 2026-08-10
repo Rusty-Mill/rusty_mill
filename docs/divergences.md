@@ -361,3 +361,68 @@ implementation convenience.
   simply having no `impl ConsoleAcquisition for LinuxTerminal` to find.
 - **Accepted**: 2026-08-05, with the console-acquisition slice
   (`docs/design-discussion-console.md`, extraction map D9).
+
+## 013 — `open_dir`/`create_dir` reach mount-confinement (R2) on Linux, only atomic link-confinement on Windows
+
+- **Linux**: `LinuxDir::open_dir`/`create_dir` are Rusty-Mill **R2** on a
+  5.6+ kernel — `sys::fdio::openat_r2`'s raw `openat2` requests
+  `RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV` together, so resolution is
+  refused both for a symlink anywhere in the path *and* for crossing a
+  filesystem/mount boundary, atomically, in one kernel call.
+- **Windows**: `WindowsDir::open_dir`/`create_dir` reach only the
+  link-confinement half — `sys::nt::open_relative_r2`'s `OBJ_DONT_REPARSE`
+  rejects a reparse point anywhere in resolution, the `RESOLVE_NO_SYMLINKS`
+  equivalent, but `NtCreateFile`'s `OBJECT_ATTRIBUTES` has no admitted
+  flag this crate found meaning "refuse to cross a volume boundary while
+  resolving this path" the way `RESOLVE_NO_XDEV` does.
+- **OS limitation**: `openat2`'s `resolve` bitmask was purpose-designed
+  (Linux 5.6, 2020) as one atomic containment primitive covering both
+  link- and mount-confinement together; NT's object-manager-era
+  `OBJECT_ATTRIBUTES.Attributes` flags predate that design by decades and
+  were never extended with a symmetric mount-boundary bit — a caller that
+  wants Windows mount-confinement has to detect the crossing itself
+  (e.g. comparing volume serial numbers before and after resolution),
+  which is a stat-then-open race, not an atomic OS guarantee, and out of
+  scope for this slice (`docs/behavior/fs.md`'s own honesty rule: don't
+  claim a guarantee this crate can't back with a real atomic mechanism).
+- **Pinning tests**:
+  `linux_open_dir_rejects_a_symlink_in_an_intermediate_component` /
+  `linux_create_dir_rejects_a_symlink_in_an_intermediate_component`
+  (`crates/platform-linux/tests/parity.rs`) pin the link-confinement half
+  both backends share; Linux's mount-confinement half has no committed
+  test — a bind-mount fixture needing elevated privilege this test
+  harness cannot assume in CI (the same `CAP_NET_ADMIN`-style honesty
+  `tests/tun_parity.rs`'s `tun_or_skip!` already practices for its own
+  environment gap) — see `crates/platform-linux/src/fs.rs`'s module doc
+  for the precise per-backend R-level claim this entry backs.
+- **Accepted**: 2026-08-10, with the Rusty-Mill fs R2/D2 slice.
+
+## 014 — directory durability after `write_atomic`'s rename: D2 on Linux, D1 on Windows
+
+- **Linux**: `Dir::write_atomic`'s inherited default now calls
+  `Dir::sync_dir` after its publishing rename; `LinuxDir::sync_dir` calls
+  `fsync` on the capability's own `O_DIRECTORY` fd, reaching Rusty-Mill
+  **D2** ("namespace synchronized") — the rename's own directory-entry
+  mutation is durable, not just the renamed file's content.
+- **Windows**: `WindowsDir` has no `sync_dir` override — the trait's
+  default no-op stands, so `write_atomic` stays **D1** ("content
+  synchronized") on this backend.
+- **OS limitation**: `fsync(2)` on a directory fd is Linux's own
+  documented, supported mechanism (`fsync(2)`'s man page states it
+  explicitly) for exactly this durability question. Windows's nearest
+  candidate, `FlushFileBuffers` on a directory handle opened with
+  `FILE_FLAG_BACKUP_SEMANTICS`, is not similarly documented by Microsoft
+  for directory handles specifically, and has a known history of
+  surprising, driver-dependent behavior for non-regular-file handles —
+  there is no way to back a D2 claim here with verified evidence rather
+  than a syntax check that happens to compile. This stays D1 pending a
+  future slice with a real Windows/NTFS test rig to establish the actual
+  behavior live, per this backend's own `Dir for WindowsDir` doc comment.
+- **Pinning tests**:
+  `write_atomic_fsyncs_the_directory_after_the_publishing_rename`
+  (`crates/platform-linux/tests/parity.rs`) — strace-verified: the
+  directory `fsync` fires strictly after the publishing `renameat2`. No
+  Windows-side pin exists or is claimed, matching the honest D1 posture
+  above; nothing to prove for a call this backend deliberately does not
+  make.
+- **Accepted**: 2026-08-10, with the Rusty-Mill fs R2/D2 slice.

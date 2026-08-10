@@ -18,6 +18,22 @@ pub use windows_sys::Wdk::Storage::FileSystem::{
 };
 pub use windows_sys::Win32::System::Kernel::OBJ_CASE_INSENSITIVE;
 
+// R2-equivalent containment (Rusty-Mill fs slice), Linux `openat2
+// RESOLVE_NO_SYMLINKS`'s NT counterpart: `OBJ_DONT_REPARSE`
+// (`OBJECT_ATTRIBUTES.Attributes`, Windows 10 1607+/SDK 10.0.14393+)
+// rejects *any* reparse point NtCreateFile would otherwise transparently
+// resolve — every intermediate path component, not just the terminal
+// one — failing the call with `STATUS_REPARSE_POINT_ENCOUNTERED`
+// (`win32_surface`'s own admission) instead. Scoped in `sys::nt` to
+// `open_dir`/`create_dir`'s directory-anchored opens only, mirroring the
+// Linux side's own scope decision for the identical reason (see
+// `sys::fdio::openat_r2`'s doc comment) — `docs/behavior/fs.md` already
+// promises `open`/`access` follow a terminal symlink transparently, and
+// this flag does not distinguish "terminal" from "intermediate" the way
+// a plain `O_NOFOLLOW`/`FILE_OPEN_REPARSE_POINT` would, so applying it
+// to those two would silently break that promise rather than extend it.
+pub use windows_sys::Win32::System::Kernel::OBJ_DONT_REPARSE;
+
 // Second ntdll admission (D11, convergence roadmap Phase 3): a live
 // windows-latest CI run proved `SetFileInformationByHandle` (the Win32
 // kernel32 wrapper) rejects a non-null `FILE_RENAME_INFO.RootDirectory`

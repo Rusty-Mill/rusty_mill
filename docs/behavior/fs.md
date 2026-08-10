@@ -40,14 +40,59 @@ convenience.
   missing file observable at that name, even across a crash between the
   write and the publishing rename. Sequence: write to a same-directory
   temp name → `sync_all` the temp file (durability *before* publish,
-  not after) → close → `rename` over `rel`; the temp file is
-  best-effort removed if the write/sync step fails. Composed entirely
-  from `open`/`write`/`sync_all`/`rename` — one implementation, shared
-  by every backend including future ones.
-- **Live-verified** (strace, not parity-pinned — timing/ordering, not a
-  value assertion): `write_atomic` on Linux fires `fsync` strictly
-  *before* the publishing `renameat2`, and `rename_no_replace` carries
-  `RENAME_NOREPLACE`.
+  not after) → close → `rename` over `rel` → `sync_dir` (below); the
+  temp file is best-effort removed if the write/sync step fails.
+  Composed entirely from `open`/`write`/`sync_all`/`rename`/`sync_dir` —
+  one implementation, shared by every backend including future ones.
+- `sync_dir` (`Dir`, Rusty-Mill D2 slice): directory-namespace
+  durability, distinct from `File::sync_all`'s content durability —
+  blocks until the containing directory's *own* mutation (a rename, a
+  create, a remove — the directory entry itself, not any file's bytes)
+  is acknowledged by stable storage. Default-provided as a no-op
+  `Ok(())` so a backend with nothing meaningful to offer isn't forced to
+  fabricate one; `write_atomic` calls it uniformly after its publishing
+  rename regardless. **Linux**: `LinuxDir::sync_dir` calls `fsync` on
+  the capability's own `O_DIRECTORY` fd (valid and meaningful per
+  `fsync(2)`'s own text) — `write_atomic` on this backend is Rusty-Mill
+  **D2** ("namespace synchronized"). **Windows**: no override — `write_atomic`
+  stays **D1** ("content synchronized") on this backend, since
+  `FlushFileBuffers`'s effect on a directory handle specifically has no
+  documented, verifiable guarantee this crate could respectfully claim
+  (`docs/divergences.md` #014 has the full reasoning; fabricating D2
+  here would be a wrong claim, worse than the honest partial gap).
+- **Live-verified** (strace): `write_atomic` on Linux fires `fsync`
+  strictly *before* the publishing `renameat2`, and `rename_no_replace`
+  carries `RENAME_NOREPLACE` — both a one-time development-session
+  trace, unlike the directory-`fsync`-after-`renameat2` ordering claim
+  just above, which is pinned as a committed, re-runnable test
+  (`write_atomic_fsyncs_the_directory_after_the_publishing_rename`,
+  `crates/platform-linux/tests/parity.rs` — the test binary re-executes
+  itself under `strace` and parses the resulting syscall log).
+- **Resolution safety** (Rusty-Mill R-scale; `docs/divergences.md` #013
+  has the full per-backend reasoning): `open`/`metadata`/`access`/
+  `unix_mode`/`file_id`/`set_unix_mode`/`read_link`/`rename`/
+  `rename_no_replace`/`remove_file`/`remove_dir`/`read_dir` are **R1**
+  on both backends — anchored to the capability (`openat`'s dirfd /
+  `NtCreateFile`'s `RootDirectory`), but an intermediate symlink/reparse
+  point is followed transparently, and so is `open`'s terminal one (the
+  "open follows symlinks transparently" line above, unchanged and still
+  true on both backends — `open_dir`/`create_dir`, not `open`, is where
+  R2 landed). `open_dir`/`create_dir` are **R2 on Linux** (a 5.6+
+  kernel: `openat2` with `RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV`,
+  rejecting a symlink or a mount-boundary crossing anywhere in
+  resolution, atomically; `ErrorKind::FilesystemLoop`/`CrossesDevices`
+  respectively) or R1 unchanged (pre-5.6 kernel — `openat2`'s own
+  `ENOSYS` falls back transparently, never a hard failure) and
+  **R2-equivalent on Windows** (`OBJ_DONT_REPARSE` gives the same
+  link-confinement atomically, unconditionally — no kernel-version gate
+  needed — but there is no admitted NT flag for mount-boundary
+  confinement, so this is link-confinement only, not full R2; see
+  divergence #013). Neither backend claims R3: no `RESOLVE_IN_ROOT`/
+  root-constraint request on Linux, no NT equivalent attempted on
+  Windows — this `Dir` contract does not promise beneath-confinement
+  (a relative `rel` containing `..`, or a symlink whose target is
+  absolute, is not prevented from resolving outside the capability's own
+  subtree today), so an R3 claim would overstate what's enforced.
 - `symlink`/`read_link` (`symlinkat`/`readlinkat`, D11's symlink slice):
   `symlink` creates `link_name` as a link storing `target` **verbatim**
   — `target` is opaque content, not validated, resolved, or required to

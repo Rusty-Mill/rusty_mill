@@ -1,6 +1,35 @@
 //! `Dir`/`File` trait impls over the sys layer — the Linux backend's
 //! mirror, with `NtCreateFile` handle-relative opens standing in for the
 //! `openat` family (RFC v2 §5.3).
+//!
+//! **Resolution safety (Rusty-Mill R-scale):** `open`/`metadata`/
+//! `access`/`unix_mode`/`file_id`/`read_link`/`rename`/
+//! `rename_no_replace`/`remove_file`/`remove_dir`/`read_dir` stay R1
+//! ("link-confined, not atomic" — anchored to the capability handle via
+//! `RootDirectory`, but a reparse point anywhere in resolution,
+//! intermediate or terminal, is transparently followed; `open`/`access`
+//! deliberately kept this way — `docs/behavior/fs.md`'s promise).
+//! `open_dir`/`create_dir` are **R2-equivalent**: `sys::nt::
+//! open_relative_r2` adds `OBJ_DONT_REPARSE` to `NtCreateFile`'s
+//! `OBJECT_ATTRIBUTES.Attributes`, rejecting any reparse point
+//! encountered while resolving `rel` (`STATUS_REPARSE_POINT_ENCOUNTERED`
+//! → `ErrorKind::FilesystemLoop`) rather than following it — the same
+//! containment `sys::fdio::openat_r2`'s `RESOLVE_NO_SYMLINKS` gives the
+//! Linux backend, unconditionally rather than kernel-version-gated (no
+//! Windows analog to `openat2`'s `ENOSYS` fallback dance: `OBJ_DONT_REPARSE`
+//! has shipped since Windows 10 1607/SDK 10.0.14393, well below anything
+//! this workspace targets). No `RESOLVE_NO_XDEV` equivalent requested —
+//! NT has no single-flag "refuse to cross a volume boundary" analog
+//! admitted here, so this is R1's link-confinement made atomic, not full
+//! R2 mount-confinement; described as "R2-equivalent" rather than R2
+//! throughout this module's docs for that reason.
+//!
+//! **Durability (Rusty-Mill D-scale):** `File::sync_all`
+//! (`FlushFileBuffers`) is D1. `Dir::write_atomic` stays **D1** on this
+//! backend — no `sync_dir` override — pending research into whether
+//! `FlushFileBuffers` on a directory handle has any documented,
+//! verifiable effect on NTFS; see the `Dir for WindowsDir` impl block's
+//! own doc comment for the full reasoning.
 
 use std::ffi::{OsStr, OsString};
 use std::os::windows::io::{AsHandle, BorrowedHandle, OwnedHandle};
@@ -149,6 +178,23 @@ fn open_params(opts: &OpenOptions) -> Result<(u32, u32)> {
     Ok((access, disposition))
 }
 
+/// No `sync_dir` override here — [`Dir::sync_dir`]'s default no-op
+/// `Ok(())` stands, so [`Dir::write_atomic`] on this backend stays D1
+/// ("content synchronized"), not D2, pending further research
+/// (`docs/behavior/fs.md`). `FlushFileBuffers` (`sys::fileio::sync_all`,
+/// `File::sync_all`'s own implementation) accepts a directory handle
+/// opened with `FILE_FLAG_BACKUP_SEMANTICS` syntactically, but its
+/// actual effect on a directory's own NTFS metadata is not documented by
+/// Microsoft and has a known history of surprising, driver-dependent
+/// behavior for non-regular-file handles (the "Revised notes on the
+/// reliability of FlushFileBuffers" caveats apply to ordinary file
+/// handles, not directory ones) — fabricating a D2 claim on an
+/// unverified call would be a wrong claim, worse than the honest partial
+/// gap this leaves. A future slice with access to a real Windows/NTFS
+/// test rig (this workspace's Windows leg runs on `windows-latest` CI
+/// but this repository has no committed test proving directory-handle
+/// flush semantics one way or the other) can promote this once it has
+/// live evidence rather than a syntax check.
 impl Dir for WindowsDir {
     fn open(&self, rel: &OsStr, opts: &OpenOptions) -> Result<Box<dyn File>> {
         let (access, disposition) = open_params(opts)?;
@@ -162,8 +208,20 @@ impl Dir for WindowsDir {
         Ok(Box::new(WindowsFile { handle }))
     }
 
+    /// R2-equivalent containment (`docs/behavior/fs.md`): `OBJ_DONT_REPARSE`
+    /// (`sys::nt::open_relative_r2`) rejects a reparse point anywhere in
+    /// `rel`'s resolution — intermediate or terminal — where the old
+    /// plain `open_relative` call would have followed it transparently.
+    /// A real, deliberate behavior change (`docs/divergences.md`), scoped
+    /// to `open_dir`/`create_dir` only to match Linux's own R2 scope
+    /// decision (`sys::fdio::openat_r2`'s doc comment): `docs/behavior/
+    /// fs.md` promises `open`/`access` follow a terminal symlink/reparse
+    /// point transparently, and `OBJ_DONT_REPARSE` cannot distinguish
+    /// "terminal" from "intermediate" the way `FILE_OPEN_REPARSE_POINT`
+    /// does for `metadata`'s lstat-style calls, so applying it there
+    /// would break that promise instead of extending it.
     fn open_dir(&self, rel: &OsStr) -> Result<Box<dyn Dir>> {
-        let handle = ntsys::open_relative(
+        let handle = ntsys::open_relative_r2(
             &self.handle,
             rel,
             w::FILE_LIST_DIRECTORY | w::FILE_READ_ATTRIBUTES | w::FILE_TRAVERSE | w::SYNCHRONIZE,
@@ -173,10 +231,12 @@ impl Dir for WindowsDir {
         Ok(Box::new(WindowsDir { handle }))
     }
 
+    /// R2-equivalent containment — see [`WindowsDir::open_dir`]'s own
+    /// doc comment; the same scope decision applies here.
     fn create_dir(&self, rel: &OsStr) -> Result<()> {
         // The returned handle is dropped immediately: creation is the
         // operation, the capability is not retained.
-        ntsys::open_relative(
+        ntsys::open_relative_r2(
             &self.handle,
             rel,
             w::FILE_LIST_DIRECTORY | w::SYNCHRONIZE,

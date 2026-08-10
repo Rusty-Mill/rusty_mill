@@ -1,7 +1,35 @@
 //! `Dir`/`File` trait impls over the sys layer. No `unsafe` here.
+//!
+//! **Resolution safety (Rusty-Mill R-scale):** `open`/`metadata`/
+//! `access`/`unix_mode`/`file_id`/`set_unix_mode`/`read_link`/`rename`/
+//! `rename_no_replace`/`remove_file`/`remove_dir`/`read_dir` resolve via
+//! the plain `openat`/`*at` family (`sys::fdio`) — R1 ("link-confined,
+//! not atomic"): every component is resolved by the kernel's ordinary
+//! path walk, which follows an intermediate symlink transparently, and
+//! `open`'s terminal component too (`docs/behavior/fs.md`'s documented
+//! "open follows symlinks transparently" promise, deliberately left
+//! unchanged here). `open_dir`/`create_dir` are **R2** on a 5.6+ kernel
+//! (`sys::fdio::openat_r2`: raw `openat2` with `RESOLVE_NO_SYMLINKS |
+//! RESOLVE_NO_XDEV` — every component, intermediate *and* terminal,
+//! rejected if it's a symlink or would cross a filesystem/mount
+//! boundary), falling back to the unchanged R1 `openat`/`mkdirat` path
+//! on an older kernel (`ErrorKind::Unsupported` from `openat2`'s own
+//! `ENOSYS`, never a hard failure). Not R3: no `RESOLVE_IN_ROOT`/root-
+//! constraint semantics are requested, and this `Dir` contract does not
+//! promise beneath-confinement today, so claiming R3 here would overstate
+//! what's actually enforced.
+//!
+//! **Durability (Rusty-Mill D-scale):** `File::sync_all` (`fsync`) is D1
+//! ("content synchronized"). `Dir::write_atomic`'s inherited default
+//! (`crates/platform/src/fs.rs`) is **D2** on this backend:
+//! `LinuxDir::sync_dir` (`fsync` on the capability's own `O_DIRECTORY`
+//! fd, valid per `fsync(2)`'s own text) runs after the publishing
+//! rename, so the directory-entry mutation itself — not just the
+//! renamed file's content — is durable before `write_atomic` returns.
 
 use std::ffi::{OsStr, OsString};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
+use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
@@ -121,6 +149,23 @@ impl File for LinuxFile {
     }
 }
 
+/// Split `rel` into (parent, leaf) at its last `/`, ignoring any run of
+/// trailing slashes first (`"a/b/"` splits the same as `"a/b"` — mkdir's
+/// own tolerance for a trailing slash on the target, which the old
+/// single-`mkdirat`-call implementation got for free from the kernel's
+/// own path parser and this split must not regress). `None` for a
+/// single-component (or empty, or all-slashes) `rel` — nothing to
+/// resolve as a separate parent step.
+fn split_last_component(rel: &OsStr) -> Option<(OsString, OsString)> {
+    let bytes = rel.as_bytes();
+    let end = bytes.iter().rposition(|&b| b != b'/').map(|i| i + 1)?;
+    let trimmed = &bytes[..end];
+    let pos = trimmed.iter().rposition(|&b| b == b'/')?;
+    let parent = OsStr::from_bytes(&trimmed[..pos]).to_os_string();
+    let leaf = OsStr::from_bytes(&trimmed[pos + 1..]).to_os_string();
+    Some((parent, leaf))
+}
+
 fn open_flags(opts: &OpenOptions) -> Result<i32> {
     let mut flags = match (opts.read, opts.write || opts.append) {
         (true, true) => c::O_RDWR,
@@ -155,13 +200,49 @@ impl Dir for LinuxDir {
         Ok(Box::new(LinuxFile { fd }))
     }
 
+    /// R2 on kernels with `openat2` (5.6+): every component of `rel` —
+    /// intermediate and terminal alike — is rejected if it's a symlink,
+    /// and resolution is refused if it would cross a filesystem/mount
+    /// boundary (`docs/behavior/fs.md`). R1 (unchanged: symlinks
+    /// followed, mounts crossed) on an older kernel — `sys::fdio::
+    /// openat_r2` falls back transparently, never a hard failure.
+    ///
+    /// This *does* newly reject a terminal symlink where the old plain-
+    /// `openat` call would have followed it — a real, deliberate
+    /// behavior change, unlike `Dir::open` (left alone; see its own
+    /// `open_flags`/call site — no such promise exists for `open_dir`
+    /// in `docs/behavior/fs.md` today, only for `open`/`access`, so
+    /// there is nothing documented to break).
     fn open_dir(&self, rel: &OsStr) -> Result<Box<dyn Dir>> {
-        let fd = fdio::openat(self.fd.as_raw_fd(), rel, c::O_RDONLY | c::O_DIRECTORY, 0)?;
+        let fd = fdio::openat_r2(self.fd.as_raw_fd(), rel, c::O_RDONLY | c::O_DIRECTORY, 0)?;
         Ok(Box::new(LinuxDir { fd }))
     }
 
+    /// R2 for the *parent* portion of a multi-component `rel` (e.g.
+    /// `"a/b/newdir"`): the parent path is resolved once via
+    /// `sys::fdio::openat_r2` (R2 on a 5.6+ kernel, R1 fallback
+    /// otherwise) into an fd, and `mkdirat` then creates the leaf
+    /// component relative to that already-resolved fd — no second path
+    /// walk, so no reintroduced race. A single-component `rel` (the
+    /// common case — no `/` at all) skips this entirely and calls
+    /// `mkdirat` directly on `self`'s own fd: with zero intermediate
+    /// components to traverse, and `mkdirat` refusing outright
+    /// (`AlreadyExists`) if a symlink already occupies the leaf name,
+    /// that case is inherently R2 already — nothing for `openat2` to
+    /// add.
     fn create_dir(&self, rel: &OsStr) -> Result<()> {
-        fdio::mkdirat(self.fd.as_raw_fd(), rel)
+        match split_last_component(rel) {
+            None => fdio::mkdirat(self.fd.as_raw_fd(), rel),
+            Some((parent, leaf)) => {
+                let parent_fd = fdio::openat_r2(
+                    self.fd.as_raw_fd(),
+                    &parent,
+                    c::O_RDONLY | c::O_DIRECTORY,
+                    0,
+                )?;
+                fdio::mkdirat(parent_fd.as_raw_fd(), &leaf)
+            }
+        }
     }
 
     fn metadata(&self, rel: &OsStr) -> Result<Metadata> {
@@ -246,6 +327,23 @@ impl Dir for LinuxDir {
 
     fn rename_no_replace(&self, from: &OsStr, to: &OsStr) -> Result<()> {
         fdio::rename_no_replace(self.fd.as_raw_fd(), from, to)
+    }
+
+    /// D2: `fsync` on this capability's own `O_DIRECTORY` fd — valid and
+    /// meaningful per `fsync(2)`'s own text ("calling fsync() does not
+    /// necessarily ensure that the entry in the directory containing the
+    /// file has also reached disk. For that an explicit fsync() on a
+    /// file descriptor for the directory is also needed"), which is
+    /// exactly the gap [`Dir::write_atomic`]'s publishing `rename` left
+    /// open before this landed. No fresh fd needed — unlike `read_dir`,
+    /// which opens a throwaway fd because `fdopendir` consumes it, this
+    /// takes no ownership and leaves `self.fd` exactly as usable
+    /// afterward. Live-verified by strace, not just "the syscall
+    /// returned 0" — see
+    /// `write_atomic_fsyncs_the_directory_after_the_publishing_rename`
+    /// in `tests/parity.rs`.
+    fn sync_dir(&self) -> Result<()> {
+        fdio::fsync(&self.fd)
     }
 }
 

@@ -1090,3 +1090,168 @@ fn linux_stdio_file_refuses_a_foreign_backend_file() {
         .expect("must refuse: foreign File backend");
     assert_eq!(e.kind, platform::error::ErrorKind::Unsupported);
 }
+
+/// D2 (`docs/behavior/fs.md`): `write_atomic`'s publishing `rename` is
+/// followed by an `fsync` on the *directory* fd itself (`LinuxDir::
+/// sync_dir`) — not just the temp file's own pre-rename `fsync` (D1),
+/// which says nothing about whether the rename's own directory-entry
+/// mutation survives a crash. Ordering/timing claims like this have no
+/// portable value to assert in the shared parity suite — the existing
+/// "fsync fires before renameat2" claim in `docs/behavior/fs.md` is
+/// pinned the same way: verified live via `strace`. Unlike that
+/// claim (a one-time development-session trace), this is a committed,
+/// re-runnable proof: this very test binary re-executes itself under
+/// `strace`, with an env-var guard selecting the traced half, and then
+/// parses the syscall log for the actual ordering.
+#[cfg(target_os = "linux")]
+#[test]
+fn write_atomic_fsyncs_the_directory_after_the_publishing_rename() {
+    use platform::fs::Dir;
+
+    const INNER: &str = "RUSTILS_STRACE_INNER_DIRSYNC";
+    const INNER_DIR: &str = "RUSTILS_STRACE_INNER_DIRSYNC_DIR";
+
+    if std::env::var_os(INNER).is_some() {
+        // Traced half: exactly one write_atomic call, then exit.
+        // Everything strace captured in this process belongs to it.
+        let tmp = std::path::PathBuf::from(std::env::var_os(INNER_DIR).expect("dir env set"));
+        let root = platform_linux::LinuxDir::open_ambient(&tmp).expect("open ambient");
+        root.write_atomic(OsStr::new("atomic.txt"), b"payload")
+            .expect("write_atomic");
+        return;
+    }
+
+    if std::process::Command::new("strace")
+        .arg("-V")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: strace not available in this environment");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join(format!("rustils-dirsync-strace-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mk tempdir");
+    let trace_path = tmp.join("trace.log");
+    let this_exe = std::env::current_exe().expect("current_exe");
+
+    let output = std::process::Command::new("strace")
+        .args(["-f", "-e", "trace=fsync,renameat2", "-o"])
+        .arg(&trace_path)
+        .arg(&this_exe)
+        .args([
+            "--exact",
+            "write_atomic_fsyncs_the_directory_after_the_publishing_rename",
+            "--nocapture",
+        ])
+        .env(INNER, "1")
+        .env(INNER_DIR, &tmp)
+        .output()
+        .expect("spawn strace");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() && stderr.contains("ptrace") {
+        // Environment lacks ptrace permission (e.g. a container without
+        // CAP_SYS_PTRACE / restrictive Yama ptrace_scope) — an
+        // environment gap, not a code bug, the same honest-skip
+        // discipline `tests/tun_parity.rs`'s `tun_or_skip!` uses for
+        // its own CAP_NET_ADMIN gap.
+        eprintln!("skipping: strace could not attach in this environment: {stderr}");
+        return;
+    }
+    assert!(
+        output.status.success(),
+        "traced inner run must itself pass: {stderr}"
+    );
+
+    let trace = std::fs::read_to_string(&trace_path).expect("read trace log");
+    let renameat2_pos = trace
+        .find("renameat2(")
+        .unwrap_or_else(|| panic!("renameat2 must appear in the trace:\n{trace}"));
+    let after_rename = &trace[renameat2_pos..];
+    assert!(
+        after_rename.contains("fsync("),
+        "no fsync call appears after the publishing renameat2 in the trace \
+         (directory durability step missing or reordered):\n{trace}"
+    );
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// R2 containment (`docs/behavior/fs.md`): `open_dir` now rejects a
+/// symlink sitting in an intermediate path component instead of
+/// silently following it — `sys::fdio::openat_r2`'s `RESOLVE_NO_SYMLINKS`
+/// request, previously unenforced (plain `openat` follows every
+/// component transparently, R1). Skips honestly on a pre-5.6 kernel,
+/// where `openat_r2` falls back to the old R1 behavior by design and
+/// this assertion would otherwise fail for the wrong reason.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_open_dir_rejects_a_symlink_in_an_intermediate_component() {
+    if !platform_linux::sys::fdio::openat2_supported() {
+        eprintln!("skipping: openat2 unsupported on this kernel (pre-5.6)");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join(format!("rustils-r2-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mk tempdir");
+    let root = platform_linux::LinuxDir::open_ambient(&tmp).expect("open ambient");
+
+    // real/target exists as a real directory; "link" is a symlink to it.
+    // "link/leaf" then has a symlink as its *intermediate* component.
+    root.create_dir(OsStr::new("target")).expect("mkdir target");
+    root.create_dir(OsStr::new("target/leaf"))
+        .expect("mkdir target/leaf");
+    root.symlink(OsStr::new("target"), OsStr::new("link"))
+        .expect("symlink link -> target");
+
+    let e = root
+        .open_dir(OsStr::new("link/leaf"))
+        .err()
+        .expect("an intermediate symlink must now be rejected under R2");
+    assert_eq!(e.kind, ErrorKind::FilesystemLoop);
+
+    // Sanity: the same path through the real (non-symlinked) name still
+    // works — this is a containment gain, not a general regression.
+    root.open_dir(OsStr::new("target/leaf"))
+        .expect("the real, non-symlinked path must still open");
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
+/// R2 containment, `create_dir`'s multi-component parent-resolution
+/// path: creating `"link/newdir"` through an intermediate symlink is
+/// rejected the same way `open_dir` rejects it above, rather than
+/// silently creating the directory on the other side of the link.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_create_dir_rejects_a_symlink_in_an_intermediate_component() {
+    if !platform_linux::sys::fdio::openat2_supported() {
+        eprintln!("skipping: openat2 unsupported on this kernel (pre-5.6)");
+        return;
+    }
+
+    let tmp = std::env::temp_dir().join(format!("rustils-r2-mkdir-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).expect("mk tempdir");
+    let root = platform_linux::LinuxDir::open_ambient(&tmp).expect("open ambient");
+
+    root.create_dir(OsStr::new("target")).expect("mkdir target");
+    root.symlink(OsStr::new("target"), OsStr::new("link"))
+        .expect("symlink link -> target");
+
+    let e = root
+        .create_dir(OsStr::new("link/newdir"))
+        .expect_err("an intermediate symlink must now be rejected under R2");
+    assert_eq!(e.kind, ErrorKind::FilesystemLoop);
+    assert!(
+        root.metadata(OsStr::new("target/newdir")).is_err(),
+        "the directory must not have been created on the other side of the symlink"
+    );
+
+    // A single-component create_dir (the common case, no intermediate
+    // component at all) is unaffected — always was, still is, R2.
+    root.create_dir(OsStr::new("plain"))
+        .expect("plain mkdir still works");
+
+    std::fs::remove_dir_all(&tmp).ok();
+}
