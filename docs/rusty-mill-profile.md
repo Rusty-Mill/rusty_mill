@@ -11,10 +11,21 @@ cannot host an authorized implementation trial or publish a Rusty Mill
 conformance/release claim). **This profile alone does not authorize
 anything** (`RM-DEV-GOV-0002`) — the companion gate is an AKB-side
 ADR/RFC authorizing rustils' capability domains for Experimental work
-(`RM-DEV-GOV-0001`), which is a **separate, not-yet-started** piece of
-work in the Rusty-Mill repo itself. Until that lands, rustils makes no
-Rusty-Mill conformance or maturity claim; it continues operating under
-its own `docs/rfc-v2.md` governance exactly as before.
+(`RM-DEV-GOV-0001`). Until that lands, rustils makes no Rusty-Mill
+conformance or maturity claim; it continues operating under its own
+`docs/rfc-v2.md` governance exactly as before.
+
+**Companion gate status:** [TRIAL-0002](https://github.com/Rusty-Mill/rusty_foundation_akb/blob/main/docs/05-governance/implementation-trials/rustils-trial-proposal.md)
+is merged into the AKB, citing this repository as candidate qualified
+input evidence for the filesystem, process, networking, and
+security-random/restricted-execution domains. Per its own gate table
+the trial remains **Not authorized** — every named subject domain is
+still `Draft domain analysis` in the AKB, and TRIAL-0002 is explicit
+that a well-cited proposal cannot substitute for a domain's own
+accepted Experimental promotion decision. Filesystem is the domain
+closest to that decision (it already has a written, if undecided,
+[promotion review](https://github.com/Rusty-Mill/rusty_foundation_akb/blob/main/docs/02-capabilities/filesystem/promotion-review.md));
+process, networking, and security have no promotion review yet.
 
 ## Profile identity / version
 
@@ -134,7 +145,7 @@ its own `docs/rfc-v2.md` governance exactly as before.
 
 ## Open items before this profile can leave Draft
 
-1. Companion AKB-side ADR/RFC authorizing rustils' proposed capability domains (`RM-DEV-GOV-0001`) — not started; separate work in the `Rusty-Mill/rusty_foundation_akb` repository.
-2. Resolve the `SignalSource` taxonomy gap (no clear `rm.*` home) with that RFC.
+1. Each proposed capability domain (filesystem, process, networking, security-random/restricted-execution) reaching an accepted Experimental promotion decision in the AKB (`RM-DEV-GOV-0001`) — filesystem is furthest along (a written, undecided promotion review exists); process, networking, and security have none yet. TRIAL-0002 stays blocked until at least one domain clears this.
+2. Resolve the `SignalSource` taxonomy gap (no clear `rm.*` home) — flagged in TRIAL-0002, unresolved.
 3. Formal unsafe-code budget, RustSec advisory scanning in CI, Miri in CI, and a performance-baseline suite — disclosed gaps above, not yet closed.
 4. A `RM-<DOMAIN>-<CAPABILITY>-NNNN`-style requirement-identifier mapping for rustils' existing behavior-spec assertions, once domain identities are accepted (today rustils' own `docs/behavior/*.md` files are the normative source; they don't yet cite AKB requirement IDs because none exist for these domains yet).
