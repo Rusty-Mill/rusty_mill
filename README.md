@@ -18,6 +18,12 @@ named, working consumer) and §5 (binding API design requirements).
   software, parity-tested across OSes, and stable enough to build on.
   First external consumer under contract: the **rush** shell
   (RFC §7 — mechanisms hoist here at rush's Phase 2 gate).
+  **Status note (2026-08-10):** this is a forward commitment, not a
+  present fact — rush's `Cargo.toml` today declares no dependency on
+  `platform`/`rustils` at all; its job control calls `rusty_libc`/
+  `rusty_win32` directly rather than going through `Process`/`Events`.
+  "First external consumer" describes what Phase 2 hoists, not rush's
+  current dependency graph (see #117).
 
 ## Layout
 

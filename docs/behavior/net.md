@@ -1,5 +1,10 @@
 # Behavior Spec — net (Net / TcpStream / TcpListener / UdpSocket)
 
+**Capability identity & maturity** (#114): `rustils.net.tcp` — Stable;
+`rustils.net.unix` — Stable; `rustils.net.udp` — Stable — all three D16
+slices are landed and parity-tested on Linux, Windows, and BSD. See
+`docs/rfc-v2.md` §10 for the numbered decision log this traces to.
+
 The parity suite asserts this spec against every backend. Its assertion
 sets — `assert_net_behavior`, `assert_unix_behavior`,
 `assert_udp_behavior` — live once, in `crates/platform-parity`; each
@@ -193,6 +198,50 @@ from the other two slices (see below).
   test (`udp_bind_port_zero_and_tcp_listen_port_zero_can_collide_by_number`)
   rather than the shared parity suite, since it is a cross-domain
   assertion rather than a per-backend behavior.
+
+## Async path (rusty_foundation_akb §9)
+
+`accept`, `read`/`write`, and `UdpSocket::send_to`/`recv_from` are the
+potentially-blocking operations here. The `Net`/`TcpStream`/etc. trait
+methods themselves stay synchronous by design (RFC v2 §5.1: the
+object-safe traits are a thin, `Box<dyn Trait>`-erased instance surface,
+not an async API) — the async path is a separate, additive escape hatch
+on each backend's *concrete* socket type, not a variant of the trait
+methods:
+
+- **Linux and BSD** (`platform-linux`/`platform-bsd`'s concrete
+  `TcpStream`/`TcpListener`/`UnixStream`/`UnixListener`/`UdpSocket`
+  types): `AsFd`/`AsRawFd`, `From<OwnedFd>`, `set_nonblocking`, and a
+  concrete `connect`/`bind` constructor returning the concrete type
+  (not `Box<dyn Trait>`) so a caller can reach the raw fd the
+  object-safe trait erases. This is what lets `rusty_tokio`'s
+  epoll/kqueue reactor register these sockets for readiness without
+  `platform`/`platform-linux`/`platform-bsd` depending on any async
+  runtime.
+- **Windows** (`platform-windows`): the same shape — `AsRawSocket`,
+  `set_nonblocking` via `ioctlsocket(FIONBIO)`, and a matching concrete
+  constructor.
+- **`platform-mock`**: no raw OS handle exists to expose; not a
+  reactor-consumer target.
+
+**Cancellation safety:** a caller that stops polling an externally-driven
+readiness wait (e.g. drops a `rusty_tokio` future wrapping the fd) leaves
+the socket exactly where it was — `set_nonblocking` and readiness are
+external to any in-flight read/write call, so there is nothing for
+`platform`'s trait methods themselves to leave in a torn state.
+
+**Completion ownership:** whichever layer issued the read/write owns
+interpreting its result; the raw-fd escape hatch changes only *when* a
+caller attempts the call (after readiness), not who owns the buffer or
+result — same ownership model as the synchronous trait methods.
+
+**Executor assumptions:** none inside `platform`/backends — no tokio/mio
+dependency anywhere in this crate family; the reactor lives entirely in
+the consumer (`rusty_tokio`), which registers the exposed fd/socket with
+its own epoll/kqueue/IOCP-backed reactor.
+
+**Backpressure:** governed by the OS socket buffer and `set_nonblocking`
+mode, same as any raw socket; `platform` adds no buffering of its own.
 
 ## Deliberately unspecified
 

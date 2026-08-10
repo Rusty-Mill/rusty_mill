@@ -1,5 +1,11 @@
 # Behavior Spec — fs (Dir / File)
 
+**Capability identity & maturity** (#114): `rustils.fs.dir` — Stable;
+`rustils.fs.file` — Stable; `rustils.fs.anonymous_file` (`memfd_create`) —
+Trial (single Linux backend, no Windows/mock counterpart yet). See
+`docs/rfc-v2.md` §10 for the numbered decision log these capabilities
+trace back to (D-6, D-11).
+
 The parity suite (`crates/platform-linux/tests/parity.rs` today; extracted
 to a shared crate when a third backend lands) asserts this spec against
 every backend. A backend that cannot honor a line gets a numbered entry in
@@ -176,6 +182,37 @@ convenience.
   all, so putting it on `Dir` would mean an always-unused `&self`
   receiver on every call — a separate, small trait instead, mirroring
   `platform::security::Csprng`'s own shape.
+
+## Async path (rusty_foundation_akb §9)
+
+**Decision: sync-only, justified — no async path today, and no raw-handle
+escape hatch either (unlike `net`).** Every `File`/`Dir` operation
+(`read`, `write`, `sync_all`, `open`, `metadata`, `read_dir`, ...) is
+ordinary blocking I/O with no non-blocking mode, no readiness-based
+escape hatch, and no owned-buffer async variant.
+
+**Why, not just "not done yet":** the closest sibling project already hit
+the actual blocker. `rusty_tokio`'s io-uring file-I/O layer
+(`io/uring_fs.rs`) is a *separate* owned-buffer (`IoBuf`/`IoBufMut`) type
+from its borrowed-buffer `AsyncRead`/`AsyncWrite` file type, specifically
+because "a borrowed-buffer async file type can't safely do this" under
+cancellation — an in-flight io_uring read holds a raw pointer into the
+caller's buffer, and if the calling future is dropped (cancelled) before
+completion, that buffer can be freed or reused while the kernel still
+writes into it. Retrofitting that onto `File::read(&mut self, buf: &mut
+[u8])`'s borrowed-buffer signature would be unsound; doing it right means
+a distinct owned-buffer trait, not an async variant of the existing one.
+
+That is real trait-surface design work, not a documentation gap, so it is
+tracked as a follow-up rather than attempted here — see the tracking
+issue this behavior spec update was filed alongside (`docs/rfc-v2.md`'s
+scope-gap tracking, RM-DEV-DEP-0001-style). Until that lands, an
+async-*driven* consumer performs file I/O the same way rusty_tokio's own
+`uring_fs` module does today: independently of `platform::fs`, not
+through it.
+
+**Cancellation / completion ownership / backpressure:** not applicable —
+there is no async path to define them for.
 
 ## Deliberately unspecified
 

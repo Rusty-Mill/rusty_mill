@@ -1,5 +1,14 @@
 # Behavior Spec — security (Csprng, CredentialStore, Sandbox)
 
+**Capability identity & maturity** (#114): `rustils.security.csprng` —
+Stable; `rustils.security.sandbox` — Trial (Linux Landlock/seccomp only,
+no Windows/BSD backend); `rustils.security.credential_store` — Trial
+(gated, no live forcing consumer as of 2026-07-20 — see
+`docs/architecture.md`'s gated-surfaces table); `rustils.security.trust_anchors`
+— Draft (rustils#88, the newest of the four slices, still accumulating
+scope decisions — see this doc's `TrustAnchors` section below). See
+`docs/rfc-v2.md` §10 for the numbered decision log.
+
 The parity suite asserts the `Csprng`/`CredentialStore`/`TrustAnchors`
 spec against every backend. Its assertion sets live once, in
 `crates/platform-parity`; each backend's `tests/security_parity.rs`
@@ -251,6 +260,26 @@ chain *verification* API instead — option B2 in
 Linux has no counterpart to it at all, and a Linux backend would mean
 hand-rolling X.509 path validation: precisely the cryptography this
 workspace refuses, through a door labelled "narrow."
+
+## Async path (rusty_foundation_akb §9)
+
+**Decision: sync-only, justified.** `Csprng::fill_random` and
+`CredentialStore::get`/`set` are the only operations here with any
+realistic blocking exposure:
+
+- `fill_random` can block only in the documented early-boot
+  unseeded-CSPRNG edge case (see Deliberately unspecified below) — a
+  one-time startup condition, not a steady-state hot path worth an async
+  variant.
+- `CredentialStore::get`/`set` may block on an OS keychain/Secret Service
+  IPC round-trip, but these are interactive-scale, low-frequency calls
+  (credential lookups), not the kind of high-volume I/O §9 targets.
+
+`Sandbox` and `TrustAnchors` operations are one-shot setup calls
+(confine filesystem, load anchors at startup), not steady-state I/O, so
+the same reasoning applies. None of these are tracked as a follow-up
+issue the way `fs`'s gap is — there is no concrete forcing consumer today
+asking for non-blocking credential or entropy access.
 
 ## Deliberately unspecified
 

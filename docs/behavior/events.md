@@ -1,5 +1,11 @@
 # Behavior Spec — events (SignalSource)
 
+**Capability identity & maturity** (#114): `rustils.events.signal_source`
+— Trial (Linux installation/delivery fully asserted in CI; Windows pins
+installation and empty-slot semantics only — delivery isn't behaviorally
+asserted, see Deliberately unspecified below). See `docs/rfc-v2.md` §10
+for the numbered decision log.
+
 The deferred-signal core (extraction map D6, from rush's `trap.rs`),
 asserted against `platform-linux`, `platform-windows`, and the mock.
 
@@ -24,6 +30,23 @@ asserted against `platform-linux`, `platform-windows`, and the mock.
   terminated by the default disposition of a mapped signal; it observes
   the event at its next safe point instead. (Pinned by the Linux parity
   test: the test process outlives a real SIGTERM.)
+
+## Async path (rusty_foundation_akb §9)
+
+`SignalSource::take` never blocks by design (Specified above) — it reads
+a single-entry coalescing slot and returns immediately whether or not an
+event is pending. This trivially satisfies §9 rule 1 ("MUST NOT occupy a
+worker thread solely while waiting"): there is no waiting state to occupy
+a thread with. A consumer that wants to react promptly polls `take` at
+its own safe points (or on a timer); `platform` defines no push/callback
+API here, since D6's whole design is deferred delivery to a safe point,
+not immediate async notification.
+
+**Cancellation safety:** trivial — `take` has no in-flight state to
+cancel. **Completion ownership:** the caller owns the returned
+`SignalEvent` outright. **Backpressure:** the single-entry slot *is* the
+backpressure mechanism — a second event of the same kind before the first
+is drained coalesces rather than queuing (Specified above).
 
 ## Deliberately unspecified / not asserted
 
