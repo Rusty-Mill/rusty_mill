@@ -47,6 +47,35 @@ The "how low do we go" question gets a per-platform, staged answer instead of on
 
 The existing hand-written `ffi/kernel32.rs`-style re-export modules are kept only as *curation points* (narrowing the imported surface), never as hand-transcribed declarations.
 
+### 2.1 Learning value vs. shipping criteria (Amendment, 2026-08-10, issue #116)
+
+Track P (and Track W) are framed above, and in the README's M1 mandate, as
+pedagogy: "hand-rolling is a feature," each replacement lands with "a
+written note of what was learned." `rusty_foundation_akb`'s dependency
+policy (`RM-DEV-DEP-0001`/`0002`) frames dependency minimization
+differently — as a supply-chain/maintenance-cost tradeoff needing a
+proposal that weighs alternatives, the transitive graph, security
+history, and an exit plan. These two framings aren't contradictory, but
+this RFC previously left them unreconciled, so a reader couldn't tell
+whether Track P's raw-syscall backend is committed to becoming the
+*default* for engineering reasons or is a learning exercise that may
+never ship as anything but an opt-in feature.
+
+**Decided:** Track P/W stay pedagogical (M1) as their primary rationale —
+`docs/learning/` notes remain the measure of success for each
+replacement, and O-2's adoption of `rusty_libc` behind `track-p` (§7.3)
+is not itself a commitment to eventually flipping the default. **Shipping
+criteria are separate and not yet met:** before `track-p`/`track-w`
+could become the *default* backend rather than an opt-in feature, that
+change needs its own RM-DEV-DEP-0001-style proposal — alternatives
+considered, transitive-dependency-graph delta, security-history
+comparison against the `libc`/`windows-sys` floor, and an exit plan if
+the raw-syscall path turns out to be the wrong default. No such proposal
+exists today; until one is written and decided, `libc`/`windows-sys`
+stay the default floor per §2's table, and Track P/W remain what they
+are now — an optional, always-available feature flag whose value is M1,
+not reduced attack surface.
+
 ---
 
 ## 3. The Consumer Gate

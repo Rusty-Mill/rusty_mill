@@ -1,5 +1,12 @@
 # Behavior Spec — process (Command / Spawner / Child)
 
+**Capability identity & maturity** (#114): `rustils.process.spawner` —
+Stable; `rustils.process.child` — Stable; `rustils.process.wait_any` —
+Trial (native reactor landed on Linux/Windows only, see this doc's Async
+path section); `rustils.process.group_handle` (`adopt`) — Trial
+(rustils#47, Windows-only real support, Unix always `Unsupported` by
+design). See `docs/rfc-v2.md` §10 for the numbered decision log (D-7).
+
 The semantics the parity suite asserts for every backend implementing
 `Spawner`/`Child`. Backends: `platform-mock` (scripted; unit tests),
 `platform-linux` (`posix_spawn`), and `platform-windows`
@@ -138,6 +145,52 @@ assertions.
   limitation to model" stance `kill_single` already takes for every
   `Signal`), logging each call to `MockSpawner::adopted` for
   assertions, mirroring `spawned`.
+
+## Async path (rusty_foundation_akb §9)
+
+`Child::wait` is the potentially-blocking operation here (`try_wait` is
+explicitly non-blocking, see Specified above). The R3 reactor promised in
+`process::wait_any`'s doc comment (RFC v2 §5.6) has landed for the two
+backends where it matters:
+
+- **Linux** (`LinuxSpawner::wait_any`): pidfd + `poll` — no worker thread
+  is occupied while waiting; falls back to the portable tick-loop only
+  when a child isn't a `LinuxChild` (foreign `Box<dyn Child>`) or the
+  kernel predates `pidfd_open`.
+- **Windows** (`WindowsSpawner::wait_any`): `WaitForMultipleObjects`, with
+  its 64-handle limit absorbed internally (batched waits), same fallback
+  rule.
+- **`platform-mock`**: no native multiplexer to reach — uses the portable
+  tick-loop unconditionally, which is fine for scripted single-process
+  tests.
+
+**Cancellation safety:** `wait_any` takes ownership of nothing — the
+`&mut [Box<dyn Child>]` slice is borrowed, not consumed, so a caller that
+drops the future/stops polling before `wait_any` returns leaves every
+child exactly as it was (no partial reap, no lost wakeup) and can safely
+call `wait_any` again later.
+
+**Completion ownership:** the winning child's exit status is reaped and
+stashed into that `Child` (retrieved via its own `try_wait`/`wait`) before
+`wait_any` returns — the caller, not the reactor, owns what happens next
+for every child, including the ones that didn't win this round.
+
+**Executor assumptions:** none. `wait_any`/`Spawner::wait_any` are plain
+blocking-with-timeout functions, callable from any thread; `platform`
+itself has no async runtime dependency (`#![forbid(unsafe_code)]`, and
+per `tun.rs`/`term.rs`'s explicit layering rule, Layer 2 must not depend
+on a Layer 3 async runtime). The async *path* this satisfies is: an
+external multiplexed wait, not a `Future`-returning API. A consumer that
+wants `wait_any` driven from an async executor (e.g. `rusty_tokio`) calls
+it from a blocking-task/reactor-thread the same way it would any other
+OS-multiplexed wait — this mirrors how `rusty_tokio`'s own reactor already
+consumes `platform-linux`/`platform-bsd`'s raw-fd escape hatches (see
+`docs/behavior/net.md`'s Async path section) rather than `platform`
+depending on `rusty_tokio`.
+
+**Backpressure:** not applicable — `wait_any` returns at most one ready
+index per call; a caller polling a large child set controls its own
+concurrency by how many children it hands in.
 
 ## Deliberately unspecified (until the R2 hoist supplies them)
 

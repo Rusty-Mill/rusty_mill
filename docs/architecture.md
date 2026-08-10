@@ -103,6 +103,33 @@ surface where every admitted symbol is listed and justified.
   donor crate still runs independently; the `winargv` handback still flows
   the other way.
 
+## Capability identity, maturity, and the decision log (#114)
+
+Each trait-level capability has a stable, informal identity
+(`rustils.<domain>.<capability>`, e.g. `rustils.fs.dir`,
+`rustils.process.wait_any`) and a maturity marker, recorded at the top of
+its `docs/behavior/<domain>.md` spec:
+
+- **Draft** — shape may still change; fewer than two backends implement
+  it, or it's still accumulating scope decisions.
+- **Trial** — implemented and parity-tested, but with a known asymmetry
+  (single-OS only, a gated/no-live-consumer status, or an explicitly
+  unasserted leg) that a consumer should check before depending on it
+  long-term.
+- **Stable** — parity-tested across every backend that claims to support
+  it, with no open asymmetry.
+
+The numbered decision log lives in `docs/rfc-v2.md` §10 (`D-1`
+onward) — every architectural decision embedded in this document's or
+`rfc-v2.md`'s prose already cites back to a `D-N` entry there (e.g. "→
+D-11"); this section formalizes that existing log as the project's ADR
+log rather than introducing a parallel one. New architectural decisions
+should be added there as a new `D-N` entry, not only described in prose.
+
+See [`docs/coverage-matrix.md`](coverage-matrix.md) for the full
+platform/domain scope-gap tracking (#115) — this section covers what's
+built and gated, not the complete target-vs-actual picture.
+
 ## Layer 2 — Platform Abstraction Layer
 
 The `platform` crate: portable traits and types, `#![forbid(unsafe_code)]`,
@@ -117,6 +144,31 @@ reactor), `Net` (all three D16 slices: TCP connect/listen/accept/
 set_nodelay, Unix domain sockets with mode+stale-cleanup bind, UDP
 datagram — D16's full four-consumer survey now landed), the two-axis
 error model.
+
+### Execution and concurrency model
+
+`rusty_foundation_akb`'s architecture model (§9) requires: potentially-
+blocking capabilities provide an async path that doesn't occupy a worker
+thread solely while waiting; stable capabilities also document a
+synchronous path; and async implementations define cancellation safety,
+completion ownership, executor assumptions, and backpressure. Layer 2
+satisfies this without depending on any async runtime — Layer 2 must not
+depend on a Layer 3 tool's async runtime (the same rule `tun.rs`/`term.rs`
+already state), so "async path" here means an executor-agnostic
+readiness/raw-handle surface an external reactor drives, not `async fn`
+on the trait methods themselves:
+
+| Capability | Sync path | Async path | Status |
+|---|---|---|---|
+| `Net` | trait methods (`Fs`/`Net`-style blocking calls) | raw-fd/socket + `set_nonblocking` escape hatch on each backend's concrete type, driven by an external reactor (`rusty_tokio`) | Done — Linux, BSD, Windows |
+| `Process` (`wait_any`) | portable tick-loop (`process::wait_any`) | native OS-multiplexed wait (pidfd+`poll` on Linux, `WaitForMultipleObjects` on Windows), same contract | Done — Linux, Windows; `platform-mock` uses the sync fallback |
+| `Events` (`SignalSource`) | `take()`, never blocks | not applicable — non-blocking by construction, no waiting state to occupy a thread | N/A |
+| `Fs` | trait methods, ordinary blocking I/O | none yet | Deferred — no raw-handle escape hatch, no owned-buffer async variant; tracked as a follow-up (an async `File`/`Dir` needs an owned-buffer design, per the cancellation-safety problem `rusty_tokio`'s own `io/uring_fs.rs` already ran into) |
+| `Security` | trait methods | none | Justified sync-only — `fill_random`'s blocking window is a one-time early-boot edge case; `CredentialStore` is low-frequency interactive-scale I/O, not a §9 target |
+
+Per-operation cancellation safety, completion ownership, and backpressure
+are documented alongside each capability's other behavior in
+`docs/behavior/*.md`'s "Async path" section, not duplicated here.
 
 **Gated future surfaces** (each unparks only when its named consumer
 arrives, §3):
