@@ -42,7 +42,19 @@ docs/
   behavior/              per-API behavior specs the parity suite asserts
   divergences.md         numbered cross-backend divergence registry
   learning/              M1 write-ups
+  rusty-mill-profile.md  Draft Rusty-Mill ecosystem standards profile (see below)
 ```
+
+## Rusty-Mill ecosystem membership (Draft)
+
+rustils is pursuing membership in the [Rusty-Mill](https://github.com/Rusty-Mill/rusty_foundation_akb)
+capability-based platform ecosystem. This is a two-gate process, and only
+one gate has a first draft so far: [`docs/rusty-mill-profile.md`](docs/rusty-mill-profile.md)
+proposes rustils' repository standards profile. The companion gate — an
+AKB-side ADR/RFC authorizing rustils' capability domains for Experimental
+work — has not been started. Until both land and are Accepted, rustils
+makes no Rusty-Mill conformance or maturity claim and continues operating
+under its own RFC below.
 
 ## Verify
 
