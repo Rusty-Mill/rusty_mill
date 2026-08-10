@@ -43,6 +43,13 @@ fn kind_of_ntstatus(status: w::NTSTATUS) -> ErrorKind {
         w::STATUS_NOT_A_DIRECTORY => ErrorKind::NotADirectory,
         w::STATUS_DIRECTORY_NOT_EMPTY => ErrorKind::DirectoryNotEmpty,
         w::STATUS_OBJECT_NAME_INVALID => ErrorKind::InvalidInput,
+        // R2-equivalent containment (`sys::nt::open_relative_r2`'s
+        // `OBJ_DONT_REPARSE`): a reparse point was encountered and
+        // rejected during resolution — the NT counterpart of Linux
+        // `openat2`'s `ELOOP` (`ErrorKind::FilesystemLoop`'s own doc
+        // comment), so the two backends answer the identical containment
+        // failure with the identical portable kind.
+        w::STATUS_REPARSE_POINT_ENCOUNTERED => ErrorKind::FilesystemLoop,
         _ => ErrorKind::Other,
     }
 }

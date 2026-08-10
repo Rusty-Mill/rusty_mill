@@ -332,6 +332,36 @@ pub trait Dir {
     /// stat-then-rename from the consumer would not be.
     fn rename_no_replace(&self, from: &OsStr, to: &OsStr) -> Result<()>;
 
+    /// Durability step for this directory's own namespace entries — D2
+    /// ("namespace synchronized") on top of [`File::sync_all`]'s D1
+    /// ("content synchronized"): after a `rename`/`create_dir`/
+    /// `remove_file`/... into or out of `self`, this blocks until the
+    /// *containing directory's* mutation (the new/changed/removed name,
+    /// not any file's content) is acknowledged by stable storage —
+    /// `fsync` on the directory's own fd on Linux (`fsync(2)`'s own
+    /// text: valid and meaningful on a directory fd, not just a regular
+    /// file). [`Dir::write_atomic`] calls this after its publishing
+    /// `rename` for exactly this reason: `File::sync_all`'s `fsync` on
+    /// the temp file before the rename proves the *content* survives a
+    /// crash, but says nothing about whether the rename itself — the
+    /// directory-entry mutation that makes `rel` name the new content at
+    /// all — is durable, since a directory entry lives in its parent
+    /// directory's own data, not the renamed file's.
+    ///
+    /// Default-provided as a no-op `Ok(())`: a backend with no
+    /// meaningful directory-durability primitive of its own (Windows,
+    /// pending further research — see `docs/behavior/fs.md`'s D-level
+    /// entry; `platform-mock`, which has no real storage to be durable
+    /// against at all) is not forced to fabricate one, and this method
+    /// existing at all is what lets [`write_atomic`](Dir::write_atomic)
+    /// call it uniformly across every backend without a downcast. A
+    /// backend that *can* offer more overrides it — the Linux backend's
+    /// `LinuxDir::sync_dir` (`fsync` on the capability's own directory
+    /// fd) is the only override today.
+    fn sync_dir(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Durably write `contents` to `rel`, atomically: never leaves a
     /// partially-written or missing file observable at that name, even
     /// across a crash between the write and the rename that publishes
@@ -346,8 +376,13 @@ pub trait Dir {
     /// the final rename is same-filesystem, hence atomic) → `sync_all`
     /// the temp file (durability *before* the rename, not after — a
     /// crash before this point leaves only the temp name, never a
-    /// half-written `rel`) → close it → `rename` over `rel`. The temp
-    /// file is best-effort removed if the write/sync step fails.
+    /// half-written `rel`) → close it → `rename` over `rel` → `sync_dir`
+    /// (D2: the rename's directory-entry mutation itself is durable, not
+    /// just the content it now points at — see [`Dir::sync_dir`]'s own
+    /// doc comment). The temp file is best-effort removed if the
+    /// write/sync step fails; `sync_dir`'s result is this method's own
+    /// return value, since a rename that "succeeded" but was never made
+    /// durable is exactly the gap this step exists to close.
     fn write_atomic(&self, rel: &OsStr, contents: &[u8]) -> Result<()> {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -381,7 +416,8 @@ pub trait Dir {
             let _ = self.remove_file(&tmp_name);
             return Err(e);
         }
-        self.rename(&tmp_name, rel)
+        self.rename(&tmp_name, rel)?;
+        self.sync_dir()
     }
 }
 

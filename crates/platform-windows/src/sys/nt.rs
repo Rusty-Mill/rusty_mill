@@ -26,6 +26,50 @@ pub fn open_relative(
     disposition: u32,
     options: u32,
 ) -> Result<OwnedWinHandle> {
+    open_relative_attrs(
+        root,
+        rel,
+        access,
+        disposition,
+        options,
+        nt::OBJ_CASE_INSENSITIVE as u32,
+    )
+}
+
+/// R2-equivalent containment (Rusty-Mill fs slice): the same
+/// handle-relative open as [`open_relative`], with `OBJ_DONT_REPARSE`
+/// added to `Attributes` — any reparse point `NtCreateFile` encounters
+/// while resolving `rel`, intermediate or terminal, fails the call with
+/// `STATUS_REPARSE_POINT_ENCOUNTERED` (mapped to `ErrorKind::
+/// FilesystemLoop`) instead of being transparently followed. Used only
+/// by [`crate::fs::WindowsDir::open_dir`]/`create_dir` — see those call
+/// sites' own doc comments for why `open`/`access` are left on plain
+/// [`open_relative`] instead.
+pub fn open_relative_r2(
+    root: &OwnedWinHandle,
+    rel: &OsStr,
+    access: u32,
+    disposition: u32,
+    options: u32,
+) -> Result<OwnedWinHandle> {
+    open_relative_attrs(
+        root,
+        rel,
+        access,
+        disposition,
+        options,
+        (nt::OBJ_CASE_INSENSITIVE | nt::OBJ_DONT_REPARSE) as u32,
+    )
+}
+
+fn open_relative_attrs(
+    root: &OwnedWinHandle,
+    rel: &OsStr,
+    access: u32,
+    disposition: u32,
+    options: u32,
+    object_attributes: u32,
+) -> Result<OwnedWinHandle> {
     let wide = to_wide_nt_component(rel);
     let byte_len = wide.len() * 2;
     if byte_len > u16::MAX as usize {
@@ -46,7 +90,9 @@ pub fn open_relative(
         // Match Win32's (and every consumer's) expectation on NTFS: name
         // lookup is case-insensitive. Case-sensitivity policy questions
         // belong to consumers (rush's shell-host layer), not here.
-        Attributes: nt::OBJ_CASE_INSENSITIVE as u32,
+        // `object_attributes` additionally carries `OBJ_DONT_REPARSE` for
+        // the `open_relative_r2` caller only.
+        Attributes: object_attributes,
         SecurityDescriptor: std::ptr::null(),
         SecurityQualityOfService: std::ptr::null(),
     };

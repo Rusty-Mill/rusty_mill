@@ -20,6 +20,80 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.26.0
+
+- **Rusty-Mill fs R2/D2 slice: directory durability + `openat2`/
+  `OBJ_DONT_REPARSE` resolution containment.** Public API change:
+  `Dir` gains a new method, `sync_dir` (default-provided no-op
+  `Ok(())`, so `platform-mock` needs no override and `platform-bsd`,
+  which has no filesystem backend at all, is unaffected) —
+  `y`-bumping per `docs/versioning.md` §2, since `Dir` is implemented as
+  well as consumed by every backend. `ErrorKind` gains two new variants,
+  `FilesystemLoop` and `CrossesDevices` (both `#[non_exhaustive]`,
+  additive).
+
+  **D2 (`write_atomic` directory durability).** `Dir::write_atomic`'s
+  shared default now calls `sync_dir` after its publishing rename.
+  `LinuxDir::sync_dir` fsyncs the capability's own `O_DIRECTORY` fd —
+  Linux `write_atomic` reaches **D2** ("namespace synchronized"),
+  live-verified by a committed, re-runnable `strace` test
+  (`write_atomic_fsyncs_the_directory_after_the_publishing_rename`,
+  `platform-linux/tests/parity.rs`) proving the directory `fsync` fires
+  strictly after `renameat2`. Windows gets no `sync_dir` override —
+  `write_atomic` stays **D1** there; `FlushFileBuffers`'s effect on a
+  directory handle has no documented, verifiable NTFS guarantee this
+  crate could responsibly claim (`docs/divergences.md` #014).
+
+  **R2 (Linux `openat_r2` / `openat2`).** `LinuxDir::open_dir`/
+  `create_dir` now resolve via a new raw-syscall `sys::fdio::openat_r2`
+  (`openat2` with `RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV`, no libc
+  wrapper at this repo's MSRV — the same raw-syscall-under-libc
+  treatment `renameat2`/`pidfd_open` already got, not gated behind
+  `track-p`), reaching **R2** ("mount-confined") on a 5.6+ kernel and
+  falling back transparently to the unchanged R1 `openat`/`mkdirat` path
+  on `ENOSYS` (pre-5.6), mirroring `sys::spawn::poll_pids`'s own
+  pidfd-then-portable-loop precedent. `Dir::open`'s plain-file case is
+  deliberately left unchanged (R1) to preserve `docs/behavior/fs.md`'s
+  existing "open follows symlinks transparently" promise —
+  `RESOLVE_NO_SYMLINKS` rejects a *terminal* symlink too, which `open`
+  never promised to stop following. New parity tests plant a symlink in
+  an intermediate path component and assert both `open_dir` and
+  `create_dir` now reject it (`ErrorKind::FilesystemLoop`) where the old
+  plain-`openat`/`mkdirat` path silently followed it. No mount-crossing
+  test: a bind-mount fixture needing elevated CI privilege this test
+  harness cannot assume — see `docs/divergences.md` #013.
+
+  **R2-equivalent (Windows `OBJ_DONT_REPARSE`).** `WindowsDir::open_dir`/
+  `create_dir` now resolve via a new `sys::nt::open_relative_r2`
+  (`OBJ_DONT_REPARSE` added to `NtCreateFile`'s `OBJECT_ATTRIBUTES`,
+  unconditionally — no kernel-version gate needed, shipped since Windows
+  10 1607), rejecting any reparse point in resolution
+  (`STATUS_REPARSE_POINT_ENCOUNTERED` → the new `ErrorKind::
+  FilesystemLoop`) — the link-confinement half of Linux's R2, not the
+  mount-confinement half (no admitted NT flag for that; `docs/
+  divergences.md` #013). `open`/`access` deliberately unchanged, for the
+  identical documented-promise reason as the Linux side. Windows-target
+  compilation **was** locally verified this slice — the
+  `x86_64-pc-windows-msvc` target was installable in this environment
+  after all, so `cargo check --target x86_64-pc-windows-msvc --workspace`
+  and `cargo clippy --target x86_64-pc-windows-msvc --workspace
+  --all-targets -- -D warnings` both ran clean, including the new
+  `windows_open_dir_rejects_a_reparse_point_in_an_intermediate_component`/
+  `windows_create_dir_rejects_a_reparse_point_in_an_intermediate_component`
+  parity tests (`crates/platform-windows/tests/parity.rs`, skipping
+  honestly without `SeCreateSymbolicLinkPrivilege`, matching the existing
+  symlink-block pattern). Not, however, *run* — no live Windows/NTFS
+  execution happened in this environment, only compilation and static
+  analysis; the actual runtime behavior (does `STATUS_REPARSE_POINT_ENCOUNTERED`
+  really come back the way `docs/divergences.md` #013 describes) is
+  reviewed by inspection against windows-sys 0.59's confirmed exported
+  symbols and this crate's existing `NtCreateFile` call shape, not
+  executed and observed.
+
+  `docs/behavior/fs.md` and each backend's `fs.rs` module doc updated
+  with the precise per-backend R-/D-level; two new `docs/divergences.md`
+  entries (#013 mount-confinement gap, #014 directory-durability gap).
+
 ### 0.25.7
 
 - **Track W: `sys::pty` migrated, partially — closes rustils#109 (D-15).**

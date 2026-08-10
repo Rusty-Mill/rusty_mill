@@ -20,6 +20,20 @@ pub use libc::{
     WNOHANG, WTERMSIG, W_OK, X_OK,
 };
 
+// R2/R3 containment (Rusty-Mill fs slice, `sys::openat2`): `openat2(2)`
+// has no libc *wrapper function* at this repo's MSRV baseline (the same
+// situation `renameat2`/`pidfd_open` were in — glibc only grew its own
+// `openat2` wrapper well after this crate's floor), hence `SYS_openat2`
+// for the raw-syscall escape hatch. `RESOLVE_NO_SYMLINKS`/
+// `RESOLVE_NO_XDEV` are the two `resolve` bits this crate requests
+// (link-confined + mount-confined, R2) — plain `u64` constants, not
+// syscalls, so admitted here rather than redefined locally. libc's own
+// `open_how` struct is `#[non_exhaustive]` (cannot be literal-
+// constructed outside the `libc` crate even with every field named), so
+// `sys::openat2` defines its own `#[repr(C)]` mirror matching the kernel
+// ABI instead of importing it — deliberately not admitted here.
+pub use libc::{SYS_openat2, RESOLVE_NO_SYMLINKS, RESOLVE_NO_XDEV};
+
 // D1/D46 job-control kill signals: `kill_tree`/`kill_single` grow a
 // portable `Signal` parameter (`kill_cmd`'s `-SIG`/`-9`/`-CONT`,
 // `fg_cmd`/`bg_cmd`'s `SIGCONT` resume). SIGKILL/SIGTERM/SIGINT/SIGHUP

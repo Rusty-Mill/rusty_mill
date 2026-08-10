@@ -39,6 +39,13 @@ fn kind_of(errno: i32) -> ErrorKind {
         libc::EAGAIN => ErrorKind::WouldBlock,
         libc::EINTR => ErrorKind::Interrupted,
         libc::EPIPE => ErrorKind::BrokenPipe,
+        // R2/R3 containment (openat2 RESOLVE_NO_SYMLINKS/RESOLVE_NO_XDEV,
+        // sys::openat2) and the pre-existing "rename across filesystems"
+        // case (renameat2, unrelated to R2 but the identical errno) —
+        // see `ErrorKind::FilesystemLoop`/`CrossesDevices`'s own doc
+        // comments for why both share one variant apiece.
+        libc::ELOOP => ErrorKind::FilesystemLoop,
+        libc::EXDEV => ErrorKind::CrossesDevices,
         _ => ErrorKind::Other,
     }
 }
@@ -70,6 +77,121 @@ pub fn openat(dirfd: RawFd, rel: &OsStr, flags: i32, mode: u32) -> Result<OwnedF
     // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
     // descriptor; wrapping it exactly once transfers ownership.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Kernel ABI layout for `openat2(2)`'s `struct open_how`
+/// (`linux/openat2.h`): three `u64`s, no padding, in this exact order.
+/// Defined locally rather than using libc's own `open_how` because that
+/// type is `#[non_exhaustive]` (see `libc_surface`'s doc comment) and so
+/// cannot be literal-constructed outside the `libc` crate at all, even
+/// naming every field.
+#[repr(C)]
+struct OpenHow {
+    flags: u64,
+    mode: u64,
+    resolve: u64,
+}
+
+/// R2 containment (Rusty-Mill fs slice): `RESOLVE_NO_SYMLINKS` (reject
+/// *any* symlink encountered while resolving the path — every
+/// intermediate component, atomically, the R1→R2 "link-confined" gap
+/// this slice closes) `|` `RESOLVE_NO_XDEV` (reject crossing a
+/// filesystem/mount boundary during that same resolution —
+/// "mount-confined", R2's own addition on top of R1). Deliberately not
+/// `RESOLVE_BENEATH`/`RESOLVE_IN_ROOT`: this crate's `Dir` contract does
+/// not promise beneath-confinement today (nothing in `docs/behavior/
+/// fs.md` stops a relative `rel` containing `..`, or a symlink whose
+/// *target* is absolute, from resolving outside the capability's own
+/// subtree — that would be a real, separate, and currently undocumented
+/// behavior narrowing, not a side effect of closing this gap) — an R3
+/// slice would need to *design* that contract first, not adopt it as an
+/// accident of which flags happened to be convenient here.
+const R2_RESOLVE: u64 = c::RESOLVE_NO_SYMLINKS | c::RESOLVE_NO_XDEV;
+
+/// `openat2(dirfd, rel, &how)` — raw syscall: no libc wrapper exists at
+/// this repo's MSRV baseline (glibc grew its own `openat2()` well after
+/// this crate's floor), the same situation `renameat2`/`pidfd_open` were
+/// in before their own slices landed (`libc_surface`'s doc comment).
+/// `ENOSYS` (pre-5.6 kernel, or a `resolve` bit the running kernel
+/// doesn't implement) comes back as `ErrorKind::Unsupported` rather than
+/// a hard failure — callers fall back to the plain `openat` path, the
+/// exact "try the modern mechanism, fall back to the portable one on an
+/// old kernel" shape `sys::spawn::poll_pids` already established for
+/// `pidfd_open` (RFC v2 §5.6).
+fn openat2_raw(dirfd: RawFd, rel: &OsStr, flags: i32, mode: u32, resolve: u64) -> Result<OwnedFd> {
+    let c_rel = to_cstring(rel, "openat2")?;
+    let how = OpenHow {
+        flags: (flags | c::O_CLOEXEC) as u64,
+        mode: u64::from(mode),
+        resolve,
+    };
+    // SAFETY: `c_rel` is a valid NUL-terminated string outliving the
+    // call; `how` is a fully initialized, correctly laid-out `open_how`
+    // (repr(C), field-for-field matching the kernel UAPI struct) whose
+    // address and exact `size_of` are passed together, satisfying
+    // openat2's own extensible-struct-by-size ABI contract; `dirfd` is a
+    // valid open descriptor owned by our caller.
+    let fd = unsafe {
+        c::syscall(
+            c::SYS_openat2,
+            dirfd,
+            c_rel.as_ptr(),
+            &how as *const OpenHow,
+            std::mem::size_of::<OpenHow>(),
+        )
+    };
+    if fd < 0 {
+        let code = errno();
+        if code == libc::ENOSYS {
+            return Err(PlatformError::new(
+                ErrorKind::Unsupported,
+                OsCode::Errno(code),
+                "openat2",
+            ));
+        }
+        return Err(
+            PlatformError::new(kind_of(code), OsCode::Errno(code), "openat2").with_path(rel),
+        );
+    }
+    // SAFETY: `fd` is a freshly returned, valid, otherwise-unowned
+    // descriptor; wrapped exactly once.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+/// `openat2` with [`R2_RESOLVE`], transparently falling back to plain
+/// `openat` — today's unchanged R1 behavior, symlinks and mount
+/// crossings both silently followed — when the kernel has no `openat2`
+/// at all. Used by [`crate::fs::LinuxDir::open_dir`] and the
+/// parent-resolution half of [`crate::fs::LinuxDir::create_dir`] only:
+/// see each call site's own doc comment for why `Dir::open`'s plain-file
+/// case is deliberately excluded (it would silently stop following a
+/// *terminal* symlink, breaking `docs/behavior/fs.md`'s existing "open
+/// follows symlinks transparently" promise, not just add a guarantee).
+pub fn openat_r2(dirfd: RawFd, rel: &OsStr, flags: i32, mode: u32) -> Result<OwnedFd> {
+    match openat2_raw(dirfd, rel, flags, mode, R2_RESOLVE) {
+        Ok(fd) => Ok(fd),
+        Err(e) if e.kind == ErrorKind::Unsupported => openat(dirfd, rel, flags, mode),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the running kernel implements `openat2` at all (5.6+),
+/// probed once (against `AT_FDCWD`/`"."`, with `resolve = 0` — this
+/// probe is "does the syscall exist," not itself an R2 containment
+/// check) and cached. Exists so a symlink/mount-containment test can
+/// honestly skip on an old kernel instead of silently exercising the R1
+/// fallback path inside [`openat_r2`] and asserting the wrong thing —
+/// the same `tun_or_skip!`-style honesty `tests/tun_parity.rs` already
+/// practices for its own environment gap.
+pub fn openat2_supported() -> bool {
+    use std::sync::OnceLock;
+    static SUPPORTED: OnceLock<bool> = OnceLock::new();
+    *SUPPORTED.get_or_init(|| {
+        !matches!(
+            openat2_raw(c::AT_FDCWD, OsStr::new("."), c::O_RDONLY | c::O_DIRECTORY, 0, 0),
+            Err(e) if e.kind == ErrorKind::Unsupported
+        )
+    })
 }
 
 /// `memfd_create(2)` — an anonymous, memory-backed file with no

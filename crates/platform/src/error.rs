@@ -49,6 +49,23 @@ pub enum ErrorKind {
     /// Net surface: the operation exceeded its deadline
     /// (`ETIMEDOUT`/`WSAETIMEDOUT`).
     TimedOut,
+    /// R2/R3 resolution containment (Rusty-Mill fs slice): path
+    /// resolution encountered a symlink/reparse point it was told to
+    /// reject (`openat2` `RESOLVE_NO_SYMLINKS` → `ELOOP`; NT
+    /// `OBJ_DONT_REPARSE` → `STATUS_REPARSE_POINT_ENCOUNTERED`) —
+    /// distinct from the ordinary POSIX "too many symlinks in a normal
+    /// resolution" `ELOOP`, which this taxonomy has never separately
+    /// distinguished either, so the two share this variant rather than
+    /// growing a third.
+    FilesystemLoop,
+    /// R2 mount-confinement (Rusty-Mill fs slice): path resolution was
+    /// told not to cross a filesystem/volume boundary and would have had
+    /// to (`openat2` `RESOLVE_NO_XDEV` → `EXDEV`). Also the existing,
+    /// unrelated-to-R2, "rename across filesystems" `EXDEV` — both are
+    /// "the kernel refused to let this resolution/operation leave one
+    /// filesystem," so one variant covers both rather than forcing a
+    /// caller to guess which of two near-identical kinds applies.
+    CrossesDevices,
     Other,
 }
 
