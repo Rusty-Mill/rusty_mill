@@ -389,13 +389,23 @@ implementation convenience.
   `linux_open_dir_rejects_a_symlink_in_an_intermediate_component` /
   `linux_create_dir_rejects_a_symlink_in_an_intermediate_component`
   (`crates/platform-linux/tests/parity.rs`) pin the link-confinement half
-  both backends share; Linux's mount-confinement half has no committed
-  test — a bind-mount fixture needing elevated privilege this test
-  harness cannot assume in CI (the same `CAP_NET_ADMIN`-style honesty
-  `tests/tun_parity.rs`'s `tun_or_skip!` already practices for its own
-  environment gap) — see `crates/platform-linux/src/fs.rs`'s module doc
-  for the precise per-backend R-level claim this entry backs.
-- **Accepted**: 2026-08-10, with the Rusty-Mill fs R2/D2 slice.
+  both backends share. Linux's mount-confinement half is pinned by
+  `linux_open_dir_rejects_a_mount_crossing_in_an_intermediate_component` /
+  `linux_create_dir_rejects_a_mount_crossing_in_an_intermediate_component`
+  (`crates/platform-linux/tests/mount_crossing.rs`) — mounts a real
+  `tmpfs` and asserts `RESOLVE_NO_XDEV` rejects resolving across it with
+  `ErrorKind::CrossesDevices`, with an R1-op sanity check (`metadata`
+  still resolves across the same boundary) proving the rejection is R2's
+  deliberate containment gain, not generic breakage. `mount(2)` needs
+  `CAP_SYS_ADMIN`, the same gap `tests/tun_parity.rs`'s `tun_or_skip!`
+  already practices honesty for: the suite skips gracefully on an
+  unprivileged host and runs for real in CI's privileged job
+  (`.github/workflows/ci.yml`) — see
+  `crates/platform-linux/src/fs.rs`'s module doc for the precise
+  per-backend R-level claim this entry backs.
+- **Accepted**: 2026-08-10, with the Rusty-Mill fs R2/D2 slice. Mount-
+  crossing containment test-verified 2026-08-10, closing the gap the
+  Rusty-Mill `TRIAL-0002` comparison record (`RT-002`) disclosed.
 
 ## 014 — directory durability after `write_atomic`'s rename: D2 on Linux, D1 on Windows
 

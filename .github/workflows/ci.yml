@@ -75,6 +75,15 @@ jobs:
       - name: test platform-linux tun surface (privileged)
         if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: sudo -E env "PATH=$PATH" cargo test -p platform-linux --test tun_parity
+      # R2 mount-confinement (openat2 RESOLVE_NO_XDEV): mount(2) needs
+      # CAP_SYS_ADMIN, same gap as the tun leg above — the `test` step
+      # already ran mount_crossing.rs, but it skipped gracefully rather
+      # than actually mounting a tmpfs and crossing it. This closes the
+      # gap the Rusty-Mill TRIAL-0002 comparison record disclosed as
+      # untested (docs/divergences.md #013).
+      - name: test platform-linux mount-crossing containment (privileged)
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: sudo -E env "PATH=$PATH" cargo test -p platform-linux --test mount_crossing
 
   # rustils#48: platform-bsd's real-hardware verification on Darwin. A
   # separate job, not a `test` matrix leg — `cargo test --workspace` on
