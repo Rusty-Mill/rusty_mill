@@ -45,16 +45,19 @@ docs/
   rusty-mill-profile.md  Draft Rusty-Mill ecosystem standards profile (see below)
 ```
 
-## Rusty-Mill ecosystem membership (Draft)
+## Rusty-Mill ecosystem membership
 
 rustils is pursuing membership in the [Rusty-Mill](https://github.com/Rusty-Mill/rusty_foundation_akb)
-capability-based platform ecosystem. This is a two-gate process, and only
-one gate has a first draft so far: [`docs/rusty-mill-profile.md`](docs/rusty-mill-profile.md)
-proposes rustils' repository standards profile. The companion gate — an
-AKB-side ADR/RFC authorizing rustils' capability domains for Experimental
-work — has not been started. Until both land and are Accepted, rustils
-makes no Rusty-Mill conformance or maturity claim and continues operating
-under its own RFC below.
+capability-based platform ecosystem. [`docs/rusty-mill-profile.md`](docs/rusty-mill-profile.md)
+is **Accepted**, scoped narrowly to the **filesystem** domain, which
+itself holds an accepted Experimental promotion decision in the AKB.
+Process, networking, and security are proposed but not yet bound — each
+needs its own accepted domain promotion and its own profile-scope
+widening, not inferred from filesystem's. An implementation trial
+(`TRIAL-0002`) citing this repository as evidence exists but remains
+**Not authorized** (Cross-cutting and independent-review gates still
+open). Outside filesystem, rustils makes no Rusty-Mill conformance or
+maturity claim and continues operating under its own RFC below.
 
 ## Verify
 
