@@ -32,6 +32,7 @@ pub mod flatten;
 mod impls;
 pub mod impossible;
 pub mod json;
+pub mod ron;
 pub mod ser;
 pub mod value;
 
