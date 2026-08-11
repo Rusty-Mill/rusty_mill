@@ -72,9 +72,12 @@ toolchain, not a crate you depend on), and everything else is `std`.
   deserialize instead of erroring (`default = "path"` falls back to calling
   an arbitrary zero-arg `path()` instead). `skip` never serializes the field
   and always defaults it on deserialize, ignoring anything present on the
-  wire under its name. `alias = "..."` (repeatable) accepts extra wire names
-  on deserialize alongside the field's primary name/`rename`; serialize is
-  unaffected and always uses the primary name.
+  wire under its name (`skip_serializing`/`skip_deserializing` are its two
+  halves independently - one keeps the field off the wire while still
+  reading it if present, the other always defaults it while still writing
+  it). `alias = "..."` (repeatable) accepts extra wire names on deserialize
+  alongside the field's primary name/`rename`; serialize is unaffected and
+  always uses the primary name.
 - Container attributes:
   ```rust
   #[derive(Serialize, Deserialize)]

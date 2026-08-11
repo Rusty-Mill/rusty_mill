@@ -108,7 +108,10 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
 }
 
 fn named_struct_serialize_body(name: &str, fields: &[NamedField]) -> String {
-    let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+    let active: Vec<&NamedField> = fields
+        .iter()
+        .filter(|f| !f.attrs.skips_serializing())
+        .collect();
     let value_of = |field_name: &str| format!("&self.{field_name}");
 
     // A flattened field's fields merge into the parent object, so the
@@ -223,7 +226,7 @@ fn variant_arm_untagged(enum_name: &str, variant: &Variant) -> String {
         }
         Fields::Named(fields) => {
             let binders = binder_list(fields);
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skips_serializing()).collect();
             let value_of = |field_name: &str| field_name.to_string();
             let count = count_expr(&active, value_of);
             let calls = field_serialize_calls(
@@ -263,7 +266,10 @@ fn variant_arm_tagged(enum_name: &str, variant: &Variant, tag: &str) -> String {
         }
         Fields::Named(fields) => {
             let binders = binder_list(fields);
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields
+                .iter()
+                .filter(|f| !f.attrs.skips_serializing())
+                .collect();
             let value_of = |field_name: &str| field_name.to_string();
             let count = count_expr(&active, value_of);
             let calls = field_serialize_calls(
@@ -290,7 +296,7 @@ fn binder_list(fields: &[NamedField]) -> String {
     fields
         .iter()
         .map(|f| {
-            if f.attrs.skip {
+            if f.attrs.skips_serializing() {
                 format!("{}: _", f.name)
             } else {
                 format!("ref {}", f.name)
@@ -328,7 +334,7 @@ fn variant_arm(enum_name: &str, index: u32, variant: &Variant) -> String {
         }
         Fields::Named(fields) => {
             let binders = binder_list(fields);
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skips_serializing()).collect();
             let value_of = |field_name: &str| field_name.to_string();
             let count = count_expr(&active, value_of);
             let calls = field_serialize_calls(

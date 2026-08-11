@@ -177,7 +177,10 @@ fn visit_map_body(
     map_error_ty: &str,
     deny_unknown_fields: bool,
 ) -> String {
-    let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+    let active: Vec<&NamedField> = fields
+        .iter()
+        .filter(|f| !f.attrs.skips_deserializing())
+        .collect();
     let flatten_field = active.iter().find(|f| f.attrs.flatten).copied();
     let normal: Vec<&NamedField> = active
         .iter()
@@ -240,8 +243,12 @@ fn visit_map_body(
         if f.attrs.flatten {
             continue;
         }
-        if f.attrs.skip {
-            out += &format!("let {ident} = ::std::default::Default::default();\n");
+        if f.attrs.skips_deserializing() {
+            let fallback = match &f.attrs.default {
+                Some(DefaultAttr::Path(path)) => format!("{path}()"),
+                Some(DefaultAttr::Trait) | None => "::std::default::Default::default()".to_string(),
+            };
+            out += &format!("let {ident} = {fallback};\n");
         } else if let Some(default) = &f.attrs.default {
             let fallback = match default {
                 DefaultAttr::Trait => "::std::default::Default::default()".to_string(),
@@ -388,7 +395,10 @@ fn struct_impl(
             )
         }
         Fields::Named(fields) => {
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields
+                .iter()
+                .filter(|f| !f.attrs.skips_deserializing())
+                .collect();
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
@@ -643,7 +653,10 @@ fn untagged_variant_body(
             )
         }
         Fields::Named(fields) => {
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields
+                .iter()
+                .filter(|f| !f.attrs.skips_deserializing())
+                .collect();
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
@@ -764,7 +777,10 @@ fn variant_arm(
             )
         }
         Fields::Named(fields) => {
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let active: Vec<&NamedField> = fields
+                .iter()
+                .filter(|f| !f.attrs.skips_deserializing())
+                .collect();
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
