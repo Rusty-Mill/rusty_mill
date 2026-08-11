@@ -401,6 +401,29 @@ where
     Ok(ok.expect("ConcreteToErased's one terminal call always populates `out` on the `Ok` path"))
 }
 
+/// What `#[rusty_serde(serialize_with = "path")]`'s generated code wraps a
+/// field's value in: `SerializeStruct::serialize_field`/
+/// `SerializeMap::serialize_entry` need a `T: Serialize` value, and this
+/// crate's derive macro never parses field types, so there's no way for it
+/// to write a matching `Serialize` impl for the field's own (unknown) type
+/// directly - `With` is the one, reusable such impl every `serialize_with`
+/// field's generated code shares, its own [`Serialize::serialize`] just
+/// calling back into [`call_with`].
+#[doc(hidden)]
+pub struct With<'a, T: ?Sized> {
+    pub value: &'a T,
+    pub with_fn: fn(&T, ErasedAsSerializer<'_>) -> Result<(), ErasedError>,
+}
+
+impl<T: ?Sized> Serialize for With<'_, T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        call_with(self.value, serializer, self.with_fn)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,6 +451,39 @@ mod tests {
     fn call_with_reformats_a_scalar_through_json() {
         let value = Seconds(std::time::Duration::from_secs(42));
         assert_eq!(json::to_string(&value).unwrap(), "42");
+    }
+
+    /// Stands in for what `#[rusty_serde(serialize_with = "...")]`'s
+    /// generated code produces: a plain struct field's value wrapped in
+    /// `With` at the `SerializeStruct::serialize_field` call site.
+    struct Event {
+        at: std::time::Duration,
+    }
+
+    impl Serialize for Event {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            use crate::ser::SerializeStruct;
+            let mut state = serializer.serialize_struct("Event", 1)?;
+            state.serialize_field(
+                "at",
+                &With {
+                    value: &self.at,
+                    with_fn: |v, s| serialize_seconds(v, s),
+                },
+            )?;
+            state.end()
+        }
+    }
+
+    #[test]
+    fn with_wraps_a_field_for_serialize_field() {
+        let value = Event {
+            at: std::time::Duration::from_secs(5),
+        };
+        assert_eq!(json::to_string(&value).unwrap(), r#"{"at":5}"#);
     }
 
     #[test]

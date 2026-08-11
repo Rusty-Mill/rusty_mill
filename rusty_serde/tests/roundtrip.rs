@@ -1352,3 +1352,48 @@ fn remote_derive_getter_reads_a_private_field_via_a_function() {
     let decoded: remote_getter_target::ForeignSecret = json::from_str(&json).unwrap();
     assert_eq!(decoded, value);
 }
+
+mod as_seconds {
+    use rusty_serde::Serializer;
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.as_secs())
+    }
+}
+
+// `Duration` has no `Serialize` impl of its own in this crate - only
+// `Serialize` is derived here (`serialize_with` doesn't touch deserialize;
+// `deserialize_with` is a separate, not-yet-implemented attribute).
+#[derive(Serialize)]
+struct Event {
+    name: String,
+    #[rusty_serde(serialize_with = "as_seconds::serialize")]
+    elapsed: std::time::Duration,
+}
+
+#[test]
+fn serialize_with_reformats_a_field_via_a_function() {
+    let value = Event {
+        name: "boot".to_string(),
+        elapsed: std::time::Duration::from_secs(90),
+    };
+    assert_eq!(
+        json::to_string(&value).unwrap(),
+        r#"{"name":"boot","elapsed":90}"#
+    );
+}
+
+#[derive(Serialize)]
+struct EventRenamed {
+    #[rusty_serde(rename = "at", serialize_with = "as_seconds::serialize")]
+    elapsed: std::time::Duration,
+}
+
+#[test]
+fn serialize_with_combines_with_rename() {
+    let value = EventRenamed {
+        elapsed: std::time::Duration::from_secs(3),
+    };
+    assert_eq!(json::to_string(&value).unwrap(), r#"{"at":3}"#);
+}

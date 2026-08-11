@@ -429,3 +429,26 @@ fn remote_derive_round_trips_through_ron_too() {
     let decoded: remote_target::ForeignPoint = ron::from_str(&encoded).unwrap();
     assert_eq!((decoded.x, decoded.y), (value.x, value.y));
 }
+
+mod as_seconds {
+    use rusty_serde::Serializer;
+    use std::time::Duration;
+
+    pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u64(value.as_secs())
+    }
+}
+
+#[derive(Serialize)]
+struct Event {
+    #[rusty_serde(serialize_with = "as_seconds::serialize")]
+    elapsed: std::time::Duration,
+}
+
+#[test]
+fn serialize_with_reformats_a_field_through_ron_too() {
+    let value = Event {
+        elapsed: std::time::Duration::from_secs(5),
+    };
+    assert_eq!(ron::to_string(&value).unwrap(), "{elapsed:5}");
+}

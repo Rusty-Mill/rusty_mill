@@ -174,18 +174,31 @@ fn named_struct_serialize_body(name: &str, fields: &[NamedField]) -> String {
         .iter()
         .filter(|f| !f.attrs.skips_serializing())
         .collect();
-    // `getter = "path"` (only meaningful alongside a container-level
-    // `remote`) reads a field that isn't visible as `self.field` from this
-    // impl's own module - `path(self)` (expected to return an owned value)
-    // stands in for the ordinary field access instead.
+    // `serialize_with = "path"` routes the field through `path` (matching
+    // the ordinary `fn<S: Serializer>(value: &T, serializer: S) -> ...`
+    // convention) instead of the field's own `Serialize` impl - wrapping it
+    // in `erased::With` is the only way to hand `serialize_field` a
+    // `Serialize` value for a field type this derive macro never named (see
+    // `rusty_serde::erased`'s module docs). `getter = "path"` (only
+    // meaningful alongside a container-level `remote`) reads a field that
+    // isn't visible as `self.field` from this impl's own module -
+    // `path(self)` (expected to return an owned value) stands in for the
+    // ordinary field access instead. Parse-time validation already
+    // guarantees at most one of the two is set on a given field.
     let value_of = |field_name: &str| {
-        let getter = active
+        let field = active
             .iter()
             .find(|f| f.name == field_name)
-            .and_then(|f| f.attrs.getter.as_deref());
-        match getter {
-            Some(getter) => format!("&({getter}(self))"),
-            None => format!("&self.{field_name}"),
+            .expect("value_of is only ever called for a field already in `active`");
+        if let Some(with_fn) = &field.attrs.serialize_with {
+            format!(
+                "&::rusty_serde::erased::With {{ value: &self.{field_name}, \
+                 with_fn: |__v, __s| {with_fn}(__v, __s) }}"
+            )
+        } else if let Some(getter) = &field.attrs.getter {
+            format!("&({getter}(self))")
+        } else {
+            format!("&self.{field_name}")
         }
     };
 
