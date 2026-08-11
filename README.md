@@ -230,16 +230,24 @@ named pipes) and was not rebuilt. The two genuine gaps: a liveness/
 zombie probe decoupled from `try_wait`'s `Child`-ownership model, and a
 spawn-time `detach()` flag (`POSIX_SPAWN_SETSID` on Linux;
 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows). `detach()`
-composes with `GroupSpec::NewGroup` on Linux but is refused there on
-Windows — a kill-on-close Job Object would silently defeat `detach`'s
-"survives a crash" guarantee (divergence 015); `is_zombie` is
-`Unsupported` on Windows, which has no zombie concept (divergence 016).
-Windows-side changes are compiled, clippy-clean, and live-tested
-(`cargo test -p platform-windows`, real `ping`/`cmd` children); Linux
-changes mirror the exact existing call-site patterns but could not be
-compiled or run in the session that wrote them (Windows workstation, no
-working WSL distro) — flagged explicitly rather than silently assumed
-correct.
+composes only with `GroupSpec::Inherit`; `NewGroup` is refused on
+**both** backends, for two unrelated real reasons caught by CI rather
+than assumed: Linux — `setsid` always makes the child a session leader,
+and the kernel's `setpgid(2)` forbids changing a session leader's own
+process group, so the combination fails `posix_spawn` itself with
+`EPERM`; Windows — a kill-on-close Job Object would silently defeat
+`detach`'s "survives a crash" guarantee. `is_zombie` is `Unsupported`
+on Windows, which has no zombie concept (divergence 015). Every line of
+the CI matrix is green (`fmt`, `clippy -D warnings` on every target
+including the `track-w` leg, `test` on ubuntu/windows × stable/1.75,
+miri, cross-compile, `cargo-deny`, unsafe-scope) — two real bugs this
+Windows-sandboxed authoring session could not see locally (a
+`platform-linux`-only `E0282`/`too_many_arguments`, invisible because
+that crate's root is `cfg(target_os = "linux")` and no-ops under
+`cargo check` on Windows; a pid-reuse race in a Windows liveness test,
+caused by testing against a pid whose owning handle the consuming
+`Child::wait` had already closed) surfaced and were fixed against real
+CI feedback, not assumed away.
 
 ## License
 

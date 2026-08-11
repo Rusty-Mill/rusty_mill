@@ -398,7 +398,10 @@ pub type ParentPipes = [Option<OwnedWinHandle>; 3];
 /// member — the instant every handle to it closes, which happens
 /// unconditionally when this process terminates for any reason
 /// including a crash, silently defeating `detached`'s whole purpose
-/// (divergence 015). Returns (process handle, job handle if grouped,
+/// (Linux hits an unrelated real kernel `EPERM` for the same combination
+/// once `Command::detach` sets `POSIX_SPAWN_SETSID`, so both backends
+/// refuse it — see `docs/decision-request-detach-liveness.md`).
+/// Returns (process handle, job handle if grouped,
 /// pid, parent pipe ends).
 ///
 /// **Stays on windows-sys in both Track W configurations (D-15).** The
@@ -850,10 +853,17 @@ pub fn is_alive(pid: u32) -> Result<bool> {
             // SAFETY: `GetLastError` takes no arguments and has no
             // preconditions.
             let code = unsafe { w::GetLastError() };
-            // `ERROR_INVALID_PARAMETER` is `OpenProcess`'s documented
-            // code for "no process with this pid"; any other failure
-            // (e.g. `ERROR_ACCESS_DENIED`) means the pid exists but this
-            // process can't query it, which still counts as alive.
+            // `ERROR_INVALID_PARAMETER` is what `OpenProcess` reports for
+            // a pid naming no process, in practice on every Windows
+            // version this backend targets — MSDN documents that code
+            // explicitly only for pid 0 (the System Idle Process) and
+            // leaves the general "no such pid" case formally
+            // unspecified, so this is an empirical classification, the
+            // same honest caveat this codebase already applies to a real
+            // OS call's undocumented-but-consistent-in-practice behavior
+            // elsewhere. Any other failure (e.g. `ERROR_ACCESS_DENIED`)
+            // means the pid exists but this process can't query it,
+            // which still counts as alive.
             return Ok(code != w::ERROR_INVALID_PARAMETER);
         }
     };

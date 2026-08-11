@@ -1110,7 +1110,7 @@ fn windows_is_alive_reports_running_then_exited() {
         .arg("30")
         .arg("127.0.0.1");
     c.stdout = Stdio::Null;
-    let child = s.spawn(&c).expect("spawn");
+    let mut child = s.spawn(&c).expect("spawn");
     let pid = child.id();
 
     assert!(
@@ -1120,27 +1120,37 @@ fn windows_is_alive_reports_running_then_exited() {
     child
         .kill_single(platform::process::Signal::Kill)
         .expect("kill_single");
-    child.wait().expect("wait");
-    // `child`'s own handle stays open through this whole poll — Windows
-    // never reuses a pid while any handle to the process object remains
-    // open (Raymond Chen, "When does a process ID become available for
-    // reuse?"), so a bounded retry here tolerates CI scheduling jitter
-    // in exit-code propagation without risking a false pass against a
-    // different, pid-reused process.
+    // Poll the *non-consuming* `try_wait` rather than `wait` (which takes
+    // `self: Box<Self>` and so closes `child`'s process handle the moment
+    // it returns). Windows never reuses a pid while any handle to the
+    // process object remains open (Raymond Chen, "When does a process ID
+    // become available for reuse?") — keeping `child` alive across the
+    // whole probe below is load-bearing, not incidental: an earlier
+    // version of this test called the consuming `wait()` first, which
+    // closed the handle before probing `is_alive`, and flaked in CI
+    // (`cargo test`'s default parallel test threads spawn/kill enough
+    // other real pids concurrently that the freed pid got reused before
+    // the probe ran).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        if !s.is_alive(pid).expect("probe") {
+        if child.try_wait().expect("try_wait").is_some() {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "must not be alive once exited"
+            "child never reported terminated"
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    assert!(
+        !s.is_alive(pid).expect("probe"),
+        "must not be alive once exited, while this test's own handle is \
+         still open (ruling out a pid-reuse false positive)"
+    );
+    child.wait().expect("wait");
 }
 
-/// `Spawner::is_zombie` (divergence 016): no zombie concept on Windows —
+/// `Spawner::is_zombie` (divergence 015): no zombie concept on Windows —
 /// always `Unsupported`, never a guessed answer.
 #[test]
 fn windows_is_zombie_is_unsupported() {
@@ -1179,10 +1189,12 @@ fn windows_detach_spawns_and_is_killable_single() {
     assert_eq!(child.wait().expect("wait"), ExitStatus::Code(1));
 }
 
-/// `Command::detach` + `GroupSpec::NewGroup` is refused on Windows
-/// (divergence 015): a kill-on-close Job Object would defeat `detach`'s
-/// "survives even a crash" guarantee, so the combination is rejected
-/// before anything spawns rather than silently picking one.
+/// `Command::detach` + `GroupSpec::NewGroup` is refused on Windows: a
+/// kill-on-close Job Object would defeat `detach`'s "survives even a
+/// crash" guarantee, so the combination is rejected before anything
+/// spawns rather than silently picking one (Linux refuses the same
+/// combination too, for an unrelated real kernel reason — see
+/// `linux_detach_with_new_group_is_refused`).
 #[test]
 fn windows_detach_with_new_group_is_refused() {
     use platform::process::{Command, GroupSpec, Spawner};

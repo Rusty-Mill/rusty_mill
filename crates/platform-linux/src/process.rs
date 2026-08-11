@@ -140,15 +140,26 @@ fn is_executable_file(path: &Path) -> bool {
 
 impl Spawner for LinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
-        if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
+        if cmd.detached && cmd.group != GroupSpec::Inherit {
             // `Command::detach`'s contract (`docs/decision-request-
-            // detach-liveness.md`): `setsid` starts a brand-new session,
-            // which cannot also join an existing, different pgid —
-            // self-contradictory, not an OS limitation.
+            // detach-liveness.md`): `JoinGroup` is refused everywhere —
+            // `setsid` starting a brand-new session cannot also join an
+            // existing, different pgid, self-contradictory rather than an
+            // OS limitation. `NewGroup` is *also* refused here — not for
+            // that reason, but a real kernel one found by an actual
+            // `posix_spawn` call returning `EPERM`: Linux's `setpgid(2)`
+            // explicitly forbids changing the process group ID of a
+            // session leader, full stop, even a self-targeting
+            // `setpgid(0, 0)` no-op (`man 2 setpgid`: "An attempt to
+            // change the process group ID of a session leader fails with
+            // EPERM"). `setsid` (which `detached` sets) always makes the
+            // child a session leader, so `POSIX_SPAWN_SETPGROUP` can never
+            // follow it — refused up front rather than surfacing the raw
+            // kernel `EPERM` from a doomed `posix_spawn` call.
             return Err(PlatformError::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Unsupported,
                 OsCode::None,
-                "spawn: detach cannot join an existing group",
+                "spawn: detach with a non-Inherit GroupSpec",
             ));
         }
         let resolved = self.resolve(&cmd.program)?;

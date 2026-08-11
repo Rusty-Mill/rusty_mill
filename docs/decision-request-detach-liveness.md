@@ -19,16 +19,44 @@ implement now rather than wait for the gate). Scope, cut to the two
 genuine gaps:
 
 1. **`Spawner::is_alive`/`is_zombie`** — new `Spawner` methods, portable,
-   `Unsupported` on Windows for `is_zombie` (divergence **016**).
-2. **`Command::detach()`** — new spawn-time flag. Composes with
-   `GroupSpec::NewGroup` on Linux (harmless-redundant `setsid`+
-   `setpgid(0,0)`, both POSIX-specified); **refused** in that same
-   combination on Windows, because a kill-on-close Job Object would
-   silently defeat `detach`'s entire purpose the instant the spawning
-   process exits for any reason, including a crash (divergence **015**).
-   Refused with `JoinGroup` on **both** backends: `setsid` creating a new
-   session is incompatible with joining an existing, different pgid — not
-   an OS limitation, a self-contradictory request (`InvalidInput`).
+   `Unsupported` on Windows for `is_zombie` (divergence **015**).
+2. **`Command::detach()`** — new spawn-time flag. Composes **only** with
+   `GroupSpec::Inherit`. `NewGroup` is **refused on both backends**
+   (`Unsupported`) — this section originally proposed Linux composing
+   `detach()` with `NewGroup` (reasoning: `setsid`+`setpgid(0,0)` is
+   POSIX-specified-harmless self-targeting); **that reasoning was wrong**,
+   caught by CI, not by review: a real `posix_spawn` call with both
+   `POSIX_SPAWN_SETSID` and `POSIX_SPAWN_SETPGROUP` set fails `EPERM`
+   every time, because Linux's `setpgid(2)` forbids changing a session
+   leader's process group ID at all, even to itself — `setsid` always
+   makes the caller a session leader first, so the two flags can never
+   coexist. Windows independently refuses the same combination for an
+   unrelated reason (a kill-on-close Job Object would defeat `detach`'s
+   entire purpose the instant the spawning process exits for any reason,
+   including a crash). Both backends now agree, so this is documented in
+   `docs/behavior/process.md`, not `docs/divergences.md` — that registry
+   is for genuine cross-backend differences, and refusing uniformly
+   isn't one. Refused with `JoinGroup` on **both** backends: `setsid`
+   creating a new session is incompatible with joining an existing,
+   different pgid — not an OS limitation, a self-contradictory request
+   (`InvalidInput`).
+
+**Also caught only by CI, unrelated to the design decision above:** a
+`platform-linux`-only `clippy::too_many_arguments` finding and an
+`E0282` type-inference gap in `sys::spawn::spawn`'s combined
+`POSIX_SPAWN_SETPGROUP`/`_SETSID` flags word — both invisible in this
+session's own local `cargo clippy`/`cargo check` runs, because
+`platform-linux`'s crate root is `#![cfg(target_os = "linux")]` and
+compiles to an empty crate on the Windows sandbox that authored this
+change. And a genuine pid-reuse race in
+`windows_is_alive_reports_running_then_exited`: the test originally
+probed `is_alive` after the *consuming* `Child::wait`, which closes the
+process handle the instant it returns — reopening the exact race
+Windows's own "a pid is never reused while a handle to it stays open"
+guarantee exists to prevent, made likely in practice by `cargo test`'s
+parallel test threads spawning/killing many other real processes at
+once. Fixed by probing while still holding the handle open via the
+non-consuming `try_wait` instead of `wait`.
 
 **Not built** — already shipped, would duplicate existing surface:
 
@@ -84,7 +112,7 @@ genuine gaps:
    Same object-safe shape as the existing pid-keyed `Spawner::adopt`
    (`process.rs:413`) sitting right next to it — mock-testable,
    consistent placement, no new trait. `is_zombie` is `Unsupported` on
-   Windows (no zombie concept — divergence **016**, same honest-refusal
+   Windows (no zombie concept — divergence **015**, same honest-refusal
    pattern `wait_job`/`try_wait_job` already use for Windows's missing
    stop/continue analog). **Chosen.**
 3. **Fold zombie detection into `is_alive` as a three-state enum**
@@ -108,18 +136,29 @@ genuine gaps:
    silently still being tied to a Job Object would be a footgun, not a
    feature. **Not chosen.**
 2. **`Command::detach()`, refused with `GroupSpec::NewGroup` on Windows
-   (divergence 015) and with `GroupSpec::JoinGroup` on both backends
-   (`InvalidInput` — self-contradictory, not an OS limitation).** Linux
-   keeps `detach()` + `NewGroup` composable: `setsid` already gives the
-   child its own pgid (`pid == pgid`, guaranteed by POSIX, no drop-side
-   kill-on-close mechanism exists on Unix to fight it — divergence 002's
-   own "Linux: process keeps running" line already establishes this). A
-   caller that wants "detached, and later killable as a tree" on Windows
-   uses the existing two-step path this repo already ships:
-   `detach()`-only spawn, then `Spawner::adopt(pid)` when it actually
-   wants to kill it — a conscious choice at kill time, not an accidental
-   side effect of spawn-time flags. **Chosen.**
-3. **Two independent booleans (`no_console` / `new_process_group`)
+   only, composable with it on Linux.** The version originally chosen
+   here, on the reasoning that `setsid`+`setpgid(0,0)` is
+   POSIX-specified-harmless self-targeting. **Retracted**: a real
+   `posix_spawn` call proved that reasoning wrong — Linux's
+   `setpgid(2)` forbids changing a session leader's process group ID at
+   all (not just to a *different* group; `setpgid(0, 0)` targeting its
+   own current group still fails), and `setsid` always makes the caller
+   a session leader first, so `POSIX_SPAWN_SETSID` and
+   `POSIX_SPAWN_SETPGROUP` can never coexist in one `posix_spawn` call
+   regardless of the target pgid. **Not chosen** (superseded by option 3
+   below, discovered only after this option shipped once and failed CI).
+3. **`Command::detach()`, refused with `GroupSpec::NewGroup` on **both**
+   backends, and with `GroupSpec::JoinGroup` on both backends**
+   (`InvalidInput` for `JoinGroup` — self-contradictory, not an OS
+   limitation; `Unsupported` for `NewGroup` — a real OS limitation on
+   each backend, just a different one). A caller that wants "detached,
+   and later killable as a tree" uses the existing two-step path this
+   repo already ships on either OS: `detach()`-only spawn — which, on
+   Linux, already gives the child its own pgid via `setsid`, so
+   `kill_tree` needs no `NewGroup` at all — then `Spawner::adopt(pid)`
+   when it actually wants to kill it, a conscious choice at kill time,
+   not an accidental side effect of spawn-time flags. **Chosen.**
+4. **Two independent booleans (`no_console` / `new_process_group`)
    instead of one `detach()`.** Matches Win32's own two flags
    (`DETACHED_PROCESS`/`CREATE_NEW_PROCESS_GROUP`) more literally, but no
    consumer (real or the brief's own stated one) has asked for
@@ -140,20 +179,22 @@ impl Command {
     /// this process exiting (including crashing) and its terminal
     /// closing. Unix: `POSIX_SPAWN_SETSID` — the child becomes a new
     /// session **and** process-group leader (`pid == sid == pgid`)
-    /// before its first instruction runs, the same race-free
-    /// before-first-instruction guarantee `GroupSpec::NewGroup` already
-    /// gives group placement (`docs/design-discussion-pty.md`'s
-    /// `posix_spawn`-substitute precedent, generalized from PTY-only to
-    /// general use). Windows: `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`
-    /// — no console, not a member of this process's Ctrl-C group.
-    /// Refused (`InvalidInput`) with `GroupSpec::JoinGroup`: a fresh
-    /// session cannot also join an existing, different pgid. Refused
-    /// (`Unsupported`) with `GroupSpec::NewGroup` **on Windows only**
-    /// (divergence 015): a kill-on-close Job Object would defeat
-    /// `detach`'s "survives a crash" guarantee the instant every handle
-    /// to it closes, which the OS does unconditionally when this process
-    /// terminates. Combines cleanly with `NewGroup` on Linux — see
-    /// `Child::kill_tree`'s doc comment.
+    /// before its first instruction runs. Windows:
+    /// `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` — no console, not a
+    /// member of this process's Ctrl-C group.
+    ///
+    /// Composes **only** with `GroupSpec::Inherit`. Refused
+    /// (`InvalidInput`) with `GroupSpec::JoinGroup` on every backend: a
+    /// fresh session cannot also join an existing, different pgid.
+    /// Refused (`Unsupported`) with `GroupSpec::NewGroup` on **every**
+    /// backend too, for two unrelated real reasons: Linux — `setsid`
+    /// always makes the child a session leader, and `setpgid(2)` forbids
+    /// changing a session leader's process group ID, even a
+    /// self-targeting `setpgid(0, 0)` no-op, so `posix_spawn` fails
+    /// `EPERM` outright (confirmed against a real kernel); Windows — a
+    /// kill-on-close Job Object would defeat `detach`'s "survives a
+    /// crash" guarantee the instant every handle to it closes, which the
+    /// OS does unconditionally when this process terminates.
     #[must_use]
     pub fn detach(mut self) -> Self { self.detached = true; self }
 }
@@ -182,35 +223,46 @@ pub trait Spawner {
     /// handle stays valid and its exit code re-readable indefinitely
     /// (see `Child::try_wait`'s own doc comment), so the question this
     /// method asks has no Windows answer to give, honest per divergence
-    /// **016**.
+    /// **015**.
     fn is_zombie(&self, pid: u32) -> Result<bool>;
 }
 ```
 
 ## Divergence registry additions
 
-- **015 — `detach()` + `GroupSpec::NewGroup` composability**: allowed on
-  Linux (harmless-redundant `setsid`+`setpgid(0,0)`, no drop-side kill
-  mechanism to fight it), refused `Unsupported` on Windows (kill-on-close
-  Job Object would defeat `detach`'s guarantee). OS limitation, not
-  convenience: Windows's only tree-kill primitive (Job Objects) is
-  inherently handle-lifetime-coupled; Linux's (`kill(-pgid, sig)`) is not.
-- **016 — no zombie concept on Windows**: `Spawner::is_zombie` is real on
+- **015 — no zombie concept on Windows**: `Spawner::is_zombie` is real on
   Linux (`/proc/<pid>/stat`), `Unsupported` on Windows — a process
   handle stays valid and queryable after exit with no distinct
   "unreaped" state to observe.
 
+`Command::detach` + `GroupSpec::NewGroup` was drafted as a second new
+divergence in this same slice — allowed on Linux, refused on Windows —
+then retracted before this branch merged: CI proved the Linux half
+wrong (real kernel `EPERM`), so both backends refuse the combination
+now, and uniform refused behavior across backends isn't divergence
+material (the registry is for where backends genuinely differ). See
+`docs/behavior/process.md`'s `Command::detach()` entry instead.
+
 ## Open questions for the owner
 
-None outstanding — both primitives are scoped, the API shapes above are
-final pending implementation review, and the two genuinely-new
-divergences are pre-recorded rather than discovered after the fact.
-Implementation follows in the same session; Linux changes cannot be
-compiled or tested in this sandbox (Windows workstation, no working WSL
-distro — `wsl --status` shows the FedoraLinux-43 disk failing to attach)
-and are therefore **unverified beyond visual review against the existing
-call sites they mirror**; Windows changes are compiled and unit-tested
-natively. Flagging this explicitly per the brief's own instruction not to
-silently skip a platform's test coverage — here it is Linux compilation/
-test coverage that is unavailable in this environment, the mirror image
-of the brief's own Windows-CI caveat.
+None outstanding — both primitives are scoped and implemented. Two
+things worth recording as the actual close-out, not the
+optimistic pre-implementation state this section originally described:
+
+- **The Linux `detach()` + `NewGroup` design was wrong on first pass,
+  corrected by CI, not by review.** This sandbox (Windows workstation,
+  no working WSL distro) could not compile or test `platform-linux` at
+  all — its crate root is `#![cfg(target_os = "linux")]`, so it no-ops
+  under `cargo check`/`clippy` on Windows — so the "harmless
+  self-targeting `setpgid(0, 0)`" reasoning went unverified until GitHub
+  Actions' `ubuntu-latest` legs ran a real `posix_spawn` call and it
+  failed `EPERM`. The design was corrected in the same PR before merge;
+  flagging this because it's exactly the failure mode this document's
+  own original "unverified beyond visual review" caveat warned about,
+  now with a concrete example rather than a hypothetical.
+- Windows changes are compiled, clippy-clean (including the `track-w`
+  leg), and live-tested end to end via GitHub Actions CI, not just this
+  sandbox's local runs — CI also caught a pid-reuse race in one Windows
+  test (`windows_is_alive_reports_running_then_exited`, fixed by probing
+  via the non-consuming `try_wait` instead of the handle-closing
+  `wait`) that this sandbox's own local runs never reproduced.

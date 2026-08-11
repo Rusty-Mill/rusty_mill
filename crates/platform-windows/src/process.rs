@@ -246,17 +246,17 @@ impl Spawner for WindowsSpawner {
         }
         if cmd.detached && cmd.group == GroupSpec::NewGroup {
             // `Command::detach`'s contract (`docs/decision-request-
-            // detach-liveness.md`, divergence 015): a kill-on-close Job
-            // Object is torn down — killing every member — the instant
-            // every handle to it closes, which the OS does
-            // unconditionally when this process terminates for any
-            // reason including a crash. Combined with `detach`, that
-            // would silently defeat the very "survives even a crashed
-            // parent" guarantee `detach` promises. Refused rather than
-            // silently dropping one of the two requests: a caller that
-            // wants both a detached child and a later kill_tree on it
-            // uses `detach()` alone at spawn, then `Spawner::adopt` on
-            // its pid when it actually decides to kill it.
+            // detach-liveness.md`): a kill-on-close Job Object is torn
+            // down — killing every member — the instant every handle to
+            // it closes, which the OS does unconditionally when this
+            // process terminates for any reason including a crash.
+            // Combined with `detach`, that would silently defeat the
+            // very "survives even a crashed parent" guarantee `detach`
+            // promises. Refused rather than silently dropping one of the
+            // two requests: a caller that wants both a detached child
+            // and a later kill_tree on it uses `detach()` alone at
+            // spawn, then `Spawner::adopt` on its pid when it actually
+            // decides to kill it.
             return Err(PlatformError::new(
                 ErrorKind::Unsupported,
                 OsCode::None,

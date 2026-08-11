@@ -180,31 +180,40 @@ impl Command {
     /// this process exiting (including crashing) and its terminal
     /// closing. Unix: `POSIX_SPAWN_SETSID` — the child becomes a new
     /// session **and** process-group leader (`pid == sid == pgid`) before
-    /// its first instruction runs, the same race-free
-    /// before-first-instruction guarantee [`GroupSpec::NewGroup`] already
-    /// gives group placement. Windows: `CREATE_NEW_PROCESS_GROUP |
+    /// its first instruction runs. Windows: `CREATE_NEW_PROCESS_GROUP |
     /// DETACHED_PROCESS` — no console, not a member of this process's
     /// Ctrl-C group.
     ///
-    /// Refused (`InvalidInput`) at spawn time together with
-    /// [`GroupSpec::JoinGroup`] on **every** backend: a fresh session
-    /// cannot also join an existing, different pgid — self-contradictory,
-    /// not an OS limitation. Refused (`Unsupported`) together with
-    /// [`GroupSpec::NewGroup`] **on Windows only**
-    /// (`docs/divergences.md` #015): a kill-on-close Job Object is torn
-    /// down — killing every member — the instant every handle to it
-    /// closes, which the OS does unconditionally when this process
-    /// terminates for any reason, including a crash; combined with
-    /// `detach`, that would silently defeat the very guarantee `detach`
-    /// promises. `detach` composes cleanly with `NewGroup` on Linux
-    /// (`setsid` already gives the child its own pgid; the additional
-    /// `setpgid(0, 0)` `NewGroup` performs is POSIX-specified-harmless
-    /// self-targeting, and Linux has no drop-side kill mechanism to fight
-    /// it — divergence 002's own "process keeps running" line). A caller
-    /// that wants a detached child it can still `kill_tree` later on
-    /// Windows uses the existing two-step path: `detach()` alone at
-    /// spawn, then [`Spawner::adopt`] on its pid when it actually decides
-    /// to kill it.
+    /// Composes **only** with [`GroupSpec::Inherit`] (the default) —
+    /// every other `GroupSpec` is refused at spawn time, for two
+    /// different reasons on the two backends, both real OS limitations
+    /// rather than a shared implementation choice:
+    /// - [`GroupSpec::JoinGroup`] is refused (`InvalidInput`) on
+    ///   **every** backend: a fresh session cannot also join an
+    ///   existing, different pgid — self-contradictory, not an OS
+    ///   limitation.
+    /// - [`GroupSpec::NewGroup`] is refused (`Unsupported`) on **every**
+    ///   backend too, for two unrelated real reasons. Linux: `setsid`
+    ///   always makes the child a session leader, and `setpgid(2)`
+    ///   forbids changing a session leader's process group ID — even a
+    ///   self-targeting `setpgid(0, 0)` no-op — so the underlying
+    ///   `posix_spawn` call would fail `EPERM` outright (confirmed
+    ///   against a real kernel, not a documentation reading). Windows: a
+    ///   kill-on-close Job Object is torn down — killing every member —
+    ///   the instant every handle to it closes, which the OS does
+    ///   unconditionally when this process terminates for any reason,
+    ///   including a crash; combined with `detach`, that would silently
+    ///   defeat the very guarantee `detach` promises.
+    ///
+    /// A caller that wants a detached child it can still `kill_tree`
+    /// later uses the existing two-step path on either backend:
+    /// `detach()` alone at spawn — which, on Linux, already gives the
+    /// child its own pgid via `setsid`, so `kill_tree` has a sound
+    /// target with no `NewGroup` needed at all — then, on Windows,
+    /// [`Spawner::adopt`] on its pid when it actually decides to kill
+    /// it (Linux's `Spawner::adopt` stays `Unsupported` regardless,
+    /// divergence 010 — irrelevant here since Linux never needed it for
+    /// this case).
     #[must_use]
     pub fn detach(mut self) -> Self {
         self.detached = true;
@@ -470,7 +479,7 @@ pub trait Spawner {
     /// Linux: `/proc/<pid>/stat`'s state field is `Z`; a missing `/proc`
     /// entry means the pid doesn't exist at all, reported as `Ok(false)`
     /// — not a zombie, gone — not an error. Windows: always `Unsupported`
-    /// (`docs/divergences.md` #016) — a Windows process handle stays
+    /// (`docs/divergences.md` #015) — a Windows process handle stays
     /// valid and its exit code re-readable indefinitely after exit (see
     /// [`Child::try_wait`]'s own doc comment), so there is no distinct
     /// "exited but unreaped" state to observe; the question this method

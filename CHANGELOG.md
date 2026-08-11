@@ -44,24 +44,43 @@ and **`coreutils`**.
 
   `detach()`: Unix `POSIX_SPAWN_SETSID` (new session + process-group
   leader, `pid == sid == pgid`); Windows `CREATE_NEW_PROCESS_GROUP |
-  DETACHED_PROCESS`. Composes with `GroupSpec::NewGroup` on Linux
-  (harmless-redundant `setpgid(0, 0)` on top of `setsid`'s already-fresh
-  pgid); refused (`Unsupported`) in that combination on Windows — a
-  kill-on-close Job Object would silently defeat `detach`'s "survives a
-  crash" guarantee (new divergence **015**). Refused (`InvalidInput`)
-  with `GroupSpec::JoinGroup` on every backend: a fresh session cannot
-  join an existing, different pgid.
+  DETACHED_PROCESS`. Composes only with `GroupSpec::Inherit`;
+  `NewGroup` is refused (`Unsupported`) on **both** backends, for two
+  unrelated real reasons: Linux — `setsid` always makes the child a
+  session leader, and the kernel's `setpgid(2)` forbids changing a
+  session leader's own process group (even a self-targeting
+  `setpgid(0, 0)` no-op), so the combination fails `posix_spawn` itself
+  with `EPERM`, confirmed against a real kernel via CI, not assumed;
+  Windows — a kill-on-close Job Object would silently defeat `detach`'s
+  "survives a crash" guarantee. Uniform refused behavior on both
+  backends isn't divergence-registry material (that registry is for
+  where backends genuinely differ), so this is documented in
+  `docs/behavior/process.md` instead. Refused (`InvalidInput`) with
+  `GroupSpec::JoinGroup` on every backend: a fresh session cannot join
+  an existing, different pgid.
 
   `is_alive(pid)`: Unix `kill(pid, 0)` (`EPERM` counts as alive);
   Windows `OpenProcess` + `GetExitCodeProcess`. `is_zombie(pid)`: Linux
   `/proc/<pid>/stat`'s state field; Windows always `Unsupported` — no
-  zombie concept exists (new divergence **016**).
+  zombie concept exists (new divergence **015**).
 
-  Windows-side changes compiled, clippy-clean, and live-tested against
-  real `ping`/`cmd` children (`cargo test -p platform-windows`). Linux
-  changes mirror existing call-site patterns exactly but were not
-  compiled or run in the authoring session (Windows workstation, no
-  working WSL distro) — flagged rather than silently assumed correct.
+  Every CI leg is green (`fmt`, `clippy -D warnings` including the
+  `track-w` leg, `test` on ubuntu/windows × stable/1.75, miri,
+  cross-compile, `cargo-deny`, unsafe-scope). Two real bugs surfaced
+  only there, invisible from the Windows-sandboxed authoring session,
+  and were fixed against real CI failures rather than assumed away:
+  `platform-linux`'s crate root is `cfg(target_os = "linux")`, so it
+  no-ops under `cargo check`/`clippy` on Windows, hiding an `E0282`
+  type-inference gap in the combined `POSIX_SPAWN_SETPGROUP`/`_SETSID`
+  flags word (fixed: explicit `c_short`, the real `libc` parameter
+  type) and a `too_many_arguments` clippy finding on `sys::spawn::spawn`
+  (fixed: `#[allow]` with justification); and a Windows liveness test
+  flaked in CI because it probed `is_alive` against a pid whose owning
+  handle the consuming `Child::wait` had already closed, reopening a
+  pid-reuse race under `cargo test`'s parallel process-spawning test
+  threads (fixed: probe via the non-consuming `try_wait` instead,
+  keeping the handle — and Windows's own no-reuse-while-open guarantee
+  — alive through the check).
 
 ### 0.26.0
 

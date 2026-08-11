@@ -1015,25 +1015,31 @@ fn linux_detach_gives_its_own_process_group() {
     assert_eq!(child.wait().expect("wait"), ExitStatus::Signaled(9));
 }
 
-/// `Command::detach` + `GroupSpec::NewGroup` composes cleanly on Linux
-/// (divergence 015's Linux side): `NewGroup`'s own `setpgid(0, 0)` is
-/// harmless self-targeting on top of `setsid`'s already-fresh pgid, so
-/// the combination spawns successfully rather than conflicting.
+/// `Command::detach` + `GroupSpec::NewGroup` is refused on Linux too
+/// (`Unsupported`) — not for the self-contradiction `JoinGroup` is
+/// refused for, but a real kernel restriction: `setsid` always makes the
+/// child a session leader, and Linux `setpgid(2)` forbids changing a
+/// session leader's process group ID, even a self-targeting
+/// `setpgid(0, 0)` no-op. Confirmed against a real kernel: attempting
+/// this combination without the pre-flight refusal fails `posix_spawn`
+/// itself with `EPERM`, which this test pins as a clean, up-front
+/// refusal instead.
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_detach_composes_with_new_group() {
-    use platform::process::{Command, ExitStatus, GroupSpec, Signal, Spawner};
+fn linux_detach_with_new_group_is_refused() {
+    use platform::process::{Command, GroupSpec, Spawner};
 
     let tmp = std::env::temp_dir();
     let s = platform_linux::LinuxSpawner;
     let c = Command::new("sh", tmp)
         .arg("-c")
-        .arg("sleep 30")
+        .arg("exit 0")
         .group(GroupSpec::NewGroup)
         .detach();
-    let child = s.spawn(&c).expect("detach composes with NewGroup on Linux");
-    child.kill_tree(Signal::Kill).expect("kill_tree");
-    assert_eq!(child.wait().expect("wait"), ExitStatus::Signaled(9));
+    assert_eq!(
+        s.spawn(&c).err().expect("must refuse").kind,
+        ErrorKind::Unsupported
+    );
 }
 
 /// `Command::detach` + `GroupSpec::JoinGroup` is refused

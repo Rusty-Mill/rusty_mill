@@ -155,19 +155,25 @@ assertions.
   child survives this process exiting, including crashing, and its
   terminal closing. Unix: `POSIX_SPAWN_SETSID` — the child becomes a new
   session **and** process-group leader (`pid == sid == pgid`) before its
-  first instruction runs, giving `kill_tree` a sound target even without
-  an explicit `NewGroup`. Windows: `CREATE_NEW_PROCESS_GROUP |
+  first instruction runs, giving `kill_tree` a sound target with no
+  `NewGroup` needed. Windows: `CREATE_NEW_PROCESS_GROUP |
   DETACHED_PROCESS` — no console, not a member of this process's Ctrl-C
-  group. Refused (`InvalidInput`) together with `GroupSpec::JoinGroup`
-  on every backend: a fresh session cannot also join an existing,
-  different pgid. Refused (`Unsupported`) together with
-  `GroupSpec::NewGroup` **on Windows only** — divergence **015**: a
-  kill-on-close Job Object would be torn down, killing every member, the
-  instant every handle to it closes, which happens unconditionally when
-  this process terminates for any reason; combined with `detach`, that
-  would silently defeat the guarantee `detach` promises. Composes
-  cleanly with `NewGroup` on Linux (harmless-redundant `setpgid(0, 0)`
-  on top of `setsid`'s already-fresh pgid).
+  group. Composes **only** with `GroupSpec::Inherit`; every other
+  `GroupSpec` is refused at spawn time, on every backend, for two
+  unrelated real reasons: `JoinGroup` (`InvalidInput`, every backend) —
+  a fresh session cannot also join an existing, different pgid,
+  self-contradictory rather than an OS limitation; `NewGroup`
+  (`Unsupported`, every backend) — Linux: `setsid` always makes the
+  child a session leader, and `setpgid(2)` forbids changing a session
+  leader's process group ID even as a self-targeting `setpgid(0, 0)`
+  no-op, so the underlying `posix_spawn` would fail `EPERM` outright
+  (confirmed against a real kernel); Windows: a kill-on-close Job Object
+  is torn down — killing every member — the instant every handle to it
+  closes, which happens unconditionally when this process terminates
+  for any reason, silently defeating the guarantee `detach` promises.
+  Both refusals land on the same observable outcome, so this is
+  documented here rather than in `docs/divergences.md` — that registry
+  is for cases where backends genuinely differ.
 
 - `Spawner::is_alive(pid)`: liveness for any pid, not tied to a `Child`
   this backend spawned. Unix: `kill(pid, 0)` — `Ok(true)` on success or
@@ -185,7 +191,7 @@ assertions.
 - `Spawner::is_zombie(pid)`: Linux — `/proc/<pid>/stat`'s state field is
   `Z`; a missing `/proc` entry means the pid doesn't exist at all
   (`Ok(false)`, not a zombie, not an error). Windows: always
-  `Unsupported` — divergence **016**, no zombie concept exists (a
+  `Unsupported` — divergence **015**, no zombie concept exists (a
   process handle stays valid and queryable indefinitely after exit).
   `platform-mock`: same registry shape as `is_alive`
   (`MockSpawner::zombie_pids`).

@@ -165,15 +165,20 @@ pub type ParentPipes = [Option<OwnedFd>; 3];
 /// lesson is subsumed by the kernel doing it during spawn). `detached`
 /// additionally sets `POSIX_SPAWN_SETSID` (`Command::detach`'s
 /// contract): the child becomes a new session **and** process-group
-/// leader, `pid == sid == pgid`, before its first instruction — combined
-/// with a `target_pgid` from `group` (`NewGroup` only; `detached` +
-/// `JoinGroup` is refused by the caller before this function is ever
-/// reached, per `docs/decision-request-detach-liveness.md`), the
-/// resulting `setpgid(0, 0)` `POSIX_SPAWN_SETPGROUP` performs is
-/// POSIX-specified-harmless self-targeting: `setsid` already made pid ==
-/// pgid, and a process may always `setpgid` itself to its own pid within
-/// its own (here, brand new) session. Returns the child pid and the
-/// parent ends of any pipes.
+/// leader, `pid == sid == pgid`, before its first instruction.
+///
+/// `target_pgid` (from `group`) and `detached` are mutually exclusive by
+/// the time this function is reached: the caller
+/// (`LinuxSpawner::spawn`) refuses any non-`Inherit` `GroupSpec`
+/// together with `detached` before ever calling this. That refusal is
+/// load-bearing, not defensive-only — `POSIX_SPAWN_SETSID` +
+/// `POSIX_SPAWN_SETPGROUP` together is not a harmless combination: Linux
+/// `setpgid(2)` forbids changing the process group ID of a session
+/// leader, even a self-targeting `setpgid(0, 0)` no-op, and `setsid`
+/// always makes the child a session leader — combining the two flags
+/// reliably fails the whole `posix_spawn` call with `EPERM` (confirmed
+/// against a real kernel, not a documentation reading). Returns the
+/// child pid and the parent ends of any pipes.
 ///
 /// `detached` is the eighth argument this always-`&`/`Copy` parameter
 /// list crosses clippy's default `too_many_arguments` threshold with —
@@ -325,11 +330,10 @@ pub fn spawn(
     let target_pgid: Option<c::pid_t> = match group {
         GroupSpec::Inherit => None,
         GroupSpec::JoinGroup(pgid) => Some(pgid as c::pid_t),
-        // `detached` already gives the child its own pgid via `setsid`
-        // below; an explicit `setpgid(0, 0)` on top is harmless
-        // self-targeting (this function's own doc comment), so `NewGroup`
-        // still requests it uniformly rather than special-casing the
-        // `detached` combination away.
+        // Never reached together with `detached` — the caller
+        // (`LinuxSpawner::spawn`) refuses that combination before this
+        // function is called (see this function's own doc comment: the
+        // resulting `EPERM` isn't a corner case, it's kernel-guaranteed).
         GroupSpec::NewGroup => Some(0),
     };
     // `POSIX_SPAWN_SETPGROUP` and `POSIX_SPAWN_SETSID` are a single flags
