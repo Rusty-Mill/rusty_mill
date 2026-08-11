@@ -844,3 +844,43 @@ fn field_alias_duplicate_via_alias_still_errors() {
     let err = json::from_str::<Aliased>(r#"{"name":"x","n":"y","age":1}"#).unwrap_err();
     assert!(err.to_string().contains("duplicate field"));
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(deny_unknown_fields)]
+struct Strict {
+    x: i32,
+}
+
+#[test]
+fn deny_unknown_fields_errors_on_an_unrecognized_key() {
+    let err = json::from_str::<Strict>(r#"{"x":1,"y":2}"#).unwrap_err();
+    assert!(err.to_string().contains("unknown field `y`"));
+}
+
+#[test]
+fn deny_unknown_fields_still_accepts_known_fields() {
+    let decoded: Strict = json::from_str(r#"{"x":1}"#).unwrap();
+    assert_eq!(decoded, Strict { x: 1 });
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(deny_unknown_fields)]
+enum StrictShape {
+    Circle,
+    Rect { width: f64, height: f64 },
+}
+
+#[test]
+fn deny_unknown_fields_applies_to_struct_variants_too() {
+    let err = json::from_str::<StrictShape>(r#"{"Rect":{"width":1.0,"height":2.0,"extra":true}}"#)
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown field `extra`"));
+    let decoded: StrictShape = json::from_str(r#"{"Rect":{"width":1.0,"height":2.0}}"#).unwrap();
+    assert_eq!(
+        decoded,
+        StrictShape::Rect {
+            width: 1.0,
+            height: 2.0
+        }
+    );
+}

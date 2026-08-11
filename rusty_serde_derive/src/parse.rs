@@ -58,6 +58,10 @@ pub struct Attrs {
     /// Container-only, enums only: no tag/wrapper at all - try each
     /// variant's own shape in turn until one deserializes successfully.
     pub untagged: bool,
+    /// Container-only: errors on deserialize instead of silently ignoring
+    /// an unrecognized field/key. Mutually exclusive with a `flatten`
+    /// field, which needs somewhere to put unrecognized keys.
+    pub deny_unknown_fields: bool,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -80,6 +84,7 @@ impl Attrs {
             && self.rename_all.is_none()
             && self.tag.is_none()
             && !self.untagged
+            && !self.deny_unknown_fields
     }
 }
 
@@ -113,6 +118,8 @@ pub enum Data {
         name: String,
         generics: Generics,
         fields: Fields,
+        /// From a container-level `#[rusty_serde(deny_unknown_fields)]`.
+        deny_unknown_fields: bool,
     },
     Enum {
         name: String,
@@ -122,6 +129,8 @@ pub enum Data {
         tag: Option<String>,
         /// From a container-level `#[rusty_serde(untagged)]`.
         untagged: bool,
+        /// From a container-level `#[rusty_serde(deny_unknown_fields)]`.
+        deny_unknown_fields: bool,
     },
 }
 
@@ -294,10 +303,22 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         apply_rename_all_fields(named, style);
     }
 
+    if container_attrs.deny_unknown_fields {
+        if let Fields::Named(named) = &fields {
+            if named.iter().any(|f| f.attrs.flatten) {
+                return Err(compile_error(&format!(
+                    "`deny_unknown_fields` and `flatten` can't both be set (on `{name}`) - a \
+                     flattened field needs somewhere to put keys that don't match another field"
+                )));
+            }
+        }
+    }
+
     Ok(Data::Struct {
         name,
         generics,
         fields,
+        deny_unknown_fields: container_attrs.deny_unknown_fields,
     })
 }
 
@@ -382,6 +403,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         variants,
         tag: container_attrs.tag,
         untagged: container_attrs.untagged,
+        deny_unknown_fields: container_attrs.deny_unknown_fields,
     })
 }
 
@@ -1001,6 +1023,17 @@ fn parse_one_meta_item(
                 return Err(compile_error("`untagged` does not take a value"));
             }
             attrs.untagged = true;
+        }
+        "deny_unknown_fields" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`deny_unknown_fields` is only supported on the container, not on a {context}"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`deny_unknown_fields` does not take a value"));
+            }
+            attrs.deny_unknown_fields = true;
         }
         other => {
             return Err(compile_error(&format!(
