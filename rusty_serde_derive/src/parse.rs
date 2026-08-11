@@ -32,7 +32,10 @@ pub enum Fields {
 #[derive(Default, Clone)]
 pub struct Attrs {
     pub rename: Option<String>,
-    pub default: bool,
+    /// `#[rusty_serde(default)]` (falls back to `Default::default()`) or
+    /// `#[rusty_serde(default = "path")]` (falls back to calling an
+    /// arbitrary zero-arg path) when the field is missing on deserialize.
+    pub default: Option<DefaultAttr>,
     pub skip: bool,
     /// A raw Rust path (e.g. `"Option::is_none"`), called as `path(&self.field)`
     /// during serialization; the field is omitted from the output (and from
@@ -53,10 +56,19 @@ pub struct Attrs {
     pub untagged: bool,
 }
 
+/// Where a field's `#[rusty_serde(default...)]` value comes from.
+#[derive(Clone)]
+pub enum DefaultAttr {
+    /// Bare `#[rusty_serde(default)]` - `Default::default()`.
+    Trait,
+    /// `#[rusty_serde(default = "path")]` - `path()`.
+    Path(String),
+}
+
 impl Attrs {
     fn is_default(&self) -> bool {
         self.rename.is_none()
-            && !self.default
+            && self.default.is_none()
             && !self.skip
             && self.skip_serializing_if.is_none()
             && !self.flatten
@@ -886,10 +898,27 @@ fn parse_one_meta_item(
                     "`default` is not supported on {context}s"
                 )));
             }
-            if it.peek().is_some() {
-                return Err(compile_error("`default` does not take a value"));
+            match it.peek() {
+                None => {
+                    attrs.default = Some(DefaultAttr::Trait);
+                }
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {
+                    it.next();
+                    let value = match it.next() {
+                        Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                        _ => {
+                            return Err(compile_error(
+                                "expected a string literal after `default =`",
+                            ))
+                        }
+                    };
+                    if it.peek().is_some() {
+                        return Err(compile_error("unexpected tokens after `default = \"...\"`"));
+                    }
+                    attrs.default = Some(DefaultAttr::Path(value));
+                }
+                Some(_) => return Err(compile_error("expected `default` or `default = \"...\"`")),
             }
-            attrs.default = true;
         }
         "skip" => {
             if context != "field" {

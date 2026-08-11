@@ -1,4 +1,4 @@
-use crate::parse::{Data, Fields, Generics, NamedField, Variant};
+use crate::parse::{Data, DefaultAttr, Fields, Generics, NamedField, Variant};
 
 pub fn generate(data: &Data) -> String {
     match data {
@@ -216,8 +216,12 @@ fn visit_map_body(
         }
         if f.attrs.skip {
             out += &format!("let {ident} = ::std::default::Default::default();\n");
-        } else if f.attrs.default {
-            out += &format!("let {ident} = __{ident}.unwrap_or_default();\n");
+        } else if let Some(default) = &f.attrs.default {
+            let fallback = match default {
+                DefaultAttr::Trait => "::std::default::Default::default()".to_string(),
+                DefaultAttr::Path(path) => format!("{path}()"),
+            };
+            out += &format!("let {ident} = __{ident}.unwrap_or_else(|| {fallback});\n");
         } else {
             out += &format!(
                 "let {ident} = __{ident}.ok_or_else(|| ::rusty_serde::Error::custom({missing:?}))?;\n",
