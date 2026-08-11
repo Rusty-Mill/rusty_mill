@@ -31,7 +31,10 @@ pub enum Fields {
 /// only our own namespace is inspected.
 #[derive(Default, Clone)]
 pub struct Attrs {
-    pub rename: Option<String>,
+    /// `#[rusty_serde(rename = "x")]` (both directions) or
+    /// `#[rusty_serde(rename(serialize = "..", deserialize = ".."))]`
+    /// (either or both, independently).
+    pub rename: RenameAttr,
     /// `#[rusty_serde(default)]` (falls back to `Default::default()`) or
     /// `#[rusty_serde(default = "path")]` (falls back to calling an
     /// arbitrary zero-arg path) when the field is missing on deserialize.
@@ -83,6 +86,22 @@ pub enum DefaultAttr {
     Path(String),
 }
 
+/// A field/variant's wire name, independently per direction. Bare
+/// `rename = "x"` sets both; `rename(serialize = "..")` and/or
+/// `rename(deserialize = "..")` set either independently, leaving the
+/// other to fall back to the field/variant's own Rust name.
+#[derive(Clone, Default)]
+pub struct RenameAttr {
+    pub serialize: Option<String>,
+    pub deserialize: Option<String>,
+}
+
+impl RenameAttr {
+    fn is_unset(&self) -> bool {
+        self.serialize.is_none() && self.deserialize.is_none()
+    }
+}
+
 impl Attrs {
     /// The field is never written to the wire - `skip` or `skip_serializing`.
     pub fn skips_serializing(&self) -> bool {
@@ -96,7 +115,7 @@ impl Attrs {
     }
 
     fn is_default(&self) -> bool {
-        self.rename.is_none()
+        self.rename.is_unset()
             && self.default.is_none()
             && !self.skip
             && !self.skip_serializing
@@ -117,10 +136,22 @@ pub struct NamedField {
 }
 
 impl NamedField {
-    /// The JSON key to use: `attrs.rename` if given, else the field's own
-    /// Rust name.
+    /// The key to serialize under: `rename`'s serialize-direction name if
+    /// given, else the field's own Rust name.
     pub fn wire_name(&self) -> &str {
-        self.attrs.rename.as_deref().unwrap_or(&self.name)
+        self.attrs.rename.serialize.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The key to match on deserialize: `rename`'s deserialize-direction
+    /// name if given, else the field's own Rust name. Independent of
+    /// `wire_name()` - `rename(serialize = "..")` alone doesn't affect
+    /// this, and vice versa.
+    pub fn de_wire_name(&self) -> &str {
+        self.attrs
+            .rename
+            .deserialize
+            .as_deref()
+            .unwrap_or(&self.name)
     }
 }
 
@@ -132,7 +163,15 @@ pub struct Variant {
 
 impl Variant {
     pub fn wire_name(&self) -> &str {
-        self.attrs.rename.as_deref().unwrap_or(&self.name)
+        self.attrs.rename.serialize.as_deref().unwrap_or(&self.name)
+    }
+
+    pub fn de_wire_name(&self) -> &str {
+        self.attrs
+            .rename
+            .deserialize
+            .as_deref()
+            .unwrap_or(&self.name)
     }
 }
 
@@ -620,8 +659,10 @@ fn parse_where_clause(tokens: &mut Tokens) -> Result<String, TokenStream> {
 /// its own `rename`.
 fn apply_rename_all_fields(fields: &mut [NamedField], style: &str) {
     for f in fields.iter_mut() {
-        if f.attrs.rename.is_none() {
-            f.attrs.rename = Some(convert_case(&f.name, style));
+        if f.attrs.rename.is_unset() {
+            let converted = convert_case(&f.name, style);
+            f.attrs.rename.serialize = Some(converted.clone());
+            f.attrs.rename.deserialize = Some(converted);
         }
     }
 }
@@ -632,8 +673,10 @@ fn apply_rename_all_fields(fields: &mut [NamedField], style: &str) {
 /// that's ever needed - not currently supported).
 fn apply_rename_all_variants(variants: &mut [Variant], style: &str) {
     for v in variants.iter_mut() {
-        if v.attrs.rename.is_none() {
-            v.attrs.rename = Some(convert_case(&v.name, style));
+        if v.attrs.rename.is_unset() {
+            let converted = convert_case(&v.name, style);
+            v.attrs.rename.serialize = Some(converted.clone());
+            v.attrs.rename.deserialize = Some(converted);
         }
     }
 }
@@ -736,7 +779,7 @@ fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, T
                 "`flatten` and `skip` can't both be set (on field `{name}`)"
             )));
         }
-        if attrs.flatten && attrs.rename.is_some() {
+        if attrs.flatten && !attrs.rename.is_unset() {
             return Err(compile_error(&format!(
                 "`flatten` and `rename` can't both be set - a flattened field has no wire key \
                  of its own (on field `{name}`)"
@@ -881,17 +924,80 @@ fn parse_one_meta_item(
                 ));
             }
             match it.next() {
-                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
-                _ => return Err(compile_error("expected `rename = \"...\"`")),
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {
+                    let value = match it.next() {
+                        Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                        _ => {
+                            return Err(compile_error("expected a string literal after `rename =`"))
+                        }
+                    };
+                    if it.peek().is_some() {
+                        return Err(compile_error("unexpected tokens after `rename = \"...\"`"));
+                    }
+                    attrs.rename.serialize = Some(value.clone());
+                    attrs.rename.deserialize = Some(value);
+                }
+                Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis => {
+                    let mut inner = group.stream().into_iter().peekable();
+                    let mut set_any = false;
+                    loop {
+                        if inner.peek().is_none() {
+                            break;
+                        }
+                        let key = match inner.next() {
+                            Some(TokenTree::Ident(id)) => id.to_string(),
+                            _ => {
+                                return Err(compile_error(
+                                    "expected `serialize` or `deserialize` in `rename(...)`",
+                                ))
+                            }
+                        };
+                        match inner.next() {
+                            Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                            _ => return Err(compile_error(&format!("expected `{key} = \"...\"`"))),
+                        }
+                        let value = match inner.next() {
+                            Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                            _ => {
+                                return Err(compile_error(&format!(
+                                    "expected a string literal after `{key} =`"
+                                )))
+                            }
+                        };
+                        match key.as_str() {
+                            "serialize" => attrs.rename.serialize = Some(value),
+                            "deserialize" => attrs.rename.deserialize = Some(value),
+                            other => {
+                                return Err(compile_error(&format!(
+                                    "unknown key `{other}` in `rename(...)`, expected \
+                                     `serialize` or `deserialize`"
+                                )))
+                            }
+                        }
+                        set_any = true;
+                        match inner.next() {
+                            Some(TokenTree::Punct(p)) if p.as_char() == ',' => continue,
+                            None => break,
+                            Some(other) => {
+                                return Err(compile_error(&format!(
+                                    "unexpected token `{other}` in `rename(...)`"
+                                )))
+                            }
+                        }
+                    }
+                    if !set_any {
+                        return Err(compile_error(
+                            "expected `rename(serialize = \"...\")`, `rename(deserialize = \"...\")`, \
+                             or both",
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(compile_error(
+                        "expected `rename = \"...\"` or `rename(serialize = \"...\", deserialize = \"...\")`",
+                    ))
+                }
             }
-            let value = match it.next() {
-                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
-                _ => return Err(compile_error("expected a string literal after `rename =`")),
-            };
-            if it.peek().is_some() {
-                return Err(compile_error("unexpected tokens after `rename = \"...\"`"));
-            }
-            attrs.rename = Some(value);
         }
         "rename_all" => {
             if context != "container" {
