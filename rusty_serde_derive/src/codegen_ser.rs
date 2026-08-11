@@ -67,13 +67,21 @@ pub fn generate(data: &Data) -> String {
             generics,
             variants,
             tag,
+            content,
             untagged,
             deny_unknown_fields: _,
             from: _,
             into,
         } => match into {
             Some(into) => into_impl(name, generics, into),
-            None => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
+            None => enum_impl(
+                name,
+                generics,
+                variants,
+                tag.as_deref(),
+                content.as_deref(),
+                *untagged,
+            ),
         },
     }
 }
@@ -202,14 +210,16 @@ fn enum_impl(
     generics: &Generics,
     variants: &[Variant],
     tag: Option<&str>,
+    content: Option<&str>,
     untagged: bool,
 ) -> String {
     let mut arms = String::new();
     for (index, variant) in variants.iter().enumerate() {
-        arms += &match (tag, untagged) {
-            (Some(t), _) => variant_arm_tagged(name, variant, t),
-            (None, true) => variant_arm_untagged(name, variant),
-            (None, false) => variant_arm(name, index as u32, variant),
+        arms += &match (tag, content, untagged) {
+            (Some(t), Some(c), _) => variant_arm_adjacent(name, variant, t, c),
+            (Some(t), None, _) => variant_arm_tagged(name, variant, t),
+            (None, _, true) => variant_arm_untagged(name, variant),
+            (None, _, false) => variant_arm(name, index as u32, variant),
         };
     }
 
@@ -323,6 +333,120 @@ fn variant_arm_tagged(enum_name: &str, variant: &Variant, tag: &str) -> String {
                 "let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(1usize + {count}))?;\n\
                  ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
                  {calls}\
+                 ::rusty_serde::ser::SerializeMap::end(__state)"
+            );
+            format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
+        }
+    }
+}
+
+/// Serializes a variant of an adjacently-tagged enum (`#[rusty_serde(tag =
+/// "...", content = "...")]`) as `{"<tag>": "<variant>", "<content>":
+/// <data>}` - a unit variant omits the content key entirely, everything
+/// else nests its own shape (bare value for a newtype, array for a tuple,
+/// object for named fields) under it. Unlike internal tagging (`tag`
+/// alone), every variant shape is representable here, since the payload
+/// gets its own key instead of needing to be spliced into the tag's own
+/// object.
+fn variant_arm_adjacent(enum_name: &str, variant: &Variant, tag: &str, content: &str) -> String {
+    let vname = &variant.name;
+    let wire_vname = variant.wire_name();
+    match &variant.fields {
+        Fields::Unit | Fields::Unnamed(0) => {
+            let pattern = match &variant.fields {
+                Fields::Unit => format!("{enum_name}::{vname}"),
+                _ => format!("{enum_name}::{vname}()"),
+            };
+            format!(
+                "    {pattern} => {{\n\
+                     let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(1))?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                     ::rusty_serde::ser::SerializeMap::end(__state)\n\
+                 }}\n"
+            )
+        }
+        Fields::Unnamed(1) => format!(
+            "    {enum_name}::{vname}(ref __f0) => {{\n\
+                     let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(2))?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {content:?}, __f0)?;\n\
+                     ::rusty_serde::ser::SerializeMap::end(__state)\n\
+                 }}\n"
+        ),
+        Fields::Unnamed(n) => {
+            let binders = (0..*n)
+                .map(|i| format!("ref __f{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let tuple_lit = format!(
+                "({})",
+                (0..*n).map(|i| format!("__f{i}")).collect::<Vec<_>>().join(", ")
+            );
+            format!(
+                "    {enum_name}::{vname}({binders}) => {{\n\
+                     let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(2))?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {content:?}, &{tuple_lit})?;\n\
+                     ::rusty_serde::ser::SerializeMap::end(__state)\n\
+                 }}\n"
+            )
+        }
+        Fields::Named(fields) => {
+            let binders = binder_list(fields);
+            let active: Vec<&NamedField> = fields
+                .iter()
+                .filter(|f| !f.attrs.skips_serializing())
+                .collect();
+            // A small local adapter that serializes just this variant's
+            // (already-borrowed, via the match arm's `ref` bindings) active
+            // fields as a struct - generic over each field's own type, with
+            // no bound beyond `Serialize` (inferred from the actual field
+            // types at construction), so it works without the derive macro
+            // ever having to name those types itself.
+            let type_params: Vec<String> =
+                (0..active.len()).map(|i| format!("__T{i}")).collect();
+            let type_params_decl = type_params.join(", ");
+            let type_params_bounded = type_params
+                .iter()
+                .map(|t| format!("{t}: ::rusty_serde::Serialize"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let content_fields_decl = active
+                .iter()
+                .zip(&type_params)
+                .map(|(f, t)| format!("{}: &'a {t}", f.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let content_value_of = |field_name: &str| format!("self.{field_name}");
+            let content_count = count_expr(&active, content_value_of);
+            let content_calls = field_serialize_calls(
+                &active,
+                "::rusty_serde::ser::SerializeStruct::serialize_field",
+                content_value_of,
+            );
+            let content_construct = active
+                .iter()
+                .map(|f| f.name.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let def = format!(
+                "struct __Content<'a, {type_params_decl}> {{ {content_fields_decl} }}\n\
+                 impl<'a, {type_params_bounded}> ::rusty_serde::Serialize for __Content<'a, {type_params_decl}> {{\n\
+                     fn serialize<__CS>(&self, serializer: __CS) -> Result<__CS::Ok, __CS::Error>\n\
+                     where\n\
+                         __CS: ::rusty_serde::Serializer,\n\
+                     {{\n\
+                         let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {vname:?}, {content_count})?;\n\
+                         {content_calls}\
+                         ::rusty_serde::ser::SerializeStruct::end(__state)\n\
+                     }}\n\
+                 }}\n"
+            );
+            let body = format!(
+                "{def}\
+                 let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(2))?;\n\
+                 ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                 ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {content:?}, &__Content {{ {content_construct} }})?;\n\
                  ::rusty_serde::ser::SerializeMap::end(__state)"
             );
             format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
