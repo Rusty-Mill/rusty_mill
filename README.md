@@ -69,9 +69,10 @@ toolchain, not a crate you depend on), and everything else is `std`.
   ```
   `rename` uses a different wire key/variant tag than the Rust name.
   `default` falls back to `Default::default()` if the field is missing on
-  deserialize instead of erroring. `skip` never serializes the field and
-  always defaults it on deserialize, ignoring anything present on the wire
-  under its name.
+  deserialize instead of erroring (`default = "path"` falls back to calling
+  an arbitrary zero-arg `path()` instead). `skip` never serializes the field
+  and always defaults it on deserialize, ignoring anything present on the
+  wire under its name.
 - Container attributes:
   ```rust
   #[derive(Serialize, Deserialize)]

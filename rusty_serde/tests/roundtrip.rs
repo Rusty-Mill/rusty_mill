@@ -773,3 +773,32 @@ fn cow_str_field_borrows_when_possible_and_owns_when_escaped() {
     assert!(matches!(decoded.name, std::borrow::Cow::Owned(_)));
     assert_eq!(decoded.name, "line\nbreak");
 }
+
+fn default_retries() -> u32 {
+    3
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct WithCustomDefault {
+    name: String,
+    #[rusty_serde(default = "default_retries")]
+    retries: u32,
+}
+
+#[test]
+fn field_default_path_used_when_missing() {
+    let decoded: WithCustomDefault = json::from_str(r#"{"name":"x"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        WithCustomDefault {
+            name: "x".into(),
+            retries: 3,
+        }
+    );
+}
+
+#[test]
+fn field_default_path_not_used_when_present() {
+    let decoded: WithCustomDefault = json::from_str(r#"{"name":"x","retries":9}"#).unwrap();
+    assert_eq!(decoded.retries, 9);
+}
