@@ -44,6 +44,10 @@ pub struct Attrs {
     /// Merges this field's own serialized shape (must be a map/struct) into
     /// the parent's, instead of nesting it under its own key.
     pub flatten: bool,
+    /// `#[rusty_serde(alias = "...")]`, repeatable: extra wire names that
+    /// deserialize accepts for this field in addition to its primary
+    /// `wire_name()`. Serialize is unaffected - always uses the primary name.
+    pub aliases: Vec<String>,
     /// Container-only: a case-conversion style (`"camelCase"`, ...) applied
     /// to every named field/variant that didn't set its own `rename`.
     pub rename_all: Option<String>,
@@ -72,6 +76,7 @@ impl Attrs {
             && !self.skip
             && self.skip_serializing_if.is_none()
             && !self.flatten
+            && self.aliases.is_empty()
             && self.rename_all.is_none()
             && self.tag.is_none()
             && !self.untagged
@@ -966,6 +971,25 @@ fn parse_one_meta_item(
                 return Err(compile_error("`flatten` does not take a value"));
             }
             attrs.flatten = true;
+        }
+        "alias" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`alias` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `alias = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `alias =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `alias = \"...\"`"));
+            }
+            attrs.aliases.push(value);
         }
         "untagged" => {
             if context != "container" {
