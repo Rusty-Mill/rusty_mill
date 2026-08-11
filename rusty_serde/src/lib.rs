@@ -27,6 +27,7 @@
 extern crate self as rusty_serde;
 
 pub mod de;
+pub mod erased;
 pub mod error;
 pub mod flatten;
 mod impls;
