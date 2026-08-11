@@ -12,7 +12,8 @@ pub fn generate(data: &Data) -> String {
             generics,
             variants,
             tag,
-        } => enum_impl(name, generics, variants, tag.as_deref()),
+            untagged,
+        } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
     }
 }
 
@@ -358,7 +359,14 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<&str>) -> String {
+fn enum_impl(
+    name: &str,
+    generics: &Generics,
+    variants: &[Variant],
+    tag: Option<&str>,
+    untagged: bool,
+) -> String {
+    let _ = untagged; // wired up fully once buffered `Value` support lands
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
         .iter()

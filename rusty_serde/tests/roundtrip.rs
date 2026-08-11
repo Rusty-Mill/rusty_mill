@@ -449,6 +449,101 @@ fn where_clause_enum() {
     roundtrip(EitherWhere::<i32, String>::Left(1), r#"{"Left":1}"#);
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct SkipIfEmpty {
+    name: String,
+    #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+    nickname: Option<String>,
+    #[rusty_serde(skip_serializing_if = "Vec::is_empty", default)]
+    tags: Vec<String>,
+}
+
+#[test]
+fn skip_serializing_if_omits_when_true() {
+    let value = SkipIfEmpty {
+        name: "ada".into(),
+        nickname: None,
+        tags: vec![],
+    };
+    assert_eq!(json::to_string(&value).unwrap(), r#"{"name":"ada"}"#);
+}
+
+#[test]
+fn skip_serializing_if_includes_when_false() {
+    let value = SkipIfEmpty {
+        name: "ada".into(),
+        nickname: Some("countess".into()),
+        tags: vec!["math".into()],
+    };
+    assert_eq!(
+        json::to_string(&value).unwrap(),
+        r#"{"name":"ada","nickname":"countess","tags":["math"]}"#
+    );
+}
+
+#[test]
+fn skip_serializing_if_round_trips_via_default() {
+    // The field is missing entirely on the wire when skipped; `default`
+    // is what lets deserialize recover the same value instead of erroring
+    // with "missing field".
+    roundtrip(
+        SkipIfEmpty {
+            name: "ada".into(),
+            nickname: None,
+            tags: vec![],
+        },
+        r#"{"name":"ada"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum SkipIfVariant {
+    Item {
+        name: String,
+        #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+        note: Option<String>,
+    },
+}
+
+#[test]
+fn skip_serializing_if_in_struct_variant() {
+    roundtrip(
+        SkipIfVariant::Item {
+            name: "x".into(),
+            note: None,
+        },
+        r#"{"Item":{"name":"x"}}"#,
+    );
+    roundtrip(
+        SkipIfVariant::Item {
+            name: "x".into(),
+            note: Some("y".into()),
+        },
+        r#"{"Item":{"name":"x","note":"y"}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind")]
+enum SkipIfTagged {
+    Item {
+        name: String,
+        #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+        note: Option<String>,
+    },
+}
+
+#[test]
+fn skip_serializing_if_in_internally_tagged_variant() {
+    roundtrip(
+        SkipIfTagged::Item {
+            name: "x".into(),
+            note: None,
+        },
+        r#"{"kind":"Item","name":"x"}"#,
+    );
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();

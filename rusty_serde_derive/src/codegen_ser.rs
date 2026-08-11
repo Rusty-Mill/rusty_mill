@@ -1,5 +1,52 @@
 use crate::parse::{Data, Fields, Generics, NamedField, Variant};
 
+/// The runtime length expression for a `serialize_struct`/`serialize_map`
+/// call: `1` per always-present field, or `if <path>(&value) { 0 } else {
+/// 1 }` for a `skip_serializing_if` field, summed. `value_of` maps a
+/// field's Rust identifier to the expression that names its value at the
+/// call site - `&self.field` for a top-level struct, or the field's own
+/// name for an enum arm's `ref field` binding (already a reference either
+/// way, so the same expression works both as the serialize-call argument
+/// and as the `skip_serializing_if` predicate's argument).
+fn count_expr(active: &[&NamedField], value_of: impl Fn(&str) -> String) -> String {
+    let terms: Vec<String> = active
+        .iter()
+        .map(|f| match &f.attrs.skip_serializing_if {
+            Some(path) => {
+                let value = value_of(&f.name);
+                format!("if {path}({value}) {{ 0usize }} else {{ 1usize }}")
+            }
+            None => "1usize".to_string(),
+        })
+        .collect();
+    if terms.is_empty() {
+        "0usize".to_string()
+    } else {
+        terms.join(" + ")
+    }
+}
+
+/// Emits one `call_fn(&mut __state, "<wire key>", <value>)?;` per active
+/// field, wrapped in `if !<path>(<value>) { ... }` for a
+/// `skip_serializing_if` field.
+fn field_serialize_calls(
+    active: &[&NamedField],
+    call_fn: &str,
+    value_of: impl Fn(&str) -> String,
+) -> String {
+    let mut out = String::new();
+    for f in active {
+        let wire = f.wire_name();
+        let value = value_of(&f.name);
+        let call = format!("{call_fn}(&mut __state, {wire:?}, {value})?;\n");
+        out += &match &f.attrs.skip_serializing_if {
+            Some(path) => format!("if !{path}({value}) {{\n    {call}}}\n"),
+            None => call,
+        };
+    }
+    out
+}
+
 pub fn generate(data: &Data) -> String {
     match data {
         Data::Struct {
@@ -12,7 +59,8 @@ pub fn generate(data: &Data) -> String {
             generics,
             variants,
             tag,
-        } => enum_impl(name, generics, variants, tag.as_deref()),
+            untagged,
+        } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
     }
 }
 
@@ -39,22 +87,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             out += "::rusty_serde::ser::SerializeTupleStruct::end(__state)";
             out
         }
-        Fields::Named(fields) => {
-            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
-            let n = active.len();
-            let mut out = format!(
-                "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {name:?}, {n})?;\n"
-            );
-            for field in &active {
-                let wire = field.wire_name();
-                let ident = &field.name;
-                out += &format!(
-                    "::rusty_serde::ser::SerializeStruct::serialize_field(&mut __state, {wire:?}, &self.{ident})?;\n"
-                );
-            }
-            out += "::rusty_serde::ser::SerializeStruct::end(__state)";
-            out
-        }
+        Fields::Named(fields) => named_struct_serialize_body(name, fields),
     };
 
     let impl_decl = generics.impl_decl(None);
@@ -72,12 +105,35 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<&str>) -> String {
+fn named_struct_serialize_body(name: &str, fields: &[NamedField]) -> String {
+    let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+    let value_of = |field_name: &str| format!("&self.{field_name}");
+    let count = count_expr(&active, value_of);
+    let calls = field_serialize_calls(
+        &active,
+        "::rusty_serde::ser::SerializeStruct::serialize_field",
+        value_of,
+    );
+    format!(
+        "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {name:?}, {count})?;\n\
+         {calls}\
+         ::rusty_serde::ser::SerializeStruct::end(__state)"
+    )
+}
+
+fn enum_impl(
+    name: &str,
+    generics: &Generics,
+    variants: &[Variant],
+    tag: Option<&str>,
+    untagged: bool,
+) -> String {
     let mut arms = String::new();
     for (index, variant) in variants.iter().enumerate() {
-        arms += &match tag {
-            Some(t) => variant_arm_tagged(name, variant, t),
-            None => variant_arm(name, index as u32, variant),
+        arms += &match (tag, untagged) {
+            (Some(t), _) => variant_arm_tagged(name, variant, t),
+            (None, true) => variant_arm_untagged(name, variant),
+            (None, false) => variant_arm(name, index as u32, variant),
         };
     }
 
@@ -102,6 +158,58 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<
 /// sound way to splice an arbitrary inner value's serialization into an
 /// outer object without knowing its shape), so only unit and named-field
 /// variants reach here.
+/// Serializes a variant of an untagged enum (`#[rusty_serde(untagged)]`) as
+/// its payload alone - no tag, no wrapper object. A unit variant becomes
+/// JSON `null`, a newtype variant serializes its inner value directly, a
+/// tuple variant becomes an array, and a named-field variant becomes a
+/// plain object of just its own fields. Since nothing on the wire
+/// distinguishes one variant from another, `Deserialize` recovers the
+/// variant by trying each one in turn (see `codegen_de`).
+fn variant_arm_untagged(enum_name: &str, variant: &Variant) -> String {
+    let vname = &variant.name;
+    match &variant.fields {
+        Fields::Unit => {
+            format!("    {enum_name}::{vname} => ::rusty_serde::Serializer::serialize_unit(serializer),\n")
+        }
+        Fields::Unnamed(0) => {
+            format!("    {enum_name}::{vname}() => ::rusty_serde::Serializer::serialize_unit(serializer),\n")
+        }
+        Fields::Unnamed(1) => format!(
+            "    {enum_name}::{vname}(ref __f0) => ::rusty_serde::Serialize::serialize(__f0, serializer),\n"
+        ),
+        Fields::Unnamed(n) => {
+            let binders = (0..*n).map(|i| format!("ref __f{i}")).collect::<Vec<_>>().join(", ");
+            let mut body = format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_tuple(serializer, {n})?;\n"
+            );
+            for i in 0..*n {
+                body += &format!(
+                    "        ::rusty_serde::ser::SerializeTuple::serialize_element(&mut __state, __f{i})?;\n"
+                );
+            }
+            body += "        ::rusty_serde::ser::SerializeTuple::end(__state)";
+            format!("    {enum_name}::{vname}({binders}) => {{\n        {body}\n    }}\n")
+        }
+        Fields::Named(fields) => {
+            let binders = binder_list(fields);
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let value_of = |field_name: &str| field_name.to_string();
+            let count = count_expr(&active, value_of);
+            let calls = field_serialize_calls(
+                &active,
+                "::rusty_serde::ser::SerializeStruct::serialize_field",
+                value_of,
+            );
+            let body = format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {vname:?}, {count})?;\n\
+                 {calls}\
+                 ::rusty_serde::ser::SerializeStruct::end(__state)"
+            );
+            format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
+        }
+    }
+}
+
 fn variant_arm_tagged(enum_name: &str, variant: &Variant, tag: &str) -> String {
     let vname = &variant.name;
     let wire_vname = variant.wire_name();
@@ -123,34 +231,42 @@ fn variant_arm_tagged(enum_name: &str, variant: &Variant, tag: &str) -> String {
             unreachable!("tuple variants are rejected at parse time when `tag` is set")
         }
         Fields::Named(fields) => {
-            let binders = fields
-                .iter()
-                .map(|f| {
-                    if f.attrs.skip {
-                        format!("{}: _", f.name)
-                    } else {
-                        format!("ref {}", f.name)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let binders = binder_list(fields);
             let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
-            let n = 1 + active.len();
-            let mut body = format!(
-                "let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some({n}))?;\n\
-                 ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n"
+            let value_of = |field_name: &str| field_name.to_string();
+            let count = count_expr(&active, value_of);
+            let calls = field_serialize_calls(
+                &active,
+                "::rusty_serde::ser::SerializeMap::serialize_entry",
+                value_of,
             );
-            for f in &active {
-                let wire = f.wire_name();
-                let ident = &f.name;
-                body += &format!(
-                    "        ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {wire:?}, {ident})?;\n"
-                );
-            }
-            body += "        ::rusty_serde::ser::SerializeMap::end(__state)";
+            let body = format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(1usize + {count}))?;\n\
+                 ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                 {calls}\
+                 ::rusty_serde::ser::SerializeMap::end(__state)"
+            );
             format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
         }
     }
+}
+
+/// The `{ ref a, ref b, c: _ }` pattern for a named-field variant/struct
+/// match arm: skipped fields are bound to `_` (matched but discarded, so
+/// the pattern stays exhaustive without pulling in a value that's never
+/// used), everything else is bound by reference.
+fn binder_list(fields: &[NamedField]) -> String {
+    fields
+        .iter()
+        .map(|f| {
+            if f.attrs.skip {
+                format!("{}: _", f.name)
+            } else {
+                format!("ref {}", f.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn variant_arm(enum_name: &str, index: u32, variant: &Variant) -> String {
@@ -180,30 +296,20 @@ fn variant_arm(enum_name: &str, index: u32, variant: &Variant) -> String {
             format!("    {enum_name}::{vname}({binders}) => {{\n        {body}\n    }}\n")
         }
         Fields::Named(fields) => {
-            let binders = fields
-                .iter()
-                .map(|f| {
-                    if f.attrs.skip {
-                        format!("{}: _", f.name)
-                    } else {
-                        format!("ref {}", f.name)
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let binders = binder_list(fields);
             let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
-            let n = active.len();
-            let mut body = format!(
-                "let mut __state = ::rusty_serde::Serializer::serialize_struct_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}, {n})?;\n"
+            let value_of = |field_name: &str| field_name.to_string();
+            let count = count_expr(&active, value_of);
+            let calls = field_serialize_calls(
+                &active,
+                "::rusty_serde::ser::SerializeStructVariant::serialize_field",
+                value_of,
             );
-            for f in &active {
-                let wire = f.wire_name();
-                let ident = &f.name;
-                body += &format!(
-                    "        ::rusty_serde::ser::SerializeStructVariant::serialize_field(&mut __state, {wire:?}, {ident})?;\n"
-                );
-            }
-            body += "        ::rusty_serde::ser::SerializeStructVariant::end(__state)";
+            let body = format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_struct_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}, {count})?;\n\
+                 {calls}\
+                 ::rusty_serde::ser::SerializeStructVariant::end(__state)"
+            );
             format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
         }
     }
