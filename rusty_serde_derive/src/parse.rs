@@ -116,6 +116,13 @@ pub struct Attrs {
     /// from the `remote` type's own module. Meaningless (and rejected)
     /// without a container-level `remote` also set.
     pub getter: Option<String>,
+    /// Field-only, named struct fields only:
+    /// `#[rusty_serde(serialize_with = "path::to::fn")]` - serializes via
+    /// `path::to::fn(&self.field, serializer)` instead of the field's own
+    /// `Serialize` impl. `path::to::fn` must match the ordinary
+    /// `fn<S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error>`
+    /// convention.
+    pub serialize_with: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -176,6 +183,7 @@ impl Attrs {
             && self.into.is_none()
             && self.remote.is_none()
             && self.getter.is_none()
+            && self.serialize_with.is_none()
     }
 }
 
@@ -981,6 +989,25 @@ fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, T
                  enum variant fields (on field `{name}`)"
             )));
         }
+        if attrs.serialize_with.is_some() && owner == "variant" {
+            return Err(compile_error(&format!(
+                "rusty_serde_derive only supports `serialize_with` on top-level struct fields, \
+                 not enum variant fields (on field `{name}`)"
+            )));
+        }
+        if attrs.serialize_with.is_some() && attrs.getter.is_some() {
+            return Err(compile_error(&format!(
+                "`serialize_with` and `getter` can't both be set (on field `{name}`) - route \
+                 the getter's own return value through `serialize_with` yourself if you need both"
+            )));
+        }
+        if attrs.serialize_with.is_some() && attrs.skip_serializing_if.is_some() {
+            return Err(compile_error(&format!(
+                "`serialize_with` and `skip_serializing_if` can't both be set (on field \
+                 `{name}`) - `skip_serializing_if`'s path expects the field's own type, not \
+                 `serialize_with`'s wrapped value"
+            )));
+        }
         fields.push(NamedField { name, attrs });
     }
 
@@ -1508,6 +1535,31 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `into = \"...\"`"));
             }
             attrs.into = Some(value);
+        }
+        "serialize_with" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`serialize_with` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `serialize_with = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `serialize_with =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `serialize_with = \"...\"`",
+                ));
+            }
+            attrs.serialize_with = Some(value);
         }
         "remote" => {
             if context != "container" {
