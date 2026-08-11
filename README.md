@@ -67,7 +67,9 @@ toolchain, not a crate you depend on), and everything else is `std`.
       cache: Option<String>,
   }
   ```
-  `rename` uses a different wire key/variant tag than the Rust name.
+  `rename` uses a different wire key/variant tag than the Rust name
+  (`rename(serialize = "..", deserialize = "..")` sets either direction
+  independently, leaving the other at the field's own Rust name).
   `default` falls back to `Default::default()` if the field is missing on
   deserialize instead of erroring (`default = "path"` falls back to calling
   an arbitrary zero-arg `path()` instead). `skip` never serializes the field

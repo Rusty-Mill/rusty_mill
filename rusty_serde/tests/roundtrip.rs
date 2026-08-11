@@ -925,3 +925,58 @@ fn skip_deserializing_always_defaults_but_still_writes() {
     assert_eq!(decoded.read_only_absent, 0);
     assert_eq!(decoded.write_only_absent, 9);
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct DirectionRenamed {
+    #[rusty_serde(rename(serialize = "out_name"))]
+    serialize_only: String,
+    #[rusty_serde(rename(deserialize = "in_name"))]
+    deserialize_only: String,
+    #[rusty_serde(rename(serialize = "o", deserialize = "i"))]
+    both_directions: String,
+}
+
+#[test]
+fn rename_serialize_only_uses_the_alternate_name_going_out() {
+    let value = DirectionRenamed {
+        serialize_only: "a".into(),
+        deserialize_only: "b".into(),
+        both_directions: "c".into(),
+    };
+    let json = json::to_string(&value).unwrap();
+    // `serialize_only` uses its alternate name; `deserialize_only` falls
+    // back to its own Rust name since `rename(deserialize = ..)` alone
+    // doesn't affect the serialize direction.
+    assert_eq!(json, r#"{"out_name":"a","deserialize_only":"b","o":"c"}"#);
+}
+
+#[test]
+fn rename_deserialize_only_accepts_the_alternate_name_coming_in() {
+    // `serialize_only` falls back to its own Rust name on the wire here,
+    // since `rename(serialize = ..)` alone doesn't affect deserialize.
+    let decoded: DirectionRenamed =
+        json::from_str(r#"{"serialize_only":"a","in_name":"b","i":"c"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        DirectionRenamed {
+            serialize_only: "a".into(),
+            deserialize_only: "b".into(),
+            both_directions: "c".into(),
+        }
+    );
+}
+
+#[test]
+fn rename_bare_form_still_sets_both_directions() {
+    // Regression: the pre-existing `rename = "x"` form (both directions at
+    // once) still works alongside the new direction-specific form.
+    roundtrip(
+        Attributed {
+            name: "hi".into(),
+            count: 0,
+            cache: 0,
+            plain: false,
+        },
+        r#"{"n":"hi","count":0,"plain":false}"#,
+    );
+}

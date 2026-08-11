@@ -209,7 +209,7 @@ fn visit_map_body(
                      }}\n\
                      __{ident} = Some(::rusty_serde::de::MapAccess::next_value(&mut map)?);\n\
                  }}\n",
-            dup = format!("duplicate field `{}`", f.wire_name())
+            dup = format!("duplicate field `{}`", f.de_wire_name())
         );
     }
     out += &if flatten_field.is_some() {
@@ -258,7 +258,7 @@ fn visit_map_body(
         } else {
             out += &format!(
                 "let {ident} = __{ident}.ok_or_else(|| ::rusty_serde::Error::custom({missing:?}))?;\n",
-                missing = format!("missing field `{}`", f.wire_name())
+                missing = format!("missing field `{}`", f.de_wire_name())
             );
         }
     }
@@ -403,7 +403,7 @@ fn struct_impl(
                 .iter()
                 .filter(|f| !f.attrs.flatten)
                 .flat_map(|f| {
-                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                    std::iter::once((f.name.clone(), f.de_wire_name().to_string())).chain(
                         f.attrs
                             .aliases
                             .iter()
@@ -414,7 +414,7 @@ fn struct_impl(
             let fields_array = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| format!("{:?}", f.wire_name()))
+                .map(|f| format!("{:?}", f.de_wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let map_body =
@@ -473,7 +473,7 @@ fn enum_impl(
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
         .iter()
-        .map(|v| (v.name.clone(), v.wire_name().to_string()))
+        .map(|v| (v.name.clone(), v.de_wire_name().to_string()))
         .collect();
     let variants_array = variant_entries
         .iter()
@@ -661,7 +661,7 @@ fn untagged_variant_body(
                 .iter()
                 .filter(|f| !f.attrs.flatten)
                 .flat_map(|f| {
-                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                    std::iter::once((f.name.clone(), f.de_wire_name().to_string())).chain(
                         f.attrs
                             .aliases
                             .iter()
@@ -672,7 +672,7 @@ fn untagged_variant_body(
             let fields_array = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| format!("{:?}", f.wire_name()))
+                .map(|f| format!("{:?}", f.de_wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let map_body = visit_map_body(
@@ -785,7 +785,7 @@ fn variant_arm(
                 .iter()
                 .filter(|f| !f.attrs.flatten)
                 .flat_map(|f| {
-                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                    std::iter::once((f.name.clone(), f.de_wire_name().to_string())).chain(
                         f.attrs
                             .aliases
                             .iter()
@@ -796,7 +796,7 @@ fn variant_arm(
             let fields_array = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| format!("{:?}", f.wire_name()))
+                .map(|f| format!("{:?}", f.de_wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
             let map_body = visit_map_body(
