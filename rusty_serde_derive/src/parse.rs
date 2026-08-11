@@ -93,6 +93,10 @@ pub struct Attrs {
     /// `#[rusty_serde(try_from = "T")]` (`Self::try_from`) - mutually
     /// exclusive with each other.
     pub from: Option<FromAttr>,
+    /// Container-only: `#[rusty_serde(into = "T")]` - the `Serialize`
+    /// counterpart to `from`/`try_from`: clone into `T` (via `Into<T>`,
+    /// hence the `Clone` requirement) then serialize that.
+    pub into: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -149,6 +153,7 @@ impl Attrs {
             && !self.transparent
             && self.bound.is_none()
             && self.from.is_none()
+            && self.into.is_none()
     }
 }
 
@@ -213,6 +218,11 @@ pub enum Data {
         /// entire generated `Deserialize` impl (ignoring `fields`
         /// entirely) with one that deserializes `T` and converts.
         from: Option<FromAttr>,
+        /// From a container-level `#[rusty_serde(into = "T")]` - when set,
+        /// replaces the entire generated `Serialize` impl (ignoring
+        /// `fields` entirely) with one that clones into `T` and
+        /// serializes that.
+        into: Option<String>,
     },
     Enum {
         name: String,
@@ -226,6 +236,8 @@ pub enum Data {
         deny_unknown_fields: bool,
         /// See `Data::Struct::from`.
         from: Option<FromAttr>,
+        /// See `Data::Struct::into`.
+        into: Option<String>,
     },
 }
 
@@ -457,6 +469,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         deny_unknown_fields: container_attrs.deny_unknown_fields,
         transparent: container_attrs.transparent,
         from: container_attrs.from,
+        into: container_attrs.into,
     })
 }
 
@@ -570,6 +583,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         untagged: container_attrs.untagged,
         deny_unknown_fields: container_attrs.deny_unknown_fields,
         from: container_attrs.from,
+        into: container_attrs.into,
     })
 }
 
@@ -1384,6 +1398,25 @@ fn parse_one_meta_item(
                 ));
             }
             attrs.from = Some(FromAttr::TryFrom(value));
+        }
+        "into" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`into` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `into = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `into =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `into = \"...\"`"));
+            }
+            attrs.into = Some(value);
         }
         other => {
             return Err(compile_error(&format!(

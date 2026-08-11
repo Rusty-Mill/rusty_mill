@@ -1132,3 +1132,29 @@ fn try_from_deserializes_via_the_intermediate_type_and_can_fail() {
     let err = json::from_str::<Positive>(r#"{"value":-1}"#).unwrap_err();
     assert!(err.to_string().contains("is not positive"));
 }
+
+#[derive(Debug, Serialize)]
+struct RawCelsius {
+    degrees: f64,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[rusty_serde(into = "RawCelsius")]
+struct Celsius {
+    degrees: f64,
+}
+
+impl From<Celsius> for RawCelsius {
+    fn from(c: Celsius) -> Self {
+        RawCelsius { degrees: c.degrees }
+    }
+}
+
+#[test]
+fn into_serializes_by_cloning_into_the_intermediate_type() {
+    let value = Celsius { degrees: 20.0 };
+    assert_eq!(json::to_string(&value).unwrap(), r#"{"degrees":20.0}"#);
+    // Deserialize is unaffected by `into` - still the normal, field-driven impl.
+    let decoded: Celsius = json::from_str(r#"{"degrees":20.0}"#).unwrap();
+    assert_eq!(decoded, value);
+}

@@ -55,10 +55,13 @@ pub fn generate(data: &Data) -> String {
             fields,
             deny_unknown_fields: _,
             transparent,
-            // `from`/`try_from` only replace the Deserialize impl - this
-            // container still gets its normal, field-driven Serialize impl.
+            // `from`/`try_from` only replace the Deserialize impl.
             from: _,
-        } => struct_impl(name, generics, fields, *transparent),
+            into,
+        } => match into {
+            Some(into) => into_impl(name, generics, into),
+            None => struct_impl(name, generics, fields, *transparent),
+        },
         Data::Enum {
             name,
             generics,
@@ -67,8 +70,35 @@ pub fn generate(data: &Data) -> String {
             untagged,
             deny_unknown_fields: _,
             from: _,
-        } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
+            into,
+        } => match into {
+            Some(into) => into_impl(name, generics, into),
+            None => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
+        },
     }
+}
+
+/// `#[rusty_serde(into = "T")]`: the entire `Serialize` impl is just
+/// "clone into `T`, then serialize that" - none of the container's own
+/// fields/variants matter to *this* impl (they still matter to `T`'s own
+/// `Serialize`, wherever that comes from). The `Into<T>` conversion takes
+/// `self` by value, hence cloning first (`serialize` only gets `&self`).
+/// Applies identically to a struct or an enum container.
+fn into_impl(name: &str, generics: &Generics, into: &str) -> String {
+    let ty = generics.ty(name);
+    let impl_decl = generics.impl_decl(None);
+    let where_clause = generics.where_clause("::rusty_serde::Serialize");
+    format!(
+        "impl{impl_decl} ::rusty_serde::Serialize for {ty}{where_clause} {{\n\
+             fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
+             where\n\
+                 __S: ::rusty_serde::Serializer,\n\
+             {{\n\
+                 let __intermediate: {into} = ::std::clone::Clone::clone(self).into();\n\
+                 ::rusty_serde::Serialize::serialize(&__intermediate, serializer)\n\
+             }}\n\
+         }}\n"
+    )
 }
 
 fn struct_impl(name: &str, generics: &Generics, fields: &Fields, transparent: bool) -> String {
