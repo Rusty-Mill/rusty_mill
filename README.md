@@ -122,6 +122,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   always a clear `compile_error!` rather than a silent no-op.
 - `where` clauses on generic structs/enums, forwarded into the generated
   `impl` alongside its own `Serialize`/`Deserialize` bounds.
+- `#[rusty_serde(bound = "T: Trait")]` (container-only) replaces the
+  derive's auto-generated `T: Serialize`/`T: Deserialize` where-clause
+  entirely (both directions), for when the inferred bound is wrong - e.g.
+  `bound = ""` for a generic struct whose only use of `T` is a
+  `PhantomData<T>` field, which doesn't actually need `T` to be
+  (de)serializable even though the macro (unable to see field types)
+  would otherwise assume it does.
 - `Serializer`/`Deserializer::is_human_readable()`, so a hand-written
   `Serialize`/`Deserialize` impl can pick a representation per format (an
   ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
