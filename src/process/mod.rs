@@ -40,15 +40,21 @@
 //! placeholder -- consistent with `fs::File`/`stdio` already choosing
 //! this same shape for operations a reactor can't drive directly.
 
+#[cfg(unix)]
 use crate::io::reactor::{poll_io, Interest, Reactor, ScheduledIo};
+#[cfg(unix)]
 use crate::io::socket;
 use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use crate::runtime::Handle;
 use std::ffi::OsStr;
+#[cfg(windows)]
+use std::future::Future;
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::pin::Pin;
+#[cfg(unix)]
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -93,6 +99,9 @@ impl Command {
     /// still what's actually executed (`execve`'s own path argument);
     /// only the name the child *sees itself invoked as* changes. Thin
     /// forward to [`std::os::unix::process::CommandExt::arg0`].
+    /// Unix-only: Windows process creation has no separate
+    /// `argv[0]`-vs-executable-path distinction the way `execve` does.
+    #[cfg(unix)]
     pub fn arg0(&mut self, arg: impl AsRef<OsStr>) -> &mut Command {
         std::os::unix::process::CommandExt::arg0(&mut self.inner, arg);
         self
@@ -103,6 +112,11 @@ impl Command {
     /// control (`0` joins the child's own new group, matching its
     /// `pid`; a positive value joins an existing group). Thin forward
     /// to [`std::os::unix::process::CommandExt::process_group`].
+    /// Unix-only: process groups are a POSIX job-control concept with
+    /// no Windows equivalent (Windows uses Job Objects for the "kill
+    /// the whole tree" use case instead, a different mechanism this
+    /// crate doesn't expose a builder method for).
+    #[cfg(unix)]
     pub fn process_group(&mut self, pgroup: i32) -> &mut Command {
         std::os::unix::process::CommandExt::process_group(&mut self.inner, pgroup);
         self
@@ -421,13 +435,18 @@ impl Drop for Child {
 /// fd, non-blocking and registered with the ambient reactor -- see this
 /// module's own docs for why a child's piped stdio is reactor-driven
 /// rather than a `spawn_blocking` round trip per operation the way
-/// [`crate::fs::File`]'s is.
+/// [`crate::fs::File`]'s is. Unix-only -- see the `#[cfg(windows)]`
+/// block below this one for the Windows arm's different shape
+/// (`spawn_blocking`-backed, matching `fs::File`/`stdio`, per
+/// `docs/decision-request-windows-process-signal-ipc.md`'s Decision 1).
+#[cfg(unix)]
 struct PipeIo {
     fd: OwnedFd,
     io: Arc<ScheduledIo>,
     reactor: Arc<Reactor>,
 }
 
+#[cfg(unix)]
 impl PipeIo {
     fn adopt(fd: OwnedFd) -> io::Result<PipeIo> {
         let reactor = Handle::current().shared.reactor.clone();
@@ -452,6 +471,7 @@ impl PipeIo {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PipeIo {
     fn drop(&mut self) {
         self.reactor.deregister(self.fd.as_raw_fd());
@@ -461,8 +481,10 @@ impl Drop for PipeIo {
 /// The parent's write end of a piped child's stdin. Dropping it (there's
 /// no other way to half-close just this direction) delivers EOF to the
 /// child, the same as `std::process::ChildStdin`.
+#[cfg(unix)]
 pub struct ChildStdin(PipeIo);
 
+#[cfg(unix)]
 impl ChildStdin {
     fn adopt(stdin: std::process::ChildStdin) -> io::Result<ChildStdin> {
         Ok(ChildStdin(PipeIo::adopt(OwnedFd::from(stdin))?))
@@ -485,6 +507,7 @@ impl ChildStdin {
     }
 }
 
+#[cfg(unix)]
 impl AsyncWrite for ChildStdin {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -515,8 +538,10 @@ impl AsyncWrite for ChildStdin {
 
 /// The parent's read end of a piped child's stdout. Reads return `0` at
 /// EOF once the child closes its end (or exits).
+#[cfg(unix)]
 pub struct ChildStdout(PipeIo);
 
+#[cfg(unix)]
 impl ChildStdout {
     fn adopt(stdout: std::process::ChildStdout) -> io::Result<ChildStdout> {
         Ok(ChildStdout(PipeIo::adopt(OwnedFd::from(stdout))?))
@@ -529,6 +554,7 @@ impl ChildStdout {
     }
 }
 
+#[cfg(unix)]
 impl AsyncRead for ChildStdout {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -550,8 +576,10 @@ impl AsyncRead for ChildStdout {
 
 /// The parent's read end of a piped child's stderr. Same shape as
 /// [`ChildStdout`], just the other stream.
+#[cfg(unix)]
 pub struct ChildStderr(PipeIo);
 
+#[cfg(unix)]
 impl ChildStderr {
     fn adopt(stderr: std::process::ChildStderr) -> io::Result<ChildStderr> {
         Ok(ChildStderr(PipeIo::adopt(OwnedFd::from(stderr))?))
@@ -564,6 +592,7 @@ impl ChildStderr {
     }
 }
 
+#[cfg(unix)]
 impl AsyncRead for ChildStderr {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -580,5 +609,230 @@ impl AsyncRead for ChildStderr {
             Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Windows: `spawn_blocking`-backed, matching `fs::File`/`crate::io::stdio`
+// -- see this module's own docs and
+// `docs/decision-request-windows-process-signal-ipc.md`'s Decision 1 for
+// why. `io::reactor::RawIo` is hard-typed to `RawSocket` on Windows (the
+// IOCP+AFD-poll reactor is socket-only); genuinely non-blocking,
+// reactor-driven piped-child I/O would need a second, completion-based
+// (`OVERLAPPED`+IOCP) mechanism, comparable in scope to the IOCP reactor
+// backend itself (issue #6) -- not attempted here.
+// ---------------------------------------------------------------------
+
+/// A single blocking read/write dispatched to [`crate::spawn_blocking`]
+/// reads/writes a bounded chunk at a time, the same
+/// not-tying-up-a-blocking-thread-forever reasoning [`crate::fs::File`]'s
+/// own chunking documents.
+#[cfg(windows)]
+const CHUNK_CAP: usize = 64 * 1024;
+
+/// One direction's worth of `fs::File::State`-shaped bookkeeping (see
+/// that type's own docs) -- simpler here than `fs::File`'s: each of
+/// [`ChildStdin`]/[`ChildStdout`]/[`ChildStderr`] only ever runs *one*
+/// kind of operation on its inner value (never interleaves reads and
+/// writes on the same handle the way a seekable file can), so there's no
+/// need for `fs::File`'s `Op` enum discriminating which operation a
+/// leftover `Busy` result belongs to.
+#[cfg(windows)]
+enum ReadState<T> {
+    /// Holds the real, still-open std handle when nothing's in flight.
+    Idle(T),
+    /// A blocking closure holding the handle is running on the pool
+    /// right now. If the poll that started it gets dropped before this
+    /// resolves (a `select!`/timeout cancelling the read), the blocking
+    /// closure keeps running in the background regardless (the same
+    /// already-abandoned-`spawn_blocking`-call behavior every other
+    /// blocking op in this crate has) -- the *next* `poll_read` resumes
+    /// waiting on this same handle rather than starting a second one,
+    /// so no read result is ever lost, just possibly delivered to a
+    /// later call than the one that originally asked for it.
+    Busy(crate::task::JoinHandle<(T, io::Result<Vec<u8>>)>),
+    /// The blocking-pool task panicked -- see [`blocking_pool_panicked`].
+    /// Every subsequent call fails the same way; there's no handle left
+    /// to recover (it was moved into the panicked closure).
+    Poisoned,
+}
+
+#[cfg(windows)]
+fn poll_blocking_read<T: std::io::Read + Send + 'static>(
+    state: &mut ReadState<T>,
+    cx: &mut Context<'_>,
+    buf: &mut ReadBuf<'_>,
+) -> Poll<io::Result<()>> {
+    loop {
+        match state {
+            ReadState::Idle(_) => {
+                let inner = match std::mem::replace(state, ReadState::Poisoned) {
+                    ReadState::Idle(inner) => inner,
+                    ReadState::Busy(_) | ReadState::Poisoned => unreachable!(),
+                };
+                let want = buf.remaining().min(CHUNK_CAP);
+                *state = ReadState::Busy(crate::spawn_blocking(move || {
+                    let mut inner = inner;
+                    let mut chunk = vec![0u8; want];
+                    let result = std::io::Read::read(&mut inner, &mut chunk).map(|n| {
+                        chunk.truncate(n);
+                        chunk
+                    });
+                    (inner, result)
+                }));
+            }
+            ReadState::Busy(handle) => match Pin::new(handle).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(_join_err)) => {
+                    *state = ReadState::Poisoned;
+                    return Poll::Ready(Err(blocking_pool_panicked()));
+                }
+                Poll::Ready(Ok((inner, result))) => {
+                    *state = ReadState::Idle(inner);
+                    return Poll::Ready(result.map(|chunk| {
+                        buf.unfilled_mut()[..chunk.len()].copy_from_slice(&chunk);
+                        buf.advance(chunk.len());
+                    }));
+                }
+            },
+            ReadState::Poisoned => return Poll::Ready(Err(blocking_pool_panicked())),
+        }
+    }
+}
+
+/// The write-side counterpart of [`ReadState`] -- see that type's docs.
+#[cfg(windows)]
+enum WriteState<T> {
+    Idle(T),
+    Busy(crate::task::JoinHandle<(T, io::Result<usize>)>),
+    Poisoned,
+}
+
+#[cfg(windows)]
+fn poll_blocking_write<T: std::io::Write + Send + 'static>(
+    state: &mut WriteState<T>,
+    cx: &mut Context<'_>,
+    buf: &[u8],
+) -> Poll<io::Result<usize>> {
+    loop {
+        match state {
+            WriteState::Idle(_) => {
+                let inner = match std::mem::replace(state, WriteState::Poisoned) {
+                    WriteState::Idle(inner) => inner,
+                    WriteState::Busy(_) | WriteState::Poisoned => unreachable!(),
+                };
+                let n = buf.len().min(CHUNK_CAP);
+                let data = buf[..n].to_vec();
+                *state = WriteState::Busy(crate::spawn_blocking(move || {
+                    let mut inner = inner;
+                    let result = std::io::Write::write(&mut inner, &data);
+                    (inner, result)
+                }));
+            }
+            WriteState::Busy(handle) => match Pin::new(handle).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(_join_err)) => {
+                    *state = WriteState::Poisoned;
+                    return Poll::Ready(Err(blocking_pool_panicked()));
+                }
+                Poll::Ready(Ok((inner, result))) => {
+                    *state = WriteState::Idle(inner);
+                    return Poll::Ready(result);
+                }
+            },
+            WriteState::Poisoned => return Poll::Ready(Err(blocking_pool_panicked())),
+        }
+    }
+}
+
+/// The parent's write end of a piped child's stdin. Dropping it while
+/// [`ReadState::Idle`]-equivalent (`WriteState::Idle`, no write in
+/// flight) closes the underlying handle immediately, delivering EOF to
+/// the child the same as the Unix arm's `PipeIo` drop does. Dropping it
+/// mid-write (`WriteState::Busy`) delays EOF until that in-flight
+/// blocking write finishes in the background and its result -- handle
+/// included -- is discarded; a real but bounded delay (one pipe write's
+/// worth), not an indefinite one.
+#[cfg(windows)]
+pub struct ChildStdin(WriteState<std::process::ChildStdin>);
+
+#[cfg(windows)]
+impl ChildStdin {
+    fn adopt(stdin: std::process::ChildStdin) -> io::Result<ChildStdin> {
+        Ok(ChildStdin(WriteState::Idle(stdin)))
+    }
+}
+
+#[cfg(windows)]
+impl AsyncWrite for ChildStdin {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        poll_blocking_write(&mut self.0, cx, buf)
+    }
+
+    /// A no-op: each write already ran synchronously (on the blocking
+    /// pool) by the time [`poll_write`](AsyncWrite::poll_write) resolves
+    /// -- same as every other unbuffered writer in this crate.
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = self;
+        Poll::Ready(Ok(()))
+    }
+
+    /// A no-op, deliberately -- a Windows anonymous pipe has no way to
+    /// half-close independently of the handle itself, the same as the
+    /// Unix arm. Drop `ChildStdin` to deliver EOF (see this type's own
+    /// docs for the `Busy`-at-drop-time caveat).
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let _ = self;
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// The parent's read end of a piped child's stdout. Reads return `0` at
+/// EOF once the child closes its end (or exits).
+#[cfg(windows)]
+pub struct ChildStdout(ReadState<std::process::ChildStdout>);
+
+#[cfg(windows)]
+impl ChildStdout {
+    fn adopt(stdout: std::process::ChildStdout) -> io::Result<ChildStdout> {
+        Ok(ChildStdout(ReadState::Idle(stdout)))
+    }
+}
+
+#[cfg(windows)]
+impl AsyncRead for ChildStdout {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        poll_blocking_read(&mut self.0, cx, buf)
+    }
+}
+
+/// The parent's read end of a piped child's stderr. Same shape as
+/// [`ChildStdout`], just the other stream.
+#[cfg(windows)]
+pub struct ChildStderr(ReadState<std::process::ChildStderr>);
+
+#[cfg(windows)]
+impl ChildStderr {
+    fn adopt(stderr: std::process::ChildStderr) -> io::Result<ChildStderr> {
+        Ok(ChildStderr(ReadState::Idle(stderr)))
+    }
+}
+
+#[cfg(windows)]
+impl AsyncRead for ChildStderr {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        poll_blocking_read(&mut self.0, cx, buf)
     }
 }

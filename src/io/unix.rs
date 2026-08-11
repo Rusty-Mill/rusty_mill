@@ -1,28 +1,44 @@
 use super::async_io::{AsyncRead, AsyncWrite, ReadBuf};
+#[cfg(unix)]
+use super::reactor::TryCloneIo;
 use super::reactor::{
-    poll_io, ready_io, Interest as ReactorInterest, Reactor, ScheduledIo, TryCloneIo,
+    poll_io, ready_io, AsRawIo, Interest as ReactorInterest, Reactor, ScheduledIo,
 };
 use super::socket::{self, from_platform_err};
 use super::{readiness, Interest, Ready};
 use crate::runtime::Handle;
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 // See `tcp.rs`'s equivalent comment: rustils' concrete type either way
-// (`platform_linux` on Linux, `platform_bsd` on macOS/BSD), identical logic
-// below regardless of which -- both shaped identically to their TCP
-// counterparts, minus `set_nodelay` (no Nagle buffering on `AF_UNIX`) and
-// minus `local_addr`/`peer_addr`, which bypass rustils entirely (see
-// `UnixSocketAddr`'s own docs for why) rather than using its
-// `Option<PathBuf>`-shaped equivalents -- unlike `tcp.rs`, this file
+// (`platform_linux` on Linux, `platform_bsd` on macOS/BSD, `platform_windows`
+// on Windows -- see `docs/decision-request-windows-process-signal-ipc.md`
+// for why Windows leans on `platform_windows` here specifically, unlike
+// `tcp.rs`/`udp.rs`), identical logic below regardless of which -- both
+// POSIX backends shaped identically to their TCP counterparts, minus
+// `set_nodelay` (no Nagle buffering on `AF_UNIX`) and minus `local_addr`/
+// `peer_addr`, which bypass rustils entirely on Unix (see
+// `UnixSocketAddr`'s own docs for why) -- unlike `tcp.rs`, this file
 // never actually calls a `platform::net::UnixListener`/`UnixStream`
 // trait method by name, only inherent methods on the concrete
 // `PlatformUnixListener`/`PlatformUnixStream` types below, so there's no
-// blanket `as _` trait import to bring into scope here.
+// blanket `as _` trait import needed on Unix. The Windows backend's
+// `local_addr`/`peer_addr` *are* trait methods on `platform::net::
+// UnixListener`/`UnixStream` (`platform_windows` only implements
+// `local_addr`/`peer_addr` via that trait, unlike `platform_linux`/
+// `platform_bsd`, which don't define `local_addr`/`peer_addr` on the
+// trait at all -- see `UnixSocketAddr`'s own docs for why the Unix arm
+// bypasses rustils there entirely), so the Windows arm needs the
+// blanket `as _` import below to call them.
+#[cfg(windows)]
+use platform::net::{UnixListener as _, UnixStream as _};
 #[cfg(target_os = "linux")]
 use platform_linux::{
     LinuxUnixListener as PlatformUnixListener, LinuxUnixStream as PlatformUnixStream,
@@ -37,6 +53,11 @@ use platform_linux::{
 ))]
 use platform_bsd::{BsdUnixListener as PlatformUnixListener, BsdUnixStream as PlatformUnixStream};
 
+#[cfg(windows)]
+use platform_windows::{
+    WindowsUnixListener as PlatformUnixListener, WindowsUnixStream as PlatformUnixStream,
+};
+
 /// An `AF_UNIX` address: a filesystem pathname, a Linux/Android
 /// abstract-namespace name (a kernel-assigned identifier with no
 /// filesystem presence at all, unrelated to `/proc`'s notion of
@@ -49,9 +70,24 @@ use platform_bsd::{BsdUnixListener as PlatformUnixListener, BsdUnixStream as Pla
 /// arbitrary byte string, not a real path -- so this wraps
 /// `std::os::unix::net::SocketAddr` instead, mirroring tokio's own
 /// `net::unix::UnixSocketAddr` exactly (itself the same wrapper).
+///
+/// Windows has no abstract-namespace concept at all (`AF_UNIX` there is
+/// pathname-only), and no stable `std::os::windows::net::SocketAddr` to
+/// wrap the way the Unix arm wraps `std::os::unix::net::SocketAddr`
+/// (`windows_unix_domain_sockets`, rust-lang/rust#150487, is nightly-only
+/// as of this writing) -- so the Windows arm goes back to the plain
+/// `Option<PathBuf>` shape this crate used everywhere before abstract
+/// namespaces existed, which already covers everything Windows `AF_UNIX`
+/// addressing can express.
+#[cfg(unix)]
 #[derive(Clone)]
 pub struct UnixSocketAddr(std::os::unix::net::SocketAddr);
 
+#[cfg(windows)]
+#[derive(Clone)]
+pub struct UnixSocketAddr(Option<PathBuf>);
+
+#[cfg(unix)]
 impl UnixSocketAddr {
     /// An address for [`UnixListener::bind_addr`]/[`UnixStream::connect_addr`]
     /// naming a real filesystem path -- see `std::os::unix::net::SocketAddr::from_pathname`.
@@ -96,9 +132,47 @@ impl UnixSocketAddr {
     }
 }
 
+#[cfg(windows)]
+impl UnixSocketAddr {
+    /// An address for [`UnixListener::bind_addr`]/[`UnixStream::connect_addr`]
+    /// naming a real filesystem path. Infallible on this arm (unlike the
+    /// Unix one) -- there's no `sockaddr_un` length limit checked until
+    /// the path is actually used, so this just stores it -- but stays
+    /// `io::Result`-returning for signature parity with the Unix arm.
+    pub fn from_pathname(path: impl AsRef<Path>) -> io::Result<UnixSocketAddr> {
+        Ok(UnixSocketAddr(Some(path.as_ref().to_path_buf())))
+    }
+
+    /// This address's filesystem path, if it's a pathname address --
+    /// `None` for the unnamed address. Windows `AF_UNIX` has no
+    /// abstract-namespace concept, so (unlike the Unix arm) every named
+    /// address is a pathname one.
+    pub fn as_pathname(&self) -> Option<&Path> {
+        self.0.as_deref()
+    }
+
+    /// Whether this is the unnamed address -- an unbound socket, or a
+    /// stream socket's end that only ever `connect`-ed, never `bind`-ed
+    /// its own address.
+    pub fn is_unnamed(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+#[cfg(unix)]
 impl std::fmt::Debug for UnixSocketAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+#[cfg(windows)]
+impl std::fmt::Debug for UnixSocketAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(path) => write!(f, "UnixSocketAddr(pathname = {path:?})"),
+            None => write!(f, "UnixSocketAddr(unnamed)"),
+        }
     }
 }
 
@@ -114,7 +188,10 @@ impl std::fmt::Debug for UnixSocketAddr {
 /// UnixStream` rather than `UnixListener`/`UnixDatagram` purely because
 /// it alone has both `local_addr` and `peer_addr`; the underlying
 /// `getsockname`/`getpeername` calls don't care which of the three a
-/// bare fd is treated as).
+/// bare fd is treated as). Unix-only -- the Windows arm gets
+/// `local_addr`/`peer_addr` straight from `platform_windows`'s own
+/// inherent methods instead (see those methods' own call sites below).
+#[cfg(unix)]
 fn with_borrowed_std_stream<R>(
     fd: std::os::fd::RawFd,
     f: impl FnOnce(&std::os::unix::net::UnixStream) -> R,
@@ -151,7 +228,7 @@ impl UnixListener {
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformUnixListener::bind(path).map_err(from_platform_err)?;
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UnixListener { inner, io, reactor })
     }
 
@@ -166,6 +243,7 @@ impl UnixListener {
     ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
     pub fn bind_addr(addr: &UnixSocketAddr) -> io::Result<UnixListener> {
         let fd = socket::new_unix_socket()?;
         socket::unix_bind_addr(fd.as_raw_fd(), &addr.0)?;
@@ -178,8 +256,33 @@ impl UnixListener {
         let reactor = Handle::current().shared.reactor.clone();
         let inner = PlatformUnixListener::from(fd);
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UnixListener { inner, io, reactor })
+    }
+
+    /// Windows has no abstract namespace at all -- every non-unnamed
+    /// [`UnixSocketAddr`] on this platform is already a pathname one
+    /// (see that type's own Windows-arm docs), so this is just
+    /// [`bind`](Self::bind) with the path unwrapped from `addr` rather
+    /// than a genuinely different code path the way the Unix arm (which
+    /// hand-rolls socket creation to reach the abstract-namespace case
+    /// `bind`/`platform_windows` can't express) needs.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    ///
+    /// # Errors
+    /// Fails with `InvalidInput` if `addr` is the unnamed address --
+    /// there's no path to bind to.
+    #[cfg(windows)]
+    pub fn bind_addr(addr: &UnixSocketAddr) -> io::Result<UnixListener> {
+        let path = addr.as_pathname().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot bind the unnamed address",
+            )
+        })?;
+        Self::bind(path)
     }
 
     pub async fn accept(&self) -> io::Result<(UnixStream, Option<PathBuf>)> {
@@ -205,20 +308,33 @@ impl UnixListener {
         }))
     }
 
+    #[cfg(unix)]
     pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
         with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.local_addr()).map(UnixSocketAddr)
+    }
+
+    /// `platform_windows::WindowsUnixListener::local_addr` already hands
+    /// back the `Option<PathBuf>` this arm's [`UnixSocketAddr`] wraps
+    /// directly -- no `getsockname`-borrowing trick needed the way the
+    /// Unix arm's lack of a rustils `local_addr`/`peer_addr` forces.
+    #[cfg(windows)]
+    pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
+        self.inner
+            .local_addr()
+            .map_err(from_platform_err)
+            .map(UnixSocketAddr)
     }
 
     /// `SO_ERROR` -- see [`TcpStream::take_error`](super::TcpStream::take_error)
     /// for the full contract, identical here.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        socket::take_error(self.inner.as_raw_fd())
+        socket::take_error(self.inner.as_raw_io())
     }
 }
 
 impl Drop for UnixListener {
     fn drop(&mut self) {
-        self.reactor.deregister(self.inner.as_raw_fd());
+        self.reactor.deregister(self.inner.as_raw_io());
     }
 }
 
@@ -228,19 +344,29 @@ impl Drop for UnixListener {
 // `From<OwnedFd>` instead, the same primitives `bind` and `Drop` above
 // already use. `IntoRawFd` dup(2)s (`try_clone_io`) rather than
 // transferring the exact same fd, for the same reason `TcpListener::
-// into_std` does -- see that method's own docs.
+// into_std` does -- see that method's own docs. Windows only gets
+// `AsRawSocket` (borrow-only) -- `platform_windows` has no
+// `AsSocket`/`FromRawSocket`/`IntoRawSocket`-equivalent ownership-transfer
+// surface yet (rustils#59 deliberately didn't add one; see
+// `docs/decision-request-windows-process-signal-ipc.md`), so there's no
+// safe way to adopt an externally-created raw socket into
+// `PlatformUnixListener`, nor to hand this one's ownership back out as a
+// raw `SOCKET` without leaking the reactor registration.
+#[cfg(unix)]
 impl std::os::fd::AsFd for UnixListener {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.inner.as_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::AsRawFd for UnixListener {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.inner.as_raw_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::FromRawFd for UnixListener {
     unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
         let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
@@ -250,18 +376,26 @@ impl std::os::fd::FromRawFd for UnixListener {
             .expect("failed to set the adopted fd non-blocking");
         let reactor = Handle::current().shared.reactor.clone();
         let io = reactor
-            .register(inner.as_raw_fd())
+            .register(inner.as_raw_io())
             .expect("failed to register raw fd with the reactor");
         UnixListener { inner, io, reactor }
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::IntoRawFd for UnixListener {
     fn into_raw_fd(self) -> std::os::fd::RawFd {
         self.inner
             .try_clone_io()
             .expect("failed to duplicate fd")
             .into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for UnixListener {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.inner.as_raw_socket()
     }
 }
 
@@ -280,10 +414,21 @@ impl std::os::fd::IntoRawFd for UnixListener {
 /// wrong kind with an error, rather than tracking which constructor was
 /// used as a separate field (which wouldn't survive a socket adopted
 /// via [`FromRawFd`](std::os::fd::FromRawFd) anyway).
+///
+/// Unix-only: every constructor here (`listen`/`connect`) needs to
+/// adopt a hand-created raw fd into `PlatformUnixListener`/
+/// `PlatformUnixStream` via `From<OwnedFd>` the same way
+/// [`UnixStream::connect`] does -- and, like that method on Windows,
+/// `platform_windows` has no owned-socket adoption path to do that with
+/// (see `docs/decision-request-windows-process-signal-ipc.md`), with no
+/// `bind`/`accept`-shaped escape the way `UnixListener` itself has
+/// either. Not attempted as a hand-rolled parallel implementation.
+#[cfg(unix)]
 pub struct UnixSocket {
     fd: std::os::fd::OwnedFd,
 }
 
+#[cfg(unix)]
 impl UnixSocket {
     /// A bare, non-blocking `SOCK_STREAM` socket -- see
     /// [`listen`](Self::listen)/[`connect`](Self::connect).
@@ -335,7 +480,7 @@ impl UnixSocket {
         // for the same belt-and-suspenders reason `TcpSocket::listen`
         // sets it again too.
         inner.set_nonblocking(true).map_err(from_platform_err)?;
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UnixListener { inner, io, reactor })
     }
 
@@ -361,7 +506,7 @@ impl UnixSocket {
         // Same non-blocking-connect-completes-asynchronously reasoning
         // as `UnixStream::connect`.
         ready_io(&io, ReactorInterest::Write, || {
-            socket::take_socket_error(inner.as_raw_fd())
+            socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
         Ok(UnixStream { inner, io, reactor })
@@ -395,18 +540,21 @@ impl UnixSocket {
 // with the reactor (`listen`/`connect`/`datagram` each do that only
 // once they've committed to a concrete type), so there's nothing to
 // deregister on drop either, unlike `UnixListener`/`UnixStream`.
+#[cfg(unix)]
 impl std::os::fd::AsFd for UnixSocket {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.fd.as_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::AsRawFd for UnixSocket {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.fd.as_raw_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::FromRawFd for UnixSocket {
     unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
         UnixSocket {
@@ -415,6 +563,7 @@ impl std::os::fd::FromRawFd for UnixSocket {
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::IntoRawFd for UnixSocket {
     fn into_raw_fd(self) -> std::os::fd::RawFd {
         self.fd.into_raw_fd()
@@ -457,6 +606,7 @@ impl UnixStream {
 
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
     pub async fn connect(path: &Path) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
@@ -466,10 +616,40 @@ impl UnixStream {
         // Same non-blocking-connect-completes-asynchronously reasoning
         // as `TcpStream::connect`.
         ready_io(&io, ReactorInterest::Write, || {
-            socket::take_socket_error(inner.as_raw_fd())
+            socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
         Ok(UnixStream { inner, io, reactor })
+    }
+
+    /// `platform_windows` has no way to adopt a hand-created raw
+    /// `SOCKET` into `WindowsUnixStream` (see
+    /// `docs/decision-request-windows-process-signal-ipc.md`), so the
+    /// Unix arm's "create non-blocking, connect, adopt" sequence isn't
+    /// available here -- this instead runs rustils' own blocking
+    /// `WindowsUnixStream::connect` on [`crate::spawn_blocking`] (the
+    /// same "operation the reactor can't drive, so dispatch it and
+    /// resume normal reactor-driven I/O once it's back" shape
+    /// `fs::File::open`/`create` already use), then flips non-blocking
+    /// and registers with the reactor for every read/write after. An
+    /// `AF_UNIX` connect to a local path has no real network RTT the
+    /// way TCP's does, so this briefly borrows a blocking-pool thread
+    /// rather than genuinely blocking for a meaningful duration.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(windows)]
+    pub async fn connect(path: &Path) -> io::Result<UnixStream> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let path = path.to_path_buf();
+        let inner = crate::spawn_blocking(move || PlatformUnixStream::connect(&path))
+            .await
+            .map_err(|_| {
+                io::Error::other("the blocking-pool task connecting this socket panicked")
+            })?
+            .map_err(from_platform_err)?;
+        inner.set_nonblocking(true).map_err(from_platform_err)?;
+        UnixStream::from_accepted(inner, reactor)
     }
 
     /// Connects to `addr` -- the [`UnixSocketAddr`]-based counterpart of
@@ -479,6 +659,7 @@ impl UnixStream {
     ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
     pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
         let reactor = Handle::current().shared.reactor.clone();
         let fd = socket::new_unix_socket()?;
@@ -486,10 +667,31 @@ impl UnixStream {
         let io = reactor.register(fd.as_raw_fd())?;
         let inner = PlatformUnixStream::from(fd);
         ready_io(&io, ReactorInterest::Write, || {
-            socket::take_socket_error(inner.as_raw_fd())
+            socket::take_socket_error(inner.as_raw_io())
         })
         .await?;
         Ok(UnixStream { inner, io, reactor })
+    }
+
+    /// Windows has no abstract namespace (see [`UnixSocketAddr`]'s own
+    /// Windows-arm docs) -- every non-unnamed address here is already a
+    /// pathname one, so this is just [`connect`](Self::connect) with the
+    /// path unwrapped from `addr`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    ///
+    /// # Errors
+    /// Fails with `InvalidInput` if `addr` is the unnamed address.
+    #[cfg(windows)]
+    pub async fn connect_addr(addr: &UnixSocketAddr) -> io::Result<UnixStream> {
+        let path = addr.as_pathname().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot connect to the unnamed address",
+            )
+        })?;
+        Self::connect(path).await
     }
 
     /// A pair of `UnixStream`s already connected to each other
@@ -497,8 +699,12 @@ impl UnixStream {
     /// spawned task while keeping the other, with no filesystem path
     /// (nor a listener to `bind`/`accept` through) involved at all.
     ///
+    /// Unix-only: Windows has no anonymous `AF_UNIX` pair primitive at
+    /// the OS level at all (not a rustils gap -- a real absence).
+    ///
     /// # Panics
     /// Panics if called outside a running [`crate::Runtime`].
+    #[cfg(unix)]
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         let reactor = Handle::current().shared.reactor.clone();
         let (fd_a, fd_b) = socket::unix_socketpair()?;
@@ -508,20 +714,20 @@ impl UnixStream {
     }
 
     fn from_accepted(inner: PlatformUnixStream, reactor: Arc<Reactor>) -> io::Result<UnixStream> {
-        let io = reactor.register(inner.as_raw_fd())?;
+        let io = reactor.register(inner.as_raw_io())?;
         Ok(UnixStream { inner, io, reactor })
     }
 
     pub async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         ready_io(&self.io, ReactorInterest::Read, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
         .await
     }
 
     pub async fn write(&self, buf: &[u8]) -> io::Result<usize> {
         ready_io(&self.io, ReactorInterest::Write, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
         .await
     }
@@ -553,18 +759,40 @@ impl UnixStream {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub fn peer_addr(&self) -> io::Result<UnixSocketAddr> {
         with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.peer_addr()).map(UnixSocketAddr)
     }
 
+    #[cfg(unix)]
     pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
         with_borrowed_std_stream(self.inner.as_raw_fd(), |s| s.local_addr()).map(UnixSocketAddr)
+    }
+
+    /// `platform_windows::WindowsUnixStream::peer_addr`/`local_addr`
+    /// already hand back the `Option<PathBuf>` this arm's
+    /// [`UnixSocketAddr`] wraps directly -- see [`UnixListener::local_addr`]'s
+    /// identical Windows-arm reasoning.
+    #[cfg(windows)]
+    pub fn peer_addr(&self) -> io::Result<UnixSocketAddr> {
+        self.inner
+            .peer_addr()
+            .map_err(from_platform_err)
+            .map(UnixSocketAddr)
+    }
+
+    #[cfg(windows)]
+    pub fn local_addr(&self) -> io::Result<UnixSocketAddr> {
+        self.inner
+            .local_addr()
+            .map_err(from_platform_err)
+            .map(UnixSocketAddr)
     }
 
     /// `SO_ERROR` -- see [`TcpStream::take_error`](super::TcpStream::take_error)
     /// for the full contract, identical here.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        socket::take_error(self.inner.as_raw_fd())
+        socket::take_error(self.inner.as_raw_io())
     }
 
     /// The effective credentials (user ID, group ID, and -- where the
@@ -580,7 +808,8 @@ impl UnixStream {
     /// and no verified implementation exists for any of them yet -- see
     /// #116. `socket/mod.rs`'s docs cover the general pattern this crate
     /// follows: don't guess at an OS-specific API without a way to
-    /// verify it.
+    /// verify it. Windows has no peer-credential mechanism this crate
+    /// could verify either -- same absence, not extended here.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn peer_cred(&self) -> io::Result<UCred> {
         ucred::get_peer_cred(self.inner.as_raw_fd())
@@ -634,7 +863,7 @@ impl UnixStream {
     /// if nothing's available yet.
     pub fn try_read(&self, buf: &mut [u8]) -> io::Result<usize> {
         self.try_io(Interest::READABLE, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
     }
 
@@ -642,7 +871,7 @@ impl UnixStream {
     /// if the socket isn't ready to accept more right now.
     pub fn try_write(&self, buf: &[u8]) -> io::Result<usize> {
         self.try_io(Interest::WRITABLE, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
     }
 
@@ -651,7 +880,7 @@ impl UnixStream {
     /// filling the first one.
     pub fn try_read_vectored(&self, bufs: &mut [io::IoSliceMut<'_>]) -> io::Result<usize> {
         self.try_io(Interest::READABLE, || {
-            socket::readv(self.inner.as_raw_fd(), bufs)
+            socket::readv(self.inner.as_raw_io(), bufs)
         })
     }
 
@@ -659,42 +888,46 @@ impl UnixStream {
     /// buffer in `bufs` in one `writev(2)` call.
     pub fn try_write_vectored(&self, bufs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         self.try_io(Interest::WRITABLE, || {
-            socket::writev(self.inner.as_raw_fd(), bufs)
+            socket::writev(self.inner.as_raw_io(), bufs)
         })
     }
 
     fn poll_read_priv(&self, cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, ReactorInterest::Read, cx, || {
-            socket::read(self.inner.as_raw_fd(), buf)
+            socket::read(self.inner.as_raw_io(), buf)
         })
     }
 
     fn poll_write_priv(&self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
         poll_io(&self.io, ReactorInterest::Write, cx, || {
-            socket::write(self.inner.as_raw_fd(), buf)
+            socket::write(self.inner.as_raw_io(), buf)
         })
     }
 }
 
 impl Drop for UnixStream {
     fn drop(&mut self) {
-        self.reactor.deregister(self.inner.as_raw_fd());
+        self.reactor.deregister(self.inner.as_raw_io());
     }
 }
 
-// See `UnixListener`'s equivalent impls above.
+// See `UnixListener`'s equivalent impls above (including why Windows
+// only gets `AsRawSocket`, not `AsSocket`/`FromRawSocket`/`IntoRawSocket`).
+#[cfg(unix)]
 impl std::os::fd::AsFd for UnixStream {
     fn as_fd(&self) -> std::os::fd::BorrowedFd<'_> {
         self.inner.as_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::AsRawFd for UnixStream {
     fn as_raw_fd(&self) -> std::os::fd::RawFd {
         self.inner.as_raw_fd()
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::FromRawFd for UnixStream {
     unsafe fn from_raw_fd(fd: std::os::fd::RawFd) -> Self {
         let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
@@ -708,12 +941,20 @@ impl std::os::fd::FromRawFd for UnixStream {
     }
 }
 
+#[cfg(unix)]
 impl std::os::fd::IntoRawFd for UnixStream {
     fn into_raw_fd(self) -> std::os::fd::RawFd {
         self.inner
             .try_clone_io()
             .expect("failed to duplicate fd")
             .into_raw_fd()
+    }
+}
+
+#[cfg(windows)]
+impl AsRawSocket for UnixStream {
+    fn as_raw_socket(&self) -> std::os::windows::io::RawSocket {
+        self.inner.as_raw_socket()
     }
 }
 
@@ -744,7 +985,7 @@ impl AsyncWrite for &UnixStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(socket::shutdown_write(self.inner.as_raw_fd()))
+        Poll::Ready(socket::shutdown_write(self.inner.as_raw_io()))
     }
 }
 
@@ -962,16 +1203,19 @@ impl AsyncWrite for OwnedUnixWriteHalf {
 /// A type representing a Unix user ID -- deliberately a plain `u32`
 /// rather than `libc::uid_t` itself (which the exact underlying integer
 /// type of varies by platform), matching tokio's own `net::unix::uid_t`.
+#[cfg(unix)]
 #[allow(non_camel_case_types)]
 pub type uid_t = u32;
 
 /// A type representing a Unix group ID -- see [`uid_t`] for why this
 /// isn't `libc::gid_t` directly.
+#[cfg(unix)]
 #[allow(non_camel_case_types)]
 pub type gid_t = u32;
 
 /// A type representing a Unix process (or process group) ID -- see
 /// [`uid_t`] for why this isn't `libc::pid_t` directly.
+#[cfg(unix)]
 #[allow(non_camel_case_types)]
 pub type pid_t = i32;
 

@@ -148,23 +148,40 @@ io-uring = { version = "0.6", optional = true }
 platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# Not `platform-windows` (rustils' own Windows backend): as of the
-# pinned rev above, that crate's net module predates rustils#41's
-# "reactor consumer" escape hatch (non-blocking toggle, `AsRawSocket`,
-# `From<OwnedSocket>`) that `platform-linux`/`platform-bsd` both
-# gained specifically for this project -- see `socket/mod.rs`'s and
-# `socket/windows.rs`'s own docs. `windows-sys` is Microsoft's own
-# low-level FFI bindings, the same crate mio itself depends on for its
-# entire Windows backend (including the undocumented AFD-poll protocol
-# `io::reactor::windows` implements -- see that module's docs), so this
-# mirrors `libc`'s role on POSIX rather than introducing a new kind of
-# dependency.
+# `platform-windows`, unlike the comment that used to be here: checked
+# directly against the pinned rev above (rustils#59/PR #60, already
+# landed there, confirmed by walking rustils' own git history rather
+# than trusting this crate's prior claim about it) and it *does* have
+# the raw-handle + non-blocking escape hatch `platform-linux`/
+# `platform-bsd` got via rustils#41/#42 -- `AsRawSocket`,
+# `set_nonblocking`, concrete (non-boxed) `connect`/`bind`/`accept`
+# constructors on all five Windows socket types, `WindowsUnixStream`/
+# `WindowsUnixListener` included. Used here for `io/unix.rs`'s Windows
+# arm only (the first thing in this crate to actually depend on it) --
+# see `docs/decision-request-windows-process-signal-ipc.md` for why
+# `tcp.rs`/`udp.rs` stay on the hand-rolled `windows-sys` layer below
+# rather than migrating too (a real, separate follow-up, not a gap this
+# change introduces) and for the one piece of the escape hatch that's
+# still missing (owned-socket adoption, blocking `UnixStream::connect`
+# from using it the same way Linux/BSD's `From<OwnedFd>` does).
+platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+# `windows-sys` is Microsoft's own low-level FFI bindings, the same
+# crate mio itself depends on for its entire Windows backend (including
+# the undocumented AFD-poll protocol `io::reactor::windows` implements
+# -- see that module's docs), so this mirrors `libc`'s role on POSIX
+# rather than introducing a new kind of dependency. `tcp.rs`/`udp.rs`
+# still build directly on this (`socket/windows.rs`) rather than
+# `platform-windows` above -- see that dependency's own comment for why.
+# `Win32_System_Console` (new): `SetConsoleCtrlHandler`/`CTRL_*_EVENT`
+# for `signal.rs`'s Windows arm -- the console-control-handler
+# equivalent of POSIX `sigaction`, see that module's own docs.
 windows-sys = { version = "0.59", features = [
     "Win32_Networking_WinSock",
     "Win32_Foundation",
     "Win32_System_IO",
     "Win32_Storage_FileSystem",
     "Win32_System_WindowsProgramming",
+    "Win32_System_Console",
     "Wdk_Foundation",
     "Wdk_Storage_FileSystem",
     "Wdk_System_IO",
@@ -182,6 +199,18 @@ futures-io = "0.3"
 # even though `required-features` below skips the test target unless
 # the `tracing` feature is enabled.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# `tests/signal_windows.rs` calls `GenerateConsoleCtrlEvent` directly to
+# drive a real, targeted `CTRL_BREAK_EVENT` at a child process's own
+# process group -- see that test's own docs for why `CTRL_BREAK_EVENT`
+# (not `CTRL_C_EVENT`, which can't be targeted at a specific group) is
+# the safe way to test real console-control delivery without risking
+# the test harness's own process.
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_System_Threading",
+] }
 
 [profile.release]
 debug = true
