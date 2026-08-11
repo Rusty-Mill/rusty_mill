@@ -326,3 +326,82 @@ fn is_human_readable_is_true_for_both_of_this_crates_formats() {
         HumanReadableProbe(true)
     );
 }
+
+/// Serializes straight from an iterator/`Display` value via
+/// `collect_seq`/`collect_map`/`collect_str`, rather than collecting into
+/// a `Vec`/`HashMap`/`String` first - proving those default trait methods
+/// actually produce the same output `serialize_seq`/`serialize_map`/
+/// `serialize_str` would.
+struct Collected {
+    doubled: Vec<i32>,
+    named: BTreeMap<i32, i32>,
+}
+
+impl Serialize for Collected {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: rusty_serde::Serializer,
+    {
+        use rusty_serde::ser::SerializeTuple;
+        let mut tuple = serializer.serialize_tuple(2)?;
+        struct SeqField<'a>(&'a Vec<i32>);
+        impl<'a> Serialize for SeqField<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: rusty_serde::Serializer,
+            {
+                serializer.collect_seq(self.0.iter().map(|v| v * 2))
+            }
+        }
+        struct MapField<'a>(&'a BTreeMap<i32, i32>);
+        impl<'a> Serialize for MapField<'a> {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: rusty_serde::Serializer,
+            {
+                serializer.collect_map(self.0.iter().map(|(k, v)| (*k, *v)))
+            }
+        }
+        SerializeTuple::serialize_element(&mut tuple, &SeqField(&self.doubled))?;
+        SerializeTuple::serialize_element(&mut tuple, &MapField(&self.named))?;
+        SerializeTuple::end(tuple)
+    }
+}
+
+#[test]
+fn collect_seq_and_collect_map_match_the_manual_equivalents() {
+    let mut named = BTreeMap::new();
+    named.insert(1, 10);
+    named.insert(2, 20);
+    let value = Collected {
+        doubled: vec![1, 2, 3],
+        named,
+    };
+    assert_eq!(
+        json::to_string(&value).unwrap(),
+        r#"[[2,4,6],{"1":10,"2":20}]"#
+    );
+    assert_eq!(ron::to_string(&value).unwrap(), "[[2,4,6],{1:10,2:20}]");
+}
+
+struct Display3;
+impl std::fmt::Display for Display3 {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "three")
+    }
+}
+struct CollectStr;
+impl Serialize for CollectStr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: rusty_serde::Serializer,
+    {
+        serializer.collect_str(&Display3)
+    }
+}
+
+#[test]
+fn collect_str_matches_serialize_str() {
+    assert_eq!(json::to_string(&CollectStr).unwrap(), r#""three""#);
+    assert_eq!(ron::to_string(&CollectStr).unwrap(), r#""three""#);
+}

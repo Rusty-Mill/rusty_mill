@@ -124,6 +124,11 @@ toolchain, not a crate you depend on), and everything else is `std`.
   ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
   `true`; both of this crate's own formats (`json`, `ron`) are text-based
   and inherit that default.
+- `Serializer::collect_seq`/`collect_map`/`collect_str`, for serializing
+  straight from an `Iterator`/`Display` value without collecting into a
+  `Vec`/`HashMap`/`String` first. Default impls built on the existing
+  `serialize_seq`/`serialize_map`/`serialize_str`, so every `Serializer`
+  implementation (including `json`/`ron`) gets them for free.
 
 Generics work without the derive macro's parser ever looking at field
 *types* (it only needs field/variant *names*, since `Serialize`/
