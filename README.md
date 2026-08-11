@@ -48,7 +48,11 @@ toolchain, not a crate you depend on), and everything else is `std`.
   parameters (`struct Foo<'a, T: Clone> { ... }`).
 - Enums: unit, newtype, tuple, and struct variants, serialized the way serde
   calls "externally tagged" (`"Variant"` for a unit variant,
-  `{"Variant": ...}` otherwise) - generic the same way structs are.
+  `{"Variant": ...}` otherwise) - generic the same way structs are. A unit
+  variant marked `#[rusty_serde(other)]` is the deserialize catch-all for
+  any tag that doesn't match another variant (external or internally
+  tagged; not meaningful on `untagged`, which already tries every variant),
+  discarding whatever data came with the unrecognized tag.
 - `bool`, all integer widths, `f32`/`f64`, `char`, `String`, `Option<T>`,
   `Vec<T>`, tuples up to arity 8, `HashMap`/`BTreeMap`, `Box<T>`.
 - Unknown JSON object fields are ignored during deserialization; missing

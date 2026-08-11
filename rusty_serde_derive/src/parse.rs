@@ -75,6 +75,10 @@ pub struct Attrs {
     /// an unrecognized field/key. Mutually exclusive with a `flatten`
     /// field, which needs somewhere to put unrecognized keys.
     pub deny_unknown_fields: bool,
+    /// Variant-only: this (unit) variant is the deserialize catch-all for
+    /// a tag value that doesn't match any other variant, instead of that
+    /// being a hard error. At most one variant per enum.
+    pub other: bool,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -127,6 +131,7 @@ impl Attrs {
             && self.tag.is_none()
             && !self.untagged
             && !self.deny_unknown_fields
+            && !self.other
     }
 }
 
@@ -456,6 +461,27 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
                     v.name
                 )));
             }
+        }
+    }
+
+    let other_variants: Vec<&Variant> = variants.iter().filter(|v| v.attrs.other).collect();
+    if other_variants.len() > 1 {
+        return Err(compile_error(&format!(
+            "at most one variant can be `#[rusty_serde(other)]` (on `{name}`)"
+        )));
+    }
+    if let Some(other) = other_variants.first() {
+        if !matches!(other.fields, Fields::Unit) {
+            return Err(compile_error(&format!(
+                "`#[rusty_serde(other)]` is only supported on a unit variant (on `{}`)",
+                other.name
+            )));
+        }
+        if container_attrs.untagged {
+            return Err(compile_error(&format!(
+                "`#[rusty_serde(other)]` is not supported on an untagged enum - every \
+                 variant is already tried in turn (on `{name}`)"
+            )));
         }
     }
 
@@ -1185,6 +1211,17 @@ fn parse_one_meta_item(
                 return Err(compile_error("`deny_unknown_fields` does not take a value"));
             }
             attrs.deny_unknown_fields = true;
+        }
+        "other" => {
+            if context != "variant" {
+                return Err(compile_error(&format!(
+                    "`other` is only supported on an enum variant, not on a {context}"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`other` does not take a value"));
+            }
+            attrs.other = true;
         }
         other => {
             return Err(compile_error(&format!(

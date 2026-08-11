@@ -980,3 +980,40 @@ fn rename_bare_form_still_sets_both_directions() {
         r#"{"n":"hi","count":0,"plain":false}"#,
     );
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum ExternallyTaggedWithOther {
+    Known,
+    #[rusty_serde(other)]
+    Unknown,
+}
+
+#[test]
+fn other_variant_catches_an_unrecognized_external_tag() {
+    let decoded: ExternallyTaggedWithOther = json::from_str(r#""Known""#).unwrap();
+    assert_eq!(decoded, ExternallyTaggedWithOther::Known);
+
+    let decoded: ExternallyTaggedWithOther = json::from_str(r#""SomethingElse""#).unwrap();
+    assert_eq!(decoded, ExternallyTaggedWithOther::Unknown);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind")]
+enum InternallyTaggedWithOther {
+    Known {
+        x: i32,
+    },
+    #[rusty_serde(other)]
+    Unknown,
+}
+
+#[test]
+fn other_variant_catches_an_unrecognized_internal_tag_and_discards_its_data() {
+    let decoded: InternallyTaggedWithOther = json::from_str(r#"{"kind":"Known","x":1}"#).unwrap();
+    assert_eq!(decoded, InternallyTaggedWithOther::Known { x: 1 });
+
+    // Whatever fields came with the unrecognized tag are simply discarded.
+    let decoded: InternallyTaggedWithOther =
+        json::from_str(r#"{"kind":"SomethingElse","y":"whatever","z":[1,2,3]}"#).unwrap();
+    assert_eq!(decoded, InternallyTaggedWithOther::Unknown);
+}
