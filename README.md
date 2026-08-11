@@ -36,8 +36,13 @@ assert_eq!(point, Point { x: 1, y: 2 });
 - **`rusty_serde_derive`** - the `#[derive(Serialize)]` / `#[derive(Deserialize)]`
   proc-macro, written directly against the compiler-provided `proc_macro`
   crate (no `syn`, no `quote`).
+- **`rusty_serde_erased`** - a single unsafe primitive (`Out`, for handing
+  a typed output slot across an object-safe/`dyn`-compatible boundary),
+  isolated in its own crate so `rusty_serde` and `rusty_serde_derive` can
+  stay entirely safe Rust. Not part of the public API surface either of
+  those crates promise - an internal building block.
 
-Run `cargo tree` and there's nothing there but the two crates in this
+Run `cargo tree` and there's nothing there but the three crates in this
 workspace - the derive macro talks to `proc_macro` (part of the Rust
 toolchain, not a crate you depend on), and everything else is `std`.
 
