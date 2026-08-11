@@ -257,7 +257,11 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
 
     let body = match tokens.next() {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => g.stream(),
-        _ => return Err(compile_error(&format!("expected `{{ ... }}` after `enum {name}`"))),
+        _ => {
+            return Err(compile_error(&format!(
+                "expected `{{ ... }}` after `enum {name}`"
+            )))
+        }
     };
 
     let mut variants = Vec::new();
@@ -689,7 +693,10 @@ fn parse_attrs(tokens: &mut Tokens, context: &str) -> Result<Attrs, TokenStream>
 /// Parses one `#[...]` attribute's contents. Returns `Ok(None)` for any
 /// attribute that isn't `rusty_serde(...)` (left untouched, same as
 /// `#[derive(...)]`'s own siblings like `#[doc = "..."]`).
-fn parse_one_attr_group(group: proc_macro::Group, context: &str) -> Result<Option<Attrs>, TokenStream> {
+fn parse_one_attr_group(
+    group: proc_macro::Group,
+    context: &str,
+) -> Result<Option<Attrs>, TokenStream> {
     let mut it = group.stream().into_iter().peekable();
     match it.peek() {
         Some(TokenTree::Ident(id)) if id.to_string() == "rusty_serde" => {}
@@ -769,10 +776,16 @@ fn parse_one_meta_item(
             }
             let value = match it.next() {
                 Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
-                _ => return Err(compile_error("expected a string literal after `rename_all =`")),
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `rename_all =`",
+                    ))
+                }
             };
             if it.peek().is_some() {
-                return Err(compile_error("unexpected tokens after `rename_all = \"...\"`"));
+                return Err(compile_error(
+                    "unexpected tokens after `rename_all = \"...\"`",
+                ));
             }
             if !RENAME_ALL_STYLES.contains(&value.as_str()) {
                 return Err(compile_error(&format!(
@@ -838,7 +851,9 @@ fn parse_one_meta_item(
 fn parse_string_literal(lit: &proc_macro::Literal) -> Result<String, TokenStream> {
     let text = lit.to_string();
     if !(text.starts_with('"') && text.ends_with('"') && text.len() >= 2) {
-        return Err(compile_error(&format!("expected a string literal, found `{text}`")));
+        return Err(compile_error(&format!(
+            "expected a string literal, found `{text}`"
+        )));
     }
     let inner = &text[1..text.len() - 1];
     let mut out = String::with_capacity(inner.len());
@@ -888,7 +903,9 @@ fn expect_ident(tokens: &mut Tokens, what: &str) -> Result<String, TokenStream> 
     match tokens.next() {
         Some(TokenTree::Ident(ident)) => Ok(ident.to_string()),
         Some(other) => Err(compile_error(&format!("expected {what}, found `{other}`"))),
-        None => Err(compile_error(&format!("expected {what}, found end of input"))),
+        None => Err(compile_error(&format!(
+            "expected {what}, found end of input"
+        ))),
     }
 }
 

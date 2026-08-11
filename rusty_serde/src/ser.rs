@@ -195,11 +195,7 @@ pub trait SerializeMap {
 pub trait SerializeStruct {
     type Ok;
     type Error: Error;
-    fn serialize_field<T>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: Serialize + ?Sized;
     fn end(self) -> Result<Self::Ok, Self::Error>;
@@ -208,11 +204,7 @@ pub trait SerializeStruct {
 pub trait SerializeStructVariant {
     type Ok;
     type Error: Error;
-    fn serialize_field<T>(
-        &mut self,
-        key: &'static str,
-        value: &T,
-    ) -> Result<(), Self::Error>
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), Self::Error>
     where
         T: Serialize + ?Sized;
     fn end(self) -> Result<Self::Ok, Self::Error>;

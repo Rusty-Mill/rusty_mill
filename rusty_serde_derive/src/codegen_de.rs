@@ -25,7 +25,12 @@ pub fn generate(data: &Data) -> String {
 /// `entries` pairs each Rust identifier (the enum variant name, and the
 /// field/variant name used everywhere else in the generated code) with the
 /// wire name to match against (its own name, unless renamed).
-fn ident_enum(ty: &str, entries: &[(String, String)], expecting: &str, allow_unknown: bool) -> String {
+fn ident_enum(
+    ty: &str,
+    entries: &[(String, String)],
+    expecting: &str,
+    allow_unknown: bool,
+) -> String {
     let mut decls: Vec<String> = entries.iter().map(|(ident, _)| ident.clone()).collect();
     if allow_unknown {
         decls.push("__ignore".to_string());
@@ -184,7 +189,11 @@ fn visit_map_body(field_enum: &str, fields: &[NamedField], constructor: &str) ->
             );
         }
     }
-    let field_list = fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
+    let field_list = fields
+        .iter()
+        .map(|f| f.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
     out += &format!("Ok({constructor} {{ {field_list} }})\n");
     out
 }

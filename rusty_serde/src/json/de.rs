@@ -909,7 +909,12 @@ impl<'de> EnumAccess<'de> for InternalTagEnumAccess {
         let value = V::deserialize(StrDeserializer {
             value: &self.variant,
         })?;
-        Ok((value, InternalTagVariantAccess { entries: self.entries }))
+        Ok((
+            value,
+            InternalTagVariantAccess {
+                entries: self.entries,
+            },
+        ))
     }
 }
 
@@ -985,18 +990,14 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
             b'-' | b'0'..=b'9' => {
                 let (text, is_float) = self.parse_number_raw()?;
                 if is_float {
-                    let v: f64 = text
-                        .parse()
-                        .map_err(|_| self.error("invalid number"))?;
+                    let v: f64 = text.parse().map_err(|_| self.error("invalid number"))?;
                     visitor.visit_f64(v)
                 } else if let Ok(v) = text.parse::<i64>() {
                     visitor.visit_i64(v)
                 } else if let Ok(v) = text.parse::<u64>() {
                     visitor.visit_u64(v)
                 } else {
-                    let v: f64 = text
-                        .parse()
-                        .map_err(|_| self.error("invalid number"))?;
+                    let v: f64 = text.parse().map_err(|_| self.error("invalid number"))?;
                     visitor.visit_f64(v)
                 }
             }
@@ -1048,7 +1049,9 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
         if is_float {
             return Err(self.error("expected an integer, found a float"));
         }
-        let v: i64 = text.parse().map_err(|_| self.error("integer out of range"))?;
+        let v: i64 = text
+            .parse()
+            .map_err(|_| self.error("integer out of range"))?;
         visitor.visit_i64(v)
     }
 
@@ -1079,7 +1082,9 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
         if is_float {
             return Err(self.error("expected an integer, found a float"));
         }
-        let v: u64 = text.parse().map_err(|_| self.error("integer out of range"))?;
+        let v: u64 = text
+            .parse()
+            .map_err(|_| self.error("integer out of range"))?;
         visitor.visit_u64(v)
     }
 
@@ -1171,11 +1176,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
         self.parse_literal("null")?;
         visitor.visit_unit()
     }
-    fn deserialize_unit_struct<V>(
-        self,
-        _name: &'static str,
-        visitor: V,
-    ) -> Result<V::Value, Error>
+    fn deserialize_unit_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Error>
     where
         V: Visitor<'de>,
     {

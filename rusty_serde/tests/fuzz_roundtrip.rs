@@ -116,7 +116,11 @@ fn gen_value(rng: &mut Rng, depth: u32) -> FuzzValue {
     }
     match rng.gen_range(8) {
         0..=5 => gen_leaf(rng),
-        6 => FuzzValue::List((0..rng.gen_range(4)).map(|_| gen_value(rng, depth - 1)).collect()),
+        6 => FuzzValue::List(
+            (0..rng.gen_range(4))
+                .map(|_| gen_value(rng, depth - 1))
+                .collect(),
+        ),
         _ => FuzzValue::Map(
             (0..rng.gen_range(4))
                 .map(|_| (rng.gen_string(8), gen_value(rng, depth - 1)))
@@ -132,9 +136,8 @@ fn fuzz_roundtrip_arbitrary_values() {
     let mut rng = Rng::new(0xC0FFEE);
     for i in 0..ITERATIONS {
         let value = gen_value(&mut rng, 4);
-        let json = json::to_string(&value).unwrap_or_else(|e| {
-            panic!("iteration {i}: failed to encode {value:?}: {e}")
-        });
+        let json = json::to_string(&value)
+            .unwrap_or_else(|e| panic!("iteration {i}: failed to encode {value:?}: {e}"));
         let decoded: FuzzValue = json::from_str(&json)
             .unwrap_or_else(|e| panic!("iteration {i}: failed to decode {json:?}: {e}"));
         assert_eq!(decoded, value, "iteration {i}: json was {json:?}");
@@ -146,9 +149,8 @@ fn fuzz_roundtrip_strings() {
     let mut rng = Rng::new(0xBADC0DE);
     for i in 0..ITERATIONS {
         let s = rng.gen_string(48);
-        let json = json::to_string(&s).unwrap_or_else(|e| {
-            panic!("iteration {i}: failed to encode {s:?}: {e}")
-        });
+        let json = json::to_string(&s)
+            .unwrap_or_else(|e| panic!("iteration {i}: failed to encode {s:?}: {e}"));
         let decoded: String = json::from_str(&json)
             .unwrap_or_else(|e| panic!("iteration {i}: failed to decode {json:?}: {e}"));
         assert_eq!(decoded, s, "iteration {i}: json was {json:?}");
