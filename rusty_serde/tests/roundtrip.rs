@@ -884,3 +884,44 @@ fn deny_unknown_fields_applies_to_struct_variants_too() {
         }
     );
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct OneDirectional {
+    name: String,
+    #[rusty_serde(skip_serializing)]
+    write_only_absent: i32,
+    #[rusty_serde(skip_deserializing)]
+    read_only_absent: i32,
+}
+
+#[test]
+fn skip_serializing_omits_the_field_but_still_reads_it() {
+    let value = OneDirectional {
+        name: "x".into(),
+        write_only_absent: 9,
+        read_only_absent: 1,
+    };
+    let json = json::to_string(&value).unwrap();
+    assert!(!json.contains("write_only_absent"));
+    assert!(json.contains("read_only_absent"));
+
+    // `write_only_absent` isn't on the wire (skip_serializing doesn't
+    // affect deserialize), so it still has to be supplied to round-trip
+    // through deserialize; `read_only_absent` is on the wire but always
+    // defaults away regardless of what's supplied (skip_deserializing).
+    let decoded: OneDirectional =
+        json::from_str(r#"{"name":"x","write_only_absent":9,"read_only_absent":1}"#).unwrap();
+    assert_eq!(decoded.name, "x");
+    assert_eq!(decoded.write_only_absent, 9);
+    assert_eq!(decoded.read_only_absent, 0);
+}
+
+#[test]
+fn skip_deserializing_always_defaults_but_still_writes() {
+    // `read_only_absent` is never read from the wire even if present - it's
+    // always defaulted, same as `skip`'s read side.
+    let decoded: OneDirectional =
+        json::from_str(r#"{"name":"x","write_only_absent":9,"read_only_absent":999}"#).unwrap();
+    assert_eq!(decoded.read_only_absent, 0);
+    assert_eq!(decoded.write_only_absent, 9);
+}

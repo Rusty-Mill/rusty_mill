@@ -36,7 +36,17 @@ pub struct Attrs {
     /// `#[rusty_serde(default = "path")]` (falls back to calling an
     /// arbitrary zero-arg path) when the field is missing on deserialize.
     pub default: Option<DefaultAttr>,
+    /// `#[rusty_serde(skip)]` - shorthand for setting both
+    /// `skip_serializing` and `skip_deserializing`.
     pub skip: bool,
+    /// `#[rusty_serde(skip_serializing)]` - the field is never serialized
+    /// (as if it didn't exist on the wire), but is still read on
+    /// deserialize if present.
+    pub skip_serializing: bool,
+    /// `#[rusty_serde(skip_deserializing)]` - the field is never read from
+    /// the wire (always falls back to `default`/`Default::default()`,
+    /// exactly like `skip`'s read side), but is still serialized.
+    pub skip_deserializing: bool,
     /// A raw Rust path (e.g. `"Option::is_none"`), called as `path(&self.field)`
     /// during serialization; the field is omitted from the output (and from
     /// the struct's computed length) whenever it returns `true`.
@@ -74,10 +84,23 @@ pub enum DefaultAttr {
 }
 
 impl Attrs {
+    /// The field is never written to the wire - `skip` or `skip_serializing`.
+    pub fn skips_serializing(&self) -> bool {
+        self.skip || self.skip_serializing
+    }
+
+    /// The field is never read from the wire (always defaulted) - `skip`
+    /// or `skip_deserializing`.
+    pub fn skips_deserializing(&self) -> bool {
+        self.skip || self.skip_deserializing
+    }
+
     fn is_default(&self) -> bool {
         self.rename.is_none()
             && self.default.is_none()
             && !self.skip
+            && !self.skip_serializing
+            && !self.skip_deserializing
             && self.skip_serializing_if.is_none()
             && !self.flatten
             && self.aliases.is_empty()
@@ -957,6 +980,28 @@ fn parse_one_meta_item(
                 return Err(compile_error("`skip` does not take a value"));
             }
             attrs.skip = true;
+        }
+        "skip_serializing" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`skip_serializing` is not supported on {context}s"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`skip_serializing` does not take a value"));
+            }
+            attrs.skip_serializing = true;
+        }
+        "skip_deserializing" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`skip_deserializing` is not supported on {context}s"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`skip_deserializing` does not take a value"));
+            }
+            attrs.skip_deserializing = true;
         }
         "skip_serializing_if" => {
             if context != "field" {
