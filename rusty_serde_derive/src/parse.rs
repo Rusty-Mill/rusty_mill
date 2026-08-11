@@ -89,6 +89,10 @@ pub struct Attrs {
     /// derive's auto-generated `T: Serialize`/`T: Deserialize` where-clause
     /// entirely (both directions) with this raw predicate text.
     pub bound: Option<String>,
+    /// Container-only: `#[rusty_serde(from = "T")]` (`Self::from`) or
+    /// `#[rusty_serde(try_from = "T")]` (`Self::try_from`) - mutually
+    /// exclusive with each other.
+    pub from: Option<FromAttr>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -144,6 +148,7 @@ impl Attrs {
             && !self.other
             && !self.transparent
             && self.bound.is_none()
+            && self.from.is_none()
     }
 }
 
@@ -203,6 +208,11 @@ pub enum Data {
         /// `false` unless `fields` is `Fields::Named` with exactly one
         /// field (any other shape is a compile error at parse time).
         transparent: bool,
+        /// From a container-level `#[rusty_serde(from = "T")]`/
+        /// `#[rusty_serde(try_from = "T")]` - when set, replaces the
+        /// entire generated `Deserialize` impl (ignoring `fields`
+        /// entirely) with one that deserializes `T` and converts.
+        from: Option<FromAttr>,
     },
     Enum {
         name: String,
@@ -214,7 +224,21 @@ pub enum Data {
         untagged: bool,
         /// From a container-level `#[rusty_serde(deny_unknown_fields)]`.
         deny_unknown_fields: bool,
+        /// See `Data::Struct::from`.
+        from: Option<FromAttr>,
     },
+}
+
+/// Where a container's `#[rusty_serde(from...)]` intermediate type comes
+/// from, and whether the conversion back to `Self` is infallible.
+#[derive(Clone)]
+pub enum FromAttr {
+    /// `#[rusty_serde(from = "T")]` - `Self::from(T)`, via `Into`.
+    From(String),
+    /// `#[rusty_serde(try_from = "T")]` - `Self::try_from(T)`, via
+    /// `TryFrom`, with the conversion error reported through
+    /// `Error::custom` (so it must implement `Display`).
+    TryFrom(String),
 }
 
 /// A type parameter's name plus any bounds it already declared (raw source
@@ -432,6 +456,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         fields,
         deny_unknown_fields: container_attrs.deny_unknown_fields,
         transparent: container_attrs.transparent,
+        from: container_attrs.from,
     })
 }
 
@@ -544,6 +569,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         tag: container_attrs.tag,
         untagged: container_attrs.untagged,
         deny_unknown_fields: container_attrs.deny_unknown_fields,
+        from: container_attrs.from,
     })
 }
 
@@ -1304,6 +1330,60 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `bound = \"...\"`"));
             }
             attrs.bound = Some(value);
+        }
+        "from" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`from` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `from = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `from =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `from = \"...\"`"));
+            }
+            if attrs.from.is_some() {
+                return Err(compile_error(
+                    "`from` and `try_from` can't both be set - pick one",
+                ));
+            }
+            attrs.from = Some(FromAttr::From(value));
+        }
+        "try_from" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`try_from` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `try_from = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `try_from =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `try_from = \"...\"`",
+                ));
+            }
+            if attrs.from.is_some() {
+                return Err(compile_error(
+                    "`from` and `try_from` can't both be set - pick one",
+                ));
+            }
+            attrs.from = Some(FromAttr::TryFrom(value));
         }
         other => {
             return Err(compile_error(&format!(

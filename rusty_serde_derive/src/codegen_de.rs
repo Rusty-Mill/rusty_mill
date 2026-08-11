@@ -1,4 +1,4 @@
-use crate::parse::{Data, DefaultAttr, Fields, Generics, NamedField, Variant};
+use crate::parse::{Data, DefaultAttr, Fields, FromAttr, Generics, NamedField, Variant};
 
 pub fn generate(data: &Data) -> String {
     match data {
@@ -8,7 +8,11 @@ pub fn generate(data: &Data) -> String {
             fields,
             deny_unknown_fields,
             transparent,
-        } => struct_impl(name, generics, fields, *deny_unknown_fields, *transparent),
+            from,
+        } => match from {
+            Some(from) => from_impl(name, generics, from),
+            None => struct_impl(name, generics, fields, *deny_unknown_fields, *transparent),
+        },
         Data::Enum {
             name,
             generics,
@@ -16,15 +20,51 @@ pub fn generate(data: &Data) -> String {
             tag,
             untagged,
             deny_unknown_fields,
-        } => enum_impl(
-            name,
-            generics,
-            variants,
-            tag.as_deref(),
-            *untagged,
-            *deny_unknown_fields,
-        ),
+            from,
+        } => match from {
+            Some(from) => from_impl(name, generics, from),
+            None => enum_impl(
+                name,
+                generics,
+                variants,
+                tag.as_deref(),
+                *untagged,
+                *deny_unknown_fields,
+            ),
+        },
     }
+}
+
+/// `#[rusty_serde(from = "T")]`/`#[rusty_serde(try_from = "T")]`: the
+/// entire `Deserialize` impl is just "deserialize a `T`, then convert" -
+/// none of the container's own fields/variants matter to *this* impl at
+/// all (they still matter to `T`'s own `Deserialize`, wherever that comes
+/// from). Applies identically to a struct or an enum container.
+fn from_impl(name: &str, generics: &Generics, from: &FromAttr) -> String {
+    let ty = generics.ty(name);
+    let impl_decl = generics.impl_decl(Some("'de"));
+    let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
+    let body = match from {
+        FromAttr::From(intermediate) => format!(
+            "let __intermediate: {intermediate} = ::rusty_serde::Deserialize::deserialize(deserializer)?;\n\
+             Ok(::std::convert::From::from(__intermediate))"
+        ),
+        FromAttr::TryFrom(intermediate) => format!(
+            "let __intermediate: {intermediate} = ::rusty_serde::Deserialize::deserialize(deserializer)?;\n\
+             <{ty} as ::std::convert::TryFrom<{intermediate}>>::try_from(__intermediate)\n\
+                 .map_err(::rusty_serde::Error::custom)"
+        ),
+    };
+    format!(
+        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
+             fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
+             where\n\
+                 __D: ::rusty_serde::Deserializer<'de>,\n\
+             {{\n\
+                 {body}\n\
+             }}\n\
+         }}\n"
+    )
 }
 
 /// `enum {ty} { name0, name1, ..., [__ignore] }` plus a `Deserialize` impl
