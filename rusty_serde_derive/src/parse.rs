@@ -123,6 +123,13 @@ pub struct Attrs {
     /// `fn<S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error>`
     /// convention.
     pub serialize_with: Option<String>,
+    /// Field-only, named struct fields only:
+    /// `#[rusty_serde(deserialize_with = "path::to::fn")]` - reads via
+    /// `path::to::fn(deserializer)` instead of the field's own
+    /// `Deserialize` impl. `path::to::fn` must match the ordinary
+    /// `fn<'de, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>`
+    /// convention.
+    pub deserialize_with: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -184,6 +191,7 @@ impl Attrs {
             && self.remote.is_none()
             && self.getter.is_none()
             && self.serialize_with.is_none()
+            && self.deserialize_with.is_none()
     }
 }
 
@@ -995,6 +1003,19 @@ fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, T
                  not enum variant fields (on field `{name}`)"
             )));
         }
+        if attrs.deserialize_with.is_some() && owner == "variant" {
+            return Err(compile_error(&format!(
+                "rusty_serde_derive only supports `deserialize_with` on top-level struct \
+                 fields, not enum variant fields (on field `{name}`)"
+            )));
+        }
+        if attrs.deserialize_with.is_some() && attrs.flatten {
+            return Err(compile_error(&format!(
+                "`deserialize_with` and `flatten` can't both be set (on field `{name}`) - a \
+                 flattened field is built from the parent's own leftover entries, not read as \
+                 a single value"
+            )));
+        }
         if attrs.serialize_with.is_some() && attrs.getter.is_some() {
             return Err(compile_error(&format!(
                 "`serialize_with` and `getter` can't both be set (on field `{name}`) - route \
@@ -1560,6 +1581,31 @@ fn parse_one_meta_item(
                 ));
             }
             attrs.serialize_with = Some(value);
+        }
+        "deserialize_with" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`deserialize_with` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `deserialize_with = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `deserialize_with =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `deserialize_with = \"...\"`",
+                ));
+            }
+            attrs.deserialize_with = Some(value);
         }
         "remote" => {
             if context != "container" {

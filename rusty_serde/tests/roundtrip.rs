@@ -1354,21 +1354,34 @@ fn remote_derive_getter_reads_a_private_field_via_a_function() {
 }
 
 mod as_seconds {
-    use rusty_serde::Serializer;
+    use rusty_serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
     pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_u64(value.as_secs())
     }
+
+    // A robust `deserialize_with` delegates to an existing `Deserialize`
+    // impl (here, `u64`'s) rather than writing a bespoke `Visitor` -
+    // besides being less code, `u64::deserialize` already handles the fact
+    // that this crate's `Value` buffering (which `deserialize_with` always
+    // goes through - see `rusty_serde::erased`'s module docs) stores a
+    // small non-negative JSON integer as `Value::Int` via `visit_i64`, not
+    // `Value::UInt`/`visit_u64` (`text.parse::<i64>()` is tried first) - a
+    // hand-rolled `Visitor` would need to implement both.
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
 }
 
-// `Duration` has no `Serialize` impl of its own in this crate - only
-// `Serialize` is derived here (`serialize_with` doesn't touch deserialize;
-// `deserialize_with` is a separate, not-yet-implemented attribute).
-#[derive(Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct Event {
     name: String,
-    #[rusty_serde(serialize_with = "as_seconds::serialize")]
+    #[rusty_serde(
+        serialize_with = "as_seconds::serialize",
+        deserialize_with = "as_seconds::deserialize"
+    )]
     elapsed: std::time::Duration,
 }
 
@@ -1384,9 +1397,24 @@ fn serialize_with_reformats_a_field_via_a_function() {
     );
 }
 
-#[derive(Serialize)]
+#[test]
+fn with_round_trips_through_json() {
+    let value = Event {
+        name: "boot".to_string(),
+        elapsed: std::time::Duration::from_secs(90),
+    };
+    let encoded = json::to_string(&value).unwrap();
+    let decoded: Event = json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, value);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct EventRenamed {
-    #[rusty_serde(rename = "at", serialize_with = "as_seconds::serialize")]
+    #[rusty_serde(
+        rename = "at",
+        serialize_with = "as_seconds::serialize",
+        deserialize_with = "as_seconds::deserialize"
+    )]
     elapsed: std::time::Duration,
 }
 
@@ -1396,4 +1424,72 @@ fn serialize_with_combines_with_rename() {
         elapsed: std::time::Duration::from_secs(3),
     };
     assert_eq!(json::to_string(&value).unwrap(), r#"{"at":3}"#);
+}
+
+#[test]
+fn deserialize_with_combines_with_rename() {
+    let decoded: EventRenamed = json::from_str(r#"{"at":3}"#).unwrap();
+    assert_eq!(
+        decoded,
+        EventRenamed {
+            elapsed: std::time::Duration::from_secs(3)
+        }
+    );
+}
+
+mod as_upper {
+    use rusty_serde::{Deserialize, Deserializer, Serializer};
+
+    // `&String`, not `&str`: `serialize_with` calls this with `&self.field`
+    // directly, so the parameter has to match the field's own declared
+    // type exactly (here, `String`) for the call to type-check.
+    #[allow(clippy::ptr_arg)]
+    pub fn serialize<S: Serializer>(value: &String, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&value.to_uppercase())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        String::deserialize(deserializer).map(|s| s.to_lowercase())
+    }
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Tag {
+    #[rusty_serde(
+        serialize_with = "as_upper::serialize",
+        deserialize_with = "as_upper::deserialize"
+    )]
+    label: String,
+}
+
+#[test]
+fn deserialize_with_reformats_a_string_field() {
+    let decoded: Tag = json::from_str(r#"{"label":"HI"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Tag {
+            label: "hi".to_string()
+        }
+    );
+}
+
+mod fails_to_deserialize {
+    use rusty_serde::{Deserializer, Error};
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(_deserializer: D) -> Result<i32, D::Error> {
+        Err(D::Error::custom("always fails"))
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
+struct AlwaysFails {
+    #[rusty_serde(deserialize_with = "fails_to_deserialize::deserialize")]
+    value: i32,
+}
+
+#[test]
+fn deserialize_with_propagates_a_custom_error() {
+    let err = json::from_str::<AlwaysFails>(r#"{"value":1}"#).unwrap_err();
+    assert!(err.to_string().contains("always fails"));
 }

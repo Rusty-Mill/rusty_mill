@@ -275,12 +275,32 @@ fn visit_map_body(
     );
     for f in &normal {
         let ident = &f.name;
+        // `deserialize_with = "path"` routes the field through `path`
+        // instead of its own `Deserialize` impl. `path` needs a concrete
+        // `D: Deserializer<'de>` to be handed a monomorphized type it can
+        // type-check against (see `rusty_serde::erased`'s module docs) -
+        // buffering through `Value`/`ValueDeserializer` first (the same
+        // machinery `flatten`/untagged enums already use) sidesteps ever
+        // needing to name the field's own type here, the same way a plain
+        // `next_value()` call already does via inference.
+        let read = match &f.attrs.deserialize_with {
+            Some(with_fn) => format!(
+                "{{\n\
+                     let __raw: ::rusty_serde::Value = ::rusty_serde::de::MapAccess::next_value(&mut map)?;\n\
+                     ::rusty_serde::erased::call_with_deserialize(\n\
+                         ::rusty_serde::value::ValueDeserializer::<{map_error_ty}>::new(__raw),\n\
+                         |__d| {with_fn}(__d),\n\
+                     )?\n\
+                 }}"
+            ),
+            None => "::rusty_serde::de::MapAccess::next_value(&mut map)?".to_string(),
+        };
         out += &format!(
             "                {field_enum}::{ident} => {{\n\
                      if __{ident}.is_some() {{\n\
                          return Err(::rusty_serde::Error::custom({dup:?}));\n\
                      }}\n\
-                     __{ident} = Some(::rusty_serde::de::MapAccess::next_value(&mut map)?);\n\
+                     __{ident} = Some({read});\n\
                  }}\n",
             dup = format!("duplicate field `{}`", f.de_wire_name())
         );
