@@ -322,6 +322,24 @@ them yet.
   Windows hardware again. Every macOS/BSD reactor path stays
   reviewed-but-unverified until someone runs *this* crate's own test
   suite on real hardware there too.
+
+  A consumer (`rusty_prime_agent`'s daemon-restart integration test) hit
+  exactly the kind of gap that one real run couldn't have caught: on
+  Windows, rebinding a `UnixListener` at a path whose previous owning
+  process was just force-killed could fail with a bogus `os error 0`
+  instead of either succeeding or a real `AddrInUse` -- but only when
+  that process also held a second, live outbound `AF_UNIX` connection
+  open at the moment of the kill. Root cause and fix are entirely on the
+  `rustils` side (`unix_listen`'s stale-reclaim gate was too narrowly
+  keyed on literal `WSAEADDRINUSE`; see
+  `docs/decision-request-af-unix-stale-reclaim-race.md` in that repo) --
+  this crate adds no retry/reclaim logic of its own on top of
+  `platform_windows::WindowsUnixListener::bind`, so there was nothing to
+  change here. Flagged in this caveat because, like the fix itself, it
+  was diagnosed and pinned from a Linux-only sandbox with no native
+  Windows execution available this round -- unlike the real-hardware run
+  above, this one is cross-compile-checked only, pending a real
+  `windows-latest` confirmation on the `rustils` side.
 - **Async filesystem I/O** (`fs::File`): a regular file can't be
   registered with `epoll`/`kevent`'s readiness model the way a socket
   can -- the kernel considers it always "ready", and the actual disk

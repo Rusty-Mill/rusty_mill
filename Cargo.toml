@@ -28,7 +28,7 @@ libc = "0.2"
 # across all three so they all resolve to the identical `platform`
 # crate instance (mixing revs would make e.g. `platform::error::
 # PlatformError` from one checkout a different type than from another).
-platform = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+platform = { git = "https://github.com/baileyrd/rustils", rev = "4550f6900e8b9ead54374fbfcb1039b48307b2f3" }
 # The scheduler's per-worker local run queues and cross-worker stealing
 # (`runtime::Shared`) -- issue #8's lock-free swap. Not hand-rolled: a
 # Chase-Lev deque is real unsafe concurrent code, and this project has
@@ -124,7 +124,7 @@ thread-per-core = []
 io-uring-fs = ["dep:io-uring"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
-platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+platform-linux = { git = "https://github.com/baileyrd/rustils", rev = "4550f6900e8b9ead54374fbfcb1039b48307b2f3" }
 # Optional (see the `io-uring-reactor` feature below): handles ring
 # setup/mmap and SQE/CQE layout safely -- issue #9 explicitly named this
 # crate (what tokio-uring/glommio/monoio are all built on) as the usual
@@ -145,7 +145,7 @@ io-uring = { version = "0.6", optional = true }
 # exactly (they must agree, or this crate would either fail to resolve
 # a dependency it needs, or pull one in it can't use). See #116.
 [target.'cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))'.dependencies]
-platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "4550f6900e8b9ead54374fbfcb1039b48307b2f3" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # `platform-windows`, unlike the comment that used to be here: checked
@@ -164,7 +164,7 @@ platform-bsd = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce9642
 # change introduces) and for the one piece of the escape hatch that's
 # still missing (owned-socket adoption, blocking `UnixStream::connect`
 # from using it the same way Linux/BSD's `From<OwnedFd>` does).
-platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "93b00ce964284d93ea6cec2581b3543f08df8f2d" }
+platform-windows = { git = "https://github.com/baileyrd/rustils", rev = "4550f6900e8b9ead54374fbfcb1039b48307b2f3" }
 # `windows-sys` is Microsoft's own low-level FFI bindings, the same
 # crate mio itself depends on for its entire Windows backend (including
 # the undocumented AFD-poll protocol `io::reactor::windows` implements
