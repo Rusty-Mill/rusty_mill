@@ -21,6 +21,12 @@
 //! owns the path, left untouched. Mirrors the Linux backend's
 //! `sys::net::is_stale_socket` — same reasoning, same one-probe/
 //! one-retry shape, `DeleteFileW` in place of `unlinkat`.
+//!
+//! `unix_listen`'s stale-cleanup retry is also reached by one failure
+//! *other* than literal `WSAEADDRINUSE` — see [`is_stale_bind_candidate`]
+//! for the specific dead-listener race that motivates it, and
+//! `docs/decision-request-af-unix-stale-reclaim-race.md` for the full
+//! writeup.
 
 #![allow(unsafe_code)]
 
@@ -974,6 +980,38 @@ fn is_stale_socket(path: &Path) -> bool {
     r == w::WSAECONNREFUSED
 }
 
+/// Whether a failed `bind` is worth probing [`is_stale_socket`] over, not
+/// just the textbook `WSAEADDRINUSE` case.
+///
+/// A dead listener's leftover path is documented (this module's own doc
+/// comment) to always come back `WSAEADDRINUSE` — true on an idle system.
+/// It stops being true in one specific race: the previous owner is force-
+/// killed (`TerminateProcess`, not a graceful close) while it also holds
+/// a *second*, unrelated live `AF_UNIX` connection open (an outbound
+/// connection to some other path). Windows tears down a terminated
+/// process's whole socket table as one batch, and afunix.sys's bookkeeping
+/// for the path this function is trying to rebind can apparently still be
+/// mid-teardown when a fresh `bind` on it lands — Winsock reports the call
+/// as failed (`SOCKET_ERROR`) but leaves `WSAGetLastError` at `0`
+/// (success), which decodes to `OsCode::Win32(0)` / `ErrorKind::Other`
+/// here, not `AddrInUse`. See
+/// `docs/decision-request-af-unix-stale-reclaim-race.md` for the full
+/// writeup, the harness repro this was traced from, and why this is
+/// recorded as a decision request rather than a settled
+/// `docs/divergences.md` entry yet (this backend has not had the fix
+/// verified against a real `windows-latest` run).
+///
+/// A fresh, just-created socket's `bind` genuinely cannot fail with
+/// success — treating that specific nonsensical combination as an
+/// `AddrInUse`-equivalent candidate is safe rather than permissive:
+/// [`is_stale_socket`]'s own probe-connect is still the only thing that
+/// actually authorizes deleting the path, so a *real* live listener is
+/// never at risk of being reclaimed out from under it just because this
+/// gate widened.
+fn is_stale_bind_candidate(e: &PlatformError) -> bool {
+    e.kind == ErrorKind::AddrInUse || matches!(e.os, OsCode::Win32(0))
+}
+
 /// `socket` + `bind` (stale-cleanup retried once — see this module's doc
 /// comment) + `listen(SOMAXCONN)`.
 pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
@@ -989,7 +1027,7 @@ pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
     let first = raw_bind_unix(sock.raw(), path);
     let bound = match first {
         Ok(()) => Ok(()),
-        Err(e) if e.kind == ErrorKind::AddrInUse && is_stale_socket(path) => {
+        Err(e) if is_stale_bind_candidate(&e) && is_stale_socket(path) => {
             let wide = to_wide_nul(path.as_os_str());
             // Stays on windows-sys in both configurations: this is a
             // *filesystem* unlink sitting in a net module, and the
