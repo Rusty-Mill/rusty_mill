@@ -6,14 +6,23 @@ pub fn generate(data: &Data) -> String {
             name,
             generics,
             fields,
-        } => struct_impl(name, generics, fields),
+            deny_unknown_fields,
+        } => struct_impl(name, generics, fields, *deny_unknown_fields),
         Data::Enum {
             name,
             generics,
             variants,
             tag,
             untagged,
-        } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
+            deny_unknown_fields,
+        } => enum_impl(
+            name,
+            generics,
+            variants,
+            tag.as_deref(),
+            *untagged,
+            *deny_unknown_fields,
+        ),
     }
 }
 
@@ -166,6 +175,7 @@ fn visit_map_body(
     fields: &[NamedField],
     constructor: &str,
     map_error_ty: &str,
+    deny_unknown_fields: bool,
 ) -> String {
     let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
     let flatten_field = active.iter().find(|f| f.attrs.flatten).copied();
@@ -204,6 +214,14 @@ fn visit_map_body(
             "                {field_enum}::__ignore(__raw_key) => {{\n\
                      let __raw_value = ::rusty_serde::de::MapAccess::next_value::<::rusty_serde::Value>(&mut map)?;\n\
                      __flatten_entries.push((__raw_key, __raw_value));\n\
+                 }}\n\
+             }}\n\
+         }}\n"
+        )
+    } else if deny_unknown_fields {
+        format!(
+            "                {field_enum}::__ignore(__raw_key) => {{\n\
+                     return Err(::rusty_serde::Error::custom(::std::format!(\"unknown field `{{}}`\", __raw_key)));\n\
                  }}\n\
              }}\n\
          }}\n"
@@ -256,7 +274,12 @@ fn visit_map_body(
     out
 }
 
-fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
+fn struct_impl(
+    name: &str,
+    generics: &Generics,
+    fields: &Fields,
+    deny_unknown_fields: bool,
+) -> String {
     let ty = generics.ty(name);
     let body = match fields {
         Fields::Unit => {
@@ -384,7 +407,8 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                 .map(|f| format!("{:?}", f.wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let map_body = visit_map_body("__Field", fields, name, "__A::Error");
+            let map_body =
+                visit_map_body("__Field", fields, name, "__A::Error", deny_unknown_fields);
             let v = visitor("__Visitor", generics);
             format!(
                 "{ident_enum}\n\
@@ -431,9 +455,10 @@ fn enum_impl(
     variants: &[Variant],
     tag: Option<&str>,
     untagged: bool,
+    deny_unknown_fields: bool,
 ) -> String {
     if untagged {
-        return enum_impl_untagged(name, generics, variants);
+        return enum_impl_untagged(name, generics, variants, deny_unknown_fields);
     }
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
@@ -448,7 +473,14 @@ fn enum_impl(
 
     let mut arms = String::new();
     for variant in variants {
-        arms += &variant_arm(name, &ty, generics, &variant.name, &variant.fields);
+        arms += &variant_arm(
+            name,
+            &ty,
+            generics,
+            &variant.name,
+            &variant.fields,
+            deny_unknown_fields,
+        );
     }
 
     let v = visitor("__Visitor", generics);
@@ -512,11 +544,16 @@ fn enum_impl(
 /// `EnumAccess`/`VariantAccess` (built for the tagged case, where the
 /// variant is already known) don't fit this at all, so this generates a
 /// completely different `deserialize` body from `enum_impl`'s.
-fn enum_impl_untagged(name: &str, generics: &Generics, variants: &[Variant]) -> String {
+fn enum_impl_untagged(
+    name: &str,
+    generics: &Generics,
+    variants: &[Variant],
+    deny_unknown_fields: bool,
+) -> String {
     let ty = generics.ty(name);
     let mut attempts = String::new();
     for variant in variants {
-        let body = untagged_variant_body(name, &ty, generics, variant);
+        let body = untagged_variant_body(name, &ty, generics, variant, deny_unknown_fields);
         attempts += &format!(
             "if let Ok(__v) = (|| -> Result<Self, __D::Error> {{\n{body}\n}})() {{\n\
                  return Ok(__v);\n\
@@ -549,6 +586,7 @@ fn untagged_variant_body(
     enum_ty: &str,
     generics: &Generics,
     variant: &Variant,
+    deny_unknown_fields: bool,
 ) -> String {
     let vname = &variant.name;
     let constructor = format!("{enum_name}::{vname}");
@@ -624,7 +662,13 @@ fn untagged_variant_body(
                 .map(|f| format!("{:?}", f.wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let map_body = visit_map_body("__Field", fields, &constructor, "__A::Error");
+            let map_body = visit_map_body(
+                "__Field",
+                fields,
+                &constructor,
+                "__A::Error",
+                deny_unknown_fields,
+            );
             let v = visitor("__StructVisitor", generics);
             format!(
                 "{ident_enum}\n\
@@ -662,6 +706,7 @@ fn variant_arm(
     generics: &Generics,
     vname: &str,
     fields: &Fields,
+    deny_unknown_fields: bool,
 ) -> String {
     let constructor = format!("{enum_name}::{vname}");
     match fields {
@@ -738,7 +783,13 @@ fn variant_arm(
                 .map(|f| format!("{:?}", f.wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let map_body = visit_map_body("__SField", fields, &constructor, "__A::Error");
+            let map_body = visit_map_body(
+                "__SField",
+                fields,
+                &constructor,
+                "__A::Error",
+                deny_unknown_fields,
+            );
             let v = visitor("__StructVisitor", generics);
             format!(
                 "(__Field::{vname}, __variant) => {{\n\

@@ -53,6 +53,7 @@ pub fn generate(data: &Data) -> String {
             name,
             generics,
             fields,
+            deny_unknown_fields: _,
         } => struct_impl(name, generics, fields),
         Data::Enum {
             name,
@@ -60,6 +61,7 @@ pub fn generate(data: &Data) -> String {
             variants,
             tag,
             untagged,
+            deny_unknown_fields: _,
         } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
     }
 }

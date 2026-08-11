@@ -98,7 +98,11 @@ toolchain, not a crate you depend on), and everything else is `std`.
   ...fields}`), for unit and named-field variants - tuple/newtype variants
   aren't representable that way (there's no sound way to splice an
   arbitrary value's serialization into an outer object without knowing its
-  shape), so `tag` on an enum with one is a `compile_error!`.
+  shape), so `tag` on an enum with one is a `compile_error!`. `deny_unknown_fields`
+  errors on deserialize instead of silently ignoring a field/key that
+  doesn't match any of the type's own (applies to struct/enum-struct-variant
+  fields alike); mutually exclusive with a `flatten` field, which needs
+  somewhere to put keys that don't match.
 
   An unsupported combination (`skip`/`default` on a variant, any
   `#[rusty_serde(...)]` on a tuple field, `rename_all`/`tag` outside the
