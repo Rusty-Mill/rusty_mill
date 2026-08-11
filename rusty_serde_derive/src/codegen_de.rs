@@ -11,7 +11,8 @@ pub fn generate(data: &Data) -> String {
             name,
             generics,
             variants,
-        } => enum_impl(name, generics, variants),
+            tag,
+        } => enum_impl(name, generics, variants, tag.as_deref()),
     }
 }
 
@@ -80,6 +81,9 @@ struct Visitor {
     def: String,
     /// The `impl<...>` header for `impl <impl_decl> Visitor<'de> for <ty>`.
     impl_decl: String,
+    /// The trailing `where ...` clause (empty string if there's nothing to
+    /// say), spliced in right after `<ty>`.
+    where_clause: String,
     /// The visitor's own type, e.g. `__Visitor` or `__Visitor<T>`.
     ty: String,
     /// The expression that builds one, e.g. `__Visitor` or
@@ -92,6 +96,7 @@ fn visitor(struct_name: &str, generics: &Generics) -> Visitor {
         return Visitor {
             def: format!("struct {struct_name};"),
             impl_decl: "<'de>".to_string(),
+            where_clause: String::new(),
             ty: struct_name.to_string(),
             construct: struct_name.to_string(),
         };
@@ -118,7 +123,8 @@ fn visitor(struct_name: &str, generics: &Generics) -> Visitor {
         def: format!(
             "struct {struct_name}{use_site} {{ __marker: ::std::marker::PhantomData<{phantom_target}> }}"
         ),
-        impl_decl: generics.impl_decl(Some("'de"), "::rusty_serde::Deserialize<'de>"),
+        impl_decl: generics.impl_decl(Some("'de")),
+        where_clause: generics.where_clause("::rusty_serde::Deserialize<'de>"),
         ty: format!("{struct_name}{use_site}"),
         construct: format!("{struct_name} {{ __marker: ::std::marker::PhantomData }}"),
     }
@@ -190,7 +196,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let v = visitor("__Visitor", generics);
             format!(
                 "{def}\n\
-                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"unit struct {name}\")\n\
@@ -203,6 +209,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                  ::rusty_serde::Deserializer::deserialize_unit_struct(deserializer, {name:?}, {construct})",
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
@@ -211,7 +218,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let v = visitor("__Visitor", generics);
             format!(
                 "{def}\n\
-                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"unit struct {name}\")\n\
@@ -224,6 +231,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                  ::rusty_serde::Deserializer::deserialize_unit_struct(deserializer, {name:?}, {construct})",
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
@@ -232,7 +240,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let v = visitor("__Visitor", generics);
             format!(
                 "{def}\n\
-                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"tuple struct {name}\")\n\
@@ -251,6 +259,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                  ::rusty_serde::Deserializer::deserialize_newtype_struct(deserializer, {name:?}, {construct})",
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
@@ -269,7 +278,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let v = visitor("__Visitor", generics);
             format!(
                 "{def}\n\
-                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"tuple struct {name}\")\n\
@@ -283,6 +292,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                  ::rusty_serde::Deserializer::deserialize_tuple_struct(deserializer, {name:?}, {n}, {construct})",
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
@@ -303,7 +313,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             format!(
                 "{ident_enum}\n\
                  {def}\n\
-                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"struct {name}\")\n\
@@ -318,15 +328,17 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                 ident_enum = ident_enum("__Field", &entries, "field identifier", true),
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
         }
     };
 
-    let impl_decl = generics.impl_decl(Some("'de"), "::rusty_serde::Deserialize<'de>");
+    let impl_decl = generics.impl_decl(Some("'de"));
+    let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
     format!(
-        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty} {{\n\
+        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
              fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
              where\n\
                  __D: ::rusty_serde::Deserializer<'de>,\n\
@@ -337,7 +349,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
+fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<&str>) -> String {
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
         .iter()
@@ -355,16 +367,35 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
     }
 
     let v = visitor("__Visitor", generics);
-    let impl_decl = generics.impl_decl(Some("'de"), "::rusty_serde::Deserialize<'de>");
+
+    // Both external and internal tagging drive the exact same
+    // EnumAccess/VariantAccess-based visitor - the only difference is which
+    // Deserializer method hands it the input. Internal tagging's added
+    // complexity (buffering a JSON object to find the tag key regardless of
+    // its position, then re-deserializing the rest) all lives in the JSON
+    // format implementation, not here.
+    let deserialize_call = match tag {
+        Some(t) => format!(
+            "::rusty_serde::Deserializer::deserialize_internally_tagged_enum(deserializer, {name:?}, {t:?}, __VARIANTS, {construct})",
+            construct = v.construct,
+        ),
+        None => format!(
+            "::rusty_serde::Deserializer::deserialize_enum(deserializer, {name:?}, __VARIANTS, {construct})",
+            construct = v.construct,
+        ),
+    };
+
+    let impl_decl = generics.impl_decl(Some("'de"));
+    let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
     format!(
-        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty} {{\n\
+        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
              fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
              where\n\
                  __D: ::rusty_serde::Deserializer<'de>,\n\
              {{\n\
                  {ident_enum}\n\
                  {def}\n\
-                 impl{v_impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                 impl{v_impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{v_where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                          f.write_str(\"enum {name}\")\n\
@@ -377,14 +408,14 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
                      }}\n\
                  }}\n\
                  const __VARIANTS: &[&str] = &[{variants_array}];\n\
-                 ::rusty_serde::Deserializer::deserialize_enum(deserializer, {name:?}, __VARIANTS, {construct})\n\
+                 {deserialize_call}\n\
              }}\n\
          }}\n",
         ident_enum = ident_enum("__Field", &variant_entries, "variant identifier", false),
         def = v.def,
         v_impl_decl = v.impl_decl,
+        v_where_clause = v.where_clause,
         vty = v.ty,
-        construct = v.construct,
     )
 }
 
@@ -433,7 +464,7 @@ fn variant_arm(
             format!(
                 "(__Field::{vname}, __variant) => {{\n\
                      {def}\n\
-                     impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                     impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                          type Value = {enum_ty};\n\
                          fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                              f.write_str(\"tuple variant {enum_name}::{vname}\")\n\
@@ -448,6 +479,7 @@ fn variant_arm(
                  }}\n",
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )
@@ -469,7 +501,7 @@ fn variant_arm(
                 "(__Field::{vname}, __variant) => {{\n\
                      {ident_enum}\n\
                      {def}\n\
-                     impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty} {{\n\
+                     impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                          type Value = {enum_ty};\n\
                          fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
                              f.write_str(\"struct variant {enum_name}::{vname}\")\n\
@@ -485,6 +517,7 @@ fn variant_arm(
                 ident_enum = ident_enum("__SField", &entries, "field identifier", true),
                 def = v.def,
                 impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
                 vty = v.ty,
                 construct = v.construct,
             )

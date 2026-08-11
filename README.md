@@ -71,8 +71,38 @@ toolchain, not a crate you depend on), and everything else is `std`.
   `default` falls back to `Default::default()` if the field is missing on
   deserialize instead of erroring. `skip` never serializes the field and
   always defaults it on deserialize, ignoring anything present on the wire
-  under its name. An unsupported attribute (`skip`/`default` on a variant,
-  any `#[rusty_serde(...)]` on a tuple field) is a clear `compile_error!`.
+  under its name.
+- Container attributes:
+  ```rust
+  #[derive(Serialize, Deserialize)]
+  #[rusty_serde(rename_all = "camelCase")]
+  struct Config {
+      display_name: String, // -> "displayName" on the wire
+  }
+
+  #[derive(Serialize, Deserialize)]
+  #[rusty_serde(tag = "kind")]
+  enum Shape {
+      Circle,                                 // -> {"kind":"Circle"}
+      Rectangle { width: f64, height: f64 },   // -> {"kind":"Rectangle","width":..,"height":..}
+  }
+  ```
+  `rename_all` case-converts every field/variant name that didn't set its
+  own `rename` (`lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`,
+  `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
+  `SCREAMING-KEBAB-CASE`). `tag` (enums only) switches from external
+  tagging (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
+  ...fields}`), for unit and named-field variants - tuple/newtype variants
+  aren't representable that way (there's no sound way to splice an
+  arbitrary value's serialization into an outer object without knowing its
+  shape), so `tag` on an enum with one is a `compile_error!`.
+
+  An unsupported combination (`skip`/`default` on a variant, any
+  `#[rusty_serde(...)]` on a tuple field, `rename_all`/`tag` outside the
+  container, `tag` on a struct, an unrecognized `rename_all` style) is
+  always a clear `compile_error!` rather than a silent no-op.
+- `where` clauses on generic structs/enums, forwarded into the generated
+  `impl` alongside its own `Serialize`/`Deserialize` bounds.
 
 Generics work without the derive macro's parser ever looking at field
 *types* (it only needs field/variant *names*, since `Serialize`/
@@ -85,10 +115,28 @@ more conservative than a hand-written impl would be (an unused
 `PhantomData<T>` field would still force `T: Serialize`, since the macro
 can't see that `T` goes unused there).
 
+Internally-tagged enums are the one place a JSON value has to be buffered
+into an in-memory tree before it can be deserialized: the tag key can
+appear anywhere in the object, so there's no way to know which variant
+you're reading until you've already read every entry. That buffering (and
+the second `Deserializer` implementation that runs the ordinary
+`Deserialize` machinery back against the buffered tree) lives entirely in
+the JSON format module, behind a `deserialize_internally_tagged_enum`
+method on the core `Deserializer` trait that other formats can just leave
+at its default ("not supported") if they don't need it.
+
+## Testing
+
+Besides hand-picked cases in `tests/roundtrip.rs`, `tests/fuzz_roundtrip.rs`
+round-trips thousands of arbitrary values (and specifically strings, to
+stress `\uXXXX`/surrogate-pair escaping, and numbers, to stress formatting)
+through a tiny hand-rolled xorshift PRNG - no `proptest`/`quickcheck`,
+consistent with the rest of the project.
+
 ## What's not (yet)
 
-- Const generics (`struct Foo<const N: usize>`) and `where` clauses -
-  rejected with a clear `compile_error!` rather than silently mishandled.
+- Const generics (`struct Foo<const N: usize>`) - rejected with a clear
+  `compile_error!` rather than silently mishandled.
 - Any format besides JSON. The data model (`ser`/`de` modules) is
   format-agnostic, so a second format is just a new `Serializer`/
   `Deserializer` impl away.

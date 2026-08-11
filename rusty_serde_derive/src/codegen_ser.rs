@@ -11,7 +11,8 @@ pub fn generate(data: &Data) -> String {
             name,
             generics,
             variants,
-        } => enum_impl(name, generics, variants),
+            tag,
+        } => enum_impl(name, generics, variants, tag.as_deref()),
     }
 }
 
@@ -54,10 +55,11 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
         }
     };
 
-    let impl_decl = generics.impl_decl(None, "::rusty_serde::Serialize");
+    let impl_decl = generics.impl_decl(None);
+    let where_clause = generics.where_clause("::rusty_serde::Serialize");
     let ty = generics.ty(name);
     format!(
-        "impl{impl_decl} ::rusty_serde::Serialize for {ty} {{\n\
+        "impl{impl_decl} ::rusty_serde::Serialize for {ty}{where_clause} {{\n\
              fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
              where\n\
                  __S: ::rusty_serde::Serializer,\n\
@@ -68,16 +70,20 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
+fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<&str>) -> String {
     let mut arms = String::new();
     for (index, variant) in variants.iter().enumerate() {
-        arms += &variant_arm(name, index as u32, variant);
+        arms += &match tag {
+            Some(t) => variant_arm_tagged(name, variant, t),
+            None => variant_arm(name, index as u32, variant),
+        };
     }
 
-    let impl_decl = generics.impl_decl(None, "::rusty_serde::Serialize");
+    let impl_decl = generics.impl_decl(None);
+    let where_clause = generics.where_clause("::rusty_serde::Serialize");
     let ty = generics.ty(name);
     format!(
-        "impl{impl_decl} ::rusty_serde::Serialize for {ty} {{\n\
+        "impl{impl_decl} ::rusty_serde::Serialize for {ty}{where_clause} {{\n\
              fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
              where\n\
                  __S: ::rusty_serde::Serializer,\n\
@@ -86,6 +92,63 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
              }}\n\
          }}\n"
     )
+}
+
+/// Serializes a variant of an internally-tagged enum (`#[rusty_serde(tag =
+/// "...")]`) as one flat JSON object: `{"<tag>": "<variant>", ...fields}`.
+/// The parser already rejected tuple variants for this case (there's no
+/// sound way to splice an arbitrary inner value's serialization into an
+/// outer object without knowing its shape), so only unit and named-field
+/// variants reach here.
+fn variant_arm_tagged(enum_name: &str, variant: &Variant, tag: &str) -> String {
+    let vname = &variant.name;
+    let wire_vname = variant.wire_name();
+    match &variant.fields {
+        Fields::Unit | Fields::Unnamed(0) => {
+            let pattern = match &variant.fields {
+                Fields::Unit => format!("{enum_name}::{vname}"),
+                _ => format!("{enum_name}::{vname}()"),
+            };
+            format!(
+                "    {pattern} => {{\n\
+                     let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some(1))?;\n\
+                     ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n\
+                     ::rusty_serde::ser::SerializeMap::end(__state)\n\
+                 }}\n"
+            )
+        }
+        Fields::Unnamed(_) => {
+            unreachable!("tuple variants are rejected at parse time when `tag` is set")
+        }
+        Fields::Named(fields) => {
+            let binders = fields
+                .iter()
+                .map(|f| {
+                    if f.attrs.skip {
+                        format!("{}: _", f.name)
+                    } else {
+                        format!("ref {}", f.name)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let n = 1 + active.len();
+            let mut body = format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, Some({n}))?;\n\
+                 ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {tag:?}, {wire_vname:?})?;\n"
+            );
+            for f in &active {
+                let wire = f.wire_name();
+                let ident = &f.name;
+                body += &format!(
+                    "        ::rusty_serde::ser::SerializeMap::serialize_entry(&mut __state, {wire:?}, {ident})?;\n"
+                );
+            }
+            body += "        ::rusty_serde::ser::SerializeMap::end(__state)";
+            format!("    {enum_name}::{vname} {{ {binders} }} => {{\n        {body}\n    }}\n")
+        }
+    }
 }
 
 fn variant_arm(enum_name: &str, index: u32, variant: &Variant) -> String {

@@ -25,19 +25,31 @@ pub enum Fields {
 }
 
 /// A `#[rusty_serde(...)]` attribute, recognized on named struct/variant
-/// fields and (for `rename` only) on enum variants themselves. Any other
-/// attribute (`#[serde(...)]`, `#[doc = "..."]`, `#[cfg(...)]`, ...) is
-/// left alone - only our own namespace is inspected.
+/// fields, on enum variants (`rename` only), and on the struct/enum item
+/// itself (`rename_all`, and - enums only - `tag`). Any other attribute
+/// (`#[serde(...)]`, `#[doc = "..."]`, `#[cfg(...)]`, ...) is left alone -
+/// only our own namespace is inspected.
 #[derive(Default, Clone)]
 pub struct Attrs {
     pub rename: Option<String>,
     pub default: bool,
     pub skip: bool,
+    /// Container-only: a case-conversion style (`"camelCase"`, ...) applied
+    /// to every named field/variant that didn't set its own `rename`.
+    pub rename_all: Option<String>,
+    /// Container-only, enums only: switches from external tagging
+    /// (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
+    /// ...fields}`).
+    pub tag: Option<String>,
 }
 
 impl Attrs {
     fn is_default(&self) -> bool {
-        self.rename.is_none() && !self.default && !self.skip
+        self.rename.is_none()
+            && !self.default
+            && !self.skip
+            && self.rename_all.is_none()
+            && self.tag.is_none()
     }
 }
 
@@ -76,6 +88,8 @@ pub enum Data {
         name: String,
         generics: Generics,
         variants: Vec<Variant>,
+        /// From a container-level `#[rusty_serde(tag = "...")]`.
+        tag: Option<String>,
     },
 }
 
@@ -91,6 +105,9 @@ pub struct Generics {
     /// Raw lifetime declarations, e.g. `["'a", "'b: 'a"]`.
     pub lifetimes: Vec<String>,
     pub type_params: Vec<TypeParam>,
+    /// Raw predicate text from a user-written `where` clause (empty if
+    /// none), e.g. `"T: MyTrait, U: OtherTrait"`.
+    pub extra_where: String,
 }
 
 impl Generics {
@@ -119,28 +136,51 @@ impl Generics {
         format!("{name}{}", self.use_site())
     }
 
-    /// The `impl<...>` declaration list: every lifetime as declared, then
-    /// every type parameter with `bound_suffix` appended to its existing
-    /// bounds. `extra_lifetime` (typically `'de`) is prepended first, since
-    /// it must be declared before anything that uses it.
-    pub fn impl_decl(&self, extra_lifetime: Option<&str>, bound_suffix: &str) -> String {
+    /// The `impl<...>` declaration list: every lifetime as declared
+    /// (bounds and all - `'a: 'b` is valid directly in this position), then
+    /// every type parameter's *bare name* (no bounds - those go in
+    /// [`Self::where_clause`] instead, since a user's own `where` clause has
+    /// to be merged in after the `for Type` part, which the `<...>` list
+    /// comes before). `extra_lifetime` (typically `'de`) is prepended
+    /// first, since it must be declared before anything that uses it.
+    pub fn impl_decl(&self, extra_lifetime: Option<&str>) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(l) = extra_lifetime {
             parts.push(l.to_string());
         }
         parts.extend(self.lifetimes.iter().cloned());
-        for tp in &self.type_params {
-            let bound = if tp.bounds.trim().is_empty() {
-                bound_suffix.to_string()
-            } else {
-                format!("{} + {}", tp.bounds, bound_suffix)
-            };
-            parts.push(format!("{}: {}", tp.name, bound));
-        }
+        parts.extend(self.type_params.iter().map(|t| t.name.clone()));
         if parts.is_empty() {
             String::new()
         } else {
             format!("<{}>", parts.join(", "))
+        }
+    }
+
+    /// The trailing `where T: Bound, ...` clause (empty string if there's
+    /// nothing to say), combining every type parameter's own bounds plus
+    /// `bound_suffix`, and the user's own `where` clause predicates (if
+    /// any) verbatim. Include a leading space when non-empty, so it can be
+    /// spliced directly after `for Type` and before the opening `{`.
+    pub fn where_clause(&self, bound_suffix: &str) -> String {
+        let mut preds: Vec<String> = self
+            .type_params
+            .iter()
+            .map(|tp| {
+                if tp.bounds.trim().is_empty() {
+                    format!("{}: {}", tp.name, bound_suffix)
+                } else {
+                    format!("{}: {} + {}", tp.name, tp.bounds, bound_suffix)
+                }
+            })
+            .collect();
+        if !self.extra_where.trim().is_empty() {
+            preds.push(self.extra_where.trim().to_string());
+        }
+        if preds.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", preds.join(", "))
         }
     }
 }
@@ -151,50 +191,57 @@ pub fn parse(input: TokenStream) -> Result<Data, TokenStream> {
     let mut tokens = input.into_iter().peekable();
 
     let container_attrs = parse_attrs(&mut tokens, "container")?;
-    if !container_attrs.is_default() {
-        return Err(compile_error(
-            "rusty_serde_derive does not support container-level `#[rusty_serde(...)]` attributes yet",
-        ));
-    }
     skip_visibility(&mut tokens);
 
     let keyword = expect_ident(&mut tokens, "a `struct` or `enum` item")?;
     match keyword.as_str() {
-        "struct" => parse_struct(&mut tokens),
-        "enum" => parse_enum(&mut tokens),
+        "struct" => parse_struct(&mut tokens, container_attrs),
+        "enum" => parse_enum(&mut tokens, container_attrs),
         other => Err(compile_error(&format!(
             "rusty_serde_derive only supports structs and enums, found `{other}`"
         ))),
     }
 }
 
-fn parse_struct(tokens: &mut Tokens) -> Result<Data, TokenStream> {
+fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, TokenStream> {
     let name = expect_ident(tokens, "a struct name")?;
-    let generics = parse_generics(tokens, &name)?;
+    if container_attrs.tag.is_some() {
+        return Err(compile_error(&format!(
+            "`tag` is only supported on enums (on `{name}`)"
+        )));
+    }
+    let mut generics = parse_generics(tokens, &name)?;
 
-    let fields = match tokens.peek() {
-        Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
-            reject_where_clause(tokens, &name)?;
-            let group = take_group(tokens);
-            parse_named_fields(group)?
-        }
+    // A tuple struct's `where` clause (if any) comes *after* the `(...)`
+    // fields, unlike every other case (named struct/unit struct/enum),
+    // where it comes right after the generics - so the tuple-fields arm
+    // handles its own `where` parsing, positioned after the `take_group`.
+    let mut fields = match tokens.peek() {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
             let group = take_group(tokens);
-            reject_where_clause(tokens, &name)?;
+            generics.extra_where = parse_where_clause(tokens)?;
             Fields::Unnamed(count_top_level_fields(group)?)
         }
-        Some(TokenTree::Ident(id)) if id.to_string() == "where" => {
-            return Err(compile_error(&format!(
-                "rusty_serde_derive does not support `where` clauses (on `{name}`)"
-            )));
-        }
-        Some(TokenTree::Punct(p)) if p.as_char() == ';' => Fields::Unit,
         _ => {
-            return Err(compile_error(&format!(
-                "expected `{{ ... }}`, `( ... )`, or `;` after `struct {name}`"
-            )))
+            generics.extra_where = parse_where_clause(tokens)?;
+            match tokens.peek() {
+                Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
+                    let group = take_group(tokens);
+                    parse_named_fields(group)?
+                }
+                Some(TokenTree::Punct(p)) if p.as_char() == ';' => Fields::Unit,
+                _ => {
+                    return Err(compile_error(&format!(
+                        "expected `{{ ... }}`, `( ... )`, or `;` after `struct {name}`"
+                    )))
+                }
+            }
         }
     };
+
+    if let (Fields::Named(named), Some(style)) = (&mut fields, &container_attrs.rename_all) {
+        apply_rename_all_fields(named, style);
+    }
 
     Ok(Data::Struct {
         name,
@@ -203,10 +250,10 @@ fn parse_struct(tokens: &mut Tokens) -> Result<Data, TokenStream> {
     })
 }
 
-fn parse_enum(tokens: &mut Tokens) -> Result<Data, TokenStream> {
+fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, TokenStream> {
     let name = expect_ident(tokens, "an enum name")?;
-    let generics = parse_generics(tokens, &name)?;
-    reject_where_clause(tokens, &name)?;
+    let mut generics = parse_generics(tokens, &name)?;
+    generics.extra_where = parse_where_clause(tokens)?;
 
     let body = match tokens.next() {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => g.stream(),
@@ -253,10 +300,27 @@ fn parse_enum(tokens: &mut Tokens) -> Result<Data, TokenStream> {
         });
     }
 
+    if let Some(style) = &container_attrs.rename_all {
+        apply_rename_all_variants(&mut variants, style);
+    }
+
+    if let Some(tag) = &container_attrs.tag {
+        for v in &variants {
+            if matches!(v.fields, Fields::Unnamed(n) if n > 0) {
+                return Err(compile_error(&format!(
+                    "rusty_serde_derive's internally-tagged enums (`tag = \"{tag}\"`) only \
+                     support unit and named-field variants, not tuple variant `{}`",
+                    v.name
+                )));
+            }
+        }
+    }
+
     Ok(Data::Enum {
         name,
         generics,
         variants,
+        tag: container_attrs.tag,
     })
 }
 
@@ -421,18 +485,122 @@ fn skip_to_top_level_comma(tokens: &mut Tokens) {
     }
 }
 
-/// `where` clauses aren't supported - detected right after generics (named
-/// structs and enums) or right after the tuple-fields group (tuple
-/// structs), since that's where Rust's grammar places them.
-fn reject_where_clause(tokens: &mut Tokens, owner: &str) -> Result<(), TokenStream> {
-    if let Some(TokenTree::Ident(id)) = tokens.peek() {
-        if id.to_string() == "where" {
-            return Err(compile_error(&format!(
-                "rusty_serde_derive does not support `where` clauses (on `{owner}`)"
-            )));
+/// Parses an optional `where ...` clause, stopping (without consuming)
+/// at the item body - a `{ ... }` group or a top-level `;` - since that's
+/// unambiguous regardless of what's inside the predicates themselves
+/// (parenthesized `Fn(i32) -> bool` bounds and the like are already atomic
+/// `Group` tokens, so they can't be mistaken for the body). Returns the
+/// raw predicate text (empty string if there was no `where` at all).
+fn parse_where_clause(tokens: &mut Tokens) -> Result<String, TokenStream> {
+    match tokens.peek() {
+        Some(TokenTree::Ident(id)) if id.to_string() == "where" => {}
+        _ => return Ok(String::new()),
+    }
+    tokens.next();
+
+    let mut raw = Vec::new();
+    loop {
+        match tokens.peek() {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => break,
+            Some(TokenTree::Punct(p)) if p.as_char() == ';' => break,
+            Some(_) => raw.push(tokens.next().unwrap()),
+            None => break,
         }
     }
-    Ok(())
+    Ok(TokenStream::from_iter(raw).to_string())
+}
+
+/// Applies a `rename_all` case style to every named field that didn't set
+/// its own `rename`.
+fn apply_rename_all_fields(fields: &mut [NamedField], style: &str) {
+    for f in fields.iter_mut() {
+        if f.attrs.rename.is_none() {
+            f.attrs.rename = Some(convert_case(&f.name, style));
+        }
+    }
+}
+
+/// Applies a `rename_all` case style to every variant that didn't set its
+/// own `rename`. Only the variant's own tag is affected, not its fields'
+/// names (put `rename_all` inside a per-variant `#[rusty_serde(...)]` if
+/// that's ever needed - not currently supported).
+fn apply_rename_all_variants(variants: &mut [Variant], style: &str) {
+    for v in variants.iter_mut() {
+        if v.attrs.rename.is_none() {
+            v.attrs.rename = Some(convert_case(&v.name, style));
+        }
+    }
+}
+
+const RENAME_ALL_STYLES: &[&str] = &[
+    "lowercase",
+    "UPPERCASE",
+    "PascalCase",
+    "camelCase",
+    "snake_case",
+    "SCREAMING_SNAKE_CASE",
+    "kebab-case",
+    "SCREAMING-KEBAB-CASE",
+];
+
+/// Splits a Rust identifier into lowercase words, regardless of whether it
+/// was originally `snake_case` (splits on `_`) or `PascalCase`/`camelCase`
+/// (splits at case boundaries, treating a run of capitals followed by a
+/// lowercase letter - e.g. the `S` before `erver` in `HTTPServer` - as the
+/// start of a new word).
+fn split_words(ident: &str) -> Vec<String> {
+    let chars: Vec<char> = ident.chars().collect();
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '_' || c == '-' {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            continue;
+        }
+        if c.is_uppercase() && !current.is_empty() {
+            let prev = chars[i - 1];
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_lowercase());
+            if prev.is_lowercase() || prev.is_numeric() || (prev.is_uppercase() && next_lower) {
+                words.push(std::mem::take(&mut current));
+            }
+        }
+        current.push(c.to_ascii_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn capitalize(word: &str) -> String {
+    let mut chars = word.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Converts a Rust identifier to one of [`RENAME_ALL_STYLES`]. `style` is
+/// assumed already validated (see its only caller in `parse_one_meta_item`).
+fn convert_case(ident: &str, style: &str) -> String {
+    let words = split_words(ident);
+    match style {
+        "lowercase" => words.concat(),
+        "UPPERCASE" => words.concat().to_uppercase(),
+        "PascalCase" => words.iter().map(|w| capitalize(w)).collect(),
+        "camelCase" => words
+            .iter()
+            .enumerate()
+            .map(|(i, w)| if i == 0 { w.clone() } else { capitalize(w) })
+            .collect(),
+        "snake_case" => words.join("_"),
+        "SCREAMING_SNAKE_CASE" => words.join("_").to_uppercase(),
+        "kebab-case" => words.join("-"),
+        "SCREAMING-KEBAB-CASE" => words.join("-").to_uppercase(),
+        other => unreachable!("`{other}` should have been rejected at attribute-parse time"),
+    }
 }
 
 /// Parses the inside of a `{ ... }` field list: `ident : <type tokens>`,
@@ -571,6 +739,11 @@ fn parse_one_meta_item(
     };
     match key.as_str() {
         "rename" => {
+            if context == "container" {
+                return Err(compile_error(
+                    "`rename` is not supported on the container - did you mean `rename_all`?",
+                ));
+            }
             match it.next() {
                 Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
                 _ => return Err(compile_error("expected `rename = \"...\"`")),
@@ -583,6 +756,49 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `rename = \"...\"`"));
             }
             attrs.rename = Some(value);
+        }
+        "rename_all" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`rename_all` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `rename_all = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `rename_all =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `rename_all = \"...\"`"));
+            }
+            if !RENAME_ALL_STYLES.contains(&value.as_str()) {
+                return Err(compile_error(&format!(
+                    "unknown `rename_all` style `{value}`, expected one of {RENAME_ALL_STYLES:?}"
+                )));
+            }
+            attrs.rename_all = Some(value);
+        }
+        "tag" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`tag` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `tag = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `tag =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `tag = \"...\"`"));
+            }
+            attrs.tag = Some(value);
         }
         "default" => {
             if context != "field" {

@@ -138,6 +138,30 @@ pub trait Deserializer<'de>: Sized {
     where
         V: Visitor<'de>;
 
+    /// Deserializes an "internally tagged" enum: `{"<tag>": "Variant",
+    /// ...fields}` rather than `{"Variant": ...fields}`. The variant tag
+    /// can appear anywhere in the object, which - unlike every other method
+    /// on this trait - generally requires buffering the whole value before
+    /// any of it can be handed to `visitor`. Formats that can't support
+    /// that (or haven't implemented it) can leave this at its default,
+    /// which just reports it as unsupported; `rusty_serde`'s JSON format
+    /// overrides it.
+    fn deserialize_internally_tagged_enum<V>(
+        self,
+        name: &'static str,
+        tag: &'static str,
+        variants: &'static [&'static str],
+        visitor: V,
+    ) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        let _ = (name, tag, variants, visitor);
+        Err(Self::Error::custom(
+            "this deserializer does not support internally tagged enums",
+        ))
+    }
+
     fn deserialize_identifier<V>(self, visitor: V) -> Result<V::Value, Self::Error>
     where
         V: Visitor<'de>;

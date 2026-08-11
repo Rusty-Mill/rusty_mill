@@ -303,6 +303,146 @@ fn variant_rename() {
     roundtrip(Renamed::Square { side: 2.0 }, r#"{"square":{"side":2.0}}"#);
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(rename_all = "camelCase")]
+struct RenameAllFields {
+    user_name: String,
+    is_active: bool,
+    #[rusty_serde(rename = "override")]
+    http_status: u32,
+}
+
+#[test]
+fn container_rename_all_fields() {
+    roundtrip(
+        RenameAllFields {
+            user_name: "ada".into(),
+            is_active: true,
+            http_status: 200,
+        },
+        r#"{"userName":"ada","isActive":true,"override":200}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum RenameAllVariants {
+    FirstOption,
+    SecondOption,
+}
+
+#[test]
+fn container_rename_all_variants() {
+    roundtrip(RenameAllVariants::FirstOption, r#""FIRST_OPTION""#);
+    roundtrip(RenameAllVariants::SecondOption, r#""SECOND_OPTION""#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind")]
+enum Shape2 {
+    Circle,
+    Rectangle { width: f64, height: f64 },
+    #[rusty_serde(rename = "tri")]
+    Triangle { base: f64, height: f64 },
+}
+
+#[test]
+fn internally_tagged_unit_variant() {
+    roundtrip(Shape2::Circle, r#"{"kind":"Circle"}"#);
+}
+
+#[test]
+fn internally_tagged_struct_variant() {
+    roundtrip(
+        Shape2::Rectangle {
+            width: 2.0,
+            height: 3.0,
+        },
+        r#"{"kind":"Rectangle","width":2.0,"height":3.0}"#,
+    );
+}
+
+#[test]
+fn internally_tagged_variant_rename() {
+    roundtrip(
+        Shape2::Triangle {
+            base: 1.0,
+            height: 2.0,
+        },
+        r#"{"kind":"tri","base":1.0,"height":2.0}"#,
+    );
+}
+
+#[test]
+fn internally_tagged_tag_can_appear_anywhere() {
+    // The tag field doesn't have to come first on the wire - deserializing
+    // it requires buffering the whole object either way.
+    let decoded: Shape2 =
+        json::from_str(r#"{"width":2.0,"height":3.0,"kind":"Rectangle"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Shape2::Rectangle {
+            width: 2.0,
+            height: 3.0
+        }
+    );
+}
+
+#[test]
+fn internally_tagged_missing_tag_is_an_error() {
+    let err = json::from_str::<Shape2>(r#"{"width":2.0,"height":3.0}"#).unwrap_err();
+    assert!(err.to_string().contains("missing tag field"));
+}
+
+#[test]
+fn internally_tagged_unknown_variant_is_an_error() {
+    let err = json::from_str::<Shape2>(r#"{"kind":"Hexagon"}"#).unwrap_err();
+    assert!(err.to_string().contains("unknown variant"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct BoundedByWhere<T>
+where
+    T: Clone + std::fmt::Debug,
+{
+    value: T,
+}
+
+#[test]
+fn where_clause_struct() {
+    roundtrip(
+        BoundedByWhere {
+            value: "hi".to_string(),
+        },
+        r#"{"value":"hi"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct TupleWhereClause<T>(T)
+where
+    T: Clone;
+
+#[test]
+fn where_clause_tuple_struct() {
+    roundtrip(TupleWhereClause(9), "9");
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum EitherWhere<L, R>
+where
+    L: Clone,
+    R: Clone,
+{
+    Left(L),
+    Right(R),
+}
+
+#[test]
+fn where_clause_enum() {
+    roundtrip(EitherWhere::<i32, String>::Left(1), r#"{"Left":1}"#);
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();
