@@ -11,3 +11,4 @@ derive = ["rusty_serde_derive"]
 
 [dependencies]
 rusty_serde_derive = { path = "../rusty_serde_derive", version = "0.1.0", optional = true }
+rusty_serde_erased = { path = "../rusty_serde_erased", version = "0.1.0" }
