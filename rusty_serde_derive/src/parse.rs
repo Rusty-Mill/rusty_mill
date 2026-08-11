@@ -64,6 +64,12 @@ pub struct Attrs {
     /// Container-only: a case-conversion style (`"camelCase"`, ...) applied
     /// to every named field/variant that didn't set its own `rename`.
     pub rename_all: Option<String>,
+    /// Container-only, enums only: like `rename_all`, but applied to the
+    /// *fields* of every struct variant across the enum, rather than to
+    /// the variant names themselves (which is what plain `rename_all`
+    /// already does on an enum). Independent of `rename_all` - both can be
+    /// set together, one for variant names, one for their fields.
+    pub rename_all_fields: Option<String>,
     /// Container-only, enums only: switches from external tagging
     /// (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
     /// ...fields}`) - or, paired with `content`, to adjacent tagging
@@ -195,6 +201,7 @@ impl Attrs {
             && !self.flatten
             && self.aliases.is_empty()
             && self.rename_all.is_none()
+            && self.rename_all_fields.is_none()
             && self.tag.is_none()
             && self.content.is_none()
             && !self.untagged
@@ -475,6 +482,12 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
             "`untagged` is only supported on enums (on `{name}`)"
         )));
     }
+    if container_attrs.rename_all_fields.is_some() {
+        return Err(compile_error(&format!(
+            "`rename_all_fields` is only supported on enums, not structs (on `{name}`) - did \
+             you mean `rename_all`?"
+        )));
+    }
     let mut generics = parse_generics(tokens, &name)?;
     generics.bound_override = container_attrs.bound.clone();
 
@@ -654,6 +667,13 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
 
     if let Some(style) = &container_attrs.rename_all {
         apply_rename_all_variants(&mut variants, style);
+    }
+    if let Some(style) = &container_attrs.rename_all_fields {
+        for v in &mut variants {
+            if let Fields::Named(named) = &mut v.fields {
+                apply_rename_all_fields(named, style);
+            }
+        }
     }
 
     // Internal tagging (`tag` alone) has no sound way to splice an
@@ -1316,6 +1336,36 @@ fn parse_one_meta_item(
                 )));
             }
             attrs.rename_all = Some(value);
+        }
+        "rename_all_fields" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`rename_all_fields` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `rename_all_fields = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `rename_all_fields =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `rename_all_fields = \"...\"`",
+                ));
+            }
+            if !RENAME_ALL_STYLES.contains(&value.as_str()) {
+                return Err(compile_error(&format!(
+                    "unknown `rename_all_fields` style `{value}`, expected one of {RENAME_ALL_STYLES:?}"
+                )));
+            }
+            attrs.rename_all_fields = Some(value);
         }
         "tag" => {
             if context != "container" {
