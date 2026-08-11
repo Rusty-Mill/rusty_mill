@@ -174,6 +174,15 @@ pub type ParentPipes = [Option<OwnedFd>; 3];
 /// pgid, and a process may always `setpgid` itself to its own pid within
 /// its own (here, brand new) session. Returns the child pid and the
 /// parent ends of any pipes.
+///
+/// `detached` is the eighth argument this always-`&`/`Copy` parameter
+/// list crosses clippy's default `too_many_arguments` threshold with —
+/// every argument is already a required, independently-meaningful piece
+/// of the `posix_spawn` call this wraps (no natural sub-grouping:
+/// `path`/`argv0`/`args` are the exec triple, `cwd`/`env`/`stdio` are
+/// spawn context, `group`/`detached` are placement), so a bundling
+/// struct would only relocate the count, not reduce it.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     path: &OsStr,
     argv0: &OsStr,
