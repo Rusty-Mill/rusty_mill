@@ -110,37 +110,30 @@ safe widening, not a general loosening of when reclaim is attempted.
 
 ## Verification
 
-**Not yet run against real Windows in this session** — this branch was
-authored in a Linux-only sandbox with no native Windows execution
-available; the change is `cargo check`/`cargo clippy --target
-x86_64-pc-windows-gnu`-clean and `cargo fmt`-clean, matching this crate's
-own "developed from a Linux host, verified for real on CI's
-`windows-latest` leg" discipline already established for every other
-Windows-only behavior in this crate (divergences #011, #012, #015; this
-crate's own `lib.rs` module doc). A new live regression test,
-`crates/platform-windows/tests/stale_reclaim_process.rs`
-(`rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection`),
-reproduces the harness's exact repro shape — bind a listener, connect out
-to a second live listener from the same process, force-kill that process
-from a genuinely separate parent process (`TerminateProcess` via a
-re-exec'd helper, not a same-process socket close, since the mechanism
-under test is specifically process-teardown timing), then assert a fresh
-bind at the original path succeeds within a bounded window. This test is
-CI-only until a `windows-latest` run actually executes it.
+**Confirmed on real `windows-latest` CI, PR #127** (this document's own
+branch): `crates/platform-windows/tests/stale_reclaim_process.rs`'s
+`rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection`
+passed on real hardware, in both the default `windows-sys` configuration
+and the `track-w` (`rusty_win32`) configuration — the same test, same
+repro shape (bind a listener, connect out to a second live listener from
+the same process, `TerminateProcess` that process from a genuinely
+separate parent process, then assert a fresh bind at the original path
+succeeds within a bounded window), run against two independently
+implemented Winsock call layers. The pre-existing `windows_unix_conforms`
+parity test passed alongside it, and the full `windows-latest` matrix
+(both `stable` and the `1.75` MSRV leg) was green. This branch was
+authored in a Linux-only sandbox with no native Windows execution of its
+own available, so this CI run is the first time any of this change
+actually executed on Windows — see `docs/divergences.md` **016** for the
+closed-out record, now that the registry's own real-hardware bar is met.
 
 ## Open questions for the owner
 
-- **This fix is unverified beyond visual review and cross-compile
-  checks.** Whoever merges this should confirm the new
-  `stale_reclaim_process.rs` test (and the pre-existing
-  `windows_unix_conforms` parity test) both pass on a real
-  `windows-latest` CI run before treating this as closed, and before
-  promoting the hypothesis above into a numbered `docs/divergences.md`
-  entry — this document intentionally stops short of that until there's
-  real-hardware evidence to cite, per the registry's own rule.
-- If CI shows the `os error 0` failure *still* reproduces even with this
-  gate widened, the next-most-likely spot to look is `is_stale_socket`'s
-  own probe: the same teardown-timing race could in principle also affect
-  the probe `connect`'s own error code, in which case the fix needs to
-  widen `is_stale_socket`'s `WSAECONNREFUSED` check the same way, not
-  just `unix_listen`'s outer gate.
+None outstanding. The fix is confirmed on real `windows-latest` CI
+(both Winsock backends) and promoted to `docs/divergences.md` **016**.
+Remaining follow-up is downstream, not in this repo: `rusty_prime_agent`'s
+own `tests/supervisor_restart_recovery.rs` integration test (the original
+repro) still needs a real run of *that* test on Windows to close the loop
+end to end — that repo has no CI configured yet, so it depends on either
+a native Windows run or standing CI being added there. This crate's own
+fix and its own regression coverage are done.

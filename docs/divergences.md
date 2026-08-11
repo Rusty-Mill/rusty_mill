@@ -465,3 +465,50 @@ implementation convenience.
   agree; uniform refused behavior isn't a divergence. See
   `docs/decision-request-detach-liveness.md`'s Outcome for the corrected
   record.)
+
+## 016 — a dead `AF_UNIX` listener's path can fail rebind with a spurious success code on Windows
+
+- **Linux**: rebinding a path a dead listener left behind always fails
+  its first `bind` with `EADDRINUSE`, regardless of what else the dead
+  process had open — `unix_listen`'s stale-cleanup probe (`is_stale_socket`)
+  reliably gets the chance to run.
+- **Windows**: in one specific race — the previous owning process is
+  force-killed (`TerminateProcess`, not a graceful close) while it also
+  holds a *second*, unrelated live `AF_UNIX` connection open to a
+  different path — the very next `bind` on the dead listener's own path
+  can fail (`SOCKET_ERROR`) while `WSAGetLastError()` reads back `0`
+  (Winsock's success code) instead of the expected `WSAEADDRINUSE`. A
+  bind on a fresh, never-yet-bound socket cannot legitimately fail with
+  "no error", so `unix_listen`'s stale-cleanup gate
+  (`is_stale_bind_candidate`) treats that specific anomalous code as an
+  `AddrInUse`-equivalent candidate for the reclaim probe, alongside the
+  literal `WSAEADDRINUSE` case both platforms share.
+- **OS limitation**: Windows tears down a terminated process's whole
+  `AF_UNIX` socket table as one batch; afunix.sys's bookkeeping for a
+  path that process's listener held can apparently still be mid-teardown
+  when a fresh `bind` on it lands from another process, in a way that
+  surfaces as a spurious success-coded failure rather than a clean
+  `WSAEADDRINUSE`. Reproduced on real `windows-latest` CI hardware, in
+  both the default `windows-sys` Winsock layer and the independently
+  implemented `track-w` (`rusty_win32`) one — not an artifact of either
+  binding's own code.
+- **Not a divergence**: the stale-cleanup probe-and-reclaim mechanism
+  itself (`is_stale_socket`'s throwaway probe connect, `unix_listen`'s
+  one-retry shape) — both backends implement it identically, same as
+  entry **007** already registers for the mode-narrowing question. Only
+  *which failure codes are worth probing over* differs, and only in this
+  one anomalous case.
+- **Pinning test**:
+  `rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection`
+  (`crates/platform-windows/tests/stale_reclaim_process.rs`) — a genuinely
+  cross-process test (a re-exec'd helper process is force-killed by a
+  separate parent process, not a same-process socket close, since the
+  mechanism is specifically about process-teardown timing). CI-only, same
+  discipline as entries **011**/**012**: this crate's backend is
+  developed from a Linux host against `cargo check --target
+  x86_64-pc-windows-gnu`, and this specific test could not have been
+  verified any other way in the session that wrote it.
+- **Accepted**: 2026-08-11, with the `rusty_prime_agent` daemon-restart
+  harness's own repro (`docs/decision-request-af-unix-stale-reclaim-race.md`),
+  confirmed on real `windows-latest` CI (PR #127) after being authored in
+  a Linux-only sandbox with no native Windows execution of its own.
