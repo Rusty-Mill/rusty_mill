@@ -218,6 +218,29 @@ either), strace-verified on a real 100ms timeout. Scoped to
 `TcpStream` only — no named consumer needs it on `UnixStream`/
 `UdpSocket` yet.
 
+`Command::detach` + `Spawner::is_alive`/`is_zombie`
+(`docs/decision-request-detach-liveness.md`) landed 2026-08-11 against
+an external brief for a not-yet-started daemon-backed agent-harness
+consumer, ahead of the RFC v2 §3 consumer gate by explicit owner
+override — most of the brief (process-group-or-single kill, a
+cross-transport local-IPC listener) turned out to already be shipped
+surface (`Child::kill_tree`/`kill_single`/`GroupHandle`;
+`Net::unix_connect`/`unix_listen` over native Winsock `AF_UNIX`, not
+named pipes) and was not rebuilt. The two genuine gaps: a liveness/
+zombie probe decoupled from `try_wait`'s `Child`-ownership model, and a
+spawn-time `detach()` flag (`POSIX_SPAWN_SETSID` on Linux;
+`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows). `detach()`
+composes with `GroupSpec::NewGroup` on Linux but is refused there on
+Windows — a kill-on-close Job Object would silently defeat `detach`'s
+"survives a crash" guarantee (divergence 015); `is_zombie` is
+`Unsupported` on Windows, which has no zombie concept (divergence 016).
+Windows-side changes are compiled, clippy-clean, and live-tested
+(`cargo test -p platform-windows`, real `ping`/`cmd` children); Linux
+changes mirror the exact existing call-site patterns but could not be
+compiled or run in the session that wrote them (Windows workstation, no
+working WSL distro) — flagged explicitly rather than silently assumed
+correct.
+
 ## License
 
 MIT — matching the sibling crates (`rush`, `rusty_win32`, `rusty_libc`,

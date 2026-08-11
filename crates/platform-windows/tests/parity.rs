@@ -1094,3 +1094,114 @@ fn windows_tun_create_is_unsupported() {
         .expect("must refuse: no wintun backend");
     assert_eq!(e.kind, platform::error::ErrorKind::Unsupported);
 }
+
+/// `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
+/// `Ok(true)` while a real child is running, `Ok(false)` once it has
+/// actually exited and been waited on.
+#[test]
+fn windows_is_alive_reports_running_then_exited() {
+    use platform::process::{Command, Spawner, Stdio};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_windows::WindowsSpawner;
+
+    let mut c = Command::new("ping", tmp)
+        .arg("-n")
+        .arg("30")
+        .arg("127.0.0.1");
+    c.stdout = Stdio::Null;
+    let child = s.spawn(&c).expect("spawn");
+    let pid = child.id();
+
+    assert!(
+        s.is_alive(pid).expect("probe"),
+        "must be alive while running"
+    );
+    child
+        .kill_single(platform::process::Signal::Kill)
+        .expect("kill_single");
+    child.wait().expect("wait");
+    assert!(
+        !s.is_alive(pid).expect("probe"),
+        "must not be alive once exited"
+    );
+}
+
+/// `Spawner::is_zombie` (divergence 016): no zombie concept on Windows —
+/// always `Unsupported`, never a guessed answer.
+#[test]
+fn windows_is_zombie_is_unsupported() {
+    use platform::process::Spawner;
+
+    let s = platform_windows::WindowsSpawner;
+    assert_eq!(
+        s.is_zombie(std::process::id())
+            .expect_err("must refuse")
+            .kind,
+        platform::error::ErrorKind::Unsupported
+    );
+}
+
+/// `Command::detach` (`docs/decision-request-detach-liveness.md`): a
+/// detached child spawns successfully with `CREATE_NEW_PROCESS_GROUP |
+/// DETACHED_PROCESS` and is independently killable via `kill_single`
+/// (no group needed for the single-process case).
+#[test]
+fn windows_detach_spawns_and_is_killable_single() {
+    use platform::process::{Command, ExitStatus, Signal, Spawner, Stdio};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_windows::WindowsSpawner;
+
+    let mut c = Command::new("ping", tmp)
+        .arg("-n")
+        .arg("30")
+        .arg("127.0.0.1")
+        .detach();
+    c.stdout = Stdio::Null;
+    let child = s.spawn(&c).expect("spawn a detached child");
+    let pid = child.id();
+    assert!(s.is_alive(pid).expect("probe"), "detached child is alive");
+    child.kill_single(Signal::Kill).expect("kill_single");
+    assert_eq!(child.wait().expect("wait"), ExitStatus::Code(1));
+}
+
+/// `Command::detach` + `GroupSpec::NewGroup` is refused on Windows
+/// (divergence 015): a kill-on-close Job Object would defeat `detach`'s
+/// "survives even a crash" guarantee, so the combination is rejected
+/// before anything spawns rather than silently picking one.
+#[test]
+fn windows_detach_with_new_group_is_refused() {
+    use platform::process::{Command, GroupSpec, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_windows::WindowsSpawner;
+    let c = Command::new("cmd", tmp)
+        .arg("/c")
+        .arg("exit 0")
+        .group(GroupSpec::NewGroup)
+        .detach();
+    assert_eq!(
+        s.spawn(&c).err().expect("must refuse").kind,
+        platform::error::ErrorKind::Unsupported
+    );
+}
+
+/// `Command::detach` + `GroupSpec::JoinGroup` is refused on every
+/// backend (`InvalidInput`, self-contradictory — a fresh session cannot
+/// join an existing pgid). Windows already refuses every `JoinGroup`
+/// unconditionally (divergence 008), so this pins the combined request
+/// still fails, without asserting which specific check fired first.
+#[test]
+fn windows_detach_with_join_group_is_refused() {
+    use platform::process::{Command, GroupSpec, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_windows::WindowsSpawner;
+    let c = Command::new("cmd", tmp)
+        .arg("/c")
+        .arg("exit 0")
+        .group(GroupSpec::JoinGroup(1))
+        .detach();
+    assert!(s.spawn(&c).is_err(), "must refuse detach + JoinGroup");
+}

@@ -5,7 +5,12 @@ Stable; `rustils.process.child` — Stable; `rustils.process.wait_any` —
 Trial (native reactor landed on Linux/Windows only, see this doc's Async
 path section); `rustils.process.group_handle` (`adopt`) — Trial
 (rustils#47, Windows-only real support, Unix always `Unsupported` by
-design). See `docs/rfc-v2.md` §10 for the numbered decision log (D-7).
+design); `rustils.process.detach`/`.liveness` (`Command::detach`,
+`Spawner::is_alive`/`is_zombie`) — Trial (`docs/decision-request-
+detach-liveness.md`, no confirmed live consumer yet — landed ahead of
+the RFC v2 §3 consumer gate by explicit owner override, see that
+document's Outcome). See `docs/rfc-v2.md` §10 for the numbered decision
+log (D-7).
 
 The semantics the parity suite asserts for every backend implementing
 `Spawner`/`Child`. Backends: `platform-mock` (scripted; unit tests),
@@ -145,6 +150,45 @@ assertions.
   limitation to model" stance `kill_single` already takes for every
   `Signal`), logging each call to `MockSpawner::adopted` for
   assertions, mirroring `spawned`.
+
+- `Command::detach()` (`docs/decision-request-detach-liveness.md`): the
+  child survives this process exiting, including crashing, and its
+  terminal closing. Unix: `POSIX_SPAWN_SETSID` — the child becomes a new
+  session **and** process-group leader (`pid == sid == pgid`) before its
+  first instruction runs, giving `kill_tree` a sound target even without
+  an explicit `NewGroup`. Windows: `CREATE_NEW_PROCESS_GROUP |
+  DETACHED_PROCESS` — no console, not a member of this process's Ctrl-C
+  group. Refused (`InvalidInput`) together with `GroupSpec::JoinGroup`
+  on every backend: a fresh session cannot also join an existing,
+  different pgid. Refused (`Unsupported`) together with
+  `GroupSpec::NewGroup` **on Windows only** — divergence **015**: a
+  kill-on-close Job Object would be torn down, killing every member, the
+  instant every handle to it closes, which happens unconditionally when
+  this process terminates for any reason; combined with `detach`, that
+  would silently defeat the guarantee `detach` promises. Composes
+  cleanly with `NewGroup` on Linux (harmless-redundant `setpgid(0, 0)`
+  on top of `setsid`'s already-fresh pgid).
+
+- `Spawner::is_alive(pid)`: liveness for any pid, not tied to a `Child`
+  this backend spawned. Unix: `kill(pid, 0)` — `Ok(true)` on success or
+  `EPERM` (exists, not signalable by this process), `Ok(false)` on
+  `ESRCH`. Windows: `OpenProcess` + `GetExitCodeProcess` —
+  `Ok(true)` if `STILL_ACTIVE` or the open failed with anything other
+  than "no such process", `Ok(false)` otherwise. A zombie (Linux,
+  unreaped) reports `true` here — `kill(pid, 0)` cannot distinguish
+  "running" from "exited but unreaped"; see `is_zombie` for that
+  distinction. `platform-mock` has no real OS process table for an
+  arbitrary pid: it reports whatever the test declared via the
+  externally-mutable `MockSpawner::live_pids` registry (`false` for any
+  pid not explicitly inserted).
+
+- `Spawner::is_zombie(pid)`: Linux — `/proc/<pid>/stat`'s state field is
+  `Z`; a missing `/proc` entry means the pid doesn't exist at all
+  (`Ok(false)`, not a zombie, not an error). Windows: always
+  `Unsupported` — divergence **016**, no zombie concept exists (a
+  process handle stays valid and queryable indefinitely after exit).
+  `platform-mock`: same registry shape as `is_alive`
+  (`MockSpawner::zombie_pids`).
 
 ## Async path (rusty_foundation_akb §9)
 

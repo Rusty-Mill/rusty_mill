@@ -140,6 +140,17 @@ fn is_executable_file(path: &Path) -> bool {
 
 impl Spawner for LinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
+        if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
+            // `Command::detach`'s contract (`docs/decision-request-
+            // detach-liveness.md`): `setsid` starts a brand-new session,
+            // which cannot also join an existing, different pgid —
+            // self-contradictory, not an OS limitation.
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "spawn: detach cannot join an existing group",
+            ));
+        }
         let resolved = self.resolve(&cmd.program)?;
         let (pid, pipes) = spawn::spawn(
             &resolved,
@@ -149,8 +160,13 @@ impl Spawner for LinuxSpawner {
             &cmd.env,
             [&cmd.stdin, &cmd.stdout, &cmd.stderr],
             cmd.group,
+            cmd.detached,
         )?;
         let group = match cmd.group {
+            // `detached` alone already gives the child its own pgid via
+            // `setsid` (`sys::spawn::spawn`'s doc comment) — `kill_tree`
+            // gets a sound target even without an explicit `NewGroup`.
+            GroupSpec::Inherit if cmd.detached => Some(pid),
             GroupSpec::Inherit => None,
             // A fresh group's pgid IS the leader's own pid (pgroup 0 at
             // spawn means exactly that).
@@ -264,5 +280,13 @@ impl Spawner for LinuxSpawner {
             OsCode::None,
             "adopt",
         ))
+    }
+
+    fn is_alive(&self, pid: u32) -> Result<bool> {
+        spawn::is_alive(pid as c::pid_t)
+    }
+
+    fn is_zombie(&self, pid: u32) -> Result<bool> {
+        spawn::is_zombie(pid as c::pid_t)
     }
 }

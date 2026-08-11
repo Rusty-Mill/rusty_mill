@@ -128,6 +128,9 @@ pub struct Command {
     pub stdout: Stdio,
     pub stderr: Stdio,
     pub group: GroupSpec,
+    /// Set by [`Command::detach`]. See that method's doc comment for the
+    /// full contract, including the `GroupSpec` combinations it refuses.
+    pub detached: bool,
 }
 
 impl Command {
@@ -141,6 +144,7 @@ impl Command {
             stdout: Stdio::default(),
             stderr: Stdio::default(),
             group: GroupSpec::default(),
+            detached: false,
         }
     }
 
@@ -169,6 +173,41 @@ impl Command {
     #[must_use]
     pub fn group(mut self, group: GroupSpec) -> Self {
         self.group = group;
+        self
+    }
+
+    /// Detach the child from this process's session/console: it survives
+    /// this process exiting (including crashing) and its terminal
+    /// closing. Unix: `POSIX_SPAWN_SETSID` — the child becomes a new
+    /// session **and** process-group leader (`pid == sid == pgid`) before
+    /// its first instruction runs, the same race-free
+    /// before-first-instruction guarantee [`GroupSpec::NewGroup`] already
+    /// gives group placement. Windows: `CREATE_NEW_PROCESS_GROUP |
+    /// DETACHED_PROCESS` — no console, not a member of this process's
+    /// Ctrl-C group.
+    ///
+    /// Refused (`InvalidInput`) at spawn time together with
+    /// [`GroupSpec::JoinGroup`] on **every** backend: a fresh session
+    /// cannot also join an existing, different pgid — self-contradictory,
+    /// not an OS limitation. Refused (`Unsupported`) together with
+    /// [`GroupSpec::NewGroup`] **on Windows only**
+    /// (`docs/divergences.md` #015): a kill-on-close Job Object is torn
+    /// down — killing every member — the instant every handle to it
+    /// closes, which the OS does unconditionally when this process
+    /// terminates for any reason, including a crash; combined with
+    /// `detach`, that would silently defeat the very guarantee `detach`
+    /// promises. `detach` composes cleanly with `NewGroup` on Linux
+    /// (`setsid` already gives the child its own pgid; the additional
+    /// `setpgid(0, 0)` `NewGroup` performs is POSIX-specified-harmless
+    /// self-targeting, and Linux has no drop-side kill mechanism to fight
+    /// it — divergence 002's own "process keeps running" line). A caller
+    /// that wants a detached child it can still `kill_tree` later on
+    /// Windows uses the existing two-step path: `detach()` alone at
+    /// spawn, then [`Spawner::adopt`] on its pid when it actually decides
+    /// to kill it.
+    #[must_use]
+    pub fn detach(mut self) -> Self {
+        self.detached = true;
         self
     }
 }
@@ -411,6 +450,32 @@ pub trait Spawner {
     /// sometimes works depending on timing would be worse than an honest
     /// refusal.
     fn adopt(&self, pid: u32) -> Result<Box<dyn GroupHandle>>;
+
+    /// Is `pid` currently alive? Not tied to any [`Child`] this backend
+    /// spawned — works for any pid, including one this process has no
+    /// wait/kill relationship with (a `detach`ed worker's pid recorded
+    /// earlier, or a third-party pid). Unix: `kill(pid, 0)` —
+    /// `Ok(true)` on success *or* `EPERM` (the pid exists, just isn't
+    /// signalable by this process), `Ok(false)` on `ESRCH` (no such
+    /// process). Windows: `OpenProcess` + `GetExitCodeProcess`;
+    /// `Ok(true)` if the code is `STILL_ACTIVE` or the open itself
+    /// failed with anything other than "no such process"; `Ok(false)`
+    /// otherwise. A zombie (Linux, exited but not yet reaped by its real
+    /// parent) reports `true` here — `kill(pid, 0)` cannot distinguish
+    /// "running" from "exited but unreaped"; see [`Spawner::is_zombie`]
+    /// for that distinction.
+    fn is_alive(&self, pid: u32) -> Result<bool>;
+
+    /// Is `pid` a zombie (exited, not yet reaped by its real parent)?
+    /// Linux: `/proc/<pid>/stat`'s state field is `Z`; a missing `/proc`
+    /// entry means the pid doesn't exist at all, reported as `Ok(false)`
+    /// — not a zombie, gone — not an error. Windows: always `Unsupported`
+    /// (`docs/divergences.md` #016) — a Windows process handle stays
+    /// valid and its exit code re-readable indefinitely after exit (see
+    /// [`Child::try_wait`]'s own doc comment), so there is no distinct
+    /// "exited but unreaped" state to observe; the question this method
+    /// asks has no honest Windows answer.
+    fn is_zombie(&self, pid: u32) -> Result<bool>;
 }
 
 #[cfg(test)]

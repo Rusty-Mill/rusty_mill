@@ -162,8 +162,18 @@ pub type ParentPipes = [Option<OwnedFd>; 3];
 /// wiring. `GroupSpec::NewGroup` makes the child a fresh process-group
 /// leader before it executes (`POSIX_SPAWN_SETPGROUP` with pgroup 0 — the
 /// race-free at-spawn placement; extraction map D1's double-`setpgid`
-/// lesson is subsumed by the kernel doing it during spawn). Returns the
-/// child pid and the parent ends of any pipes.
+/// lesson is subsumed by the kernel doing it during spawn). `detached`
+/// additionally sets `POSIX_SPAWN_SETSID` (`Command::detach`'s
+/// contract): the child becomes a new session **and** process-group
+/// leader, `pid == sid == pgid`, before its first instruction — combined
+/// with a `target_pgid` from `group` (`NewGroup` only; `detached` +
+/// `JoinGroup` is refused by the caller before this function is ever
+/// reached, per `docs/decision-request-detach-liveness.md`), the
+/// resulting `setpgid(0, 0)` `POSIX_SPAWN_SETPGROUP` performs is
+/// POSIX-specified-harmless self-targeting: `setsid` already made pid ==
+/// pgid, and a process may always `setpgid` itself to its own pid within
+/// its own (here, brand new) session. Returns the child pid and the
+/// parent ends of any pipes.
 pub fn spawn(
     path: &OsStr,
     argv0: &OsStr,
@@ -172,6 +182,7 @@ pub fn spawn(
     env: &EnvSpec,
     stdio: [&Stdio; 3],
     group: GroupSpec,
+    detached: bool,
 ) -> Result<(c::pid_t, ParentPipes)> {
     // Every allocation happens here, before the spawn call (B-1/B-2 fix
     // standard): owned CStrings outlive the raw pointer arrays built from
@@ -304,16 +315,35 @@ pub fn spawn(
     // first instruction, never a post-spawn `setpgid`.
     let target_pgid: Option<c::pid_t> = match group {
         GroupSpec::Inherit => None,
-        GroupSpec::NewGroup => Some(0),
         GroupSpec::JoinGroup(pgid) => Some(pgid as c::pid_t),
+        // `detached` already gives the child its own pgid via `setsid`
+        // below; an explicit `setpgid(0, 0)` on top is harmless
+        // self-targeting (this function's own doc comment), so `NewGroup`
+        // still requests it uniformly rather than special-casing the
+        // `detached` combination away.
+        GroupSpec::NewGroup => Some(0),
     };
-    if let Some(pgid) = target_pgid {
+    // `POSIX_SPAWN_SETPGROUP` and `POSIX_SPAWN_SETSID` are a single flags
+    // word (`posix_spawnattr_setflags` *replaces*, not accumulates) — set
+    // once with both bits present rather than two calls that would
+    // silently drop the first.
+    let mut spawn_flags = 0;
+    if target_pgid.is_some() {
+        spawn_flags |= c::POSIX_SPAWN_SETPGROUP as _;
+    }
+    if detached {
+        spawn_flags |= c::POSIX_SPAWN_SETSID as _;
+    }
+    if spawn_flags != 0 {
         // SAFETY: `attr.0` is initialized; setflags/setpgroup have no
         // pointer arguments beyond it.
         let r = unsafe {
-            let r = c::posix_spawnattr_setflags(&mut attr.0, c::POSIX_SPAWN_SETPGROUP as _);
+            let r = c::posix_spawnattr_setflags(&mut attr.0, spawn_flags);
             if r == 0 {
-                c::posix_spawnattr_setpgroup(&mut attr.0, pgid)
+                match target_pgid {
+                    Some(pgid) => c::posix_spawnattr_setpgroup(&mut attr.0, pgid),
+                    None => 0,
+                }
             } else {
                 r
             }
@@ -530,6 +560,73 @@ pub fn kill_single(pid: c::pid_t, sig: Signal) -> Result<()> {
 pub fn kill_single(pid: c::pid_t, sig: Signal) -> Result<()> {
     rusty_libc::process::kill(pid, signum_of(sig))
         .map_err(|e| errno_err("kill", e.0, OsStr::new("")))
+}
+
+/// Portable liveness probe (`Spawner::is_alive`): `kill(pid, 0)` —
+/// POSIX's own no-op signal-existence check, valid for any pid this
+/// process didn't necessarily spawn. `Ok(true)` on success (permitted to
+/// signal it) or `EPERM` (exists, just not signalable by this process);
+/// `Ok(false)` on `ESRCH` (no such process — already reaped, or never
+/// existed).
+#[cfg(not(feature = "track-p"))]
+pub fn is_alive(pid: c::pid_t) -> Result<bool> {
+    // SAFETY: kill has no pointer arguments; signal 0 delivers nothing —
+    // POSIX specifies it as existence/permission-only probe.
+    let r = unsafe { c::kill(pid, 0) };
+    if r == 0 {
+        return Ok(true);
+    }
+    let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if code == c::ESRCH {
+        Ok(false)
+    } else if code == c::EPERM {
+        Ok(true)
+    } else {
+        Err(errno_err("kill", code, OsStr::new("")))
+    }
+}
+
+/// Liveness probe — Track P: raw `SYS_kill` via `rusty_libc::process::kill`.
+#[cfg(feature = "track-p")]
+pub fn is_alive(pid: c::pid_t) -> Result<bool> {
+    match rusty_libc::process::kill(pid, 0) {
+        Ok(()) => Ok(true),
+        Err(e) if e.0 == c::ESRCH => Ok(false),
+        Err(e) if e.0 == c::EPERM => Ok(true),
+        Err(e) => Err(errno_err("kill", e.0, OsStr::new(""))),
+    }
+}
+
+/// Is `pid` a zombie (`Spawner::is_zombie`)? Reads `/proc/<pid>/stat`'s
+/// state field — the token right after the `comm` field's closing `)`.
+/// Splits on the *last* `)` rather than naively tokenizing: `comm` (a
+/// user-settable process name) can itself contain spaces or parens. A
+/// missing `/proc` entry means the pid doesn't exist at all —
+/// `Ok(false)` (not a zombie, gone), not an error. Plain `std::fs`, no
+/// `libc`/syscall involved, so identical under every feature
+/// configuration — not `track-p`-gated.
+pub fn is_zombie(pid: c::pid_t) -> Result<bool> {
+    let path = format!("/proc/{pid}/stat");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => {
+            let code = e.raw_os_error().unwrap_or(0);
+            return Err(errno_err("read /proc/<pid>/stat", code, OsStr::new(&path)));
+        }
+    };
+    let after_comm = contents
+        .rsplit_once(')')
+        .map(|(_, rest)| rest)
+        .ok_or_else(|| {
+            PlatformError::new(ErrorKind::Other, OsCode::None, "parse /proc/<pid>/stat")
+                .with_path(OsStr::new(&path))
+        })?;
+    let state = after_comm.split_whitespace().next().ok_or_else(|| {
+        PlatformError::new(ErrorKind::Other, OsCode::None, "parse /proc/<pid>/stat")
+            .with_path(OsStr::new(&path))
+    })?;
+    Ok(state == "Z")
 }
 
 #[cfg(not(feature = "track-p"))]

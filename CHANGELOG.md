@@ -20,6 +20,49 @@ and **`coreutils`**.
 
 ## PAL group (`platform` / `platform-linux` / `platform-windows` / `platform-mock` / `platform-bsd` / `platform-parity`)
 
+### 0.27.0
+
+- **`Command::detach` + `Spawner::is_alive`/`is_zombie`
+  (`docs/decision-request-detach-liveness.md`).** Public API change:
+  `process::Command` gains a new field (`detached: bool`) and builder
+  method (`detach`); `process::Spawner` gains two new required methods,
+  `is_alive`/`is_zombie` (implemented on every backend, including
+  `platform-mock` via new externally-mutable `live_pids`/`zombie_pids`
+  registries) — `y`-bumping per `docs/versioning.md` §2. `ErrorKind`
+  gains no new variant; refusals use the existing `InvalidInput`/
+  `Unsupported` pair.
+
+  Landed against an external brief for a not-yet-started daemon-backed
+  agent-harness consumer, ahead of the RFC v2 §3 consumer gate by
+  explicit owner override (the decision-request doc's own Outcome).
+  Most of the brief was already-shipped surface and was not rebuilt:
+  process-group-or-single kill is `Child::kill_tree`/`kill_single`/
+  `GroupHandle` (Windows already the "real Job Object" branch); a
+  cross-transport local-IPC listener is `Net::unix_connect`/
+  `unix_listen`, shipped Stable on Windows over native Winsock
+  `AF_UNIX`, not named pipes.
+
+  `detach()`: Unix `POSIX_SPAWN_SETSID` (new session + process-group
+  leader, `pid == sid == pgid`); Windows `CREATE_NEW_PROCESS_GROUP |
+  DETACHED_PROCESS`. Composes with `GroupSpec::NewGroup` on Linux
+  (harmless-redundant `setpgid(0, 0)` on top of `setsid`'s already-fresh
+  pgid); refused (`Unsupported`) in that combination on Windows — a
+  kill-on-close Job Object would silently defeat `detach`'s "survives a
+  crash" guarantee (new divergence **015**). Refused (`InvalidInput`)
+  with `GroupSpec::JoinGroup` on every backend: a fresh session cannot
+  join an existing, different pgid.
+
+  `is_alive(pid)`: Unix `kill(pid, 0)` (`EPERM` counts as alive);
+  Windows `OpenProcess` + `GetExitCodeProcess`. `is_zombie(pid)`: Linux
+  `/proc/<pid>/stat`'s state field; Windows always `Unsupported` — no
+  zombie concept exists (new divergence **016**).
+
+  Windows-side changes compiled, clippy-clean, and live-tested against
+  real `ping`/`cmd` children (`cargo test -p platform-windows`). Linux
+  changes mirror existing call-site patterns exactly but were not
+  compiled or run in the authoring session (Windows workstation, no
+  working WSL distro) — flagged rather than silently assumed correct.
+
 ### 0.26.0
 
 - **Rusty-Mill fs R2/D2 slice: directory durability + `openat2`/

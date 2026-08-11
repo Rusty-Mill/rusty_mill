@@ -934,6 +934,129 @@ fn linux_wait_job_observes_stop_and_continue() {
     assert_eq!(child.wait().expect("wait"), ExitStatus::Code(5));
 }
 
+/// `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
+/// `Ok(true)` while a real child is running, `Ok(false)` once it has
+/// actually exited and been reaped.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_is_alive_reports_running_then_exited() {
+    use platform::process::{Command, Signal, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_linux::LinuxSpawner;
+    let c = Command::new("sh", tmp).arg("-c").arg("sleep 30");
+    let child = s.spawn(&c).expect("spawn");
+    let pid = child.id();
+
+    assert!(
+        s.is_alive(pid).expect("probe"),
+        "must be alive while running"
+    );
+    child.kill_single(Signal::Kill).expect("kill_single");
+    child.wait().expect("wait");
+    assert!(
+        !s.is_alive(pid).expect("probe"),
+        "must not be alive once reaped"
+    );
+}
+
+/// `Spawner::is_zombie`: `Ok(false)` for a running process, `Ok(true)`
+/// for one that has terminated but not yet been reaped, `Ok(false)`
+/// again once `try_wait` reaps it (the `/proc` entry is gone entirely).
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_is_zombie_detects_an_unreaped_child() {
+    use platform::process::{Command, Signal, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_linux::LinuxSpawner;
+    let c = Command::new("sh", tmp).arg("-c").arg("sleep 30");
+    let mut child = s.spawn(&c).expect("spawn");
+    let pid = child.id();
+
+    assert!(
+        !s.is_zombie(pid).expect("probe"),
+        "a running process is not a zombie"
+    );
+    child.kill_single(Signal::Kill).expect("kill_single");
+    // The kernel needs a moment to transition the killed process to `Z`
+    // before this, its real parent, reaps it — the probe above this
+    // sleep must run before `try_wait` below does the reaping.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(
+        s.is_zombie(pid).expect("probe"),
+        "an unreaped, terminated child is a zombie"
+    );
+
+    child.try_wait().expect("try_wait reaps it");
+    assert!(
+        !s.is_zombie(pid).expect("probe"),
+        "a reaped pid no longer exists"
+    );
+}
+
+/// `Command::detach`: `setsid` alone already gives the child its own
+/// session and process group (`pid == pgid`) without an explicit
+/// `GroupSpec::NewGroup` — `kill_tree` has a sound target purely from
+/// `detach()`.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_detach_gives_its_own_process_group() {
+    use platform::process::{Command, ExitStatus, Signal, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_linux::LinuxSpawner;
+    let c = Command::new("sh", tmp).arg("-c").arg("sleep 30").detach();
+    let child = s.spawn(&c).expect("spawn a detached child");
+
+    child
+        .kill_tree(Signal::Kill)
+        .expect("kill_tree targets the detached child's own pgid");
+    assert_eq!(child.wait().expect("wait"), ExitStatus::Signaled(9));
+}
+
+/// `Command::detach` + `GroupSpec::NewGroup` composes cleanly on Linux
+/// (divergence 015's Linux side): `NewGroup`'s own `setpgid(0, 0)` is
+/// harmless self-targeting on top of `setsid`'s already-fresh pgid, so
+/// the combination spawns successfully rather than conflicting.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_detach_composes_with_new_group() {
+    use platform::process::{Command, ExitStatus, GroupSpec, Signal, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_linux::LinuxSpawner;
+    let c = Command::new("sh", tmp)
+        .arg("-c")
+        .arg("sleep 30")
+        .group(GroupSpec::NewGroup)
+        .detach();
+    let child = s.spawn(&c).expect("detach composes with NewGroup on Linux");
+    child.kill_tree(Signal::Kill).expect("kill_tree");
+    assert_eq!(child.wait().expect("wait"), ExitStatus::Signaled(9));
+}
+
+/// `Command::detach` + `GroupSpec::JoinGroup` is refused
+/// (`InvalidInput`, self-contradictory — `setsid` starting a brand-new
+/// session cannot also join an existing, different pgid).
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_detach_with_join_group_is_refused() {
+    use platform::process::{Command, GroupSpec, Spawner};
+
+    let tmp = std::env::temp_dir();
+    let s = platform_linux::LinuxSpawner;
+    let c = Command::new("sh", tmp)
+        .arg("-c")
+        .arg("exit 0")
+        .group(GroupSpec::JoinGroup(1))
+        .detach();
+    assert_eq!(
+        s.spawn(&c).err().expect("must refuse").kind,
+        ErrorKind::InvalidInput
+    );
+}
+
 /// `JobControlTerminal::give_terminal` (rustils#43, D1's `tcsetpgrp`
 /// give/reclaim): under cargo's non-tty harness this refuses with the
 /// same `ENOTTY` shape `enter_raw`/`window_size` already pin on a
