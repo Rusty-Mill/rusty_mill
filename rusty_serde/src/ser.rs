@@ -143,6 +143,60 @@ pub trait Serializer: Sized {
         variant: &'static str,
         len: usize,
     ) -> Result<Self::SerializeStructVariant, Self::Error>;
+
+    /// Serializes an iterator as a sequence, without collecting it into a
+    /// `Vec` first. Default impl built on [`Self::serialize_seq`] plus
+    /// [`SerializeSeq::serialize_element`]; a length is passed through only
+    /// when the iterator's own [`Iterator::size_hint`] is exact.
+    fn collect_seq<I>(self, iter: I) -> Result<Self::Ok, Self::Error>
+    where
+        I: IntoIterator,
+        I::Item: Serialize,
+    {
+        let iter = iter.into_iter();
+        let mut seq = self.serialize_seq(exact_size_hint(&iter))?;
+        for item in iter {
+            SerializeSeq::serialize_element(&mut seq, &item)?;
+        }
+        SerializeSeq::end(seq)
+    }
+
+    /// Serializes an iterator of key/value pairs as a map, without
+    /// collecting it into a `HashMap`/`BTreeMap` first. Default impl built
+    /// on [`Self::serialize_map`] plus [`SerializeMap::serialize_entry`].
+    fn collect_map<K, V, I>(self, iter: I) -> Result<Self::Ok, Self::Error>
+    where
+        K: Serialize,
+        V: Serialize,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let iter = iter.into_iter();
+        let mut map = self.serialize_map(exact_size_hint(&iter))?;
+        for (k, v) in iter {
+            SerializeMap::serialize_entry(&mut map, &k, &v)?;
+        }
+        SerializeMap::end(map)
+    }
+
+    /// Serializes any [`Display`](std::fmt::Display) value as a string.
+    ///
+    /// The default impl just does the naive thing
+    /// (`self.serialize_str(&value.to_string())`); formats that can stream
+    /// text directly (this crate's JSON/RON formats included) can override
+    /// this to skip that intermediate allocation.
+    fn collect_str<T>(self, value: &T) -> Result<Self::Ok, Self::Error>
+    where
+        T: std::fmt::Display + ?Sized,
+    {
+        self.serialize_str(&value.to_string())
+    }
+}
+
+fn exact_size_hint<I: Iterator>(iter: &I) -> Option<usize> {
+    match iter.size_hint() {
+        (lower, Some(upper)) if lower == upper => Some(lower),
+        _ => None,
+    }
 }
 
 pub trait SerializeSeq {
