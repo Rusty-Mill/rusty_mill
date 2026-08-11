@@ -22,6 +22,14 @@ pub trait Deserialize<'de>: Sized {
 pub trait Deserializer<'de>: Sized {
     type Error: Error;
 
+    /// The deserialize-side counterpart to [`Serializer::is_human_readable`](crate::ser::Serializer::is_human_readable) -
+    /// whether the input is text-based/human-editable (JSON, this crate's
+    /// RON-like format) or not. Defaults to `true`; a binary format would
+    /// override it to `false`.
+    fn is_human_readable(&self) -> bool {
+        true
+    }
+
     /// Figure out what's in the input without a type hint (JSON, for
     /// example, can always do this - the token itself tells you the shape).
     fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>

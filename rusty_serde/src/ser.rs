@@ -31,6 +31,16 @@ pub trait Serializer: Sized {
     type SerializeStruct: SerializeStruct<Ok = Self::Ok, Error = Self::Error>;
     type SerializeStructVariant: SerializeStructVariant<Ok = Self::Ok, Error = Self::Error>;
 
+    /// Whether the output is meant to be human-readable (text formats like
+    /// this crate's JSON/RON) or not (a hypothetical compact binary
+    /// format). Lets a hand-written `Serialize` impl choose a
+    /// representation per format - e.g. an ISO-8601 string for a
+    /// timestamp type here, vs. a raw integer for a binary format.
+    /// Defaults to `true`; a binary format would override it to `false`.
+    fn is_human_readable(&self) -> bool {
+        true
+    }
+
     fn serialize_bool(self, v: bool) -> Result<Self::Ok, Self::Error>;
 
     fn serialize_i8(self, v: i8) -> Result<Self::Ok, Self::Error> {
