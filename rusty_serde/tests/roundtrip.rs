@@ -1046,3 +1046,31 @@ fn transparent_named_struct_nests_the_same_way_a_newtype_struct_would() {
         r#"{"label":"trail","m":10.0}"#,
     );
 }
+
+// A type that deliberately does NOT implement Serialize/Deserialize, to
+// prove `#[rusty_serde(bound = "")]` below actually replaces the derive's
+// auto-inferred `T: Serialize`/`T: Deserialize` bound rather than merely
+// adding to it - without the override, the derive can't see that
+// `PhantomData<T>` doesn't actually hold a `T` and would (wrongly) require
+// `NotSerializable: Serialize`.
+#[derive(Debug, PartialEq)]
+struct NotSerializable;
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(bound = "")]
+struct Marker<T> {
+    #[rusty_serde(skip)]
+    _marker: std::marker::PhantomData<T>,
+    value: i32,
+}
+
+#[test]
+fn bound_override_lets_a_phantom_type_param_skip_the_auto_inferred_bound() {
+    roundtrip(
+        Marker::<NotSerializable> {
+            _marker: std::marker::PhantomData,
+            value: 7,
+        },
+        r#"{"value":7}"#,
+    );
+}

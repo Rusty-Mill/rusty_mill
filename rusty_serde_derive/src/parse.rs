@@ -85,6 +85,10 @@ pub struct Attrs {
     /// single-field struct too. Only valid on a struct with exactly one
     /// field.
     pub transparent: bool,
+    /// Container-only: `#[rusty_serde(bound = "T: Trait")]` - replaces the
+    /// derive's auto-generated `T: Serialize`/`T: Deserialize` where-clause
+    /// entirely (both directions) with this raw predicate text.
+    pub bound: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -139,6 +143,7 @@ impl Attrs {
             && !self.deny_unknown_fields
             && !self.other
             && !self.transparent
+            && self.bound.is_none()
     }
 }
 
@@ -227,6 +232,11 @@ pub struct Generics {
     /// Raw predicate text from a user-written `where` clause (empty if
     /// none), e.g. `"T: MyTrait, U: OtherTrait"`.
     pub extra_where: String,
+    /// From a container-level `#[rusty_serde(bound = "...")]`: replaces
+    /// the entire auto-generated where-clause (both the per-type-param
+    /// `Serialize`/`Deserialize` bounds and `extra_where` above) with this
+    /// raw predicate text, verbatim.
+    pub bound_override: Option<String>,
 }
 
 impl Generics {
@@ -296,6 +306,16 @@ impl Generics {
     /// any) verbatim. Include a leading space when non-empty, so it can be
     /// spliced directly after `for Type` and before the opening `{`.
     pub fn where_clause(&self, bound_suffix: &str) -> String {
+        if let Some(bound) = &self.bound_override {
+            return if bound.trim().is_empty() {
+                // `bound = ""` - no bound at all, e.g. for a `PhantomData<T>`
+                // field the macro can't see doesn't actually need `T` to be
+                // (De)Serialize.
+                String::new()
+            } else {
+                format!(" where {}", bound.trim())
+            };
+        }
         let mut preds: Vec<String> = self
             .type_params
             .iter()
@@ -349,6 +369,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         )));
     }
     let mut generics = parse_generics(tokens, &name)?;
+    generics.bound_override = container_attrs.bound.clone();
 
     // A tuple struct's `where` clause (if any) comes *after* the `(...)`
     // fields, unlike every other case (named struct/unit struct/enum),
@@ -427,6 +448,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         )));
     }
     let mut generics = parse_generics(tokens, &name)?;
+    generics.bound_override = container_attrs.bound.clone();
     generics.extra_where = parse_where_clause(tokens)?;
 
     let body = match tokens.next() {
@@ -1263,6 +1285,25 @@ fn parse_one_meta_item(
                 return Err(compile_error("`transparent` does not take a value"));
             }
             attrs.transparent = true;
+        }
+        "bound" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`bound` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `bound = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `bound =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `bound = \"...\"`"));
+            }
+            attrs.bound = Some(value);
         }
         other => {
             return Err(compile_error(&format!(
