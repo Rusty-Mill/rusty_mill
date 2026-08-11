@@ -1017,3 +1017,32 @@ fn other_variant_catches_an_unrecognized_internal_tag_and_discards_its_data() {
         json::from_str(r#"{"kind":"SomethingElse","y":"whatever","z":[1,2,3]}"#).unwrap();
     assert_eq!(decoded, InternallyTaggedWithOther::Unknown);
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(transparent)]
+struct Meters {
+    value: f64,
+}
+
+#[test]
+fn transparent_named_struct_serializes_as_the_bare_inner_value() {
+    roundtrip(Meters { value: 2.5 }, "2.5");
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Distance {
+    label: String,
+    #[rusty_serde(rename = "m")]
+    meters: Meters,
+}
+
+#[test]
+fn transparent_named_struct_nests_the_same_way_a_newtype_struct_would() {
+    roundtrip(
+        Distance {
+            label: "trail".into(),
+            meters: Meters { value: 10.0 },
+        },
+        r#"{"label":"trail","m":10.0}"#,
+    );
+}

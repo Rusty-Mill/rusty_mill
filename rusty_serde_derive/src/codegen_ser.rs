@@ -54,7 +54,8 @@ pub fn generate(data: &Data) -> String {
             generics,
             fields,
             deny_unknown_fields: _,
-        } => struct_impl(name, generics, fields),
+            transparent,
+        } => struct_impl(name, generics, fields, *transparent),
         Data::Enum {
             name,
             generics,
@@ -66,7 +67,7 @@ pub fn generate(data: &Data) -> String {
     }
 }
 
-fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
+fn struct_impl(name: &str, generics: &Generics, fields: &Fields, transparent: bool) -> String {
     let body = match fields {
         Fields::Unit => {
             format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})")
@@ -89,6 +90,13 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             out += "::rusty_serde::ser::SerializeTupleStruct::end(__state)";
             out
         }
+        // Parse-time validation guarantees `transparent` only reaches here
+        // with exactly one field - serialize exactly as that field would
+        // on its own, the same way a tuple-struct-of-one already does.
+        Fields::Named(fields) if transparent => format!(
+            "::rusty_serde::Serializer::serialize_newtype_struct(serializer, {name:?}, &self.{field})",
+            field = fields[0].name,
+        ),
         Fields::Named(fields) => named_struct_serialize_body(name, fields),
     };
 

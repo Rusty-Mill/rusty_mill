@@ -111,7 +111,10 @@ toolchain, not a crate you depend on), and everything else is `std`.
   errors on deserialize instead of silently ignoring a field/key that
   doesn't match any of the type's own (applies to struct/enum-struct-variant
   fields alike); mutually exclusive with a `flatten` field, which needs
-  somewhere to put keys that don't match.
+  somewhere to put keys that don't match. `transparent` (structs only, and
+  only with exactly one named field) serializes/deserializes exactly as
+  that one field would on its own, no wrapping - like a tuple-struct-of-one's
+  existing behavior, opted into for a named struct.
 
   An unsupported combination (`skip`/`default` on a variant, any
   `#[rusty_serde(...)]` on a tuple field, `rename_all`/`tag` outside the

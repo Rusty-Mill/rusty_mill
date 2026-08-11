@@ -7,7 +7,8 @@ pub fn generate(data: &Data) -> String {
             generics,
             fields,
             deny_unknown_fields,
-        } => struct_impl(name, generics, fields, *deny_unknown_fields),
+            transparent,
+        } => struct_impl(name, generics, fields, *deny_unknown_fields, *transparent),
         Data::Enum {
             name,
             generics,
@@ -305,6 +306,7 @@ fn struct_impl(
     generics: &Generics,
     fields: &Fields,
     deny_unknown_fields: bool,
+    transparent: bool,
 ) -> String {
     let ty = generics.ty(name);
     let body = match fields {
@@ -406,6 +408,33 @@ fn struct_impl(
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_tuple_struct(deserializer, {name:?}, {n}, {construct})",
+                def = v.def,
+                impl_decl = v.impl_decl,
+                where_clause = v.where_clause,
+                vty = v.ty,
+                construct = v.construct,
+            )
+        }
+        // Parse-time validation guarantees `transparent` only reaches here
+        // with exactly one field - delegate straight to that field's own
+        // `Deserialize` impl, the same way a tuple-struct-of-one already
+        // does (just building `{name} { field: v }` instead of `{name}(v)`).
+        Fields::Named(fields) if transparent => {
+            let field = &fields[0].name;
+            let v = visitor("__Visitor", generics);
+            format!(
+                "{def}\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
+                     type Value = {ty};\n\
+                     fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
+                         f.write_str(\"struct {name}\")\n\
+                     }}\n\
+                     fn visit_newtype_struct<__D>(self, deserializer: __D) -> Result<{ty}, __D::Error>\n\
+                     where __D: ::rusty_serde::Deserializer<'de> {{\n\
+                         ::rusty_serde::Deserialize::deserialize(deserializer).map(|__v0| {name} {{ {field}: __v0 }})\n\
+                     }}\n\
+                 }}\n\
+                 ::rusty_serde::Deserializer::deserialize_newtype_struct(deserializer, {name:?}, {construct})",
                 def = v.def,
                 impl_decl = v.impl_decl,
                 where_clause = v.where_clause,

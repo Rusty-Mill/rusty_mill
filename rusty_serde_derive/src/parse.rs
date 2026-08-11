@@ -79,6 +79,12 @@ pub struct Attrs {
     /// a tag value that doesn't match any other variant, instead of that
     /// being a hard error. At most one variant per enum.
     pub other: bool,
+    /// Container-only, structs only: serialize/deserialize exactly as the
+    /// single field would on its own, with no wrapping - like a
+    /// tuple-struct-of-one's existing behavior, but opt-in for a *named*
+    /// single-field struct too. Only valid on a struct with exactly one
+    /// field.
+    pub transparent: bool,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -132,6 +138,7 @@ impl Attrs {
             && !self.untagged
             && !self.deny_unknown_fields
             && !self.other
+            && !self.transparent
     }
 }
 
@@ -187,6 +194,10 @@ pub enum Data {
         fields: Fields,
         /// From a container-level `#[rusty_serde(deny_unknown_fields)]`.
         deny_unknown_fields: bool,
+        /// From a container-level `#[rusty_serde(transparent)]` - always
+        /// `false` unless `fields` is `Fields::Named` with exactly one
+        /// field (any other shape is a compile error at parse time).
+        transparent: bool,
     },
     Enum {
         name: String,
@@ -381,11 +392,25 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         }
     }
 
+    if container_attrs.transparent {
+        match &fields {
+            Fields::Named(named) if named.len() == 1 => {}
+            _ => {
+                return Err(compile_error(&format!(
+                    "`#[rusty_serde(transparent)]` is only supported on a struct with exactly \
+                     one named field (on `{name}`) - a tuple struct with one field is already \
+                     transparent without the attribute"
+                )))
+            }
+        }
+    }
+
     Ok(Data::Struct {
         name,
         generics,
         fields,
         deny_unknown_fields: container_attrs.deny_unknown_fields,
+        transparent: container_attrs.transparent,
     })
 }
 
@@ -394,6 +419,11 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
     if container_attrs.tag.is_some() && container_attrs.untagged {
         return Err(compile_error(&format!(
             "`tag` and `untagged` can't both be set (on `{name}`)"
+        )));
+    }
+    if container_attrs.transparent {
+        return Err(compile_error(&format!(
+            "`transparent` is only supported on structs, not enums (on `{name}`)"
         )));
     }
     let mut generics = parse_generics(tokens, &name)?;
@@ -1222,6 +1252,17 @@ fn parse_one_meta_item(
                 return Err(compile_error("`other` does not take a value"));
             }
             attrs.other = true;
+        }
+        "transparent" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`transparent` is only supported on the container, not on a {context}"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`transparent` does not take a value"));
+            }
+            attrs.transparent = true;
         }
         other => {
             return Err(compile_error(&format!(
