@@ -408,6 +408,121 @@ fn internally_tagged_unknown_variant_is_an_error() {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind", content = "data")]
+enum Shape3 {
+    Circle,
+    Radius(f64),
+    Point(f64, f64),
+    Rectangle {
+        width: f64,
+        height: f64,
+    },
+    #[rusty_serde(rename = "tri")]
+    Triangle {
+        base: f64,
+        height: f64,
+    },
+}
+
+#[test]
+fn adjacently_tagged_unit_variant() {
+    roundtrip(Shape3::Circle, r#"{"kind":"Circle"}"#);
+}
+
+#[test]
+fn adjacently_tagged_newtype_variant() {
+    roundtrip(Shape3::Radius(1.5), r#"{"kind":"Radius","data":1.5}"#);
+}
+
+#[test]
+fn adjacently_tagged_tuple_variant() {
+    // Adjacent tagging can represent every variant shape, including a
+    // tuple variant - unlike internal tagging (`tag` alone), which rejects
+    // tuple variants entirely since there's nowhere sound to splice their
+    // data into the tag's own object.
+    roundtrip(
+        Shape3::Point(1.0, 2.0),
+        r#"{"kind":"Point","data":[1.0,2.0]}"#,
+    );
+}
+
+#[test]
+fn adjacently_tagged_struct_variant() {
+    roundtrip(
+        Shape3::Rectangle {
+            width: 2.0,
+            height: 3.0,
+        },
+        r#"{"kind":"Rectangle","data":{"width":2.0,"height":3.0}}"#,
+    );
+}
+
+#[test]
+fn adjacently_tagged_variant_rename() {
+    roundtrip(
+        Shape3::Triangle {
+            base: 1.0,
+            height: 2.0,
+        },
+        r#"{"kind":"tri","data":{"base":1.0,"height":2.0}}"#,
+    );
+}
+
+#[test]
+fn adjacently_tagged_tag_can_appear_anywhere() {
+    let decoded: Shape3 =
+        json::from_str(r#"{"data":{"width":2.0,"height":3.0},"kind":"Rectangle"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Shape3::Rectangle {
+            width: 2.0,
+            height: 3.0
+        }
+    );
+}
+
+#[test]
+fn adjacently_tagged_missing_content_is_treated_as_null() {
+    // A unit variant has no `content` key on the wire at all, so decoding
+    // has to tolerate its absence the same way `Radius`/etc. would treat
+    // an explicit `null`.
+    let decoded: Shape3 = json::from_str(r#"{"kind":"Circle"}"#).unwrap();
+    assert_eq!(decoded, Shape3::Circle);
+}
+
+#[test]
+fn adjacently_tagged_missing_tag_is_an_error() {
+    let err = json::from_str::<Shape3>(r#"{"data":1.5}"#).unwrap_err();
+    assert!(err.to_string().contains("missing field `kind`"));
+}
+
+#[test]
+fn adjacently_tagged_non_string_tag_is_an_error() {
+    let err = json::from_str::<Shape3>(r#"{"kind":5}"#).unwrap_err();
+    assert!(err.to_string().contains("tag must be a string"));
+}
+
+#[test]
+fn adjacently_tagged_unknown_variant_is_an_error() {
+    let err = json::from_str::<Shape3>(r#"{"kind":"Hexagon"}"#).unwrap_err();
+    assert!(err.to_string().contains("unknown variant"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind", content = "data")]
+enum Shape3WithOther {
+    Circle,
+    #[rusty_serde(other)]
+    Unknown,
+}
+
+#[test]
+fn adjacently_tagged_other_variant_catches_an_unrecognized_tag() {
+    let decoded: Shape3WithOther = json::from_str(r#"{"kind":"Hexagon","data":123}"#).unwrap();
+    assert_eq!(decoded, Shape3WithOther::Unknown);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct BoundedByWhere<T>
 where
     T: Clone + std::fmt::Debug,

@@ -107,7 +107,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   ...fields}`), for unit and named-field variants - tuple/newtype variants
   aren't representable that way (there's no sound way to splice an
   arbitrary value's serialization into an outer object without knowing its
-  shape), so `tag` on an enum with one is a `compile_error!`. `deny_unknown_fields`
+  shape), so `tag` on an enum with one is a `compile_error!`. Pairing `tag`
+  with `content` switches to adjacent tagging instead
+  (`#[rusty_serde(tag = "kind", content = "data")]` ->
+  `{"kind":"Variant","data":...fields}`, or just `{"kind":"Variant"}` for a
+  unit variant) - since the payload gets its own key instead of sharing the
+  tag's object, every variant shape is representable, including tuple
+  variants; `content` without `tag` is a `compile_error!`. `deny_unknown_fields`
   errors on deserialize instead of silently ignoring a field/key that
   doesn't match any of the type's own (applies to struct/enum-struct-variant
   fields alike); mutually exclusive with a `flatten` field, which needs
@@ -170,7 +176,12 @@ the second `Deserializer` implementation that runs the ordinary
 `Deserialize` machinery back against the buffered tree) lives entirely in
 the JSON format module, behind a `deserialize_internally_tagged_enum`
 method on the core `Deserializer` trait that other formats can just leave
-at its default ("not supported") if they don't need it.
+at its default ("not supported") if they don't need it. Adjacently- and
+untagged enums buffer the same way, but through the format-agnostic
+`Value`/`ValueDeserializer` machinery instead - no core trait method needed,
+since a tag (if any) and a self-contained sub-value are all that's needed
+to pick and drive a variant, and any format's `Deserialize::deserialize`
+call already produces a `Value` for free.
 
 ## Testing
 

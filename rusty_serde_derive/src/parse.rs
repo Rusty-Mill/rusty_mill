@@ -66,8 +66,12 @@ pub struct Attrs {
     pub rename_all: Option<String>,
     /// Container-only, enums only: switches from external tagging
     /// (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
-    /// ...fields}`).
+    /// ...fields}`) - or, paired with `content`, to adjacent tagging
+    /// (`{"<tag>": "Variant", "<content>": ...fields}`).
     pub tag: Option<String>,
+    /// Container-only, enums only: paired with `tag` for adjacent tagging.
+    /// Meaningless (and rejected) without `tag` also set.
+    pub content: Option<String>,
     /// Container-only, enums only: no tag/wrapper at all - try each
     /// variant's own shape in turn until one deserializes successfully.
     pub untagged: bool,
@@ -147,6 +151,7 @@ impl Attrs {
             && self.aliases.is_empty()
             && self.rename_all.is_none()
             && self.tag.is_none()
+            && self.content.is_none()
             && !self.untagged
             && !self.deny_unknown_fields
             && !self.other
@@ -230,7 +235,12 @@ pub enum Data {
         variants: Vec<Variant>,
         /// From a container-level `#[rusty_serde(tag = "...")]`.
         tag: Option<String>,
-        /// From a container-level `#[rusty_serde(untagged)]`.
+        /// From a container-level `#[rusty_serde(content = "...")]`, only
+        /// meaningful (and only ever `Some`) alongside `tag` - together
+        /// they select adjacent tagging instead of internal tagging.
+        content: Option<String>,
+        /// Container-only, enums only: no tag/wrapper at all - try each
+        /// variant's own shape in turn until one deserializes successfully.
         untagged: bool,
         /// From a container-level `#[rusty_serde(deny_unknown_fields)]`.
         deny_unknown_fields: bool,
@@ -480,6 +490,11 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
             "`tag` and `untagged` can't both be set (on `{name}`)"
         )));
     }
+    if container_attrs.content.is_some() && container_attrs.tag.is_none() {
+        return Err(compile_error(&format!(
+            "`content` requires `tag` to also be set (on `{name}`)"
+        )));
+    }
     if container_attrs.transparent {
         return Err(compile_error(&format!(
             "`transparent` is only supported on structs, not enums (on `{name}`)"
@@ -542,12 +557,19 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         apply_rename_all_variants(&mut variants, style);
     }
 
-    if let Some(tag) = &container_attrs.tag {
+    // Internal tagging (`tag` alone) has no sound way to splice an
+    // arbitrary tuple variant's serialization into the same outer object
+    // as the tag - so tuple variants are rejected there. Adjacent tagging
+    // (`tag` + `content`) doesn't have that problem (the payload gets its
+    // own `content` key), so every variant shape is representable.
+    if let (Some(tag), None) = (&container_attrs.tag, &container_attrs.content) {
         for v in &variants {
             if matches!(v.fields, Fields::Unnamed(n) if n > 0) {
                 return Err(compile_error(&format!(
                     "rusty_serde_derive's internally-tagged enums (`tag = \"{tag}\"`) only \
-                     support unit and named-field variants, not tuple variant `{}`",
+                     support unit and named-field variants, not tuple variant `{}` - use \
+                     `content = \"...\"` alongside `tag` for adjacent tagging, which supports \
+                     every variant shape",
                     v.name
                 )));
             }
@@ -580,6 +602,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         generics,
         variants,
         tag: container_attrs.tag,
+        content: container_attrs.content,
         untagged: container_attrs.untagged,
         deny_unknown_fields: container_attrs.deny_unknown_fields,
         from: container_attrs.from,
@@ -1165,6 +1188,25 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `tag = \"...\"`"));
             }
             attrs.tag = Some(value);
+        }
+        "content" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`content` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `content = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `content =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `content = \"...\"`"));
+            }
+            attrs.content = Some(value);
         }
         "default" => {
             if context != "field" {

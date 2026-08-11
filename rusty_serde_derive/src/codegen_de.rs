@@ -20,6 +20,7 @@ pub fn generate(data: &Data) -> String {
             generics,
             variants,
             tag,
+            content,
             untagged,
             deny_unknown_fields,
             from,
@@ -31,6 +32,7 @@ pub fn generate(data: &Data) -> String {
                 generics,
                 variants,
                 tag.as_deref(),
+                content.as_deref(),
                 *untagged,
                 *deny_unknown_fields,
             ),
@@ -555,11 +557,15 @@ fn enum_impl(
     generics: &Generics,
     variants: &[Variant],
     tag: Option<&str>,
+    content: Option<&str>,
     untagged: bool,
     deny_unknown_fields: bool,
 ) -> String {
     if untagged {
         return enum_impl_untagged(name, generics, variants, deny_unknown_fields);
+    }
+    if let (Some(t), Some(c)) = (tag, content) {
+        return enum_impl_adjacent(name, generics, variants, t, c, deny_unknown_fields);
     }
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
@@ -643,6 +649,63 @@ fn enum_impl(
         v_impl_decl = v.impl_decl,
         v_where_clause = v.where_clause,
         vty = v.ty,
+    )
+}
+
+/// An adjacently-tagged enum (`#[rusty_serde(tag = "t", content = "c")]`)
+/// buffers the whole input into a `Value` (same as `untagged` has to), reads
+/// the tag key to know which variant to expect ahead of time, then reuses
+/// `untagged_variant_body`'s per-shape codegen against the `content` key's
+/// value (or `Value::Null`, for a unit variant, if `content` is absent -
+/// same as external tagging already treats a bare `"Variant"` as having no
+/// data). Unlike `enum_impl_untagged`, the tag tells us exactly which
+/// variant to try, so this dispatches with a single `match` instead of
+/// trying every variant in declaration order.
+fn enum_impl_adjacent(
+    name: &str,
+    generics: &Generics,
+    variants: &[Variant],
+    tag: &str,
+    content: &str,
+    deny_unknown_fields: bool,
+) -> String {
+    let ty = generics.ty(name);
+    let other_variant = variants.iter().find(|v| v.attrs.other).map(|v| &v.name);
+
+    let mut arms = String::new();
+    for variant in variants {
+        let body = untagged_variant_body(name, &ty, generics, variant, deny_unknown_fields);
+        let wire = variant.de_wire_name();
+        arms += &format!(
+            "                    {wire:?} => (|| -> Result<Self, __D::Error> {{\n{body}\n}})(),\n"
+        );
+    }
+    let fallback = match other_variant {
+        Some(ident) => format!("                    _ => Ok({name}::{ident}),\n"),
+        None => "                    __other => Err(::rusty_serde::Error::custom(::std::format!(\"unknown variant `{}`\", __other))),\n".to_string(),
+    };
+
+    let missing_tag_msg = format!("missing field `{tag}`");
+    let impl_decl = generics.impl_decl(Some("'de"));
+    let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
+    format!(
+        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
+             fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
+             where\n\
+                 __D: ::rusty_serde::Deserializer<'de>,\n\
+             {{\n\
+                 let __outer: ::rusty_serde::Value = ::rusty_serde::Deserialize::deserialize(deserializer)?;\n\
+                 let __tag = __outer.get({tag:?})\n\
+                     .ok_or_else(|| ::rusty_serde::Error::custom({missing_tag_msg:?}))?\n\
+                     .as_str()\n\
+                     .ok_or_else(|| ::rusty_serde::Error::custom(\"tag must be a string\"))?;\n\
+                 let __value: ::rusty_serde::Value = __outer.get({content:?}).cloned().unwrap_or(::rusty_serde::Value::Null);\n\
+                 match __tag {{\n\
+                     {arms}\
+                     {fallback}\
+                 }}\n\
+             }}\n\
+         }}\n"
     )
 }
 
