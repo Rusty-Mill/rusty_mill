@@ -7,7 +7,7 @@ use std::fmt;
 use std::hash::Hash;
 
 use crate::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
-use crate::ser::{SerializeMap, SerializeSeq, SerializeTuple, Serialize, Serializer};
+use crate::ser::{Serialize, SerializeMap, SerializeSeq, SerializeTuple, Serializer};
 
 macro_rules! impl_serialize_for_int {
     ($($ty:ty => $method:ident as $via:ty),* $(,)?) => {

@@ -341,9 +341,15 @@ fn container_rename_all_variants() {
 #[rusty_serde(tag = "kind")]
 enum Shape2 {
     Circle,
-    Rectangle { width: f64, height: f64 },
+    Rectangle {
+        width: f64,
+        height: f64,
+    },
     #[rusty_serde(rename = "tri")]
-    Triangle { base: f64, height: f64 },
+    Triangle {
+        base: f64,
+        height: f64,
+    },
 }
 
 #[test]

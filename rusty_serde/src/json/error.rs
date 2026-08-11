@@ -22,7 +22,11 @@ impl fmt::Display for Error {
         if self.line == 0 {
             write!(f, "{}", self.msg)
         } else {
-            write!(f, "{} at line {} column {}", self.msg, self.line, self.column)
+            write!(
+                f,
+                "{} at line {} column {}",
+                self.msg, self.line, self.column
+            )
         }
     }
 }

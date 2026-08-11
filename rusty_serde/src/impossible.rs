@@ -9,8 +9,8 @@ use std::marker::PhantomData;
 
 use crate::error::Error;
 use crate::ser::{
-    Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
-    SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
+    Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
+    SerializeTupleStruct, SerializeTupleVariant,
 };
 
 pub struct Impossible<Ok, E> {

@@ -18,7 +18,9 @@ pub fn generate(data: &Data) -> String {
 
 fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     let body = match fields {
-        Fields::Unit => format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})"),
+        Fields::Unit => {
+            format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})")
+        }
         Fields::Unnamed(0) => {
             format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})")
         }
