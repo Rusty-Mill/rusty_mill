@@ -55,6 +55,9 @@ pub fn generate(data: &Data) -> String {
             fields,
             deny_unknown_fields: _,
             transparent,
+            // `from`/`try_from` only replace the Deserialize impl - this
+            // container still gets its normal, field-driven Serialize impl.
+            from: _,
         } => struct_impl(name, generics, fields, *transparent),
         Data::Enum {
             name,
@@ -63,6 +66,7 @@ pub fn generate(data: &Data) -> String {
             tag,
             untagged,
             deny_unknown_fields: _,
+            from: _,
         } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
     }
 }

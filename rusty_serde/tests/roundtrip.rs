@@ -1074,3 +1074,61 @@ fn bound_override_lets_a_phantom_type_param_skip_the_auto_inferred_bound() {
         r#"{"value":7}"#,
     );
 }
+
+#[derive(Debug, Deserialize)]
+struct RawPoint {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(from = "RawPoint")]
+struct FromPoint {
+    x: i32,
+    y: i32,
+}
+
+impl From<RawPoint> for FromPoint {
+    fn from(r: RawPoint) -> Self {
+        FromPoint { x: r.x, y: r.y }
+    }
+}
+
+#[test]
+fn from_deserializes_via_the_intermediate_type_then_converts() {
+    let decoded: FromPoint = json::from_str(r#"{"x":1,"y":2}"#).unwrap();
+    assert_eq!(decoded, FromPoint { x: 1, y: 2 });
+    // Serialize is unaffected by `from` - still the normal, field-driven impl.
+    assert_eq!(json::to_string(&decoded).unwrap(), r#"{"x":1,"y":2}"#);
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPositive {
+    value: i32,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(try_from = "RawPositive")]
+struct Positive {
+    value: i32,
+}
+
+impl std::convert::TryFrom<RawPositive> for Positive {
+    type Error = String;
+    fn try_from(r: RawPositive) -> Result<Self, String> {
+        if r.value > 0 {
+            Ok(Positive { value: r.value })
+        } else {
+            Err(format!("{} is not positive", r.value))
+        }
+    }
+}
+
+#[test]
+fn try_from_deserializes_via_the_intermediate_type_and_can_fail() {
+    let decoded: Positive = json::from_str(r#"{"value":5}"#).unwrap();
+    assert_eq!(decoded, Positive { value: 5 });
+
+    let err = json::from_str::<Positive>(r#"{"value":-1}"#).unwrap_err();
+    assert!(err.to_string().contains("is not positive"));
+}

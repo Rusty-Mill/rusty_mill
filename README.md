@@ -129,6 +129,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   `PhantomData<T>` field, which doesn't actually need `T` to be
   (de)serializable even though the macro (unable to see field types)
   would otherwise assume it does.
+- `#[rusty_serde(from = "T")]`/`#[rusty_serde(try_from = "T")]`
+  (container-only, deserialize side only - `#[derive(Deserialize)]` is
+  still required for the impl to exist at all): deserializes an
+  intermediate type `T` and converts via `From<T>`/`TryFrom<T>` instead of
+  reading the container's own fields directly. A `try_from` conversion
+  error is reported through the target format's error type via
+  `Error::custom`, so it needs to implement `Display`.
 - `Serializer`/`Deserializer::is_human_readable()`, so a hand-written
   `Serialize`/`Deserialize` impl can pick a representation per format (an
   ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
