@@ -405,3 +405,27 @@ fn collect_str_matches_serialize_str() {
     assert_eq!(json::to_string(&CollectStr).unwrap(), r#""three""#);
     assert_eq!(ron::to_string(&CollectStr).unwrap(), r#""three""#);
 }
+
+mod remote_target {
+    pub struct ForeignPoint {
+        pub x: i32,
+        pub y: i32,
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+#[rusty_serde(remote = "remote_target::ForeignPoint")]
+struct ForeignPointMirror {
+    x: i32,
+    y: i32,
+}
+
+#[test]
+fn remote_derive_round_trips_through_ron_too() {
+    let value = remote_target::ForeignPoint { x: 1, y: 2 };
+    let encoded = ron::to_string(&value).unwrap();
+    assert_eq!(encoded, "{x:1,y:2}");
+    let decoded: remote_target::ForeignPoint = ron::from_str(&encoded).unwrap();
+    assert_eq!((decoded.x, decoded.y), (value.x, value.y));
+}

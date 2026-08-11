@@ -146,6 +146,25 @@ toolchain, not a crate you depend on), and everything else is `std`.
   `Serialize` counterpart to `from`/`try_from` - clones into `T` (via
   `Into<T>`, so the container itself needs `Clone`) then serializes that,
   instead of serializing the container's own fields directly.
+- `#[rusty_serde(remote = "path::Type")]` (container-only, structs only)
+  targets the generated impls at `path::Type` instead of the annotated
+  struct itself, using the annotated struct's own field list as
+  `path::Type`'s shape - for writing a `Serialize`/`Deserialize` impl for a
+  type whose definition you can't add `#[derive(...)]` to directly. A
+  field's `#[rusty_serde(getter = "path::to::fn")]` calls `path::to::fn(self)`
+  (expected to return an owned value) instead of `&self.field` during
+  serialization, for a field that isn't visible from wherever the impl
+  ends up (`getter` is meaningless, and rejected, without `remote` also
+  set). Deserializing still builds `path::Type { field1, field2, .. }`
+  directly, so its fields need to already be nameable from that point -
+  either public, or (as with a private-field type you don't own) by giving
+  the annotated struct the same module as `path::Type` itself, same as
+  real serde's own remote-derive examples. `path::Type` also needs to
+  already be local enough for Rust's orphan rule to allow the impl in the
+  first place - a foreign crate's type typically isn't, unless it's used
+  alongside a `with`-equivalent indirection this crate doesn't support (see
+  "What's not (yet)" below); `remote` on an enum is a `compile_error!`
+  rather than an untested, partially-working shape.
 - `Serializer`/`Deserializer::is_human_readable()`, so a hand-written
   `Serialize`/`Deserialize` impl can pick a representation per format (an
   ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
@@ -195,8 +214,13 @@ consistent with the rest of the project.
 
 - Const generics (`struct Foo<const N: usize>`) - rejected with a clear
   `compile_error!` rather than silently mishandled.
-- Any format besides JSON. The data model (`ser`/`de` modules) is
-  format-agnostic, so a second format is just a new `Serializer`/
-  `Deserializer` impl away.
 - Zero-copy deserialization (`&'de str` borrows) - the JSON parser always
   allocates `String`s for simplicity.
+- `#[rusty_serde(with = "module")]`/`serialize_with`/`deserialize_with`.
+  Real serde bridges these to a field's concrete type via a
+  `T`-generic-parameter trick that this crate's derive macro can't use,
+  since it never parses field types in the first place (see "Generics work
+  without..." above) - and the macro has no other way to name that type
+  itself to call a concrete function against it. `remote` (above) covers
+  part of the same use case - a foreign type you can't add `#[derive(...)]`
+  to - without needing this.

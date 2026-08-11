@@ -1273,3 +1273,82 @@ fn into_serializes_by_cloning_into_the_intermediate_type() {
     let decoded: Celsius = json::from_str(r#"{"degrees":20.0}"#).unwrap();
     assert_eq!(decoded, value);
 }
+
+/// Stands in for a type from another crate: has its own (non-derived)
+/// `Serialize`/`Deserialize` would-be target, all-public fields.
+mod remote_target {
+    #[derive(Debug, PartialEq)]
+    pub struct ForeignPoint {
+        pub x: i32,
+        pub y: i32,
+    }
+}
+
+// `remote` targets `remote_target::ForeignPoint` - this struct is never
+// constructed directly, it's only a shape template for the derive macro.
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize)]
+#[rusty_serde(remote = "remote_target::ForeignPoint")]
+struct ForeignPointMirror {
+    x: i32,
+    y: i32,
+}
+
+#[test]
+fn remote_derive_targets_the_foreign_type_with_public_fields() {
+    let value = remote_target::ForeignPoint { x: 1, y: 2 };
+    let json = json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"x":1,"y":2}"#);
+    let decoded: remote_target::ForeignPoint = json::from_str(&json).unwrap();
+    assert_eq!(decoded, value);
+}
+
+// A private-field foreign type's mirror has to live in the same module as
+// the type itself, same as real serde's own remote-derive examples - a
+// struct literal needs its fields visible from wherever it's built, `derive`
+// or not.
+mod remote_getter_target {
+    use rusty_serde::{Deserialize, Serialize};
+
+    #[derive(Debug, PartialEq)]
+    pub struct ForeignSecret {
+        label: String,
+        count: i32,
+    }
+
+    impl ForeignSecret {
+        pub fn new(label: &str, count: i32) -> Self {
+            ForeignSecret {
+                label: label.to_string(),
+                count,
+            }
+        }
+        pub fn label(&self) -> String {
+            self.label.clone()
+        }
+        pub fn count(&self) -> i32 {
+            self.count
+        }
+    }
+
+    // Never constructed directly - only a shape template for the derive
+    // macro, which targets `ForeignSecret` via `remote`.
+    #[allow(dead_code)]
+    #[derive(Serialize, Deserialize)]
+    #[rusty_serde(remote = "ForeignSecret")]
+    pub struct ForeignSecretMirror {
+        #[rusty_serde(getter = "ForeignSecret::label")]
+        label: String,
+        #[rusty_serde(getter = "ForeignSecret::count")]
+        count: i32,
+    }
+}
+
+#[test]
+fn remote_derive_getter_reads_a_private_field_via_a_function() {
+    let value = remote_getter_target::ForeignSecret::new("hi", 42);
+    let json = json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"label":"hi","count":42}"#);
+    let decoded: remote_getter_target::ForeignSecret = json::from_str(&json).unwrap();
+    assert_eq!(decoded, value);
+}
