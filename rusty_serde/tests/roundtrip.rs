@@ -1409,6 +1409,25 @@ fn with_round_trips_through_json() {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct EventWithShorthand {
+    name: String,
+    #[rusty_serde(with = "as_seconds")]
+    elapsed: std::time::Duration,
+}
+
+#[test]
+fn with_shorthand_sets_both_directions() {
+    let value = EventWithShorthand {
+        name: "boot".to_string(),
+        elapsed: std::time::Duration::from_secs(90),
+    };
+    let encoded = json::to_string(&value).unwrap();
+    assert_eq!(encoded, r#"{"name":"boot","elapsed":90}"#);
+    let decoded: EventWithShorthand = json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, value);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct EventRenamed {
     #[rusty_serde(
         rename = "at",

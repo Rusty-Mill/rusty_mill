@@ -131,9 +131,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   own number handling, a small non-negative JSON integer arrives as
   `Value::Int` (`visit_i64`), not `Value::UInt`/`visit_u64`; delegating to
   an existing `Deserialize` impl (`u64::deserialize`, above) rather than
-  writing a bespoke `Visitor` sidesteps needing to know that. There's no
-  bare `with = "module"` shorthand for setting both directions at once yet
-  - write out `serialize_with`/`deserialize_with` individually. Neither
+  writing a bespoke `Visitor` sidesteps needing to know that.
+  `with = "module"` is shorthand for setting both at once -
+  `serialize_with = "module::serialize"` and
+  `deserialize_with = "module::deserialize"` together (so the example
+  above could instead write `#[rusty_serde(with = "as_seconds")]`) -
+  mutually exclusive with setting either individually on the same field.
+  Neither `with` nor `serialize_with`/`deserialize_with` on their own
   combines with `getter`, and `serialize_with` doesn't combine with
   `skip_serializing_if`; `deserialize_with` doesn't combine with
   `flatten`. See "Generics work without..." below for why this needs an
@@ -307,13 +311,3 @@ consistent with the rest of the project.
   `compile_error!` rather than silently mishandled.
 - Zero-copy deserialization (`&'de str` borrows) - the JSON parser always
   allocates `String`s for simplicity.
-- Bare `#[rusty_serde(with = "module")]` (shorthand for setting
-  `serialize_with`/`deserialize_with` to the same module's `serialize`/
-  `deserialize` at once) - `serialize_with` and `deserialize_with`
-  (above) are both implemented individually, via an object-safe erasure
-  layer (`rusty_serde::erased`) rather than the `T`-generic-parameter
-  trick real serde uses (which doesn't work here, since this crate's
-  derive macro never parses field types in the first place - see
-  "Generics work without..." above). `remote` (above) covers part of the
-  same use case - a foreign type you can't add `#[derive(...)]` to -
-  without needing either.

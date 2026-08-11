@@ -130,6 +130,13 @@ pub struct Attrs {
     /// `fn<'de, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>`
     /// convention.
     pub deserialize_with: Option<String>,
+    /// Field-only, named struct fields only:
+    /// `#[rusty_serde(with = "module")]` - shorthand for
+    /// `serialize_with = "module::serialize"` and
+    /// `deserialize_with = "module::deserialize"` together. Expanded into
+    /// those two at parse time (see `parse_named_fields`); mutually
+    /// exclusive with setting either individually on the same field.
+    pub with: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -192,6 +199,7 @@ impl Attrs {
             && self.getter.is_none()
             && self.serialize_with.is_none()
             && self.deserialize_with.is_none()
+            && self.with.is_none()
     }
 }
 
@@ -969,7 +977,7 @@ fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, T
     let mut fields = Vec::new();
 
     loop {
-        let attrs = parse_attrs(&mut tokens, "field")?;
+        let mut attrs = parse_attrs(&mut tokens, "field")?;
         skip_visibility(&mut tokens);
         if tokens.peek().is_none() {
             break;
@@ -980,6 +988,21 @@ fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, T
             _ => return Err(compile_error(&format!("expected `:` after field `{name}`"))),
         }
         skip_to_top_level_comma(&mut tokens);
+        // `with = "module"` is pure sugar for setting `serialize_with`/
+        // `deserialize_with` to that module's own `serialize`/
+        // `deserialize` together - expanded here, before any of their own
+        // validation below, so it's indistinguishable from having set both
+        // individually from that point on.
+        if let Some(module) = &attrs.with {
+            if attrs.serialize_with.is_some() || attrs.deserialize_with.is_some() {
+                return Err(compile_error(&format!(
+                    "`with` can't be combined with `serialize_with`/`deserialize_with` on the \
+                     same field (on field `{name}`) - `with` already sets both"
+                )));
+            }
+            attrs.serialize_with = Some(format!("{module}::serialize"));
+            attrs.deserialize_with = Some(format!("{module}::deserialize"));
+        }
         if attrs.flatten && attrs.skip {
             return Err(compile_error(&format!(
                 "`flatten` and `skip` can't both be set (on field `{name}`)"
@@ -1606,6 +1629,25 @@ fn parse_one_meta_item(
                 ));
             }
             attrs.deserialize_with = Some(value);
+        }
+        "with" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`with` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `with = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `with =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `with = \"...\"`"));
+            }
+            attrs.with = Some(value);
         }
         "remote" => {
             if context != "container" {
