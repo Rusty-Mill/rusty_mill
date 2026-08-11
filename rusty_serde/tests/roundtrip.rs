@@ -155,6 +155,73 @@ fn trailing_garbage_is_an_error() {
     assert!(err.to_string().contains("trailing"));
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct GenericPoint<T> {
+    x: T,
+    y: T,
+}
+
+#[test]
+fn generic_named_struct() {
+    roundtrip(GenericPoint { x: 1, y: 2 }, r#"{"x":1,"y":2}"#);
+    roundtrip(
+        GenericPoint {
+            x: "a".to_string(),
+            y: "b".to_string(),
+        },
+        r#"{"x":"a","y":"b"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct GenericWrapper<T>(T);
+
+#[test]
+fn generic_newtype_struct() {
+    roundtrip(GenericWrapper(vec![1, 2, 3]), "[1,2,3]");
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct GenericPair<A, B>(A, B);
+
+#[test]
+fn generic_tuple_struct() {
+    roundtrip(GenericPair(1, "two".to_string()), r#"[1,"two"]"#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum GenericEither<L, R> {
+    Left(L),
+    Right(R),
+    Neither,
+    Both { left: L, right: R },
+}
+
+#[test]
+fn generic_enum() {
+    roundtrip(GenericEither::<i32, String>::Left(1), r#"{"Left":1}"#);
+    roundtrip(
+        GenericEither::<i32, String>::Right("hi".to_string()),
+        r#"{"Right":"hi"}"#,
+    );
+    roundtrip(GenericEither::<i32, String>::Neither, r#""Neither""#);
+    roundtrip(
+        GenericEither::Both {
+            left: 1,
+            right: "hi".to_string(),
+        },
+        r#"{"Both":{"left":1,"right":"hi"}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Bounded<T: Clone + std::fmt::Debug>(T);
+
+#[test]
+fn generic_struct_with_preexisting_bound() {
+    roundtrip(Bounded(42), "42");
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();

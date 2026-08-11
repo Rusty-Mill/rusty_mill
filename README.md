@@ -44,24 +44,32 @@ toolchain, not a crate you depend on), and everything else is `std`.
 ## What's supported
 
 - Structs: named (`struct Foo { a: i32 }`), tuple (`struct Foo(i32, String)`),
-  and unit (`struct Foo;`).
+  and unit (`struct Foo;`) - generic over any number of lifetime/type
+  parameters (`struct Foo<'a, T: Clone> { ... }`).
 - Enums: unit, newtype, tuple, and struct variants, serialized the way serde
   calls "externally tagged" (`"Variant"` for a unit variant,
-  `{"Variant": ...}` otherwise).
+  `{"Variant": ...}` otherwise) - generic the same way structs are.
 - `bool`, all integer widths, `f32`/`f64`, `char`, `String`, `Option<T>`,
   `Vec<T>`, tuples up to arity 8, `HashMap`/`BTreeMap`, `Box<T>`.
 - Unknown JSON object fields are ignored during deserialization; missing
   required fields and type mismatches produce descriptive errors with a
   line/column.
 
+Generics work without the derive macro's parser ever looking at field
+*types* (it only needs field/variant *names*, since `Serialize`/
+`Deserialize` are invoked generically and Rust's own type inference fills
+in the rest): every declared type parameter just gets a blanket
+`Serialize`/`Deserialize` bound tacked onto the generated `impl`, e.g.
+`impl<T: Serialize> Serialize for Foo<T>`. That's always sound - any field
+type built from `T` already needs that bound to compile - if occasionally
+more conservative than a hand-written impl would be (an unused
+`PhantomData<T>` field would still force `T: Serialize`, since the macro
+can't see that `T` goes unused there).
+
 ## What's not (yet)
 
-- Generic structs/enums (`struct Foo<T>`) - the derive macro's parser
-  deliberately never looks at field *types* (it only needs field/variant
-  *names*, since `Serialize`/`Deserialize` are invoked generically and Rust's
-  own type inference fills in the rest), which is what keeps a hand-written
-  parser this small - but that same shortcut means it can't yet thread a `T:
-  Serialize` bound onto an `impl` block.
+- Const generics (`struct Foo<const N: usize>`) and `where` clauses -
+  rejected with a clear `compile_error!` rather than silently mishandled.
 - Any format besides JSON. The data model (`ser`/`de` modules) is
   format-agnostic, so a second format is just a new `Serializer`/
   `Deserializer` impl away.

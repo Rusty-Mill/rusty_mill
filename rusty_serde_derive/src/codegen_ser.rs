@@ -1,13 +1,21 @@
-use crate::parse::{Data, Fields, Variant};
+use crate::parse::{Data, Fields, Generics, Variant};
 
 pub fn generate(data: &Data) -> String {
     match data {
-        Data::Struct { name, fields } => struct_impl(name, fields),
-        Data::Enum { name, variants } => enum_impl(name, variants),
+        Data::Struct {
+            name,
+            generics,
+            fields,
+        } => struct_impl(name, generics, fields),
+        Data::Enum {
+            name,
+            generics,
+            variants,
+        } => enum_impl(name, generics, variants),
     }
 }
 
-fn struct_impl(name: &str, fields: &Fields) -> String {
+fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     let body = match fields {
         Fields::Unit => format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})"),
         Fields::Unnamed(0) => {
@@ -43,11 +51,13 @@ fn struct_impl(name: &str, fields: &Fields) -> String {
         }
     };
 
+    let impl_decl = generics.impl_decl(None, "::rusty_serde::Serialize");
+    let ty = generics.ty(name);
     format!(
-        "impl ::rusty_serde::Serialize for {name} {{\n\
-             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>\n\
+        "impl{impl_decl} ::rusty_serde::Serialize for {ty} {{\n\
+             fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
              where\n\
-                 S: ::rusty_serde::Serializer,\n\
+                 __S: ::rusty_serde::Serializer,\n\
              {{\n\
                  {body}\n\
              }}\n\
@@ -55,18 +65,20 @@ fn struct_impl(name: &str, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, variants: &[Variant]) -> String {
+fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
     let mut arms = String::new();
     for (index, variant) in variants.iter().enumerate() {
         let vname = &variant.name;
         arms += &variant_arm(name, index as u32, vname, &variant.fields);
     }
 
+    let impl_decl = generics.impl_decl(None, "::rusty_serde::Serialize");
+    let ty = generics.ty(name);
     format!(
-        "impl ::rusty_serde::Serialize for {name} {{\n\
-             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>\n\
+        "impl{impl_decl} ::rusty_serde::Serialize for {ty} {{\n\
+             fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
              where\n\
-                 S: ::rusty_serde::Serializer,\n\
+                 __S: ::rusty_serde::Serializer,\n\
              {{\n\
                  match *self {{\n{arms}}}\n\
              }}\n\
