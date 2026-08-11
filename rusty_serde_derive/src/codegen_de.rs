@@ -9,6 +9,8 @@ pub fn generate(data: &Data) -> String {
             deny_unknown_fields,
             transparent,
             from,
+            // `into` only replaces the Serialize impl.
+            into: _,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => struct_impl(name, generics, fields, *deny_unknown_fields, *transparent),
@@ -21,6 +23,7 @@ pub fn generate(data: &Data) -> String {
             untagged,
             deny_unknown_fields,
             from,
+            into: _,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => enum_impl(

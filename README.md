@@ -136,6 +136,10 @@ toolchain, not a crate you depend on), and everything else is `std`.
   reading the container's own fields directly. A `try_from` conversion
   error is reported through the target format's error type via
   `Error::custom`, so it needs to implement `Display`.
+- `#[rusty_serde(into = "T")]` (container-only, serialize side only): the
+  `Serialize` counterpart to `from`/`try_from` - clones into `T` (via
+  `Into<T>`, so the container itself needs `Clone`) then serializes that,
+  instead of serializing the container's own fields directly.
 - `Serializer`/`Deserializer::is_human_readable()`, so a hand-written
   `Serialize`/`Deserialize` impl can pick a representation per format (an
   ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
