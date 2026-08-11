@@ -592,6 +592,71 @@ fn value_usable_as_a_derived_field() {
     assert_eq!(json, r#"{"name":"x","extra":{"whatever":[1,2]}}"#);
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(untagged)]
+enum UntaggedShape {
+    Circle,
+    Named(String),
+    Point(i32, i32),
+    Rect { width: f64, height: f64 },
+}
+
+#[test]
+fn untagged_unit_variant() {
+    roundtrip(UntaggedShape::Circle, "null");
+}
+
+#[test]
+fn untagged_newtype_variant() {
+    roundtrip(UntaggedShape::Named("x".into()), r#""x""#);
+}
+
+#[test]
+fn untagged_tuple_variant() {
+    roundtrip(UntaggedShape::Point(1, 2), "[1,2]");
+}
+
+#[test]
+fn untagged_struct_variant() {
+    roundtrip(
+        UntaggedShape::Rect {
+            width: 1.0,
+            height: 2.0,
+        },
+        r#"{"width":1.0,"height":2.0}"#,
+    );
+}
+
+#[test]
+fn untagged_tries_variants_in_declaration_order() {
+    // `Named(String)` comes before `Point(i32, i32)`, so a JSON array
+    // never even reaches the newtype attempt; a JSON string never reaches
+    // the tuple attempt.
+    let decoded: UntaggedShape = json::from_str(r#""hi""#).unwrap();
+    assert_eq!(decoded, UntaggedShape::Named("hi".into()));
+    let decoded: UntaggedShape = json::from_str("[3,4]").unwrap();
+    assert_eq!(decoded, UntaggedShape::Point(3, 4));
+}
+
+#[test]
+fn untagged_no_matching_variant_is_an_error() {
+    let err = json::from_str::<UntaggedShape>("true").unwrap_err();
+    assert!(err.to_string().contains("did not match any variant"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(untagged)]
+enum UntaggedGeneric<T> {
+    Single(T),
+    Pair(T, T),
+}
+
+#[test]
+fn untagged_generic_enum() {
+    roundtrip(UntaggedGeneric::Single(1), "1");
+    roundtrip(UntaggedGeneric::Pair(1, 2), "[1,2]");
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();
