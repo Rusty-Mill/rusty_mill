@@ -28,14 +28,18 @@ extern crate self as rusty_serde;
 
 pub mod de;
 pub mod error;
+pub mod flatten;
 mod impls;
 pub mod impossible;
 pub mod json;
+pub mod ron;
 pub mod ser;
+pub mod value;
 
 pub use crate::de::{Deserialize, Deserializer};
 pub use crate::error::Error;
 pub use crate::ser::{Serialize, Serializer};
+pub use crate::value::Value;
 
 #[cfg(feature = "derive")]
 pub use rusty_serde_derive::{Deserialize, Serialize};

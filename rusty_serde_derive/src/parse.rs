@@ -34,6 +34,13 @@ pub struct Attrs {
     pub rename: Option<String>,
     pub default: bool,
     pub skip: bool,
+    /// A raw Rust path (e.g. `"Option::is_none"`), called as `path(&self.field)`
+    /// during serialization; the field is omitted from the output (and from
+    /// the struct's computed length) whenever it returns `true`.
+    pub skip_serializing_if: Option<String>,
+    /// Merges this field's own serialized shape (must be a map/struct) into
+    /// the parent's, instead of nesting it under its own key.
+    pub flatten: bool,
     /// Container-only: a case-conversion style (`"camelCase"`, ...) applied
     /// to every named field/variant that didn't set its own `rename`.
     pub rename_all: Option<String>,
@@ -41,6 +48,9 @@ pub struct Attrs {
     /// (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
     /// ...fields}`).
     pub tag: Option<String>,
+    /// Container-only, enums only: no tag/wrapper at all - try each
+    /// variant's own shape in turn until one deserializes successfully.
+    pub untagged: bool,
 }
 
 impl Attrs {
@@ -48,8 +58,11 @@ impl Attrs {
         self.rename.is_none()
             && !self.default
             && !self.skip
+            && self.skip_serializing_if.is_none()
+            && !self.flatten
             && self.rename_all.is_none()
             && self.tag.is_none()
+            && !self.untagged
     }
 }
 
@@ -90,6 +103,8 @@ pub enum Data {
         variants: Vec<Variant>,
         /// From a container-level `#[rusty_serde(tag = "...")]`.
         tag: Option<String>,
+        /// From a container-level `#[rusty_serde(untagged)]`.
+        untagged: bool,
     },
 }
 
@@ -142,11 +157,25 @@ impl Generics {
     /// [`Self::where_clause`] instead, since a user's own `where` clause has
     /// to be merged in after the `for Type` part, which the `<...>` list
     /// comes before). `extra_lifetime` (typically `'de`) is prepended
-    /// first, since it must be declared before anything that uses it.
+    /// first, since it must be declared before anything that uses it - and,
+    /// when the type has lifetimes of its own, bounded by all of them
+    /// (`'de: 'a`) so a borrowed field (`&'a str`, `Cow<'a, str>`, ...)
+    /// can actually be built from data a `Deserializer<'de>` hands back;
+    /// callers that don't need `'de` (Serialize) just pass `None` and get
+    /// the type's own lifetimes back unbounded.
     pub fn impl_decl(&self, extra_lifetime: Option<&str>) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(l) = extra_lifetime {
-            parts.push(l.to_string());
+            if self.lifetimes.is_empty() {
+                parts.push(l.to_string());
+            } else {
+                let bare_names = self
+                    .lifetimes
+                    .iter()
+                    .map(|decl| decl.split(':').next().unwrap().trim().to_string());
+                let bounds = bare_names.collect::<Vec<_>>().join(" + ");
+                parts.push(format!("{l}: {bounds}"));
+            }
         }
         parts.extend(self.lifetimes.iter().cloned());
         parts.extend(self.type_params.iter().map(|t| t.name.clone()));
@@ -210,6 +239,11 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
             "`tag` is only supported on enums (on `{name}`)"
         )));
     }
+    if container_attrs.untagged {
+        return Err(compile_error(&format!(
+            "`untagged` is only supported on enums (on `{name}`)"
+        )));
+    }
     let mut generics = parse_generics(tokens, &name)?;
 
     // A tuple struct's `where` clause (if any) comes *after* the `(...)`
@@ -227,7 +261,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
             match tokens.peek() {
                 Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
                     let group = take_group(tokens);
-                    parse_named_fields(group)?
+                    parse_named_fields(group, "struct")?
                 }
                 Some(TokenTree::Punct(p)) if p.as_char() == ';' => Fields::Unit,
                 _ => {
@@ -252,6 +286,11 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
 
 fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, TokenStream> {
     let name = expect_ident(tokens, "an enum name")?;
+    if container_attrs.tag.is_some() && container_attrs.untagged {
+        return Err(compile_error(&format!(
+            "`tag` and `untagged` can't both be set (on `{name}`)"
+        )));
+    }
     let mut generics = parse_generics(tokens, &name)?;
     generics.extra_where = parse_where_clause(tokens)?;
 
@@ -275,7 +314,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         let fields = match variant_tokens.peek() {
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
                 let group = take_group(&mut variant_tokens);
-                parse_named_fields(group)?
+                parse_named_fields(group, "variant")?
             }
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
                 let group = take_group(&mut variant_tokens);
@@ -325,6 +364,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         generics,
         variants,
         tag: container_attrs.tag,
+        untagged: container_attrs.untagged,
     })
 }
 
@@ -610,7 +650,10 @@ fn convert_case(ident: &str, style: &str) -> String {
 /// Parses the inside of a `{ ... }` field list: `ident : <type tokens>`,
 /// repeated and comma-separated. Attributes (including `#[rusty_serde(...)]`)
 /// and `pub`/`pub(...)` visibility ahead of a field name are consumed.
-fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
+/// `owner` is `"struct"` for a top-level struct's fields or `"variant"` for
+/// an enum variant's - `flatten` is only supported on the former (see the
+/// check below).
+fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, TokenStream> {
     let mut tokens = group.stream().into_iter().peekable();
     let mut fields = Vec::new();
 
@@ -626,7 +669,31 @@ fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
             _ => return Err(compile_error(&format!("expected `:` after field `{name}`"))),
         }
         skip_to_top_level_comma(&mut tokens);
+        if attrs.flatten && attrs.skip {
+            return Err(compile_error(&format!(
+                "`flatten` and `skip` can't both be set (on field `{name}`)"
+            )));
+        }
+        if attrs.flatten && attrs.rename.is_some() {
+            return Err(compile_error(&format!(
+                "`flatten` and `rename` can't both be set - a flattened field has no wire key \
+                 of its own (on field `{name}`)"
+            )));
+        }
+        if attrs.flatten && owner == "variant" {
+            return Err(compile_error(&format!(
+                "rusty_serde_derive only supports `flatten` on top-level struct fields, not \
+                 enum variant fields (on field `{name}`)"
+            )));
+        }
         fields.push(NamedField { name, attrs });
+    }
+
+    let flatten_count = fields.iter().filter(|f| f.attrs.flatten).count();
+    if flatten_count > 1 {
+        return Err(compile_error(
+            "rusty_serde_derive only supports one `#[rusty_serde(flatten)]` field per struct",
+        ));
     }
 
     Ok(Fields::Named(fields))
@@ -834,6 +901,53 @@ fn parse_one_meta_item(
                 return Err(compile_error("`skip` does not take a value"));
             }
             attrs.skip = true;
+        }
+        "skip_serializing_if" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`skip_serializing_if` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `skip_serializing_if = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `skip_serializing_if =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `skip_serializing_if = \"...\"`",
+                ));
+            }
+            attrs.skip_serializing_if = Some(value);
+        }
+        "flatten" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`flatten` is not supported on {context}s"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`flatten` does not take a value"));
+            }
+            attrs.flatten = true;
+        }
+        "untagged" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`untagged` is only supported on the container, not on a {context}"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`untagged` does not take a value"));
+            }
+            attrs.untagged = true;
         }
         other => {
             return Err(compile_error(&format!(

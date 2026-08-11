@@ -12,7 +12,8 @@ pub fn generate(data: &Data) -> String {
             generics,
             variants,
             tag,
-        } => enum_impl(name, generics, variants, tag.as_deref()),
+            untagged,
+        } => enum_impl(name, generics, variants, tag.as_deref(), *untagged),
     }
 }
 
@@ -33,7 +34,10 @@ fn ident_enum(
 ) -> String {
     let mut decls: Vec<String> = entries.iter().map(|(ident, _)| ident.clone()).collect();
     if allow_unknown {
-        decls.push("__ignore".to_string());
+        // Carries the raw key text along, not just an "unknown" tag - a
+        // flatten field needs it to rebuild the leftover entries; callers
+        // that don't need it just match `__ignore(_)`.
+        decls.push("__ignore(::std::string::String)".to_string());
     }
     let decls = decls.join(", ");
 
@@ -42,7 +46,7 @@ fn ident_enum(
         arms += &format!("                            {wire:?} => Ok({ty}::{ident}),\n");
     }
     let fallback = if allow_unknown {
-        format!("                            _ => Ok({ty}::__ignore),\n")
+        format!("                            _ => Ok({ty}::__ignore(value.to_string())),\n")
     } else {
         "                            _ => Err(::rusty_serde::Error::custom(::std::format!(\"unknown variant `{}`\", value))),\n".to_string()
     };
@@ -146,18 +150,36 @@ fn visitor(struct_name: &str, generics: &Generics) -> Visitor {
 /// matched against `field_enum`) and are unconditionally defaulted;
 /// `default`-ed fields are still read if present, but fall back to
 /// `Default::default()` instead of erroring when absent.
-fn visit_map_body(field_enum: &str, fields: &[NamedField], constructor: &str) -> String {
+/// `map_error_ty` is the enclosing `visit_map`'s `MapAccess::Error`
+/// associated type name (e.g. `__A::Error`), needed to name the type of
+/// the buffer a flattened field's leftover entries get collected into.
+fn visit_map_body(
+    field_enum: &str,
+    fields: &[NamedField],
+    constructor: &str,
+    map_error_ty: &str,
+) -> String {
     let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+    let flatten_field = active.iter().find(|f| f.attrs.flatten).copied();
+    let normal: Vec<&NamedField> = active
+        .iter()
+        .filter(|f| !f.attrs.flatten)
+        .copied()
+        .collect();
+
     let mut out = String::new();
-    for f in &active {
+    for f in &normal {
         let ident = &f.name;
         out += &format!("let mut __{ident}: Option<_> = None;\n");
+    }
+    if flatten_field.is_some() {
+        out += "let mut __flatten_entries: ::std::vec::Vec<(::std::string::String, ::rusty_serde::Value)> = ::std::vec::Vec::new();\n";
     }
     out += &format!(
         "while let Some(__key) = ::rusty_serde::de::MapAccess::next_key::<{field_enum}>(&mut map)? {{\n\
              match __key {{\n"
     );
-    for f in &active {
+    for f in &normal {
         let ident = &f.name;
         out += &format!(
             "                {field_enum}::{ident} => {{\n\
@@ -169,15 +191,29 @@ fn visit_map_body(field_enum: &str, fields: &[NamedField], constructor: &str) ->
             dup = format!("duplicate field `{}`", f.wire_name())
         );
     }
-    out += &format!(
-        "                {field_enum}::__ignore => {{\n\
+    out += &if flatten_field.is_some() {
+        format!(
+            "                {field_enum}::__ignore(__raw_key) => {{\n\
+                     let __raw_value = ::rusty_serde::de::MapAccess::next_value::<::rusty_serde::Value>(&mut map)?;\n\
+                     __flatten_entries.push((__raw_key, __raw_value));\n\
+                 }}\n\
+             }}\n\
+         }}\n"
+        )
+    } else {
+        format!(
+            "                {field_enum}::__ignore(_) => {{\n\
                      let _ = ::rusty_serde::de::MapAccess::next_value::<::rusty_serde::de::IgnoredAny>(&mut map)?;\n\
                  }}\n\
              }}\n\
          }}\n"
-    );
+        )
+    };
     for f in fields {
         let ident = &f.name;
+        if f.attrs.flatten {
+            continue;
+        }
         if f.attrs.skip {
             out += &format!("let {ident} = ::std::default::Default::default();\n");
         } else if f.attrs.default {
@@ -188,6 +224,16 @@ fn visit_map_body(field_enum: &str, fields: &[NamedField], constructor: &str) ->
                 missing = format!("missing field `{}`", f.wire_name())
             );
         }
+    }
+    if let Some(flat) = flatten_field {
+        let ident = &flat.name;
+        out += &format!(
+            "let {ident} = ::rusty_serde::Deserialize::deserialize(\
+                 ::rusty_serde::value::ValueDeserializer::<{map_error_ty}>::new(\
+                     ::rusty_serde::Value::Map(__flatten_entries)\
+                 )\
+             )?;\n"
+        );
     }
     let field_list = fields
         .iter()
@@ -310,14 +356,16 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
             let entries: Vec<(String, String)> = active
                 .iter()
+                .filter(|f| !f.attrs.flatten)
                 .map(|f| (f.name.clone(), f.wire_name().to_string()))
                 .collect();
             let fields_array = active
                 .iter()
+                .filter(|f| !f.attrs.flatten)
                 .map(|f| format!("{:?}", f.wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let map_body = visit_map_body("__Field", fields, name);
+            let map_body = visit_map_body("__Field", fields, name, "__A::Error");
             let v = visitor("__Visitor", generics);
             format!(
                 "{ident_enum}\n\
@@ -358,7 +406,16 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
     )
 }
 
-fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<&str>) -> String {
+fn enum_impl(
+    name: &str,
+    generics: &Generics,
+    variants: &[Variant],
+    tag: Option<&str>,
+    untagged: bool,
+) -> String {
+    if untagged {
+        return enum_impl_untagged(name, generics, variants);
+    }
     let ty = generics.ty(name);
     let variant_entries: Vec<(String, String)> = variants
         .iter()
@@ -426,6 +483,148 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant], tag: Option<
         v_where_clause = v.where_clause,
         vty = v.ty,
     )
+}
+
+/// An untagged enum (`#[rusty_serde(untagged)]`) has nothing on the wire
+/// that names the variant, so there's no way to know which one to expect
+/// ahead of time - the only option is to buffer the whole input into a
+/// `Value` once, then try each variant's own shape against a clone of it
+/// in declaration order, keeping the first one that deserializes cleanly.
+/// `EnumAccess`/`VariantAccess` (built for the tagged case, where the
+/// variant is already known) don't fit this at all, so this generates a
+/// completely different `deserialize` body from `enum_impl`'s.
+fn enum_impl_untagged(name: &str, generics: &Generics, variants: &[Variant]) -> String {
+    let ty = generics.ty(name);
+    let mut attempts = String::new();
+    for variant in variants {
+        let body = untagged_variant_body(name, &ty, generics, variant);
+        attempts += &format!(
+            "if let Ok(__v) = (|| -> Result<Self, __D::Error> {{\n{body}\n}})() {{\n\
+                 return Ok(__v);\n\
+             }}\n"
+        );
+    }
+
+    let impl_decl = generics.impl_decl(Some("'de"));
+    let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
+    let missing_variant_msg = format!("data did not match any variant of {name}");
+    format!(
+        "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
+             fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
+             where\n\
+                 __D: ::rusty_serde::Deserializer<'de>,\n\
+             {{\n\
+                 let __value: ::rusty_serde::Value = ::rusty_serde::Deserialize::deserialize(deserializer)?;\n\
+                 {attempts}\
+                 Err(::rusty_serde::Error::custom({missing_variant_msg:?}))\n\
+             }}\n\
+         }}\n"
+    )
+}
+
+/// One variant's attempt at consuming the buffered `__value`, as the body
+/// of a `Result<Self, __D::Error>`-returning closure (so failed attempts
+/// can use `?` freely and just fall through via the closure's `Err`).
+fn untagged_variant_body(
+    enum_name: &str,
+    enum_ty: &str,
+    generics: &Generics,
+    variant: &Variant,
+) -> String {
+    let vname = &variant.name;
+    let constructor = format!("{enum_name}::{vname}");
+    match &variant.fields {
+        Fields::Unit | Fields::Unnamed(0) => {
+            let ctor_call = match &variant.fields {
+                Fields::Unit => constructor,
+                _ => format!("{constructor}()"),
+            };
+            format!(
+                "match __value.clone() {{\n\
+                     ::rusty_serde::Value::Null => Ok({ctor_call}),\n\
+                     _ => Err(::rusty_serde::Error::custom(\"expected null\")),\n\
+                 }}"
+            )
+        }
+        Fields::Unnamed(1) => format!(
+            "::rusty_serde::Deserialize::deserialize(\
+                 ::rusty_serde::value::ValueDeserializer::<__D::Error>::new(__value.clone())\
+             ).map({constructor})"
+        ),
+        Fields::Unnamed(n) => {
+            let mut elems = String::new();
+            let mut binders = String::new();
+            for i in 0..*n {
+                elems += &format!(
+                    "let __v{i} = ::rusty_serde::de::SeqAccess::next_element(&mut seq)?\n\
+                             .ok_or_else(|| ::rusty_serde::Error::custom({msg:?}))?;\n",
+                    msg = format!("missing tuple element {i}")
+                );
+                binders += &format!("__v{i}, ");
+            }
+            let v = visitor("__TupleVisitor", generics);
+            format!(
+                "{def}\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
+                     type Value = {enum_ty};\n\
+                     fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
+                         f.write_str(\"tuple variant {enum_name}::{vname}\")\n\
+                     }}\n\
+                     fn visit_seq<__A>(self, mut seq: __A) -> Result<{enum_ty}, __A::Error>\n\
+                     where __A: ::rusty_serde::de::SeqAccess<'de> {{\n\
+                         {elems}\n\
+                         Ok({constructor}({binders}))\n\
+                     }}\n\
+                 }}\n\
+                 ::rusty_serde::Deserializer::deserialize_tuple(\
+                     ::rusty_serde::value::ValueDeserializer::<__D::Error>::new(__value.clone()), {n}, {construct})",
+                def = v.def,
+                impl_decl = v.impl_decl,
+                vty = v.ty,
+                where_clause = v.where_clause,
+                construct = v.construct,
+            )
+        }
+        Fields::Named(fields) => {
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let entries: Vec<(String, String)> = active
+                .iter()
+                .filter(|f| !f.attrs.flatten)
+                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .collect();
+            let fields_array = active
+                .iter()
+                .filter(|f| !f.attrs.flatten)
+                .map(|f| format!("{:?}", f.wire_name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let map_body = visit_map_body("__Field", fields, &constructor, "__A::Error");
+            let v = visitor("__StructVisitor", generics);
+            format!(
+                "{ident_enum}\n\
+                 {def}\n\
+                 impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
+                     type Value = {enum_ty};\n\
+                     fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
+                         f.write_str(\"struct variant {enum_name}::{vname}\")\n\
+                     }}\n\
+                     fn visit_map<__A>(self, mut map: __A) -> Result<{enum_ty}, __A::Error>\n\
+                     where __A: ::rusty_serde::de::MapAccess<'de> {{\n\
+                         {map_body}\n\
+                     }}\n\
+                 }}\n\
+                 const __FIELDS: &[&str] = &[{fields_array}];\n\
+                 ::rusty_serde::Deserializer::deserialize_struct(\
+                     ::rusty_serde::value::ValueDeserializer::<__D::Error>::new(__value.clone()), {vname:?}, __FIELDS, {construct})",
+                ident_enum = ident_enum("__Field", &entries, "field identifier", true),
+                def = v.def,
+                impl_decl = v.impl_decl,
+                vty = v.ty,
+                where_clause = v.where_clause,
+                construct = v.construct,
+            )
+        }
+    }
 }
 
 /// `enum_name` is the bare path prefix used to build constructor
@@ -497,14 +696,16 @@ fn variant_arm(
             let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
             let entries: Vec<(String, String)> = active
                 .iter()
+                .filter(|f| !f.attrs.flatten)
                 .map(|f| (f.name.clone(), f.wire_name().to_string()))
                 .collect();
             let fields_array = active
                 .iter()
+                .filter(|f| !f.attrs.flatten)
                 .map(|f| format!("{:?}", f.wire_name()))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let map_body = visit_map_body("__SField", fields, &constructor);
+            let map_body = visit_map_body("__SField", fields, &constructor, "__A::Error");
             let v = visitor("__StructVisitor", generics);
             format!(
                 "(__Field::{vname}, __variant) => {{\n\

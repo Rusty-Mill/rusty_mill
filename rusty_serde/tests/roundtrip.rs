@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use rusty_serde::json::Value;
 use rusty_serde::{json, Deserialize, Serialize};
 
 fn roundtrip<T>(value: T, expected_json: &str)
@@ -449,8 +450,326 @@ fn where_clause_enum() {
     roundtrip(EitherWhere::<i32, String>::Left(1), r#"{"Left":1}"#);
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct SkipIfEmpty {
+    name: String,
+    #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+    nickname: Option<String>,
+    #[rusty_serde(skip_serializing_if = "Vec::is_empty", default)]
+    tags: Vec<String>,
+}
+
+#[test]
+fn skip_serializing_if_omits_when_true() {
+    let value = SkipIfEmpty {
+        name: "ada".into(),
+        nickname: None,
+        tags: vec![],
+    };
+    assert_eq!(json::to_string(&value).unwrap(), r#"{"name":"ada"}"#);
+}
+
+#[test]
+fn skip_serializing_if_includes_when_false() {
+    let value = SkipIfEmpty {
+        name: "ada".into(),
+        nickname: Some("countess".into()),
+        tags: vec!["math".into()],
+    };
+    assert_eq!(
+        json::to_string(&value).unwrap(),
+        r#"{"name":"ada","nickname":"countess","tags":["math"]}"#
+    );
+}
+
+#[test]
+fn skip_serializing_if_round_trips_via_default() {
+    // The field is missing entirely on the wire when skipped; `default`
+    // is what lets deserialize recover the same value instead of erroring
+    // with "missing field".
+    roundtrip(
+        SkipIfEmpty {
+            name: "ada".into(),
+            nickname: None,
+            tags: vec![],
+        },
+        r#"{"name":"ada"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum SkipIfVariant {
+    Item {
+        name: String,
+        #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+        note: Option<String>,
+    },
+}
+
+#[test]
+fn skip_serializing_if_in_struct_variant() {
+    roundtrip(
+        SkipIfVariant::Item {
+            name: "x".into(),
+            note: None,
+        },
+        r#"{"Item":{"name":"x"}}"#,
+    );
+    roundtrip(
+        SkipIfVariant::Item {
+            name: "x".into(),
+            note: Some("y".into()),
+        },
+        r#"{"Item":{"name":"x","note":"y"}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(tag = "kind")]
+enum SkipIfTagged {
+    Item {
+        name: String,
+        #[rusty_serde(skip_serializing_if = "Option::is_none", default)]
+        note: Option<String>,
+    },
+}
+
+#[test]
+fn skip_serializing_if_in_internally_tagged_variant() {
+    roundtrip(
+        SkipIfTagged::Item {
+            name: "x".into(),
+            note: None,
+        },
+        r#"{"kind":"Item","name":"x"}"#,
+    );
+}
+
+#[test]
+fn value_parses_arbitrary_json() {
+    let v: Value = json::from_str(r#"{"a":1,"b":[true,null,"x"],"c":{"d":2.5}}"#).unwrap();
+    assert_eq!(v["a"].as_i64(), Some(1));
+    assert_eq!(v["b"][0].as_bool(), Some(true));
+    assert!(v["b"][1].is_null());
+    assert_eq!(v["b"][2].as_str(), Some("x"));
+    assert_eq!(v["c"]["d"].as_f64(), Some(2.5));
+    assert!(v["missing"].is_null());
+    assert!(v["b"][99].is_null());
+}
+
+#[test]
+fn value_round_trips_and_displays_as_compact_json() {
+    let original = r#"{"a":1,"b":[true,null,"x"]}"#;
+    let v: Value = json::from_str(original).unwrap();
+    let reencoded = json::to_string(&v).unwrap();
+    assert_eq!(reencoded, original);
+    assert_eq!(v.to_string(), original);
+}
+
+#[test]
+fn value_from_conversions() {
+    let v: Value = 42i32.into();
+    assert_eq!(v.as_i64(), Some(42));
+    let v: Value = "hi".into();
+    assert_eq!(v.as_str(), Some("hi"));
+    let v: Value = vec![1, 2, 3].into();
+    assert_eq!(v.as_seq().unwrap().len(), 3);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct HasValueField {
+    name: String,
+    extra: Value,
+}
+
+#[test]
+fn value_usable_as_a_derived_field() {
+    let decoded: HasValueField =
+        json::from_str(r#"{"name":"x","extra":{"whatever":[1,2]}}"#).unwrap();
+    assert_eq!(decoded.name, "x");
+    assert_eq!(decoded.extra["whatever"][1].as_i64(), Some(2));
+    let json = json::to_string(&decoded).unwrap();
+    assert_eq!(json, r#"{"name":"x","extra":{"whatever":[1,2]}}"#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(untagged)]
+enum UntaggedShape {
+    Circle,
+    Named(String),
+    Point(i32, i32),
+    Rect { width: f64, height: f64 },
+}
+
+#[test]
+fn untagged_unit_variant() {
+    roundtrip(UntaggedShape::Circle, "null");
+}
+
+#[test]
+fn untagged_newtype_variant() {
+    roundtrip(UntaggedShape::Named("x".into()), r#""x""#);
+}
+
+#[test]
+fn untagged_tuple_variant() {
+    roundtrip(UntaggedShape::Point(1, 2), "[1,2]");
+}
+
+#[test]
+fn untagged_struct_variant() {
+    roundtrip(
+        UntaggedShape::Rect {
+            width: 1.0,
+            height: 2.0,
+        },
+        r#"{"width":1.0,"height":2.0}"#,
+    );
+}
+
+#[test]
+fn untagged_tries_variants_in_declaration_order() {
+    // `Named(String)` comes before `Point(i32, i32)`, so a JSON array
+    // never even reaches the newtype attempt; a JSON string never reaches
+    // the tuple attempt.
+    let decoded: UntaggedShape = json::from_str(r#""hi""#).unwrap();
+    assert_eq!(decoded, UntaggedShape::Named("hi".into()));
+    let decoded: UntaggedShape = json::from_str("[3,4]").unwrap();
+    assert_eq!(decoded, UntaggedShape::Point(3, 4));
+}
+
+#[test]
+fn untagged_no_matching_variant_is_an_error() {
+    let err = json::from_str::<UntaggedShape>("true").unwrap_err();
+    assert!(err.to_string().contains("did not match any variant"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(untagged)]
+enum UntaggedGeneric<T> {
+    Single(T),
+    Pair(T, T),
+}
+
+#[test]
+fn untagged_generic_enum() {
+    roundtrip(UntaggedGeneric::Single(1), "1");
+    roundtrip(UntaggedGeneric::Pair(1, 2), "[1,2]");
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();
     assert_eq!(decoded, Point { x: 1, y: 2 });
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Meta {
+    id: i32,
+    tag: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Record {
+    name: String,
+    #[rusty_serde(flatten)]
+    meta: Meta,
+}
+
+#[test]
+fn flatten_merges_a_nested_structs_fields_into_the_parent_object() {
+    roundtrip(
+        Record {
+            name: "x".into(),
+            meta: Meta {
+                id: 1,
+                tag: "t".into(),
+            },
+        },
+        r#"{"name":"x","id":1,"tag":"t"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct WithExtra {
+    known: i32,
+    #[rusty_serde(flatten)]
+    extra: Value,
+}
+
+#[test]
+fn flatten_into_value_captures_unknown_fields() {
+    let decoded: WithExtra = json::from_str(r#"{"known":1,"a":2,"b":"x"}"#).unwrap();
+    assert_eq!(decoded.known, 1);
+    assert_eq!(decoded.extra["a"].as_i64(), Some(2));
+    assert_eq!(decoded.extra["b"].as_str(), Some("x"));
+    let encoded = json::to_string(&decoded).unwrap();
+    assert_eq!(encoded, r#"{"known":1,"a":2,"b":"x"}"#);
+}
+
+#[test]
+fn flatten_into_value_with_no_extra_fields_round_trips() {
+    roundtrip(
+        WithExtra {
+            known: 1,
+            extra: Value::Map(Vec::new()),
+        },
+        r#"{"known":1}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Borrowed<'a> {
+    name: &'a str,
+    age: i32,
+}
+
+#[test]
+fn borrowed_str_field_round_trips() {
+    let json = r#"{"name":"grace","age":30}"#;
+    let decoded: Borrowed = json::from_str(json).unwrap();
+    assert_eq!(
+        decoded,
+        Borrowed {
+            name: "grace",
+            age: 30
+        }
+    );
+    assert_eq!(json::to_string(&decoded).unwrap(), json);
+}
+
+#[test]
+fn borrowed_str_field_actually_borrows_from_the_input_without_escapes() {
+    let json = r#"{"name":"grace","age":30}"#;
+    let decoded: Borrowed = json::from_str(json).unwrap();
+    // A real zero-copy borrow means `decoded.name` points *inside* `json`'s
+    // buffer, not into some freshly allocated `String`.
+    let input_range = json.as_ptr() as usize..(json.as_ptr() as usize + json.len());
+    assert!(input_range.contains(&(decoded.name.as_ptr() as usize)));
+}
+
+#[test]
+fn borrowed_str_field_falls_back_to_an_owned_string_when_the_input_has_escapes() {
+    // `\n` forces the JSON deserializer down its escaped/owned path; `&str`
+    // deserialization only supports the zero-copy case and reports a type
+    // error rather than fabricating a borrow out of an owned buffer.
+    let err = json::from_str::<Borrowed>(r#"{"name":"line\nbreak","age":1}"#).unwrap_err();
+    assert!(err.to_string().contains("invalid type"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct CowField<'a> {
+    name: std::borrow::Cow<'a, str>,
+}
+
+#[test]
+fn cow_str_field_borrows_when_possible_and_owns_when_escaped() {
+    let json = r#"{"name":"grace"}"#;
+    let decoded: CowField = json::from_str(json).unwrap();
+    assert!(matches!(decoded.name, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(decoded.name, "grace");
+
+    let decoded: CowField = json::from_str(r#"{"name":"line\nbreak"}"#).unwrap();
+    assert!(matches!(decoded.name, std::borrow::Cow::Owned(_)));
+    assert_eq!(decoded.name, "line\nbreak");
 }
