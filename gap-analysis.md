@@ -57,3 +57,29 @@ target when the two derive macros don't share an implementation.
   already has working (if not maximally efficient) `Vec<u8>`
   serialize/deserialize via the existing `bytes`/`byte_buf` methods; not a
   capability gap.
+
+## Pass 2 (re-scan)
+
+All 15 rows above (plus `with = "module"`, filed separately after this table
+was first written) are implemented and merged. Re-checked `serde-rs/serde`
+for drift: `master` is still at the exact same commit (`747814f`) pinned
+above - nothing shipped upstream since Pass 1. The three rows below are
+items Pass 1's read of `symbol.rs` simply missed, not new upstream surface;
+found by re-cross-referencing the current `serde_derive/src/internals/symbol.rs`
+symbol list and https://serde.rs/container-attrs.html against
+`rusty_serde_derive`'s `Attrs` struct.
+
+| Symbol | Category | Source | Platforms | Reference | Breaking? | Est. size | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `crate = "path"` | attr (container) | spec | n/a | `CRATE` symbol / [container attrs](https://serde.rs/container-attrs.html#crate) | no | L | Overrides the `::rusty_serde::...` path prefix generated code uses, for a crate that re-exports/vendors `rusty_serde` under a different name. Conceptually a simple parameterization, but mechanically large - every one of the hundreds of `::rusty_serde::` path literals across `codegen_ser.rs`/`codegen_de.rs` needs threading through a configurable prefix instead of a hardcoded string. |
+| `expecting = "..."` | attr (container) | spec | n/a | `EXPECTING` symbol / [container attrs](https://serde.rs/container-attrs.html#expecting) | no | S | Overrides the auto-generated `"struct {name}"`/`"enum {name}"` text used in the generated `Visitor::expecting()` (shows up in "invalid type" error messages) with a custom string. Purely additive - a handful of codegen sites, one per container's `Visitor` impl. |
+| `rename_all_fields = "..."` | attr (container, enums only) | spec | n/a | `RENAME_ALL_FIELDS` symbol / [container attrs](https://serde.rs/container-attrs.html#rename_all_fields) | no | S | Like `rename_all`, but applies the case conversion to the *fields* of every struct variant across an enum, rather than to the variant names themselves (which is what plain `rename_all` on an enum already does). Reuses the existing `apply_rename_all_fields` case-conversion helper, just applied per-variant instead of at the top level. |
+
+**Still deliberately out of scope** (unchanged from Pass 1, re-confirmed
+against the current symbol list): `field_identifier` / `variant_identifier`
+/ `repr` (serde_derive-internal plumbing - used to hand-write a `Deserialize`
+impl for an identifier enum paired with a derive elsewhere; doesn't fit this
+crate's private, non-exposed `ident_enum` codegen), `borrow` (zero-copy
+deserialization is a standing, documented non-goal - see README's "What's
+not (yet)"), `no_std`, `deserialize_in_place`, exact error-message-wording
+parity, and a `serde_bytes`-equivalent format.
