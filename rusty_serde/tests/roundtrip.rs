@@ -1512,3 +1512,36 @@ fn deserialize_with_propagates_a_custom_error() {
     let err = json::from_str::<AlwaysFails>(r#"{"value":1}"#).unwrap_err();
     assert!(err.to_string().contains("always fails"));
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(expecting = "a friendly Point")]
+struct ExpectingPoint {
+    x: i32,
+    y: i32,
+}
+
+#[test]
+fn expecting_still_round_trips_normally() {
+    let value = ExpectingPoint { x: 1, y: 2 };
+    let json = json::to_string(&value).unwrap();
+    let decoded: ExpectingPoint = json::from_str(&json).unwrap();
+    assert_eq!(decoded, value);
+}
+
+#[test]
+fn expecting_overrides_the_visitor_text() {
+    // JSON's own top-level `deserialize_struct` hard-requires `{` before
+    // it ever consults the `Visitor` (its own generic "expected `{`"
+    // message wins on a wrong top-level shape) - `expecting()` only
+    // actually gets read on a *type* mismatch once the visitor is
+    // reached, same as any other `Visitor` method's default `invalid_type`
+    // error. Deserializing directly from an already-buffered `Value` (the
+    // same path `flatten`/untagged enums/`deserialize_with` all go
+    // through) is what makes that reachable here.
+    use rusty_serde::value::ValueDeserializer;
+    use rusty_serde::Value as RawValue;
+
+    let err = ExpectingPoint::deserialize(ValueDeserializer::<json::Error>::new(RawValue::Int(5)))
+        .unwrap_err();
+    assert!(err.to_string().contains("a friendly Point"), "{err}");
+}

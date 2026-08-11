@@ -12,6 +12,7 @@ pub fn generate(data: &Data) -> String {
             // `into` only replaces the Serialize impl.
             into: _,
             remote,
+            expecting,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => struct_impl(
@@ -21,6 +22,7 @@ pub fn generate(data: &Data) -> String {
                 *deny_unknown_fields,
                 *transparent,
                 remote.as_deref(),
+                expecting.as_deref(),
             ),
         },
         Data::Enum {
@@ -33,6 +35,7 @@ pub fn generate(data: &Data) -> String {
             deny_unknown_fields,
             from,
             into: _,
+            expecting,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => enum_impl(
@@ -43,6 +46,7 @@ pub fn generate(data: &Data) -> String {
                 content.as_deref(),
                 *untagged,
                 *deny_unknown_fields,
+                expecting.as_deref(),
             ),
         },
     }
@@ -374,6 +378,13 @@ fn visit_map_body(
     out
 }
 
+/// The text a generated `Visitor::expecting()` body writes: a container-level
+/// `#[rusty_serde(expecting = "...")]` overrides it outright, else `default`
+/// (the usual auto-generated `"struct Foo"`/`"enum Foo"`-style text).
+fn expecting_text(expecting: Option<&str>, default: &str) -> String {
+    expecting.unwrap_or(default).to_string()
+}
+
 fn struct_impl(
     name: &str,
     generics: &Generics,
@@ -381,24 +392,30 @@ fn struct_impl(
     deny_unknown_fields: bool,
     transparent: bool,
     remote: Option<&str>,
+    expecting: Option<&str>,
 ) -> String {
     // `remote` targets the impl (and every constructor expression below,
     // which all build a `Self`) at a different type than the one this
     // derive was written on - see `codegen_ser`'s `struct_impl` for the
     // serialize-side half of the same idea. Cosmetic text (`"struct
     // {name}"`, the wire type-name hint passed to `deserialize_struct` and
-    // friends) keeps using the original `name` either way.
+    // friends) keeps using the original `name` either way. `expecting`
+    // (from a container-level `#[rusty_serde(expecting = "...")]`)
+    // overrides that same cosmetic text specifically in the generated
+    // `Visitor::expecting()` body, which is what actually reaches an
+    // "invalid type" deserialize error message.
     let target = remote.unwrap_or(name);
     let ty = generics.ty(target);
     let body = match fields {
         Fields::Unit => {
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("unit struct {name}"));
             format!(
                 "{def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"unit struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_unit<__E>(self) -> Result<{ty}, __E>\n\
                      where __E: ::rusty_serde::Error {{\n\
@@ -415,12 +432,13 @@ fn struct_impl(
         }
         Fields::Unnamed(0) => {
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("unit struct {name}"));
             format!(
                 "{def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"unit struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_unit<__E>(self) -> Result<{ty}, __E>\n\
                      where __E: ::rusty_serde::Error {{\n\
@@ -437,12 +455,13 @@ fn struct_impl(
         }
         Fields::Unnamed(1) => {
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("tuple struct {name}"));
             format!(
                 "{def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"tuple struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_newtype_struct<__D>(self, deserializer: __D) -> Result<{ty}, __D::Error>\n\
                      where __D: ::rusty_serde::Deserializer<'de> {{\n\
@@ -475,12 +494,13 @@ fn struct_impl(
                 binders += &format!("__v{i}, ");
             }
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("tuple struct {name}"));
             format!(
                 "{def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"tuple struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_seq<__A>(self, mut seq: __A) -> Result<{ty}, __A::Error>\n\
                      where __A: ::rusty_serde::de::SeqAccess<'de> {{\n\
@@ -503,12 +523,13 @@ fn struct_impl(
         Fields::Named(fields) if transparent => {
             let field = &fields[0].name;
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("struct {name}"));
             format!(
                 "{def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_newtype_struct<__D>(self, deserializer: __D) -> Result<{ty}, __D::Error>\n\
                      where __D: ::rusty_serde::Deserializer<'de> {{\n\
@@ -549,13 +570,14 @@ fn struct_impl(
             let map_body =
                 visit_map_body("__Field", fields, target, "__A::Error", deny_unknown_fields);
             let v = visitor("__Visitor", generics);
+            let msg = expecting_text(expecting, &format!("struct {name}"));
             format!(
                 "{ident_enum}\n\
                  {def}\n\
                  impl{impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"struct {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_map<__A>(self, mut map: __A) -> Result<{ty}, __A::Error>\n\
                      where __A: ::rusty_serde::de::MapAccess<'de> {{\n\
@@ -588,6 +610,9 @@ fn struct_impl(
     )
 }
 
+// One parameter per container attribute that can affect enum codegen -
+// splitting into a struct would just move the same count around.
+#[allow(clippy::too_many_arguments)]
 fn enum_impl(
     name: &str,
     generics: &Generics,
@@ -596,7 +621,13 @@ fn enum_impl(
     content: Option<&str>,
     untagged: bool,
     deny_unknown_fields: bool,
+    expecting: Option<&str>,
 ) -> String {
+    // `untagged`/adjacent (`tag` + `content`) enums don't drive a
+    // `Visitor` at all (they buffer into `Value` and try/dispatch
+    // directly) - there's no `expecting()` body to override in either
+    // shape, so `expecting` is rejected there at parse time rather than
+    // silently doing nothing.
     if untagged {
         return enum_impl_untagged(name, generics, variants, deny_unknown_fields);
     }
@@ -648,6 +679,7 @@ fn enum_impl(
 
     let impl_decl = generics.impl_decl(Some("'de"));
     let outer_where = generics.where_clause("::rusty_serde::Deserialize<'de>");
+    let msg = expecting_text(expecting, &format!("enum {name}"));
     format!(
         "impl{impl_decl} ::rusty_serde::Deserialize<'de> for {ty}{outer_where} {{\n\
              fn deserialize<__D>(deserializer: __D) -> Result<Self, __D::Error>\n\
@@ -659,7 +691,7 @@ fn enum_impl(
                  impl{v_impl_decl} ::rusty_serde::de::Visitor<'de> for {vty}{v_where_clause} {{\n\
                      type Value = {ty};\n\
                      fn expecting(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {{\n\
-                         f.write_str(\"enum {name}\")\n\
+                         f.write_str({msg:?})\n\
                      }}\n\
                      fn visit_enum<__A>(self, data: __A) -> Result<{ty}, __A::Error>\n\
                      where __A: ::rusty_serde::de::EnumAccess<'de> {{\n\

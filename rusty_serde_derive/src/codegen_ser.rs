@@ -59,6 +59,8 @@ pub fn generate(data: &Data) -> String {
             from: _,
             into,
             remote,
+            // `expecting` only replaces `Visitor::expecting()`, deserialize-only.
+            expecting: _,
         } => match into {
             Some(into) => into_impl(name, generics, into),
             None => struct_impl(name, generics, fields, *transparent, remote.as_deref()),
@@ -73,6 +75,7 @@ pub fn generate(data: &Data) -> String {
             deny_unknown_fields: _,
             from: _,
             into,
+            expecting: _,
         } => match into {
             Some(into) => into_impl(name, generics, into),
             None => enum_impl(

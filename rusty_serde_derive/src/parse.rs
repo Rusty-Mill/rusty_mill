@@ -137,6 +137,15 @@ pub struct Attrs {
     /// those two at parse time (see `parse_named_fields`); mutually
     /// exclusive with setting either individually on the same field.
     pub with: Option<String>,
+    /// Container-only: `#[rusty_serde(expecting = "...")]` - overrides the
+    /// auto-generated `"struct Foo"`/`"enum Foo"`-style text used in the
+    /// generated `Visitor::expecting()` (surfaces in "invalid type"
+    /// deserialize error messages) with a custom string. Only meaningful
+    /// on a container whose deserialize impl actually drives a `Visitor`
+    /// (every struct shape; external/internally tagged enums) - `untagged`
+    /// and adjacently tagged (`tag` + `content`) enums don't, and reject
+    /// `expecting` at parse time rather than silently ignoring it.
+    pub expecting: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -200,6 +209,7 @@ impl Attrs {
             && self.serialize_with.is_none()
             && self.deserialize_with.is_none()
             && self.with.is_none()
+            && self.expecting.is_none()
     }
 }
 
@@ -273,6 +283,8 @@ pub enum Data {
         /// when set, the generated impls target `path::Type` instead of
         /// this struct itself.
         remote: Option<String>,
+        /// From a container-level `#[rusty_serde(expecting = "...")]`.
+        expecting: Option<String>,
     },
     Enum {
         name: String,
@@ -293,6 +305,10 @@ pub enum Data {
         from: Option<FromAttr>,
         /// See `Data::Struct::into`.
         into: Option<String>,
+        /// See `Data::Struct::expecting` - only ever `Some` alongside
+        /// external or internal tagging (`untagged`/adjacent enums reject
+        /// `expecting` at parse time).
+        expecting: Option<String>,
     },
 }
 
@@ -538,6 +554,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         from: container_attrs.from,
         into: container_attrs.into,
         remote: container_attrs.remote,
+        expecting: container_attrs.expecting,
     })
 }
 
@@ -561,6 +578,15 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
     if container_attrs.remote.is_some() {
         return Err(compile_error(&format!(
             "`remote` is only supported on structs, not enums (on `{name}`)"
+        )));
+    }
+    if container_attrs.expecting.is_some()
+        && (container_attrs.untagged || container_attrs.content.is_some())
+    {
+        return Err(compile_error(&format!(
+            "`expecting` isn't supported on an `untagged` or adjacently tagged (`tag` + \
+             `content`) enum (on `{name}`) - neither drives a `Visitor` with an `expecting()` \
+             to override"
         )));
     }
     let mut generics = parse_generics(tokens, &name)?;
@@ -680,6 +706,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         deny_unknown_fields: container_attrs.deny_unknown_fields,
         from: container_attrs.from,
         into: container_attrs.into,
+        expecting: container_attrs.expecting,
     })
 }
 
@@ -1648,6 +1675,31 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `with = \"...\"`"));
             }
             attrs.with = Some(value);
+        }
+        "expecting" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`expecting` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `expecting = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => {
+                    return Err(compile_error(
+                        "expected a string literal after `expecting =`",
+                    ))
+                }
+            };
+            if it.peek().is_some() {
+                return Err(compile_error(
+                    "unexpected tokens after `expecting = \"...\"`",
+                ));
+            }
+            attrs.expecting = Some(value);
         }
         "remote" => {
             if context != "container" {

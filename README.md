@@ -180,7 +180,24 @@ toolchain, not a crate you depend on), and everything else is `std`.
   somewhere to put keys that don't match. `transparent` (structs only, and
   only with exactly one named field) serializes/deserializes exactly as
   that one field would on its own, no wrapping - like a tuple-struct-of-one's
-  existing behavior, opted into for a named struct.
+  existing behavior, opted into for a named struct. `expecting = "..."`
+  overrides the auto-generated `"struct Foo"`/`"enum Foo"`-style text the
+  generated `Visitor::expecting()` writes (surfaces in "invalid type"
+  deserialize errors) with a custom message - rejected on `untagged`/
+  adjacently tagged (`tag` + `content`) enums, since neither drives a
+  `Visitor` with an `expecting()` to override. Note that with this crate's
+  own JSON/RON formats, a *struct's* `expecting()` text is only actually
+  reached on a type mismatch once a `Visitor` is already involved - e.g.
+  deserializing an already-buffered `Value` (what `flatten`/untagged
+  enums/`deserialize_with` all do internally) - since both formats' own
+  top-level `deserialize_struct`/`deserialize_enum` fail with their own
+  generic message (`"expected ..."`) on a wrong top-level *shape* before
+  ever consulting the `Visitor`; an *enum's* `expecting()` text currently
+  has no reachable path at all, since every deserializer this crate ships
+  (`json`, `ron`, and the `Value` buffer itself) hard-checks an enum's
+  shape the same way. Still implemented for both (matching serde's
+  attribute one-for-one, and correct for any future deserializer that
+  dispatches more generically), just worth knowing before relying on it.
 
   An unsupported combination (`skip`/`default` on a variant, any
   `#[rusty_serde(...)]` on a tuple field, `rename_all`/`tag` outside the
