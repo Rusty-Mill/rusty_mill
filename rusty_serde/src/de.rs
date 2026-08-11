@@ -223,6 +223,21 @@ pub trait Visitor<'de>: Sized {
         Err(invalid_type(&Unexpected::Str(v), &self))
     }
 
+    /// Like [`visit_str`](Self::visit_str), but `v` is borrowed from the
+    /// input the [`Deserializer`] is reading rather than a temporary owned
+    /// by the deserializer itself - a format calls this instead of
+    /// `visit_str`/`visit_string` when it can hand back a slice that lives
+    /// as long as `'de` (e.g. a JSON string with no escapes). Defaults to
+    /// `visit_str`, so a visitor that doesn't care about zero-copy doesn't
+    /// need to implement this separately; `&'de str`/`Cow<'de, str>`
+    /// override it to actually borrow instead of allocating.
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+    where
+        E: Error,
+    {
+        self.visit_str(v)
+    }
+
     fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
     where
         E: Error,
@@ -235,6 +250,16 @@ pub trait Visitor<'de>: Sized {
         E: Error,
     {
         Err(invalid_type(&Unexpected::Bytes(v), &self))
+    }
+
+    /// Borrowed-input counterpart to [`visit_bytes`](Self::visit_bytes), the
+    /// same way [`visit_borrowed_str`](Self::visit_borrowed_str) is to
+    /// `visit_str`.
+    fn visit_borrowed_bytes<E>(self, v: &'de [u8]) -> Result<Self::Value, E>
+    where
+        E: Error,
+    {
+        self.visit_bytes(v)
     }
 
     fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Self::Value, E>

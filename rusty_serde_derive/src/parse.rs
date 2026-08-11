@@ -157,11 +157,25 @@ impl Generics {
     /// [`Self::where_clause`] instead, since a user's own `where` clause has
     /// to be merged in after the `for Type` part, which the `<...>` list
     /// comes before). `extra_lifetime` (typically `'de`) is prepended
-    /// first, since it must be declared before anything that uses it.
+    /// first, since it must be declared before anything that uses it - and,
+    /// when the type has lifetimes of its own, bounded by all of them
+    /// (`'de: 'a`) so a borrowed field (`&'a str`, `Cow<'a, str>`, ...)
+    /// can actually be built from data a `Deserializer<'de>` hands back;
+    /// callers that don't need `'de` (Serialize) just pass `None` and get
+    /// the type's own lifetimes back unbounded.
     pub fn impl_decl(&self, extra_lifetime: Option<&str>) -> String {
         let mut parts: Vec<String> = Vec::new();
         if let Some(l) = extra_lifetime {
-            parts.push(l.to_string());
+            if self.lifetimes.is_empty() {
+                parts.push(l.to_string());
+            } else {
+                let bare_names = self
+                    .lifetimes
+                    .iter()
+                    .map(|decl| decl.split(':').next().unwrap().trim().to_string());
+                let bounds = bare_names.collect::<Vec<_>>().join(" + ");
+                parts.push(format!("{l}: {bounds}"));
+            }
         }
         parts.extend(self.lifetimes.iter().cloned());
         parts.extend(self.type_params.iter().map(|t| t.name.clone()));

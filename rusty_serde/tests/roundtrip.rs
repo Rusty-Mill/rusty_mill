@@ -717,3 +717,59 @@ fn flatten_into_value_with_no_extra_fields_round_trips() {
         r#"{"known":1}"#,
     );
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Borrowed<'a> {
+    name: &'a str,
+    age: i32,
+}
+
+#[test]
+fn borrowed_str_field_round_trips() {
+    let json = r#"{"name":"grace","age":30}"#;
+    let decoded: Borrowed = json::from_str(json).unwrap();
+    assert_eq!(
+        decoded,
+        Borrowed {
+            name: "grace",
+            age: 30
+        }
+    );
+    assert_eq!(json::to_string(&decoded).unwrap(), json);
+}
+
+#[test]
+fn borrowed_str_field_actually_borrows_from_the_input_without_escapes() {
+    let json = r#"{"name":"grace","age":30}"#;
+    let decoded: Borrowed = json::from_str(json).unwrap();
+    // A real zero-copy borrow means `decoded.name` points *inside* `json`'s
+    // buffer, not into some freshly allocated `String`.
+    let input_range = json.as_ptr() as usize..(json.as_ptr() as usize + json.len());
+    assert!(input_range.contains(&(decoded.name.as_ptr() as usize)));
+}
+
+#[test]
+fn borrowed_str_field_falls_back_to_an_owned_string_when_the_input_has_escapes() {
+    // `\n` forces the JSON deserializer down its escaped/owned path; `&str`
+    // deserialization only supports the zero-copy case and reports a type
+    // error rather than fabricating a borrow out of an owned buffer.
+    let err = json::from_str::<Borrowed>(r#"{"name":"line\nbreak","age":1}"#).unwrap_err();
+    assert!(err.to_string().contains("invalid type"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct CowField<'a> {
+    name: std::borrow::Cow<'a, str>,
+}
+
+#[test]
+fn cow_str_field_borrows_when_possible_and_owns_when_escaped() {
+    let json = r#"{"name":"grace"}"#;
+    let decoded: CowField = json::from_str(json).unwrap();
+    assert!(matches!(decoded.name, std::borrow::Cow::Borrowed(_)));
+    assert_eq!(decoded.name, "grace");
+
+    let decoded: CowField = json::from_str(r#"{"name":"line\nbreak"}"#).unwrap();
+    assert!(matches!(decoded.name, std::borrow::Cow::Owned(_)));
+    assert_eq!(decoded.name, "line\nbreak");
+}

@@ -102,6 +102,52 @@ impl<'de> Deserializer<'de> {
     fn parse_string(&mut self) -> Result<String, Error> {
         self.expect_byte(b'"')?;
         let mut out = String::new();
+        self.parse_string_tail(&mut out)?;
+        Ok(out)
+    }
+
+    /// Parses a JSON string, borrowing straight from the input (no
+    /// allocation) when it contains no escapes; falls back to building an
+    /// owned `String` the moment an escape shows up. ASCII `"`/`\\` can
+    /// only ever appear as themselves in valid UTF-8 (never as a
+    /// multi-byte sequence's continuation byte), so the borrowed fast path
+    /// can scan byte-by-byte without decoding.
+    fn parse_str(&mut self) -> Result<ParsedStr<'de>, Error> {
+        self.expect_byte(b'"')?;
+        let start = self.pos;
+        loop {
+            let b = *self
+                .input
+                .get(self.pos)
+                .ok_or_else(|| self.error("unterminated string"))?;
+            match b {
+                b'"' => {
+                    let raw = &self.input[start..self.pos];
+                    self.pos += 1;
+                    let s = std::str::from_utf8(raw)
+                        .map_err(|_| self.error("invalid UTF-8 in string"))?;
+                    return Ok(ParsedStr::Borrowed(s));
+                }
+                b'\\' => {
+                    let prefix = std::str::from_utf8(&self.input[start..self.pos])
+                        .map_err(|_| self.error("invalid UTF-8 in string"))?;
+                    let mut out = String::from(prefix);
+                    self.parse_string_tail(&mut out)?;
+                    return Ok(ParsedStr::Owned(out));
+                }
+                _ => {
+                    self.pos += 1;
+                }
+            }
+        }
+    }
+
+    /// Continues parsing a JSON string (with `self.pos` inside its body,
+    /// i.e. after the opening quote) into `out`, consuming through the
+    /// closing quote. Shared by [`Self::parse_string`] (which always
+    /// builds an owned `String`) and [`Self::parse_str`]'s escaped-input
+    /// fallback.
+    fn parse_string_tail(&mut self, out: &mut String) -> Result<(), Error> {
         loop {
             let b = *self
                 .input
@@ -110,7 +156,7 @@ impl<'de> Deserializer<'de> {
             match b {
                 b'"' => {
                     self.pos += 1;
-                    return Ok(out);
+                    return Ok(());
                 }
                 b'\\' => {
                     self.pos += 1;
@@ -284,6 +330,26 @@ impl<'de> Deserializer<'de> {
     fn end_tagged_object(&mut self) -> Result<(), Error> {
         self.skip_whitespace();
         self.expect_byte(b'}')
+    }
+}
+
+/// The result of [`Deserializer::parse_str`]: a string borrowed straight
+/// from the input when that was possible (no escapes), or one that had to
+/// be built up in an owned buffer because it contained an escape sequence.
+enum ParsedStr<'de> {
+    Borrowed(&'de str),
+    Owned(String),
+}
+
+impl<'de> ParsedStr<'de> {
+    fn visit<V>(self, visitor: V) -> Result<V::Value, Error>
+    where
+        V: Visitor<'de>,
+    {
+        match self {
+            ParsedStr::Borrowed(s) => visitor.visit_borrowed_str(s),
+            ParsedStr::Owned(s) => visitor.visit_string(s),
+        }
     }
 }
 
@@ -681,10 +747,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
                 self.parse_literal("false")?;
                 visitor.visit_bool(false)
             }
-            b'"' => {
-                let s = self.parse_string()?;
-                visitor.visit_string(s)
-            }
+            b'"' => self.parse_str()?.visit(visitor),
             b'[' => self.parse_array(visitor),
             b'{' => self.parse_object(visitor),
             b'-' | b'0'..=b'9' => {
@@ -821,8 +884,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         self.peek()?;
-        let s = self.parse_string()?;
-        visitor.visit_string(s)
+        self.parse_str()?.visit(visitor)
     }
 
     fn deserialize_bytes<V>(self, visitor: V) -> Result<V::Value, Error>

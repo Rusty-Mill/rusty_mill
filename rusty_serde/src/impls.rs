@@ -2,6 +2,7 @@
 //! data model can represent directly, so `#[derive(...)]` only has to worry
 //! about the shape of the user's own type.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::hash::Hash;
@@ -83,6 +84,15 @@ impl Serialize for str {
 }
 
 impl Serialize for String {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self)
+    }
+}
+
+impl Serialize for Cow<'_, str> {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
@@ -391,6 +401,67 @@ impl<'de> Deserialize<'de> for String {
             }
         }
         deserializer.deserialize_string(StringVisitor)
+    }
+}
+
+// `'de: 'a` (not just `impl<'de> ... for &'de str`) is what lets this
+// satisfy a field of type `&'a str` on a struct whose own lifetime `'a` is
+// distinct from - but outlived by - the deserializer's `'de`, which is the
+// shape `#[derive(Deserialize)]` generates for any type with its own
+// lifetime parameter.
+impl<'de: 'a, 'a> Deserialize<'de> for &'a str {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct StrVisitor;
+        impl<'de> Visitor<'de> for StrVisitor {
+            type Value = &'de str;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a borrowed string")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+            where
+                E: crate::error::Error,
+            {
+                Ok(v)
+            }
+        }
+        deserializer.deserialize_str(StrVisitor)
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Cow<'a, str> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct CowStrVisitor;
+        impl<'de> Visitor<'de> for CowStrVisitor {
+            type Value = Cow<'de, str>;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "a string")
+            }
+            fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E>
+            where
+                E: crate::error::Error,
+            {
+                Ok(Cow::Borrowed(v))
+            }
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: crate::error::Error,
+            {
+                Ok(Cow::Owned(v.to_owned()))
+            }
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: crate::error::Error,
+            {
+                Ok(Cow::Owned(v))
+            }
+        }
+        deserializer.deserialize_str(CowStrVisitor)
     }
 }
 
