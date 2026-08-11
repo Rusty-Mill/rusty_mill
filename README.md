@@ -54,6 +54,25 @@ toolchain, not a crate you depend on), and everything else is `std`.
 - Unknown JSON object fields are ignored during deserialization; missing
   required fields and type mismatches produce descriptive errors with a
   line/column.
+- Field attributes on named struct/variant fields (`rename`/`default` on
+  enum variants too):
+  ```rust
+  #[derive(Serialize, Deserialize)]
+  struct Config {
+      #[rusty_serde(rename = "name")]
+      display_name: String,
+      #[rusty_serde(default)]
+      retries: u32,
+      #[rusty_serde(skip)]
+      cache: Option<String>,
+  }
+  ```
+  `rename` uses a different wire key/variant tag than the Rust name.
+  `default` falls back to `Default::default()` if the field is missing on
+  deserialize instead of erroring. `skip` never serializes the field and
+  always defaults it on deserialize, ignoring anything present on the wire
+  under its name. An unsupported attribute (`skip`/`default` on a variant,
+  any `#[rusty_serde(...)]` on a tuple field) is a clear `compile_error!`.
 
 Generics work without the derive macro's parser ever looking at field
 *types* (it only needs field/variant *names*, since `Serialize`/

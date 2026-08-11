@@ -1,4 +1,4 @@
-use crate::parse::{Data, Fields, Generics, Variant};
+use crate::parse::{Data, Fields, Generics, NamedField, Variant};
 
 pub fn generate(data: &Data) -> String {
     match data {
@@ -36,14 +36,17 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             out += "::rusty_serde::ser::SerializeTupleStruct::end(__state)";
             out
         }
-        Fields::Named(field_names) => {
-            let n = field_names.len();
+        Fields::Named(fields) => {
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let n = active.len();
             let mut out = format!(
                 "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {name:?}, {n})?;\n"
             );
-            for field in field_names {
+            for field in &active {
+                let wire = field.wire_name();
+                let ident = &field.name;
                 out += &format!(
-                    "::rusty_serde::ser::SerializeStruct::serialize_field(&mut __state, {field:?}, &self.{field})?;\n"
+                    "::rusty_serde::ser::SerializeStruct::serialize_field(&mut __state, {wire:?}, &self.{ident})?;\n"
                 );
             }
             out += "::rusty_serde::ser::SerializeStruct::end(__state)";
@@ -68,8 +71,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
 fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
     let mut arms = String::new();
     for (index, variant) in variants.iter().enumerate() {
-        let vname = &variant.name;
-        arms += &variant_arm(name, index as u32, vname, &variant.fields);
+        arms += &variant_arm(name, index as u32, variant);
     }
 
     let impl_decl = generics.impl_decl(None, "::rusty_serde::Serialize");
@@ -86,21 +88,23 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
     )
 }
 
-fn variant_arm(enum_name: &str, index: u32, vname: &str, fields: &Fields) -> String {
-    match fields {
+fn variant_arm(enum_name: &str, index: u32, variant: &Variant) -> String {
+    let vname = &variant.name;
+    let wire_vname = variant.wire_name();
+    match &variant.fields {
         Fields::Unit => format!(
-            "    {enum_name}::{vname} => ::rusty_serde::Serializer::serialize_unit_variant(serializer, {enum_name:?}, {index}, {vname:?}),\n"
+            "    {enum_name}::{vname} => ::rusty_serde::Serializer::serialize_unit_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}),\n"
         ),
         Fields::Unnamed(0) => format!(
-            "    {enum_name}::{vname}() => ::rusty_serde::Serializer::serialize_unit_variant(serializer, {enum_name:?}, {index}, {vname:?}),\n"
+            "    {enum_name}::{vname}() => ::rusty_serde::Serializer::serialize_unit_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}),\n"
         ),
         Fields::Unnamed(1) => format!(
-            "    {enum_name}::{vname}(ref __f0) => ::rusty_serde::Serializer::serialize_newtype_variant(serializer, {enum_name:?}, {index}, {vname:?}, __f0),\n"
+            "    {enum_name}::{vname}(ref __f0) => ::rusty_serde::Serializer::serialize_newtype_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}, __f0),\n"
         ),
         Fields::Unnamed(n) => {
             let binders = (0..*n).map(|i| format!("ref __f{i}")).collect::<Vec<_>>().join(", ");
             let mut body = format!(
-                "let mut __state = ::rusty_serde::Serializer::serialize_tuple_variant(serializer, {enum_name:?}, {index}, {vname:?}, {n})?;\n"
+                "let mut __state = ::rusty_serde::Serializer::serialize_tuple_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}, {n})?;\n"
             );
             for i in 0..*n {
                 body += &format!(
@@ -110,19 +114,28 @@ fn variant_arm(enum_name: &str, index: u32, vname: &str, fields: &Fields) -> Str
             body += "        ::rusty_serde::ser::SerializeTupleVariant::end(__state)";
             format!("    {enum_name}::{vname}({binders}) => {{\n        {body}\n    }}\n")
         }
-        Fields::Named(field_names) => {
-            let binders = field_names
+        Fields::Named(fields) => {
+            let binders = fields
                 .iter()
-                .map(|f| format!("ref {f}"))
+                .map(|f| {
+                    if f.attrs.skip {
+                        format!("{}: _", f.name)
+                    } else {
+                        format!("ref {}", f.name)
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let n = field_names.len();
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let n = active.len();
             let mut body = format!(
-                "let mut __state = ::rusty_serde::Serializer::serialize_struct_variant(serializer, {enum_name:?}, {index}, {vname:?}, {n})?;\n"
+                "let mut __state = ::rusty_serde::Serializer::serialize_struct_variant(serializer, {enum_name:?}, {index}, {wire_vname:?}, {n})?;\n"
             );
-            for f in field_names {
+            for f in &active {
+                let wire = f.wire_name();
+                let ident = &f.name;
                 body += &format!(
-                    "        ::rusty_serde::ser::SerializeStructVariant::serialize_field(&mut __state, {f:?}, {f})?;\n"
+                    "        ::rusty_serde::ser::SerializeStructVariant::serialize_field(&mut __state, {wire:?}, {ident})?;\n"
                 );
             }
             body += "        ::rusty_serde::ser::SerializeStructVariant::end(__state)";

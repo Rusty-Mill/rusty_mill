@@ -222,6 +222,87 @@ fn generic_struct_with_preexisting_bound() {
     roundtrip(Bounded(42), "42");
 }
 
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Attributed {
+    #[rusty_serde(rename = "n")]
+    name: String,
+    #[rusty_serde(default)]
+    count: i32,
+    #[rusty_serde(skip)]
+    cache: i32,
+    plain: bool,
+}
+
+#[test]
+fn field_rename() {
+    let value = Attributed {
+        name: "hi".into(),
+        count: 5,
+        cache: 0,
+        plain: true,
+    };
+    let json = json::to_string(&value).unwrap();
+    assert_eq!(json, r#"{"n":"hi","count":5,"plain":true}"#);
+}
+
+#[test]
+fn field_default_when_missing() {
+    let decoded: Attributed = json::from_str(r#"{"n":"hi","plain":false}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Attributed {
+            name: "hi".into(),
+            count: 0,
+            cache: 0,
+            plain: false,
+        }
+    );
+}
+
+#[test]
+fn field_default_when_present() {
+    let decoded: Attributed = json::from_str(r#"{"n":"hi","count":9,"plain":false}"#).unwrap();
+    assert_eq!(decoded.count, 9);
+}
+
+#[test]
+fn field_skip_never_serialized_and_always_defaulted() {
+    let value = Attributed {
+        name: "hi".into(),
+        count: 1,
+        cache: 999,
+        plain: true,
+    };
+    let json = json::to_string(&value).unwrap();
+    assert!(!json.contains("cache"));
+
+    // Even if a "cache" key is present on the wire, it's ignored - the
+    // field is never read, only ever defaulted.
+    let decoded: Attributed =
+        json::from_str(r#"{"n":"hi","count":1,"cache":999,"plain":true}"#).unwrap();
+    assert_eq!(decoded.cache, 0);
+}
+
+#[test]
+fn missing_required_field_still_errors_alongside_defaults() {
+    let err = json::from_str::<Attributed>(r#"{"count":1,"plain":true}"#).unwrap_err();
+    assert!(err.to_string().contains("missing field `n`"));
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum Renamed {
+    #[rusty_serde(rename = "circle")]
+    Circle,
+    #[rusty_serde(rename = "square")]
+    Square { side: f64 },
+}
+
+#[test]
+fn variant_rename() {
+    roundtrip(Renamed::Circle, r#""circle""#);
+    roundtrip(Renamed::Square { side: 2.0 }, r#"{"square":{"side":2.0}}"#);
+}
+
 #[test]
 fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();

@@ -5,8 +5,18 @@
 //! Field/variant *types* are never parsed: the generated code calls
 //! `Serialize`/`Deserialize` generically and lets Rust's own type inference
 //! fill in the rest, which is what keeps a hand-written parser tractable.
-//! The tradeoff is that generic structs/enums aren't supported yet (see
-//! `parse::reject_generics`).
+//! Generic structs/enums are supported (every declared type parameter gets
+//! a blanket `Serialize`/`Deserialize` bound); const generics and `where`
+//! clauses are not.
+//!
+//! Named struct/variant fields (and, for `rename` only, enum variants
+//! themselves) can carry a `#[rusty_serde(...)]` attribute:
+//! - `rename = "..."` - use a different JSON key/variant tag than the
+//!   Rust name.
+//! - `default` - fall back to `Default::default()` if the field is absent
+//!   on deserialize, instead of erroring.
+//! - `skip` - never serialize the field, and always default it on
+//!   deserialize (any value present on the wire under its name is ignored).
 
 use proc_macro::TokenStream;
 
@@ -14,12 +24,12 @@ mod codegen_de;
 mod codegen_ser;
 mod parse;
 
-#[proc_macro_derive(Serialize)]
+#[proc_macro_derive(Serialize, attributes(rusty_serde))]
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
     expand(input, codegen_ser::generate)
 }
 
-#[proc_macro_derive(Deserialize)]
+#[proc_macro_derive(Deserialize, attributes(rusty_serde))]
 pub fn derive_deserialize(input: TokenStream) -> TokenStream {
     expand(input, codegen_de::generate)
 }

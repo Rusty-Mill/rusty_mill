@@ -19,14 +19,51 @@ use proc_macro::{Delimiter, TokenStream, TokenTree};
 use std::iter::Peekable;
 
 pub enum Fields {
-    Named(Vec<String>),
+    Named(Vec<NamedField>),
     Unnamed(usize),
     Unit,
 }
 
+/// A `#[rusty_serde(...)]` attribute, recognized on named struct/variant
+/// fields and (for `rename` only) on enum variants themselves. Any other
+/// attribute (`#[serde(...)]`, `#[doc = "..."]`, `#[cfg(...)]`, ...) is
+/// left alone - only our own namespace is inspected.
+#[derive(Default, Clone)]
+pub struct Attrs {
+    pub rename: Option<String>,
+    pub default: bool,
+    pub skip: bool,
+}
+
+impl Attrs {
+    fn is_default(&self) -> bool {
+        self.rename.is_none() && !self.default && !self.skip
+    }
+}
+
+pub struct NamedField {
+    pub name: String,
+    pub attrs: Attrs,
+}
+
+impl NamedField {
+    /// The JSON key to use: `attrs.rename` if given, else the field's own
+    /// Rust name.
+    pub fn wire_name(&self) -> &str {
+        self.attrs.rename.as_deref().unwrap_or(&self.name)
+    }
+}
+
 pub struct Variant {
     pub name: String,
+    pub attrs: Attrs,
     pub fields: Fields,
+}
+
+impl Variant {
+    pub fn wire_name(&self) -> &str {
+        self.attrs.rename.as_deref().unwrap_or(&self.name)
+    }
 }
 
 pub enum Data {
@@ -113,7 +150,12 @@ type Tokens = Peekable<proc_macro::token_stream::IntoIter>;
 pub fn parse(input: TokenStream) -> Result<Data, TokenStream> {
     let mut tokens = input.into_iter().peekable();
 
-    skip_outer_attributes(&mut tokens);
+    let container_attrs = parse_attrs(&mut tokens, "container")?;
+    if !container_attrs.is_default() {
+        return Err(compile_error(
+            "rusty_serde_derive does not support container-level `#[rusty_serde(...)]` attributes yet",
+        ));
+    }
     skip_visibility(&mut tokens);
 
     let keyword = expect_ident(&mut tokens, "a `struct` or `enum` item")?;
@@ -139,7 +181,7 @@ fn parse_struct(tokens: &mut Tokens) -> Result<Data, TokenStream> {
         Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
             let group = take_group(tokens);
             reject_where_clause(tokens, &name)?;
-            Fields::Unnamed(count_top_level_fields(group))
+            Fields::Unnamed(count_top_level_fields(group)?)
         }
         Some(TokenTree::Ident(id)) if id.to_string() == "where" => {
             return Err(compile_error(&format!(
@@ -174,7 +216,7 @@ fn parse_enum(tokens: &mut Tokens) -> Result<Data, TokenStream> {
     let mut variants = Vec::new();
     let mut variant_tokens = body.into_iter().peekable();
     while variant_tokens.peek().is_some() {
-        skip_outer_attributes(&mut variant_tokens);
+        let attrs = parse_attrs(&mut variant_tokens, "variant")?;
         if variant_tokens.peek().is_none() {
             break;
         }
@@ -186,7 +228,7 @@ fn parse_enum(tokens: &mut Tokens) -> Result<Data, TokenStream> {
             }
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
                 let group = take_group(&mut variant_tokens);
-                Fields::Unnamed(count_top_level_fields(group))
+                Fields::Unnamed(count_top_level_fields(group)?)
             }
             _ => Fields::Unit,
         };
@@ -206,6 +248,7 @@ fn parse_enum(tokens: &mut Tokens) -> Result<Data, TokenStream> {
 
         variants.push(Variant {
             name: variant_name,
+            attrs,
             fields,
         });
     }
@@ -393,14 +436,14 @@ fn reject_where_clause(tokens: &mut Tokens, owner: &str) -> Result<(), TokenStre
 }
 
 /// Parses the inside of a `{ ... }` field list: `ident : <type tokens>`,
-/// repeated and comma-separated. Attributes and `pub`/`pub(...)` visibility
-/// ahead of a field name are skipped.
+/// repeated and comma-separated. Attributes (including `#[rusty_serde(...)]`)
+/// and `pub`/`pub(...)` visibility ahead of a field name are consumed.
 fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
     let mut tokens = group.stream().into_iter().peekable();
-    let mut names = Vec::new();
+    let mut fields = Vec::new();
 
     loop {
-        skip_outer_attributes(&mut tokens);
+        let attrs = parse_attrs(&mut tokens, "field")?;
         skip_visibility(&mut tokens);
         if tokens.peek().is_none() {
             break;
@@ -411,49 +454,198 @@ fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
             _ => return Err(compile_error(&format!("expected `:` after field `{name}`"))),
         }
         skip_to_top_level_comma(&mut tokens);
-        names.push(name);
+        fields.push(NamedField { name, attrs });
     }
 
-    Ok(Fields::Named(names))
+    Ok(Fields::Named(fields))
 }
 
 /// Counts comma-separated entries inside a `( ... )` tuple field/variant
-/// list, ignoring nested delimiters and attributes/visibility per entry.
-fn count_top_level_fields(group: proc_macro::Group) -> usize {
+/// list, ignoring nested delimiters and visibility per entry.
+/// `#[rusty_serde(...)]` isn't supported here (only named fields can carry
+/// it - a tuple field has no name to key it by), so one is a clear error
+/// rather than a silently-ignored attribute.
+fn count_top_level_fields(group: proc_macro::Group) -> Result<usize, TokenStream> {
     let mut tokens = group.stream().into_iter().peekable();
     let mut count = 0;
 
     loop {
-        skip_outer_attributes(&mut tokens);
+        let attrs = parse_attrs(&mut tokens, "field")?;
+        if !attrs.is_default() {
+            return Err(compile_error(
+                "rusty_serde_derive only supports `#[rusty_serde(...)]` on named fields, not tuple fields",
+            ));
+        }
         skip_visibility(&mut tokens);
         if tokens.peek().is_none() {
             break;
         }
-        let before = tokens.peek().is_some();
         skip_to_top_level_comma(&mut tokens);
-        if before {
-            count += 1;
-        }
+        count += 1;
     }
 
-    count
+    Ok(count)
 }
 
-fn skip_outer_attributes(tokens: &mut Tokens) {
+/// Consumes every `#[...]` attribute ahead of a field/variant, merging any
+/// `#[rusty_serde(...)]` found (at most one - a second is an error) into an
+/// `Attrs`. Any other attribute is discarded, same as before field
+/// attributes existed.
+fn parse_attrs(tokens: &mut Tokens, context: &str) -> Result<Attrs, TokenStream> {
+    let mut attrs = Attrs::default();
+    let mut seen = false;
     loop {
         match tokens.peek() {
             Some(TokenTree::Punct(p)) if p.as_char() == '#' => {
                 tokens.next();
-                if let Some(TokenTree::Group(g)) = tokens.peek() {
-                    if g.delimiter() == Delimiter::Bracket {
-                        tokens.next();
-                        continue;
+                match tokens.next() {
+                    Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket => {
+                        if let Some(parsed) = parse_one_attr_group(g, context)? {
+                            if seen {
+                                return Err(compile_error(&format!(
+                                    "duplicate `#[rusty_serde(...)]` attribute on this {context}"
+                                )));
+                            }
+                            seen = true;
+                            attrs = parsed;
+                        }
                     }
+                    _ => return Err(compile_error("expected `[...]` after `#`")),
                 }
             }
-            _ => return,
+            _ => return Ok(attrs),
         }
     }
+}
+
+/// Parses one `#[...]` attribute's contents. Returns `Ok(None)` for any
+/// attribute that isn't `rusty_serde(...)` (left untouched, same as
+/// `#[derive(...)]`'s own siblings like `#[doc = "..."]`).
+fn parse_one_attr_group(group: proc_macro::Group, context: &str) -> Result<Option<Attrs>, TokenStream> {
+    let mut it = group.stream().into_iter().peekable();
+    match it.peek() {
+        Some(TokenTree::Ident(id)) if id.to_string() == "rusty_serde" => {}
+        _ => return Ok(None),
+    }
+    it.next();
+    let inner = match it.next() {
+        Some(TokenTree::Group(inner)) if inner.delimiter() == Delimiter::Parenthesis => inner,
+        Some(other) => {
+            return Err(compile_error(&format!(
+                "expected `rusty_serde(...)`, found `rusty_serde {other}`"
+            )))
+        }
+        None => return Err(compile_error("expected `rusty_serde(...)`")),
+    };
+    if it.peek().is_some() {
+        return Err(compile_error("unexpected tokens after `rusty_serde(...)`"));
+    }
+
+    let mut attrs = Attrs::default();
+    let raw: Vec<TokenTree> = inner.stream().into_iter().collect();
+    for chunk in split_top_level(raw, |depth, tt| {
+        depth == 0 && matches!(tt, TokenTree::Punct(p) if p.as_char() == ',')
+    }) {
+        if chunk.is_empty() {
+            continue;
+        }
+        parse_one_meta_item(chunk, context, &mut attrs)?;
+    }
+    Ok(Some(attrs))
+}
+
+fn parse_one_meta_item(
+    chunk: Vec<TokenTree>,
+    context: &str,
+    attrs: &mut Attrs,
+) -> Result<(), TokenStream> {
+    let mut it = chunk.into_iter().peekable();
+    let key = match it.next() {
+        Some(TokenTree::Ident(id)) => id.to_string(),
+        Some(other) => {
+            return Err(compile_error(&format!(
+                "expected an attribute name, found `{other}`"
+            )))
+        }
+        None => return Ok(()),
+    };
+    match key.as_str() {
+        "rename" => {
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `rename = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `rename =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `rename = \"...\"`"));
+            }
+            attrs.rename = Some(value);
+        }
+        "default" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`default` is not supported on {context}s"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`default` does not take a value"));
+            }
+            attrs.default = true;
+        }
+        "skip" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`skip` is not supported on {context}s"
+                )));
+            }
+            if it.peek().is_some() {
+                return Err(compile_error("`skip` does not take a value"));
+            }
+            attrs.skip = true;
+        }
+        other => {
+            return Err(compile_error(&format!(
+                "unknown rusty_serde attribute `{other}`"
+            )))
+        }
+    }
+    Ok(())
+}
+
+/// Unescapes a source-text string literal (`proc_macro::Literal::to_string`
+/// returns the raw token text, quotes included). Handles the escapes that
+/// realistically show up in a `rename = "..."` value; anything else is
+/// passed through unchanged rather than rejected.
+fn parse_string_literal(lit: &proc_macro::Literal) -> Result<String, TokenStream> {
+    let text = lit.to_string();
+    if !(text.starts_with('"') && text.ends_with('"') && text.len() >= 2) {
+        return Err(compile_error(&format!("expected a string literal, found `{text}`")));
+    }
+    let inner = &text[1..text.len() - 1];
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    Ok(out)
 }
 
 fn skip_visibility(tokens: &mut Tokens) {

@@ -1,4 +1,4 @@
-use crate::parse::{Data, Fields, Generics, Variant};
+use crate::parse::{Data, Fields, Generics, NamedField, Variant};
 
 pub fn generate(data: &Data) -> String {
     match data {
@@ -20,16 +20,20 @@ pub fn generate(data: &Data) -> String {
 /// both for a struct's field names and an enum's variant names. This
 /// generated enum only ever holds identifier tags, so - unlike the "real"
 /// visitor types below - it never needs the outer type's own generics.
-fn ident_enum(ty: &str, names: &[String], expecting: &str, allow_unknown: bool) -> String {
-    let mut decls: Vec<String> = names.to_vec();
+///
+/// `entries` pairs each Rust identifier (the enum variant name, and the
+/// field/variant name used everywhere else in the generated code) with the
+/// wire name to match against (its own name, unless renamed).
+fn ident_enum(ty: &str, entries: &[(String, String)], expecting: &str, allow_unknown: bool) -> String {
+    let mut decls: Vec<String> = entries.iter().map(|(ident, _)| ident.clone()).collect();
     if allow_unknown {
         decls.push("__ignore".to_string());
     }
     let decls = decls.join(", ");
 
     let mut arms = String::new();
-    for n in names {
-        arms += &format!("                            {n:?} => Ok({ty}::{n}),\n");
+    for (ident, wire) in entries {
+        arms += &format!("                            {wire:?} => Ok({ty}::{ident}),\n");
     }
     let fallback = if allow_unknown {
         format!("                            _ => Ok({ty}::__ignore),\n")
@@ -120,29 +124,38 @@ fn visitor(struct_name: &str, generics: &Generics) -> Visitor {
     }
 }
 
-/// Body of a `visit_map` that fills in `field_names` from a `MapAccess`,
-/// erroring on duplicates/missing fields, then builds `constructor { .. }`.
-/// `constructor` is a bare (non-generic) path like `Foo` or `Foo::Variant`:
-/// Rust infers any generic arguments from the enclosing function's return
-/// type, so it never needs to be spelled out here.
-fn visit_map_body(field_enum: &str, field_names: &[String], constructor: &str) -> String {
+/// Body of a `visit_map` that fills in `fields` from a `MapAccess`,
+/// erroring on duplicates/missing fields (or defaulting per `#[rusty_serde]`
+/// attributes), then builds `constructor { .. }`. `constructor` is a bare
+/// (non-generic) path like `Foo` or `Foo::Variant`: Rust infers any generic
+/// arguments from the enclosing function's return type, so it never needs
+/// to be spelled out here.
+///
+/// `skip`-ped fields never appear on the wire at all (not read, not
+/// matched against `field_enum`) and are unconditionally defaulted;
+/// `default`-ed fields are still read if present, but fall back to
+/// `Default::default()` instead of erroring when absent.
+fn visit_map_body(field_enum: &str, fields: &[NamedField], constructor: &str) -> String {
+    let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
     let mut out = String::new();
-    for f in field_names {
-        out += &format!("let mut __{f}: Option<_> = None;\n");
+    for f in &active {
+        let ident = &f.name;
+        out += &format!("let mut __{ident}: Option<_> = None;\n");
     }
     out += &format!(
         "while let Some(__key) = ::rusty_serde::de::MapAccess::next_key::<{field_enum}>(&mut map)? {{\n\
              match __key {{\n"
     );
-    for f in field_names {
+    for f in &active {
+        let ident = &f.name;
         out += &format!(
-            "                {field_enum}::{f} => {{\n\
-                     if __{f}.is_some() {{\n\
+            "                {field_enum}::{ident} => {{\n\
+                     if __{ident}.is_some() {{\n\
                          return Err(::rusty_serde::Error::custom({dup:?}));\n\
                      }}\n\
-                     __{f} = Some(::rusty_serde::de::MapAccess::next_value(&mut map)?);\n\
+                     __{ident} = Some(::rusty_serde::de::MapAccess::next_value(&mut map)?);\n\
                  }}\n",
-            dup = format!("duplicate field `{f}`")
+            dup = format!("duplicate field `{}`", f.wire_name())
         );
     }
     out += &format!(
@@ -152,13 +165,20 @@ fn visit_map_body(field_enum: &str, field_names: &[String], constructor: &str) -
              }}\n\
          }}\n"
     );
-    for f in field_names {
-        out += &format!(
-            "let {f} = __{f}.ok_or_else(|| ::rusty_serde::Error::custom({missing:?}))?;\n",
-            missing = format!("missing field `{f}`")
-        );
+    for f in fields {
+        let ident = &f.name;
+        if f.attrs.skip {
+            out += &format!("let {ident} = ::std::default::Default::default();\n");
+        } else if f.attrs.default {
+            out += &format!("let {ident} = __{ident}.unwrap_or_default();\n");
+        } else {
+            out += &format!(
+                "let {ident} = __{ident}.ok_or_else(|| ::rusty_serde::Error::custom({missing:?}))?;\n",
+                missing = format!("missing field `{}`", f.wire_name())
+            );
+        }
     }
-    let field_list = field_names.join(", ");
+    let field_list = fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(", ");
     out += &format!("Ok({constructor} {{ {field_list} }})\n");
     out
 }
@@ -267,10 +287,18 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                 construct = v.construct,
             )
         }
-        Fields::Named(field_names) => {
-            let field_list_dbg: Vec<String> = field_names.iter().map(|f| format!("{f:?}")).collect();
-            let fields_array = field_list_dbg.join(", ");
-            let map_body = visit_map_body("__Field", field_names, name);
+        Fields::Named(fields) => {
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let entries: Vec<(String, String)> = active
+                .iter()
+                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .collect();
+            let fields_array = active
+                .iter()
+                .map(|f| format!("{:?}", f.wire_name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let map_body = visit_map_body("__Field", fields, name);
             let v = visitor("__Visitor", generics);
             format!(
                 "{ident_enum}\n\
@@ -287,7 +315,7 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
                  }}\n\
                  const __FIELDS: &[&str] = &[{fields_array}];\n\
                  ::rusty_serde::Deserializer::deserialize_struct(deserializer, {name:?}, __FIELDS, {construct})",
-                ident_enum = ident_enum("__Field", field_names, "field identifier", true),
+                ident_enum = ident_enum("__Field", &entries, "field identifier", true),
                 def = v.def,
                 impl_decl = v.impl_decl,
                 vty = v.ty,
@@ -311,9 +339,15 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
 
 fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
     let ty = generics.ty(name);
-    let variant_names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
-    let variant_list_dbg: Vec<String> = variant_names.iter().map(|v| format!("{v:?}")).collect();
-    let variants_array = variant_list_dbg.join(", ");
+    let variant_entries: Vec<(String, String)> = variants
+        .iter()
+        .map(|v| (v.name.clone(), v.wire_name().to_string()))
+        .collect();
+    let variants_array = variant_entries
+        .iter()
+        .map(|(_, wire)| format!("{wire:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     let mut arms = String::new();
     for variant in variants {
@@ -346,7 +380,7 @@ fn enum_impl(name: &str, generics: &Generics, variants: &[Variant]) -> String {
                  ::rusty_serde::Deserializer::deserialize_enum(deserializer, {name:?}, __VARIANTS, {construct})\n\
              }}\n\
          }}\n",
-        ident_enum = ident_enum("__Field", &variant_names, "variant identifier", false),
+        ident_enum = ident_enum("__Field", &variant_entries, "variant identifier", false),
         def = v.def,
         v_impl_decl = v.impl_decl,
         vty = v.ty,
@@ -418,10 +452,18 @@ fn variant_arm(
                 construct = v.construct,
             )
         }
-        Fields::Named(field_names) => {
-            let field_list_dbg: Vec<String> = field_names.iter().map(|f| format!("{f:?}")).collect();
-            let fields_array = field_list_dbg.join(", ");
-            let map_body = visit_map_body("__SField", field_names, &constructor);
+        Fields::Named(fields) => {
+            let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
+            let entries: Vec<(String, String)> = active
+                .iter()
+                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .collect();
+            let fields_array = active
+                .iter()
+                .map(|f| format!("{:?}", f.wire_name()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let map_body = visit_map_body("__SField", fields, &constructor);
             let v = visitor("__StructVisitor", generics);
             format!(
                 "(__Field::{vname}, __variant) => {{\n\
@@ -440,7 +482,7 @@ fn variant_arm(
                      const __SFIELDS: &[&str] = &[{fields_array}];\n\
                      ::rusty_serde::de::VariantAccess::struct_variant(__variant, __SFIELDS, {construct})\n\
                  }}\n",
-                ident_enum = ident_enum("__SField", field_names, "field identifier", true),
+                ident_enum = ident_enum("__SField", &entries, "field identifier", true),
                 def = v.def,
                 impl_decl = v.impl_decl,
                 vty = v.ty,
