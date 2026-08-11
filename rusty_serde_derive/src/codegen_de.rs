@@ -32,6 +32,24 @@ pub fn generate(data: &Data) -> String {
 /// generated enum only ever holds identifier tags, so - unlike the "real"
 /// visitor types below - it never needs the outer type's own generics.
 ///
+/// What an `ident_enum`'s generated identifier `Visitor` does with a wire
+/// value that doesn't match any known name.
+enum IdentFallback<'a> {
+    /// Struct/variant fields: an error naming the field is a programmer
+    /// bug, not a data error - unrecognized fields are handled by the
+    /// caller (ignored, or - with `deny_unknown_fields` - an error raised
+    /// closer to the actual map-walking code, with more context).
+    Error,
+    /// A struct's own fields: carries the raw key text along, not just an
+    /// "unknown" tag - a flatten field needs it to rebuild the leftover
+    /// entries; callers that don't need it just match `__ignore(_)`.
+    IgnoreUnknown,
+    /// An enum's variant tags, when one variant carries
+    /// `#[rusty_serde(other)]`: route anything unrecognized to that
+    /// variant instead of erroring.
+    MapTo(&'a str),
+}
+
 /// `entries` pairs each Rust identifier (the enum variant name, and the
 /// field/variant name used everywhere else in the generated code) with the
 /// wire name to match against (its own name, unless renamed).
@@ -39,7 +57,7 @@ fn ident_enum(
     ty: &str,
     entries: &[(String, String)],
     expecting: &str,
-    allow_unknown: bool,
+    fallback_kind: IdentFallback,
 ) -> String {
     // A field's aliases add extra rows to `entries` that share its ident
     // (multiple wire names -> one variant), so the declaration list has to
@@ -50,10 +68,7 @@ fn ident_enum(
             decls.push(ident.clone());
         }
     }
-    if allow_unknown {
-        // Carries the raw key text along, not just an "unknown" tag - a
-        // flatten field needs it to rebuild the leftover entries; callers
-        // that don't need it just match `__ignore(_)`.
+    if matches!(fallback_kind, IdentFallback::IgnoreUnknown) {
         decls.push("__ignore(::std::string::String)".to_string());
     }
     let decls = decls.join(", ");
@@ -62,10 +77,14 @@ fn ident_enum(
     for (ident, wire) in entries {
         arms += &format!("                            {wire:?} => Ok({ty}::{ident}),\n");
     }
-    let fallback = if allow_unknown {
-        format!("                            _ => Ok({ty}::__ignore(value.to_string())),\n")
-    } else {
-        "                            _ => Err(::rusty_serde::Error::custom(::std::format!(\"unknown variant `{}`\", value))),\n".to_string()
+    let fallback = match fallback_kind {
+        IdentFallback::IgnoreUnknown => {
+            format!("                            _ => Ok({ty}::__ignore(value.to_string())),\n")
+        }
+        IdentFallback::MapTo(other_ident) => {
+            format!("                            _ => Ok({ty}::{other_ident}),\n")
+        }
+        IdentFallback::Error => "                            _ => Err(::rusty_serde::Error::custom(::std::format!(\"unknown variant `{}`\", value))),\n".to_string(),
     };
 
     format!(
@@ -435,7 +454,7 @@ fn struct_impl(
                  }}\n\
                  const __FIELDS: &[&str] = &[{fields_array}];\n\
                  ::rusty_serde::Deserializer::deserialize_struct(deserializer, {name:?}, __FIELDS, {construct})",
-                ident_enum = ident_enum("__Field", &entries, "field identifier", true),
+                ident_enum = ident_enum("__Field", &entries, "field identifier", IdentFallback::IgnoreUnknown),
                 def = v.def,
                 impl_decl = v.impl_decl,
                 where_clause = v.where_clause,
@@ -480,6 +499,7 @@ fn enum_impl(
         .map(|(_, wire)| format!("{wire:?}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let other_variant = variants.iter().find(|v| v.attrs.other).map(|v| &v.name);
 
     let mut arms = String::new();
     for variant in variants {
@@ -538,7 +558,15 @@ fn enum_impl(
                  {deserialize_call}\n\
              }}\n\
          }}\n",
-        ident_enum = ident_enum("__Field", &variant_entries, "variant identifier", false),
+        ident_enum = ident_enum(
+            "__Field",
+            &variant_entries,
+            "variant identifier",
+            match other_variant {
+                Some(ident) => IdentFallback::MapTo(ident),
+                None => IdentFallback::Error,
+            },
+        ),
         def = v.def,
         v_impl_decl = v.impl_decl,
         v_where_clause = v.where_clause,
@@ -699,7 +727,7 @@ fn untagged_variant_body(
                  const __FIELDS: &[&str] = &[{fields_array}];\n\
                  ::rusty_serde::Deserializer::deserialize_struct(\
                      ::rusty_serde::value::ValueDeserializer::<__D::Error>::new(__value.clone()), {vname:?}, __FIELDS, {construct})",
-                ident_enum = ident_enum("__Field", &entries, "field identifier", true),
+                ident_enum = ident_enum("__Field", &entries, "field identifier", IdentFallback::IgnoreUnknown),
                 def = v.def,
                 impl_decl = v.impl_decl,
                 vty = v.ty,
@@ -824,7 +852,7 @@ fn variant_arm(
                      const __SFIELDS: &[&str] = &[{fields_array}];\n\
                      ::rusty_serde::de::VariantAccess::struct_variant(__variant, __SFIELDS, {construct})\n\
                  }}\n",
-                ident_enum = ident_enum("__SField", &entries, "field identifier", true),
+                ident_enum = ident_enum("__SField", &entries, "field identifier", IdentFallback::IgnoreUnknown),
                 def = v.def,
                 impl_decl = v.impl_decl,
                 where_clause = v.where_clause,
