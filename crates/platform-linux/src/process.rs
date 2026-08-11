@@ -140,26 +140,33 @@ fn is_executable_file(path: &Path) -> bool {
 
 impl Spawner for LinuxSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
-        if cmd.detached && cmd.group != GroupSpec::Inherit {
+        if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
             // `Command::detach`'s contract (`docs/decision-request-
-            // detach-liveness.md`): `JoinGroup` is refused everywhere —
-            // `setsid` starting a brand-new session cannot also join an
-            // existing, different pgid, self-contradictory rather than an
-            // OS limitation. `NewGroup` is *also* refused here — not for
-            // that reason, but a real kernel one found by an actual
-            // `posix_spawn` call returning `EPERM`: Linux's `setpgid(2)`
-            // explicitly forbids changing the process group ID of a
-            // session leader, full stop, even a self-targeting
+            // detach-liveness.md`): `setsid` starting a brand-new
+            // session cannot also join an existing, different pgid —
+            // self-contradictory, not an OS limitation.
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "spawn: detach cannot join an existing group",
+            ));
+        }
+        if cmd.detached && cmd.group == GroupSpec::NewGroup {
+            // Refused here too — not for the self-contradiction
+            // `JoinGroup` is refused for, but a real kernel one found by
+            // an actual `posix_spawn` call returning `EPERM`: Linux's
+            // `setpgid(2)` explicitly forbids changing the process group
+            // ID of a session leader, full stop, even a self-targeting
             // `setpgid(0, 0)` no-op (`man 2 setpgid`: "An attempt to
             // change the process group ID of a session leader fails with
             // EPERM"). `setsid` (which `detached` sets) always makes the
-            // child a session leader, so `POSIX_SPAWN_SETPGROUP` can never
-            // follow it — refused up front rather than surfacing the raw
-            // kernel `EPERM` from a doomed `posix_spawn` call.
+            // child a session leader, so `POSIX_SPAWN_SETPGROUP` can
+            // never follow it — refused up front rather than surfacing
+            // the raw kernel `EPERM` from a doomed `posix_spawn` call.
             return Err(PlatformError::new(
                 ErrorKind::Unsupported,
                 OsCode::None,
-                "spawn: detach with a non-Inherit GroupSpec",
+                "spawn: detach with GroupSpec::NewGroup",
             ));
         }
         let resolved = self.resolve(&cmd.program)?;
