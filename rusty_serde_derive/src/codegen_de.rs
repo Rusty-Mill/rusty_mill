@@ -11,9 +11,17 @@ pub fn generate(data: &Data) -> String {
             from,
             // `into` only replaces the Serialize impl.
             into: _,
+            remote,
         } => match from {
             Some(from) => from_impl(name, generics, from),
-            None => struct_impl(name, generics, fields, *deny_unknown_fields, *transparent),
+            None => struct_impl(
+                name,
+                generics,
+                fields,
+                *deny_unknown_fields,
+                *transparent,
+                remote.as_deref(),
+            ),
         },
         Data::Enum {
             name,
@@ -352,8 +360,16 @@ fn struct_impl(
     fields: &Fields,
     deny_unknown_fields: bool,
     transparent: bool,
+    remote: Option<&str>,
 ) -> String {
-    let ty = generics.ty(name);
+    // `remote` targets the impl (and every constructor expression below,
+    // which all build a `Self`) at a different type than the one this
+    // derive was written on - see `codegen_ser`'s `struct_impl` for the
+    // serialize-side half of the same idea. Cosmetic text (`"struct
+    // {name}"`, the wire type-name hint passed to `deserialize_struct` and
+    // friends) keeps using the original `name` either way.
+    let target = remote.unwrap_or(name);
+    let ty = generics.ty(target);
     let body = match fields {
         Fields::Unit => {
             let v = visitor("__Visitor", generics);
@@ -366,7 +382,7 @@ fn struct_impl(
                      }}\n\
                      fn visit_unit<__E>(self) -> Result<{ty}, __E>\n\
                      where __E: ::rusty_serde::Error {{\n\
-                         Ok({name})\n\
+                         Ok({target})\n\
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_unit_struct(deserializer, {name:?}, {construct})",
@@ -388,7 +404,7 @@ fn struct_impl(
                      }}\n\
                      fn visit_unit<__E>(self) -> Result<{ty}, __E>\n\
                      where __E: ::rusty_serde::Error {{\n\
-                         Ok({name}())\n\
+                         Ok({target}())\n\
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_unit_struct(deserializer, {name:?}, {construct})",
@@ -410,13 +426,13 @@ fn struct_impl(
                      }}\n\
                      fn visit_newtype_struct<__D>(self, deserializer: __D) -> Result<{ty}, __D::Error>\n\
                      where __D: ::rusty_serde::Deserializer<'de> {{\n\
-                         ::rusty_serde::Deserialize::deserialize(deserializer).map({name})\n\
+                         ::rusty_serde::Deserialize::deserialize(deserializer).map({target})\n\
                      }}\n\
                      fn visit_seq<__A>(self, mut seq: __A) -> Result<{ty}, __A::Error>\n\
                      where __A: ::rusty_serde::de::SeqAccess<'de> {{\n\
                          let __v0 = ::rusty_serde::de::SeqAccess::next_element(&mut seq)?\n\
                              .ok_or_else(|| ::rusty_serde::Error::custom(\"missing tuple element 0\"))?;\n\
-                         Ok({name}(__v0))\n\
+                         Ok({target}(__v0))\n\
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_newtype_struct(deserializer, {name:?}, {construct})",
@@ -449,7 +465,7 @@ fn struct_impl(
                      fn visit_seq<__A>(self, mut seq: __A) -> Result<{ty}, __A::Error>\n\
                      where __A: ::rusty_serde::de::SeqAccess<'de> {{\n\
                          {elems}\n\
-                         Ok({name}({binders}))\n\
+                         Ok({target}({binders}))\n\
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_tuple_struct(deserializer, {name:?}, {n}, {construct})",
@@ -463,7 +479,7 @@ fn struct_impl(
         // Parse-time validation guarantees `transparent` only reaches here
         // with exactly one field - delegate straight to that field's own
         // `Deserialize` impl, the same way a tuple-struct-of-one already
-        // does (just building `{name} { field: v }` instead of `{name}(v)`).
+        // does (just building `{target} { field: v }` instead of `{target}(v)`).
         Fields::Named(fields) if transparent => {
             let field = &fields[0].name;
             let v = visitor("__Visitor", generics);
@@ -476,7 +492,7 @@ fn struct_impl(
                      }}\n\
                      fn visit_newtype_struct<__D>(self, deserializer: __D) -> Result<{ty}, __D::Error>\n\
                      where __D: ::rusty_serde::Deserializer<'de> {{\n\
-                         ::rusty_serde::Deserialize::deserialize(deserializer).map(|__v0| {name} {{ {field}: __v0 }})\n\
+                         ::rusty_serde::Deserialize::deserialize(deserializer).map(|__v0| {target} {{ {field}: __v0 }})\n\
                      }}\n\
                  }}\n\
                  ::rusty_serde::Deserializer::deserialize_newtype_struct(deserializer, {name:?}, {construct})",
@@ -511,7 +527,7 @@ fn struct_impl(
                 .collect::<Vec<_>>()
                 .join(", ");
             let map_body =
-                visit_map_body("__Field", fields, name, "__A::Error", deny_unknown_fields);
+                visit_map_body("__Field", fields, target, "__A::Error", deny_unknown_fields);
             let v = visitor("__Visitor", generics);
             format!(
                 "{ident_enum}\n\

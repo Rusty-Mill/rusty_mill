@@ -101,6 +101,21 @@ pub struct Attrs {
     /// counterpart to `from`/`try_from`: clone into `T` (via `Into<T>`,
     /// hence the `Clone` requirement) then serialize that.
     pub into: Option<String>,
+    /// Container-only, structs only: `#[rusty_serde(remote = "path::Type")]`
+    /// makes the generated `Serialize`/`Deserialize` impls target
+    /// `path::Type` instead of the annotated struct itself, using the
+    /// annotated struct's own field list as `path::Type`'s shape. For a
+    /// type this crate doesn't own (defined in another crate), `path::Type`
+    /// has to already be local enough for the orphan rule to allow the
+    /// impl - see the README for what that means in practice without
+    /// `with` support.
+    pub remote: Option<String>,
+    /// Field-only: `#[rusty_serde(getter = "path::to::fn")]` - calls
+    /// `path::to::fn(self)` (expected to return an owned value) instead of
+    /// `&self.field` during serialization, for a field that isn't visible
+    /// from the `remote` type's own module. Meaningless (and rejected)
+    /// without a container-level `remote` also set.
+    pub getter: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -159,6 +174,8 @@ impl Attrs {
             && self.bound.is_none()
             && self.from.is_none()
             && self.into.is_none()
+            && self.remote.is_none()
+            && self.getter.is_none()
     }
 }
 
@@ -228,6 +245,10 @@ pub enum Data {
         /// `fields` entirely) with one that clones into `T` and
         /// serializes that.
         into: Option<String>,
+        /// From a container-level `#[rusty_serde(remote = "path::Type")]` -
+        /// when set, the generated impls target `path::Type` instead of
+        /// this struct itself.
+        remote: Option<String>,
     },
     Enum {
         name: String,
@@ -472,6 +493,18 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         }
     }
 
+    if container_attrs.remote.is_none() {
+        if let Fields::Named(named) = &fields {
+            if let Some(f) = named.iter().find(|f| f.attrs.getter.is_some()) {
+                return Err(compile_error(&format!(
+                    "`getter` requires the container to also set `remote = \"...\"` (on field \
+                     `{}`)",
+                    f.name
+                )));
+            }
+        }
+    }
+
     Ok(Data::Struct {
         name,
         generics,
@@ -480,6 +513,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         transparent: container_attrs.transparent,
         from: container_attrs.from,
         into: container_attrs.into,
+        remote: container_attrs.remote,
     })
 }
 
@@ -498,6 +532,11 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
     if container_attrs.transparent {
         return Err(compile_error(&format!(
             "`transparent` is only supported on structs, not enums (on `{name}`)"
+        )));
+    }
+    if container_attrs.remote.is_some() {
+        return Err(compile_error(&format!(
+            "`remote` is only supported on structs, not enums (on `{name}`)"
         )));
     }
     let mut generics = parse_generics(tokens, &name)?;
@@ -524,7 +563,17 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         let fields = match variant_tokens.peek() {
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
                 let group = take_group(&mut variant_tokens);
-                parse_named_fields(group, "variant")?
+                let fields = parse_named_fields(group, "variant")?;
+                if let Fields::Named(named) = &fields {
+                    if let Some(f) = named.iter().find(|f| f.attrs.getter.is_some()) {
+                        return Err(compile_error(&format!(
+                            "`getter` is only supported on struct fields, alongside a \
+                             container-level `remote` (on field `{}`)",
+                            f.name
+                        )));
+                    }
+                }
+                fields
             }
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
                 let group = take_group(&mut variant_tokens);
@@ -1459,6 +1508,44 @@ fn parse_one_meta_item(
                 return Err(compile_error("unexpected tokens after `into = \"...\"`"));
             }
             attrs.into = Some(value);
+        }
+        "remote" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`remote` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `remote = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `remote =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `remote = \"...\"`"));
+            }
+            attrs.remote = Some(value);
+        }
+        "getter" => {
+            if context != "field" {
+                return Err(compile_error(&format!(
+                    "`getter` is not supported on {context}s"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `getter = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `getter =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `getter = \"...\"`"));
+            }
+            attrs.getter = Some(value);
         }
         other => {
             return Err(compile_error(&format!(

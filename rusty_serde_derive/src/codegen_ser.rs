@@ -58,9 +58,10 @@ pub fn generate(data: &Data) -> String {
             // `from`/`try_from` only replace the Deserialize impl.
             from: _,
             into,
+            remote,
         } => match into {
             Some(into) => into_impl(name, generics, into),
-            None => struct_impl(name, generics, fields, *transparent),
+            None => struct_impl(name, generics, fields, *transparent, remote.as_deref()),
         },
         Data::Enum {
             name,
@@ -109,7 +110,13 @@ fn into_impl(name: &str, generics: &Generics, into: &str) -> String {
     )
 }
 
-fn struct_impl(name: &str, generics: &Generics, fields: &Fields, transparent: bool) -> String {
+fn struct_impl(
+    name: &str,
+    generics: &Generics,
+    fields: &Fields,
+    transparent: bool,
+    remote: Option<&str>,
+) -> String {
     let body = match fields {
         Fields::Unit => {
             format!("::rusty_serde::Serializer::serialize_unit_struct(serializer, {name:?})")
@@ -144,7 +151,12 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields, transparent: bo
 
     let impl_decl = generics.impl_decl(None);
     let where_clause = generics.where_clause("::rusty_serde::Serialize");
-    let ty = generics.ty(name);
+    // `remote` targets the impl at a different (foreign, or just
+    // undecorated) type instead of this one - `self` is still built from
+    // the annotated struct's own field list, just read as `path::Type`
+    // instead of `name` (field access is structural either way, so nothing
+    // else here needs to change).
+    let ty = generics.ty(remote.unwrap_or(name));
     format!(
         "impl{impl_decl} ::rusty_serde::Serialize for {ty}{where_clause} {{\n\
              fn serialize<__S>(&self, serializer: __S) -> Result<__S::Ok, __S::Error>\n\
@@ -162,7 +174,20 @@ fn named_struct_serialize_body(name: &str, fields: &[NamedField]) -> String {
         .iter()
         .filter(|f| !f.attrs.skips_serializing())
         .collect();
-    let value_of = |field_name: &str| format!("&self.{field_name}");
+    // `getter = "path"` (only meaningful alongside a container-level
+    // `remote`) reads a field that isn't visible as `self.field` from this
+    // impl's own module - `path(self)` (expected to return an owned value)
+    // stands in for the ordinary field access instead.
+    let value_of = |field_name: &str| {
+        let getter = active
+            .iter()
+            .find(|f| f.name == field_name)
+            .and_then(|f| f.attrs.getter.as_deref());
+        match getter {
+            Some(getter) => format!("&({getter}(self))"),
+            None => format!("&self.{field_name}"),
+        }
+    };
 
     // A flattened field's fields merge into the parent object, so the
     // parent can no longer use serialize_struct (a fixed key set) - it
