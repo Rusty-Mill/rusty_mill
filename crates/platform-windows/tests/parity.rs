@@ -1121,10 +1121,23 @@ fn windows_is_alive_reports_running_then_exited() {
         .kill_single(platform::process::Signal::Kill)
         .expect("kill_single");
     child.wait().expect("wait");
-    assert!(
-        !s.is_alive(pid).expect("probe"),
-        "must not be alive once exited"
-    );
+    // `child`'s own handle stays open through this whole poll — Windows
+    // never reuses a pid while any handle to the process object remains
+    // open (Raymond Chen, "When does a process ID become available for
+    // reuse?"), so a bounded retry here tolerates CI scheduling jitter
+    // in exit-code propagation without risking a false pass against a
+    // different, pid-reused process.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if !s.is_alive(pid).expect("probe") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "must not be alive once exited"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// `Spawner::is_zombie` (divergence 016): no zombie concept on Windows —

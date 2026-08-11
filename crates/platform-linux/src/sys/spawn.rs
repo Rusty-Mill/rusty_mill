@@ -327,12 +327,18 @@ pub fn spawn(
     // word (`posix_spawnattr_setflags` *replaces*, not accumulates) — set
     // once with both bits present rather than two calls that would
     // silently drop the first.
-    let mut spawn_flags = 0;
+    // Explicit `c_short` — this is `posix_spawnattr_setflags`'s real
+    // parameter type in `libc` (POSIX specifies `short flags`); letting
+    // it default and casting `as _` at each `|=` site left the type
+    // genuinely ambiguous to rustc here (confirmed: `error[E0282]` on a
+    // real build), unlike the single-flag call this replaced, where `as
+    // _` resolved directly against the call's own parameter type.
+    let mut spawn_flags: c::c_short = 0;
     if target_pgid.is_some() {
-        spawn_flags |= c::POSIX_SPAWN_SETPGROUP as _;
+        spawn_flags |= c::POSIX_SPAWN_SETPGROUP as c::c_short;
     }
     if detached {
-        spawn_flags |= c::POSIX_SPAWN_SETSID as _;
+        spawn_flags |= c::POSIX_SPAWN_SETSID as c::c_short;
     }
     if spawn_flags != 0 {
         // SAFETY: `attr.0` is initialized; setflags/setpgroup have no
