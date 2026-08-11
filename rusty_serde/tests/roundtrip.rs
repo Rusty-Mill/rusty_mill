@@ -662,3 +662,58 @@ fn pretty_enough_whitespace_tolerance() {
     let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();
     assert_eq!(decoded, Point { x: 1, y: 2 });
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Meta {
+    id: i32,
+    tag: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Record {
+    name: String,
+    #[rusty_serde(flatten)]
+    meta: Meta,
+}
+
+#[test]
+fn flatten_merges_a_nested_structs_fields_into_the_parent_object() {
+    roundtrip(
+        Record {
+            name: "x".into(),
+            meta: Meta {
+                id: 1,
+                tag: "t".into(),
+            },
+        },
+        r#"{"name":"x","id":1,"tag":"t"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct WithExtra {
+    known: i32,
+    #[rusty_serde(flatten)]
+    extra: Value,
+}
+
+#[test]
+fn flatten_into_value_captures_unknown_fields() {
+    let decoded: WithExtra = json::from_str(r#"{"known":1,"a":2,"b":"x"}"#).unwrap();
+    assert_eq!(decoded.known, 1);
+    assert_eq!(decoded.extra["a"].as_i64(), Some(2));
+    assert_eq!(decoded.extra["b"].as_str(), Some("x"));
+    let encoded = json::to_string(&decoded).unwrap();
+    assert_eq!(encoded, r#"{"known":1,"a":2,"b":"x"}"#);
+}
+
+#[test]
+fn flatten_into_value_with_no_extra_fields_round_trips() {
+    roundtrip(
+        WithExtra {
+            known: 1,
+            extra: Value::Map(Vec::new()),
+        },
+        r#"{"known":1}"#,
+    );
+}

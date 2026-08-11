@@ -247,7 +247,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
             match tokens.peek() {
                 Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
                     let group = take_group(tokens);
-                    parse_named_fields(group)?
+                    parse_named_fields(group, "struct")?
                 }
                 Some(TokenTree::Punct(p)) if p.as_char() == ';' => Fields::Unit,
                 _ => {
@@ -300,7 +300,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         let fields = match variant_tokens.peek() {
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => {
                 let group = take_group(&mut variant_tokens);
-                parse_named_fields(group)?
+                parse_named_fields(group, "variant")?
             }
             Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis => {
                 let group = take_group(&mut variant_tokens);
@@ -636,7 +636,10 @@ fn convert_case(ident: &str, style: &str) -> String {
 /// Parses the inside of a `{ ... }` field list: `ident : <type tokens>`,
 /// repeated and comma-separated. Attributes (including `#[rusty_serde(...)]`)
 /// and `pub`/`pub(...)` visibility ahead of a field name are consumed.
-fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
+/// `owner` is `"struct"` for a top-level struct's fields or `"variant"` for
+/// an enum variant's - `flatten` is only supported on the former (see the
+/// check below).
+fn parse_named_fields(group: proc_macro::Group, owner: &str) -> Result<Fields, TokenStream> {
     let mut tokens = group.stream().into_iter().peekable();
     let mut fields = Vec::new();
 
@@ -663,7 +666,20 @@ fn parse_named_fields(group: proc_macro::Group) -> Result<Fields, TokenStream> {
                  of its own (on field `{name}`)"
             )));
         }
+        if attrs.flatten && owner == "variant" {
+            return Err(compile_error(&format!(
+                "rusty_serde_derive only supports `flatten` on top-level struct fields, not \
+                 enum variant fields (on field `{name}`)"
+            )));
+        }
         fields.push(NamedField { name, attrs });
+    }
+
+    let flatten_count = fields.iter().filter(|f| f.attrs.flatten).count();
+    if flatten_count > 1 {
+        return Err(compile_error(
+            "rusty_serde_derive only supports one `#[rusty_serde(flatten)]` field per struct",
+        ));
     }
 
     Ok(Fields::Named(fields))

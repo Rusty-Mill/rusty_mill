@@ -108,17 +108,46 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
 fn named_struct_serialize_body(name: &str, fields: &[NamedField]) -> String {
     let active: Vec<&NamedField> = fields.iter().filter(|f| !f.attrs.skip).collect();
     let value_of = |field_name: &str| format!("&self.{field_name}");
-    let count = count_expr(&active, value_of);
-    let calls = field_serialize_calls(
-        &active,
-        "::rusty_serde::ser::SerializeStruct::serialize_field",
-        value_of,
-    );
-    format!(
-        "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {name:?}, {count})?;\n\
-         {calls}\
-         ::rusty_serde::ser::SerializeStruct::end(__state)"
-    )
+
+    // A flattened field's fields merge into the parent object, so the
+    // parent can no longer use serialize_struct (a fixed key set) - it
+    // falls back to serialize_map (an open one) for the whole struct, the
+    // same way real serde does. Parse-time validation already guarantees
+    // at most one flatten field.
+    match active.iter().find(|f| f.attrs.flatten) {
+        None => {
+            let count = count_expr(&active, value_of);
+            let calls = field_serialize_calls(
+                &active,
+                "::rusty_serde::ser::SerializeStruct::serialize_field",
+                value_of,
+            );
+            format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_struct(serializer, {name:?}, {count})?;\n\
+                 {calls}\
+                 ::rusty_serde::ser::SerializeStruct::end(__state)"
+            )
+        }
+        Some(flat) => {
+            let normal: Vec<&NamedField> = active
+                .iter()
+                .filter(|f| !f.attrs.flatten)
+                .copied()
+                .collect();
+            let calls = field_serialize_calls(
+                &normal,
+                "::rusty_serde::ser::SerializeMap::serialize_entry",
+                value_of,
+            );
+            let flat_ident = &flat.name;
+            format!(
+                "let mut __state = ::rusty_serde::Serializer::serialize_map(serializer, None)?;\n\
+                 {calls}\
+                 ::rusty_serde::Serialize::serialize(&self.{flat_ident}, ::rusty_serde::flatten::FlattenSerializer::new(&mut __state))?;\n\
+                 ::rusty_serde::ser::SerializeMap::end(__state)"
+            )
+        }
+    }
 }
 
 fn enum_impl(
