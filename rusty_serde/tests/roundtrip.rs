@@ -1,0 +1,162 @@
+use std::collections::BTreeMap;
+
+use rusty_serde::{json, Deserialize, Serialize};
+
+fn roundtrip<T>(value: T, expected_json: &str)
+where
+    T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug,
+{
+    let encoded = json::to_string(&value).unwrap();
+    assert_eq!(encoded, expected_json);
+    let decoded: T = json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, value);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+#[test]
+fn named_struct() {
+    roundtrip(Point { x: 1, y: -2 }, r#"{"x":1,"y":-2}"#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Wrapper(i32);
+
+#[test]
+fn newtype_struct() {
+    roundtrip(Wrapper(42), "42");
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Pair(i32, String);
+
+#[test]
+fn tuple_struct() {
+    roundtrip(Pair(1, "two".into()), r#"[1,"two"]"#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Unit;
+
+#[test]
+fn unit_struct() {
+    roundtrip(Unit, "null");
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Nested {
+    point: Point,
+    items: Vec<i32>,
+    tag: Option<String>,
+}
+
+#[test]
+fn nested_struct() {
+    roundtrip(
+        Nested {
+            point: Point { x: 0, y: 0 },
+            items: vec![1, 2, 3],
+            tag: None,
+        },
+        r#"{"point":{"x":0,"y":0},"items":[1,2,3],"tag":null}"#,
+    );
+    roundtrip(
+        Nested {
+            point: Point { x: 5, y: 6 },
+            items: vec![],
+            tag: Some("hi".into()),
+        },
+        r#"{"point":{"x":5,"y":6},"items":[],"tag":"hi"}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+enum Shape {
+    Circle,
+    Square(f64),
+    Rectangle(f64, f64),
+    Named { label: String, sides: u32 },
+}
+
+#[test]
+fn enum_unit_variant() {
+    roundtrip(Shape::Circle, r#""Circle""#);
+}
+
+#[test]
+fn enum_newtype_variant() {
+    roundtrip(Shape::Square(2.5), r#"{"Square":2.5}"#);
+}
+
+#[test]
+fn enum_tuple_variant() {
+    roundtrip(Shape::Rectangle(1.0, 2.0), r#"{"Rectangle":[1.0,2.0]}"#);
+}
+
+#[test]
+fn enum_struct_variant() {
+    roundtrip(
+        Shape::Named {
+            label: "tri".into(),
+            sides: 3,
+        },
+        r#"{"Named":{"label":"tri","sides":3}}"#,
+    );
+}
+
+#[test]
+fn primitives_and_collections() {
+    roundtrip(true, "true");
+    roundtrip(-7i64, "-7");
+    roundtrip(7u64, "7");
+    roundtrip("hello".to_string(), r#""hello""#);
+    roundtrip(vec![1, 2, 3], "[1,2,3]");
+    roundtrip((1, "two".to_string(), 3.5), r#"[1,"two",3.5]"#);
+
+    let mut map = BTreeMap::new();
+    map.insert("a".to_string(), 1);
+    map.insert("b".to_string(), 2);
+    roundtrip(map, r#"{"a":1,"b":2}"#);
+}
+
+#[test]
+fn string_escaping() {
+    roundtrip(
+        "line1\nline2\t\"quoted\"\\".to_string(),
+        r#""line1\nline2\t\"quoted\"\\""#,
+    );
+}
+
+#[test]
+fn unknown_fields_are_ignored() {
+    let decoded: Point = json::from_str(r#"{"x":1,"y":2,"z":99}"#).unwrap();
+    assert_eq!(decoded, Point { x: 1, y: 2 });
+}
+
+#[test]
+fn missing_field_is_an_error() {
+    let err = json::from_str::<Point>(r#"{"x":1}"#).unwrap_err();
+    assert!(err.to_string().contains("missing field"));
+}
+
+#[test]
+fn type_mismatch_is_an_error() {
+    let err = json::from_str::<Point>(r#"{"x":"nope","y":2}"#).unwrap_err();
+    assert!(err.to_string().contains("invalid number"));
+}
+
+#[test]
+fn trailing_garbage_is_an_error() {
+    let err = json::from_str::<i32>("1 2").unwrap_err();
+    assert!(err.to_string().contains("trailing"));
+}
+
+#[test]
+fn pretty_enough_whitespace_tolerance() {
+    let decoded: Point = json::from_str("{\n  \"x\": 1,\n  \"y\": 2\n}\n").unwrap();
+    assert_eq!(decoded, Point { x: 1, y: 2 });
+}

@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = [
+    "rusty_serde",
+    "rusty_serde_derive",
+]
