@@ -39,14 +39,18 @@
 //!
 //! # Deserialize
 //!
-//! `deserialize_with` needs the same treatment on the [`Deserializer`]/
-//! [`Visitor`](crate::de::Visitor) side - not yet implemented; this module
-//! only covers `with`'s serialize half so far.
-//!
-//! [`Deserializer`]: crate::Deserializer
+//! The bottom half of this module is the same idea applied to
+//! [`Deserializer`]/[`Visitor`](crate::de::Visitor), for `deserialize_with`.
+//! The role [`Out`] plays flips accordingly: [`Deserializer`] itself has no
+//! per-format "Ok" associated type to smuggle out (every method's result
+//! type is `V::Value`, chosen by whichever [`Visitor`](crate::de::Visitor)
+//! the *caller* supplies) - so it's erasing a caller-supplied `Visitor`
+//! ([`VisitorToErased`]) that needs `Out`, not erasing the deserializer
+//! itself ([`DeserializerToErased`]).
 
 use rusty_serde_erased::Out;
 
+use crate::de::{Deserializer, Visitor};
 use crate::error::Error as ErrorTrait;
 use crate::impossible::Impossible;
 use crate::ser::{Serialize, Serializer};
@@ -424,6 +428,441 @@ impl<T: ?Sized> Serialize for With<'_, T> {
     }
 }
 
+fn unsupported_compound_shape_de() -> ErasedError {
+    ErasedError::custom(
+        "a `deserialize_with` function can't deserialize a sequence/tuple/map/struct/enum \
+         shape (yet) - only scalars, `Option`, and unit are supported",
+    )
+}
+
+/// Object-safe stand-in for [`Visitor`], mirroring [`ErasedSerializer`] on
+/// the deserialize side - see the module's "Deserialize" doc section for
+/// why it's [`VisitorToErased`] (not [`DeserializerToErased`]) that carries
+/// [`Out`] here.
+#[doc(hidden)]
+pub trait ErasedVisitor {
+    fn erased_visit_bool(self: Box<Self>, v: bool) -> Result<(), ErasedError>;
+    fn erased_visit_i64(self: Box<Self>, v: i64) -> Result<(), ErasedError>;
+    fn erased_visit_u64(self: Box<Self>, v: u64) -> Result<(), ErasedError>;
+    fn erased_visit_f64(self: Box<Self>, v: f64) -> Result<(), ErasedError>;
+    fn erased_visit_str(self: Box<Self>, v: &str) -> Result<(), ErasedError>;
+    fn erased_visit_bytes(self: Box<Self>, v: &[u8]) -> Result<(), ErasedError>;
+    fn erased_visit_none(self: Box<Self>) -> Result<(), ErasedError>;
+    fn erased_visit_some(
+        self: Box<Self>,
+        deserializer: Box<dyn ErasedDeserializer + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_visit_unit(self: Box<Self>) -> Result<(), ErasedError>;
+}
+
+/// Object-safe stand-in for [`Deserializer`], scoped the same way
+/// [`ErasedSerializer`] is on the serialize side - scalars/`Option`/unit
+/// only, everything else (`erased_deserialize_*` for a compound shape)
+/// simply isn't part of this trait, since [`ErasedAsDeserializer`] returns
+/// a clear error for those before ever reaching it.
+#[doc(hidden)]
+pub trait ErasedDeserializer {
+    fn erased_is_human_readable(&self) -> bool;
+    fn erased_deserialize_any(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_bool(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_i8(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_i16(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_i32(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_i64(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_u8(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_u16(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_u32(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_u64(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_f32(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_f64(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_char(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_str(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_string(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_bytes(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_byte_buf(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_option(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+    fn erased_deserialize_unit(
+        self: Box<Self>,
+        visitor: Box<dyn ErasedVisitor + '_>,
+    ) -> Result<(), ErasedError>;
+}
+
+/// Wraps a real, concrete `V: Visitor<'de>` to implement the object-safe
+/// [`ErasedVisitor`] trait - the "concrete-to-erased" half of the deserialize
+/// adapter pair (see the module's "Deserialize" doc section for why `Out`
+/// lives here rather than on [`DeserializerToErased`]).
+struct VisitorToErased<'out, V> {
+    inner: V,
+    out: Out<'out>,
+}
+
+/// Generates one [`ErasedVisitor`] method that forwards to the
+/// identically-shaped real [`Visitor`] method (always instantiated at
+/// `E = ErasedError`, since `Visitor`'s methods are themselves generic over
+/// the error type), stashing the result via `Out`.
+macro_rules! forward_visit {
+    ($erased:ident, $real:ident($($arg:ident: $ty:ty),*)) => {
+        fn $erased(self: Box<Self>, $($arg: $ty),*) -> Result<(), ErasedError> {
+            let this = *self;
+            match this.inner.$real($($arg),*) {
+                // SAFETY: `this.out` was constructed (in
+                // `ErasedAsDeserializer`'s own generic methods, the only
+                // caller) from an `Option<V::Value>` for this exact `V` -
+                // `val`'s type here is that same `V::Value`.
+                Ok(val) => {
+                    unsafe { this.out.set(val) };
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
+    };
+}
+
+impl<'de, 'out, V: Visitor<'de>> ErasedVisitor for VisitorToErased<'out, V> {
+    forward_visit!(erased_visit_bool, visit_bool(v: bool));
+    forward_visit!(erased_visit_i64, visit_i64(v: i64));
+    forward_visit!(erased_visit_u64, visit_u64(v: u64));
+    forward_visit!(erased_visit_f64, visit_f64(v: f64));
+    forward_visit!(erased_visit_str, visit_str(v: &str));
+    forward_visit!(erased_visit_bytes, visit_bytes(v: &[u8]));
+    forward_visit!(erased_visit_none, visit_none());
+    forward_visit!(erased_visit_unit, visit_unit());
+
+    fn erased_visit_some(
+        self: Box<Self>,
+        deserializer: Box<dyn ErasedDeserializer + '_>,
+    ) -> Result<(), ErasedError> {
+        let this = *self;
+        match this.inner.visit_some(ErasedAsDeserializer(deserializer)) {
+            Ok(val) => {
+                unsafe { this.out.set(val) };
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Wraps a real, concrete `D: Deserializer<'de>` to implement the
+/// object-safe [`ErasedDeserializer`] trait. Needs no [`Out`] of its own -
+/// unlike [`Serializer`], [`Deserializer`] has no per-format "Ok" type of
+/// its own to smuggle out (every method's result type comes from whichever
+/// `Visitor` the *caller* supplies, which is what [`VisitorToErased`]
+/// already handles).
+struct DeserializerToErased<D> {
+    inner: D,
+}
+
+/// Generates one [`ErasedDeserializer`] method that forwards to the
+/// identically-shaped real [`Deserializer`] method, wrapping the erased
+/// visitor as a real (synthetic-`Value = ()`) [`Visitor`] via
+/// [`ErasedAsVisitor`].
+macro_rules! forward_deserialize {
+    ($erased:ident, $real:ident) => {
+        fn $erased(
+            self: Box<Self>,
+            visitor: Box<dyn ErasedVisitor + '_>,
+        ) -> Result<(), ErasedError> {
+            self.inner
+                .$real(ErasedAsVisitor(visitor))
+                .map_err(ErasedError::custom)
+        }
+    };
+}
+
+impl<'de, D: Deserializer<'de>> ErasedDeserializer for DeserializerToErased<D> {
+    fn erased_is_human_readable(&self) -> bool {
+        self.inner.is_human_readable()
+    }
+
+    forward_deserialize!(erased_deserialize_any, deserialize_any);
+    forward_deserialize!(erased_deserialize_bool, deserialize_bool);
+    forward_deserialize!(erased_deserialize_i8, deserialize_i8);
+    forward_deserialize!(erased_deserialize_i16, deserialize_i16);
+    forward_deserialize!(erased_deserialize_i32, deserialize_i32);
+    forward_deserialize!(erased_deserialize_i64, deserialize_i64);
+    forward_deserialize!(erased_deserialize_u8, deserialize_u8);
+    forward_deserialize!(erased_deserialize_u16, deserialize_u16);
+    forward_deserialize!(erased_deserialize_u32, deserialize_u32);
+    forward_deserialize!(erased_deserialize_u64, deserialize_u64);
+    forward_deserialize!(erased_deserialize_f32, deserialize_f32);
+    forward_deserialize!(erased_deserialize_f64, deserialize_f64);
+    forward_deserialize!(erased_deserialize_char, deserialize_char);
+    forward_deserialize!(erased_deserialize_str, deserialize_str);
+    forward_deserialize!(erased_deserialize_string, deserialize_string);
+    forward_deserialize!(erased_deserialize_bytes, deserialize_bytes);
+    forward_deserialize!(erased_deserialize_byte_buf, deserialize_byte_buf);
+    forward_deserialize!(erased_deserialize_option, deserialize_option);
+    forward_deserialize!(erased_deserialize_unit, deserialize_unit);
+}
+
+/// The concrete `Value = ()` [`Visitor`] every erased-deserializer method
+/// hands the *real* format, so the format's own `deserialize_*` can call an
+/// ordinary (non-object-safe) `Visitor` method - which then forwards
+/// through the boxed [`ErasedVisitor`] this wraps.
+struct ErasedAsVisitor<'a>(Box<dyn ErasedVisitor + 'a>);
+
+impl<'de> Visitor<'de> for ErasedAsVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a scalar, option, or unit value")
+    }
+
+    fn visit_bool<E: ErrorTrait>(self, v: bool) -> Result<(), E> {
+        self.0.erased_visit_bool(v).map_err(E::custom)
+    }
+    fn visit_i64<E: ErrorTrait>(self, v: i64) -> Result<(), E> {
+        self.0.erased_visit_i64(v).map_err(E::custom)
+    }
+    fn visit_u64<E: ErrorTrait>(self, v: u64) -> Result<(), E> {
+        self.0.erased_visit_u64(v).map_err(E::custom)
+    }
+    fn visit_f64<E: ErrorTrait>(self, v: f64) -> Result<(), E> {
+        self.0.erased_visit_f64(v).map_err(E::custom)
+    }
+    fn visit_str<E: ErrorTrait>(self, v: &str) -> Result<(), E> {
+        self.0.erased_visit_str(v).map_err(E::custom)
+    }
+    fn visit_bytes<E: ErrorTrait>(self, v: &[u8]) -> Result<(), E> {
+        self.0.erased_visit_bytes(v).map_err(E::custom)
+    }
+    fn visit_none<E: ErrorTrait>(self) -> Result<(), E> {
+        self.0.erased_visit_none().map_err(E::custom)
+    }
+    fn visit_some<D>(self, deserializer: D) -> Result<(), D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let boxed: Box<dyn ErasedDeserializer + '_> = Box::new(DeserializerToErased {
+            inner: deserializer,
+        });
+        self.0.erased_visit_some(boxed).map_err(D::Error::custom)
+    }
+    fn visit_unit<E: ErrorTrait>(self) -> Result<(), E> {
+        self.0.erased_visit_unit().map_err(E::custom)
+    }
+}
+
+/// The concrete type a `deserialize_with` function actually gets
+/// monomorphized against - mirrors [`ErasedAsSerializer`], see its docs.
+pub struct ErasedAsDeserializer<'a>(Box<dyn ErasedDeserializer + 'a>);
+
+/// Generates one [`Deserializer`] method that erases `visitor`, drives it
+/// through the boxed [`ErasedDeserializer`], and unstashes the real
+/// `V::Value` via `Out`.
+macro_rules! forward_erased_deserializer {
+    ($real:ident, $erased:ident) => {
+        fn $real<V>(self, visitor: V) -> Result<V::Value, ErasedError>
+        where
+            V: Visitor<'de>,
+        {
+            let mut ok: Option<V::Value> = None;
+            let boxed: Box<dyn ErasedVisitor + '_> = Box::new(VisitorToErased {
+                inner: visitor,
+                out: Out::new(&mut ok),
+            });
+            self.0.$erased(boxed)?;
+            Ok(ok.expect(
+                "VisitorToErased's one terminal call always populates `out` on the `Ok` path",
+            ))
+        }
+    };
+}
+
+impl<'de> Deserializer<'de> for ErasedAsDeserializer<'_> {
+    type Error = ErasedError;
+
+    fn is_human_readable(&self) -> bool {
+        self.0.erased_is_human_readable()
+    }
+
+    forward_erased_deserializer!(deserialize_any, erased_deserialize_any);
+    forward_erased_deserializer!(deserialize_bool, erased_deserialize_bool);
+    forward_erased_deserializer!(deserialize_i8, erased_deserialize_i8);
+    forward_erased_deserializer!(deserialize_i16, erased_deserialize_i16);
+    forward_erased_deserializer!(deserialize_i32, erased_deserialize_i32);
+    forward_erased_deserializer!(deserialize_i64, erased_deserialize_i64);
+    forward_erased_deserializer!(deserialize_u8, erased_deserialize_u8);
+    forward_erased_deserializer!(deserialize_u16, erased_deserialize_u16);
+    forward_erased_deserializer!(deserialize_u32, erased_deserialize_u32);
+    forward_erased_deserializer!(deserialize_u64, erased_deserialize_u64);
+    forward_erased_deserializer!(deserialize_f32, erased_deserialize_f32);
+    forward_erased_deserializer!(deserialize_f64, erased_deserialize_f64);
+    forward_erased_deserializer!(deserialize_char, erased_deserialize_char);
+    forward_erased_deserializer!(deserialize_str, erased_deserialize_str);
+    forward_erased_deserializer!(deserialize_string, erased_deserialize_string);
+    forward_erased_deserializer!(deserialize_bytes, erased_deserialize_bytes);
+    forward_erased_deserializer!(deserialize_byte_buf, erased_deserialize_byte_buf);
+    forward_erased_deserializer!(deserialize_option, erased_deserialize_option);
+    forward_erased_deserializer!(deserialize_unit, erased_deserialize_unit);
+
+    fn deserialize_unit_struct<V>(
+        self,
+        _name: &'static str,
+        _visitor: V,
+    ) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_newtype_struct<V>(
+        self,
+        _name: &'static str,
+        _visitor: V,
+    ) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_seq<V>(self, _visitor: V) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_tuple<V>(self, _len: usize, _visitor: V) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_tuple_struct<V>(
+        self,
+        _name: &'static str,
+        _len: usize,
+        _visitor: V,
+    ) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_map<V>(self, _visitor: V) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_struct<V>(
+        self,
+        _name: &'static str,
+        _fields: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_enum<V>(
+        self,
+        _name: &'static str,
+        _variants: &'static [&'static str],
+        _visitor: V,
+    ) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_identifier<V>(self, _visitor: V) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    fn deserialize_ignored_any<V>(self, _visitor: V) -> Result<V::Value, ErasedError>
+    where
+        V: Visitor<'de>,
+    {
+        Err(unsupported_compound_shape_de())
+    }
+    // `deserialize_internally_tagged_enum` inherits the trait's own
+    // default ("this deserializer does not support internally tagged
+    // enums") - already exactly the error this scope calls for.
+}
+
+/// Drives `with_fn` (an ordinary `fn my_with<'de, D: Deserializer<'de>>(D)
+/// -> Result<T, D::Error>`, monomorphized at `D = ErasedAsDeserializer` -
+/// see [`ErasedAsDeserializer`]'s docs) against a real `deserializer`,
+/// translating the erased result back into a genuine `Result<T,
+/// D::Error>`. `T` needs no `Out`-based hand-off here - unlike
+/// `serialize_with`'s `S::Ok` (unknown until called), `T` is exactly
+/// `with_fn`'s own, already-concrete return type. This is the entry point
+/// `rusty_serde_derive`'s generated code calls for a `deserialize_with`
+/// field.
+#[doc(hidden)]
+pub fn call_with_deserialize<'de, T, D>(
+    deserializer: D,
+    with_fn: fn(ErasedAsDeserializer<'_>) -> Result<T, ErasedError>,
+) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let boxed: Box<dyn ErasedDeserializer + '_> = Box::new(DeserializerToErased {
+        inner: deserializer,
+    });
+    with_fn(ErasedAsDeserializer(boxed)).map_err(D::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -544,5 +983,106 @@ mod tests {
     fn compound_shapes_are_a_clear_error_not_a_silent_miscompile() {
         let err = json::to_string(&Unsupported(1)).unwrap_err();
         assert!(err.to_string().contains("sequence/tuple/map/struct"));
+    }
+
+    fn deserialize_seconds<'de, D>(deserializer: D) -> Result<std::time::Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = deserializer.deserialize_u64(U64Visitor)?;
+        Ok(std::time::Duration::from_secs(secs))
+    }
+
+    struct U64Visitor;
+    impl<'de> Visitor<'de> for U64Visitor {
+        type Value = u64;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a u64")
+        }
+        fn visit_u64<E: ErrorTrait>(self, v: u64) -> Result<u64, E> {
+            Ok(v)
+        }
+    }
+
+    #[test]
+    fn call_with_deserialize_reformats_a_scalar_through_json() {
+        let mut de = json::Deserializer::from_str("42");
+        let value: std::time::Duration =
+            call_with_deserialize(&mut de, |d| deserialize_seconds(d)).unwrap();
+        assert_eq!(value, std::time::Duration::from_secs(42));
+    }
+
+    fn deserialize_label<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct OptVisitor;
+        impl<'de> Visitor<'de> for OptVisitor {
+            type Value = Option<String>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an optional string")
+            }
+            fn visit_none<E: ErrorTrait>(self) -> Result<Option<String>, E> {
+                Ok(None)
+            }
+            fn visit_some<D2>(self, deserializer: D2) -> Result<Option<String>, D2::Error>
+            where
+                D2: Deserializer<'de>,
+            {
+                struct StrVisitor;
+                impl<'de> Visitor<'de> for StrVisitor {
+                    type Value = String;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("a string")
+                    }
+                    fn visit_str<E: ErrorTrait>(self, v: &str) -> Result<String, E> {
+                        Ok(v.to_string())
+                    }
+                }
+                deserializer.deserialize_str(StrVisitor).map(Some)
+            }
+        }
+        deserializer.deserialize_option(OptVisitor)
+    }
+
+    #[test]
+    fn call_with_deserialize_forwards_an_option_and_erases_its_inner_value_too() {
+        let mut de = json::Deserializer::from_str(r#""hi""#);
+        let some: Option<String> =
+            call_with_deserialize(&mut de, |d| deserialize_label(d)).unwrap();
+        assert_eq!(some.as_deref(), Some("hi"));
+
+        let mut de = json::Deserializer::from_str("null");
+        let none: Option<String> =
+            call_with_deserialize(&mut de, |d| deserialize_label(d)).unwrap();
+        assert_eq!(none, None);
+    }
+
+    fn deserialize_as_seq<'de, D>(deserializer: D) -> Result<i32, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SeqVisitor;
+        impl<'de> Visitor<'de> for SeqVisitor {
+            type Value = i32;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a sequence")
+            }
+            fn visit_seq<A>(self, mut seq: A) -> Result<i32, A::Error>
+            where
+                A: crate::de::SeqAccess<'de>,
+            {
+                Ok(seq.next_element::<i32>()?.unwrap_or_default())
+            }
+        }
+        deserializer.deserialize_seq(SeqVisitor)
+    }
+
+    #[test]
+    fn deserialize_compound_shapes_are_a_clear_error_not_a_silent_miscompile() {
+        let mut de = json::Deserializer::from_str("[1]");
+        let err: Result<i32, _> = call_with_deserialize(&mut de, |d| deserialize_as_seq(d));
+        let err = err.unwrap_err();
+        assert!(err.to_string().contains("sequence/tuple/map/struct/enum"));
     }
 }
