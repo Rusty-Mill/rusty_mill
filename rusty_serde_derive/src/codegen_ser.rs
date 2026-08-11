@@ -48,7 +48,7 @@ fn field_serialize_calls(
 }
 
 pub fn generate(data: &Data) -> String {
-    match data {
+    let out = match data {
         Data::Struct {
             name,
             generics,
@@ -61,6 +61,7 @@ pub fn generate(data: &Data) -> String {
             remote,
             // `expecting` only replaces `Visitor::expecting()`, deserialize-only.
             expecting: _,
+            krate: _,
         } => match into {
             Some(into) => into_impl(name, generics, into),
             None => struct_impl(name, generics, fields, *transparent, remote.as_deref()),
@@ -76,6 +77,7 @@ pub fn generate(data: &Data) -> String {
             from: _,
             into,
             expecting: _,
+            krate: _,
         } => match into {
             Some(into) => into_impl(name, generics, into),
             None => enum_impl(
@@ -87,6 +89,13 @@ pub fn generate(data: &Data) -> String {
                 *untagged,
             ),
         },
+    };
+    // See `codegen_de`'s `generate()` for why a plain, whole-string
+    // substring replace is the right (and exact, not heuristic) way to
+    // apply `#[rusty_serde(crate = "path")]` here.
+    match data.krate() {
+        Some(krate) => out.replace("::rusty_serde", krate),
+        None => out,
     }
 }
 

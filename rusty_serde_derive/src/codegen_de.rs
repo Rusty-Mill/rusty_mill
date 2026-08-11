@@ -1,7 +1,7 @@
 use crate::parse::{Data, DefaultAttr, Fields, FromAttr, Generics, NamedField, Variant};
 
 pub fn generate(data: &Data) -> String {
-    match data {
+    let out = match data {
         Data::Struct {
             name,
             generics,
@@ -13,6 +13,7 @@ pub fn generate(data: &Data) -> String {
             into: _,
             remote,
             expecting,
+            krate: _,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => struct_impl(
@@ -36,6 +37,7 @@ pub fn generate(data: &Data) -> String {
             from,
             into: _,
             expecting,
+            krate: _,
         } => match from {
             Some(from) => from_impl(name, generics, from),
             None => enum_impl(
@@ -49,6 +51,17 @@ pub fn generate(data: &Data) -> String {
                 expecting.as_deref(),
             ),
         },
+    };
+    // `#[rusty_serde(crate = "path")]`: rewritten here, once, over the
+    // whole generated string, rather than threading a path parameter
+    // through every codegen call site above - every reference to this
+    // crate in the generated text is the literal substring
+    // `::rusty_serde` (always followed by `::`, never bare), which can't
+    // otherwise occur (Rust identifiers can't contain `::`), so a plain
+    // substring replace is exact, not just a heuristic.
+    match data.krate() {
+        Some(krate) => out.replace("::rusty_serde", krate),
+        None => out,
     }
 }
 

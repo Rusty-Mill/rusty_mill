@@ -1603,3 +1603,46 @@ fn expecting_overrides_the_visitor_text() {
         .unwrap_err();
     assert!(err.to_string().contains("a friendly Point"), "{err}");
 }
+
+// Stands in for a crate that re-exports `rusty_serde` under its own name -
+// every generated reference in `CratePoint`'s impls below has to resolve
+// through `my_serde::...`, not `::rusty_serde::...`, for this to compile at
+// all (the attribute macro's own namespace, `#[rusty_serde(...)]`, is
+// unaffected either way - only the *generated code's* path references
+// change). A scratch crate that renames the actual `rusty_serde`
+// dependency itself (so `::rusty_serde` can't resolve at all) is a
+// stronger proof this really took effect; this test just exercises the
+// real substitution machinery in-tree.
+mod my_serde {
+    pub use rusty_serde::*;
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(crate = "my_serde")]
+struct CratePoint {
+    x: i32,
+    y: i32,
+}
+
+#[test]
+fn crate_attribute_retargets_generated_code() {
+    roundtrip(CratePoint { x: 1, y: 2 }, r#"{"x":1,"y":2}"#);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(crate = "my_serde")]
+enum CrateShape {
+    Circle,
+    Square(f64),
+    Rectangle { w: f64, h: f64 },
+}
+
+#[test]
+fn crate_attribute_retargets_generated_enum_code() {
+    roundtrip(CrateShape::Circle, r#""Circle""#);
+    roundtrip(CrateShape::Square(2.5), r#"{"Square":2.5}"#);
+    roundtrip(
+        CrateShape::Rectangle { w: 1.0, h: 2.0 },
+        r#"{"Rectangle":{"w":1.0,"h":2.0}}"#,
+    );
+}
