@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use rusty_serde::json::Value;
 use rusty_serde::{json, Deserialize, Serialize};
 
 fn roundtrip<T>(value: T, expected_json: &str)
@@ -542,6 +543,53 @@ fn skip_serializing_if_in_internally_tagged_variant() {
         },
         r#"{"kind":"Item","name":"x"}"#,
     );
+}
+
+#[test]
+fn value_parses_arbitrary_json() {
+    let v: Value = json::from_str(r#"{"a":1,"b":[true,null,"x"],"c":{"d":2.5}}"#).unwrap();
+    assert_eq!(v["a"].as_i64(), Some(1));
+    assert_eq!(v["b"][0].as_bool(), Some(true));
+    assert!(v["b"][1].is_null());
+    assert_eq!(v["b"][2].as_str(), Some("x"));
+    assert_eq!(v["c"]["d"].as_f64(), Some(2.5));
+    assert!(v["missing"].is_null());
+    assert!(v["b"][99].is_null());
+}
+
+#[test]
+fn value_round_trips_and_displays_as_compact_json() {
+    let original = r#"{"a":1,"b":[true,null,"x"]}"#;
+    let v: Value = json::from_str(original).unwrap();
+    let reencoded = json::to_string(&v).unwrap();
+    assert_eq!(reencoded, original);
+    assert_eq!(v.to_string(), original);
+}
+
+#[test]
+fn value_from_conversions() {
+    let v: Value = 42i32.into();
+    assert_eq!(v.as_i64(), Some(42));
+    let v: Value = "hi".into();
+    assert_eq!(v.as_str(), Some("hi"));
+    let v: Value = vec![1, 2, 3].into();
+    assert_eq!(v.as_seq().unwrap().len(), 3);
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct HasValueField {
+    name: String,
+    extra: Value,
+}
+
+#[test]
+fn value_usable_as_a_derived_field() {
+    let decoded: HasValueField =
+        json::from_str(r#"{"name":"x","extra":{"whatever":[1,2]}}"#).unwrap();
+    assert_eq!(decoded.name, "x");
+    assert_eq!(decoded.extra["whatever"][1].as_i64(), Some(2));
+    let json = json::to_string(&decoded).unwrap();
+    assert_eq!(json, r#"{"name":"x","extra":{"whatever":[1,2]}}"#);
 }
 
 #[test]

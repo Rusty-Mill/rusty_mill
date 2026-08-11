@@ -5,6 +5,7 @@ use crate::de::{
 use crate::error::Error as ErrorTrait;
 use crate::forward_to_deserialize_any;
 use crate::json::error::Error;
+use crate::json::value::Value;
 
 /// Parse `s` as JSON into a `T`.
 pub fn from_str<'de, T>(s: &'de str) -> Result<T, Error>
@@ -586,104 +587,19 @@ fn skip_value(de: &mut Deserializer) -> Result<(), Error> {
 // breaks that: `{"<tag>": "Variant", "a": 1, "b": 2}` might have the tag
 // key anywhere in the object, so there's no way to know *which* variant's
 // fields you're about to read until you've already read (and so have to
-// buffer) every entry. `Buffered` is a minimal in-memory JSON tree for
+// buffer) every entry. `Value` is a minimal in-memory JSON tree for
 // exactly that purpose, and `ValueDeserializer` lets the ordinary
 // `Deserialize` machinery run against it exactly as it would against the
 // live token stream.
 
-enum Buffered {
-    Null,
-    Bool(bool),
-    Signed(i64),
-    Unsigned(u64),
-    Float(f64),
-    Str(String),
-    Seq(Vec<Buffered>),
-    Map(Vec<(String, Buffered)>),
-}
-
-/// Parses one JSON value into a `Buffered` tree instead of visiting it -
-/// the buffering counterpart to `deserialize_any`.
-fn parse_buffered(de: &mut Deserializer) -> Result<Buffered, Error> {
-    match de.peek()? {
-        b'n' => {
-            de.parse_literal("null")?;
-            Ok(Buffered::Null)
-        }
-        b't' => {
-            de.parse_literal("true")?;
-            Ok(Buffered::Bool(true))
-        }
-        b'f' => {
-            de.parse_literal("false")?;
-            Ok(Buffered::Bool(false))
-        }
-        b'"' => Ok(Buffered::Str(de.parse_string()?)),
-        b'[' => {
-            de.bump();
-            let mut items = Vec::new();
-            loop {
-                de.skip_whitespace();
-                if de.peek()? == b']' {
-                    de.bump();
-                    break;
-                }
-                if !items.is_empty() {
-                    de.expect_byte(b',')?;
-                    de.skip_whitespace();
-                }
-                items.push(parse_buffered(de)?);
-            }
-            Ok(Buffered::Seq(items))
-        }
-        b'{' => {
-            de.bump();
-            let mut entries = Vec::new();
-            loop {
-                de.skip_whitespace();
-                if de.peek()? == b'}' {
-                    de.bump();
-                    break;
-                }
-                if !entries.is_empty() {
-                    de.expect_byte(b',')?;
-                    de.skip_whitespace();
-                }
-                let key = de.parse_string()?;
-                de.skip_whitespace();
-                de.expect_byte(b':')?;
-                entries.push((key, parse_buffered(de)?));
-            }
-            Ok(Buffered::Map(entries))
-        }
-        b'-' | b'0'..=b'9' => {
-            let (text, is_float) = de.parse_number_raw()?;
-            if is_float {
-                Ok(Buffered::Float(
-                    text.parse().map_err(|_| de.error("invalid number"))?,
-                ))
-            } else if let Ok(v) = text.parse::<i64>() {
-                Ok(Buffered::Signed(v))
-            } else if let Ok(v) = text.parse::<u64>() {
-                Ok(Buffered::Unsigned(v))
-            } else {
-                Ok(Buffered::Float(
-                    text.parse().map_err(|_| de.error("invalid number"))?,
-                ))
-            }
-        }
-        other => Err(de.error(format!("unexpected character `{}`", other as char))),
-    }
-}
-
-/// A `Deserializer` over an already-parsed `Buffered` tree rather than the
-/// live byte stream. Since `Buffered` owns everything (no borrowed data),
+/// A `Deserializer` over an already-parsed `Value` tree rather than the
+/// live byte stream. Since `Value` owns everything (no borrowed data),
 /// this works for any `'de`. Most methods forward to `deserialize_any`
-/// (`Buffered` is already fully self-describing, same as the live
-/// deserializer) - only the handful that need `Buffered`-specific logic
+/// (`Value` is already fully self-describing, same as the live
+/// deserializer) - only the handful that need `Value`-specific logic
 /// are written out.
 struct ValueDeserializer {
-    value: Buffered,
+    value: Value,
 }
 
 impl<'de> DeserializerTrait<'de> for ValueDeserializer {
@@ -694,16 +610,16 @@ impl<'de> DeserializerTrait<'de> for ValueDeserializer {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Null => visitor.visit_unit(),
-            Buffered::Bool(b) => visitor.visit_bool(b),
-            Buffered::Signed(v) => visitor.visit_i64(v),
-            Buffered::Unsigned(v) => visitor.visit_u64(v),
-            Buffered::Float(v) => visitor.visit_f64(v),
-            Buffered::Str(s) => visitor.visit_string(s),
-            Buffered::Seq(items) => visitor.visit_seq(BufferedSeqAccess {
+            Value::Null => visitor.visit_unit(),
+            Value::Bool(b) => visitor.visit_bool(b),
+            Value::Int(v) => visitor.visit_i64(v),
+            Value::UInt(v) => visitor.visit_u64(v),
+            Value::Float(v) => visitor.visit_f64(v),
+            Value::String(s) => visitor.visit_string(s),
+            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess {
                 items: items.into_iter(),
             }),
-            Buffered::Map(entries) => visitor.visit_map(BufferedMapAccess {
+            Value::Map(entries) => visitor.visit_map(ValueMapAccess {
                 entries: entries.into_iter(),
                 pending_value: None,
             }),
@@ -715,7 +631,7 @@ impl<'de> DeserializerTrait<'de> for ValueDeserializer {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Null => visitor.visit_none(),
+            Value::Null => visitor.visit_none(),
             other => visitor.visit_some(ValueDeserializer { value: other }),
         }
     }
@@ -725,7 +641,7 @@ impl<'de> DeserializerTrait<'de> for ValueDeserializer {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Str(s) => visitor.visit_str(&s),
+            Value::String(s) => visitor.visit_str(&s),
             _ => Err(Error::custom("expected a string identifier")),
         }
     }
@@ -740,10 +656,10 @@ impl<'de> DeserializerTrait<'de> for ValueDeserializer {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Str(s) => visitor.visit_enum(StrDeserializer { value: &s }),
-            Buffered::Map(mut entries) if entries.len() == 1 => {
+            Value::String(s) => visitor.visit_enum(StrDeserializer { value: &s }),
+            Value::Map(mut entries) if entries.len() == 1 => {
                 let (variant, value) = entries.remove(0);
-                visitor.visit_enum(BufferedTaggedEnumAccess { variant, value })
+                visitor.visit_enum(ValueTaggedEnumAccess { variant, value })
             }
             _ => Err(Error::custom(
                 "expected string or single-entry object for enum",
@@ -762,11 +678,11 @@ impl<'de> DeserializerTrait<'de> for ValueDeserializer {
     }
 }
 
-struct BufferedSeqAccess {
-    items: std::vec::IntoIter<Buffered>,
+struct ValueSeqAccess {
+    items: std::vec::IntoIter<Value>,
 }
 
-impl<'de> SeqAccess<'de> for BufferedSeqAccess {
+impl<'de> SeqAccess<'de> for ValueSeqAccess {
     type Error = Error;
 
     fn next_element<T>(&mut self) -> Result<Option<T>, Error>
@@ -784,12 +700,12 @@ impl<'de> SeqAccess<'de> for BufferedSeqAccess {
     }
 }
 
-struct BufferedMapAccess {
-    entries: std::vec::IntoIter<(String, Buffered)>,
-    pending_value: Option<Buffered>,
+struct ValueMapAccess {
+    entries: std::vec::IntoIter<(String, Value)>,
+    pending_value: Option<Value>,
 }
 
-impl<'de> MapAccess<'de> for BufferedMapAccess {
+impl<'de> MapAccess<'de> for ValueMapAccess {
     type Error = Error;
 
     fn next_key<K>(&mut self) -> Result<Option<K>, Error>
@@ -824,14 +740,14 @@ impl<'de> MapAccess<'de> for BufferedMapAccess {
 /// `EnumAccess`/`VariantAccess` for an ordinary externally-tagged enum
 /// found *inside* a buffered tree (e.g. one field's value, nested inside
 /// an internally-tagged enum's own fields).
-struct BufferedTaggedEnumAccess {
+struct ValueTaggedEnumAccess {
     variant: String,
-    value: Buffered,
+    value: Value,
 }
 
-impl<'de> EnumAccess<'de> for BufferedTaggedEnumAccess {
+impl<'de> EnumAccess<'de> for ValueTaggedEnumAccess {
     type Error = Error;
-    type Variant = BufferedTaggedVariantAccess;
+    type Variant = ValueTaggedVariantAccess;
 
     fn variant<V>(self) -> Result<(V, Self::Variant), Error>
     where
@@ -840,15 +756,15 @@ impl<'de> EnumAccess<'de> for BufferedTaggedEnumAccess {
         let value = V::deserialize(StrDeserializer {
             value: &self.variant,
         })?;
-        Ok((value, BufferedTaggedVariantAccess { value: self.value }))
+        Ok((value, ValueTaggedVariantAccess { value: self.value }))
     }
 }
 
-struct BufferedTaggedVariantAccess {
-    value: Buffered,
+struct ValueTaggedVariantAccess {
+    value: Value,
 }
 
-impl<'de> VariantAccess<'de> for BufferedTaggedVariantAccess {
+impl<'de> VariantAccess<'de> for ValueTaggedVariantAccess {
     type Error = Error;
 
     fn unit_variant(self) -> Result<(), Error> {
@@ -865,7 +781,7 @@ impl<'de> VariantAccess<'de> for BufferedTaggedVariantAccess {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Seq(items) => visitor.visit_seq(BufferedSeqAccess {
+            Value::Seq(items) => visitor.visit_seq(ValueSeqAccess {
                 items: items.into_iter(),
             }),
             _ => Err(Error::custom("expected an array for a tuple variant")),
@@ -880,7 +796,7 @@ impl<'de> VariantAccess<'de> for BufferedTaggedVariantAccess {
         V: Visitor<'de>,
     {
         match self.value {
-            Buffered::Map(entries) => visitor.visit_map(BufferedMapAccess {
+            Value::Map(entries) => visitor.visit_map(ValueMapAccess {
                 entries: entries.into_iter(),
                 pending_value: None,
             }),
@@ -892,10 +808,10 @@ impl<'de> VariantAccess<'de> for BufferedTaggedVariantAccess {
 /// `EnumAccess`/`VariantAccess` for the *outer* internally-tagged enum
 /// itself: `entries` is the buffered object with the tag entry already
 /// removed, and every remaining entry becomes a field the variant's own
-/// `VariantAccess::struct_variant` walks via `BufferedMapAccess`.
+/// `VariantAccess::struct_variant` walks via `ValueMapAccess`.
 struct InternalTagEnumAccess {
     variant: String,
-    entries: Vec<(String, Buffered)>,
+    entries: Vec<(String, Value)>,
 }
 
 impl<'de> EnumAccess<'de> for InternalTagEnumAccess {
@@ -919,7 +835,7 @@ impl<'de> EnumAccess<'de> for InternalTagEnumAccess {
 }
 
 struct InternalTagVariantAccess {
-    entries: Vec<(String, Buffered)>,
+    entries: Vec<(String, Value)>,
 }
 
 impl<'de> VariantAccess<'de> for InternalTagVariantAccess {
@@ -954,7 +870,7 @@ impl<'de> VariantAccess<'de> for InternalTagVariantAccess {
     where
         V: Visitor<'de>,
     {
-        visitor.visit_map(BufferedMapAccess {
+        visitor.visit_map(ValueMapAccess {
             entries: self.entries.into_iter(),
             pending_value: None,
         })
@@ -1270,7 +1186,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
         V: Visitor<'de>,
     {
         self.expect_byte(b'{')?;
-        let mut entries: Vec<(String, Buffered)> = Vec::new();
+        let mut entries: Vec<(String, Value)> = Vec::new();
         loop {
             self.skip_whitespace();
             if self.peek()? == b'}' {
@@ -1284,7 +1200,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
             let key = self.parse_string()?;
             self.skip_whitespace();
             self.expect_byte(b':')?;
-            let value = parse_buffered(self)?;
+            let value = Value::deserialize(&mut *self)?;
             entries.push((key, value));
         }
 
@@ -1294,7 +1210,7 @@ impl<'de> DeserializerTrait<'de> for &mut Deserializer<'de> {
             .ok_or_else(|| self.error(format!("missing tag field `{tag}`")))?;
         let (_, tag_value) = entries.remove(tag_index);
         let variant = match tag_value {
-            Buffered::Str(s) => s,
+            Value::String(s) => s,
             _ => return Err(self.error(format!("tag field `{tag}` must be a string"))),
         };
         visitor.visit_enum(InternalTagEnumAccess { variant, entries })
