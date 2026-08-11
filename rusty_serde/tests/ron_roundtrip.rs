@@ -470,3 +470,20 @@ fn with_round_trips_through_ron_too() {
     let decoded: Event = ron::from_str(&encoded).unwrap();
     assert_eq!(decoded, value);
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct EventWithShorthand {
+    #[rusty_serde(with = "as_seconds")]
+    elapsed: std::time::Duration,
+}
+
+#[test]
+fn with_shorthand_round_trips_through_ron_too() {
+    let value = EventWithShorthand {
+        elapsed: std::time::Duration::from_secs(5),
+    };
+    let encoded = ron::to_string(&value).unwrap();
+    assert_eq!(encoded, "{elapsed:5}");
+    let decoded: EventWithShorthand = ron::from_str(&encoded).unwrap();
+    assert_eq!(decoded, value);
+}
