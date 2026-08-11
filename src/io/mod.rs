@@ -12,22 +12,31 @@
 //!
 //! Socket bind/connect/accept/addressing is built on `rustils`' concrete
 //! `platform_linux::{LinuxTcpListener, LinuxTcpStream, LinuxUdpSocket,
-//! LinuxUnixListener, LinuxUnixStream}` on Linux and
+//! LinuxUnixListener, LinuxUnixStream}` on Linux,
 //! `platform_macos::{MacosTcpListener, MacosTcpStream, MacosUdpSocket,
 //! MacosUnixListener, MacosUnixStream}` on macOS (see `socket/mod.rs`'s
-//! docs for the small remainder that's still hand-rolled on both), shaped
-//! identically enough between the two backends that `tcp.rs`/`udp.rs`/
+//! docs for the small remainder that's still hand-rolled on both), and
+//! `platform_windows::{WindowsUnixListener, WindowsUnixStream}` on
+//! Windows for `unix.rs` specifically (see that module's own docs, and
+//! `docs/decision-request-windows-process-signal-ipc.md`, for why
+//! Windows leans on rustils there but not for `tcp.rs`/`udp.rs`, which
+//! stay on the hand-rolled `socket::windows` arm below) -- shaped
+//! identically enough between the backends that `tcp.rs`/`udp.rs`/
 //! `unix.rs` each need only a `#[cfg]`-gated type alias, not their own OS
 //! branching. `UnixDatagram` is the one exception -- rustils has no
-//! `AF_UNIX` datagram support at all, so `unix_datagram.rs` wraps
-//! `std::os::unix::net::UnixDatagram` directly instead; see that
-//! module's own docs for why.
+//! `AF_UNIX` datagram support at all, on *any* platform, so
+//! `unix_datagram.rs` wraps `std::os::unix::net::UnixDatagram` directly
+//! instead; see that module's own docs for why, and for why it stays
+//! `#[cfg(unix)]`-only (no stable Windows equivalent to wrap the same
+//! way -- `std::os::windows::net` is nightly-only as of this writing).
 //!
-//! Windows has no `AF_UNIX`-backed rustils crate at all (nor, for that
-//! matter, a `platform-windows` net module at parity with this crate's
-//! needs -- see `socket/windows.rs`'s docs), so `unix.rs`/
-//! `unix_datagram.rs` are POSIX-only, `#[cfg(unix)]`-gated below; `tcp.rs`/
-//! `udp.rs` instead gain a third, hand-rolled `socket::windows` arm.
+//! `unix.rs` (`UnixListener`/`UnixStream`) compiles on `unix`/`windows`
+//! both; its bare pre-bind `UnixSocket` builder and `UnixStream::pair`
+//! stay `#[cfg(unix)]`-only -- see that module's own docs for the
+//! specific rustils-side gap (no owned-socket adoption on Windows yet)
+//! and OS-level absence (no anonymous `AF_UNIX` pair on Windows) behind
+//! each. `unix_datagram.rs` stays `#[cfg(unix)]`-only entirely, per
+//! above.
 
 mod addr;
 #[cfg(unix)]
@@ -50,7 +59,7 @@ mod split;
 mod stdio;
 mod tcp;
 mod udp;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod unix;
 #[cfg(unix)]
 mod unix_datagram;
@@ -84,9 +93,11 @@ pub use tcp::{
 };
 pub use udp::{UdpSocket, MAX_UDP_DATAGRAM_SIZE};
 #[cfg(unix)]
+pub use unix::{gid_t, pid_t, uid_t, UnixSocket};
+#[cfg(any(unix, windows))]
 pub use unix::{
-    gid_t, pid_t, uid_t, OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf,
-    UnixReuniteError, UnixSocket, UnixSocketAddr, UnixStream, UnixWriteHalf,
+    OwnedUnixReadHalf, OwnedUnixWriteHalf, UnixListener, UnixReadHalf, UnixReuniteError,
+    UnixSocketAddr, UnixStream, UnixWriteHalf,
 };
 // `UnixStream::peer_cred`'s return type -- not available on generic BSD
 // yet, see that method's own docs, so `UCred` doesn't exist there either.

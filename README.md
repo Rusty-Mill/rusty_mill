@@ -190,22 +190,26 @@ them yet.
   the starvation case above. A future polled outside of `Task::run` (an
   outer `block_on` future, most notably) has no budget in scope at all.
 - **I/O** (`io`): a reactor thread plus non-blocking `TcpStream`,
-  `TcpListener`, `UdpSocket` (all three cross-platform), and
-  `UnixStream`/`UnixListener`/`UnixDatagram` (`AF_UNIX`, Unix-only).
-  Three backends behind the same interface -- `epoll` on Linux, `kevent`
-  on macOS, IOCP plus the undocumented AFD-poll trick (mio's own
-  production solution to the same problem, cited directly as this
-  crate's reference point -- see `io::reactor::windows`'s own module
-  docs) on Windows. The POSIX two are level-triggered by choice, since
-  edge-triggered epoll/kqueue demands every reader drain a fd to
-  `EWOULDBLOCK` or risk missing events forever, an easy invariant to get
-  subtly wrong for one extra syscall's worth of savings; IOCP has no
-  level/edge distinction of its own (it's completion-, not
-  readiness-based to begin with), but the Windows backend re-arms its
-  poll request on every completion to match the other two's observable
-  behavior anyway. Socket setup goes through `rustils` on Linux/macOS,
-  and directly through `windows-sys` on Windows (see "Built on rustils"
-  below for why there's no rustils backend to lean on there).
+  `TcpListener`, `UdpSocket`, `UnixStream`, `UnixListener` (`AF_UNIX`
+  stream/listener, all five cross-platform including Windows), and
+  `UnixDatagram` (`AF_UNIX` datagram, Unix-only -- see that type's own
+  bullet below for why). Three backends behind the same interface --
+  `epoll` on Linux, `kevent` on macOS, IOCP plus the undocumented
+  AFD-poll trick (mio's own production solution to the same problem,
+  cited directly as this crate's reference point -- see
+  `io::reactor::windows`'s own module docs) on Windows. The POSIX two
+  are level-triggered by choice, since edge-triggered epoll/kqueue
+  demands every reader drain a fd to `EWOULDBLOCK` or risk missing
+  events forever, an easy invariant to get subtly wrong for one extra
+  syscall's worth of savings; IOCP has no level/edge distinction of its
+  own (it's completion-, not readiness-based to begin with), but the
+  Windows backend re-arms its poll request on every completion to match
+  the other two's observable behavior anyway. Socket setup goes through
+  `rustils` on Linux/macOS/BSD, and, for `UnixStream`/`UnixListener`
+  specifically, on Windows too; `TcpStream`/`TcpListener`/`UdpSocket`
+  still go directly through `windows-sys` on Windows (see "Built on
+  rustils" below for the full story, including a real inconsistency
+  between the two that's flagged there rather than silently fixed).
   Also includes an `AsyncRead`/`AsyncWrite` trait pair (shaped like
   tokio's/`futures-io`'s -- `Pin<&mut Self>`, `poll_*` methods -- but
   this crate's own definitions, not a re-export) plus a generic `copy`,
@@ -288,29 +292,36 @@ them yet.
   shared in-flight-blocking-call state machine, so there's nothing else
   meaningful to poll in between.
 
-  **This crate's macOS/BSD and Windows integrations have never run on
-  real hardware.** It's developed and tested on Linux only; the kqueue
-  reactor and the `TcpStream`/`TcpListener`/`UdpSocket` wiring on top of
-  rustils' `platform-bsd` are verified with `cargo check --target
-  x86_64-apple-darwin`/`x86_64-unknown-freebsd`/`x86_64-unknown-netbsd`
-  (real target-specific `libc` bindings, real type-checking) -- OpenBSD
-  and DragonFly can't even get that much here, no prebuilt `std` for
-  either target in this sandbox -- but nothing beyond that. `platform-bsd`
-  itself is better off: it has real `macos-latest`/FreeBSD-VM/OpenBSD-VM
-  CI upstream, which already caught two genuine `AF_UNIX` bugs (one on
-  Darwin, one OpenBSD-specific) the cross-checks alone couldn't -- so the
-  socket layer is solid on the targets that CI actually runs, but this
-  crate's own reactor integration on top of it is still
-  reviewed-but-unverified on every target until someone actually runs
-  *this* crate's `cargo test` on the real OS. The Windows IOCP+AFD
-  reactor and its hand-rolled `windows-sys` socket layer carry the
-  identical caveat, verified only with `cargo check --target
-  x86_64-pc-windows-gnu --all-targets` -- and with no upstream equivalent
-  to `platform-bsd`'s real CI legs backing the socket layer this time,
-  since that layer is entirely this crate's own code (see "Built on
-  rustils" below). Treat every non-Linux reactor path as
+  **This crate's macOS/BSD integrations have never run on real
+  hardware; Windows now has, once.** It's normally developed and tested
+  on Linux only; the kqueue reactor and the `TcpStream`/`TcpListener`/
+  `UdpSocket` wiring on top of rustils' `platform-bsd` are verified with
+  `cargo check --target x86_64-apple-darwin`/`x86_64-unknown-freebsd`/
+  `x86_64-unknown-netbsd` (real target-specific `libc` bindings, real
+  type-checking) -- OpenBSD and DragonFly can't even get that much in
+  that sandbox, no prebuilt `std` for either target there -- but nothing
+  beyond that. `platform-bsd` itself is better off: it has real
+  `macos-latest`/FreeBSD-VM/OpenBSD-VM CI upstream, which already caught
+  two genuine `AF_UNIX` bugs (one on Darwin, one OpenBSD-specific) the
+  cross-checks alone couldn't -- so the socket layer is solid on the
+  targets that CI actually runs, but this crate's own reactor
+  integration on top of it is still reviewed-but-unverified on every BSD
+  target. The Windows IOCP+AFD reactor and its hand-rolled `windows-sys`
+  socket layer carried the identical caveat for most of this crate's
+  life -- until the session that added `process`/`signal`/
+  `UnixStream`/`UnixListener`'s Windows arms happened to run natively on
+  real Windows hardware (not the usual Linux sandbox) and actually ran
+  `cargo test` there: every non-doctest test passed, including the
+  pre-existing TCP/UDP/reactor suite exercised on real hardware for the
+  first time. Doctests hit a sandboxed-tempdir `noexec` restriction
+  specific to that one environment, unrelated to any reactor/socket
+  code. That's one real run, not standing CI -- treat it as meaningfully
+  better evidence than a cross-compile check, not as an ongoing
+  guarantee the way `platform-bsd`'s actual CI legs are; a regression
+  since then wouldn't necessarily be caught until someone runs real
+  Windows hardware again. Every macOS/BSD reactor path stays
   reviewed-but-unverified until someone runs *this* crate's own test
-  suite on the real OS.
+  suite on real hardware there too.
 - **Async filesystem I/O** (`fs::File`): a regular file can't be
   registered with `epoll`/`kevent`'s readiness model the way a socket
   can -- the kernel considers it always "ready", and the actual disk
@@ -392,76 +403,151 @@ them yet.
   `fs::File`/`io::stdio`/`process::Child::wait` already use for
   operations with no reactor-driven alternative.
 - **`UnixDatagram`** (`io::UnixDatagram`, Unix-only -- absent from the
-  crate entirely on Windows, along with `UnixStream`/`UnixListener`/
-  `process`/`signal`, rather than compiling to stub methods that would
-  panic at runtime): the connectionless `AF_UNIX`
-  counterpart of `UdpSocket` -- one socket both sends and receives,
-  addressed by filesystem path, no listener/stream split. The one socket
-  type in `io` *not* built on a rustils concrete type: rustils' `Net`
-  trait has no `AF_UNIX` datagram support at all (only `unix_connect`/
-  `unix_listen` for connection-oriented `AF_UNIX` sockets), and rather
-  than hand-rolling a third copy of `AF_UNIX` sockaddr packing and
-  `sendto`/`recvfrom` in this crate (`socket/mod.rs` already has one
-  hand-rolled copy for non-blocking `AF_UNIX` stream `connect`, and
-  rustils has its own internal one), this wraps
-  `std::os::unix::net::UnixDatagram` directly -- std's own
+  crate entirely on Windows, rather than compiling to stub methods that
+  would panic at runtime, unlike `UnixStream`/`UnixListener`/`process`/
+  `signal` below, which now have real Windows arms): the connectionless
+  `AF_UNIX` counterpart of `UdpSocket` -- one socket both sends and
+  receives, addressed by filesystem path, no listener/stream split. The
+  one socket type in `io` *not* built on a rustils concrete type:
+  rustils' `Net` trait has no `AF_UNIX` datagram support at all on any
+  platform (only `unix_connect`/`unix_listen` for connection-oriented
+  `AF_UNIX` sockets), and rather than hand-rolling a third copy of
+  `AF_UNIX` sockaddr packing and `sendto`/`recvfrom` in this crate
+  (`socket/mod.rs` already has one hand-rolled copy for non-blocking
+  `AF_UNIX` stream `connect`, and rustils has its own internal one),
+  this wraps `std::os::unix::net::UnixDatagram` directly -- std's own
   implementation is already complete and needs zero new unsafe code
   here, just a `set_nonblocking(true)` and reactor registration, the
   same bridge `TcpStream::from_std` already builds for adopting a `std`
-  socket into this crate's reactor.
-- **Async child processes** (`process::Command`): mirrors
-  `std::process::Command`'s builder API (`arg`/`args`/`env`/`envs`/
-  `env_remove`/`env_clear`/`current_dir`/`stdin`/`stdout`/`stderr`,
-  same `&mut self -> &mut Self` chaining), but `spawn()`'s `Child` gives
-  async access to piped stdio and a `wait()` that doesn't block a
-  worker thread. Built directly on `std::process`, not rustils: rustils
-  does have a real `Command`/`Spawner`/`Child` abstraction, but its
-  piped stdio comes back as an object-safe `File` trait that
-  deliberately hides the underlying fd (for Windows portability, where
-  "raw fd" doesn't mean anything) -- incompatible with this crate's
-  actual need, since a child's piped stdin/stdout/stderr are plain
-  pipes and, unlike a regular file or a terminal, genuinely block on
-  read when empty and become readable when data arrives, exactly like a
-  socket. Rather than hand-rolling `fork`/`exec`/`posix_spawn` a second
-  time just to get raw fds back, this wraps `std::process::Command`/
-  `Child` directly -- the same call `io::UnixDatagram` already made for
-  the identical reason (rustils' abstraction not fitting this crate's
-  reactor-integration need, with `std` already having a complete, safe
-  implementation). `ChildStdin`/`ChildStdout`/`ChildStderr` are
-  reactor-registered the same way `TcpStream` is (non-blocking,
-  readiness-driven) -- a real difference from `fs::File`/stdio, which
-  can't be. `wait()` still runs the real, blocking
-  `std::process::Child::wait()` on the `spawn_blocking` pool rather
-  than a reactor-driven `pidfd`/`EVFILT_PROC` -- not a polling loop
-  (nothing re-checks on a timer), a genuine blocking wait that wakes
-  immediately and exactly when the child exits, just parked on a
-  dedicated OS thread instead of a reactor-registered fd. A pidfd
+  socket into this crate's reactor. This stays Windows-absent because
+  neither escape hatch exists there yet: rustils has no `AF_UNIX`
+  datagram support to lean on (same as every other platform), and the
+  only other candidate, `std::os::windows::net::UnixDatagram`, doesn't
+  exist even on nightly (the in-progress `windows_unix_domain_sockets`
+  tracking PR, rust-lang/rust#150487, only adds `UnixStream`/
+  `UnixListener`, not `UnixDatagram`) -- a real, separate, still-open
+  gap, not something this crate is choosing to skip.
+- **`UnixStream`/`UnixListener`** (`io::unix`, `AF_UNIX` stream sockets):
+  cross-platform, including Windows -- built on rustils'
+  `platform_linux`/`platform_bsd` concrete types on Linux/macOS/BSD (see
+  "Built on rustils" below), and, as of rustils#59,
+  `platform_windows::{WindowsUnixStream, WindowsUnixListener}` on
+  Windows too (Win10 1803+) -- the first thing in this crate to actually
+  lean on `platform-windows` rather than the hand-rolled `windows-sys`
+  layer `tcp.rs`/`udp.rs` still use (see "Built on rustils" for why
+  those two haven't followed yet). Bind/accept/`local_addr`/`peer_addr`
+  work identically to the Unix arm; `UnixSocketAddr` drops down to a
+  plain `Option<PathBuf>` on Windows (no abstract-namespace concept
+  there -- `from_abstract_name`/`as_abstract_name` stay Linux/
+  Android-only, unchanged). Three things stay Windows-specific gaps,
+  documented rather than papered over: `UnixStream::connect`/
+  `connect_addr` dispatch rustils' own blocking `WindowsUnixStream::connect`
+  through `spawn_blocking` instead of the Unix arm's non-blocking-connect-
+  through-the-reactor dance (`platform_windows` has no owned-socket
+  adoption path yet to build that on, unlike Linux/BSD's `From<OwnedFd>`
+  -- a real, narrower follow-on gap from rustils#59, not something this
+  crate worked around by hand-rolling a second `AF_UNIX` layer);
+  `UnixStream::pair`/the bare pre-bind `UnixSocket` builder stay
+  `#[cfg(unix)]`-only (no anonymous `AF_UNIX` pair primitive on Windows
+  at the OS level, and the same owned-socket-adoption gap blocks
+  `UnixSocket::listen`/`connect`); and `UnixListener`/`UnixStream` get
+  `AsRawSocket` but not `AsSocket`/`FromRawSocket`/`IntoRawSocket` (no
+  ownership-transfer interop from rustils yet either). See
+  `docs/decision-request-windows-process-signal-ipc.md` for the full
+  reasoning.
+- **Async child processes** (`process::Command`, cross-platform including
+  Windows): mirrors `std::process::Command`'s builder API (`arg`/`args`/
+  `env`/`envs`/`env_remove`/`env_clear`/`current_dir`/`stdin`/`stdout`/
+  `stderr`, same `&mut self -> &mut Self` chaining; `arg0`/
+  `process_group` stay Unix-only -- POSIX-specific concepts with no
+  Windows equivalent), but `spawn()`'s `Child` gives async access to
+  piped stdio and a `wait()` that doesn't block a worker thread. Built
+  directly on `std::process`, not rustils: rustils does have a real
+  `Command`/`Spawner`/`Child` abstraction on every platform including
+  Windows, but its piped stdio comes back as an object-safe `File` trait
+  that deliberately hides the underlying fd/handle -- incompatible with
+  this crate's actual need on Unix, since a child's piped stdin/stdout/
+  stderr are plain pipes and, unlike a regular file or a terminal,
+  genuinely block on read when empty and become readable when data
+  arrives, exactly like a socket. Rather than hand-rolling `fork`/
+  `exec`/`posix_spawn` a second time just to get raw fds back, this
+  wraps `std::process::Command`/`Child` directly -- the same call
+  `io::UnixDatagram` already made for the identical reason (rustils'
+  abstraction not fitting this crate's reactor-integration need, with
+  `std` already having a complete, safe implementation). On Unix,
+  `ChildStdin`/`ChildStdout`/`ChildStderr` are reactor-registered the
+  same way `TcpStream` is (non-blocking, readiness-driven) -- a real
+  difference from `fs::File`/stdio, which can't be. **On Windows,
+  they're `spawn_blocking`-backed instead**, matching `fs::File`/stdio's
+  own shape rather than Unix's reactor-driven one: this crate's Windows
+  reactor (`io::reactor::windows`) is IOCP+AFD-poll and fundamentally
+  socket-only (`io::reactor::RawIo` is `RawSocket`, not an arbitrary
+  `HANDLE`), so a child's anonymous pipe can't be registered with it as-is
+  -- genuine non-blocking piped I/O there would need a second,
+  completion-based (`OVERLAPPED`+IOCP) reactor mechanism, comparable in
+  scope to the IOCP reactor backend itself, not attempted here (see
+  `docs/decision-request-windows-process-signal-ipc.md`'s Decision 1).
+  The cost is one parked blocking-pool thread per in-flight Windows
+  child read/write rather than readiness-based concurrency -- a
+  reasonable trade for process supervision's typical scale, not a
+  silent behavioral gap. `wait()` runs the real, blocking
+  `std::process::Child::wait()` on the `spawn_blocking` pool on every
+  platform rather than a reactor-driven `pidfd`/`EVFILT_PROC` -- not a
+  polling loop (nothing re-checks on a timer), a genuine blocking wait
+  that wakes immediately and exactly when the child exits, just parked
+  on a dedicated OS thread instead of a reactor-registered fd. A pidfd
   (Linux 5.3+) or kqueue's `EVFILT_PROC`/`NOTE_EXIT` (macOS) would each
   need their own from-scratch reactor integration and their own
   real-hardware verification -- a deliberate simplicity trade-off, not
   a placeholder, consistent with `fs::File`/stdio already choosing this
   same shape for operations a reactor can't drive directly.
-- **Signal handling** (`signal`): `signal::ctrl_c()` resolves once on
-  the next `SIGINT`; `signal::signal(kind)` returns a `Signal` that
-  fires every time that `SignalKind` arrives, for as long as it's held.
-  Uses the self-pipe trick -- a signal handler can only safely call a
-  short, fixed list of async-signal-safe functions (not allocate, not
-  lock a mutex), so the actual OS handler installed via `sigaction` does
-  exactly one thing, an async-signal-safe `write(2)` of the signal
-  number to a pre-created pipe. Everything else -- figuring out which
-  listeners care, waking them -- happens later, in an ordinary spawned
-  task reading the pipe's other end through the same reactor every
-  socket in this crate uses. Each `Signal` coalesces rather than queues
-  (three occurrences before a poll are observed as one `Some(())`, not
-  three, matching how signal delivery already behaves at the OS level),
-  and installation is idempotent and additive: the first call for a
-  given kind installs its `sigaction`, every call (including the first)
-  adds an independent listener, and a kind this crate was never asked
-  about is never touched. This state is process-wide, not per-`Runtime`
-  -- signals are a process-wide concept -- driven by whichever `Runtime`
-  happens to be current at the first `signal`/`ctrl_c` call; see that
-  module's own docs for the (unusual) multiple-`Runtime` caveat this
-  implies.
+- **Signal handling** (`signal`, cross-platform including Windows for
+  `ctrl_c` -- see below for exactly what else is/isn't): `signal::ctrl_c()`
+  resolves once on the next `SIGINT` (Unix) or Ctrl+C (Windows);
+  `signal::signal(kind)` returns a `Signal` that fires every time that
+  `SignalKind` arrives, for as long as it's held. Uses the self-pipe
+  trick -- a signal handler can only safely call a short, fixed list of
+  async-signal-safe functions (not allocate, not lock a mutex), so the
+  actual OS handler installed via `sigaction` does exactly one thing, an
+  async-signal-safe `write(2)` of the signal number to a pre-created
+  pipe. Everything else -- figuring out which listeners care, waking
+  them -- happens later, in an ordinary spawned task reading the pipe's
+  other end through the same reactor every socket in this crate uses.
+  Each `Signal` coalesces rather than queues (three occurrences before a
+  poll are observed as one `Some(())`, not three, matching how signal
+  delivery already behaves at the OS level), and installation is
+  idempotent and additive: the first call for a given kind installs its
+  `sigaction`, every call (including the first) adds an independent
+  listener, and a kind this crate was never asked about is never
+  touched. This state is process-wide, not per-`Runtime` -- signals are
+  a process-wide concept -- driven by whichever `Runtime` happens to be
+  current at the first `signal`/`ctrl_c` call; see that module's own
+  docs for the (unusual) multiple-`Runtime` caveat this implies.
+
+  **Windows has no POSIX signal model at all.** The nearest equivalent,
+  `SetConsoleCtrlHandler`, delivers a narrower, differently-shaped set of
+  events (Ctrl+C, Ctrl+Break, console-close, logoff, shutdown) with no
+  honest equivalent of `SIGTERM`/`SIGHUP`/`SIGQUIT`/`SIGALRM`/`SIGCHLD`/
+  `SIGPIPE`/`SIGUSR1`/`SIGUSR2`/`SIGWINCH` at all. Rather than silently
+  no-op those on Windows or bolting Windows-only event names onto
+  `SignalKind`, the generic `signal`/`SignalKind` surface stays
+  `#[cfg(unix)]`-only (a compile error on Windows, not a silent runtime
+  no-op), and a separate `signal::windows` submodule
+  (`ctrl_break`/`ctrl_close`/`ctrl_logoff`/`ctrl_shutdown`, each its own
+  listener type with its own `recv()`) covers the four console-control
+  events with no Unix equivalent -- mirroring `tokio::signal::windows`'s
+  own split exactly. The self-pipe shape carries over structurally
+  unchanged: a `SetConsoleCtrlHandler` callback runs on an ordinary
+  OS-created thread (not interrupt context, so none of a POSIX handler's
+  async-signal-safety restrictions apply -- it can lock a mutex, unlike
+  Unix's handler) and does a plain blocking one-byte write instead of
+  Unix's non-blocking `write(2)`; an ordinary spawned task still reads
+  the other end through the reactor. The channel itself is a
+  synchronously-bootstrapped loopback TCP pair (`127.0.0.1`, ephemeral
+  port) rather than a real pipe, since this crate's Windows reactor is
+  socket-only and Windows has no anonymous `socketpair(2)`/`pipe(2)`
+  equivalent. See `docs/decision-request-windows-process-signal-ipc.md`
+  for the full design writeup.
 - **Timers** (`time`): `sleep`, `sleep_until`, `timeout`, `interval`, and
   `interval_at` (like `interval`, but the first tick fires at a given
   `Instant` instead of always `now + period`), backed by a single
@@ -787,25 +873,42 @@ peer-credential retrieval genuinely diverges per BSD (FreeBSD's
 simply doesn't exist on those targets rather than risk shipping an
 unverified guess at any of the three.
 
-Windows is the one exception to "socket setup goes through rustils":
-`rustils` does have a `platform-windows` crate, but its net module
-predates rustils#41/#42's escape hatch above and has no equivalent
-surface (no non-blocking toggle, no `AsRawSocket`, no `From<OwnedSocket>`
-adoption) -- depending on it would mean hand-rolling the exact same
-missing pieces on top of it anyway. `io/socket/windows.rs` goes straight
-to `windows-sys` instead (Microsoft's own low-level FFI bindings, the
-same crate mio itself depends on for its entire Windows backend),
-providing `WindowsTcpListener`/`WindowsTcpStream`/`WindowsUdpSocket` with
-the identical inherent-method surface `platform_linux`/`platform_bsd`
-give their concrete types, so `io/tcp.rs`/`io/udp.rs` need only a third
-`#[cfg]`-gated type alias, same as the Linux/macOS/BSD split. The two
-hand-rolled exceptions above (non-blocking connect, `&self`-based
-read/write) apply here too, plus a third that's Windows-specific:
-`SO_REUSEPORT` has no Windows equivalent at all, so
-`set_reuseport`/`reuseport` fall back to `SO_REUSEADDR` there -- a
-strict superset of the POSIX option's behavior, not an exact match, but
-the closest available primitive (the same pragmatic choice most
-cross-platform networking libraries make).
+Windows is a partial exception to "socket setup goes through rustils":
+`rustils` does have a `platform-windows` crate with a full `WindowsNet`/
+`WindowsTcpStream`/`WindowsTcpListener`/`WindowsUdpSocket`/
+`WindowsUnixStream`/`WindowsUnixListener` surface, and, as of rustils#59,
+it *does* have the same raw-handle + non-blocking escape hatch
+(`AsRawSocket`, `set_nonblocking`, concrete non-boxed constructors)
+`platform_linux`/`platform_bsd` got via rustils#41/#42 -- forced by this
+very crate (`platform-windows/src/net.rs`'s own doc comment names this
+crate's issue #6 as the reason). `io/unix.rs`'s Windows arm
+(`UnixStream`/`UnixListener`) uses it directly, the same `#[cfg]`-gated
+type-alias pattern Linux/macOS/BSD already use -- see that module's own
+docs and `docs/decision-request-windows-process-signal-ipc.md` for the
+one piece of the escape hatch that's still missing (owned-socket
+adoption) and how the Windows arm works around it for `UnixStream::connect`.
+
+`io/tcp.rs`/`io/udp.rs` **don't** use `platform_windows` yet, though --
+they still build on `io/socket/windows.rs`'s hand-rolled `windows-sys`
+layer (`WindowsTcpListener`/`WindowsTcpStream`/`WindowsUdpSocket`, this
+crate's own types, confusingly same-named as rustils' concrete types
+above but otherwise unrelated). This is a real, pre-existing
+inconsistency, not a deliberate current design: issue #6's own comment
+thread found and stated outright that `platform_windows`'s escape hatch
+had landed and "no separate hand-rolled Windows socket layer [was]
+needed" -- then #105 shipped the hand-rolled layer anyway, the day after,
+with a closing comment that doesn't match that same thread's own
+analysis. Flagged here rather than quietly fixed: migrating `tcp.rs`/
+`udp.rs` onto `platform_windows` is a legitimate follow-up, but it's a
+larger, unrelated refactor of already-shipped, already-tested code, out
+of scope for whatever change is reading this paragraph next. The two
+hand-rolled exceptions POSIX/Linux/BSD need (non-blocking connect,
+`&self`-based read/write) apply to `tcp.rs`/`udp.rs`'s Windows arm too,
+plus a third that's Windows-specific: `SO_REUSEPORT` has no Windows
+equivalent at all, so `set_reuseport`/`reuseport` fall back to
+`SO_REUSEADDR` there -- a strict superset of the POSIX option's
+behavior, not an exact match, but the closest available primitive (the
+same pragmatic choice most cross-platform networking libraries make).
 
 ## What's deliberately not here (yet)
 
@@ -813,19 +916,29 @@ This is a real, working runtime, not a toy -- but it's honest about its
 edges instead of papering over them:
 
 - **Linux, macOS/BSD, and Windows.** All three now have a reactor backend
-  (`epoll`, `kevent`, and IOCP+the AFD-poll trick, respectively -- see
-  the caveat above for what "have" means for the latter two: reviewed,
-  compile-checked, never run on real hardware). Generic BSD (FreeBSD/
-  OpenBSD/NetBSD/DragonFly) shares the same `kevent` reactor as macOS --
-  `kqueue` doesn't differ across the family -- paired with rustils'
-  `platform-bsd` (widened from macOS-only in rustils#86) for the socket
-  layer underneath it. Verification is uneven across the five: macOS,
-  FreeBSD, and NetBSD are cross-compile-checked from this Linux sandbox
-  (`cargo check --target x86_64-apple-darwin`/`x86_64-unknown-freebsd`/
+  (`epoll`, `kevent`, and IOCP+the AFD-poll trick, respectively).
+  Generic BSD (FreeBSD/OpenBSD/NetBSD/DragonFly) shares the same
+  `kevent` reactor as macOS -- `kqueue` doesn't differ across the family
+  -- paired with rustils' `platform-bsd` (widened from macOS-only in
+  rustils#86) for the socket layer underneath it. Verification is uneven
+  across the five: macOS, FreeBSD, and NetBSD are cross-compile-checked
+  from the Linux sandbox this crate is normally developed in (`cargo
+  check --target x86_64-apple-darwin`/`x86_64-unknown-freebsd`/
   `x86_64-unknown-netbsd`); OpenBSD and DragonFly can't be, for lack of a
-  prebuilt `std` for either target here -- `platform-bsd` itself covers
+  prebuilt `std` for either target there -- `platform-bsd` itself covers
   OpenBSD with real CI (a VM job), this crate's own reactor code doesn't.
-  See #116.
+  **Windows is the one platform in this list that has actually run this
+  crate's own `cargo test` on real hardware** -- done in the same
+  session that landed `process`/`signal`/`UnixStream`/`UnixListener`'s
+  Windows arms (see those sections above): every non-doctest test
+  (`unittests`, every `tests/*.rs` integration binary, including the
+  pre-existing TCP/UDP/reactor suite that had never run on real Windows
+  before) passed. Doctests hit an unrelated sandboxed-tempdir `noexec`
+  restriction specific to that one environment, not a code issue. That
+  bears on #106 (verifying the Windows/IOCP backend on real hardware)
+  without this change itself claiming to close it -- macOS/BSD remain
+  reviewed-but-cross-compile-checked-only, unchanged. See #116 for the
+  BSD-specific verification gaps.
 - **`AsyncRead`/`AsyncWrite` are this crate's own traits, not tokio's or
   `futures-io`'s.** Same shape, so generic code within this project works
   the same way, but a third-party codec/framing crate built against
@@ -888,9 +1001,16 @@ cargo test --features io-uring-reactor
 rustup target add x86_64-apple-darwin
 cargo check --target x86_64-apple-darwin --all-targets
 
-# Same caveat, same reason, for Windows:
+# Windows, normally the identical cross-compile-check-only story as
+# macOS above -- but if you're actually *on* Windows (unlike this
+# crate's usual Linux dev sandbox), prefer real execution over the
+# cross-compile check, the same "prefer real hardware when available"
+# call already made once for `process`/`signal`/`UnixStream`/
+# `UnixListener`'s Windows arms (see the real-hardware-verification
+# caveat above):
 rustup target add x86_64-pc-windows-gnu
-cargo check --target x86_64-pc-windows-gnu --all-targets
+cargo check --target x86_64-pc-windows-gnu --all-targets   # from Linux
+cargo test                                                  # from Windows itself
 ```
 
 The integration tests deliberately exercise real concurrency (many

@@ -100,6 +100,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform-windows"
+version = "0.22.1"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform",
+ "winargv",
+ "windows-sys",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -143,6 +153,7 @@ dependencies = [
  "platform",
  "platform-bsd",
  "platform-linux",
+ "platform-windows",
  "rusty_std",
  "rusty_tokio-macros",
  "tracing",
@@ -218,6 +229,14 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "winargv"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+dependencies = [
+ "platform",
+]
 
 [[package]]
 name = "windows-sys"

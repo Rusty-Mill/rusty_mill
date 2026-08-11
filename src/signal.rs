@@ -1,9 +1,15 @@
-//! Async signal handling: [`ctrl_c`] resolves once on the next `SIGINT`;
-//! [`signal`] returns a [`Signal`] that fires every time a given
-//! [`SignalKind`] arrives, for as long as it's held.
+//! Async signal handling: [`ctrl_c`] resolves once on the next `SIGINT`
+//! (Unix) / Ctrl+C (Windows); [`signal`] (Unix-only) returns a [`Signal`]
+//! that fires every time a given [`SignalKind`] arrives, for as long as
+//! it's held. On Windows, [`windows::ctrl_break`]/[`windows::ctrl_close`]/
+//! [`windows::ctrl_logoff`]/[`windows::ctrl_shutdown`] cover the four
+//! additional `SetConsoleCtrlHandler` events with no POSIX equivalent --
+//! see that submodule's own docs, and this module's "Windows" section
+//! below, for why the API forks here rather than forcing every platform
+//! through one generic `SignalKind` surface.
 //!
-//! **The self-pipe trick.** A signal handler can only safely do a very
-//! limited set of things (a short, fixed list of async-signal-safe
+//! **The self-pipe trick (Unix).** A signal handler can only safely do a
+//! very limited set of things (a short, fixed list of async-signal-safe
 //! functions -- notably not allocate, not lock a mutex, not touch most
 //! of the runtime this crate would otherwise reach for), so
 //! `handle_signal` does exactly one thing: an async-signal-safe
@@ -18,7 +24,7 @@
 //! the identical shape); doing real work *inside* the OS signal handler
 //! itself is the actual footgun this sidesteps.
 //!
-//! **Coalescing, not queuing.** Each [`Signal`]'s own `ListenerState`
+//! **Coalescing, not queuing.** Each listener's own `ListenerState`
 //! is a single pending flag, not a growing counter -- if the same signal
 //! kind arrives twice before a listener gets around to polling, that's
 //! observed as one `Some(())`, not two. This matches how tokio's own
@@ -47,33 +53,101 @@
 //! for every listener, regardless of which `Runtime` later callers are
 //! on. Matches this crate's realistic, single-runtime-per-process usage;
 //! not something to design around further without an actual need.
+//!
+//! # Windows
+//!
+//! Windows has no POSIX signal model at all -- the nearest equivalent is
+//! [`SetConsoleCtrlHandler`](https://learn.microsoft.com/windows/console/setconsolectrlhandler),
+//! which delivers a narrower, differently-shaped set of events
+//! (Ctrl+C, Ctrl+Break, console-window-close, logoff, shutdown) than
+//! POSIX signals, with no honest equivalent of `SIGTERM`/`SIGHUP`/
+//! `SIGQUIT`/`SIGALRM`/`SIGCHLD`/`SIGPIPE`/`SIGUSR1`/`SIGUSR2`/`SIGWINCH`
+//! at all. Rather than silently no-op those on Windows (a real behavioral
+//! gap masquerading as success) or bolting Windows-only event names onto
+//! `SignalKind` (blurring "exists on this platform" with "will simply
+//! never fire"), the generic `signal`/`SignalKind` surface stays
+//! `#[cfg(unix)]`-only -- calling it from Windows-targeted code is a
+//! compile error, not a silent runtime no-op -- and a separate
+//! `#[cfg(windows)]`-only [`windows`] submodule covers the four
+//! console-control events with no Unix equivalent, mirroring tokio's own
+//! `tokio::signal::windows` split exactly (same four event names, same
+//! per-kind-listener-type shape). [`ctrl_c`] is the one function that
+//! stays genuinely cross-platform: `SIGINT` on Unix, `CTRL_C_EVENT` on
+//! Windows, both through the identical "resolves once on the next
+//! interrupt" contract.
+//!
+//! The self-pipe trick still applies, structurally unchanged -- a
+//! `SetConsoleCtrlHandler` callback runs on an OS-created thread with
+//! none of a POSIX signal handler's async-signal-safety restrictions (it
+//! can allocate, lock, block -- it's an ordinary thread, not interrupt
+//! context), so it does a plain blocking one-byte write instead of the
+//! `write(2)`-only self-pipe Unix needs, but the shape is the same:
+//! push into a channel, let an ordinary spawned task read the other end
+//! through the reactor. The channel itself is a synchronously-bootstrapped
+//! loopback TCP pair (`127.0.0.1`, ephemeral port) rather than a real
+//! pipe: this crate's Windows reactor (`io::reactor::windows`) is
+//! socket-only (`io::reactor::RawIo` is `RawSocket`, not an arbitrary
+//! `HANDLE`), and Windows has no anonymous `socketpair(2)`/`pipe(2)`
+//! equivalent usable with it. See `docs/decision-request-windows-process-signal-ipc.md`
+//! for the full reasoning and the option that wasn't chosen.
 
-use crate::io::reactor::{ready_io, Interest, ScheduledIo};
-use crate::io::socket;
-use crate::runtime::Handle;
-use libc::c_int;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::task::{Context, Poll, Waker};
+
+#[cfg(unix)]
+use crate::io::reactor::{ready_io, Interest, ScheduledIo};
+#[cfg(unix)]
+use crate::io::socket;
+#[cfg(unix)]
+use crate::runtime::Handle;
+#[cfg(unix)]
+use libc::c_int;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+#[cfg(unix)]
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+
+#[cfg(windows)]
+use crate::io::reactor::{ready_io, Interest, ScheduledIo};
+#[cfg(windows)]
+use crate::io::socket::{self, windows::WindowsTcpStream};
+#[cfg(windows)]
+use crate::runtime::Handle;
+#[cfg(windows)]
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+#[cfg(windows)]
+use std::os::windows::io::AsRawSocket;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{BOOL, FALSE, TRUE};
+#[cfg(windows)]
+use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_C_EVENT};
 
 /// Generous headroom past the highest standard POSIX signal number (31)
 /// -- this crate only hands out constructors for the common named
 /// signals, but [`SignalKind::from_raw`] accepts anything in range.
+#[cfg(unix)]
 const NSIG: usize = 64;
 
 /// The self-pipe's write end -- read only from inside `handle_signal`,
 /// a real OS signal handler, so a plain relaxed atomic load is all it
 /// can safely do; never mutated again once `global` first sets it.
+#[cfg(unix)]
 static PIPE_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
 
+/// Shared by every listener flavor on every platform: [`Signal`] (Unix)
+/// and every listener type in [`windows`] (Windows) -- a single pending
+/// flag (see this module's own "Coalescing" docs) plus the waker to fire
+/// once it flips.
 struct ListenerState {
     pending: AtomicBool,
     waker: Mutex<Option<Waker>>,
 }
 
 /// One slot per possible signal number.
+#[cfg(unix)]
 struct SignalSlot {
     /// Whether a `sigaction` handler has been installed for this signal
     /// number yet. Checked and set while holding `listeners`'s own lock
@@ -90,6 +164,7 @@ struct SignalSlot {
     listeners: Vec<Weak<ListenerState>>,
 }
 
+#[cfg(unix)]
 struct Global {
     slots: Vec<Mutex<SignalSlot>>,
     /// Kept alive only so the write end's fd stays open for the whole
@@ -98,12 +173,14 @@ struct Global {
     _write_fd: OwnedFd,
 }
 
+#[cfg(unix)]
 static GLOBAL: OnceLock<io::Result<Global>> = OnceLock::new();
 
 /// The only thing that runs inside the actual OS signal handler --
 /// async-signal-safe by construction: one atomic load, one `write(2)`,
 /// nothing else. See this module's own docs for why real work happens
 /// later, in `reader_loop`, instead.
+#[cfg(unix)]
 extern "C" fn handle_signal(signum: c_int) {
     let fd = PIPE_WRITE_FD.load(Ordering::Relaxed);
     if fd < 0 {
@@ -122,6 +199,7 @@ extern "C" fn handle_signal(signum: c_int) {
     }
 }
 
+#[cfg(unix)]
 fn install_handler(signum: c_int) -> io::Result<()> {
     // SAFETY: `action` is fully initialized before `sigaction` reads it
     // (every field either zeroed or explicitly set below); `signum` is
@@ -145,6 +223,7 @@ fn install_handler(signum: c_int) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     let mut fds = [0 as c_int; 2];
     // See `io::pipe::new_pipe`'s equivalent comment: `pipe2` is a Linux
@@ -187,6 +266,7 @@ fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     Ok((read_fd, write_fd))
 }
 
+#[cfg(unix)]
 async fn reader_loop(io: Arc<ScheduledIo>, read_fd: OwnedFd) {
     let raw_fd = read_fd.as_raw_fd();
     loop {
@@ -207,6 +287,7 @@ async fn reader_loop(io: Arc<ScheduledIo>, read_fd: OwnedFd) {
     }
 }
 
+#[cfg(unix)]
 fn dispatch(signum: c_int) {
     let Some(Ok(global)) = GLOBAL.get() else {
         return;
@@ -230,6 +311,7 @@ fn dispatch(signum: c_int) {
     });
 }
 
+#[cfg(unix)]
 fn global() -> io::Result<&'static Global> {
     let result = GLOBAL.get_or_init(|| -> io::Result<Global> {
         let reactor = Handle::current().shared.reactor.clone();
@@ -263,10 +345,14 @@ fn global() -> io::Result<&'static Global> {
 }
 
 /// A signal kind -- either one of the common named constructors below,
-/// or [`SignalKind::from_raw`] for anything else.
+/// or [`SignalKind::from_raw`] for anything else. Unix-only -- see this
+/// module's own "Windows" docs for why, and for the [`windows`]
+/// submodule that covers Windows' own console-control events instead.
+#[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SignalKind(c_int);
 
+#[cfg(unix)]
 impl SignalKind {
     pub fn from_raw(signum: c_int) -> SignalKind {
         SignalKind(signum)
@@ -320,15 +406,18 @@ impl SignalKind {
 /// A listener for one [`SignalKind`], firing every time it arrives for
 /// as long as this value is held. Dropping it stops it from being woken
 /// -- other listeners for the same kind (including ones registered
-/// before or after) are unaffected.
+/// before or after) are unaffected. Unix-only -- see [`windows`] for the
+/// per-kind listener types Windows uses instead.
 ///
 /// # Panics
 /// [`signal`] (which every `Signal` is created through) panics if
 /// called outside a running [`crate::Runtime`].
+#[cfg(unix)]
 pub struct Signal {
     listener: Arc<ListenerState>,
 }
 
+#[cfg(unix)]
 impl Signal {
     /// Resolves once this signal kind next arrives -- immediately, if
     /// it already has since the last call (or since this `Signal` was
@@ -341,30 +430,33 @@ impl Signal {
     }
 
     fn poll_recv(&self, cx: &mut Context<'_>) -> Poll<Option<()>> {
-        if self.listener.pending.swap(false, Ordering::AcqRel) {
-            return Poll::Ready(Some(()));
-        }
-        *self.listener.waker.lock().unwrap() = Some(cx.waker().clone());
-        // Re-check after registering: `dispatch` could have set
-        // `pending` (and found no waker yet to wake) in the window
-        // between the check above and registering the waker just now --
-        // the same re-check-after-register shape `ScheduledIo::
-        // poll_ready` already uses, for the identical "don't lose a
-        // wakeup that raced registration" reason.
-        if self.listener.pending.swap(false, Ordering::AcqRel) {
-            return Poll::Ready(Some(()));
-        }
-        Poll::Pending
+        poll_listener(&self.listener, cx).map(Some)
     }
+}
+
+/// Shared by [`Signal::poll_recv`] (Unix) and every listener type in
+/// [`windows`] (Windows) -- the same re-check-after-register shape
+/// [`crate::io::reactor::ScheduledIo::poll_ready`] uses, for the
+/// identical "don't lose a wakeup that raced registration" reason.
+fn poll_listener(listener: &ListenerState, cx: &mut Context<'_>) -> Poll<()> {
+    if listener.pending.swap(false, Ordering::AcqRel) {
+        return Poll::Ready(());
+    }
+    *listener.waker.lock().unwrap() = Some(cx.waker().clone());
+    if listener.pending.swap(false, Ordering::AcqRel) {
+        return Poll::Ready(());
+    }
+    Poll::Pending
 }
 
 /// Listens for `kind`. Installs a `sigaction` handler for it the first
 /// time any caller asks for this particular kind (see this module's own
 /// docs); every call, including the first, adds an independent listener
-/// that gets woken on every occurrence from here on.
+/// that gets woken on every occurrence from here on. Unix-only.
 ///
 /// # Panics
 /// Panics if called outside a running [`crate::Runtime`].
+#[cfg(unix)]
 pub fn signal(kind: SignalKind) -> io::Result<Signal> {
     let global = global()?;
     let signum = kind.0 as usize;
@@ -397,7 +489,389 @@ pub fn signal(kind: SignalKind) -> io::Result<Signal> {
 ///
 /// # Panics
 /// Panics if called outside a running [`crate::Runtime`].
+#[cfg(unix)]
 pub async fn ctrl_c() -> io::Result<()> {
     signal(SignalKind::interrupt())?.recv().await;
     Ok(())
+}
+
+// =========================================================================
+// Windows
+// =========================================================================
+//
+// See this module's own top-level "Windows" docs for the design. Short
+// version: one `SetConsoleCtrlHandler` callback (installed once, ever --
+// unlike Unix's per-signal-number `sigaction`, there is only one console
+// handler registration mechanism, covering every event) writes a single
+// byte (which event fired) to a loopback-socket self-pipe; an ordinary
+// spawned task reads the other end through the reactor and wakes whichever
+// listeners asked for that event, reusing the same `ListenerState`/
+// `poll_listener` shape `Signal` uses on Unix.
+
+/// One slot per console-control event this module hands out a listener
+/// constructor for (`CTRL_C_EVENT` = 0 through `CTRL_SHUTDOWN_EVENT` = 6
+/// -- indices 3/4 are unused by any named event, left as permanently-empty
+/// slots rather than a sparser map for a fixed, tiny event set).
+#[cfg(windows)]
+const NCTRL: usize = 7;
+
+#[cfg(windows)]
+struct WindowsSlot {
+    listeners: Vec<Weak<ListenerState>>,
+}
+
+#[cfg(windows)]
+struct WindowsGlobal {
+    slots: [Mutex<WindowsSlot>; NCTRL],
+    /// Kept alive only so the write end's socket stays open for the
+    /// whole process lifetime, matching what `console_ctrl_handler`
+    /// assumes; never read back out. See `Global::_write_fd`'s
+    /// identical Unix-arm role.
+    _write_sock: WindowsTcpStream,
+}
+
+#[cfg(windows)]
+static WINDOWS_GLOBAL: OnceLock<io::Result<WindowsGlobal>> = OnceLock::new();
+
+/// The self-pipe's write end -- read only from inside
+/// `console_ctrl_handler`. Unlike Unix's `PIPE_WRITE_FD`, nothing here
+/// forces a relaxed-only load for async-signal-safety reasons (a console
+/// control handler runs on an ordinary thread, not in interrupt
+/// context) -- plain `AtomicU64` (the same width as `RawSocket`) is used
+/// anyway, matching `PIPE_WRITE_FD`'s shape for the identical
+/// "handler finds it without a lock" purpose. `u64::MAX` (never a valid
+/// `SOCKET`) is the "not yet initialized" sentinel.
+#[cfg(windows)]
+static PIPE_WRITE_SOCKET: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// The only thing `console_ctrl_handler` needs to decide safely without
+/// touching `WINDOWS_GLOBAL` under contention it can't otherwise
+/// coordinate with: whether *any* listener anywhere is currently asking
+/// for the event that just fired, so an event nobody registered for can
+/// return `FALSE` (let the next handler / default OS action run) rather
+/// than being silently swallowed. Reused, not process-specific: the
+/// handler still writes the actual event byte through the self-pipe;
+/// `dispatch` (on the reader task) does the real per-listener wake-up
+/// work, exactly mirroring Unix's `handle_signal`/`dispatch` split.
+#[cfg(windows)]
+fn console_event_has_listeners(ctrl_type: u32) -> bool {
+    let Some(Ok(global)) = WINDOWS_GLOBAL.get() else {
+        return false;
+    };
+    let Some(slot) = global.slots.get(ctrl_type as usize) else {
+        return false;
+    };
+    !slot.lock().unwrap().listeners.is_empty()
+}
+
+/// The only thing that runs inside the actual `SetConsoleCtrlHandler`
+/// callback. Unlike Unix's `handle_signal`, this runs on an ordinary
+/// OS-created thread (not interrupt/signal context), so it's under no
+/// async-signal-safety restriction -- it can lock a mutex
+/// ([`console_event_has_listeners`] does) and it does a plain *blocking*
+/// one-byte socket write rather than needing Unix's non-blocking,
+/// async-signal-safe `write(2)`. Still kept minimal on purpose: real
+/// work (waking listeners) happens later in `reader_loop`, the same
+/// split Unix's own docs explain.
+#[cfg(windows)]
+extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    if !console_event_has_listeners(ctrl_type) {
+        return FALSE;
+    }
+    let sock = PIPE_WRITE_SOCKET.load(Ordering::Relaxed);
+    if sock == u64::MAX {
+        return FALSE;
+    }
+    let byte = [ctrl_type as u8];
+    // Best-effort: nothing sensible to do with a write failure from
+    // inside this callback, and the reader task treats "nothing more
+    // ever arrives" the same way Unix's does (see `reader_loop`).
+    let _ = socket::write(sock, &byte);
+    TRUE
+}
+
+/// A plain blocking TCP socket, deliberately *not* flipped non-blocking
+/// the way `io::socket::windows::new_tcp_socket` always does (that one
+/// exists specifically for the non-blocking-before-connect dance
+/// `TcpStream`/`UnixStream::connect` need) -- routed through it anyway
+/// (rather than a hand-rolled `WinSock::socket()` call) purely to reuse
+/// its `WSAStartup`-once guarantee, which this module has no other way
+/// to trigger (`io::socket::windows::wsa_init` is private to that
+/// module). This crate's self-pipe bootstrap wants a genuinely blocking
+/// `connect`/`accept` pair instead -- see [`windows_socket_pair`].
+#[cfg(windows)]
+fn new_blocking_tcp_socket(addr: SocketAddr) -> io::Result<std::os::windows::io::OwnedSocket> {
+    let sock = socket::new_tcp_socket(addr)?;
+    socket::set_nonblocking(sock.as_raw_socket(), false)?;
+    Ok(sock)
+}
+
+/// Windows' self-pipe equivalent: a loopback TCP pair, synchronously
+/// bootstrapped (both sockets genuinely blocking, not the non-blocking-
+/// connect-then-poll-for-writability dance `TcpStream::connect` needs --
+/// a loopback handshake settles synchronously either way, and this runs
+/// once, lazily, with no reactor necessarily available to drive polling
+/// yet). See this module's own top-level "Windows" docs for why a
+/// loopback socket pair stands in for a real pipe here at all (this
+/// crate's Windows reactor is socket-only).
+#[cfg(windows)]
+fn windows_socket_pair() -> io::Result<(WindowsTcpStream, WindowsTcpStream)> {
+    use crate::io::socket::windows::WindowsTcpListener;
+
+    let loopback0 = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0));
+    let listener_sock = new_blocking_tcp_socket(loopback0)?;
+    socket::bind(listener_sock.as_raw_socket(), loopback0)?;
+    socket::listen(listener_sock.as_raw_socket(), 1)?;
+    let listener = WindowsTcpListener::from(listener_sock);
+    let addr = listener.local_addr().map_err(socket::from_platform_err)?;
+
+    let connector_sock = new_blocking_tcp_socket(addr)?;
+    // A blocking `connect()` to loopback blocks briefly (sub-millisecond
+    // in practice) until the handshake genuinely completes, then returns
+    // -- no `WSAEWOULDBLOCK`/`SO_ERROR`-polling ambiguity the way a
+    // non-blocking connect would have (`SO_ERROR` alone can't
+    // distinguish "still connecting" from "connected" without first
+    // waiting for write-readiness, which needs a reactor this bootstrap
+    // deliberately avoids depending on).
+    socket::connect(connector_sock.as_raw_socket(), addr)?;
+    let connector = WindowsTcpStream::from(connector_sock);
+
+    // The connect above only returns once the handshake has completed,
+    // so the listener already has a queued connection by now -- this
+    // `accept()` (on a still-blocking listener socket) returns
+    // immediately rather than genuinely blocking.
+    let (accepted, _peer) = listener.accept().map_err(socket::from_platform_err)?;
+
+    Ok((accepted, connector))
+}
+
+#[cfg(windows)]
+async fn reader_loop(io: Arc<ScheduledIo>, read_sock: WindowsTcpStream) {
+    loop {
+        let mut buf = [0u8; 64];
+        let n = match ready_io(&io, Interest::Read, || {
+            socket::read(read_sock.as_raw_socket(), &mut buf)
+        })
+        .await
+        {
+            Ok(n) if n > 0 => n,
+            // The write end lives in `WindowsGlobal` for the whole
+            // process lifetime, so `n == 0` (EOF) should never actually
+            // happen -- see `reader_loop`'s (Unix) identical comment.
+            _ => return,
+        };
+        for &ctrl_type in &buf[..n] {
+            dispatch(ctrl_type as u32);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn dispatch(ctrl_type: u32) {
+    let Some(Ok(global)) = WINDOWS_GLOBAL.get() else {
+        return;
+    };
+    let Some(slot) = global.slots.get(ctrl_type as usize) else {
+        return;
+    };
+    let mut slot = slot.lock().unwrap();
+    slot.listeners.retain(|weak| {
+        let Some(listener) = weak.upgrade() else {
+            return false;
+        };
+        listener.pending.store(true, Ordering::Release);
+        if let Some(waker) = listener.waker.lock().unwrap().take() {
+            waker.wake();
+        }
+        true
+    });
+}
+
+#[cfg(windows)]
+fn global() -> io::Result<&'static WindowsGlobal> {
+    let result = WINDOWS_GLOBAL.get_or_init(|| -> io::Result<WindowsGlobal> {
+        let reactor = Handle::current().shared.reactor.clone();
+        let (read_sock, write_sock) = windows_socket_pair()?;
+        PIPE_WRITE_SOCKET.store(write_sock.as_raw_socket(), Ordering::Relaxed);
+        read_sock
+            .set_nonblocking(true)
+            .map_err(socket::from_platform_err)?;
+        let io = reactor.register(read_sock.as_raw_socket())?;
+        crate::spawn(reader_loop(io, read_sock));
+
+        // SAFETY: `console_ctrl_handler` has the exact `PHANDLER_ROUTINE`
+        // signature (`extern "system" fn(u32) -> BOOL`) `Some(..)` needs
+        // to coerce into; `TRUE` *adds* this handler rather than
+        // removing it -- every call through `global()` installs, never
+        // uninstalls (matching `install_handler`'s Unix-arm idempotence:
+        // installed exactly once, on the first call, here implicitly via
+        // `OnceLock::get_or_init` rather than a per-signal-number `bool`
+        // since there's only one handler registration to make at all).
+        let installed = unsafe { SetConsoleCtrlHandler(Some(console_ctrl_handler), TRUE) };
+        if installed == FALSE {
+            return Err(io::Error::last_os_error());
+        }
+
+        let slots = std::array::from_fn(|_| {
+            Mutex::new(WindowsSlot {
+                listeners: Vec::new(),
+            })
+        });
+        Ok(WindowsGlobal {
+            slots,
+            _write_sock: write_sock,
+        })
+    });
+    match result {
+        Ok(global) => Ok(global),
+        // See `global`'s (Unix) identical comment: `io::Error` isn't
+        // `Clone`, so every call after the first that observes a failed
+        // initialization gets a fresh, equivalent error instead.
+        Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
+    }
+}
+
+#[cfg(windows)]
+fn listen_for(ctrl_type: u32) -> io::Result<Arc<ListenerState>> {
+    let global = global()?;
+    let Some(slot) = global.slots.get(ctrl_type as usize) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "unrecognized console control event",
+        ));
+    };
+    let listener = Arc::new(ListenerState {
+        pending: AtomicBool::new(false),
+        waker: Mutex::new(None),
+    });
+    slot.lock()
+        .unwrap()
+        .listeners
+        .push(Arc::downgrade(&listener));
+    Ok(listener)
+}
+
+/// Resolves once on the next Ctrl+C (`CTRL_C_EVENT`). Equivalent to
+/// `signal(SignalKind::interrupt())?.recv()` on Unix, through a
+/// genuinely different mechanism underneath (`SetConsoleCtrlHandler`
+/// instead of `sigaction`/`SIGINT`) -- see this module's own "Windows"
+/// docs.
+///
+/// # Panics
+/// Panics if called outside a running [`crate::Runtime`].
+#[cfg(windows)]
+pub async fn ctrl_c() -> io::Result<()> {
+    let listener = listen_for(CTRL_C_EVENT)?;
+    std::future::poll_fn(|cx| poll_listener(&listener, cx)).await;
+    Ok(())
+}
+
+/// Windows-only console-control events with no POSIX equivalent --
+/// `SetConsoleCtrlHandler`'s four events besides Ctrl+C (which
+/// [`super::ctrl_c`] already covers, cross-platform). See the parent
+/// module's own "Windows" docs for why these live in their own
+/// submodule instead of being folded into a generic `SignalKind`, and
+/// for the self-pipe-over-loopback-socket mechanism every listener type
+/// here shares.
+///
+/// Mirrors `tokio::signal::windows`'s own shape exactly: one type per
+/// event, each with its own `recv()`, each coalescing repeated
+/// occurrences into a single pending notification the same way
+/// [`super::Signal`] does on Unix.
+#[cfg(windows)]
+pub mod windows {
+    use super::{listen_for, poll_listener, ListenerState};
+    use std::io;
+    use std::sync::Arc;
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
+    };
+
+    /// Delivered when the process is running as a console process and
+    /// Ctrl+Break is pressed. No Unix equivalent (`SIGINT`'s nearest
+    /// analog is [`super::ctrl_c`], not this).
+    pub struct CtrlBreak(Arc<ListenerState>);
+
+    /// Listens for `CTRL_BREAK_EVENT`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn ctrl_break() -> io::Result<CtrlBreak> {
+        listen_for(CTRL_BREAK_EVENT).map(CtrlBreak)
+    }
+
+    impl CtrlBreak {
+        /// Resolves once this event next arrives -- see [`super::Signal::recv`]
+        /// for the identical coalescing/immediate-if-already-pending
+        /// contract.
+        pub async fn recv(&mut self) -> Option<()> {
+            std::future::poll_fn(|cx| poll_listener(&self.0, cx)).await;
+            Some(())
+        }
+    }
+
+    /// Delivered when the console window is being closed. Windows gives
+    /// the process a short grace period to handle this before it's
+    /// force-terminated regardless of what this handler does -- there is
+    /// no way to indefinitely veto a console close the way ignoring
+    /// `SIGTERM` can indefinitely ignore a Unix termination request.
+    pub struct CtrlClose(Arc<ListenerState>);
+
+    /// Listens for `CTRL_CLOSE_EVENT`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn ctrl_close() -> io::Result<CtrlClose> {
+        listen_for(CTRL_CLOSE_EVENT).map(CtrlClose)
+    }
+
+    impl CtrlClose {
+        /// See [`CtrlBreak::recv`].
+        pub async fn recv(&mut self) -> Option<()> {
+            std::future::poll_fn(|cx| poll_listener(&self.0, cx)).await;
+            Some(())
+        }
+    }
+
+    /// Delivered when the current user is logging off. Not sent to
+    /// services (only interactive console processes) -- no Unix
+    /// equivalent.
+    pub struct CtrlLogoff(Arc<ListenerState>);
+
+    /// Listens for `CTRL_LOGOFF_EVENT`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn ctrl_logoff() -> io::Result<CtrlLogoff> {
+        listen_for(CTRL_LOGOFF_EVENT).map(CtrlLogoff)
+    }
+
+    impl CtrlLogoff {
+        /// See [`CtrlBreak::recv`].
+        pub async fn recv(&mut self) -> Option<()> {
+            std::future::poll_fn(|cx| poll_listener(&self.0, cx)).await;
+            Some(())
+        }
+    }
+
+    /// Delivered when the system is shutting down. Same short-grace-period
+    /// caveat as [`CtrlClose`] -- this is a notice, not an indefinitely
+    /// vetoable request the way ignoring `SIGTERM` is on Unix.
+    pub struct CtrlShutdown(Arc<ListenerState>);
+
+    /// Listens for `CTRL_SHUTDOWN_EVENT`.
+    ///
+    /// # Panics
+    /// Panics if called outside a running [`crate::Runtime`].
+    pub fn ctrl_shutdown() -> io::Result<CtrlShutdown> {
+        listen_for(CTRL_SHUTDOWN_EVENT).map(CtrlShutdown)
+    }
+
+    impl CtrlShutdown {
+        /// See [`CtrlBreak::recv`].
+        pub async fn recv(&mut self) -> Option<()> {
+            std::future::poll_fn(|cx| poll_listener(&self.0, cx)).await;
+            Some(())
+        }
+    }
 }

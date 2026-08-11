@@ -309,9 +309,9 @@
 
 pub mod fs;
 pub mod io;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod process;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod signal;
 pub mod sync;
 pub mod task;
