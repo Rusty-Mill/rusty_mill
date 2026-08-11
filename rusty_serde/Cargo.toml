@@ -1,0 +1,13 @@
+[package]
+name = "rusty_serde"
+version = "0.1.0"
+edition = "2021"
+description = "A hand-rolled, dependency-free reimplementation of the serde data model plus a JSON format."
+license = "MIT"
+
+[features]
+default = ["derive"]
+derive = ["rusty_serde_derive"]
+
+[dependencies]
+rusty_serde_derive = { path = "../rusty_serde_derive", version = "0.1.0", optional = true }
