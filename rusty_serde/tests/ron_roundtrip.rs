@@ -283,3 +283,46 @@ fn same_derived_type_round_trips_through_both_formats() {
     assert_eq!(as_ron, r#"{point:{x:5,y:6},items:[1,2,3],tag:Some("hi")}"#);
     assert_eq!(ron::from_str::<Nested>(&as_ron).unwrap(), value);
 }
+
+/// Both of this crate's formats are text-based, so `is_human_readable()`
+/// is `true` for each of them (the default every `Serializer`/
+/// `Deserializer` impl inherits unless it opts into a compact binary
+/// representation instead) - exercised here with a hand-written impl that
+/// branches on it, the same way a real-world type (a timestamp, say)
+/// would pick a human-editable representation vs. a compact one.
+#[derive(Debug, PartialEq)]
+struct HumanReadableProbe(bool);
+
+impl Serialize for HumanReadableProbe {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: rusty_serde::Serializer,
+    {
+        serializer.is_human_readable().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HumanReadableProbe {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: rusty_serde::Deserializer<'de>,
+    {
+        let human_readable = deserializer.is_human_readable();
+        bool::deserialize(deserializer).map(|_| HumanReadableProbe(human_readable))
+    }
+}
+
+#[test]
+fn is_human_readable_is_true_for_both_of_this_crates_formats() {
+    assert_eq!(json::to_string(&HumanReadableProbe(true)).unwrap(), "true");
+    assert_eq!(
+        json::from_str::<HumanReadableProbe>("true").unwrap(),
+        HumanReadableProbe(true)
+    );
+
+    assert_eq!(ron::to_string(&HumanReadableProbe(true)).unwrap(), "true");
+    assert_eq!(
+        ron::from_str::<HumanReadableProbe>("true").unwrap(),
+        HumanReadableProbe(true)
+    );
+}

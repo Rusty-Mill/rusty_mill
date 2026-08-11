@@ -119,6 +119,11 @@ toolchain, not a crate you depend on), and everything else is `std`.
   always a clear `compile_error!` rather than a silent no-op.
 - `where` clauses on generic structs/enums, forwarded into the generated
   `impl` alongside its own `Serialize`/`Deserialize` bounds.
+- `Serializer`/`Deserializer::is_human_readable()`, so a hand-written
+  `Serialize`/`Deserialize` impl can pick a representation per format (an
+  ISO-8601 string vs. a raw integer for a timestamp, say). Defaults to
+  `true`; both of this crate's own formats (`json`, `ron`) are text-based
+  and inherit that default.
 
 Generics work without the derive macro's parser ever looking at field
 *types* (it only needs field/variant *names*, since `Serialize`/
