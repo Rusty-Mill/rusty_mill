@@ -339,6 +339,64 @@ fn container_rename_all_variants() {
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(rename_all_fields = "camelCase")]
+enum RenameAllFieldsVariants {
+    Started,
+    Ticked { current_step: u32, total_steps: u32 },
+}
+
+#[test]
+fn container_rename_all_fields_leaves_variant_names_alone() {
+    roundtrip(RenameAllFieldsVariants::Started, r#""Started""#);
+}
+
+#[test]
+fn container_rename_all_fields_converts_struct_variant_fields() {
+    roundtrip(
+        RenameAllFieldsVariants::Ticked {
+            current_step: 1,
+            total_steps: 10,
+        },
+        r#"{"Ticked":{"currentStep":1,"totalSteps":10}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(rename_all = "SCREAMING_SNAKE_CASE", rename_all_fields = "camelCase")]
+enum RenameAllAndRenameAllFields {
+    Ticked { current_step: u32 },
+}
+
+#[test]
+fn container_rename_all_and_rename_all_fields_combine() {
+    roundtrip(
+        RenameAllAndRenameAllFields::Ticked { current_step: 3 },
+        r#"{"TICKED":{"currentStep":3}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[rusty_serde(rename_all_fields = "camelCase")]
+enum RenameAllFieldsWithExplicitFieldRename {
+    Ticked {
+        #[rusty_serde(rename = "step")]
+        current_step: u32,
+        total_steps: u32,
+    },
+}
+
+#[test]
+fn container_rename_all_fields_does_not_override_an_explicit_field_rename() {
+    roundtrip(
+        RenameAllFieldsWithExplicitFieldRename::Ticked {
+            current_step: 1,
+            total_steps: 2,
+        },
+        r#"{"Ticked":{"step":1,"totalSteps":2}}"#,
+    );
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[rusty_serde(tag = "kind")]
 enum Shape2 {
     Circle,

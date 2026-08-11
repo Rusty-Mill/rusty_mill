@@ -162,7 +162,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   `rename_all` case-converts every field/variant name that didn't set its
   own `rename` (`lowercase`, `UPPERCASE`, `PascalCase`, `camelCase`,
   `snake_case`, `SCREAMING_SNAKE_CASE`, `kebab-case`,
-  `SCREAMING-KEBAB-CASE`). `tag` (enums only) switches from external
+  `SCREAMING-KEBAB-CASE`). `rename_all_fields` (enums only) is the same
+  idea applied one level down: converts the *fields* of every struct
+  variant across the enum, rather than the variant names themselves
+  (which is what plain `rename_all` on an enum already does) - the two are
+  independent and can be combined, one for variant names and one for
+  their fields; a struct-variant field's own explicit `rename` still wins
+  over either. `tag` (enums only) switches from external
   tagging (`{"Variant": ...}`) to internal tagging (`{"<tag>": "Variant",
   ...fields}`), for unit and named-field variants - tuple/newtype variants
   aren't representable that way (there's no sound way to splice an
