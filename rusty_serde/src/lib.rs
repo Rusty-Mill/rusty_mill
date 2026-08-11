@@ -32,10 +32,12 @@ mod impls;
 pub mod impossible;
 pub mod json;
 pub mod ser;
+pub mod value;
 
 pub use crate::de::{Deserialize, Deserializer};
 pub use crate::error::Error;
 pub use crate::ser::{Serialize, Serializer};
+pub use crate::value::Value;
 
 #[cfg(feature = "derive")]
 pub use rusty_serde_derive::{Deserialize, Serialize};
