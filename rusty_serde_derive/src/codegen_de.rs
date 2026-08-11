@@ -32,7 +32,15 @@ fn ident_enum(
     expecting: &str,
     allow_unknown: bool,
 ) -> String {
-    let mut decls: Vec<String> = entries.iter().map(|(ident, _)| ident.clone()).collect();
+    // A field's aliases add extra rows to `entries` that share its ident
+    // (multiple wire names -> one variant), so the declaration list has to
+    // be deduplicated even though the match arms below use every row.
+    let mut decls: Vec<String> = Vec::new();
+    for (ident, _) in entries {
+        if !decls.contains(ident) {
+            decls.push(ident.clone());
+        }
+    }
     if allow_unknown {
         // Carries the raw key text along, not just an "unknown" tag - a
         // flatten field needs it to rebuild the leftover entries; callers
@@ -361,7 +369,14 @@ fn struct_impl(name: &str, generics: &Generics, fields: &Fields) -> String {
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .flat_map(|f| {
+                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                        f.attrs
+                            .aliases
+                            .iter()
+                            .map(|alias| (f.name.clone(), alias.clone())),
+                    )
+                })
                 .collect();
             let fields_array = active
                 .iter()
@@ -594,7 +609,14 @@ fn untagged_variant_body(
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .flat_map(|f| {
+                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                        f.attrs
+                            .aliases
+                            .iter()
+                            .map(|alias| (f.name.clone(), alias.clone())),
+                    )
+                })
                 .collect();
             let fields_array = active
                 .iter()
@@ -701,7 +723,14 @@ fn variant_arm(
             let entries: Vec<(String, String)> = active
                 .iter()
                 .filter(|f| !f.attrs.flatten)
-                .map(|f| (f.name.clone(), f.wire_name().to_string()))
+                .flat_map(|f| {
+                    std::iter::once((f.name.clone(), f.wire_name().to_string())).chain(
+                        f.attrs
+                            .aliases
+                            .iter()
+                            .map(|alias| (f.name.clone(), alias.clone())),
+                    )
+                })
                 .collect();
             let fields_array = active
                 .iter()

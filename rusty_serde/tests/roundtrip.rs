@@ -802,3 +802,45 @@ fn field_default_path_not_used_when_present() {
     let decoded: WithCustomDefault = json::from_str(r#"{"name":"x","retries":9}"#).unwrap();
     assert_eq!(decoded.retries, 9);
 }
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct Aliased {
+    #[rusty_serde(alias = "n", alias = "nm")]
+    name: String,
+    age: i32,
+}
+
+#[test]
+fn field_alias_accepts_primary_name() {
+    let decoded: Aliased = json::from_str(r#"{"name":"x","age":1}"#).unwrap();
+    assert_eq!(
+        decoded,
+        Aliased {
+            name: "x".into(),
+            age: 1
+        }
+    );
+}
+
+#[test]
+fn field_alias_accepts_any_alternate_name() {
+    let decoded: Aliased = json::from_str(r#"{"n":"x","age":1}"#).unwrap();
+    assert_eq!(decoded.name, "x");
+    let decoded: Aliased = json::from_str(r#"{"nm":"x","age":1}"#).unwrap();
+    assert_eq!(decoded.name, "x");
+}
+
+#[test]
+fn field_alias_serializes_under_the_primary_name_only() {
+    let value = Aliased {
+        name: "x".into(),
+        age: 1,
+    };
+    assert_eq!(json::to_string(&value).unwrap(), r#"{"name":"x","age":1}"#);
+}
+
+#[test]
+fn field_alias_duplicate_via_alias_still_errors() {
+    let err = json::from_str::<Aliased>(r#"{"name":"x","n":"y","age":1}"#).unwrap_err();
+    assert!(err.to_string().contains("duplicate field"));
+}
