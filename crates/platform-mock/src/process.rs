@@ -132,6 +132,16 @@ pub struct MockSpawner {
     pub spawned: Arc<Mutex<Vec<SpawnRecord>>>,
     /// Log of every `adopt` call, for assertions — mirrors `spawned`.
     pub adopted: Arc<Mutex<Vec<u32>>>,
+    /// Pids `is_alive` reports `true` for; unlisted pids report `false`
+    /// (a scripted `Spawner` has no real OS process table, so "alive"
+    /// is whatever the test declares it to be — the same externally-
+    /// mutable-registry shape `spawned`/`adopted` already use). Tests
+    /// populate this directly, e.g. after a `detach()`ed spawn whose
+    /// pid they want a later `is_alive` probe to answer `true` for.
+    pub live_pids: Arc<Mutex<std::collections::BTreeSet<u32>>>,
+    /// Pids `is_zombie` reports `true` for; unlisted pids report
+    /// `false`. Same externally-mutable-registry shape as `live_pids`.
+    pub zombie_pids: Arc<Mutex<std::collections::BTreeSet<u32>>>,
 }
 
 impl MockSpawner {
@@ -264,6 +274,18 @@ impl GroupHandle for MockGroupHandle {
 
 impl Spawner for MockSpawner {
     fn spawn(&self, cmd: &Command) -> Result<Box<dyn Child>> {
+        if cmd.detached && matches!(cmd.group, GroupSpec::JoinGroup(_)) {
+            // Portable contract (`docs/decision-request-detach-liveness.md`):
+            // a fresh session cannot also join an existing, different
+            // pgid — self-contradictory on every backend, not an OS
+            // limitation, so the mock enforces it too rather than only
+            // the native backends.
+            return Err(PlatformError::new(
+                ErrorKind::InvalidInput,
+                OsCode::None,
+                "spawn: detach cannot join an existing group",
+            ));
+        }
         crate::sync::lock(&self.spawned).push(SpawnRecord::from(cmd));
         let script = self.scripts.get(&cmd.program).ok_or_else(|| {
             PlatformError::new(ErrorKind::NotFound, OsCode::None, "spawn")
@@ -289,6 +311,14 @@ impl Spawner for MockSpawner {
     fn adopt(&self, pid: u32) -> Result<Box<dyn GroupHandle>> {
         crate::sync::lock(&self.adopted).push(pid);
         Ok(Box::new(MockGroupHandle))
+    }
+
+    fn is_alive(&self, pid: u32) -> Result<bool> {
+        Ok(crate::sync::lock(&self.live_pids).contains(&pid))
+    }
+
+    fn is_zombie(&self, pid: u32) -> Result<bool> {
+        Ok(crate::sync::lock(&self.zombie_pids).contains(&pid))
     }
 }
 
@@ -355,5 +385,27 @@ mod tests {
         handle.kill_tree(Signal::Kill).expect("kill_tree");
         handle.kill_single(Signal::Term).expect("kill_single");
         assert_eq!(*crate::sync::lock(&spawner.adopted), vec![4242]);
+    }
+
+    #[test]
+    fn is_alive_and_is_zombie_report_whatever_the_test_declared() {
+        let spawner = MockSpawner::new();
+        assert!(!spawner.is_alive(99).expect("probe"));
+        assert!(!spawner.is_zombie(99).expect("probe"));
+
+        crate::sync::lock(&spawner.live_pids).insert(99);
+        crate::sync::lock(&spawner.zombie_pids).insert(99);
+        assert!(spawner.is_alive(99).expect("probe"));
+        assert!(spawner.is_zombie(99).expect("probe"));
+    }
+
+    #[test]
+    fn detach_with_join_group_is_refused() {
+        let spawner = MockSpawner::new().script("true", ExitStatus::Code(0));
+        let cmd = Command::new("true", "/")
+            .group(GroupSpec::JoinGroup(1))
+            .detach();
+        let e = spawner.spawn(&cmd).err().expect("must refuse");
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
     }
 }

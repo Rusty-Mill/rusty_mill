@@ -218,6 +218,37 @@ either), strace-verified on a real 100ms timeout. Scoped to
 `TcpStream` only — no named consumer needs it on `UnixStream`/
 `UdpSocket` yet.
 
+`Command::detach` + `Spawner::is_alive`/`is_zombie`
+(`docs/decision-request-detach-liveness.md`) landed 2026-08-11 against
+an external brief for a not-yet-started daemon-backed agent-harness
+consumer, ahead of the RFC v2 §3 consumer gate by explicit owner
+override — most of the brief (process-group-or-single kill, a
+cross-transport local-IPC listener) turned out to already be shipped
+surface (`Child::kill_tree`/`kill_single`/`GroupHandle`;
+`Net::unix_connect`/`unix_listen` over native Winsock `AF_UNIX`, not
+named pipes) and was not rebuilt. The two genuine gaps: a liveness/
+zombie probe decoupled from `try_wait`'s `Child`-ownership model, and a
+spawn-time `detach()` flag (`POSIX_SPAWN_SETSID` on Linux;
+`CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` on Windows). `detach()`
+composes only with `GroupSpec::Inherit`; `NewGroup` is refused on
+**both** backends, for two unrelated real reasons caught by CI rather
+than assumed: Linux — `setsid` always makes the child a session leader,
+and the kernel's `setpgid(2)` forbids changing a session leader's own
+process group, so the combination fails `posix_spawn` itself with
+`EPERM`; Windows — a kill-on-close Job Object would silently defeat
+`detach`'s "survives a crash" guarantee. `is_zombie` is `Unsupported`
+on Windows, which has no zombie concept (divergence 015). Every line of
+the CI matrix is green (`fmt`, `clippy -D warnings` on every target
+including the `track-w` leg, `test` on ubuntu/windows × stable/1.75,
+miri, cross-compile, `cargo-deny`, unsafe-scope) — two real bugs this
+Windows-sandboxed authoring session could not see locally (a
+`platform-linux`-only `E0282`/`too_many_arguments`, invisible because
+that crate's root is `cfg(target_os = "linux")` and no-ops under
+`cargo check` on Windows; a pid-reuse race in a Windows liveness test,
+caused by testing against a pid whose owning handle the consuming
+`Child::wait` had already closed) surfaced and were fixed against real
+CI feedback, not assumed away.
+
 ## License
 
 MIT — matching the sibling crates (`rush`, `rusty_win32`, `rusty_libc`,

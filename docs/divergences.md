@@ -436,3 +436,32 @@ implementation convenience.
   above; nothing to prove for a call this backend deliberately does not
   make.
 - **Accepted**: 2026-08-10, with the Rusty-Mill fs R2/D2 slice.
+
+## 015 — no zombie concept on Windows
+
+- **Linux**: `Spawner::is_zombie` reads `/proc/<pid>/stat`'s state field;
+  `Z` means the process has terminated but not yet been reaped by its
+  real parent.
+- **Windows**: `Spawner::is_zombie` is always `Unsupported`. A Windows
+  process handle stays valid and its exit code re-readable indefinitely
+  after the process has exited (`Child::try_wait`'s own doc comment) —
+  there is no distinct "exited but unreaped" state for this method to
+  observe, honestly refused rather than always answering `false` (which
+  would silently claim a fact this backend cannot know).
+- **OS limitation**: zombie/reaping is POSIX process-table bookkeeping
+  with no Windows analog; the NT process object model has no comparable
+  intermediate state between "running" and "handle closed".
+- **Pinning tests**: `linux_is_zombie_detects_an_unreaped_child`
+  (`crates/platform-linux/tests/parity.rs`),
+  `windows_is_zombie_is_unsupported`
+  (`crates/platform-windows/tests/parity.rs`).
+- **Accepted**: 2026-08-11, with the `Command::detach`/`Spawner::is_alive`/
+  `Spawner::is_zombie` slice (`docs/decision-request-detach-liveness.md`).
+  (`Command::detach` + `GroupSpec::NewGroup` was drafted as a second
+  divergence here in the same slice, then retracted before this branch
+  merged: a real kernel `EPERM` — Linux `setpgid(2)` forbids changing a
+  session leader's process group ID — turned out to refuse the same
+  combination Linux was first believed to allow, so both backends now
+  agree; uniform refused behavior isn't a divergence. See
+  `docs/decision-request-detach-liveness.md`'s Outcome for the corrected
+  record.)

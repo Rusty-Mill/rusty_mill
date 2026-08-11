@@ -10,6 +10,11 @@ pub use windows_sys::Win32::Foundation::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_SHARING_VIOLATION,
     STATUS_SUCCESS, UNICODE_STRING,
 };
+// `Spawner::is_alive`: `STILL_ACTIVE` is `GetExitCodeProcess`'s
+// documented sentinel for "hasn't exited yet" — a `Foundation` constant
+// (typed `NTSTATUS`/`i32`, not `Threading`), despite being consumed
+// exclusively through the `Threading` process APIs above.
+pub use windows_sys::Win32::Foundation::STILL_ACTIVE;
 // R2-equivalent containment (Rusty-Mill fs slice): `NtCreateFile`'s
 // documented failure when `OBJ_DONT_REPARSE` (`nt_surface`'s own
 // admission) rejects a reparse point encountered during resolution —
@@ -102,6 +107,22 @@ pub use windows_sys::Win32::System::Threading::{
 pub use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
 };
+// `Spawner::is_alive` (`docs/decision-request-detach-liveness.md`):
+// `PROCESS_QUERY_LIMITED_INFORMATION` is the least-privileged access
+// mask that still lets `GetExitCodeProcess` (already admitted above)
+// answer "is this pid still running" for an arbitrary pid, including
+// ones opened at a lower privilege than this process's own; narrower
+// than `adopt`'s `PROCESS_SET_QUOTA | PROCESS_TERMINATE` above, which
+// this query has no need of.
+pub use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+// `Command::detach` (`docs/decision-request-detach-liveness.md`):
+// `CREATE_NEW_PROCESS_GROUP` takes the child out of this process's
+// Ctrl-C group (so a console close/Ctrl-C here doesn't propagate);
+// `DETACHED_PROCESS` gives it no console at all. Both are plain
+// `CreateProcessW` `dwCreationFlags` bits, freely composable with
+// `CREATE_SUSPENDED`/`CREATE_UNICODE_ENVIRONMENT` (already admitted
+// above) — no new Win32 subsystem, no interaction with Job Objects.
+pub use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 pub use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 // Oracle for the winargv tests only: parse a command line the way MSVCRT
 // argv splitting does, to round-trip what `winargv` builds. Not used by

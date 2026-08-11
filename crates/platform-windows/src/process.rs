@@ -244,6 +244,25 @@ impl Spawner for WindowsSpawner {
                 "spawn: GroupSpec::JoinGroup",
             ));
         }
+        if cmd.detached && cmd.group == GroupSpec::NewGroup {
+            // `Command::detach`'s contract (`docs/decision-request-
+            // detach-liveness.md`): a kill-on-close Job Object is torn
+            // down — killing every member — the instant every handle to
+            // it closes, which the OS does unconditionally when this
+            // process terminates for any reason including a crash.
+            // Combined with `detach`, that would silently defeat the
+            // very "survives even a crashed parent" guarantee `detach`
+            // promises. Refused rather than silently dropping one of the
+            // two requests: a caller that wants both a detached child
+            // and a later kill_tree on it uses `detach()` alone at
+            // spawn, then `Spawner::adopt` on its pid when it actually
+            // decides to kill it.
+            return Err(PlatformError::new(
+                ErrorKind::Unsupported,
+                OsCode::None,
+                "spawn: detach with GroupSpec::NewGroup",
+            ));
+        }
         let resolved = self.resolve(&cmd.program)?;
         let args: Vec<&OsStr> = cmd.argv.iter().map(OsString::as_os_str).collect();
         // The security boundary: winargv classifies the resolved program
@@ -256,6 +275,7 @@ impl Spawner for WindowsSpawner {
             &cmd.env,
             [&cmd.stdin, &cmd.stdout, &cmd.stderr],
             cmd.group == GroupSpec::NewGroup,
+            cmd.detached,
         )?;
         Ok(Box::new(WindowsChild {
             process,
@@ -362,5 +382,21 @@ impl Spawner for WindowsSpawner {
     fn adopt(&self, pid: u32) -> Result<Box<dyn GroupHandle>> {
         let (process, job) = proc::adopt(pid)?;
         Ok(Box::new(WindowsGroupHandle { process, job }))
+    }
+
+    fn is_alive(&self, pid: u32) -> Result<bool> {
+        proc::is_alive(pid)
+    }
+
+    fn is_zombie(&self, _pid: u32) -> Result<bool> {
+        // No zombie concept on Windows — a process handle stays valid
+        // and its exit code re-readable indefinitely after exit, with no
+        // distinct "exited but unreaped" state to observe (divergence
+        // 016).
+        Err(PlatformError::new(
+            ErrorKind::Unsupported,
+            OsCode::None,
+            "is_zombie",
+        ))
     }
 }

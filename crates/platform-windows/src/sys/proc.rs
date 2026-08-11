@@ -387,8 +387,22 @@ pub type ParentPipes = [Option<OwnedWinHandle>; 3];
 /// `CREATE_SUSPENDED`, joins a fresh kill-on-close Job Object, and only
 /// then resumes — job membership is guaranteed before the child (or
 /// anything it later spawns) executes a single instruction (extraction
-/// map D2's proven sequence). Returns (process handle, job handle if
-/// grouped, pid, parent pipe ends).
+/// map D2's proven sequence). With `detached`
+/// (`Command::detach`, `docs/decision-request-detach-liveness.md`), the
+/// child also gets `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` — no
+/// console, not a member of this process's Ctrl-C group — composed
+/// freely with `new_group`'s flags (independent `dwCreationFlags` bits,
+/// no interaction with Job Objects). The **caller** (`WindowsSpawner::
+/// spawn`) refuses `detached && new_group` before this function is ever
+/// reached: a kill-on-close Job would be torn down — killing every
+/// member — the instant every handle to it closes, which happens
+/// unconditionally when this process terminates for any reason
+/// including a crash, silently defeating `detached`'s whole purpose
+/// (Linux hits an unrelated real kernel `EPERM` for the same combination
+/// once `Command::detach` sets `POSIX_SPAWN_SETSID`, so both backends
+/// refuse it — see `docs/decision-request-detach-liveness.md`).
+/// Returns (process handle, job handle if grouped,
+/// pid, parent pipe ends).
 ///
 /// **Stays on windows-sys in both Track W configurations (D-15).** The
 /// surrounding job/resume/terminate steps migrated; this `CreateProcessW`
@@ -422,6 +436,7 @@ pub fn spawn(
     env: &EnvSpec,
     stdio: [&Stdio; 3],
     new_group: bool,
+    detached: bool,
 ) -> Result<(OwnedWinHandle, Option<OwnedWinHandle>, u32, ParentPipes)> {
     let mut line: Vec<u16> = command_line.to_vec();
     line.push(0);
@@ -476,6 +491,9 @@ pub fn spawn(
     };
     if new_group {
         flags |= w::CREATE_SUSPENDED;
+    }
+    if detached {
+        flags |= w::CREATE_NEW_PROCESS_GROUP | w::DETACHED_PROCESS;
     }
     let env_ptr = block
         .as_ref()
@@ -809,4 +827,52 @@ pub fn wait(process: &OwnedWinHandle) -> Result<ExitStatus> {
         return Err(errmap::last_win32_err("GetExitCodeProcess", OsStr::new("")));
     }
     Ok(ExitStatus::Code(code as i32))
+}
+
+/// Liveness probe (`Spawner::is_alive`): `OpenProcess` +
+/// `GetExitCodeProcess`. `Ok(true)` if still running (`STILL_ACTIVE`) or
+/// the open itself failed with anything other than "no such process"
+/// (e.g. access denied — the pid exists, this process just can't query
+/// it, the same "exists but not fully reachable" answer Unix's `EPERM`
+/// gives `is_alive` there); `Ok(false)` if `OpenProcess` reports no such
+/// process, or the process has exited (any code other than
+/// `STILL_ACTIVE` — a Windows handle stays queryable after exit, see
+/// `try_wait`'s own doc comment above). Not Track W-gated: no
+/// `rusty_win32` wrapper for this exact least-privilege query exists to
+/// route through — the same "nothing to route through" stance the Net
+/// surface's Unix-socket admission already takes for sockets never
+/// being in rush's required surface.
+pub fn is_alive(pid: u32) -> Result<bool> {
+    // SAFETY: `pid` is caller-supplied and may not name a live process at
+    // all — `OpenProcess` reports that as a `NULL` return, checked below,
+    // not as UB.
+    let handle = unsafe { w::OpenProcess(w::PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let process = match OwnedWinHandle::from_raw(handle) {
+        Some(p) => p,
+        None => {
+            // SAFETY: `GetLastError` takes no arguments and has no
+            // preconditions.
+            let code = unsafe { w::GetLastError() };
+            // `ERROR_INVALID_PARAMETER` is what `OpenProcess` reports for
+            // a pid naming no process, in practice on every Windows
+            // version this backend targets — MSDN documents that code
+            // explicitly only for pid 0 (the System Idle Process) and
+            // leaves the general "no such pid" case formally
+            // unspecified, so this is an empirical classification, the
+            // same honest caveat this codebase already applies to a real
+            // OS call's undocumented-but-consistent-in-practice behavior
+            // elsewhere. Any other failure (e.g. `ERROR_ACCESS_DENIED`)
+            // means the pid exists but this process can't query it,
+            // which still counts as alive.
+            return Ok(code != w::ERROR_INVALID_PARAMETER);
+        }
+    };
+    let mut code: u32 = 0;
+    // SAFETY: `process` is a valid, just-opened handle; `code` is a
+    // valid out-pointer.
+    let ok = unsafe { w::GetExitCodeProcess(process.as_raw(), &mut code) };
+    if ok == 0 {
+        return Err(errmap::last_win32_err("GetExitCodeProcess", OsStr::new("")));
+    }
+    Ok(code == w::STILL_ACTIVE as u32)
 }
