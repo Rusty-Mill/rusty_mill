@@ -88,40 +88,58 @@ toolchain, not a crate you depend on), and everything else is `std`.
   reading it if present, the other always defaults it while still writing
   it). `alias = "..."` (repeatable) accepts extra wire names on deserialize
   alongside the field's primary name/`rename`; serialize is unaffected and
-  always uses the primary name. `serialize_with = "path"` (named struct
-  fields only) serializes via `path(&self.field, serializer)` instead of
-  the field's own `Serialize` impl - `path` matches the ordinary
-  `fn<S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error>`
-  convention, and works even for a field type with no `Serialize` impl at
-  all (or one you don't want used here), e.g. reformatting a
-  `std::time::Duration` as a plain integer:
+  always uses the primary name. `serialize_with = "path"`/
+  `deserialize_with = "path"` (named struct fields only) route the field
+  through `path` instead of its own `Serialize`/`Deserialize` impl - each
+  `path` matches the ordinary
+  `fn<S: Serializer>(value: &T, serializer: S) -> Result<S::Ok, S::Error>`/
+  `fn<'de, D: Deserializer<'de>>(deserializer: D) -> Result<T, D::Error>`
+  convention, and works even for a field type with no `Serialize`/
+  `Deserialize` impl of its own (or one you don't want used here), e.g.
+  reformatting a `std::time::Duration` as a plain integer:
   ```rust
   mod as_seconds {
-      use rusty_serde::Serializer;
+      use rusty_serde::{Deserialize, Deserializer, Serializer};
       use std::time::Duration;
 
       pub fn serialize<S: Serializer>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
           serializer.serialize_u64(value.as_secs())
       }
+
+      pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+          let secs = u64::deserialize(deserializer)?;
+          Ok(Duration::from_secs(secs))
+      }
   }
 
-  #[derive(Serialize)]
+  #[derive(Serialize, Deserialize)]
   struct Event {
-      #[rusty_serde(serialize_with = "as_seconds::serialize")]
+      #[rusty_serde(
+          serialize_with = "as_seconds::serialize",
+          deserialize_with = "as_seconds::deserialize"
+      )]
       elapsed: std::time::Duration,
   }
   ```
   Only scalars, `Option`, unit, and unit/newtype enum variants are
-  supported inside `path` - it can't itself serialize a sequence/tuple/
-  map/struct shape (yet); doing so is a runtime error, not a
-  `compile_error!`, since the derive macro has no way to check `path`'s
-  body ahead of time. Serialize-only for now: there's no `deserialize_with`
-  or bare `with = "module"` (which would need both directions) yet, and
-  `serialize_with` can't be combined with `getter` or
-  `skip_serializing_if` on the same field. See "Generics work without..."
-  below for why this needs an object-safe erasure layer
-  (`rusty_serde::erased`) instead of the straightforward generic wrapper
-  every other attribute in this list gets away with.
+  supported inside either `path` - one that tries a sequence/tuple/map/
+  struct shape gets a runtime error, not a `compile_error!`, since the
+  derive macro has no way to check `path`'s body ahead of time. A
+  `deserialize_with` path always runs against a value already buffered
+  into this crate's format-agnostic `Value` (the same machinery `flatten`/
+  untagged enums use) rather than live input - which means, per `Value`'s
+  own number handling, a small non-negative JSON integer arrives as
+  `Value::Int` (`visit_i64`), not `Value::UInt`/`visit_u64`; delegating to
+  an existing `Deserialize` impl (`u64::deserialize`, above) rather than
+  writing a bespoke `Visitor` sidesteps needing to know that. There's no
+  bare `with = "module"` shorthand for setting both directions at once yet
+  - write out `serialize_with`/`deserialize_with` individually. Neither
+  combines with `getter`, and `serialize_with` doesn't combine with
+  `skip_serializing_if`; `deserialize_with` doesn't combine with
+  `flatten`. See "Generics work without..." below for why this needs an
+  object-safe erasure layer (`rusty_serde::erased`) instead of the
+  straightforward generic wrapper every other attribute in this list gets
+  away with.
 - Container attributes:
   ```rust
   #[derive(Serialize, Deserialize)]
@@ -225,21 +243,40 @@ more conservative than a hand-written impl would be (an unused
 `PhantomData<T>` field would still force `T: Serialize`, since the macro
 can't see that `T` goes unused there).
 
-`serialize_with` is the one place a field's generated code needs to call a
-function generically (over any `S: Serializer`) without the derive macro
-having parsed - or being able to name - that field's own type. A normal
-generic wrapper can't do this (its own `Serialize` impl would need to
-satisfy every possible field type at once, which doesn't type-check for a
-function specific to one type); instead, `rusty_serde::erased` gives the
-with-function a *concrete* stand-in type (`ErasedAsSerializer`) that
-implements the real `Serializer` trait, satisfying the with-function's own
-genericity through ordinary monomorphization. That stand-in forwards each
-call through a small object-safe (`dyn`-compatible) trait - and getting the
-*real* format's result back out through that boundary (an object-safe
-method can't mention an arbitrary `Serializer::Ok` type in its own
-signature) needs one small, deliberately isolated piece of `unsafe` code,
-kept in its own crate (`rusty_serde_erased`) so `rusty_serde` and
-`rusty_serde_derive` themselves stay 100% safe Rust.
+`serialize_with`/`deserialize_with` are the one place a field's generated
+code needs to call a function generically (over any `S: Serializer`/
+`D: Deserializer<'de>`) without the derive macro having parsed - or being
+able to name - that field's own type. A normal generic wrapper can't do
+this (its own `Serialize`/`Deserialize` impl would need to satisfy every
+possible field type at once, which doesn't type-check for a function
+specific to one type); instead, `rusty_serde::erased` gives the with-
+function a *concrete* stand-in type (`ErasedAsSerializer`/
+`ErasedAsDeserializer`) that implements the real trait, satisfying the
+with-function's own genericity through ordinary monomorphization. That
+stand-in forwards each call through a small object-safe (`dyn`-compatible)
+trait - and getting a real value back out through that boundary needs one
+small, deliberately isolated piece of `unsafe` code (`rusty_serde_erased`'s
+`Out`), so `rusty_serde` and `rusty_serde_derive` themselves stay 100%
+safe Rust. Which side of the call needs `Out` flips between the two
+directions: `Serializer::Ok` is opaque per-format, so a *real* serializer
+wrapped as erased needs it to hand its result back to the original
+caller; `Deserializer` has no such opaque type of its own (every method's
+result comes from whichever `Visitor` the caller supplies), so it's the
+caller's *own* `Visitor`, once wrapped as erased, that needs it instead -
+`deserialize_with`'s `T` (the with-function's own, already-concrete return
+type) needs no such hand-off at all, unlike `serialize_with`'s `S::Ok`,
+unknown until called.
+
+`deserialize_with` specifically also routes through this crate's
+`Value`/`ValueDeserializer` buffering (the same machinery `flatten`/
+untagged enums use) before ever reaching the with-function, rather than
+handing it live input directly - `Deserialize::deserialize` has no `&self`
+(a value doesn't exist to read a per-instance function pointer from yet,
+unlike `Serialize::serialize`), so there's no way to carry a specific
+with-function through a single reusable generic wrapper type the way
+`serialize_with`'s `With<T>` does; buffering into the already-nameable
+`Value` type first sidesteps ever needing a per-field type name on this
+side too.
 
 Internally-tagged enums are the one place a JSON value has to be buffered
 into an in-memory tree before it can be deserialized: the tag key can
@@ -270,13 +307,13 @@ consistent with the rest of the project.
   `compile_error!` rather than silently mishandled.
 - Zero-copy deserialization (`&'de str` borrows) - the JSON parser always
   allocates `String`s for simplicity.
-- `deserialize_with` and bare `#[rusty_serde(with = "module")]` (which
-  needs both directions). `serialize_with` (above) is implemented, via an
-  object-safe erasure layer (`rusty_serde::erased`) rather than the
-  `T`-generic-parameter trick real serde uses (which doesn't work here,
-  since this crate's derive macro never parses field types in the first
-  place - see "Generics work without..." above). The same erasure
-  technique extends to `Deserializer`/`Visitor` for `deserialize_with`, but
-  that side isn't built yet. `remote` (above) covers part of the same use
-  case - a foreign type you can't add `#[derive(...)]` to - without needing
-  either.
+- Bare `#[rusty_serde(with = "module")]` (shorthand for setting
+  `serialize_with`/`deserialize_with` to the same module's `serialize`/
+  `deserialize` at once) - `serialize_with` and `deserialize_with`
+  (above) are both implemented individually, via an object-safe erasure
+  layer (`rusty_serde::erased`) rather than the `T`-generic-parameter
+  trick real serde uses (which doesn't work here, since this crate's
+  derive macro never parses field types in the first place - see
+  "Generics work without..." above). `remote` (above) covers part of the
+  same use case - a foreign type you can't add `#[derive(...)]` to -
+  without needing either.
