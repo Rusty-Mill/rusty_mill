@@ -211,6 +211,13 @@ toolchain, not a crate you depend on), and everything else is `std`.
   always a clear `compile_error!` rather than a silent no-op.
 - `where` clauses on generic structs/enums, forwarded into the generated
   `impl` alongside its own `Serialize`/`Deserialize` bounds.
+- `#[rusty_serde(crate = "path")]` (container-only): every generated
+  reference to this crate (normally `::rusty_serde::...`) uses `path`
+  instead, for a crate that re-exports or vendors `rusty_serde` under a
+  different name. Only affects the *generated code's* own path references -
+  the attribute macro's own namespace is always `#[rusty_serde(...)]`
+  regardless, same as real serde's `crate` doesn't change `#[serde(...)]`
+  itself either.
 - `#[rusty_serde(bound = "T: Trait")]` (container-only) replaces the
   derive's auto-generated `T: Serialize`/`T: Deserialize` where-clause
   entirely (both directions), for when the inferred bound is wrong - e.g.

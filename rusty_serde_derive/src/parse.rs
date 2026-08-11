@@ -152,6 +152,11 @@ pub struct Attrs {
     /// and adjacently tagged (`tag` + `content`) enums don't, and reject
     /// `expecting` at parse time rather than silently ignoring it.
     pub expecting: Option<String>,
+    /// Container-only: `#[rusty_serde(crate = "path")]` - every generated
+    /// reference to this crate (normally `::rusty_serde::...`) uses `path`
+    /// instead, for a crate that re-exports or vendors `rusty_serde` under
+    /// a different name. Named `krate` since `crate` is a reserved word.
+    pub krate: Option<String>,
 }
 
 /// Where a field's `#[rusty_serde(default...)]` value comes from.
@@ -217,6 +222,7 @@ impl Attrs {
             && self.deserialize_with.is_none()
             && self.with.is_none()
             && self.expecting.is_none()
+            && self.krate.is_none()
     }
 }
 
@@ -292,6 +298,8 @@ pub enum Data {
         remote: Option<String>,
         /// From a container-level `#[rusty_serde(expecting = "...")]`.
         expecting: Option<String>,
+        /// From a container-level `#[rusty_serde(crate = "path")]`.
+        krate: Option<String>,
     },
     Enum {
         name: String,
@@ -316,7 +324,22 @@ pub enum Data {
         /// external or internal tagging (`untagged`/adjacent enums reject
         /// `expecting` at parse time).
         expecting: Option<String>,
+        /// See `Data::Struct::krate`.
+        krate: Option<String>,
     },
+}
+
+impl Data {
+    /// The container-level `#[rusty_serde(crate = "path")]` override, if
+    /// any - used to rewrite every `::rusty_serde::...` reference in the
+    /// generated code as a final post-processing step (see
+    /// `codegen_ser`/`codegen_de`'s own `generate()`), rather than
+    /// threading a path parameter through every codegen call site.
+    pub fn krate(&self) -> Option<&str> {
+        match self {
+            Data::Struct { krate, .. } | Data::Enum { krate, .. } => krate.as_deref(),
+        }
+    }
 }
 
 /// Where a container's `#[rusty_serde(from...)]` intermediate type comes
@@ -568,6 +591,7 @@ fn parse_struct(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Tok
         into: container_attrs.into,
         remote: container_attrs.remote,
         expecting: container_attrs.expecting,
+        krate: container_attrs.krate,
     })
 }
 
@@ -727,6 +751,7 @@ fn parse_enum(tokens: &mut Tokens, container_attrs: Attrs) -> Result<Data, Token
         from: container_attrs.from,
         into: container_attrs.into,
         expecting: container_attrs.expecting,
+        krate: container_attrs.krate,
     })
 }
 
@@ -1750,6 +1775,25 @@ fn parse_one_meta_item(
                 ));
             }
             attrs.expecting = Some(value);
+        }
+        "crate" => {
+            if context != "container" {
+                return Err(compile_error(&format!(
+                    "`crate` is only supported on the container, not on a {context}"
+                )));
+            }
+            match it.next() {
+                Some(TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                _ => return Err(compile_error("expected `crate = \"...\"`")),
+            }
+            let value = match it.next() {
+                Some(TokenTree::Literal(lit)) => parse_string_literal(&lit)?,
+                _ => return Err(compile_error("expected a string literal after `crate =`")),
+            };
+            if it.peek().is_some() {
+                return Err(compile_error("unexpected tokens after `crate = \"...\"`"));
+            }
+            attrs.krate = Some(value);
         }
         "remote" => {
             if context != "container" {
