@@ -5,8 +5,8 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
-## PR #4 — parity-gap: async multi-child wait (wait_any), closes #4
-**2026-08-12** · [#4](https://github.com/baileyrd/rustils_async/pull/4)
+## PR #7 — parity-gap: async multi-child wait (wait_any), closes #4
+**2026-08-12** · [#7](https://github.com/baileyrd/rustils_async/pull/7)
 
 - **Added:** `AsyncChild::ready()` (borrowing, non-consuming — resolves once a
   child has terminated, without retrieving its status) and
