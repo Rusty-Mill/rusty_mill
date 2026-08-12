@@ -14,7 +14,7 @@ license = "MIT"
 # different revs of the same git dependency as two unrelated crates, so
 # their trait/type identities wouldn't match at a different rev even
 # though the source is otherwise compatible.
-rusty_tokio = { path = "../rusty_tokio" }
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8" }
 # The ecosystem's one shared TLS implementation and trust policy (see its
 # own README/ARCHITECTURE.md) -- this crate is the design's first named
 # consumer. `rusty-tokio` feature enables its async adapter, which is
@@ -24,7 +24,7 @@ rusty_tokio = { path = "../rusty_tokio" }
 # up ALPN protocol negotiation (`AsyncTlsStream::new_with_alpn`/
 # `negotiated_alpn_protocol`) -- this rev's own `rusty_tokio` pin is
 # unchanged (still `ac598c93`), so no matching bump is needed there.
-rusty_tls = { path = "../rusty_tls", features = [
+rusty_tls = { git = "https://github.com/baileyrd/rusty_tls", rev = "233598faf2ffc76c38cd901019f466c1ab0e2267", features = [
     "rusty-tokio",
 ] }
 # The ecosystem's one shared HTTP/1.1 message layer + Url type (see its
@@ -35,7 +35,7 @@ rusty_tls = { path = "../rusty_tls", features = [
 # the RFC 6265 jar `Client`'s cookie store already depended on. Pinned to
 # a specific rev, same convention (and same reasoning) as `rusty_tokio`
 # above.
-rusty_http = { path = "../rusty_http", features = [
+rusty_http = { git = "https://github.com/baileyrd/rusty_http", rev = "7ddc011628c55330ec8dab33524b290cae927426", features = [
     "rusty-tokio",
     "cookies",
 ] }
@@ -99,17 +99,3 @@ tokio = { version = "1", default-features = false, features = [
     "time",
     "io-util",
 ] }
-
-# `rusty_tls` pins its own `rusty_tokio` dependency by git rev rather than
-# by sibling path (its own convention for a cross-repo pin -- see that
-# crate's Cargo.toml). Left alone, that's a *second*, unrelated
-# `rusty_tokio` crate instance in this build's dependency graph -- the
-# same "two revs don't type-check against each other" problem the
-# `rusty_tokio`/`rusty_tls`/`rusty_http` dependency comments above
-# describe, just reached via a path-vs-git mismatch instead of a rev
-# mismatch this time. This redirects that git source to the same sibling
-# checkout everything else here already uses, so there's exactly one
-# `rusty_tokio` in the graph and `rusty_tls::AsyncTlsStream<S>`'s `S:
-# AsyncRead + AsyncWrite` bound is satisfied by this crate's own `Conn`.
-[patch."https://github.com/baileyrd/rusty_tokio"]
-rusty_tokio = { path = "../rusty_tokio" }
