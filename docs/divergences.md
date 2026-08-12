@@ -512,3 +512,20 @@ implementation convenience.
   harness's own repro (`docs/decision-request-af-unix-stale-reclaim-race.md`),
   confirmed on real `windows-latest` CI (PR #127) after being authored in
   a Linux-only sandbox with no native Windows execution of its own.
+- **Related, not itself a divergence**: `is_stale_socket`'s own probe
+  connect can independently see `WSAENOBUFS` ("No buffer space
+  available") instead of the expected `WSAECONNREFUSED`, in the same
+  underlying race — found via the same harness's fuller integration test
+  (a real supervisor with a longer connection history than this entry's
+  own dedicated regression test exercises), not by this entry's own
+  test, which never triggers it. `is_stale_socket` retries its probe a
+  bounded number of times specifically on that code, which resolves it
+  in some cases but is not sufficient on its own — real CI evidence
+  showed it persisting for a full 20+ continuous seconds in
+  `rusty_prime_agent`'s own fuller scenario. That project closed the
+  remaining gap with its own defense in depth (a `probe()`-based
+  liveness check in its `bind_with_retry`, independent of this crate's
+  internal error-code classification) rather than waiting on a complete
+  fix at this layer. Not filed as its own divergence entry: it's the
+  same OS-level race as this entry, just a second symptom of it, not a
+  distinct cross-backend difference in its own right.

@@ -963,11 +963,9 @@ const STALE_PROBE_ENOBUFS_RETRY_DELAY: std::time::Duration = std::time::Duration
 /// comment for why a throwaway `connect` is the only way to tell.
 ///
 /// Real `windows-latest` CI evidence (`rusty_prime_agent`'s own
-/// integration test, traced via the temporary DBG instrumentation still
-/// in this function) showed the probe connect reliably returning
+/// integration test) showed the probe connect reliably returning
 /// `WSAENOBUFS` (10055, "No buffer space available") — not
-/// `WSAECONNREFUSED` — for the *entire* duration of a 20-second outer
-/// retry budget, in exactly the race this module's docs already
+/// `WSAECONNREFUSED` — in exactly the race this module's docs already
 /// describe (rebind right after force-killing a process that also held
 /// a second `AF_UNIX` connection). `WSAENOBUFS` is Winsock's generic
 /// resource-transient code, not a considered "yes/no" answer the way
@@ -975,30 +973,31 @@ const STALE_PROBE_ENOBUFS_RETRY_DELAY: std::time::Duration = std::time::Duration
 /// stale" outright (the previous behavior) means this scenario can
 /// never reclaim, no matter how long the caller retries, since a fresh
 /// probe keeps reproducing the identical code. Retrying the probe
-/// itself specifically on this one code, a bounded number of times with
-/// a short delay, resolves it deterministically in observed practice —
-/// `STALE_PROBE_ENOBUFS_RETRIES` was chosen generously (20 × 25ms = up
-/// to 500ms of extra latency in the worst case) since the alternative
-/// (misreading `WSAENOBUFS` as either "definitely stale" or "definitely
-/// live") each have their own real failure mode: the former can delete
-/// a path a live listener still legitimately holds if this code is ever
-/// genuinely resource-exhaustion-related, not just this race; the
-/// latter is the "can never reclaim" bug this whole change exists to
-/// fix.
+/// itself specifically on this one code narrows the window (and is the
+/// right *shape* of fix, not a wrong one — the alternative of folding
+/// `WSAENOBUFS` straight into "definitely stale" risks deleting a path
+/// a live listener still legitimately holds if this code is ever
+/// genuinely resource-exhaustion-related, not just this race).
+///
+/// **This bounded retry is not sufficient on its own**, per further
+/// real `windows-latest` evidence from the same integration test: in
+/// its fuller, more realistic scenario (a real supervisor with a longer
+/// connection history than this crate's own dedicated regression test),
+/// `WSAENOBUFS` was observed persisting solidly for a full 20+ continuous
+/// seconds, identically on every fresh probe — well past what any bounded
+/// in-process retry here can afford to wait out. `rusty_prime_agent`
+/// closed the remaining gap with its own defense in depth
+/// (`transport::Listener::bind_with_retry`'s `probe()`-based fallback,
+/// which checks liveness via a real request/response round trip instead
+/// of trusting any raw OS error code) rather than waiting on a fix at
+/// this layer alone. See `docs/decision-request-af-unix-stale-reclaim-
+/// race.md` for the full trace across both layers.
 fn is_stale_socket(path: &Path) -> bool {
     for attempt in 0..=STALE_PROBE_ENOBUFS_RETRIES {
         let Ok(probe) = new_unix_socket() else {
-            // TEMPORARY, load-bearing for now -- do not remove until the
-            // rusty_prime_agent Windows CI failure this is diagnosing is
-            // confirmed resolved. See docs/decision-request-af-unix-
-            // stale-reclaim-race.md's "Open questions".
-            eprintln!("DBG: is_stale_socket: new_unix_socket() for the probe failed");
             return false;
         };
         let connect_result = raw_connect_unix(probe.raw(), path);
-        eprintln!(
-            "DBG: is_stale_socket: probe connect to {path:?} (attempt {attempt}) -> {connect_result:?}"
-        );
         let r = match connect_result {
             Ok(()) => 0,
             // The probe only needs to distinguish "refused" (nothing
@@ -1048,10 +1047,9 @@ fn is_stale_socket(path: &Path) -> bool {
 /// (success), which decodes to `OsCode::Win32(0)` / `ErrorKind::Other`
 /// here, not `AddrInUse`. See
 /// `docs/decision-request-af-unix-stale-reclaim-race.md` for the full
-/// writeup, the harness repro this was traced from, and why this is
-/// recorded as a decision request rather than a settled
-/// `docs/divergences.md` entry yet (this backend has not had the fix
-/// verified against a real `windows-latest` run).
+/// writeup and the harness repro this was traced from — confirmed on
+/// real `windows-latest` CI, and promoted to `docs/divergences.md`
+/// **016**.
 ///
 /// A fresh, just-created socket's `bind` genuinely cannot fail with
 /// success — treating that specific nonsensical combination as an
@@ -1077,20 +1075,9 @@ pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
     // only instant it was valid. Note 003's lesson, arriving where it
     // actually changes something.
     let first = raw_bind_unix(sock.raw(), path);
-    // TEMPORARY, load-bearing for now -- do not remove until the
-    // rusty_prime_agent Windows CI failure this is diagnosing is
-    // confirmed resolved. See docs/decision-request-af-unix-stale-
-    // reclaim-race.md's "Open questions".
-    if let Err(e) = &first {
-        eprintln!(
-            "DBG: unix_listen: first bind of {path:?} -> {e:?} (candidate={})",
-            is_stale_bind_candidate(e)
-        );
-    }
     let bound = match first {
         Ok(()) => Ok(()),
         Err(e) if is_stale_bind_candidate(&e) && is_stale_socket(path) => {
-            eprintln!("DBG: unix_listen: reclaiming {path:?}, deleting then retrying bind");
             let wide = to_wide_nul(path.as_os_str());
             // Stays on windows-sys in both configurations: this is a
             // *filesystem* unlink sitting in a net module, and the
