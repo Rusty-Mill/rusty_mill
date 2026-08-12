@@ -16,7 +16,7 @@ tantivy = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 anyhow = "1"
 time = { version = "0.3", features = ["parsing", "formatting"] }
-uuid = { version = "1", features = ["v4"] }
+rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
 
 [dev-dependencies]
 tokio = { workspace = true }

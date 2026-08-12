@@ -118,7 +118,7 @@ pub fn document_to_row(
     let id = document
         .id
         .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(|| rusty_uuid::Uuid::new_v4().to_string());
 
     let mut content_values = Vec::with_capacity(field_order.len());
     let mut fts_values = Vec::new();
