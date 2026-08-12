@@ -5,8 +5,8 @@ to its PR. No version tags yet (pre-1.0).
 
 ---
 
-## Repo governance setup — README, ARCHITECTURE, CONTRIBUTING, SECURITY, etc.
-**2026-08-12** · (not yet merged)
+## PR #3 — Apply standard repo-config governance file set
+**2026-08-12** · [#3](https://github.com/baileyrd/rusty_err/pull/3)
 
 - **Added:** the standard repo-config governance file set — README,
   CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CHANGELOG, RELEASE_NOTES,
