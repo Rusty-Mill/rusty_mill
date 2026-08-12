@@ -8,9 +8,10 @@ pub enum Category {
     Syntax,
     /// Input ended before a complete JSON value was parsed.
     Eof,
-    /// JSON was well-formed but didn't match an expected data shape.
-    /// Unreachable today (this crate has no typed deserialization yet);
-    /// reserved for a future round.
+    /// JSON was well-formed but didn't match an expected data shape --
+    /// e.g. a `Deserialize` type's field was missing, or `serde::de::Error::custom`/
+    /// `serde::ser::Error::custom` was raised by a `Serialize`/`Deserialize`
+    /// impl. Has no meaningful position (see [`Error::line`]/[`Error::column`]).
     Data,
     /// An I/O error occurred while reading/writing JSON (`std` feature
     /// only). Unreachable in a `no_std` build.
