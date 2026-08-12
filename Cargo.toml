@@ -48,6 +48,32 @@ rusty_http = { path = "../rusty_http", features = [
 # dependency, already present in the build graph at a compatible version
 # via `rusty_tls`/the `rustls` dev-dependency below.
 rustls-pki-types = "1"
+# Optional (see the `tokio` feature below): drives the connector over
+# real crates.io `tokio`'s `AsyncRead`/`AsyncWrite` instead of
+# `rusty_tokio`'s, for a consumer (e.g. `rusty_search`) already running
+# inside its own real tokio runtime -- see `src/tokio_compat.rs` for how
+# the two trait sets meet without ever starting a second reactor.
+# `default-features = false` + exactly what's used: `net` (`TcpStream::
+# connect`), `time` (the request timeout and retry backoff sleeps), `rt`
+# (`spawn_blocking` for DNS resolution), `io-util`
+# (`AsyncRead`/`AsyncWrite`/their `*Ext` convenience methods).
+tokio = { version = "1", default-features = false, features = [
+    "net",
+    "time",
+    "rt",
+    "io-util",
+], optional = true }
+
+[features]
+# Off by default so an existing `rusty_tokio`-based consumer sees no
+# change. See `src/tokio_compat.rs`'s module docs for the full picture:
+# `rusty_tls`/`rusty_http` haven't grown a real-tokio adapter of their
+# own yet (unlike `rusty_http`'s own `rusty-tokio`/`tokio` split), so
+# this feature reaches their existing `rusty-tokio`-based adapters
+# through a small compat shim instead of a parallel adapter module --
+# real tokio still does every bit of actual I/O; `rusty_tokio` never
+# runs.
+tokio = ["dep:tokio"]
 
 [dev-dependencies]
 # Test-only: builds a local TLS server (via a self-signed cert) to
@@ -60,3 +86,30 @@ rustls = { version = "0.23", default-features = false, features = [
     "ring",
 ] }
 rcgen = "0.13"
+# Same crate as the optional `tokio` dependency above, unified by Cargo's
+# normal feature resolution -- but with `macros` (`#[tokio::test]`) and
+# `rt` (the current-thread runtime that macro spins up) added on top, the
+# same way `rusty_http`'s own `tokio` dev-dependency does it, so
+# `tests/tokio_feature.rs` (which only runs under `--features tokio`) can
+# use them without the shipped library itself asking for them.
+tokio = { version = "1", default-features = false, features = [
+    "macros",
+    "rt",
+    "net",
+    "time",
+    "io-util",
+] }
+
+# `rusty_tls` pins its own `rusty_tokio` dependency by git rev rather than
+# by sibling path (its own convention for a cross-repo pin -- see that
+# crate's Cargo.toml). Left alone, that's a *second*, unrelated
+# `rusty_tokio` crate instance in this build's dependency graph -- the
+# same "two revs don't type-check against each other" problem the
+# `rusty_tokio`/`rusty_tls`/`rusty_http` dependency comments above
+# describe, just reached via a path-vs-git mismatch instead of a rev
+# mismatch this time. This redirects that git source to the same sibling
+# checkout everything else here already uses, so there's exactly one
+# `rusty_tokio` in the graph and `rusty_tls::AsyncTlsStream<S>`'s `S:
+# AsyncRead + AsyncWrite` bound is satisfied by this crate's own `Conn`.
+[patch."https://github.com/baileyrd/rusty_tokio"]
+rusty_tokio = { path = "../rusty_tokio" }

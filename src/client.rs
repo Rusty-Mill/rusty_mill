@@ -7,7 +7,7 @@ use crate::proxy::{NoProxyRules, Proxy};
 use crate::request::Request;
 use crate::response::Response;
 use crate::retry::RetryPolicy;
-use crate::stream::Conn;
+use crate::stream::{Conn, RawStream};
 use crate::streaming::StreamingResponse;
 use rusty_http::async_tokio::{AsyncTransport, BodyReader};
 use rusty_http::body::{self, Framing};
@@ -16,10 +16,23 @@ use rusty_http::head::RequestHead;
 use rusty_http::url::percent_encode;
 use rusty_http::{HeaderMap, Method, StatusCode, Url, Version};
 use rusty_tls::TrustPolicy;
-use rusty_tokio::io::{AsyncReadExt, TcpStream};
+#[cfg(not(feature = "tokio"))]
+use rusty_tokio::io::AsyncReadExt;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+#[cfg(feature = "tokio")]
+use tokio::io::AsyncReadExt;
+
+/// Real tokio's and `rusty_tokio`'s `time`/`spawn_blocking` are shaped
+/// identically (`timeout`/`sleep` return the same `Result<_, Elapsed>`
+/// shape when awaited; `spawn_blocking` returns the same `Result<_,
+/// _>`-on-join `JoinHandle`), so every call site below is written once
+/// against whichever one this feature selects.
+#[cfg(not(feature = "tokio"))]
+use rusty_tokio::{spawn_blocking, time};
+#[cfg(feature = "tokio")]
+use tokio::{task::spawn_blocking, time};
 
 /// Bytes at a time a streaming request body ([`Body::Stream`]) is relayed
 /// onto the wire per read -- also the max response head size a server
@@ -593,7 +606,7 @@ impl RequestBuilder {
             trust_policy,
         );
         match request_timeout {
-            Some(d) => match rusty_tokio::time::timeout(d, fut).await {
+            Some(d) => match time::timeout(d, fut).await {
                 Ok(inner) => inner,
                 Err(_elapsed) => Err(Error::Timeout),
             },
@@ -651,7 +664,7 @@ impl RequestBuilder {
             trust_policy,
         );
         match request_timeout {
-            Some(d) => match rusty_tokio::time::timeout(d, fut).await {
+            Some(d) => match time::timeout(d, fut).await {
                 Ok(inner) => inner,
                 Err(_elapsed) => Err(Error::Timeout),
             },
@@ -723,7 +736,7 @@ async fn send_with_retries(
             return result;
         }
 
-        rusty_tokio::time::sleep(policy.delay_for(attempt, retry_after)).await;
+        time::sleep(policy.delay_for(attempt, retry_after)).await;
         attempt += 1;
     }
 }
@@ -1089,13 +1102,17 @@ fn hop_target(url: &Url, proxy: Option<&Proxy>) -> HopTarget {
 /// through a proxy), then a TLS handshake, if `target.tls_server_name`
 /// says so (any `https://` hop, tunneled or direct) -- verified per
 /// `trust_policy` (see [`ClientBuilder::trust_policy`]).
-async fn establish(raw: TcpStream, target: &HopTarget, trust_policy: &TrustPolicy) -> Result<Conn> {
-    if let Some((host, port)) = &target.connect_tunnel {
-        let status = connect_tunnel(&raw, host, *port).await?;
-        if !status.is_success() {
-            return Err(Error::ProxyConnectFailed(status));
+async fn establish(raw: RawStream, target: &HopTarget, trust_policy: &TrustPolicy) -> Result<Conn> {
+    let raw = match &target.connect_tunnel {
+        Some((host, port)) => {
+            let (raw, status) = connect_tunnel(raw, host, *port).await?;
+            if !status.is_success() {
+                return Err(Error::ProxyConnectFailed(status));
+            }
+            raw
         }
-    }
+        None => raw,
+    };
     match &target.tls_server_name {
         Some(name) => {
             let tls = rusty_tls::AsyncTlsStream::new(raw, name, trust_policy)?;
@@ -1110,14 +1127,24 @@ async fn establish(raw: TcpStream, target: &HopTarget, trust_policy: &TrustPolic
 const MAX_CONNECT_RESPONSE_LEN: usize = 64 * 1024;
 
 /// Sends `CONNECT host:port HTTP/1.1` on `stream` (a fresh, plain TCP
-/// connection to a proxy) and reads the status line of its response --
-/// `AsyncTransport::read_response_head` stops exactly at the blank line
-/// that ends the head, so a successful (2xx) `CONNECT` response (which
-/// never carries a body) never over-reads into what's actually the start
-/// of the tunneled TLS handshake. A failing response might carry a body,
-/// but this crate has no use for it beyond the status code, so it's left
-/// undrained -- `t.into_inner()` (dropped, here) would discard it anyway.
-async fn connect_tunnel(stream: &TcpStream, host: &str, port: u16) -> Result<StatusCode> {
+/// connection to a proxy) and reads the status line of its response,
+/// handing `stream` back either way via `AsyncTransport::into_inner` --
+/// takes it by value rather than by reference so this works the same
+/// whether `RawStream` is `rusty_tokio`'s own `TcpStream` (which
+/// implements `AsyncRead`/`AsyncWrite` for `&TcpStream` too) or (under
+/// the `tokio` feature) [`crate::tokio_compat::TokioIo`] (which, mirroring
+/// real tokio's own `TcpStream`, only implements them for the owned
+/// value). `AsyncTransport::read_response_head` stops exactly at the
+/// blank line that ends the head, so a successful (2xx) `CONNECT`
+/// response (which never carries a body) never over-reads into what's
+/// actually the start of the tunneled TLS handshake. A failing response
+/// might carry a body, but this crate has no use for it beyond the
+/// status code, so it's left undrained.
+async fn connect_tunnel(
+    stream: RawStream,
+    host: &str,
+    port: u16,
+) -> Result<(RawStream, StatusCode)> {
     let authority = format!("{host}:{port}");
     let mut t = AsyncTransport::new(stream);
     let head = RequestHead {
@@ -1132,7 +1159,7 @@ async fn connect_tunnel(stream: &TcpStream, host: &str, port: u16) -> Result<Sta
     };
     t.write_request_head(&head).await?;
     let resp_head = t.read_response_head(MAX_CONNECT_RESPONSE_LEN).await?;
-    Ok(resp_head.status)
+    Ok((t.into_inner(), resp_head.status))
 }
 
 /// A response too small to have landed a real result yet; the wire
@@ -1339,10 +1366,10 @@ async fn send_one_hop_streaming(
 }
 
 /// DNS resolution is a blocking OS call (`getaddrinfo` under the hood);
-/// running it via [`rusty_tokio::spawn_blocking`] keeps it off the async
-/// worker threads rather than stalling the reactor.
+/// running it via `spawn_blocking` keeps it off the async worker threads
+/// rather than stalling the reactor.
 async fn resolve(host: String, port: u16) -> Result<Vec<SocketAddr>> {
-    let handle = rusty_tokio::spawn_blocking(move || {
+    let handle = spawn_blocking(move || {
         (host.as_str(), port)
             .to_socket_addrs()
             .map(|it| it.collect::<Vec<_>>())
@@ -1366,11 +1393,15 @@ async fn resolve(host: String, port: u16) -> Result<Vec<SocketAddr>> {
 
 /// Tries each resolved address in order (the same "happy eyeballs"-free
 /// sequential fallback `std::net::TcpStream::connect` itself uses),
-/// returning the first that connects.
-async fn connect(addrs: &[SocketAddr]) -> Result<TcpStream> {
+/// returning the first that connects. Dials with real tokio's own
+/// `TcpStream` under the `tokio` feature (wrapped in
+/// [`crate::tokio_compat::TokioIo`] immediately, so every caller past
+/// this point only ever sees a [`RawStream`]) -- `rusty_tokio`'s
+/// otherwise, unchanged from before this feature existed.
+async fn connect(addrs: &[SocketAddr]) -> Result<RawStream> {
     let mut last_err = None;
     for addr in addrs {
-        match TcpStream::connect(*addr).await {
+        match dial(*addr).await {
             Ok(stream) => return Ok(stream),
             Err(e) => last_err = Some(e),
         }
@@ -1381,4 +1412,16 @@ async fn connect(addrs: &[SocketAddr]) -> Result<TcpStream> {
             "no addresses to connect to",
         )
     })))
+}
+
+#[cfg(not(feature = "tokio"))]
+async fn dial(addr: SocketAddr) -> std::io::Result<RawStream> {
+    rusty_tokio::io::TcpStream::connect(addr).await
+}
+
+#[cfg(feature = "tokio")]
+async fn dial(addr: SocketAddr) -> std::io::Result<RawStream> {
+    tokio::net::TcpStream::connect(addr)
+        .await
+        .map(crate::tokio_compat::TokioIo::new)
 }

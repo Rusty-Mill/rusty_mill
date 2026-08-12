@@ -18,6 +18,12 @@
 //! `trust_policy`-based tests below don't consult `SSL_CERT_FILE` at all
 //! (pinning/no-verification never touch the system store), so they're
 //! free to run as ordinary, independent, parallel `#[test]` functions.
+//!
+//! Like `tests/client.rs`, this drives the crate's default (`rusty_tokio`)
+//! backend directly through `tests/common`'s own runtime and servers --
+//! not meaningful (and not run) under the `tokio` feature. See
+//! `tests/tokio_feature.rs` for that feature's own smoke tests.
+#![cfg(not(feature = "tokio"))]
 
 mod common;
 

@@ -104,6 +104,8 @@ mod retry;
 mod stream;
 mod streaming;
 mod tls;
+#[cfg(feature = "tokio")]
+mod tokio_compat;
 
 pub use body::Body;
 pub use client::{Client, ClientBuilder, RequestBuilder};
