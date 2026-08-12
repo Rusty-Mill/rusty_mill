@@ -125,6 +125,18 @@ impl AsyncChild for AsyncLinuxChild {
             PidfdReady::new(reactor, pidfd).await
         })
     }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stdin()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stderr()
+    }
 }
 
 /// Resolves once the wrapped pidfd is readable (RM-ASYNC-ENGINE-0001-

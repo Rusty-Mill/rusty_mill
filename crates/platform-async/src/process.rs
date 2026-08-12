@@ -36,6 +36,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use platform::error::{ErrorKind, OsCode, PlatformError, Result};
+use platform::fs::File;
 use platform::process::{Command, ExitStatus, GroupHandle, Signal};
 
 /// Boxed future — the hand-written equivalent of what an
@@ -89,6 +90,20 @@ pub trait AsyncChild {
     /// case, where retrieval happens afterward via `try_wait`/`wait` on
     /// whichever child answered first.
     fn ready(&self) -> BoxFuture<'_, Result<()>>;
+
+    /// Same contract as [`platform::process::Child::take_stdin`]: the
+    /// parent's write end of the child's stdin, if that slot was
+    /// `Stdio::Pipe`. `Some` exactly once; dropping the handle delivers
+    /// EOF to the child. Stays synchronous — the returned handle is a
+    /// plain [`platform::fs::File`], not a new piece of async machinery
+    /// (no fs async surface exists or is in scope for this repo yet).
+    fn take_stdin(&mut self) -> Option<Box<dyn File>>;
+
+    /// Same contract as [`platform::process::Child::take_stdout`].
+    fn take_stdout(&mut self) -> Option<Box<dyn File>>;
+
+    /// Same contract as [`platform::process::Child::take_stderr`].
+    fn take_stderr(&mut self) -> Option<Box<dyn File>>;
 }
 
 /// A backend capable of spawning processes with an async wait path.
