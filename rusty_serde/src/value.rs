@@ -23,7 +23,10 @@ use crate::de::{
     Deserialize, Deserializer, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
 };
 use crate::error::Error as ErrorTrait;
-use crate::ser::{Serialize, SerializeMap, SerializeSeq, Serializer};
+use crate::ser::{
+    Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
+    SerializeTupleStruct, SerializeTupleVariant, Serializer,
+};
 
 /// A dynamically-typed JSON value.
 #[derive(Debug, Clone, PartialEq)]
@@ -725,5 +728,390 @@ impl<'de, 'a, E: ErrorTrait> VariantAccess<'de> for UnitOnlyVariantAccess<'a, E>
             "expected struct variant, found unit variant `{}`",
             self.name
         )))
+    }
+}
+
+// ---- Building a `Value` directly from a `Serialize` value ----
+//
+// The serialize-side complement of `ValueDeserializer` above: instead of
+// re-driving `Deserialize` against an already-buffered `Value`, this drives
+// `Serialize` and buffers *into* one, without going through any wire
+// format's text representation. Generic over the error type for the same
+// reason `ValueDeserializer` is - a `Serializer` impl's `Error` type has to
+// be concrete, so callers pick it via `ValueSerializer::<D::Error>::new()`.
+//
+// Enum variants are represented exactly as this crate's JSON format writes
+// them on the wire (see `crate::json::ser`): a unit variant is a bare
+// `Value::String`, and newtype/tuple/struct variants are a single-entry
+// `Value::Map` keyed by the variant name. `#[rusty_serde(tag/content/untagged)]`
+// need no special handling here - the derive macro already expresses those
+// entirely in terms of `serialize_map`/`serialize_entry`, which this
+// `Serializer` impl provides like any other.
+
+/// Converts any [`Serialize`] value straight into a [`Value`] tree, without
+/// going through a wire format's text representation. The
+/// [`crate::json::to_value`] wrapper is what most callers want; this free
+/// function exists for formats other than JSON to reuse the same machinery,
+/// the same way [`ValueDeserializer`] is reused by [`crate::json::de`]'s
+/// internally-tagged enum support.
+pub fn to_value<E, T>(value: &T) -> Result<Value, E>
+where
+    E: ErrorTrait,
+    T: Serialize + ?Sized,
+{
+    value.serialize(ValueSerializer::<E>::new())
+}
+
+/// Deserializes an already-buffered [`Value`] into a `T`. The
+/// [`crate::json::from_value`] wrapper is what most callers want; this free
+/// function exists for formats other than JSON to reuse the same machinery.
+pub fn from_value<E, T>(value: Value) -> Result<T, E>
+where
+    E: ErrorTrait,
+    T: for<'de> Deserialize<'de>,
+{
+    T::deserialize(ValueDeserializer::<E>::new(value))
+}
+
+/// A [`Serializer`] that builds a [`Value`] rather than emitting
+/// wire-format output.
+pub struct ValueSerializer<E> {
+    _marker: PhantomData<E>,
+}
+
+impl<E> ValueSerializer<E> {
+    pub fn new() -> Self {
+        ValueSerializer {
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E> Default for ValueSerializer<E> {
+    fn default() -> Self {
+        ValueSerializer::new()
+    }
+}
+
+impl<E: ErrorTrait> Serializer for ValueSerializer<E> {
+    type Ok = Value;
+    type Error = E;
+
+    type SerializeSeq = ValueSeqBuilder<E>;
+    type SerializeTuple = ValueSeqBuilder<E>;
+    type SerializeTupleStruct = ValueSeqBuilder<E>;
+    type SerializeTupleVariant = ValueVariantSeqBuilder<E>;
+    type SerializeMap = ValueMapBuilder<E>;
+    type SerializeStruct = ValueMapBuilder<E>;
+    type SerializeStructVariant = ValueVariantMapBuilder<E>;
+
+    fn serialize_bool(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+    fn serialize_i64(self, v: i64) -> Result<Value, E> {
+        Ok(Value::Int(v))
+    }
+    fn serialize_u64(self, v: u64) -> Result<Value, E> {
+        Ok(Value::UInt(v))
+    }
+    fn serialize_f64(self, v: f64) -> Result<Value, E> {
+        Ok(Value::Float(v))
+    }
+    fn serialize_str(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_string()))
+    }
+    fn serialize_bytes(self, v: &[u8]) -> Result<Value, E> {
+        Ok(Value::Seq(
+            v.iter().map(|&b| Value::UInt(b as u64)).collect(),
+        ))
+    }
+
+    fn serialize_none(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn serialize_some<T>(self, value: &T) -> Result<Value, E>
+    where
+        T: Serialize + ?Sized,
+    {
+        value.serialize(self)
+    }
+
+    fn serialize_unit(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn serialize_unit_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+    ) -> Result<Value, E> {
+        Ok(Value::String(variant.to_string()))
+    }
+    fn serialize_newtype_variant<T>(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        value: &T,
+    ) -> Result<Value, E>
+    where
+        T: Serialize + ?Sized,
+    {
+        let inner = value.serialize(ValueSerializer::<E>::new())?;
+        Ok(Value::Map(vec![(variant.to_string(), inner)]))
+    }
+
+    fn serialize_seq(self, _len: Option<usize>) -> Result<ValueSeqBuilder<E>, E> {
+        Ok(ValueSeqBuilder::new())
+    }
+    fn serialize_tuple(self, len: usize) -> Result<ValueSeqBuilder<E>, E> {
+        Serializer::serialize_seq(self, Some(len))
+    }
+    fn serialize_tuple_struct(
+        self,
+        _name: &'static str,
+        len: usize,
+    ) -> Result<ValueSeqBuilder<E>, E> {
+        Serializer::serialize_seq(self, Some(len))
+    }
+    fn serialize_tuple_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        _len: usize,
+    ) -> Result<ValueVariantSeqBuilder<E>, E> {
+        Ok(ValueVariantSeqBuilder::new(variant))
+    }
+
+    fn serialize_map(self, _len: Option<usize>) -> Result<ValueMapBuilder<E>, E> {
+        Ok(ValueMapBuilder::new())
+    }
+    fn serialize_struct(self, _name: &'static str, _len: usize) -> Result<ValueMapBuilder<E>, E> {
+        Ok(ValueMapBuilder::new())
+    }
+    fn serialize_struct_variant(
+        self,
+        _name: &'static str,
+        _variant_index: u32,
+        variant: &'static str,
+        _len: usize,
+    ) -> Result<ValueVariantMapBuilder<E>, E> {
+        Ok(ValueVariantMapBuilder::new(variant))
+    }
+}
+
+/// Shared by `SerializeSeq`/`SerializeTuple`/`SerializeTupleStruct` - all
+/// three just collect elements into a `Value::Seq`, with no wrapper needed.
+pub struct ValueSeqBuilder<E> {
+    items: Vec<Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E> ValueSeqBuilder<E> {
+    fn new() -> Self {
+        ValueSeqBuilder {
+            items: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: ErrorTrait> SerializeSeq for ValueSeqBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.items
+            .push(value.serialize(ValueSerializer::<E>::new())?);
+        Ok(())
+    }
+    fn end(self) -> Result<Value, E> {
+        Ok(Value::Seq(self.items))
+    }
+}
+
+impl<E: ErrorTrait> SerializeTuple for ValueSeqBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_element<T>(&mut self, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+    fn end(self) -> Result<Value, E> {
+        SerializeSeq::end(self)
+    }
+}
+
+impl<E: ErrorTrait> SerializeTupleStruct for ValueSeqBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        SerializeSeq::serialize_element(self, value)
+    }
+    fn end(self) -> Result<Value, E> {
+        SerializeSeq::end(self)
+    }
+}
+
+/// A tuple variant's elements, wrapped in a single-entry `{variant: [...]}`
+/// map on `end()` to match how this crate's JSON format writes tuple
+/// variants on the wire.
+pub struct ValueVariantSeqBuilder<E> {
+    variant: &'static str,
+    items: Vec<Value>,
+    _marker: PhantomData<E>,
+}
+
+impl<E> ValueVariantSeqBuilder<E> {
+    fn new(variant: &'static str) -> Self {
+        ValueVariantSeqBuilder {
+            variant,
+            items: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: ErrorTrait> SerializeTupleVariant for ValueVariantSeqBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_field<T>(&mut self, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        self.items
+            .push(value.serialize(ValueSerializer::<E>::new())?);
+        Ok(())
+    }
+    fn end(self) -> Result<Value, E> {
+        Ok(Value::Map(vec![(
+            self.variant.to_string(),
+            Value::Seq(self.items),
+        )]))
+    }
+}
+
+/// Shared by `SerializeMap`/`SerializeStruct` - both just collect entries
+/// into a `Value::Map`, with no wrapper needed.
+pub struct ValueMapBuilder<E> {
+    entries: Vec<(String, Value)>,
+    pending_key: Option<String>,
+    _marker: PhantomData<E>,
+}
+
+impl<E> ValueMapBuilder<E> {
+    fn new() -> Self {
+        ValueMapBuilder {
+            entries: Vec::new(),
+            pending_key: None,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: ErrorTrait> SerializeMap for ValueMapBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_key<T>(&mut self, key: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        let key_value = key.serialize(ValueSerializer::<E>::new())?;
+        self.pending_key = Some(value_to_map_key(key_value)?);
+        Ok(())
+    }
+    fn serialize_value<T>(&mut self, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        let key = self
+            .pending_key
+            .take()
+            .expect("serialize_value called without a preceding serialize_key");
+        let value = value.serialize(ValueSerializer::<E>::new())?;
+        self.entries.push((key, value));
+        Ok(())
+    }
+    fn end(self) -> Result<Value, E> {
+        Ok(Value::Map(self.entries))
+    }
+}
+
+impl<E: ErrorTrait> SerializeStruct for ValueMapBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        let value = value.serialize(ValueSerializer::<E>::new())?;
+        self.entries.push((key.to_string(), value));
+        Ok(())
+    }
+    fn end(self) -> Result<Value, E> {
+        Ok(Value::Map(self.entries))
+    }
+}
+
+/// A struct variant's fields, wrapped in a single-entry `{variant: {...}}`
+/// map on `end()` to match how this crate's JSON format writes struct
+/// variants on the wire.
+pub struct ValueVariantMapBuilder<E> {
+    variant: &'static str,
+    entries: Vec<(String, Value)>,
+    _marker: PhantomData<E>,
+}
+
+impl<E> ValueVariantMapBuilder<E> {
+    fn new(variant: &'static str) -> Self {
+        ValueVariantMapBuilder {
+            variant,
+            entries: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<E: ErrorTrait> SerializeStructVariant for ValueVariantMapBuilder<E> {
+    type Ok = Value;
+    type Error = E;
+    fn serialize_field<T>(&mut self, key: &'static str, value: &T) -> Result<(), E>
+    where
+        T: Serialize + ?Sized,
+    {
+        let value = value.serialize(ValueSerializer::<E>::new())?;
+        self.entries.push((key.to_string(), value));
+        Ok(())
+    }
+    fn end(self) -> Result<Value, E> {
+        Ok(Value::Map(vec![(
+            self.variant.to_string(),
+            Value::Map(self.entries),
+        )]))
+    }
+}
+
+/// Coerces a serialized key [`Value`] into the `String` a [`Value::Map`]
+/// entry needs. Only scalar shapes are accepted (matching how this crate's
+/// JSON format's own `KeySerializer` restricts map keys) - a sequence or
+/// map key has no sound string representation.
+fn value_to_map_key<E: ErrorTrait>(value: Value) -> Result<String, E> {
+    match value {
+        Value::String(s) => Ok(s),
+        Value::Bool(b) => Ok(b.to_string()),
+        Value::Int(v) => Ok(v.to_string()),
+        Value::UInt(v) => Ok(v.to_string()),
+        Value::Float(v) => Ok(v.to_string()),
+        other => Err(E::custom(format!(
+            "map keys must be strings, found {other}"
+        ))),
     }
 }

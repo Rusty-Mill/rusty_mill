@@ -6,6 +6,7 @@ use crate::ser::{
     Serialize, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple,
     SerializeTupleStruct, SerializeTupleVariant, Serializer as SerializerTrait,
 };
+use crate::value::Value;
 
 /// Serialize `value` as a compact JSON string.
 pub fn to_string<T>(value: &T) -> Result<String, Error>
@@ -17,6 +18,17 @@ where
     };
     value.serialize(&mut serializer)?;
     Ok(serializer.output)
+}
+
+/// Serialize `value` into a [`Value`] tree, without going through JSON
+/// text. Useful for working with a value's shape programmatically (as
+/// `serde_json::to_value` is), or as a first step before merging it into a
+/// larger `Value`.
+pub fn to_value<T>(value: &T) -> Result<Value, Error>
+where
+    T: Serialize + ?Sized,
+{
+    crate::value::to_value(value)
 }
 
 pub struct Serializer {

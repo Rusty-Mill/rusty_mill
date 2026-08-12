@@ -9,6 +9,6 @@ mod ser;
 /// (see [`crate::value`]), but this is where most people go looking for a
 /// `serde_json::Value` equivalent.
 pub use crate::value::Value;
-pub use de::{from_str, Deserializer};
+pub use de::{from_str, from_value, Deserializer};
 pub use error::Error;
-pub use ser::{to_string, Serializer};
+pub use ser::{to_string, to_value, Serializer};
