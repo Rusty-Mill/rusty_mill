@@ -598,4 +598,51 @@ mod tests {
             .unwrap();
         assert_eq!(results.total, 1);
     }
+
+    #[tokio::test]
+    async fn date_field_round_trips_through_rusty_time_parsing() {
+        let backend = TantivyBackend::in_memory();
+        backend
+            .create_index(
+                "events",
+                Schema::builder().date_field("published_at").build(),
+            )
+            .await
+            .unwrap();
+        backend
+            .index_batch(
+                "events",
+                vec![
+                    Document::new()
+                        .with_id("1")
+                        .set("published_at", "2026-08-12T01:18:55Z"),
+                    Document::new()
+                        .with_id("2")
+                        .set("published_at", "2020-01-01T00:00:00Z"),
+                ],
+            )
+            .await
+            .unwrap();
+        backend.commit("events").await.unwrap();
+
+        let results = backend
+            .search(
+                "events",
+                Query::range("published_at", Some("2025-01-01T00:00:00Z".into()), None).into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.total, 1);
+        assert_eq!(results.hits[0].id, "1");
+
+        let exact = backend
+            .search(
+                "events",
+                Query::term("published_at", "2026-08-12T01:18:55Z").into(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exact.total, 1);
+        assert_eq!(exact.hits[0].id, "1");
+    }
 }

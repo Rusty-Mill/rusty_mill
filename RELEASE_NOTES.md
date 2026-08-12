@@ -5,6 +5,36 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #23 — Swap time for rusty_time in rusty-search-tantivy and rusty-search-sqlite-fts5
+**2026-08-12** · [#23](https://github.com/baileyrd/rusty_search/issues/23)
+
+- **Changed:** `rusty-search-tantivy` and `rusty-search-sqlite-fts5`
+  depend on [`rusty_time`](https://github.com/baileyrd/rusty_time)
+  (pinned git dependency) instead of `time`, for RFC 3339 date
+  parsing/validation on `Date`-typed fields.
+  `rusty-search-tantivy::convert::parse_date` uses
+  `rusty_time::DateTime::parse` + `tantivy::DateTime::from_timestamp_nanos`
+  in place of `time::OffsetDateTime::parse(&Rfc3339)` +
+  `tantivy::DateTime::from_utc` - reconstructing a nanosecond-precision
+  timestamp from `rusty_time::DateTime::timestamp()` (whole seconds) plus
+  `.time().nanosecond()` (the sub-second remainder), since `rusty_time`
+  has no `time::OffsetDateTime`-shaped type to hand to `from_utc`
+  directly. `rusty-search-sqlite-fts5::convert::validate_date` is a
+  simpler swap - just the parser, no conversion needed. Added a new test
+  in each crate exercising a real `Date` field end to end (range query,
+  exact-term query, and - for `sqlite-fts5` - a malformed-date rejection
+  case), since neither crate's existing test suite touched `Date` fields
+  at all.
+- **From:** the `sovereignty-loop` audit, completing the `time`/`uuid`
+  follow-up now that [`rusty_time#1`](https://github.com/baileyrd/rusty_time/issues/1)
+  (RFC 3339 parser) and [`rusty_time#4`](https://github.com/baileyrd/rusty_time/issues/4)
+  (standalone-git-dependency resolution) are both merged. Verified
+  directly before wiring this in: a standalone probe crate depending on
+  `rusty_time = { git = "..." }` builds clean, pulling in
+  `rusty_std`/`rusty_libc`/`rusty_win32` transitively (all confirmed
+  public, so no repo-visibility CI blocker like `rusty_sqlite`/`rusty_uuid`
+  hit earlier).
+
 ## Issue #20 — Swap uuid for rusty_uuid across all seven backend crates
 **2026-08-12** · [#20](https://github.com/baileyrd/rusty_search/issues/20)
 
