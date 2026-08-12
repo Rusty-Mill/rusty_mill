@@ -38,6 +38,11 @@ rusty-search-azure-search = { path = "crates/rusty-search-azure-search", version
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Internal replacement for serde/serde_json, adopted incrementally per
+# crate - see https://github.com/baileyrd/rusty_search/issues/19. Pinned to
+# a specific commit rather than a version since this isn't published to
+# crates.io.
+rusty_serde = { git = "https://github.com/baileyrd/rusty_serde", rev = "caebf39ab26e95362086cccc1fd3f88e90e720bc", features = ["derive"] }
 thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tantivy = "0.26"

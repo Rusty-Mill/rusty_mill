@@ -25,7 +25,7 @@ pub enum SearchError {
     InvalidQuery(String),
 
     #[error("serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(#[from] rusty_serde::json::Error),
 
     /// Catch-all for backend-specific failures (I/O, network, the engine's
     /// own error type, etc). Backends should prefer the typed variants above

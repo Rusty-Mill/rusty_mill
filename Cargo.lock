@@ -1765,8 +1765,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "serde",
- "serde_json",
+ "rusty_serde",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -1865,6 +1864,25 @@ dependencies = [
  "tokio",
  "uuid",
 ]
+
+[[package]]
+name = "rusty_serde"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=caebf39ab26e95362086cccc1fd3f88e90e720bc#caebf39ab26e95362086cccc1fd3f88e90e720bc"
+dependencies = [
+ "rusty_serde_derive",
+ "rusty_serde_erased",
+]
+
+[[package]]
+name = "rusty_serde_derive"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=caebf39ab26e95362086cccc1fd3f88e90e720bc#caebf39ab26e95362086cccc1fd3f88e90e720bc"
+
+[[package]]
+name = "rusty_serde_erased"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=caebf39ab26e95362086cccc1fd3f88e90e720bc#caebf39ab26e95362086cccc1fd3f88e90e720bc"
 
 [[package]]
 name = "rusty_sqlite"

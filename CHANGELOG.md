@@ -5,6 +5,19 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `rusty-search-core` now depends on
+  [`rusty_serde`](https://github.com/baileyrd/rusty_serde) instead of
+  `serde`/`serde_json` - `Document`, `Query`, `VectorQuery`, `Sort`,
+  `SearchRequest`, `Hit`, `SearchResults`, and `Schema`'s types all derive
+  `rusty_serde::{Serialize, Deserialize}` now, and `Document::fields`
+  changes type from `serde_json::Map<String, serde_json::Value>` to
+  `rusty_serde::Value` (JSON wire shape unchanged). **Step 1 of an XL,
+  ecosystem-wide migration** (#19) - every backend crate still depends on
+  real `serde`/`serde_json` and expects the old `Document::fields` type, so
+  the workspace does not build as a whole until they're migrated too in
+  follow-up work. `rusty_serde` gained the `to_value`/`from_value` pair
+  `Document::from_serializable`/`into_serializable` need as a direct
+  prerequisite for this (`rusty_serde` #50).
 - `rusty-search-sqlite-fts5` now depends on
   [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite) instead of
   `rusqlite` directly - same `rusqlite` underneath (re-exported), but with
