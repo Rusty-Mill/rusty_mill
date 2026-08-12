@@ -10,10 +10,6 @@ description = "Sovereign zero-dependency HTTP JSON remote cloud search provider 
 
 [dependencies]
 rusty-search-core = { workspace = true }
-rusty_request = { path = "../../../rusty_request" }
-rusty_json = { path = "../../../rusty_json" }
-rusty_tokio = { path = "../../../rusty_tokio" }
-rusty_std = { path = "../../../rusty_std" }
 async-trait = { workspace = true }
 
 [dev-dependencies]

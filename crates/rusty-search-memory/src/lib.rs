@@ -99,6 +99,11 @@ impl SearchBackend for MemoryBackend {
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
+        if request.vector.is_some() {
+            return Err(SearchError::InvalidQuery(
+                "vector/hybrid search is not supported by rusty-search-memory".into(),
+            ));
+        }
         let indices = self.indices.read().await;
         let idx = indices
             .get(index)
@@ -278,5 +283,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, SearchError::IndexNotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn vector_search_is_rejected() {
+        let backend = seeded_backend().await;
+        assert!(!backend.supports_vector_search());
+        let request = SearchRequest::new(Query::match_all()).vector(
+            rusty_search_core::VectorQuery::new("embedding", vec![0.1, 0.2], 5),
+        );
+        let err = backend.search("articles", request).await.unwrap_err();
+        assert!(matches!(err, SearchError::InvalidQuery(_)));
     }
 }

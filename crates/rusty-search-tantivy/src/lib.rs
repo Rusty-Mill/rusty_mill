@@ -171,6 +171,11 @@ impl SearchBackend for TantivyBackend {
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
+        if request.vector.is_some() {
+            return Err(SearchError::InvalidQuery(
+                "vector/hybrid search is not supported by rusty-search-tantivy".into(),
+            ));
+        }
         let handle = self.handle(index).await?;
 
         let tantivy_query = query_map::build_query(&handle.index, &handle.fields, &request.query)?;

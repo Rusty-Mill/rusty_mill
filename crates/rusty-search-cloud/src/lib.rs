@@ -9,6 +9,7 @@ use rusty_search_core::{
 
 /// Sovereign Remote Cloud Search Provider client.
 pub struct CloudSearchBackend {
+    #[allow(dead_code)] // not yet wired into any SearchBackend method below
     endpoint: String,
 }
 
@@ -39,7 +40,11 @@ impl SearchBackend for CloudSearchBackend {
         Ok(())
     }
 
-    async fn index_batch(&self, _index_name: &str, _docs: Vec<Document>) -> Result<(), SearchError> {
+    async fn index_batch(
+        &self,
+        _index_name: &str,
+        _docs: Vec<Document>,
+    ) -> Result<(), SearchError> {
         Ok(())
     }
 
@@ -51,7 +56,11 @@ impl SearchBackend for CloudSearchBackend {
         Ok(())
     }
 
-    async fn search(&self, _index_name: &str, _request: SearchRequest) -> Result<SearchResults, SearchError> {
+    async fn search(
+        &self,
+        _index_name: &str,
+        _request: SearchRequest,
+    ) -> Result<SearchResults, SearchError> {
         Ok(SearchResults::empty())
     }
 }

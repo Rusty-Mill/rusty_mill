@@ -5,6 +5,54 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #14 — Add a SQLite FTS5 backend, and settle the vector/hybrid-search design question
+**2026-08-12** · [#14](https://github.com/baileyrd/rusty_search/issues/14)
+
+- **Added:** `rusty-search-sqlite-fts5`, a new `SearchBackend` crate backed
+  by SQLite's FTS5 virtual table module (via `rusqlite`'s bundled build -
+  no system SQLite required). Embedded like `rusty-search-tantivy`, but
+  every schema field gets a real, typed SQL column in a `content` table,
+  so `Query::Term`/`Query::Range`/`Sort::Field` all work natively on any
+  field type with no `fast: true` opt-in and no in-memory sort fallback -
+  a real capability advantage over `rusty-search-tantivy`, not just
+  another adapter with the same shape. Supports at most one `Query::Match`
+  clause per search (its `bm25()`-derived score wires to exactly one FTS5
+  join); a second is rejected with `SearchError::InvalidQuery`. Unlike
+  `rusty-search-meilisearch`/`rusty-search-algolia`, `must_not` wrapping a
+  bare `Query::MatchAll`/`Query::Match` needs no special-casing - plain
+  SQL `NOT (...)` handles it directly. Wired into the `rusty-search`
+  facade behind a new `sqlite-fts5` feature flag and into the
+  `pluggable_backends` example (`SqliteFts5Backend::in_memory()`, no
+  external service needed, so it always runs).
+- **Added:** ADR-0008, settling the issue's second ask - whether `Query`
+  grows a vector-similarity variant. Decision: no. `Query`'s nodes are
+  boolean predicates; a k-NN similarity search is a continuous ranking
+  signal with no natural must/should/must_not membership, and fusing it
+  with lexical results is a backend-specific decision `Query`'s existing
+  variants don't need to make individually. Instead, `rusty-search-core`
+  gained a standalone `VectorQuery { field, vector, k }` type and an
+  additive `SearchRequest::vector: Option<VectorQuery>` field (`None` by
+  default, run alongside `query` rather than replacing it - matching
+  `rusty_knowledge`'s stated need for *hybrid*, not vector-only, search),
+  plus `SearchBackend::supports_vector_search() -> bool` (default
+  `false`). All eight pre-existing backends now explicitly reject
+  `request.vector.is_some()` with `SearchError::InvalidQuery` rather than
+  silently ignoring it, matching this workspace's established "fail loud
+  on an unsupported query shape" posture (ADR-0003).
+- **Not included:** actually wiring `sqlite-vec` into
+  `rusty-search-sqlite-fts5` for real hybrid search. That's real,
+  separate work (a second native SQLite extension, plus a fusion-strategy
+  choice) the issue itself flagged as "not urgent" - scoped out
+  deliberately rather than attempted without the same chance to verify it
+  against a real, embedded SQLite build that every other claim in this
+  change got.
+- **Fixed:** a direct, unrelated commit to `main` ("Antigravity Update")
+  had added path dependencies (`rusty_regx`, `rusty_wire`, `rusty_tokio`,
+  `rusty_std`, `rusty_json`, `rusty_request`) pointing at sibling
+  directories that don't exist in this repo and aren't referenced by any
+  source file, breaking `cargo build` for the entire workspace. Removed
+  as a necessary prerequisite to developing and testing this change.
+
 ## PR #13 — Add a "Planned backends" list to README
 **2026-07-21** · [#13](https://github.com/baileyrd/rusty_search/pull/13)
 
