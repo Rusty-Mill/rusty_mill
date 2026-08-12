@@ -131,6 +131,18 @@ impl AsyncChild for AsyncMockChild {
     fn take_stderr(&mut self) -> Option<Box<dyn platform::fs::File>> {
         self.inner.take_stderr()
     }
+
+    fn try_wait_job(&mut self) -> Result<Option<ExitStatus>> {
+        self.inner.try_wait_job()
+    }
+
+    fn wait_job(&mut self) -> BoxFuture<'_, Result<ExitStatus>> {
+        // Scripted children never model a real stop/continue
+        // transition, same as the sync `MockChild::wait_job` this
+        // delegates to — resolves to the scripted terminal status
+        // immediately.
+        Box::pin(std::future::ready(self.inner.wait_job()))
+    }
 }
 
 #[cfg(test)]
@@ -226,5 +238,21 @@ mod tests {
         assert!(child.take_stdin().is_none());
         assert!(child.take_stdout().is_none());
         assert!(child.take_stderr().is_none());
+    }
+
+    #[test]
+    fn wait_job_resolves_to_the_scripted_terminal_status() {
+        let spawner = AsyncMockSpawner::new().script("echo", ExitStatus::Code(0));
+        let mut child = spawner.spawn(&Command::new("echo", "/")).expect("spawn");
+        let status = block_on(child.wait_job()).expect("wait_job");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn try_wait_job_resolves_to_the_scripted_terminal_status() {
+        let spawner = AsyncMockSpawner::new().script("echo", ExitStatus::Code(0));
+        let mut child = spawner.spawn(&Command::new("echo", "/")).expect("spawn");
+        let status = child.try_wait_job().expect("try_wait_job");
+        assert_eq!(status, Some(ExitStatus::Code(0)));
     }
 }
