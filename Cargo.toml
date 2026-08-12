@@ -1,3 +1,6 @@
+[workspace]
+members = ["derive"]
+
 [package]
 name = "rusty_err"
 version = "0.1.0"
@@ -15,6 +18,7 @@ categories = ["rust-patterns", "no-std"]
 # doesn't exist for CI or any external consumer (matches rusty_std's own
 # rationale for pinning rusty_libc/rusty_win32 the same way).
 rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
+rusty_err_derive = { path = "derive", version = "0.1.0" }
 
 [features]
 default = []
