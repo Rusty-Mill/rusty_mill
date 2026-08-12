@@ -11,10 +11,19 @@ to its PR. No version tags yet (pre-1.0).
 - **Added:** the standard repo-config governance file set — README,
   CONTRIBUTING, CODE_OF_CONDUCT, SECURITY, CHANGELOG, RELEASE_NOTES,
   ARCHITECTURE, and an ADR seed under `docs/adr/`.
-- **Known limitation:** this skill's installed template assets are missing
-  `.github/PULL_REQUEST_TEMPLATE/`, `.github/ISSUE_TEMPLATE/`, and the
-  stack-selected CI workflow (`ci-rust.yml`) — none of those were applied
-  here, only the eight root/docs markdown files.
+- **Added:** `.github/PULL_REQUEST_TEMPLATE/`, `.github/ISSUE_TEMPLATE/`, and
+  a `ci-rust.yml` workflow (fmt --check, clippy -D warnings, test), once a
+  local skill-installation gap that was blocking them got fixed separately.
+- **Fixed:** `rusty_std` was a `path = "../rusty_std"` dependency, which only
+  resolves when a sibling checkout happens to already exist — it fails
+  outright on a fresh CI checkout of just this repo (verified directly).
+  Switched to a pinned `git` dependency, matching the exact pattern
+  `rusty_std` itself already uses for `rusty_libc`/`rusty_win32`. Without
+  this, `ci-rust.yml` would have been permanently red.
+- Verified locally end-to-end: `cargo fmt --all -- --check`, `cargo clippy
+  --all-targets --all-features -- -D warnings`, and `cargo test
+  --all-features` all pass; a fresh clone (no sibling `rusty_std` present)
+  builds successfully.
 
 ## PR #2 — Add #[derive(Error)] macro and BoxError
 **2026-08-12** · [#2](https://github.com/baileyrd/rusty_err/pull/2)
