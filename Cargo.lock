@@ -76,7 +76,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "platform"
 version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=4550f6900e8b9ead54374fbfcb1039b48307b2f3#4550f6900e8b9ead54374fbfcb1039b48307b2f3"
+source = "git+https://github.com/baileyrd/rustils?rev=bc4f6a6a95e2fde628d6064d9584590bfd54fb6e#bc4f6a6a95e2fde628d6064d9584590bfd54fb6e"
 dependencies = [
  "thiserror",
 ]
@@ -84,7 +84,7 @@ dependencies = [
 [[package]]
 name = "platform-bsd"
 version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=4550f6900e8b9ead54374fbfcb1039b48307b2f3#4550f6900e8b9ead54374fbfcb1039b48307b2f3"
+source = "git+https://github.com/baileyrd/rustils?rev=bc4f6a6a95e2fde628d6064d9584590bfd54fb6e#bc4f6a6a95e2fde628d6064d9584590bfd54fb6e"
 dependencies = [
  "libc",
  "platform",
@@ -93,7 +93,7 @@ dependencies = [
 [[package]]
 name = "platform-linux"
 version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=4550f6900e8b9ead54374fbfcb1039b48307b2f3#4550f6900e8b9ead54374fbfcb1039b48307b2f3"
+source = "git+https://github.com/baileyrd/rustils?rev=bc4f6a6a95e2fde628d6064d9584590bfd54fb6e#bc4f6a6a95e2fde628d6064d9584590bfd54fb6e"
 dependencies = [
  "libc",
  "platform",
@@ -102,7 +102,7 @@ dependencies = [
 [[package]]
 name = "platform-windows"
 version = "0.27.0"
-source = "git+https://github.com/baileyrd/rustils?rev=4550f6900e8b9ead54374fbfcb1039b48307b2f3#4550f6900e8b9ead54374fbfcb1039b48307b2f3"
+source = "git+https://github.com/baileyrd/rustils?rev=bc4f6a6a95e2fde628d6064d9584590bfd54fb6e#bc4f6a6a95e2fde628d6064d9584590bfd54fb6e"
 dependencies = [
  "platform",
  "winargv",
@@ -233,7 +233,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "winargv"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rustils?rev=4550f6900e8b9ead54374fbfcb1039b48307b2f3#4550f6900e8b9ead54374fbfcb1039b48307b2f3"
+source = "git+https://github.com/baileyrd/rustils?rev=bc4f6a6a95e2fde628d6064d9584590bfd54fb6e#bc4f6a6a95e2fde628d6064d9584590bfd54fb6e"
 dependencies = [
  "platform",
 ]
