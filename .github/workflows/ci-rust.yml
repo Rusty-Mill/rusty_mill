@@ -15,6 +15,15 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      # actions/checkout injects an auth header for all of github.com (not
+      # just this repo) so it can handle private repos/submodules. That
+      # header breaks Cargo's default libgit2-based fetch of *other*
+      # github.com repos used as git dependencies (e.g. rusty_serde, pinned
+      # by commit since it isn't on crates.io) - "failed to authenticate"/
+      # "revision not found" even though the commit is real and public.
+      # Shelling out to the system git CLI instead sidesteps it.
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
     steps:
       - uses: actions/checkout@v4
 
