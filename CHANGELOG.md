@@ -43,13 +43,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   #17.
 
 ### Fixed
-- CI: set `CARGO_NET_GIT_FETCH_WITH_CLI=true` for the `check` job.
-  `actions/checkout`'s github.com-wide auth header broke Cargo's default
-  libgit2-based fetch of the `rusty_serde` git dependency (pinned by
-  commit, since it isn't on crates.io) - "failed to authenticate"/
-  "revision not found" even though the commit was real and public.
-  Shelling out to the system git CLI instead sidesteps it. Blocked CI on
-  every PR touching a crate migrated to `rusty_serde` (#19) until fixed.
+- CI: `actions/checkout@v4` now runs with `persist-credentials: false` in
+  the `check` job. Its default github.com-wide auth header broke Cargo's
+  fetch of the `rusty_serde` git dependency (pinned by commit, since it
+  isn't on crates.io) - "failed to authenticate"/"revision not found"
+  even though the commit was real and public, and unaffected by whether
+  Cargo used its bundled libgit2 or `CARGO_NET_GIT_FETCH_WITH_CLI`'s
+  system-git-CLI fallback (tried first; still failed under the same
+  header, so not the actual fix). Blocked CI on every PR touching a crate
+  migrated to `rusty_serde` (#19) until fixed.
 - Removed unused, unresolvable path dependencies (`rusty_regx`, `rusty_wire`,
   `rusty_tokio`, `rusty_std`, `rusty_json`, `rusty_request`) accidentally
   committed straight to `main` pointing at sibling directories that don't
