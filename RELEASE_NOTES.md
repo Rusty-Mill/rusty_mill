@@ -5,6 +5,21 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #12 — parity-loop rerun: confirm no remaining gaps
+**2026-08-12** · [#12](https://github.com/baileyrd/rustils_async/pull/12)
+
+- **Added:** a second `gap-analysis.md` rerun entry, re-checking `rustils`
+  for drift (`origin/main` unchanged at `9d3ab36` since the prior rerun)
+  and re-enumerating the *entire* `Spawner`/`Child` trait surface against
+  `AsyncSpawner`/`AsyncChild` symbol-for-symbol in both directions, rather
+  than only re-verifying the previously-filed rows.
+- **Result: zero gaps found.** `AsyncSpawner`/`AsyncChild` fully cover
+  `Spawner`/`Child` for the process domain now — no issues filed, no code
+  changed. The `parity-loop` stop condition holds, confirmed on a second
+  consecutive rerun rather than assumed stable from the first (which is
+  exactly how the prior rerun caught `is_zombie`, issue #10, that the
+  original pass missed).
+
 ## PR #11 — parity-gap: async liveness probe (is_zombie), closes #10
 **2026-08-12** · [#11](https://github.com/baileyrd/rustils_async/pull/11)
 
