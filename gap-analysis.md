@@ -26,6 +26,38 @@ the current `rustils::platform::process::{Spawner, Child}` trait definitions.
   the first place — this is a sync-side implementation detail with no
   async-side counterpart to be missing.
 
+## Rerun — 2026-08-12 (after issue #10/PR #11 merged)
+
+Re-checked for drift and re-enumerated the full `Spawner`/`Child` trait
+surface against `AsyncSpawner`/`AsyncChild` symbol-for-symbol, rather than
+re-verifying only the previously-filed rows (the same discipline that
+caught `is_zombie` last time).
+
+- `rustils`' `origin/main` is still at `9d3ab36` — no commits landed
+  upstream since the prior rerun, so there is nothing new to diff and the
+  pin stays valid unchanged.
+- Full symbol enumeration, this time both directions:
+  - `Spawner`: `spawn`, `resolve`, `wait_any`, `adopt`, `is_alive`,
+    `is_zombie` — all six present on `AsyncSpawner` (the last two as
+    synchronous pass-throughs, per `RM-DEV-ASYNC-0001`).
+  - `Child`: `wait`, `id`, `kill_tree`, `kill_single`, `try_wait`,
+    `wait_job`, `try_wait_job`, `take_stdin`, `take_stdout`, `take_stderr`
+    — all nine present on `AsyncChild` (plus `ready`, the async-only
+    multiplexing primitive `wait_any` is built on, with no sync
+    counterpart to diff against by construction). `as_any_mut` stays
+    excluded for the reason already given above.
+  - No other in-scope symbols: `Command`/`Stdio`/`EnvSpec`/`GroupSpec`/
+    `ExitStatus`/`Signal`/`PlatformError` are shared types via the pinned
+    git dependency (no gap possible by construction); `GroupHandle`
+    already matches (`kill_tree`/`kill_single`); fs/net/Windows/BSD stay
+    out of scope per the roadmap, unchanged.
+- **Result: zero gaps found.** `AsyncSpawner`/`AsyncChild` now cover the
+  `Spawner`/`Child` surface completely for the one domain both repos are
+  committed to. No issues filed, no PR needed beyond this doc update — the
+  `parity-loop` stop condition ("no open `parity-gap` issues remain")
+  holds, confirmed on a second consecutive rerun rather than assumed
+  stable from the first.
+
 ## Step 0 — scope, settled from the target's own roadmap
 
 `rustils_async` already carries a hand-curated scope doc, so this run audits
