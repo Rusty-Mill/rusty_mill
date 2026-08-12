@@ -33,7 +33,7 @@ pub fn document_to_source(document: Document) -> (String, JsonValue) {
     let id = document
         .id
         .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(|| rusty_uuid::Uuid::new_v4().to_string());
     (id, JsonValue::Object(document.fields))
 }
 

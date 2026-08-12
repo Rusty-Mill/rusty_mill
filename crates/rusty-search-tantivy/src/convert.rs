@@ -83,7 +83,7 @@ pub fn document_to_tantivy(
     let id = document
         .id
         .clone()
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        .unwrap_or_else(|| rusty_uuid::Uuid::new_v4().to_string());
 
     let mut object = document.fields;
     object.insert(ID_FIELD_NAME.to_string(), JsonValue::String(id.clone()));
