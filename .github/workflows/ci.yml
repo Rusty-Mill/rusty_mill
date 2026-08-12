@@ -16,6 +16,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # This crate's Cargo.toml depends on rusty_tokio/rusty_tls/rusty_http
+      # via sibling `path = "../..."` dependencies (see its own comments for
+      # why -- these are the ecosystem's shared runtime/TLS/HTTP crates, and
+      # this repo's convention is a monorepo-style sibling checkout rather
+      # than a registry or git-rev dependency). Without checking them out
+      # as siblings of this repo's own checkout here, `cargo` can't resolve
+      # those paths at all -- not a version/feature issue, just missing
+      # directories.
+      - name: Checkout sibling rusty_tokio
+        uses: actions/checkout@v4
+        with:
+          repository: baileyrd/rusty_tokio
+          path: ../rusty_tokio
+
+      - name: Checkout sibling rusty_tls
+        uses: actions/checkout@v4
+        with:
+          repository: baileyrd/rusty_tls
+          path: ../rusty_tls
+
+      - name: Checkout sibling rusty_http
+        uses: actions/checkout@v4
+        with:
+          repository: baileyrd/rusty_http
+          path: ../rusty_http
+
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
