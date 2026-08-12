@@ -81,6 +81,10 @@ impl AsyncSpawner for AsyncMockSpawner {
     fn is_alive(&self, pid: u32) -> Result<bool> {
         self.inner.is_alive(pid)
     }
+
+    fn is_zombie(&self, pid: u32) -> Result<bool> {
+        self.inner.is_zombie(pid)
+    }
 }
 
 struct AsyncMockChild {
@@ -209,6 +213,14 @@ mod tests {
         let mut children: Vec<Box<dyn AsyncChild>> = Vec::new();
         let err = block_on(spawner.wait_any(&mut children, None)).expect_err("must fail");
         assert_eq!(err.kind, platform::error::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn is_zombie_reports_whatever_the_test_declared() {
+        let spawner = AsyncMockSpawner::new();
+        assert!(!spawner.is_zombie(99).expect("probe"));
+        spawner.inner().zombie_pids.lock().unwrap().insert(99);
+        assert!(spawner.is_zombie(99).expect("probe"));
     }
 
     #[test]

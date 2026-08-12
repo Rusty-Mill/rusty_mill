@@ -142,6 +142,13 @@ pub trait AsyncSpawner: Send + Sync {
     /// Same contract as [`platform::process::Spawner::is_alive`].
     fn is_alive(&self, pid: u32) -> Result<bool>;
 
+    /// Same contract as [`platform::process::Spawner::is_zombie`]: already
+    /// non-blocking on the sync side (`RM-DEV-ASYNC-0001` — work that
+    /// doesn't wait stays sync, same reasoning already applied to
+    /// `is_alive`/`adopt`/`resolve` above), so this is a pure pass-through,
+    /// not new async machinery.
+    fn is_zombie(&self, pid: u32) -> Result<bool>;
+
     /// Async counterpart to [`platform::process::Spawner::wait_any`] /
     /// the free fn [`platform::process::wait_any`]: wait for *some*
     /// child in `children` to terminate, for up to `timeout` (`None` =
