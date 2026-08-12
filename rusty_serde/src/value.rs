@@ -107,6 +107,42 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Inserts a key/value entry into a `Value::Map`, in place. Overwrites
+    /// and returns the previous value if `key` was already present
+    /// (matching `HashMap::insert`/`serde_json::Map::insert`'s
+    /// convention), otherwise appends a new entry and returns `None`.
+    ///
+    /// A no-op returning `None` on any non-`Map` value (including
+    /// `Value::Null`, so this doesn't double as a way to turn a fresh
+    /// `Value::default()`-less value into a map - construct
+    /// `Value::Map(Vec::new())` explicitly first) - same "acts like an
+    /// empty map rather than panicking" convention [`Value::get`] and the
+    /// `Index` impls already use for a shape mismatch.
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<Value>) -> Option<Value> {
+        let Value::Map(entries) = self else {
+            return None;
+        };
+        let key = key.into();
+        let value = value.into();
+        match entries.iter_mut().find(|(k, _)| *k == key) {
+            Some(entry) => Some(std::mem::replace(&mut entry.1, value)),
+            None => {
+                entries.push((key, value));
+                None
+            }
+        }
+    }
+
+    /// Removes and returns a `Value::Map` entry by key, if present. A
+    /// no-op returning `None` on any non-`Map` value or a missing key.
+    pub fn remove(&mut self, key: &str) -> Option<Value> {
+        let Value::Map(entries) = self else {
+            return None;
+        };
+        let pos = entries.iter().position(|(k, _)| k == key)?;
+        Some(entries.remove(pos).1)
+    }
 }
 
 impl Index<&str> for Value {
