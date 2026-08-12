@@ -60,13 +60,19 @@ impl<T, E: Display> Context<T, E> for Result<T, E> {
 /// Type-erasure helper implemented for every sovereign [`Error`], giving
 /// [`BoxError`] a way to downcast back to the concrete type it was built
 /// from.
-trait AnyError: Error {
+///
+/// Bounded by `Send + Sync` (on top of [`Error`] itself) so that
+/// `Box<dyn AnyError>` — and therefore [`BoxError`] — is `Send + Sync`
+/// unconditionally, matching `anyhow::Error`'s own guarantee. This is what
+/// lets `BoxError` satisfy the `Send` futures that `#[async_trait]` methods
+/// require by default.
+trait AnyError: Error + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
     fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
 
-impl<E: Error + 'static> AnyError for E {
+impl<E: Error + Send + Sync + 'static> AnyError for E {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -86,13 +92,17 @@ impl<E: Error + 'static> AnyError for E {
 /// `String` and discards it, `BoxError` boxes the original error behind one
 /// type while preserving [`Display`], [`Debug`], [`Error::source`] chaining,
 /// and the ability to downcast back to the concrete type.
+///
+/// `BoxError` is `Send + Sync` unconditionally (the boxed error must be
+/// `Send + Sync` too — see [`BoxError::new`]), so it can be used as the
+/// error type of `Send` futures, e.g. in `#[async_trait]` method signatures.
 pub struct BoxError {
     inner: Box<dyn AnyError>,
 }
 
 impl BoxError {
     /// Boxes any sovereign [`Error`] into a type-erased `BoxError`.
-    pub fn new<E: Error + 'static>(err: E) -> Self {
+    pub fn new<E: Error + Send + Sync + 'static>(err: E) -> Self {
         BoxError {
             inner: Box::new(err),
         }
@@ -140,7 +150,7 @@ impl Display for BoxError {
     }
 }
 
-impl<E: Error + 'static> From<E> for BoxError {
+impl<E: Error + Send + Sync + 'static> From<E> for BoxError {
     fn from(err: E) -> Self {
         BoxError::new(err)
     }
@@ -231,5 +241,15 @@ mod tests {
         // including being boxed by `BoxError`.
         let boxed: BoxError = ForeignError.into();
         assert_eq!(boxed.to_string(), "foreign failure");
+    }
+
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[test]
+    fn box_error_is_send_and_sync() {
+        // Regression test for the `#[async_trait]` blocker from
+        // https://github.com/baileyrd/rusty_err/issues/4: `BoxError` must be
+        // `Send + Sync` unconditionally, matching `anyhow::Error`.
+        assert_send_sync::<BoxError>();
     }
 }

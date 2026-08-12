@@ -5,6 +5,26 @@ to its PR. No version tags yet (pre-1.0).
 
 ---
 
+## PR #5 — Make BoxError Send + Sync
+**2026-08-12** · [#5](https://github.com/baileyrd/rusty_err/pull/5)
+
+- **Fixed:** `BoxError` wasn't `Send`/`Sync` unconditionally, which broke
+  any error type embedding one when used across an `#[async_trait]`
+  boundary (those default to `Send` futures). Root cause: `AnyError`, the
+  private trait `BoxError` boxes errors behind, had no `Send`/`Sync` bound.
+  Added `Send + Sync` as supertrait bounds on `AnyError`, and required them
+  on `BoxError::new`'s/`From<E>`'s `E: Error + 'static` bound — matching
+  `anyhow::Error`'s own construction-time guarantee. The base `Error` trait
+  itself stays unbounded, so non-thread-safe types can still implement it;
+  they just can't be boxed by `BoxError`.
+- 2 new regression tests: `box_error_is_send_and_sync` mirrors the issue's
+  compile probe directly, `search_error_is_send` asserts a
+  `#[derive(Error)]` enum with a `BoxError` field is itself `Send`.
+- Verified locally: `cargo test --all-features`, `cargo fmt --all --
+  --check`, and `cargo clippy --all-targets --all-features -- -D warnings`
+  all pass.
+- Fixes [#4](https://github.com/baileyrd/rusty_err/issues/4).
+
 ## PR #3 — Apply standard repo-config governance file set
 **2026-08-12** · [#3](https://github.com/baileyrd/rusty_err/pull/3)
 

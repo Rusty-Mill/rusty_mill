@@ -41,9 +41,20 @@ enum SearchError {
 impl SearchError {
     /// Analogous to the issue's per-backend `backend_err()` helpers: boxes
     /// any sovereign error into the catch-all `Backend` variant.
-    fn backend(err: impl Error + 'static) -> Self {
+    fn backend(err: impl Error + Send + Sync + 'static) -> Self {
         SearchError::Backend(BoxError::new(err))
     }
+}
+
+fn assert_send<T: Send>() {}
+
+#[test]
+fn search_error_is_send() {
+    // Regression test for https://github.com/baileyrd/rusty_err/issues/4:
+    // a `BoxError`-backed variant must not stop the enclosing error from
+    // being `Send`, since that's what `#[async_trait]`'s default `Send`
+    // futures require of every type reachable from a method's `Result`.
+    assert_send::<SearchError>();
 }
 
 #[test]
