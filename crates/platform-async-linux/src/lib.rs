@@ -20,6 +20,7 @@ use std::ffi::{OsStr, OsString};
 use std::future::Future;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -109,17 +110,36 @@ impl AsyncChild for AsyncLinuxChild {
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         self.inner.try_wait()
     }
+
+    fn ready(&self) -> BoxFuture<'_, Result<()>> {
+        // Borrowing counterpart of `wait` — same pidfd + `PidfdReady`
+        // mechanism, but doesn't consume `self` or reap the child
+        // afterward. This is what lets several `AsyncLinuxChild`s be
+        // multiplexed through the same shared `EpollReactor` by
+        // `platform_async::process::wait_any` without any of them being
+        // given up before the caller knows which one actually finished.
+        let pid = self.inner.id();
+        let reactor = Arc::clone(&self.reactor);
+        Box::pin(async move {
+            let pidfd = sys::pidfd::open(pid as libc::pid_t)?;
+            PidfdReady::new(reactor, pidfd).await
+        })
+    }
 }
 
 /// Resolves once the wrapped pidfd is readable (RM-ASYNC-ENGINE-0001-
 /// style completion orientation: this is a one-shot readiness-to-
 /// completion translation, not a raw readiness stream). Registers with
-/// the reactor on first poll and relies on the reactor calling
-/// [`Waker::wake`] exactly once via `EPOLLONESHOT` — see
-/// [`EpollReactor::register`].
+/// the reactor on first poll and checks its own `ready` flag on every
+/// poll thereafter — see [`EpollReactor::register`]'s doc comment for
+/// why checking the flag, rather than assuming "polled again means
+/// ready," is required once this future can be polled through a waker
+/// shared with unrelated futures (as [`platform_async::process::wait_any`]
+/// does).
 struct PidfdReady {
     reactor: Arc<EpollReactor>,
     fd: OwnedFd,
+    ready: Arc<AtomicBool>,
     registered: bool,
 }
 
@@ -128,6 +148,7 @@ impl PidfdReady {
         Self {
             reactor,
             fd,
+            ready: Arc::new(AtomicBool::new(false)),
             registered: false,
         }
     }
@@ -141,17 +162,19 @@ impl Future for PidfdReady {
         // (`OwnedFd`/`Arc`/`bool` are all `Unpin`) — `Self` is `Unpin`
         // automatically, so getting a plain `&mut Self` is sound.
         let this = self.get_mut();
+        if this.ready.load(Ordering::Acquire) {
+            return Poll::Ready(Ok(()));
+        }
         if !this.registered {
             let raw = this.fd.as_raw_fd();
-            if let Err(e) = this.reactor.register(raw, cx.waker().clone()) {
+            if let Err(e) = this
+                .reactor
+                .register(raw, Arc::clone(&this.ready), cx.waker().clone())
+            {
                 return Poll::Ready(Err(e));
             }
             this.registered = true;
-            return Poll::Pending;
         }
-        // Only reachable after the reactor observed readiness and woke
-        // this future's waker (`EPOLLONESHOT` fires once, for exactly
-        // this readiness edge) — ready by construction.
-        Poll::Ready(Ok(()))
+        Poll::Pending
     }
 }

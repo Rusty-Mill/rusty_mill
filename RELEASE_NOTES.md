@@ -5,6 +5,31 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #4 — parity-gap: async multi-child wait (wait_any), closes #4
+**2026-08-12** · [#4](https://github.com/baileyrd/rustils_async/pull/4)
+
+- **Added:** `AsyncChild::ready()` (borrowing, non-consuming — resolves once a
+  child has terminated, without retrieving its status) and
+  `AsyncSpawner::wait_any` (default implementation, built entirely on
+  `ready()`) so several children can be awaited concurrently through one
+  call instead of one `AsyncChild::wait` registration per child. Genuinely
+  multiplexed on `platform-async-linux` — every `ready()` future registers
+  with the same shared `EpollReactor`. Timeout support via a small one-shot
+  `Timeout` future (a disclosed helper thread per call with a timeout, none
+  without one) — no timer-wheel dependency added.
+- **Fixed, caught before merge:** `PidfdReady` originally assumed "polled a
+  second time" meant "the reactor woke me for my own fd" — true for the
+  single-child `wait()` path, but wrong once `wait_any`'s combinator polls
+  several `ready()` futures through one *shared* waker: a wake caused by a
+  sibling child (or the timeout) would have made every already-registered
+  child spuriously report ready. Fixed by having the reactor set a per-fd
+  `Arc<AtomicBool>` flag before waking, and having `PidfdReady` check that
+  flag explicitly rather than inferring readiness from being re-polled at
+  all. The new `wait_any_times_out_when_nothing_exits_in_time` test would
+  have failed under the old assumption.
+- Closes parity-gap #4, from the `parity-loop` run against `rustils`
+  (`gap-analysis.md`).
+
 ## PR #3 — parity-loop gap analysis: async process domain vs. rustils
 **2026-08-12** · [#3](https://github.com/baileyrd/rustils_async/pull/3)
 
