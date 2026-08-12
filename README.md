@@ -17,6 +17,12 @@ struct Point { x: i32, y: i32 }
 let json = rusty_json::to_string(&Point { x: 1, y: 2 }).unwrap();
 assert_eq!(json, r#"{"x":1,"y":2}"#);
 assert_eq!(rusty_json::from_str::<Point>(&json).unwrap(), Point { x: 1, y: 2 });
+
+// `to_value`/`from_value` convert directly to/from `Value`, without a JSON
+// text intermediate.
+let value = rusty_json::to_value(&Point { x: 1, y: 2 }).unwrap();
+assert_eq!(value["x"], 1);
+assert_eq!(rusty_json::from_value::<Point>(value).unwrap(), Point { x: 1, y: 2 });
 ```
 
 See [`ROADMAP.md`](ROADMAP.md) for the phased parity plan (currently Phase 1:

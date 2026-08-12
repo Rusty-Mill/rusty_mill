@@ -17,6 +17,8 @@ mod parser;
 mod ser;
 mod serde_support;
 mod value;
+mod value_de;
+mod value_ser;
 
 pub use error::{Category, Error};
 pub use formatter::{CharEscape, CompactFormatter, Formatter, PrettyFormatter};
@@ -35,6 +37,8 @@ pub use ser::{
     to_string, to_string_pretty, to_string_with_formatter, to_vec, to_vec_pretty, Compound,
     Serializer,
 };
+pub use value_de::from_value;
+pub use value_ser::to_value;
 
 #[cfg(feature = "std")]
 pub use de::from_reader;
