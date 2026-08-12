@@ -20,6 +20,12 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   prerequisite for this (`rusty_serde` #50). `Document::set` now uses
   `rusty_serde`'s `Value::insert` (`rusty_serde` #51/#52) instead of the
   hand-rolled find-or-push logic that gap originally forced.
+- `rusty-search-memory` now depends on `rusty_serde` instead of
+  `serde_json` - `eval.rs`/`sort.rs`'s field-value handling (term/range
+  matching, field sort comparison) updated for `rusty_serde::Value`'s
+  split `Int`/`UInt`/`Float` numeric variants and `Seq` (vs.
+  `serde_json::Value`'s single `Number` and `Array`). Second crate of the
+  migration tracked in #19, after `rusty-search-core`.
 - All seven backend crates that generate client-side document ids
   (`rusty-search-algolia`, `-azure-search`, `-elasticsearch`,
   `-meilisearch`, `-solr`, `-sqlite-fts5`, `-tantivy`) depend on

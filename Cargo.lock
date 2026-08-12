@@ -1804,7 +1804,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
- "serde_json",
+ "rusty_serde",
  "tokio",
 ]
 
