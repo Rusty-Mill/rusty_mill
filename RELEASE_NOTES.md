@@ -5,6 +5,25 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #3 — parity-loop gap analysis: async process domain vs. rustils
+**2026-08-12** · [#3](https://github.com/baileyrd/rustils_async/pull/3)
+
+- **Added:** `gap-analysis.md` and a `parity_gap` issue template, from running
+  the `parity-loop` skill against `rustils` (pinned at the same rev this repo
+  already depends on). Scope was settled from this repo's own existing
+  roadmap (README's "Reserved, not built" table + `docs/adr/0001`) rather than
+  a fresh mechanical diff — fs/net/Windows/BSD stay out of scope, unchanged.
+  Three in-scope gaps found in the one domain both repos are committed to
+  (`process`): an async multi-child wait (`wait_any`), pipe handle retrieval
+  (`take_stdin`/`take_stdout`/`take_stderr`), and Unix job-control wait
+  (`wait_job`/`try_wait_job`). Filed as issues, worked one PR each.
+- **Known limitation, stated plainly:** the "Existing RustyMill impl" check
+  couldn't run for real — the RustyMill org's sibling repos (`rush`,
+  `rusty_tokio`) are outside this session's attached owner tier and
+  `add_repo` refused the cross-tier add. Marked "not checked" in
+  `gap-analysis.md` rather than assumed absent; worth a real check from a
+  session that has org access.
+
 ## PR #2 — Apply repo-config governance file set
 **2026-08-12** · [#2](https://github.com/baileyrd/rustils_async/pull/2)
 
