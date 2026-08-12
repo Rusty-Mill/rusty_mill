@@ -12,7 +12,9 @@ pub type DocumentId = String;
 ///
 /// `fields` is always the `Value::Map` variant - every constructor
 /// (`Document::default`/`new`, `Document::from_serializable`) establishes
-/// that invariant, and `Document::set` relies on it.
+/// that invariant. `Document::set` doesn't strictly depend on it holding
+/// (`Value::insert` is a no-op on a non-`Map` value rather than panicking),
+/// but a `set` silently doing nothing would be surprising, so keep it true.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub id: Option<DocumentId>,
@@ -43,15 +45,7 @@ impl Document {
 
     /// Sets a field value, consuming and returning `self` for chaining.
     pub fn set(mut self, field: impl Into<String>, value: impl Into<Value>) -> Self {
-        let key = field.into();
-        let value = value.into();
-        let Value::Map(entries) = &mut self.fields else {
-            unreachable!("Document::fields is always the Value::Map variant");
-        };
-        match entries.iter_mut().find(|(k, _)| *k == key) {
-            Some(entry) => entry.1 = value,
-            None => entries.push((key, value)),
-        }
+        self.fields.insert(field.into(), value.into());
         self
     }
 
