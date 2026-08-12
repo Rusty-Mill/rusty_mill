@@ -45,6 +45,7 @@ source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cb
 [[package]]
 name = "rusty_std"
 version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_std?rev=99135f32afc48e868d3e17b6e234db4162e1c758#99135f32afc48e868d3e17b6e234db4162e1c758"
 dependencies = [
  "rusty_libc",
  "rusty_win32",

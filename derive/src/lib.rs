@@ -9,7 +9,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Field, Fields, LitStr};
+use syn::{Data, DeriveInput, Field, Fields, LitStr, parse_macro_input};
 
 #[proc_macro_derive(Error, attributes(error, from, source))]
 pub fn derive_error(input: TokenStream) -> TokenStream {
@@ -29,7 +29,7 @@ fn expand(input: DeriveInput) -> syn::Result<TokenStream2> {
             return Err(syn::Error::new_spanned(
                 &input,
                 "`#[derive(rusty_err::Error)]` currently supports enums only",
-            ))
+            ));
         }
     };
 
@@ -293,9 +293,6 @@ mod tests {
 
     #[test]
     fn rewrites_multiple_positional_indices() {
-        assert_eq!(
-            rewrite_format_string("{0} and {1}"),
-            "{_0} and {_1}"
-        );
+        assert_eq!(rewrite_format_string("{0} and {1}"), "{_0} and {_1}");
     }
 }

@@ -117,7 +117,11 @@ impl BoxError {
     /// type `E`, or the `BoxError` unchanged otherwise.
     pub fn downcast<E: Error + 'static>(self) -> Result<E, Self> {
         if self.inner.as_any().is::<E>() {
-            Ok(*self.inner.into_any().downcast::<E>().expect("type checked above"))
+            Ok(*self
+                .inner
+                .into_any()
+                .downcast::<E>()
+                .expect("type checked above"))
         } else {
             Err(self)
         }
@@ -151,7 +155,10 @@ mod tests {
     fn context_attachment() {
         let res: Result<(), &'static str> = Err("file not found");
         let ctx_res = res.context("Failed to load config");
-        assert_eq!(ctx_res.unwrap_err(), "Failed to load config: file not found");
+        assert_eq!(
+            ctx_res.unwrap_err(),
+            "Failed to load config: file not found"
+        );
     }
 
     #[derive(Debug)]
