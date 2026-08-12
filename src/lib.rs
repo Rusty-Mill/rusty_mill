@@ -97,11 +97,21 @@ pub struct Time {
 
 impl Time {
     /// Creates a new Time instance.
-    pub fn from_hms_nano(hour: u8, minute: u8, second: u8, nano: u32) -> Result<Self, &'static str> {
+    pub fn from_hms_nano(
+        hour: u8,
+        minute: u8,
+        second: u8,
+        nano: u32,
+    ) -> Result<Self, &'static str> {
         if hour > 23 || minute > 59 || second > 59 {
             return Err("Invalid time parameters");
         }
-        Ok(Self { hour, minute, second, nano })
+        Ok(Self {
+            hour,
+            minute,
+            second,
+            nano,
+        })
     }
 
     /// Returns hour (0-23).
@@ -136,7 +146,11 @@ pub struct DateTime {
 impl DateTime {
     /// Creates a new DateTime instance.
     pub fn new(date: Date, time: Time, offset_secs: i32) -> Self {
-        Self { date, time, offset_secs }
+        Self {
+            date,
+            time,
+            offset_secs,
+        }
     }
 
     /// Returns the date component.
@@ -242,11 +256,7 @@ impl DateTime {
                 let offset_minute = parse_digits(s, idx + 3, idx + 5)? as i32;
                 idx += 5;
                 let magnitude = offset_hour * 3600 + offset_minute * 60;
-                if sign == b'-' {
-                    -magnitude
-                } else {
-                    magnitude
-                }
+                if sign == b'-' { -magnitude } else { magnitude }
             }
             _ => return Err("Invalid timezone designator"),
         };
@@ -344,7 +354,10 @@ mod tests {
         let dt = DateTime::parse("2026-08-12T03:18:55.5+02:00").unwrap();
         assert_eq!(dt.time().nanosecond(), 500_000_000);
         // 03:18:55+02:00 is the same instant as 01:18:55Z.
-        assert_eq!(dt.timestamp(), DateTime::parse("2026-08-12T01:18:55Z").unwrap().timestamp());
+        assert_eq!(
+            dt.timestamp(),
+            DateTime::parse("2026-08-12T01:18:55Z").unwrap().timestamp()
+        );
     }
 
     #[test]
@@ -355,7 +368,10 @@ mod tests {
     #[test]
     fn parse_negative_offset() {
         let dt = DateTime::parse("2026-08-11T23:18:55-02:00").unwrap();
-        assert_eq!(dt.timestamp(), DateTime::parse("2026-08-12T01:18:55Z").unwrap().timestamp());
+        assert_eq!(
+            dt.timestamp(),
+            DateTime::parse("2026-08-12T01:18:55Z").unwrap().timestamp()
+        );
     }
 
     #[test]

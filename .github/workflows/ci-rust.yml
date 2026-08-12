@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout rusty_time
+        uses: actions/checkout@v4
+        with:
+          path: rusty_time
+
+      # rusty_time depends on rusty_std via a `path = "../rusty_std"` Cargo
+      # dependency, so it must be checked out as a sibling directory for the
+      # build to resolve — see repo README/ARCHITECTURE for why this crate
+      # isn't yet a standalone-buildable workspace member.
+      - name: Checkout rusty_std
+        uses: actions/checkout@v4
+        with:
+          repository: baileyrd/rusty_std
+          path: rusty_std
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: cargo fmt --check
+        working-directory: rusty_time
+        run: cargo fmt --check
+
+      - name: cargo clippy
+        working-directory: rusty_time
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        working-directory: rusty_time
+        run: cargo test
