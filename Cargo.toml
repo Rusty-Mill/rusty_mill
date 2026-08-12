@@ -10,7 +10,11 @@ keywords = ["error", "context", "derive", "no-std"]
 categories = ["rust-patterns", "no-std"]
 
 [dependencies]
-rusty_std = { path = "../rusty_std" }
+# Pinned git dep, not a path dep: a `git = "..."` dependency on this crate
+# clones only this one repository, so a sibling `../rusty_std` checkout
+# doesn't exist for CI or any external consumer (matches rusty_std's own
+# rationale for pinning rusty_libc/rusty_win32 the same way).
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
 
 [features]
 default = []

@@ -47,6 +47,9 @@ mod tests {
     fn context_attachment() {
         let res: Result<(), &'static str> = Err("file not found");
         let ctx_res = res.context("Failed to load config");
-        assert_eq!(ctx_res.unwrap_err(), "Failed to load config: file not found");
+        assert_eq!(
+            ctx_res.unwrap_err(),
+            "Failed to load config: file not found"
+        );
     }
 }
