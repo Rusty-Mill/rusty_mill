@@ -39,10 +39,15 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Internal replacement for serde/serde_json, adopted incrementally per
-# crate - see https://github.com/baileyrd/rusty_search/issues/19. Pinned to
-# a specific commit rather than a version since this isn't published to
-# crates.io.
-rusty_serde = { git = "https://github.com/baileyrd/rusty_serde", rev = "ed0a0bd0029e3bfa96e62c6064f296233e07fc35", features = ["derive"] }
+# crate - see https://github.com/baileyrd/rusty_search/issues/19. Not
+# published to crates.io. TEMPORARY: `branch = "main"` instead of a pinned
+# `rev` - CI's git-dependency fetch fails identically with a raw commit SHA
+# regardless of two otherwise-correct auth fixes (see PR #22's discussion),
+# so this is a diagnostic swap to see whether fetching a named ref instead
+# of an exact SHA changes anything. If it does, this should go back to a
+# pinned `rev` (or a tag) for reproducibility once the actual cause is
+# understood - a floating branch dependency isn't a good permanent state.
+rusty_serde = { git = "https://github.com/baileyrd/rusty_serde", branch = "main", features = ["derive"] }
 thiserror = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tantivy = "0.26"

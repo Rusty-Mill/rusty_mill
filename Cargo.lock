@@ -1868,7 +1868,7 @@ dependencies = [
 [[package]]
 name = "rusty_serde"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
+source = "git+https://github.com/baileyrd/rusty_serde?branch=main#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
 dependencies = [
  "rusty_serde_derive",
  "rusty_serde_erased",
@@ -1877,12 +1877,12 @@ dependencies = [
 [[package]]
 name = "rusty_serde_derive"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
+source = "git+https://github.com/baileyrd/rusty_serde?branch=main#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
 
 [[package]]
 name = "rusty_serde_erased"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
+source = "git+https://github.com/baileyrd/rusty_serde?branch=main#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
 
 [[package]]
 name = "rusty_sqlite"
