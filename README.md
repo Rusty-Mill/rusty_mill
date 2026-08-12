@@ -8,7 +8,7 @@ This crate does not try to replace `rusqlite` — it re-exports it — and inste
 - **Typed FTS5 schema building.** `rusqlite` only ever exposes FTS5 as hand-written `CREATE VIRTUAL TABLE ... USING fts5(...)` SQL. [`Fts5TableBuilder`] gives the common options — columns, `UNINDEXED` columns, tokenizer, prefix indexes, external content tables — a typed, composable API.
 - **Migration lifecycle management.** [`Migrations`] tracks schema version via `PRAGMA user_version` and applies pending steps in registration order, each in its own transaction, so it's safe to call on every application startup.
 
-Enable the `pool` feature for an [`r2d2`](https://docs.rs/r2d2)-backed connection pool for multi-threaded applications.
+Enable the `pool` feature for a small built-in, `std`-only connection pool for multi-threaded applications.
 
 ## Example
 

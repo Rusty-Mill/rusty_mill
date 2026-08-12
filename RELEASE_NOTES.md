@@ -5,6 +5,28 @@ Notable changes to this repo, tracked one entry per merged PR against `main`
 
 ---
 
+## PR #6 — Hand-roll thiserror and r2d2/r2d2_sqlite out of the dependency tree
+**2026-08-12** · [#6](https://github.com/baileyrd/rusty_sqlite/pull/6)
+
+- **Changed:** dropped `thiserror`, `r2d2`, and `r2d2_sqlite` as direct dependencies.
+  `Error` now has hand-written `Display`/`std::error::Error` impls; the `pool`
+  feature's connection pool is a hand-rolled `Mutex`+`Condvar` structure scoped
+  directly to `rusqlite::Connection`, with no external crates at all.
+- **Added:** `build_pool_with_timeout` (configurable acquire timeout; `build_pool`
+  now delegates to it with a 30s default), and new pool tests covering exhaustion,
+  blocking-until-released, timeout, and connection reuse — the previous suite only
+  covered the happy path.
+- Per [`dependency-audit.md`](./dependency-audit.md): `thiserror` had no internal
+  coverage (a candidate, `rusty_err`, claims a derive macro in its description that
+  its source doesn't actually implement) and was hand-rolled since the enum is
+  small. `r2d2`/`r2d2_sqlite` were this audit's one `keep external` recommendation
+  — hand-rolled anyway per explicit sign-off, since the pool this crate needs
+  (one connection type, no generic manager abstraction) is materially smaller than
+  what those crates solve.
+- Closes #4, closes #5.
+- 19 tests (unit, integration, doctests) passing under `--all-features`; `cargo
+  clippy --all-features --all-targets -- -D warnings` and `cargo fmt --check` clean.
+
 ## PR #3 — Apply standard governance file set (repo-config)
 **2026-08-12** · [#3](https://github.com/baileyrd/rusty_sqlite/pull/3)
 

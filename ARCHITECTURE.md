@@ -19,7 +19,7 @@ depend on for the long term, and keep each concern in its own module.
 | Connection lifecycle | `connection::Connection` wrapping `rusqlite::Connection` | Owns pragma defaults (WAL, foreign keys, busy timeout); consumers reach the raw `rusqlite` connection explicitly via `as_raw`, not implicitly. |
 | Schema versioning | `migration::Migrations` | Tracks version via `PRAGMA user_version`; no separate migrations table. Swappable in principle, not yet abstracted behind a trait since there's only one implementation. |
 | FTS5 schema | `fts5::Fts5TableBuilder` | Only virtual-table DDL generation — it does not manage query execution or ranking, that stays the caller's / `rusty_search`'s concern. |
-| Multi-threaded access | `pool::Pool` (feature `pool`, `r2d2` + `r2d2_sqlite`) | Optional and off by default; single-connection use doesn't pay for the dependency. |
+| Multi-threaded access | `pool::Pool` (feature `pool`, hand-rolled: `Mutex`+`Condvar` over `rusqlite::Connection`, `std` only) | Optional and off by default; single-connection use doesn't pay for the extra API surface. Originally backed by `r2d2`/`r2d2_sqlite`; hand-rolled in [#5](https://github.com/baileyrd/rusty_sqlite/issues/5) since the pool this crate actually needs (one connection type, no generic `ManageConnection` abstraction) is materially smaller than what those crates solve. |
 
 ## Structure
 Modular monolith at the crate level: one crate, one `lib.rs`, one module per
