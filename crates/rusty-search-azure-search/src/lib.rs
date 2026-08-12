@@ -51,15 +51,14 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
-    Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError, SearchRequest,
-    SearchResults, Sort, SortOrder,
+    BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
+    SearchRequest, SearchResults, Sort, SortOrder,
 };
 
 use convert::{document_to_json, json_to_document};
@@ -126,13 +125,13 @@ impl AzureSearchBackend {
 }
 
 fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 async fn error_for_status(resp: reqwest::Response) -> SearchError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    SearchError::Backend(anyhow!("azure ai search returned {status}: {body}"))
+    SearchError::backend_msg(format!("azure ai search returned {status}: {body}"))
 }
 
 /// Checks an Azure `docs/index` batch response for per-document failures
@@ -159,7 +158,7 @@ async fn check_batch_errors(resp: reqwest::Response) -> Result<()> {
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(SearchError::Backend(anyhow!(
+        Err(SearchError::backend_msg(format!(
             "azure ai search reported per-document errors: {}",
             failures.join("; ")
         )))
@@ -188,7 +187,7 @@ impl SearchBackend for AzureSearchBackend {
             if text.to_lowercase().contains("already exists") {
                 return Err(SearchError::IndexAlreadyExists(name.to_string()));
             }
-            return Err(SearchError::Backend(anyhow!(
+            return Err(SearchError::backend_msg(format!(
                 "azure ai search rejected index creation: {text}"
             )));
         }

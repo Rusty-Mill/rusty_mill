@@ -45,7 +45,6 @@ mod schema_map;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use meilisearch_sdk::client::Client;
 use meilisearch_sdk::errors::{Error as MeiliError, ErrorCode, MeilisearchError};
@@ -83,8 +82,8 @@ impl MeilisearchBackend {
         base_url: impl Into<String>,
         api_key: Option<impl Into<String>>,
     ) -> Result<Self> {
-        let client = Client::new(base_url, api_key)
-            .map_err(|e| SearchError::Backend(anyhow!(e.to_string())))?;
+        let client =
+            Client::new(base_url, api_key).map_err(|e| SearchError::backend_msg(e.to_string()))?;
         Ok(Self {
             client,
             indices: Arc::new(RwLock::new(HashMap::new())),
@@ -119,14 +118,14 @@ fn classify_meili_error(e: &MeilisearchError, index: &str) -> SearchError {
     match e.error_code {
         ErrorCode::IndexAlreadyExists => SearchError::IndexAlreadyExists(index.to_string()),
         ErrorCode::IndexNotFound => SearchError::IndexNotFound(index.to_string()),
-        _ => SearchError::Backend(anyhow!("meilisearch error: {e}")),
+        _ => SearchError::backend_msg(format!("meilisearch error: {e}")),
     }
 }
 
 fn classify_error(e: MeiliError, index: &str) -> SearchError {
     match e {
         MeiliError::Meilisearch(me) => classify_meili_error(&me, index),
-        other => SearchError::Backend(anyhow!("meilisearch request failed: {other}")),
+        other => SearchError::backend_msg(format!("meilisearch request failed: {other}")),
     }
 }
 
