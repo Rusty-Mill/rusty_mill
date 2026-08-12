@@ -41,11 +41,24 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   used only at that one boundary (`document_to_tantivy`/
   `tantivy_doc_to_document`), rather than threading `serde_json` through
   the rest of the crate. Fourth crate of the migration tracked in #19.
-  Five crates still block a full workspace build: `rusty-search-elasticsearch`,
-  `-meilisearch`, `-solr`, `-algolia`, `-azure-search` (`-opensearch` wraps
-  `-elasticsearch` and has its own `serde_json` usage too; `-cloud` and the
-  top-level `rusty-search` facade have none of their own, so they should
-  follow once their dependencies do).
+- `rusty-search-elasticsearch`, `-solr`, and `-algolia` follow the same
+  pattern as `-tantivy`: each keeps `serde_json` alongside `rusty_serde`,
+  since all three send/receive their `Document`s over HTTP through
+  `reqwest`'s real-serde-backed `.json()`/`resp.json()` methods - the wire
+  protocol, not one narrow API call like `tantivy`'s. Each crate's
+  `convert.rs` gains the same `rusty_value_to_json`/`json_value_to_rusty`
+  conversion pair, used only where a `Document` crosses that boundary;
+  `rusty_serde::Value` is the type everywhere else that touches
+  `Document`/`Query` (`compare_values` in each crate's `lib.rs`,
+  `numeric_literal`/`coerce_range_bound`/`range_literal` in each crate's
+  `query_map.rs`). Fifth, sixth, and seventh crates of the migration
+  tracked in #19. `rusty-search-opensearch` (wraps `-elasticsearch`
+  entirely - no `Document`/`Query` handling of its own, its one
+  `serde_json` reference is an unrelated `#[cfg(test)]` helper) and
+  `-cloud` (no `serde_json` at all) now build too, confirming neither
+  needed a fix of their own - only `rusty-search-meilisearch` and
+  `-azure-search` (and the top-level `rusty-search` facade, transitively)
+  still block a full workspace build.
 - `rusty-search-tantivy` and `rusty-search-sqlite-fts5` depend on
   [`rusty_time`](https://github.com/baileyrd/rusty_time) instead of
   `time` for RFC 3339 date parsing/validation on `Date`-typed fields.
