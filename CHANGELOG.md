@@ -31,8 +31,14 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   this crate never needed `serde_json::Value` for a third-party API
   contract (unlike `rusty-search-tantivy`'s `tantivy::Document::from_json_object`),
   so it's a straightforward swap. Third crate of the migration tracked in
-  #19, leaving `rusty-search-tantivy` as the only crate still blocking a
-  full workspace build.
+  #19. Six crates still block a full workspace build:
+  `rusty-search-tantivy`, `-elasticsearch`, `-meilisearch`, `-solr`,
+  `-algolia`, `-azure-search` (`-opensearch` wraps `-elasticsearch` and has
+  its own `serde_json` usage too; `-cloud` and the top-level `rusty-search`
+  facade have none of their own, so they should follow once their
+  dependencies do) - corrects an earlier, premature "only tantivy left"
+  note here, based on a `cargo build --workspace` run that stopped after
+  its first few failures rather than a complete `--keep-going` pass.
 - `rusty-search-tantivy` and `rusty-search-sqlite-fts5` depend on
   [`rusty_time`](https://github.com/baileyrd/rusty_time) instead of
   `time` for RFC 3339 date parsing/validation on `Date`-typed fields.
