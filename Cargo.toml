@@ -1,0 +1,9 @@
+[package]
+name = "rusty_uuid"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal, dependency-free UUID v4 generation"
+license = "MIT"
+repository = "https://github.com/baileyrd/rusty_uuid"
+
+[dependencies]
