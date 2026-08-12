@@ -313,6 +313,11 @@ impl SearchBackend for AlgoliaBackend {
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
+        if request.vector.is_some() {
+            return Err(SearchError::InvalidQuery(
+                "vector/hybrid search is not supported by rusty-search-algolia".into(),
+            ));
+        }
         let fields = self.require_known(index).await?;
         let params = query_map::build_search_params(&request.query, &fields)?;
 

@@ -149,6 +149,41 @@ impl Query {
     }
 }
 
+/// A k-nearest-neighbor vector similarity request, run alongside (not
+/// instead of) a lexical [`Query`] via [`SearchRequest::vector`].
+///
+/// This is deliberately *not* a [`Query`] variant. `Query`'s nodes are
+/// boolean predicates - a document either matches a term/range/bool clause
+/// or it doesn't - composed with `.and()`/`.or()`/`.not()`. Vector
+/// similarity is a continuous ranking signal with no natural
+/// must/should/must_not membership of its own; forcing it into the same
+/// tree would conflate "does this document match" with "how do we fuse two
+/// independent rankings together", which is a backend-specific fusion
+/// strategy (e.g. reciprocal rank fusion), not a boolean composition rule.
+/// See ADR-0008 for the full reasoning.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VectorQuery {
+    /// The schema field holding the vector to compare against (expected to
+    /// be backed by a vector-capable column/index; ordinary `Schema`
+    /// field types don't currently model vector dimensionality).
+    pub field: String,
+    /// The query vector.
+    pub vector: Vec<f32>,
+    /// How many nearest neighbors to retrieve before fusing with `query`'s
+    /// lexical results.
+    pub k: usize,
+}
+
+impl VectorQuery {
+    pub fn new(field: impl Into<String>, vector: Vec<f32>, k: usize) -> Self {
+        Self {
+            field: field.into(),
+            vector,
+            k,
+        }
+    }
+}
+
 /// Sort direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortOrder {
@@ -182,6 +217,14 @@ pub struct SearchRequest {
     pub sort: Vec<Sort>,
     pub offset: usize,
     pub limit: usize,
+    /// An optional vector similarity request, fused with `query`'s lexical
+    /// results by backends that implement [`crate::SearchBackend::supports_vector_search`].
+    /// `None` (the default) means a plain lexical search, unchanged from
+    /// before this field existed. Backends that don't support vector
+    /// search must reject a `Some` value with [`crate::SearchError::InvalidQuery`]
+    /// rather than silently ignoring it.
+    #[serde(default)]
+    pub vector: Option<VectorQuery>,
 }
 
 impl SearchRequest {
@@ -191,6 +234,7 @@ impl SearchRequest {
             sort: Vec::new(),
             offset: 0,
             limit: 10,
+            vector: None,
         }
     }
 
@@ -206,6 +250,13 @@ impl SearchRequest {
 
     pub fn sort(mut self, sort: Sort) -> Self {
         self.sort.push(sort);
+        self
+    }
+
+    /// Attaches a vector similarity request, to be fused with `query`'s
+    /// lexical results by backends that support it.
+    pub fn vector(mut self, vector: VectorQuery) -> Self {
+        self.vector = Some(vector);
         self
     }
 }
@@ -269,5 +320,13 @@ mod tests {
         assert_eq!(req.offset, 0);
         assert_eq!(req.limit, 10);
         assert!(req.sort.is_empty());
+        assert!(req.vector.is_none());
+    }
+
+    #[test]
+    fn search_request_vector_builder_attaches_query() {
+        let vector_query = VectorQuery::new("embedding", vec![0.1, 0.2, 0.3], 5);
+        let req = SearchRequest::new(Query::match_all()).vector(vector_query.clone());
+        assert_eq!(req.vector, Some(vector_query));
     }
 }

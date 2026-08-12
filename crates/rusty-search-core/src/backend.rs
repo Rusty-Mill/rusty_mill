@@ -62,4 +62,18 @@ pub trait SearchBackend: Send + Sync {
     /// searches. Backends with immediate read-after-write consistency may
     /// implement this as a no-op.
     async fn commit(&self, index: &str) -> Result<()>;
+
+    /// Whether this backend can fuse a [`crate::query::VectorQuery`]
+    /// (attached via [`crate::SearchRequest::vector`]) into `search`.
+    ///
+    /// Defaults to `false`. A backend that returns `true` here must accept
+    /// `SearchRequest::vector` in `search`; a backend that returns `false`
+    /// (the default for every backend that predates this method) must
+    /// reject a request with `vector: Some(_)` via
+    /// [`crate::SearchError::InvalidQuery`] rather than silently searching
+    /// lexically-only, so callers get a loud failure instead of a quietly
+    /// incomplete answer.
+    fn supports_vector_search(&self) -> bool {
+        false
+    }
 }

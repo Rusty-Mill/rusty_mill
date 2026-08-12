@@ -1,0 +1,23 @@
+[package]
+name = "rusty-search-sqlite-fts5"
+description = "SQLite FTS5-backed SearchBackend implementation for rusty_search: embedded full-text search via SQL virtual tables"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rusty-search-core = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+anyhow = "1"
+time = { version = "0.3", features = ["parsing", "formatting"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = "3"

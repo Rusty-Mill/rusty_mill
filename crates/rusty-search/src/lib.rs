@@ -30,7 +30,10 @@
 //!
 //! Enable the `memory` feature for the dependency-free [`MemoryBackend`]
 //! (a great default for tests), the `tantivy` feature for the embedded,
-//! real full-text-search [`TantivyBackend`], the `elasticsearch` feature
+//! real full-text-search [`TantivyBackend`], the `sqlite-fts5` feature for
+//! [`SqliteFts5Backend`], another embedded backend - genuinely embedded
+//! like `TantivyBackend`, but via SQL virtual tables rather than an
+//! inverted-index library - the `elasticsearch` feature
 //! for [`ElasticsearchBackend`], a thin HTTP client for a remote
 //! Elasticsearch cluster, the `opensearch` feature for
 //! [`OpenSearchBackend`] (a thin wrapper around `ElasticsearchBackend`,
@@ -52,6 +55,9 @@ pub use rusty_search_memory::MemoryBackend;
 
 #[cfg(feature = "tantivy")]
 pub use rusty_search_tantivy::TantivyBackend;
+
+#[cfg(feature = "sqlite-fts5")]
+pub use rusty_search_sqlite_fts5::SqliteFts5Backend;
 
 #[cfg(feature = "elasticsearch")]
 pub use rusty_search_elasticsearch::ElasticsearchBackend;

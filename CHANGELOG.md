@@ -4,7 +4,28 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Fixed
+- Removed unused, unresolvable path dependencies (`rusty_regx`, `rusty_wire`,
+  `rusty_tokio`, `rusty_std`, `rusty_json`, `rusty_request`) accidentally
+  committed straight to `main` pointing at sibling directories that don't
+  exist in this repo, which broke `cargo build`/`cargo metadata` for the
+  entire workspace. None were referenced by any source file.
+
 ### Added
+- `rusty-search-sqlite-fts5`: a `SearchBackend` backed by SQLite's FTS5
+  virtual table module - embedded like `rusty-search-tantivy`, but via SQL
+  rather than an inverted-index library, with native SQL sorting/filtering
+  on every field type and no fast-field opt-in needed. Wired into the
+  `rusty-search` facade behind a new `sqlite-fts5` feature flag and into
+  the `pluggable_backends` example. (#14)
+- `rusty-search-core`: `VectorQuery` and `SearchRequest::vector`, plus
+  `SearchBackend::supports_vector_search()` (default `false`) - settles
+  the `Query` DSL's vector/hybrid design question without implementing
+  hybrid search anywhere yet. All eight pre-existing backends now
+  explicitly reject a `SearchRequest` with `vector: Some(_)`. (#14)
+- ADR-0008: SQLite FTS5 backend design, and why `Query` doesn't grow a
+  vector-similarity variant (a separate, additive `SearchRequest::vector`
+  instead). (#14)
 - README "Planned backends" list under Status: candidate engines being
   considered for future adapter crates (Typesense, Quickwit, Manticore
   Search, Redis/RediSearch, SQLite FTS5, a managed enterprise search SaaS,

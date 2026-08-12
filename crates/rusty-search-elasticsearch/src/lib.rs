@@ -257,6 +257,11 @@ impl SearchBackend for ElasticsearchBackend {
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
+        if request.vector.is_some() {
+            return Err(SearchError::InvalidQuery(
+                "vector/hybrid search is not supported by rusty-search-elasticsearch".into(),
+            ));
+        }
         let fields = self.require_known(index).await?;
         let query_body = query_map::build_query(&request.query, &fields)?;
 

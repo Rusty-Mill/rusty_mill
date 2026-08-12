@@ -12,6 +12,7 @@ authors.workspace = true
 default = []
 memory = ["dep:rusty-search-memory"]
 tantivy = ["dep:rusty-search-tantivy"]
+sqlite-fts5 = ["dep:rusty-search-sqlite-fts5"]
 elasticsearch = ["dep:rusty-search-elasticsearch"]
 meilisearch = ["dep:rusty-search-meilisearch"]
 opensearch = ["dep:rusty-search-opensearch"]
@@ -23,6 +24,7 @@ azure-search = ["dep:rusty-search-azure-search"]
 rusty-search-core = { workspace = true }
 rusty-search-memory = { workspace = true, optional = true }
 rusty-search-tantivy = { workspace = true, optional = true }
+rusty-search-sqlite-fts5 = { workspace = true, optional = true }
 rusty-search-elasticsearch = { workspace = true, optional = true }
 rusty-search-meilisearch = { workspace = true, optional = true }
 rusty-search-opensearch = { workspace = true, optional = true }

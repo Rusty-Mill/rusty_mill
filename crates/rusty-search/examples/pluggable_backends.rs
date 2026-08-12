@@ -1,15 +1,15 @@
 //! Demonstrates the whole point of `rusty_search`: application code is
 //! written once against `Arc<dyn SearchBackend>`, and the concrete engine
-//! underneath - an in-memory index here, an embedded Tantivy index there, a
-//! remote Elasticsearch, OpenSearch, Meilisearch, or Solr cluster, or a
-//! hosted Algolia or Azure AI Search application over there - is swapped
-//! without changing a single line of `run_demo`.
+//! underneath - an in-memory index here, an embedded Tantivy or SQLite
+//! FTS5 index there, a remote Elasticsearch, OpenSearch, Meilisearch, or
+//! Solr cluster, or a hosted Algolia or Azure AI Search application over
+//! there - is swapped without changing a single line of `run_demo`.
 //!
 //! Run with:
 //!   cargo run -p rusty-search --example pluggable_backends --features memory,tantivy
 //!
-//! Add `,elasticsearch`/`,opensearch`/`,meilisearch`/`,solr`/`,algolia`/
-//! `,azure-search` to `--features` and set `RUSTY_SEARCH_ES_URL` /
+//! Add `,sqlite-fts5`/`,elasticsearch`/`,opensearch`/`,meilisearch`/`,solr`/
+//! `,algolia`/`,azure-search` to `--features` and set `RUSTY_SEARCH_ES_URL` /
 //! `RUSTY_SEARCH_OS_URL` (both e.g. `http://localhost:9200`) /
 //! `RUSTY_SEARCH_MEILI_URL` (e.g. `http://localhost:7700`) /
 //! `RUSTY_SEARCH_SOLR_URL` (e.g. `http://localhost:8983`) /
@@ -105,6 +105,13 @@ async fn main() -> rusty_search::Result<()> {
     run_demo(
         Arc::new(rusty_search::TantivyBackend::in_memory()),
         "TantivyBackend",
+    )
+    .await?;
+
+    #[cfg(feature = "sqlite-fts5")]
+    run_demo(
+        Arc::new(rusty_search::SqliteFts5Backend::in_memory()),
+        "SqliteFts5Backend",
     )
     .await?;
 
