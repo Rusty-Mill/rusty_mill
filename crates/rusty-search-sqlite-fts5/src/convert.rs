@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use rusqlite::types::Value as SqlValue;
-use rusqlite::Row;
 use rusty_search_core::{Document, FieldType as CoreFieldType, SearchError};
+use rusty_sqlite::rusqlite::types::Value as SqlValue;
+use rusty_sqlite::rusqlite::Row;
 use serde_json::Value as JsonValue;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;

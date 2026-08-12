@@ -13,7 +13,13 @@ rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+# Wraps the same rusqlite = "0.31" (bundled) this crate would otherwise
+# depend on directly, applying sane connection pragmas (WAL, foreign keys,
+# busy timeout) this crate didn't set on its own, plus a typed FTS5 table
+# builder in place of hand-assembled DDL strings. Re-exports rusqlite
+# itself (`rusty_sqlite::rusqlite`), so this is the crate's only sqlite
+# dependency line - see rusty_search#17.
+rusty_sqlite = { git = "https://github.com/baileyrd/rusty_sqlite", rev = "c0f671d8b98ab27ff31f64cfb0865da82893d9bb" }
 anyhow = "1"
 time = { version = "0.3", features = ["parsing", "formatting"] }
 uuid = { version = "1", features = ["v4"] }
