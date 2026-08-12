@@ -212,18 +212,28 @@ impl Reactor {
                 0,
             ),
         ];
-        let mut errors = [empty_kevent(); 2];
         // SAFETY: `kq_fd` is valid; `changes` is a valid 2-element
-        // changelist and `errors` a valid 2-element output buffer, both
-        // outliving the call; `fd` is a valid, open fd owned by the
-        // caller.
+        // changelist outliving the call; `fd` is a valid, open fd owned
+        // by the caller. `nevents: 0` (no output eventlist) is
+        // deliberate, not an oversight -- see this struct's own doc
+        // comment on why a real eventlist here is a real bug, not just
+        // unnecessary: with a non-null timeout of `null` (block
+        // indefinitely) *and* a non-zero `nevents`, `kevent()`'s
+        // documented behavior is to apply the changelist and then wait
+        // for up to `nevents` events to report -- across the *entire*
+        // kqueue, not just this fd's own change -- which on a freshly
+        // registered fd with nothing else immediately ready blocks this
+        // call forever. `Reactor::new`'s own `EVFILT_USER` registration
+        // already gets this right (`nevents: 0`); this call and
+        // `deregister`'s used to differ from it for no reason that ever
+        // needed the output (neither read it).
         let r = unsafe {
             libc::kevent(
                 self.kq_fd,
                 changes.as_ptr(),
                 changes.len() as _,
-                errors.as_mut_ptr(),
-                errors.len() as _,
+                std::ptr::null_mut(),
+                0,
                 std::ptr::null(),
             )
         };
@@ -250,20 +260,20 @@ impl Reactor {
                 0,
             ),
         ];
-        let mut errors = [empty_kevent(); 2];
-        // SAFETY: see `register`. A per-change `EV_ERROR` (e.g. the
-        // kernel already dropped this filter because the fd itself was
-        // closed) is reported into `errors`, not treated as a hard
-        // failure of the whole call -- deregistering an already-gone
-        // filter is a harmless no-op, the same as epoll's `EPOLL_CTL_DEL`
-        // on a closed fd.
+        // SAFETY: see `register` -- same call shape, same reasoning for
+        // `nevents: 0`. A per-change error here (e.g. the kernel already
+        // dropped this filter because the fd itself was closed) was
+        // never read even when this call did request an eventlist, and
+        // deregistering an already-gone filter is meant to be a
+        // harmless no-op regardless, the same as epoll's
+        // `EPOLL_CTL_DEL` on a closed fd.
         unsafe {
             libc::kevent(
                 self.kq_fd,
                 changes.as_ptr(),
                 changes.len() as _,
-                errors.as_mut_ptr(),
-                errors.len() as _,
+                std::ptr::null_mut(),
+                0,
                 std::ptr::null(),
             );
         }

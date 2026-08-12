@@ -75,16 +75,16 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "platform"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "platform-bsd"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "libc",
  "platform",
@@ -92,8 +92,8 @@ dependencies = [
 
 [[package]]
 name = "platform-linux"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "libc",
  "platform",
@@ -101,8 +101,8 @@ dependencies = [
 
 [[package]]
 name = "platform-windows"
-version = "0.22.1"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+version = "0.27.0"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "platform",
  "winargv",
@@ -233,7 +233,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "winargv"
 version = "0.1.0"
-source = "git+https://github.com/baileyrd/rustils?rev=93b00ce964284d93ea6cec2581b3543f08df8f2d#93b00ce964284d93ea6cec2581b3543f08df8f2d"
+source = "git+https://github.com/baileyrd/rustils?rev=ce9259d465ef7d9c49c27542a98745ee7b26d249#ce9259d465ef7d9c49c27542a98745ee7b26d249"
 dependencies = [
  "platform",
 ]
