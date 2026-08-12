@@ -5,6 +5,33 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #27 — Swap reqwest for rusty_request across the HTTP-backed backends
+**2026-08-12** · [#27](https://github.com/baileyrd/rusty_search/issues/27)
+
+- **Changed:** `rusty-search-algolia`, `rusty-search-azure-search`,
+  `rusty-search-elasticsearch`, `rusty-search-opensearch`, and
+  `rusty-search-solr` depend on
+  [`rusty_request`](https://github.com/baileyrd/rusty_request) (pinned
+  git dependency, `tokio` feature) instead of `reqwest`. Request/response
+  bodies still go through real `serde_json` (`to_vec`/`from_slice`) over
+  `rusty_request`'s raw-bytes `body()`/`bytes()`/`text()`, rather than
+  adopting its own non-serde `Json` type. `rusty_http::StatusCode` has no
+  named constants (`NOT_FOUND`, `BAD_REQUEST`, ...) like `reqwest`'s did,
+  so status comparisons became `.as_u16() == 404` etc; `Method`'s variants
+  are `Method::Get`/`Method::Post`/... rather than `Method::GET`/
+  `Method::POST`. `rusty_request::Client::request`/`RequestBuilder::header`/
+  `.basic_auth`/`.bearer_auth` return `Result` (a malformed header/URL is
+  now caught at the type level instead of panicking deep in `reqwest`),
+  so each crate's `request()` helper now returns
+  `Result<RequestBuilder, SearchError>`. `rusty-search-meilisearch` is
+  unaffected - it depends on `meilisearch-sdk`, which bundles `reqwest`
+  internally; that's `meilisearch-sdk`'s call, not this workspace's.
+- **From:** the `sovereignty-loop` audit's last unimplemented row, unblocked
+  now that [`rusty_request#28`](https://github.com/baileyrd/rusty_request/issues/28)
+  (path deps on `rusty_tokio`/`rusty_tls`/`rusty_http` breaking standalone
+  git-dependency resolution) is fixed upstream and re-verified via an
+  isolated probe build before this swap began.
+
 ## Issue #25 — Swap thiserror + anyhow for rusty_err across the whole workspace
 **2026-08-12** · [#25](https://github.com/baileyrd/rusty_search/issues/25)
 

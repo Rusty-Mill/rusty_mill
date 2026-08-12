@@ -12,7 +12,7 @@ authors.workspace = true
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rusty_request = { git = "https://github.com/baileyrd/rusty_request", rev = "ebd1fed32dcd6958cab2c9c93ec8c04b3e7fd07a", features = ["tokio"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
 

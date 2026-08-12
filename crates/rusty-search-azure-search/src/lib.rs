@@ -1,7 +1,7 @@
 //! A [`SearchBackend`] implementation backed by [Azure AI
 //! Search](https://azure.microsoft.com/en-us/products/ai-services/ai-search)
 //! (formerly Azure Cognitive Search), a hosted search service on Azure,
-//! talked to over HTTP via [`reqwest`]. No official async Azure AI Search
+//! talked to over HTTP via [`rusty_request`]. No official async Azure AI Search
 //! Rust SDK with confidence comparable to `meilisearch-sdk`'s was
 //! available, so - like `rusty-search-elasticsearch`, `rusty-search-solr`,
 //! and `rusty-search-algolia` - this backend hand-rolls the REST API
@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
+use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
@@ -76,7 +76,7 @@ pub const FALLBACK_SORT_CAP: usize = 10_000;
 /// share the same HTTP client and index registry.
 #[derive(Clone)]
 pub struct AzureSearchBackend {
-    client: reqwest::Client,
+    client: Client,
     endpoint: String,
     api_key: String,
     indices: Arc<RwLock<HashMap<String, FieldMap>>>,
@@ -87,15 +87,15 @@ impl AzureSearchBackend {
     /// `"https://my-service.search.windows.net"`) using an admin or query
     /// API key.
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self::with_client(endpoint, api_key, reqwest::Client::new())
+        Self::with_client(endpoint, api_key, Client::new())
     }
 
-    /// Connects with a caller-supplied [`reqwest::Client`] (for custom
+    /// Connects with a caller-supplied [`rusty_request::Client`] (for custom
     /// timeouts, TLS config, proxies, etc).
     pub fn with_client(
         endpoint: impl Into<String>,
         api_key: impl Into<String>,
-        client: reqwest::Client,
+        client: Client,
     ) -> Self {
         Self {
             client,
@@ -105,13 +105,15 @@ impl AzureSearchBackend {
         }
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
         self.client
             .request(
                 method,
-                format!("{}/{path}?api-version={API_VERSION}", self.endpoint),
+                &format!("{}/{path}?api-version={API_VERSION}", self.endpoint),
             )
+            .map_err(backend_err)?
             .header("api-key", &self.api_key)
+            .map_err(backend_err)
     }
 
     async fn require_known(&self, index: &str) -> Result<FieldMap> {
@@ -128,17 +130,25 @@ fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError
     SearchError::Backend(BoxError::new(e))
 }
 
-async fn error_for_status(resp: reqwest::Response) -> SearchError {
+fn error_for_status(resp: Response) -> SearchError {
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp.text().unwrap_or_default();
     SearchError::backend_msg(format!("azure ai search returned {status}: {body}"))
+}
+
+fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
+    let bytes = serde_json::to_vec(value).map_err(backend_err)?;
+    builder
+        .header("Content-Type", "application/json")
+        .map_err(backend_err)
+        .map(|b| b.body(bytes))
 }
 
 /// Checks an Azure `docs/index` batch response for per-document failures
 /// (Azure reports these inside a `200`/`207` body rather than as an HTTP
 /// error status).
-async fn check_batch_errors(resp: reqwest::Response) -> Result<()> {
-    let parsed: Value = resp.json().await.map_err(backend_err)?;
+fn check_batch_errors(resp: Response) -> Result<()> {
+    let parsed: Value = serde_json::from_slice(resp.bytes()).map_err(backend_err)?;
     let failures: Vec<String> = parsed
         .get("value")
         .and_then(Value::as_array)
@@ -175,15 +185,16 @@ impl SearchBackend for AzureSearchBackend {
         let (mut body, fields) = build_index_body(&schema);
         body["name"] = json!(name);
 
-        let resp = self
-            .request(Method::PUT, &format!("indexes/{name}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Put, &format!("indexes/{name}"))?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
 
-        if resp.status() == StatusCode::BAD_REQUEST {
-            let text = resp.text().await.unwrap_or_default();
+        if resp.status().as_u16() == 400 {
+            let text = resp.text().unwrap_or_default();
             if text.to_lowercase().contains("already exists") {
                 return Err(SearchError::IndexAlreadyExists(name.to_string()));
             }
@@ -192,7 +203,7 @@ impl SearchBackend for AzureSearchBackend {
             )));
         }
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
 
         self.indices.write().await.insert(name.to_string(), fields);
@@ -203,12 +214,12 @@ impl SearchBackend for AzureSearchBackend {
         self.require_known(name).await?;
 
         let resp = self
-            .request(Method::DELETE, &format!("indexes/{name}"))
+            .request(Method::Delete, &format!("indexes/{name}"))?
             .send()
             .await
             .map_err(backend_err)?;
-        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
-            return Err(error_for_status(resp).await);
+        if !resp.status().is_success() && resp.status().as_u16() != 404 {
+            return Err(error_for_status(resp));
         }
 
         self.indices.write().await.remove(name);
@@ -234,16 +245,17 @@ impl SearchBackend for AzureSearchBackend {
             })
             .collect();
 
-        let resp = self
-            .request(Method::POST, &format!("indexes/{index}/docs/index"))
-            .json(&json!({ "value": value }))
-            .send()
-            .await
-            .map_err(backend_err)?;
-        if !(resp.status().is_success() || resp.status() == StatusCode::MULTI_STATUS) {
-            return Err(error_for_status(resp).await);
+        let resp = json_body(
+            self.request(Method::Post, &format!("indexes/{index}/docs/index"))?,
+            &json!({ "value": value }),
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
+        if !(resp.status().is_success() || resp.status().as_u16() == 207) {
+            return Err(error_for_status(resp));
         }
-        check_batch_errors(resp).await
+        check_batch_errors(resp)
     }
 
     async fn delete(&self, index: &str, id: &str) -> Result<()> {
@@ -252,16 +264,17 @@ impl SearchBackend for AzureSearchBackend {
         let body = json!({
             "value": [{ "@search.action": "delete", KEY_FIELD: id }]
         });
-        let resp = self
-            .request(Method::POST, &format!("indexes/{index}/docs/index"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(backend_err)?;
-        if !(resp.status().is_success() || resp.status() == StatusCode::MULTI_STATUS) {
-            return Err(error_for_status(resp).await);
+        let resp = json_body(
+            self.request(Method::Post, &format!("indexes/{index}/docs/index"))?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
+        if !(resp.status().is_success() || resp.status().as_u16() == 207) {
+            return Err(error_for_status(resp));
         }
-        check_batch_errors(resp).await
+        check_batch_errors(resp)
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
@@ -331,19 +344,20 @@ impl SearchBackend for AzureSearchBackend {
 
 impl AzureSearchBackend {
     async fn execute_search(&self, index: &str, body: &Value) -> Result<Value> {
-        let resp = self
-            .request(Method::POST, &format!("indexes/{index}/docs/search"))
-            .json(body)
-            .send()
-            .await
-            .map_err(backend_err)?;
-        if resp.status() == StatusCode::NOT_FOUND {
+        let resp = json_body(
+            self.request(Method::Post, &format!("indexes/{index}/docs/search"))?,
+            body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
+        if resp.status().as_u16() == 404 {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
-        resp.json().await.map_err(backend_err)
+        serde_json::from_slice(resp.bytes()).map_err(backend_err)
     }
 }
 

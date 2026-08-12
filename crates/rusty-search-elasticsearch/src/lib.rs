@@ -1,6 +1,6 @@
 //! A [`SearchBackend`] implementation backed by a remote
 //! [Elasticsearch](https://www.elastic.co/elasticsearch) cluster, talked
-//! to over HTTP via [`reqwest`]. (OpenSearch speaks this same wire
+//! to over HTTP via [`rusty_request`]. (OpenSearch speaks this same wire
 //! protocol too - see `rusty-search-opensearch`, which wraps this crate
 //! rather than reimplementing it.)
 //!
@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
+use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
@@ -58,7 +58,7 @@ enum Auth {
 /// cloneable - clones share the same HTTP client and index registry.
 #[derive(Clone)]
 pub struct ElasticsearchBackend {
-    client: reqwest::Client,
+    client: Client,
     base_url: String,
     auth: Auth,
     indices: Arc<RwLock<HashMap<String, FieldMap>>>,
@@ -68,7 +68,7 @@ impl ElasticsearchBackend {
     /// Connects to an unauthenticated cluster (e.g. a local dev instance)
     /// at `base_url` (e.g. `"http://localhost:9200"`).
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client_and_auth(base_url, reqwest::Client::new(), Auth::None)
+        Self::with_client_and_auth(base_url, Client::new(), Auth::None)
     }
 
     /// Connects using HTTP basic auth.
@@ -79,7 +79,7 @@ impl ElasticsearchBackend {
     ) -> Self {
         Self::with_client_and_auth(
             base_url,
-            reqwest::Client::new(),
+            Client::new(),
             Auth::Basic {
                 username: username.into(),
                 password: password.into(),
@@ -90,25 +90,17 @@ impl ElasticsearchBackend {
     /// Connects using an Elasticsearch API key (sent as `Authorization:
     /// ApiKey <key>`).
     pub fn with_api_key(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self::with_client_and_auth(
-            base_url,
-            reqwest::Client::new(),
-            Auth::ApiKey(api_key.into()),
-        )
+        Self::with_client_and_auth(base_url, Client::new(), Auth::ApiKey(api_key.into()))
     }
 
-    /// Connects with a caller-supplied [`reqwest::Client`] (for custom
+    /// Connects with a caller-supplied [`rusty_request::Client`] (for custom
     /// timeouts, TLS config, proxies, etc), unauthenticated beyond whatever
     /// the client itself is configured with.
-    pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {
         Self::with_client_and_auth(base_url, client, Auth::None)
     }
 
-    fn with_client_and_auth(
-        base_url: impl Into<String>,
-        client: reqwest::Client,
-        auth: Auth,
-    ) -> Self {
+    fn with_client_and_auth(base_url: impl Into<String>, client: Client, auth: Auth) -> Self {
         let base_url = base_url.into();
         Self {
             client,
@@ -118,14 +110,19 @@ impl ElasticsearchBackend {
         }
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
         let builder = self
             .client
-            .request(method, format!("{}/{path}", self.base_url));
+            .request(method, &format!("{}/{path}", self.base_url))
+            .map_err(backend_err)?;
         match &self.auth {
-            Auth::None => builder,
-            Auth::Basic { username, password } => builder.basic_auth(username, Some(password)),
-            Auth::ApiKey(key) => builder.header("Authorization", format!("ApiKey {key}")),
+            Auth::None => Ok(builder),
+            Auth::Basic { username, password } => {
+                builder.basic_auth(username, password).map_err(backend_err)
+            }
+            Auth::ApiKey(key) => builder
+                .header("Authorization", &format!("ApiKey {key}"))
+                .map_err(backend_err),
         }
     }
 
@@ -143,10 +140,18 @@ fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError
     SearchError::Backend(BoxError::new(e))
 }
 
-async fn error_for_status(resp: reqwest::Response) -> SearchError {
+fn error_for_status(resp: Response) -> SearchError {
     let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let body = resp.text().unwrap_or_default();
     SearchError::backend_msg(format!("elasticsearch returned {status}: {body}"))
+}
+
+fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
+    let bytes = serde_json::to_vec(value).map_err(backend_err)?;
+    builder
+        .header("Content-Type", "application/json")
+        .map_err(backend_err)
+        .map(|b| b.body(bytes))
 }
 
 #[async_trait]
@@ -157,15 +162,13 @@ impl SearchBackend for ElasticsearchBackend {
         }
 
         let (body, fields) = build_index_body(&schema);
-        let resp = self
-            .request(Method::PUT, name)
-            .json(&body)
+        let resp = json_body(self.request(Method::Put, name)?, &body)?
             .send()
             .await
             .map_err(backend_err)?;
 
-        if resp.status() == StatusCode::BAD_REQUEST {
-            let body = resp.text().await.unwrap_or_default();
+        if resp.status().as_u16() == 400 {
+            let body = resp.text().unwrap_or_default();
             if body.contains("resource_already_exists_exception") {
                 return Err(SearchError::IndexAlreadyExists(name.to_string()));
             }
@@ -174,7 +177,7 @@ impl SearchBackend for ElasticsearchBackend {
             )));
         }
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
 
         self.indices.write().await.insert(name.to_string(), fields);
@@ -185,12 +188,12 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(name).await?;
 
         let resp = self
-            .request(Method::DELETE, name)
+            .request(Method::Delete, name)?
             .send()
             .await
             .map_err(backend_err)?;
-        if !resp.status().is_success() && resp.status() != StatusCode::NOT_FOUND {
-            return Err(error_for_status(resp).await);
+        if !resp.status().is_success() && resp.status().as_u16() != 404 {
+            return Err(error_for_status(resp));
         }
 
         self.indices.write().await.remove(name);
@@ -218,17 +221,18 @@ impl SearchBackend for ElasticsearchBackend {
         }
 
         let resp = self
-            .request(Method::POST, "_bulk")
+            .request(Method::Post, "_bulk")?
             .header("Content-Type", "application/x-ndjson")
+            .map_err(backend_err)?
             .body(body)
             .send()
             .await
             .map_err(backend_err)?;
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
 
-        let parsed: Value = resp.json().await.map_err(backend_err)?;
+        let parsed: Value = serde_json::from_slice(resp.bytes()).map_err(backend_err)?;
         if parsed
             .get("errors")
             .and_then(Value::as_bool)
@@ -245,14 +249,14 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(index).await?;
 
         let resp = self
-            .request(Method::DELETE, &format!("{index}/_doc/{id}"))
+            .request(Method::Delete, &format!("{index}/_doc/{id}"))?
             .send()
             .await
             .map_err(backend_err)?;
-        if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
+        if resp.status().is_success() || resp.status().as_u16() == 404 {
             return Ok(());
         }
-        Err(error_for_status(resp).await)
+        Err(error_for_status(resp))
     }
 
     async fn search(&self, index: &str, request: SearchRequest) -> Result<SearchResults> {
@@ -276,20 +280,21 @@ impl SearchBackend for ElasticsearchBackend {
             body["sort"] = Value::Array(sort);
         }
 
-        let resp = self
-            .request(Method::POST, &format!("{index}/_search"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(backend_err)?;
-        if resp.status() == StatusCode::NOT_FOUND {
+        let resp = json_body(
+            self.request(Method::Post, &format!("{index}/_search"))?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
+        if resp.status().as_u16() == 404 {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
 
-        let parsed: Value = resp.json().await.map_err(backend_err)?;
+        let parsed: Value = serde_json::from_slice(resp.bytes()).map_err(backend_err)?;
         parse_search_response(parsed)
     }
 
@@ -297,15 +302,15 @@ impl SearchBackend for ElasticsearchBackend {
         self.require_known(index).await?;
 
         let resp = self
-            .request(Method::POST, &format!("{index}/_refresh"))
+            .request(Method::Post, &format!("{index}/_refresh"))?
             .send()
             .await
             .map_err(backend_err)?;
-        if resp.status() == StatusCode::NOT_FOUND {
+        if resp.status().as_u16() == 404 {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !resp.status().is_success() {
-            return Err(error_for_status(resp).await);
+            return Err(error_for_status(resp));
         }
         Ok(())
     }

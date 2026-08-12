@@ -1,5 +1,5 @@
 //! A [`SearchBackend`] implementation backed by [Algolia](https://www.algolia.com),
-//! a hosted search SaaS, talked to over HTTP via [`reqwest`]. No official
+//! a hosted search SaaS, talked to over HTTP via [`rusty_request`]. No official
 //! or well-established async Algolia Rust client was available to build
 //! on with confidence, so - like `rusty-search-elasticsearch` and
 //! `rusty-search-solr` - this backend hand-rolls the REST API directly.
@@ -52,7 +52,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
+use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
@@ -76,7 +76,7 @@ const TASK_POLL_MAX_ATTEMPTS: usize = 100;
 /// the same HTTP client and index registry.
 #[derive(Clone)]
 pub struct AlgoliaBackend {
-    client: reqwest::Client,
+    client: Client,
     app_id: String,
     api_key: String,
     write_host: String,
@@ -91,16 +91,16 @@ impl AlgoliaBackend {
     /// `https://{app_id}.algolia.net` for writes,
     /// `https://{app_id}-dsn.algolia.net` for reads.
     pub fn new(app_id: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self::with_client(app_id, api_key, reqwest::Client::new())
+        Self::with_client(app_id, api_key, Client::new())
     }
 
-    /// Connects with a caller-supplied [`reqwest::Client`] (for custom
+    /// Connects with a caller-supplied [`rusty_request::Client`] (for custom
     /// timeouts, TLS config, proxies, etc), using the standard derived
     /// hosts.
     pub fn with_client(
         app_id: impl Into<String>,
         api_key: impl Into<String>,
-        client: reqwest::Client,
+        client: Client,
     ) -> Self {
         let app_id = app_id.into();
         let write_host = format!("https://{app_id}.algolia.net");
@@ -117,13 +117,7 @@ impl AlgoliaBackend {
         write_host: impl Into<String>,
         read_host: impl Into<String>,
     ) -> Self {
-        Self::with_hosts_and_client(
-            app_id,
-            api_key,
-            write_host,
-            read_host,
-            reqwest::Client::new(),
-        )
+        Self::with_hosts_and_client(app_id, api_key, write_host, read_host, Client::new())
     }
 
     fn with_hosts_and_client(
@@ -131,7 +125,7 @@ impl AlgoliaBackend {
         api_key: impl Into<String>,
         write_host: impl Into<String>,
         read_host: impl Into<String>,
-        client: reqwest::Client,
+        client: Client,
     ) -> Self {
         Self {
             client,
@@ -143,11 +137,14 @@ impl AlgoliaBackend {
         }
     }
 
-    fn request(&self, method: Method, host: &str, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, host: &str, path: &str) -> Result<RequestBuilder> {
         self.client
-            .request(method, format!("{host}/{path}"))
+            .request(method, &format!("{host}/{path}"))
+            .map_err(backend_err)?
             .header("X-Algolia-Application-Id", &self.app_id)
+            .map_err(backend_err)?
             .header("X-Algolia-API-Key", &self.api_key)
+            .map_err(backend_err)
     }
 
     async fn require_known(&self, index: &str) -> Result<FieldMap> {
@@ -159,11 +156,11 @@ impl AlgoliaBackend {
             .ok_or_else(|| SearchError::IndexNotFound(index.to_string()))
     }
 
-    async fn parse_response(&self, resp: reqwest::Response, index: &str) -> Result<Value> {
+    async fn parse_response(&self, resp: Response, index: &str) -> Result<Value> {
         let status = resp.status();
-        let text = resp.text().await.map_err(backend_err)?;
+        let text = resp.text().map_err(backend_err)?;
 
-        if status == StatusCode::NOT_FOUND {
+        if status.as_u16() == 404 {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !status.is_success() {
@@ -186,10 +183,10 @@ impl AlgoliaBackend {
         for _ in 0..TASK_POLL_MAX_ATTEMPTS {
             let resp = self
                 .request(
-                    Method::GET,
+                    Method::Get,
                     &self.write_host,
                     &format!("1/indexes/{index}/task/{task_id}"),
-                )
+                )?
                 .send()
                 .await
                 .map_err(backend_err)?;
@@ -209,6 +206,14 @@ fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError
     SearchError::Backend(BoxError::new(e))
 }
 
+fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
+    let bytes = serde_json::to_vec(value).map_err(backend_err)?;
+    builder
+        .header("Content-Type", "application/json")
+        .map_err(backend_err)
+        .map(|b| b.body(bytes))
+}
+
 #[async_trait]
 impl SearchBackend for AlgoliaBackend {
     async fn create_index(&self, name: &str, schema: CoreSchema) -> Result<()> {
@@ -217,16 +222,17 @@ impl SearchBackend for AlgoliaBackend {
         }
 
         let (settings, fields) = build_settings(&schema);
-        let resp = self
-            .request(
-                Method::PUT,
+        let resp = json_body(
+            self.request(
+                Method::Put,
                 &self.write_host,
                 &format!("1/indexes/{name}/settings"),
-            )
-            .json(&settings)
-            .send()
-            .await
-            .map_err(backend_err)?;
+            )?,
+            &settings,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         let json = self.parse_response(resp, name).await?;
         if let Some(task_id) = json.get("taskID").and_then(Value::as_u64) {
             self.wait_task(name, task_id).await?;
@@ -241,10 +247,10 @@ impl SearchBackend for AlgoliaBackend {
 
         let resp = self
             .request(
-                Method::DELETE,
+                Method::Delete,
                 &self.write_host,
                 &format!("1/indexes/{name}"),
-            )
+            )?
             .send()
             .await
             .map_err(backend_err)?;
@@ -275,16 +281,17 @@ impl SearchBackend for AlgoliaBackend {
             })
             .collect();
 
-        let resp = self
-            .request(
-                Method::POST,
+        let resp = json_body(
+            self.request(
+                Method::Post,
                 &self.write_host,
                 &format!("1/indexes/{index}/batch"),
-            )
-            .json(&json!({ "requests": requests }))
-            .send()
-            .await
-            .map_err(backend_err)?;
+            )?,
+            &json!({ "requests": requests }),
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         let json = self.parse_response(resp, index).await?;
         if let Some(task_id) = json.get("taskID").and_then(Value::as_u64) {
             self.wait_task(index, task_id).await?;
@@ -297,10 +304,10 @@ impl SearchBackend for AlgoliaBackend {
 
         let resp = self
             .request(
-                Method::DELETE,
+                Method::Delete,
                 &self.write_host,
                 &format!("1/indexes/{index}/{id}"),
-            )
+            )?
             .send()
             .await
             .map_err(backend_err)?;
@@ -338,16 +345,17 @@ impl SearchBackend for AlgoliaBackend {
             body["length"] = json!(request.limit);
         }
 
-        let resp = self
-            .request(
-                Method::POST,
+        let resp = json_body(
+            self.request(
+                Method::Post,
                 &self.read_host,
                 &format!("1/indexes/{index}/query"),
-            )
-            .json(&body)
-            .send()
-            .await
-            .map_err(backend_err)?;
+            )?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         let json = self.parse_response(resp, index).await?;
 
         let total = json.get("nbHits").and_then(Value::as_u64).unwrap_or(0) as usize;
