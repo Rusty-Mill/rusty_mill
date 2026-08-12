@@ -23,24 +23,15 @@ jobs:
       # than a registry or git-rev dependency). Without checking them out
       # as siblings of this repo's own checkout here, `cargo` can't resolve
       # those paths at all -- not a version/feature issue, just missing
-      # directories.
-      - name: Checkout sibling rusty_tokio
-        uses: actions/checkout@v4
-        with:
-          repository: baileyrd/rusty_tokio
-          path: ../rusty_tokio
-
-      - name: Checkout sibling rusty_tls
-        uses: actions/checkout@v4
-        with:
-          repository: baileyrd/rusty_tls
-          path: ../rusty_tls
-
-      - name: Checkout sibling rusty_http
-        uses: actions/checkout@v4
-        with:
-          repository: baileyrd/rusty_http
-          path: ../rusty_http
+      # directories. Plain `git clone`, not `actions/checkout`'s `path:` --
+      # that action refuses a path outside its own repo's workspace
+      # ("Repository path '.../rusty_tokio' is not under '.../rusty_request'"),
+      # so it can't place a true sibling checkout the way this needs.
+      - name: Checkout sibling rusty_tokio, rusty_tls, rusty_http
+        run: |
+          git clone --depth 1 https://github.com/baileyrd/rusty_tokio "$GITHUB_WORKSPACE/../rusty_tokio"
+          git clone --depth 1 https://github.com/baileyrd/rusty_tls "$GITHUB_WORKSPACE/../rusty_tls"
+          git clone --depth 1 https://github.com/baileyrd/rusty_http "$GITHUB_WORKSPACE/../rusty_http"
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
