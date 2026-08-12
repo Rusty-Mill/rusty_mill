@@ -5,6 +5,38 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #9 — parity-gap: async job-control wait (wait_job/try_wait_job), closes #6
+**2026-08-12** · [#9](https://github.com/baileyrd/rustils_async/pull/9)
+
+- **Added:** `AsyncChild::wait_job`/`try_wait_job`, Unix job control
+  (`WUNTRACED`/`WCONTINUED` — stop/continue, not just terminate).
+  `try_wait_job` stays synchronous (already non-blocking, `WNOHANG`).
+  `wait_job` is a disclosed one-shot background thread running the real
+  blocking `waitpid` — a pidfd does **not** become readable on
+  stop/continue (confirmed against real behavior, not assumed from the
+  termination case), so the `EpollReactor` this workspace otherwise
+  builds everything on cannot multiplex this the way it does plain
+  termination.
+- **Design note, not a shortcut:** `AsyncLinuxChild` now owns a single
+  authoritative reap-state cache (`reaped: Mutex<Option<ExitStatus>>`)
+  consulted by every reaping path (`wait`, `try_wait`, `ready`,
+  `try_wait_job`, `wait_job`), mirroring rustils' own
+  `LinuxChild::reaped` field. Without this, a caller mixing job-control
+  and plain-wait calls on the same child could hit `ECHILD` from
+  re-`waitpid`-ing an already-reaped pid — confirmed by a real test
+  (`wait_job_observes_stop_then_continue_then_terminate`) that calls
+  `wait()` *after* `wait_job()` already reaped the child and checks the
+  stashed status comes back instead of an error.
+- Real end-to-end test: a spawned child stopped (`SIGSTOP`), observed as
+  `Stopped` through `wait_job`, resumed (`SIGCONT`), observed as
+  `Continued`, then killed and observed as `Signaled` — not a scripted
+  mock, an actual OS process transitioning through real job-control
+  states.
+- Closes parity-gap #6, from the `parity-loop` run against `rustils`
+  (`gap-analysis.md`). This closes the gap list from that run — all
+  three identified gaps (`wait_any`, `take_stdin`/`take_stdout`/
+  `take_stderr`, `wait_job`/`try_wait_job`) are now merged.
+
 ## PR #8 — parity-gap: async pipe handle retrieval (take_stdin/take_stdout/take_stderr), closes #5
 **2026-08-12** · [#8](https://github.com/baileyrd/rustils_async/pull/8)
 

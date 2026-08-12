@@ -104,6 +104,21 @@ pub trait AsyncChild {
 
     /// Same contract as [`platform::process::Child::take_stderr`].
     fn take_stderr(&mut self) -> Option<Box<dyn File>>;
+
+    /// Non-blocking poll for stop/continue/terminate — identical
+    /// contract to the sync `Child::try_wait_job` (`WNOHANG`-style:
+    /// already non-blocking, so `RM-DEV-ASYNC-0001` says this stays
+    /// sync, same as `try_wait`).
+    fn try_wait_job(&mut self) -> Result<Option<ExitStatus>>;
+
+    /// Async counterpart to the sync `Child::wait_job`: without
+    /// blocking a thread, wait until the child terminates, stops, or
+    /// (if already stopped) continues — Unix job control
+    /// (`WUNTRACED`/`WCONTINUED`), the `rush` foreground-job-tracking
+    /// shape. Does not consume `self`: a `Stopped`/`Continued` result is
+    /// not terminal, so the caller keeps the child and may call again,
+    /// same as the sync side.
+    fn wait_job(&mut self) -> BoxFuture<'_, Result<ExitStatus>>;
 }
 
 /// A backend capable of spawning processes with an async wait path.
