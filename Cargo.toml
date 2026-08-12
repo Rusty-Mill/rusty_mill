@@ -23,7 +23,7 @@ repository = "https://github.com/baileyrd/rusty_http"
 # and Cargo treats two different revs of the same git dependency as two
 # unrelated crates, so trait/type identity has to line up with whatever
 # rev a consumer's other rusty_tokio-dependent crates already use.
-rusty_tokio = { path = "../rusty_tokio", optional = true }
+rusty_tokio = { git = "https://github.com/baileyrd/rusty_tokio", rev = "ac598c930e85460ae3f79328a1d82f28390672f8", optional = true }
 # Optional (see the `tokio` feature below): a second async adapter,
 # alongside `rusty-tokio`'s, driving the sans-IO core over real crates.io
 # tokio's `AsyncRead`/`AsyncWrite` instead -- for a consumer (`rusty_tail`)
