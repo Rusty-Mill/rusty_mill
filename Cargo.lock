@@ -1731,9 +1731,9 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tokio",
- "uuid",
  "wiremock",
 ]
 
@@ -1745,9 +1745,9 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tokio",
- "uuid",
  "wiremock",
 ]
 
@@ -1779,9 +1779,9 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tokio",
- "uuid",
  "wiremock",
 ]
 
@@ -1793,9 +1793,9 @@ dependencies = [
  "async-trait",
  "meilisearch-sdk",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tokio",
- "uuid",
  "wiremock",
 ]
 
@@ -1830,9 +1830,9 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tokio",
- "uuid",
  "wiremock",
 ]
 
@@ -1844,11 +1844,11 @@ dependencies = [
  "async-trait",
  "rusty-search-core",
  "rusty_sqlite",
+ "rusty_uuid",
  "serde_json",
  "tempfile",
  "time",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1858,12 +1858,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "rusty-search-core",
+ "rusty_uuid",
  "serde_json",
  "tantivy",
  "tempfile",
  "time",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -1874,6 +1874,11 @@ dependencies = [
  "rusqlite",
  "thiserror 1.0.69",
 ]
+
+[[package]]
+name = "rusty_uuid"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_uuid?rev=6bc9e04868fd3042d77d3bb757d40363654ebb45#6bc9e04868fd3042d77d3bb757d40363654ebb45"
 
 [[package]]
 name = "ryu"

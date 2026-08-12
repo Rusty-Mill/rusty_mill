@@ -5,6 +5,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- All seven backend crates that generate client-side document ids
+  (`rusty-search-algolia`, `-azure-search`, `-elasticsearch`,
+  `-meilisearch`, `-solr`, `-sqlite-fts5`, `-tantivy`) depend on
+  [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid) instead of
+  `uuid` - a genuine, complete sovereignty win (zero dependencies of its
+  own), unlike the `rusqlite`→`rusty_sqlite` swap below. From the
+  `sovereignty-loop` audit; tracked in #20.
 - `rusty-search-sqlite-fts5` now depends on
   [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite) instead of
   `rusqlite` directly - same `rusqlite` underneath (re-exported), but with

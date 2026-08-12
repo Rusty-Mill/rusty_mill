@@ -5,6 +5,26 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #20 — Swap uuid for rusty_uuid across all seven backend crates
+**2026-08-12** · [#20](https://github.com/baileyrd/rusty_search/issues/20)
+
+- **Changed:** `rusty-search-algolia`, `-azure-search`, `-elasticsearch`,
+  `-meilisearch`, `-solr`, `-sqlite-fts5`, and `-tantivy` all depend on
+  [`rusty_uuid`](https://github.com/baileyrd/rusty_uuid) (pinned git
+  dependency) instead of `uuid`, and call `rusty_uuid::Uuid::new_v4()` in
+  place of `uuid::Uuid::new_v4()` wherever a `Document` without an id is
+  indexed. `rusty_uuid` has **zero dependencies of its own** - a complete
+  sovereignty win, not a partial one.
+- **From:** the `sovereignty-loop` audit (`dependency-audit.md`), following
+  up once [`rusty_uuid#1`](https://github.com/baileyrd/rusty_uuid/issues/1)
+  (filed against the empty repo) was implemented and merged.
+- **Not included:** `time` → `rusty_time`, the other half of this
+  follow-up. `rusty_time` still depends on `rusty_std` via a `path`
+  dependency, which breaks resolution as a standalone git dependency -
+  confirmed by trying it (`error: no matching package named rusty_std
+  found`). Filed as [`rusty_time#4`](https://github.com/baileyrd/rusty_time/issues/4);
+  revisit once that's fixed.
+
 ## Issue #17 — Swap rusqlite for rusty_sqlite in rusty-search-sqlite-fts5
 **2026-08-12** · [#17](https://github.com/baileyrd/rusty_search/issues/17)
 

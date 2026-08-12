@@ -15,7 +15,7 @@ serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["sync", "time"] }
 anyhow = "1"
-uuid = { version = "1", features = ["v4"] }
+rusty_uuid = { git = "https://github.com/baileyrd/rusty_uuid", rev = "6bc9e04868fd3042d77d3bb757d40363654ebb45" }
 
 [dev-dependencies]
 tokio = { workspace = true }
