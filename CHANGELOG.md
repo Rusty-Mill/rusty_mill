@@ -5,6 +5,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `rusty-search-tantivy` and `rusty-search-sqlite-fts5` depend on
+  [`rusty_time`](https://github.com/baileyrd/rusty_time) instead of
+  `time` for RFC 3339 date parsing/validation on `Date`-typed fields.
+  `rusty-search-tantivy::convert::parse_date` reconstructs a
+  nanosecond-precision `tantivy::DateTime` via
+  `tantivy::DateTime::from_timestamp_nanos` (`rusty_time` has no
+  `time::OffsetDateTime`-shaped type for `DateTime::from_utc`). From the
+  `sovereignty-loop` audit, completing the `time`/`uuid` follow-up;
+  tracked in #23.
 - All seven backend crates that generate client-side document ids
   (`rusty-search-algolia`, `-azure-search`, `-elasticsearch`,
   `-meilisearch`, `-solr`, `-sqlite-fts5`, `-tantivy`) depend on
