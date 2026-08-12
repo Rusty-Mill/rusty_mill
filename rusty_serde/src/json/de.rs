@@ -21,6 +21,17 @@ where
     Ok(value)
 }
 
+/// Deserializes an already-parsed [`Value`] tree into a `T`, without
+/// re-parsing JSON text. Useful for working with a value's shape
+/// programmatically before committing to a concrete type (as
+/// `serde_json::from_value` is).
+pub fn from_value<T>(value: Value) -> Result<T, Error>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    crate::value::from_value(value)
+}
+
 pub struct Deserializer<'de> {
     input: &'de [u8],
     pos: usize,
