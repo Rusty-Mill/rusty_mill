@@ -16,23 +16,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # This crate's Cargo.toml depends on rusty_tokio/rusty_tls/rusty_http
-      # via sibling `path = "../..."` dependencies (see its own comments for
-      # why -- these are the ecosystem's shared runtime/TLS/HTTP crates, and
-      # this repo's convention is a monorepo-style sibling checkout rather
-      # than a registry or git-rev dependency). Without checking them out
-      # as siblings of this repo's own checkout here, `cargo` can't resolve
-      # those paths at all -- not a version/feature issue, just missing
-      # directories. Plain `git clone`, not `actions/checkout`'s `path:` --
-      # that action refuses a path outside its own repo's workspace
-      # ("Repository path '.../rusty_tokio' is not under '.../rusty_request'"),
-      # so it can't place a true sibling checkout the way this needs.
-      - name: Checkout sibling rusty_tokio, rusty_tls, rusty_http
-        run: |
-          git clone --depth 1 https://github.com/baileyrd/rusty_tokio "$GITHUB_WORKSPACE/../rusty_tokio"
-          git clone --depth 1 https://github.com/baileyrd/rusty_tls "$GITHUB_WORKSPACE/../rusty_tls"
-          git clone --depth 1 https://github.com/baileyrd/rusty_http "$GITHUB_WORKSPACE/../rusty_http"
-
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
