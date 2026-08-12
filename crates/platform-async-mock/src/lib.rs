@@ -35,6 +35,21 @@ impl AsyncMockSpawner {
         self
     }
 
+    /// Register a scripted response with stdout bytes, same contract as
+    /// [`MockSpawner::script_with_output`] — served through
+    /// [`AsyncChild::take_stdout`] when the spawn requests
+    /// `Stdio::Pipe`.
+    #[must_use]
+    pub fn script_with_output(
+        mut self,
+        program: impl Into<OsString>,
+        status: ExitStatus,
+        stdout: impl Into<Vec<u8>>,
+    ) -> Self {
+        self.inner = self.inner.script_with_output(program, status, stdout);
+        self
+    }
+
     /// Access to the wrapped [`MockSpawner`] for spawn-log assertions —
     /// the same surface consumer tests already use against the sync
     /// mock.
@@ -104,6 +119,18 @@ impl AsyncChild for AsyncMockChild {
         // for — this always resolves on first poll.
         Box::pin(std::future::ready(Ok(())))
     }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stdin()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn platform::fs::File>> {
+        self.inner.take_stderr()
+    }
 }
 
 #[cfg(test)]
@@ -170,5 +197,34 @@ mod tests {
         let mut children: Vec<Box<dyn AsyncChild>> = Vec::new();
         let err = block_on(spawner.wait_any(&mut children, None)).expect_err("must fail");
         assert_eq!(err.kind, platform::error::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn take_stdout_yields_scripted_bytes_exactly_once() {
+        use platform::process::Stdio;
+
+        let spawner =
+            AsyncMockSpawner::new().script_with_output("echo", ExitStatus::Code(0), b"hi\n");
+        let cmd = Command {
+            stdout: Stdio::Pipe,
+            ..Command::new("echo", "/")
+        };
+        let mut child = spawner.spawn(&cmd).expect("spawn");
+
+        let mut stdout = child.take_stdout().expect("stdout was piped");
+        assert!(child.take_stdout().is_none());
+
+        let mut buf = [0u8; 16];
+        let n = stdout.read(&mut buf).expect("read");
+        assert_eq!(&buf[..n], b"hi\n");
+    }
+
+    #[test]
+    fn take_stdin_is_none_when_not_piped() {
+        let spawner = AsyncMockSpawner::new().script("echo", ExitStatus::Code(0));
+        let mut child = spawner.spawn(&Command::new("echo", "/")).expect("spawn");
+        assert!(child.take_stdin().is_none());
+        assert!(child.take_stdout().is_none());
+        assert!(child.take_stderr().is_none());
     }
 }

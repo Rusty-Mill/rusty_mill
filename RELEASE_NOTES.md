@@ -5,6 +5,24 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #8 — parity-gap: async pipe handle retrieval (take_stdin/take_stdout/take_stderr), closes #5
+**2026-08-12** · [#8](https://github.com/baileyrd/rustils_async/pull/8)
+
+- **Added:** `AsyncChild::take_stdin`/`take_stdout`/`take_stderr`, matching the
+  sync `Child` contract exactly (`Some` exactly once; dropping stdin delivers
+  EOF; stdout/stderr reads return 0 at EOF). Pure pass-through to the wrapped
+  sync `Child`'s own `take_*` — no new async machinery, since the returned
+  handle stays a plain synchronous `platform::fs::File` (fs remains sync,
+  unchanged scope). `AsyncMockSpawner::script_with_output` added alongside so
+  the mock backend can exercise scripted stdout content the same way the
+  sync `MockSpawner` already does.
+- Real end-to-end test: `/bin/cat` spawned with `Stdio::Pipe` on stdin and
+  stdout, bytes written through `take_stdin`, the same bytes read back
+  through `take_stdout` after EOF — not just a compile-time check that the
+  methods exist.
+- Closes parity-gap #5, from the `parity-loop` run against `rustils`
+  (`gap-analysis.md`).
+
 ## PR #7 — parity-gap: async multi-child wait (wait_any), closes #4
 **2026-08-12** · [#7](https://github.com/baileyrd/rustils_async/pull/7)
 
