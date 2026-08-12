@@ -43,15 +43,14 @@ mod schema_map;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
-    Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError, SearchRequest,
-    SearchResults,
+    BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
+    SearchRequest, SearchResults,
 };
 
 use convert::{document_to_json, json_to_document};
@@ -158,14 +157,14 @@ impl SolrBackend {
             {
                 return Err(SearchError::IndexNotFound(index.to_string()));
             }
-            return Err(SearchError::Backend(anyhow!("solr error: {msg}")));
+            return Err(SearchError::backend_msg(format!("solr error: {msg}")));
         }
 
         if status == StatusCode::NOT_FOUND {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !status.is_success() {
-            return Err(SearchError::Backend(anyhow!(
+            return Err(SearchError::backend_msg(format!(
                 "solr returned {status}: {text}"
             )));
         }
@@ -175,7 +174,7 @@ impl SolrBackend {
 }
 
 fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 #[async_trait]
@@ -324,9 +323,9 @@ impl SearchBackend for SolrBackend {
 }
 
 fn parse_search_response(json: Value) -> Result<SearchResults> {
-    let response = json.get("response").ok_or_else(|| {
-        SearchError::Backend(anyhow!("malformed solr response: missing `response`"))
-    })?;
+    let response = json
+        .get("response")
+        .ok_or_else(|| SearchError::backend_msg("malformed solr response: missing `response`"))?;
 
     let total = response
         .get("numFound")

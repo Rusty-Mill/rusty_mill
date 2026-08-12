@@ -33,8 +33,8 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
-    Document, FieldType as CoreFieldType, Hit, Result, Schema as CoreSchema, SearchBackend,
-    SearchError, SearchRequest, SearchResults, Sort, SortOrder,
+    BoxError, Document, FieldType as CoreFieldType, Hit, Result, Schema as CoreSchema,
+    SearchBackend, SearchError, SearchRequest, SearchResults, Sort, SortOrder,
 };
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::Query as TantivyQuery;
@@ -94,7 +94,7 @@ impl Default for TantivyBackend {
 }
 
 fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 #[async_trait]

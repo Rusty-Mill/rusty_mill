@@ -20,4 +20,5 @@ pub use document::{Document, DocumentId};
 pub use error::{Result, SearchError};
 pub use query::{Query, SearchRequest, Sort, SortOrder, VectorQuery};
 pub use result::{Hit, SearchResults};
+pub use rusty_err::BoxError;
 pub use schema::{FieldDefinition, FieldOptions, FieldType, Schema, SchemaBuilder};

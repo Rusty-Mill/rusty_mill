@@ -68,6 +68,20 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   `cargo test --all-features` all clean) for the first time since
   `rusty-search-core`'s swap landed - closing out the migration this
   changelog has been tracking since the first entry above.
+- `rusty-search-core` and all eight backend crates depend on
+  [`rusty_err`](https://github.com/baileyrd/rusty_err) instead of
+  `thiserror`/`anyhow`. `SearchError` derives via `rusty_err::Error`
+  (same `#[error("...")]`/`#[from]` shape as `thiserror`); its `Backend`
+  variant wraps `rusty_err::BoxError` (the `anyhow::Error` analog,
+  `Send + Sync` unconditionally so it satisfies `#[async_trait]`'s `Send`
+  futures) instead of `anyhow::Error`. A new `SearchError::backend_msg`
+  covers `anyhow!("...")`'s ad-hoc-message case (`rusty_err` has no such
+  macro), backed by a small local `Display`+`Debug`-only wrapper type.
+  From the `sovereignty-loop` audit, completing the last row of its
+  original "immature candidate" bucket now that both
+  [`rusty_err#1`](https://github.com/baileyrd/rusty_err/issues/1) (derive
+  macro + `BoxError`) and [`rusty_err#4`](https://github.com/baileyrd/rusty_err/issues/4)
+  (`BoxError` being `Send + Sync`) are merged upstream.
 - `rusty-search-tantivy` and `rusty-search-sqlite-fts5` depend on
   [`rusty_time`](https://github.com/baileyrd/rusty_time) instead of
   `time` for RFC 3339 date parsing/validation on `Date`-typed fields.

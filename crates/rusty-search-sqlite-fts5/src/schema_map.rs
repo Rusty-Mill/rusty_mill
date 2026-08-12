@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use rusty_search_core::{FieldType as CoreFieldType, Schema as CoreSchema, SearchError};
+use rusty_search_core::{BoxError, FieldType as CoreFieldType, Schema as CoreSchema, SearchError};
 use rusty_sqlite::rusqlite::Connection;
 use rusty_sqlite::{Fts5TableBuilder, Fts5Tokenizer};
 
@@ -99,9 +99,9 @@ pub fn create_tables(
 }
 
 fn backend_err(e: rusty_sqlite::rusqlite::Error) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 fn rusty_sqlite_err(e: rusty_sqlite::Error) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }

@@ -58,8 +58,8 @@ use rusty_sqlite::rusqlite::params;
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
-    Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError, SearchRequest,
-    SearchResults,
+    BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
+    SearchRequest, SearchResults,
 };
 
 use schema_map::{quote_ident, FieldMeta};
@@ -111,11 +111,11 @@ impl Default for SqliteFts5Backend {
 }
 
 fn backend_err(e: rusty_sqlite::rusqlite::Error) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 fn rusty_sqlite_err(e: rusty_sqlite::Error) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 #[async_trait]

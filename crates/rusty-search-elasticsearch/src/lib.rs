@@ -34,15 +34,14 @@ mod schema_map;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Map, Value};
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
-    Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError, SearchRequest,
-    SearchResults, Sort, SortOrder,
+    BoxError, Document, Hit, Result, Schema as CoreSchema, SearchBackend, SearchError,
+    SearchRequest, SearchResults, Sort, SortOrder,
 };
 
 use convert::{document_to_source, source_to_document};
@@ -141,13 +140,13 @@ impl ElasticsearchBackend {
 }
 
 fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError {
-    SearchError::Backend(anyhow::Error::new(e))
+    SearchError::Backend(BoxError::new(e))
 }
 
 async fn error_for_status(resp: reqwest::Response) -> SearchError {
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
-    SearchError::Backend(anyhow!("elasticsearch returned {status}: {body}"))
+    SearchError::backend_msg(format!("elasticsearch returned {status}: {body}"))
 }
 
 #[async_trait]
@@ -170,7 +169,7 @@ impl SearchBackend for ElasticsearchBackend {
             if body.contains("resource_already_exists_exception") {
                 return Err(SearchError::IndexAlreadyExists(name.to_string()));
             }
-            return Err(SearchError::Backend(anyhow!(
+            return Err(SearchError::backend_msg(format!(
                 "elasticsearch rejected index creation: {body}"
             )));
         }
@@ -235,7 +234,7 @@ impl SearchBackend for ElasticsearchBackend {
             .and_then(Value::as_bool)
             .unwrap_or(false)
         {
-            return Err(SearchError::Backend(anyhow!(
+            return Err(SearchError::backend_msg(format!(
                 "elasticsearch bulk request reported per-item errors: {parsed}"
             )));
         }
@@ -329,7 +328,7 @@ fn sort_to_es(sort: &Sort) -> Value {
 
 fn parse_search_response(parsed: Value) -> Result<SearchResults> {
     let hits_obj = parsed.get("hits").ok_or_else(|| {
-        SearchError::Backend(anyhow!("malformed elasticsearch response: missing `hits`"))
+        SearchError::backend_msg("malformed elasticsearch response: missing `hits`")
     })?;
 
     let total = hits_obj

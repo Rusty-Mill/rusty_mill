@@ -30,12 +30,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
 name = "arc-swap"
 version = "1.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1727,7 +1721,6 @@ dependencies = [
 name = "rusty-search-algolia"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
@@ -1742,7 +1735,6 @@ dependencies = [
 name = "rusty-search-azure-search"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
@@ -1765,10 +1757,9 @@ dependencies = [
 name = "rusty-search-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
+ "rusty_err",
  "rusty_serde",
- "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -1776,7 +1767,6 @@ dependencies = [
 name = "rusty-search-elasticsearch"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
@@ -1791,7 +1781,6 @@ dependencies = [
 name = "rusty-search-meilisearch"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "meilisearch-sdk",
  "rusty-search-core",
@@ -1829,7 +1818,6 @@ dependencies = [
 name = "rusty-search-solr"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
@@ -1844,7 +1832,6 @@ dependencies = [
 name = "rusty-search-sqlite-fts5"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "rusty-search-core",
  "rusty_serde",
@@ -1859,7 +1846,6 @@ dependencies = [
 name = "rusty-search-tantivy"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "rusty-search-core",
  "rusty_serde",
@@ -1869,6 +1855,25 @@ dependencies = [
  "tantivy",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "rusty_err"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_err?rev=992ede743fe16cefef789a85dad55891065d523a#992ede743fe16cefef789a85dad55891065d523a"
+dependencies = [
+ "rusty_err_derive",
+ "rusty_std",
+]
+
+[[package]]
+name = "rusty_err_derive"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_err?rev=992ede743fe16cefef789a85dad55891065d523a#992ede743fe16cefef789a85dad55891065d523a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
