@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use rusqlite::types::Value as SqlValue;
 use rusty_search_core::{
     FieldType as CoreFieldType, Query as CoreQuery, SearchError, SearchRequest, Sort, SortOrder,
 };
+use rusty_sqlite::rusqlite::types::Value as SqlValue;
 
 use crate::convert;
 use crate::schema_map::{quote_ident, FieldMeta};

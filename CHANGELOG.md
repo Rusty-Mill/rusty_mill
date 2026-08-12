@@ -4,6 +4,16 @@ All notable changes to this repo are documented here.
 Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
+### Changed
+- `rusty-search-sqlite-fts5` now depends on
+  [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite) instead of
+  `rusqlite` directly - same `rusqlite` underneath (re-exported), but with
+  connection pragmas (WAL journaling, foreign key enforcement, a busy
+  timeout) this crate didn't set before, and a typed `Fts5TableBuilder` in
+  place of a hand-assembled `CREATE VIRTUAL TABLE ... USING fts5(...)`
+  string. From the `sovereignty-loop` dependency audit (#16); tracked in
+  #17.
+
 ### Fixed
 - Removed unused, unresolvable path dependencies (`rusty_regx`, `rusty_wire`,
   `rusty_tokio`, `rusty_std`, `rusty_json`, `rusty_request`) accidentally

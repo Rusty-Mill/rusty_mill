@@ -2,8 +2,11 @@
 //! [FTS5](https://www.sqlite.org/fts5.html) virtual table module - genuinely
 //! embedded like [`rusty-search-tantivy`](https://docs.rs/rusty-search-tantivy),
 //! but via SQL rather than an inverted-index library. Bundles its own SQLite
-//! (via `rusqlite`'s `bundled` feature), so no system SQLite install is
-//! required.
+//! (via [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite), a thin
+//! wrapper over `rusqlite`'s `bundled` feature that also applies sane
+//! connection pragmas - WAL journaling, foreign key enforcement, a busy
+//! timeout - this crate didn't set on its own before adopting it), so no
+//! system SQLite install is required.
 //!
 //! Use [`SqliteFts5Backend::in_memory`] for an ephemeral, process-local
 //! database, or [`SqliteFts5Backend::on_disk`] to persist each index as its
@@ -51,7 +54,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
-use rusqlite::{params, Connection};
+use rusty_sqlite::rusqlite::params;
 use tokio::sync::RwLock;
 
 use rusty_search_core::{
@@ -62,7 +65,7 @@ use rusty_search_core::{
 use schema_map::{quote_ident, FieldMeta};
 
 struct IndexHandle {
-    conn: StdMutex<Connection>,
+    conn: StdMutex<rusty_sqlite::Connection>,
     fields: HashMap<String, FieldMeta>,
     /// Every schema field, in declared order - the column order `content`
     /// `INSERT`s bind against.
@@ -107,7 +110,11 @@ impl Default for SqliteFts5Backend {
     }
 }
 
-fn backend_err(e: rusqlite::Error) -> SearchError {
+fn backend_err(e: rusty_sqlite::rusqlite::Error) -> SearchError {
+    SearchError::Backend(anyhow::Error::new(e))
+}
+
+fn rusty_sqlite_err(e: rusty_sqlite::Error) -> SearchError {
     SearchError::Backend(anyhow::Error::new(e))
 }
 
@@ -120,18 +127,18 @@ impl SearchBackend for SqliteFts5Backend {
         }
 
         let conn = match &self.data_dir {
-            None => Connection::open_in_memory().map_err(backend_err)?,
+            None => rusty_sqlite::Connection::open_in_memory().map_err(rusty_sqlite_err)?,
             Some(dir) => {
                 let path = dir.join(format!("{name}.sqlite3"));
                 if path.exists() {
                     return Err(SearchError::IndexAlreadyExists(name.to_string()));
                 }
                 std::fs::create_dir_all(dir).map_err(|e| SearchError::Backend(e.into()))?;
-                Connection::open(&path).map_err(backend_err)?
+                rusty_sqlite::Connection::open(&path).map_err(rusty_sqlite_err)?
             }
         };
 
-        let fields = schema_map::create_tables(&conn, &schema)?;
+        let fields = schema_map::create_tables(conn.as_raw(), &schema)?;
         let field_order: Vec<String> = schema.fields.iter().map(|f| f.name.clone()).collect();
         let fts_field_order: Vec<String> = field_order
             .iter()
@@ -171,7 +178,7 @@ impl SearchBackend for SqliteFts5Backend {
     async fn index_batch(&self, index: &str, documents: Vec<Document>) -> Result<()> {
         let handle = self.handle(index).await?;
         let mut conn = handle.conn.lock().expect("connection mutex poisoned");
-        let tx = conn.transaction().map_err(backend_err)?;
+        let tx = conn.as_raw_mut().transaction().map_err(backend_err)?;
 
         let content_columns: String = handle
             .field_order
@@ -240,25 +247,31 @@ impl SearchBackend for SqliteFts5Backend {
             tx.execute("DELETE FROM content WHERE _id = ?1", params![prepared.id])
                 .map_err(backend_err)?;
 
-            let content_params = std::iter::once(rusqlite::types::Value::Text(prepared.id.clone()))
-                .chain(prepared.content_values.iter().cloned());
+            let content_params = std::iter::once(rusty_sqlite::rusqlite::types::Value::Text(
+                prepared.id.clone(),
+            ))
+            .chain(prepared.content_values.iter().cloned());
             tx.execute(
                 &insert_content_sql,
-                rusqlite::params_from_iter(content_params),
+                rusty_sqlite::rusqlite::params_from_iter(content_params),
             )
             .map_err(backend_err)?;
 
             if handle.has_fts {
                 let rowid = tx.last_insert_rowid();
-                let fts_params = std::iter::once(rusqlite::types::Value::Integer(rowid)).chain(
-                    prepared
-                        .fts_values
-                        .iter()
-                        .cloned()
-                        .map(rusqlite::types::Value::Text),
-                );
-                tx.execute(&insert_fts_sql, rusqlite::params_from_iter(fts_params))
-                    .map_err(backend_err)?;
+                let fts_params =
+                    std::iter::once(rusty_sqlite::rusqlite::types::Value::Integer(rowid)).chain(
+                        prepared
+                            .fts_values
+                            .iter()
+                            .cloned()
+                            .map(rusty_sqlite::rusqlite::types::Value::Text),
+                    );
+                tx.execute(
+                    &insert_fts_sql,
+                    rusty_sqlite::rusqlite::params_from_iter(fts_params),
+                )
+                .map_err(backend_err)?;
             }
         }
 
@@ -270,13 +283,15 @@ impl SearchBackend for SqliteFts5Backend {
         let handle = self.handle(index).await?;
         let conn = handle.conn.lock().expect("connection mutex poisoned");
         if handle.has_fts {
-            conn.execute(
-                "DELETE FROM idx_fts WHERE rowid = (SELECT rowid FROM content WHERE _id = ?1)",
-                params![id],
-            )
-            .map_err(backend_err)?;
+            conn.as_raw()
+                .execute(
+                    "DELETE FROM idx_fts WHERE rowid = (SELECT rowid FROM content WHERE _id = ?1)",
+                    params![id],
+                )
+                .map_err(backend_err)?;
         }
-        conn.execute("DELETE FROM content WHERE _id = ?1", params![id])
+        conn.as_raw()
+            .execute("DELETE FROM content WHERE _id = ?1", params![id])
             .map_err(backend_err)?;
         Ok(())
     }
@@ -292,17 +307,21 @@ impl SearchBackend for SqliteFts5Backend {
         let conn = handle.conn.lock().expect("connection mutex poisoned");
 
         let total: usize = conn
+            .as_raw()
             .query_row(
                 &compiled.count_sql,
-                rusqlite::params_from_iter(compiled.count_params.iter().cloned()),
+                rusty_sqlite::rusqlite::params_from_iter(compiled.count_params.iter().cloned()),
                 |row| row.get::<_, i64>(0),
             )
             .map_err(backend_err)? as usize;
 
-        let mut stmt = conn.prepare(&compiled.select_sql).map_err(backend_err)?;
+        let mut stmt = conn
+            .as_raw()
+            .prepare(&compiled.select_sql)
+            .map_err(backend_err)?;
         let rows = stmt
             .query_map(
-                rusqlite::params_from_iter(compiled.select_params.iter().cloned()),
+                rusty_sqlite::rusqlite::params_from_iter(compiled.select_params.iter().cloned()),
                 |row| {
                     let score: f64 = row.get("score")?;
                     let document = convert::row_to_document(row, &handle.fields);

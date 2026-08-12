@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
-use rusqlite::Connection;
 use rusty_search_core::{FieldType as CoreFieldType, Schema as CoreSchema, SearchError};
+use rusty_sqlite::rusqlite::Connection;
+use rusty_sqlite::{Fts5TableBuilder, Fts5Tokenizer};
 
 /// Per-field metadata kept alongside the physical SQL tables, so query and
 /// row-conversion logic know a field's core type, whether it round-trips
@@ -74,11 +75,13 @@ pub fn create_tables(
     conn.execute(&create_content, []).map_err(backend_err)?;
 
     if !fts_columns.is_empty() {
-        let create_fts = format!(
-            "CREATE VIRTUAL TABLE idx_fts USING fts5({})",
-            fts_columns.join(", ")
-        );
-        conn.execute(&create_fts, []).map_err(backend_err)?;
+        let mut builder = Fts5TableBuilder::new("idx_fts").tokenizer(Fts5Tokenizer::Unicode61);
+        for def in &schema.fields {
+            if fields[&def.name].fts_indexed {
+                builder = builder.column(def.name.as_str());
+            }
+        }
+        builder.create(conn).map_err(rusty_sqlite_err)?;
     }
 
     for def in &schema.fields {
@@ -95,6 +98,10 @@ pub fn create_tables(
     Ok(fields)
 }
 
-fn backend_err(e: rusqlite::Error) -> SearchError {
+fn backend_err(e: rusty_sqlite::rusqlite::Error) -> SearchError {
+    SearchError::Backend(anyhow::Error::new(e))
+}
+
+fn rusty_sqlite_err(e: rusty_sqlite::Error) -> SearchError {
     SearchError::Backend(anyhow::Error::new(e))
 }

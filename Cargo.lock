@@ -1842,8 +1842,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "rusqlite",
  "rusty-search-core",
+ "rusty_sqlite",
  "serde_json",
  "tempfile",
  "time",
@@ -1864,6 +1864,15 @@ dependencies = [
  "time",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "rusty_sqlite"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_sqlite?rev=c0f671d8b98ab27ff31f64cfb0865da82893d9bb#c0f671d8b98ab27ff31f64cfb0865da82893d9bb"
+dependencies = [
+ "rusqlite",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

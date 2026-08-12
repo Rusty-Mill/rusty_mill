@@ -5,6 +5,27 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #17 — Swap rusqlite for rusty_sqlite in rusty-search-sqlite-fts5
+**2026-08-12** · [#17](https://github.com/baileyrd/rusty_search/issues/17)
+
+- **Changed:** `rusty-search-sqlite-fts5` depends on
+  [`rusty_sqlite`](https://github.com/baileyrd/rusty_sqlite) (pinned git
+  dependency) instead of `rusqlite` directly. `rusty_sqlite` re-exports the
+  same `rusqlite = "0.31"` (`bundled`) underneath - this doesn't eliminate
+  the external crate, but consolidates it behind a wrapper that applies
+  connection pragmas this crate didn't set before (WAL journaling, foreign
+  key enforcement, a busy timeout) and offers a typed `Fts5TableBuilder`
+  in place of a hand-assembled `CREATE VIRTUAL TABLE ... USING fts5(...)`
+  string.
+- **From:** the `sovereignty-loop` skill's dependency audit ([PR #16](https://github.com/baileyrd/rusty_search/pull/16),
+  `dependency-audit.md`) - the one row classified as a tractable,
+  low-risk swap. All 15 `rusty-search-sqlite-fts5` tests pass unmodified.
+- **Not included:** the other audit rows (`serde`/`serde_json` →
+  `rusty_serde`/`rusty_json`, `reqwest` → `rusty_request`, and the
+  immature `rusty_err`/`rusty_time`/`rusty_uuid` candidates) - tracked as
+  capability-gap issues on their respective repos instead, since none are
+  viable drop-in swaps today.
+
 ## Issue #14 — Add a SQLite FTS5 backend, and settle the vector/hybrid-search design question
 **2026-08-12** · [#14](https://github.com/baileyrd/rusty_search/issues/14)
 
