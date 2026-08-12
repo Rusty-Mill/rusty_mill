@@ -749,6 +749,49 @@ fn value_from_conversions() {
     assert_eq!(v.as_seq().unwrap().len(), 3);
 }
 
+#[test]
+fn value_insert_appends_and_overwrites() {
+    let mut v = Value::Map(Vec::new());
+    assert_eq!(v.insert("a", 1), None);
+    assert_eq!(v["a"].as_i64(), Some(1));
+
+    // Overwriting returns the previous value and doesn't duplicate the entry.
+    assert_eq!(v.insert("a", 2), Some(Value::Int(1)));
+    assert_eq!(v["a"].as_i64(), Some(2));
+    assert_eq!(v.as_seq(), None);
+    match &v {
+        Value::Map(entries) => assert_eq!(entries.len(), 1),
+        _ => panic!("expected a map"),
+    }
+}
+
+#[test]
+fn value_insert_is_a_no_op_on_a_non_map_value() {
+    let mut v = Value::Bool(true);
+    assert_eq!(v.insert("a", 1), None);
+    assert_eq!(v, Value::Bool(true));
+}
+
+#[test]
+fn value_remove_deletes_a_present_entry() {
+    let mut v = Value::Map(Vec::new());
+    v.insert("a", 1);
+    v.insert("b", 2);
+
+    assert_eq!(v.remove("a"), Some(Value::Int(1)));
+    assert!(v["a"].is_null());
+    assert_eq!(v["b"].as_i64(), Some(2));
+}
+
+#[test]
+fn value_remove_returns_none_for_a_missing_key_or_non_map_value() {
+    let mut map = Value::Map(Vec::new());
+    assert_eq!(map.remove("missing"), None);
+
+    let mut scalar = Value::Int(1);
+    assert_eq!(scalar.remove("a"), None);
+}
+
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 struct HasValueField {
     name: String,
