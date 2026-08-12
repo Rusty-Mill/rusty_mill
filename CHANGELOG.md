@@ -26,6 +26,13 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   split `Int`/`UInt`/`Float` numeric variants and `Seq` (vs.
   `serde_json::Value`'s single `Number` and `Array`). Second crate of the
   migration tracked in #19, after `rusty-search-core`.
+- `rusty-search-sqlite-fts5` now depends on `rusty_serde` instead of
+  `serde_json` for its own `Document`/SQL-row conversion (`convert.rs`) -
+  this crate never needed `serde_json::Value` for a third-party API
+  contract (unlike `rusty-search-tantivy`'s `tantivy::Document::from_json_object`),
+  so it's a straightforward swap. Third crate of the migration tracked in
+  #19, leaving `rusty-search-tantivy` as the only crate still blocking a
+  full workspace build.
 - All seven backend crates that generate client-side document ids
   (`rusty-search-algolia`, `-azure-search`, `-elasticsearch`,
   `-meilisearch`, `-solr`, `-sqlite-fts5`, `-tantivy`) depend on
