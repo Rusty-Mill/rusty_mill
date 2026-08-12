@@ -2,8 +2,9 @@
 
 A hand-rolled, dependency-free reimplementation of the ideas behind
 [serde](https://serde.rs): a `Serialize`/`Deserialize` data model that's
-independent of any wire format, a compact JSON format built on top of it,
-and a `#[derive(Serialize, Deserialize)]` macro - all with **zero crates.io
+independent of any wire format, a compact JSON format and a second,
+RON-inspired format built on top of it, and a
+`#[derive(Serialize, Deserialize)]` macro - all with **zero crates.io
 dependencies**.
 
 ```toml
@@ -31,8 +32,11 @@ assert_eq!(point, Point { x: 1, y: 2 });
 
 - **`rusty_serde`** - the data model (`Serialize`, `Deserialize`,
   `Serializer`, `Deserializer`, `Visitor`, ...), built-in impls for
-  primitives/`String`/`Option`/`Vec`/tuples/`HashMap`/`BTreeMap`, and the
-  `json` module (`to_string` / `from_str`).
+  primitives/`String`/`Option`/`Vec`/tuples/`HashMap`/`BTreeMap`, and two
+  formats built on that model: `json` (`to_string` / `from_str`) and `ron`
+  (`to_string` / `from_str`), a RON-inspired but not spec-compliant format
+  with unquoted field names, shape-dependent brackets, and bare-identifier
+  enum tags - the same derived impls round-trip through either.
 - **`rusty_serde_derive`** - the `#[derive(Serialize)]` / `#[derive(Deserialize)]`
   proc-macro, written directly against the compiler-provided `proc_macro`
   crate (no `syn`, no `quote`).
