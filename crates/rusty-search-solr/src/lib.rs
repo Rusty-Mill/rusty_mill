@@ -1,6 +1,6 @@
 //! A [`SearchBackend`] implementation backed by a remote
 //! [Apache Solr](https://solr.apache.org) instance, talked to over HTTP
-//! via [`reqwest`].
+//! via [`rusty_request`].
 //!
 //! Like `rusty-search-elasticsearch`, this backend has no in-process index
 //! of its own and keeps a small local registry (which indices it created,
@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use reqwest::{Method, StatusCode};
+use rusty_request::{Client, Method, RequestBuilder, Response};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
@@ -66,7 +66,7 @@ enum Auth {
 /// share the same HTTP client and index registry.
 #[derive(Clone)]
 pub struct SolrBackend {
-    client: reqwest::Client,
+    client: Client,
     base_url: String,
     auth: Auth,
     indices: Arc<RwLock<HashMap<String, FieldMap>>>,
@@ -76,7 +76,7 @@ impl SolrBackend {
     /// Connects to an unauthenticated instance at `base_url` (e.g.
     /// `"http://localhost:8983"`).
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client_and_auth(base_url, reqwest::Client::new(), Auth::None)
+        Self::with_client_and_auth(base_url, Client::new(), Auth::None)
     }
 
     /// Connects using HTTP basic auth (Solr's Basic Authentication
@@ -88,7 +88,7 @@ impl SolrBackend {
     ) -> Self {
         Self::with_client_and_auth(
             base_url,
-            reqwest::Client::new(),
+            Client::new(),
             Auth::Basic {
                 username: username.into(),
                 password: password.into(),
@@ -96,17 +96,13 @@ impl SolrBackend {
         )
     }
 
-    /// Connects with a caller-supplied [`reqwest::Client`] (for custom
+    /// Connects with a caller-supplied [`rusty_request::Client`] (for custom
     /// timeouts, TLS config, proxies, etc).
-    pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn with_client(base_url: impl Into<String>, client: Client) -> Self {
         Self::with_client_and_auth(base_url, client, Auth::None)
     }
 
-    fn with_client_and_auth(
-        base_url: impl Into<String>,
-        client: reqwest::Client,
-        auth: Auth,
-    ) -> Self {
+    fn with_client_and_auth(base_url: impl Into<String>, client: Client, auth: Auth) -> Self {
         let base_url = base_url.into();
         Self {
             client,
@@ -116,13 +112,16 @@ impl SolrBackend {
         }
     }
 
-    fn request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+    fn request(&self, method: Method, path: &str) -> Result<RequestBuilder> {
         let builder = self
             .client
-            .request(method, format!("{}/{path}", self.base_url));
+            .request(method, &format!("{}/{path}", self.base_url))
+            .map_err(backend_err)?;
         match &self.auth {
-            Auth::None => builder,
-            Auth::Basic { username, password } => builder.basic_auth(username, Some(password)),
+            Auth::None => Ok(builder),
+            Auth::Basic { username, password } => {
+                builder.basic_auth(username, password).map_err(backend_err)
+            }
         }
     }
 
@@ -140,9 +139,9 @@ impl SolrBackend {
     /// `"error"` object in a `200 OK` body rather than returning the real
     /// status code, so this checks for that shape first regardless of the
     /// HTTP status, and only falls back to the status code otherwise.
-    async fn parse_response(&self, resp: reqwest::Response, index: &str) -> Result<Value> {
+    async fn parse_response(&self, resp: Response, index: &str) -> Result<Value> {
         let status = resp.status();
-        let text = resp.text().await.map_err(backend_err)?;
+        let text = resp.text().map_err(backend_err)?;
         let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
 
         if let Some(error) = json.get("error") {
@@ -160,7 +159,7 @@ impl SolrBackend {
             return Err(SearchError::backend_msg(format!("solr error: {msg}")));
         }
 
-        if status == StatusCode::NOT_FOUND {
+        if status.as_u16() == 404 {
             return Err(SearchError::IndexNotFound(index.to_string()));
         }
         if !status.is_success() {
@@ -177,6 +176,14 @@ fn backend_err(e: impl std::error::Error + Send + Sync + 'static) -> SearchError
     SearchError::Backend(BoxError::new(e))
 }
 
+fn json_body(builder: RequestBuilder, value: &Value) -> Result<RequestBuilder> {
+    let bytes = serde_json::to_vec(value).map_err(backend_err)?;
+    builder
+        .header("Content-Type", "application/json")
+        .map_err(backend_err)
+        .map(|b| b.body(bytes))
+}
+
 #[async_trait]
 impl SearchBackend for SolrBackend {
     async fn create_index(&self, name: &str, schema: CoreSchema) -> Result<()> {
@@ -185,8 +192,8 @@ impl SearchBackend for SolrBackend {
         }
 
         let resp = self
-            .request(Method::POST, "solr/admin/cores")
-            .query(&[
+            .request(Method::Post, "solr/admin/cores")?
+            .query([
                 ("action", "CREATE"),
                 ("name", name),
                 ("configSet", "_default"),
@@ -198,12 +205,13 @@ impl SearchBackend for SolrBackend {
         self.parse_response(resp, name).await?;
 
         let (body, fields) = build_add_field_body(&schema);
-        let resp = self
-            .request(Method::POST, &format!("solr/{name}/schema"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Post, &format!("solr/{name}/schema"))?,
+            &body,
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         self.parse_response(resp, name).await?;
 
         self.indices.write().await.insert(name.to_string(), fields);
@@ -214,8 +222,8 @@ impl SearchBackend for SolrBackend {
         self.require_known(name).await?;
 
         let resp = self
-            .request(Method::POST, "solr/admin/cores")
-            .query(&[
+            .request(Method::Post, "solr/admin/cores")?
+            .query([
                 ("action", "UNLOAD"),
                 ("core", name),
                 ("deleteInstanceDir", "true"),
@@ -248,13 +256,14 @@ impl SearchBackend for SolrBackend {
             })
             .collect();
 
-        let resp = self
-            .request(Method::POST, &format!("solr/{index}/update"))
-            .query(&[("wt", "json")])
-            .json(&commands)
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Post, &format!("solr/{index}/update"))?
+                .query([("wt", "json")]),
+            &json!(commands),
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         self.parse_response(resp, index).await?;
         Ok(())
     }
@@ -262,13 +271,14 @@ impl SearchBackend for SolrBackend {
     async fn delete(&self, index: &str, id: &str) -> Result<()> {
         self.require_known(index).await?;
 
-        let resp = self
-            .request(Method::POST, &format!("solr/{index}/update"))
-            .query(&[("wt", "json")])
-            .json(&json!({ "delete": { "id": id } }))
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Post, &format!("solr/{index}/update"))?
+                .query([("wt", "json")]),
+            &json!({ "delete": { "id": id } }),
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         self.parse_response(resp, index).await?;
         Ok(())
     }
@@ -297,8 +307,8 @@ impl SearchBackend for SolrBackend {
         }
 
         let resp = self
-            .request(Method::GET, &format!("solr/{index}/select"))
-            .query(&query_params)
+            .request(Method::Get, &format!("solr/{index}/select"))?
+            .query(query_params)
             .send()
             .await
             .map_err(backend_err)?;
@@ -310,13 +320,14 @@ impl SearchBackend for SolrBackend {
     async fn commit(&self, index: &str) -> Result<()> {
         self.require_known(index).await?;
 
-        let resp = self
-            .request(Method::POST, &format!("solr/{index}/update"))
-            .query(&[("wt", "json")])
-            .json(&json!({ "commit": {} }))
-            .send()
-            .await
-            .map_err(backend_err)?;
+        let resp = json_body(
+            self.request(Method::Post, &format!("solr/{index}/update"))?
+                .query([("wt", "json")]),
+            &json!({ "commit": {} }),
+        )?
+        .send()
+        .await
+        .map_err(backend_err)?;
         self.parse_response(resp, index).await?;
         Ok(())
     }

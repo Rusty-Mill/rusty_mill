@@ -12,7 +12,7 @@ authors.workspace = true
 rusty-search-core = { workspace = true }
 rusty-search-elasticsearch = { workspace = true }
 async-trait = { workspace = true }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rusty_request = { git = "https://github.com/baileyrd/rusty_request", rev = "ebd1fed32dcd6958cab2c9c93ec8c04b3e7fd07a", features = ["tokio"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

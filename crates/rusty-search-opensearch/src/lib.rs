@@ -21,7 +21,7 @@
 //! - No first-class AWS SigV4 request signing for Amazon OpenSearch
 //!   Service - the common way to reach a *managed* OpenSearch cluster on
 //!   AWS. [`OpenSearchBackend::with_client`] accepts a pre-configured
-//!   [`reqwest::Client`], which is the escape hatch until this crate adds
+//!   [`rusty_request::Client`], which is the escape hatch until this crate adds
 //!   direct support (e.g. a signing mechanism); a caller can layer SigV4
 //!   signing into that client themselves in the meantime.
 
@@ -55,11 +55,11 @@ impl OpenSearchBackend {
         ))
     }
 
-    /// Connects with a caller-supplied [`reqwest::Client`] (for custom
+    /// Connects with a caller-supplied [`rusty_request::Client`] (for custom
     /// timeouts, TLS config, proxies, or - notably - injecting AWS SigV4
     /// signing for Amazon OpenSearch Service via the client's middleware,
     /// which this crate doesn't implement directly yet).
-    pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+    pub fn with_client(base_url: impl Into<String>, client: rusty_request::Client) -> Self {
         Self(ElasticsearchBackend::with_client(base_url, client))
     }
 }
@@ -266,7 +266,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = reqwest::Client::new();
+        let client = rusty_request::Client::new();
         let backend = OpenSearchBackend::with_client(server.uri(), client);
         backend
             .create_index("articles", articles_schema())

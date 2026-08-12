@@ -5,6 +5,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `rusty-search-algolia`, `rusty-search-azure-search`,
+  `rusty-search-elasticsearch`, `rusty-search-opensearch`, and
+  `rusty-search-solr` depend on
+  [`rusty_request`](https://github.com/baileyrd/rusty_request) instead of
+  `reqwest`. Bodies are still encoded/decoded with real `serde_json` over
+  `rusty_request`'s raw-bytes `body()`/`bytes()`/`text()`, not its own
+  `Json` type. `rusty-search-meilisearch` is unaffected - `meilisearch-sdk`
+  bundles `reqwest` internally, independent of this workspace's choice.
+  From the `sovereignty-loop` audit, completing its last row now that
+  [`rusty_request#28`](https://github.com/baileyrd/rusty_request/issues/28)
+  (path deps breaking standalone git-dependency resolution) is merged
+  upstream. Tracked in #27.
 - `rusty-search-core` now depends on
   [`rusty_serde`](https://github.com/baileyrd/rusty_serde) instead of
   `serde`/`serde_json` - `Document`, `Query`, `VectorQuery`, `Sort`,
