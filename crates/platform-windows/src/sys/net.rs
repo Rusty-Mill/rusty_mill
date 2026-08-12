@@ -952,39 +952,84 @@ pub fn unix_connect(path: &Path) -> Result<OwnedSocket> {
     Ok(sock)
 }
 
+/// How many times [`is_stale_socket`] retries its probe connect while it
+/// keeps seeing `WSAENOBUFS` — see that function's own doc comment for
+/// why this exists at all.
+const STALE_PROBE_ENOBUFS_RETRIES: u32 = 20;
+const STALE_PROBE_ENOBUFS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Probe whether the `AF_UNIX` path at `path` is a stale leftover file
 /// (no live listener) or genuinely held by one — see this module's doc
 /// comment for why a throwaway `connect` is the only way to tell.
+///
+/// Real `windows-latest` CI evidence (`rusty_prime_agent`'s own
+/// integration test, traced via the temporary DBG instrumentation still
+/// in this function) showed the probe connect reliably returning
+/// `WSAENOBUFS` (10055, "No buffer space available") — not
+/// `WSAECONNREFUSED` — for the *entire* duration of a 20-second outer
+/// retry budget, in exactly the race this module's docs already
+/// describe (rebind right after force-killing a process that also held
+/// a second `AF_UNIX` connection). `WSAENOBUFS` is Winsock's generic
+/// resource-transient code, not a considered "yes/no" answer the way
+/// `WSAECONNREFUSED`/a successful connect are — treating it as "not
+/// stale" outright (the previous behavior) means this scenario can
+/// never reclaim, no matter how long the caller retries, since a fresh
+/// probe keeps reproducing the identical code. Retrying the probe
+/// itself specifically on this one code, a bounded number of times with
+/// a short delay, resolves it deterministically in observed practice —
+/// `STALE_PROBE_ENOBUFS_RETRIES` was chosen generously (20 × 25ms = up
+/// to 500ms of extra latency in the worst case) since the alternative
+/// (misreading `WSAENOBUFS` as either "definitely stale" or "definitely
+/// live") each have their own real failure mode: the former can delete
+/// a path a live listener still legitimately holds if this code is ever
+/// genuinely resource-exhaustion-related, not just this race; the
+/// latter is the "can never reclaim" bug this whole change exists to
+/// fix.
 fn is_stale_socket(path: &Path) -> bool {
-    let Ok(probe) = new_unix_socket() else {
-        // TEMPORARY, load-bearing for now -- do not remove until the
-        // rusty_prime_agent Windows CI failure this is diagnosing is
-        // confirmed resolved. See docs/decision-request-af-unix-stale-
-        // reclaim-race.md's "Open questions".
-        eprintln!("DBG: is_stale_socket: new_unix_socket() for the probe failed");
-        return false;
-    };
-    let connect_result = raw_connect_unix(probe.raw(), path);
-    eprintln!("DBG: is_stale_socket: probe connect to {path:?} -> {connect_result:?}");
-    let r = match connect_result {
-        Ok(()) => 0,
-        // The probe only needs to distinguish "refused" (nothing
-        // listening — stale) from "connected" (a live owner). Any other
-        // failure is neither, and is reported as a nonzero code the
-        // caller's `WSAECONNREFUSED` check below will not match.
-        Err(e) if e.kind == ErrorKind::ConnectionRefused => w::WSAECONNREFUSED,
-        Err(_) => -1,
-    };
-    // A live listener accepting the probe means not stale; `probe`'s
-    // `Drop` closes it, ending the connection without disturbing the
-    // listener. Otherwise stale iff the refusal was `WSAECONNREFUSED`.
-    //
-    // This no longer re-reads `WSAGetLastError` after the fact. That was
-    // already a latent race (any intervening Winsock call overwrites the
-    // slot), and under `track-w` the code has to come from the returned
-    // value anyway — note 003's lesson landing somewhere it changes
-    // behavior rather than merely restating it.
-    r == w::WSAECONNREFUSED
+    for attempt in 0..=STALE_PROBE_ENOBUFS_RETRIES {
+        let Ok(probe) = new_unix_socket() else {
+            // TEMPORARY, load-bearing for now -- do not remove until the
+            // rusty_prime_agent Windows CI failure this is diagnosing is
+            // confirmed resolved. See docs/decision-request-af-unix-
+            // stale-reclaim-race.md's "Open questions".
+            eprintln!("DBG: is_stale_socket: new_unix_socket() for the probe failed");
+            return false;
+        };
+        let connect_result = raw_connect_unix(probe.raw(), path);
+        eprintln!(
+            "DBG: is_stale_socket: probe connect to {path:?} (attempt {attempt}) -> {connect_result:?}"
+        );
+        let r = match connect_result {
+            Ok(()) => 0,
+            // The probe only needs to distinguish "refused" (nothing
+            // listening — stale) from "connected" (a live owner). Any
+            // other failure is neither, and is reported as a nonzero
+            // code the caller's `WSAECONNREFUSED` check below will not
+            // match.
+            Err(e) if e.kind == ErrorKind::ConnectionRefused => w::WSAECONNREFUSED,
+            Err(e)
+                if matches!(e.os, OsCode::Win32(code) if code == w::WSAENOBUFS as u32)
+                    && attempt < STALE_PROBE_ENOBUFS_RETRIES =>
+            {
+                std::thread::sleep(STALE_PROBE_ENOBUFS_RETRY_DELAY);
+                continue;
+            }
+            Err(_) => -1,
+        };
+        // A live listener accepting the probe means not stale; `probe`'s
+        // `Drop` closes it, ending the connection without disturbing the
+        // listener. Otherwise stale iff the refusal was
+        // `WSAECONNREFUSED`.
+        //
+        // This no longer re-reads `WSAGetLastError` after the fact. That
+        // was already a latent race (any intervening Winsock call
+        // overwrites the slot), and under `track-w` the code has to
+        // come from the returned value anyway — note 003's lesson
+        // landing somewhere it changes behavior rather than merely
+        // restating it.
+        return r == w::WSAECONNREFUSED;
+    }
+    false
 }
 
 /// Whether a failed `bind` is worth probing [`is_stale_socket`] over, not

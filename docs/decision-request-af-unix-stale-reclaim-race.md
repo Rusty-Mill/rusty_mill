@@ -127,13 +127,55 @@ own available, so this CI run is the first time any of this change
 actually executed on Windows — see `docs/divergences.md` **016** for the
 closed-out record, now that the registry's own real-hardware bar is met.
 
+## Update: a second, distinct gap found via `rusty_prime_agent`'s own CI
+
+The `unix_listen`-level fix above and its dedicated regression test were
+confirmed correct and fast (both reclaim within ~20ms on real hardware).
+But once `rusty_prime_agent` got its own `windows-latest` CI running the
+*full* `tests/supervisor_restart_recovery.rs` integration test — a
+meaningfully more complex process (a real supervisor that has accepted
+and closed several incoming connections and made one outbound one over
+its lifetime, not just the one extra connection this repo's own isolated
+test exercises) — that test still failed, exhausting a 20-second retry
+budget with an *identical* real `AddrInUse` on every one of ~hundreds of
+attempts. That's not a timing issue (more time would never have helped);
+temporary DBG instrumentation added to `is_stale_socket` and re-pinned
+through to that project's own CI (so the diagnostics ran inside the real
+failing process, not just an isolated reproduction) showed why: the probe
+`connect()` was reliably returning `WSAENOBUFS` (10055, "No buffer space
+available"), not `WSAECONNREFUSED` — a code `is_stale_socket` didn't
+recognize at all, so it always concluded "not stale" and never reached
+the actual reclaim (`DeleteFileW` + retry `bind`), no matter how many
+times the caller retried the outer `bind_with_retry` loop.
+
+**Fix**: `is_stale_socket` now retries its own probe connect, specifically
+on `WSAENOBUFS`, up to `STALE_PROBE_ENOBUFS_RETRIES` (20 × 25ms = up to
+500ms worst case) before giving up — see that function's own doc comment
+for the full reasoning, in particular why this treats `WSAENOBUFS` as
+"inconclusive, try again" rather than folding it into the "definitely
+stale" classification `WSAECONNREFUSED` gets: an outright reclassification
+would risk deleting a live listener's socket file if `WSAENOBUFS` is ever
+genuinely resource-exhaustion-related rather than this specific teardown
+race, which the bounded-retry approach avoids while still resolving the
+race in observed practice. Also added `WSAENOBUFS` to
+`ffi::win32_surface`'s re-exported constants (it wasn't bound at all
+before this).
+
+**Not yet re-confirmed on real Windows CI as of this commit** — pushed
+alongside this doc update, pending the next `rusty_prime_agent` CI run
+with the fix (not just the diagnostics) re-pinned in. Update this section
+once that lands, and only then remove the temporary DBG `eprintln!`s in
+`is_stale_socket`/`unix_listen` and promote this second finding into its
+own `docs/divergences.md` entry (or a revision of **016** — undecided
+until there's confirming evidence either way).
+
 ## Open questions for the owner
 
-None outstanding. The fix is confirmed on real `windows-latest` CI
-(both Winsock backends) and promoted to `docs/divergences.md` **016**.
-Remaining follow-up is downstream, not in this repo: `rusty_prime_agent`'s
-own `tests/supervisor_restart_recovery.rs` integration test (the original
-repro) still needs a real run of *that* test on Windows to close the loop
-end to end — that repo has no CI configured yet, so it depends on either
+The `WSAENOBUFS` finding above is the actual open item — everything below
+predates it and is otherwise resolved. Remaining follow-up is downstream,
+not in this repo: `rusty_prime_agent`'s own
+`tests/supervisor_restart_recovery.rs` integration test (the original
+repro) still needs a real, *passing* run of that test on Windows to close
+the loop end to end — that repo has no CI configured yet, so it depends on either
 a native Windows run or standing CI being added there. This crate's own
 fix and its own regression coverage are done.
