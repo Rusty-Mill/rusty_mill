@@ -1,0 +1,11 @@
+[package]
+name = "threading"
+description = "Minimal multithreading primitives: scoped-thread spawn with a decoded join outcome, and Mutex/RwLock with an explicit poisoning policy. No unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true

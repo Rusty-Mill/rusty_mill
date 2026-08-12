@@ -1,0 +1,22 @@
+[package]
+name = "coreutils-async"
+description = "Reference consumer for platform-async: arun, an async port of rustils' rrun."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+platform.workspace = true
+platform-async.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+platform-async-linux.workspace = true
+
+[[bin]]
+name = "arun"
+path = "src/bin/arun.rs"
+
+[lints]
+workspace = true
