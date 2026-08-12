@@ -19,13 +19,14 @@ Single-crate, single-file (`src/lib.rs`). That's appropriate at the current size
 split into modules (`date.rs`, `time.rs`, `parse.rs`, ...) only once the file becomes
 hard to navigate, not preemptively.
 
-One structural quirk worth flagging: `Cargo.toml` declares `rusty_std` as a
-`path = "../rusty_std"` dependency, even though nothing in `src/lib.rs` currently
-uses it. That means:
-- A standalone `git clone` of `rusty_time` won't `cargo build` — `rusty_std` must be
-  checked out as a sibling directory first (see README's Getting Started).
-- CI checks out both repos as siblings under `$GITHUB_WORKSPACE` to reproduce that
-  layout (see `.github/workflows/ci-rust.yml`).
+One structural quirk worth flagging: `Cargo.toml` declares a `rusty_std` dependency
+even though nothing in `src/lib.rs` currently uses it. It's pinned via `git`/`rev`
+(matching the convention `rusty_tokio`/`rusty_request` use for their own
+`rusty_std`/`platform` dependencies) rather than `path`, specifically so `rusty_time`
+resolves for any external consumer — including as a `git` dependency of some other
+crate, where no sibling checkout of `rusty_std` exists (see #4). A `path` dependency
+only resolves in a workspace where both repos happen to be checked out side by side,
+which broke exactly that case.
 
 If `rusty_std` stays unused, consider dropping the dependency; if it's needed soon,
 say what for in the PR that starts using it.

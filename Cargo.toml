@@ -10,7 +10,7 @@ keywords = ["time", "datetime", "date", "iso8601", "no-std"]
 categories = ["date-and-time", "no-std"]
 
 [dependencies]
-rusty_std = { path = "../rusty_std" }
+rusty_std = { git = "https://github.com/baileyrd/rusty_std", rev = "99135f32afc48e868d3e17b6e234db4162e1c758" }
 
 [features]
 default = []

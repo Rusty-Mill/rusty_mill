@@ -10,14 +10,15 @@ Active — @baileyrd.
 
 ## Getting started
 ```bash
-# rusty_time depends on rusty_std via a path dependency, so it must be
-# checked out as a sibling directory:
 git clone https://github.com/baileyrd/rusty_time
-git clone https://github.com/baileyrd/rusty_std ../rusty_std   # from inside rusty_time/
-
+cd rusty_time
 cargo build
 cargo test
 ```
+
+`rusty_std` is a pinned `git` dependency (see `Cargo.toml`), so no sibling checkout
+is needed — `cargo build` resolves it on its own, including as a `git` dependency of
+some other crate.
 
 ## Architecture
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for boundaries, key decisions, and data flow.

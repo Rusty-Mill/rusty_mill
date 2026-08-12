@@ -23,6 +23,23 @@ chronological.
 
 ---
 
+## PR #5 — Depend on rusty_std via git, not path
+**2026-08-12** · [#5](https://github.com/baileyrd/rusty_time/pull/5)
+
+- **Fixed:** `rusty_std` is now a pinned `git`/`rev` dependency instead of
+  `path = "../rusty_std"`, matching the convention `rusty_tokio`/`rusty_request`
+  already use for their own `rusty_std`/`platform` dependencies. The `path` form
+  only resolved in a workspace with both repos checked out side by side — it broke
+  `cargo build` for any external consumer pulling `rusty_time` in as a `git`
+  dependency (e.g. `rusty_search`), since Cargo only clones `rusty_time`'s own tree
+  in that case.
+- **Changed:** CI's `ci-rust.yml` no longer needs a separate sibling checkout of
+  `rusty_std` — a single `actions/checkout` is enough now that Cargo resolves the
+  dependency itself.
+- Verified end-to-end: added `rusty_time` as a `git` dependency from a throwaway
+  crate (no sibling `rusty_std` checkout) and confirmed `cargo build` succeeds.
+- Fixes #4
+
 ## PR #3 — Add standard governance scaffolding and CI
 **2026-08-12** · [#3](https://github.com/baileyrd/rusty_time/pull/3)
 
