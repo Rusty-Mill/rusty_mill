@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# meilisearch-sdk's document methods take/return real serde_json::Value,
+# so this stays alongside rusty_serde rather than being replaced by it -
+# see convert.rs.
 serde_json = { workspace = true }
 meilisearch-sdk = "0.33"
 tokio = { workspace = true, features = ["sync"] }

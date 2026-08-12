@@ -56,9 +56,18 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   entirely - no `Document`/`Query` handling of its own, its one
   `serde_json` reference is an unrelated `#[cfg(test)]` helper) and
   `-cloud` (no `serde_json` at all) now build too, confirming neither
-  needed a fix of their own - only `rusty-search-meilisearch` and
-  `-azure-search` (and the top-level `rusty-search` facade, transitively)
-  still block a full workspace build.
+  needed a fix of their own.
+- `rusty-search-meilisearch` and `rusty-search-azure-search` complete the
+  migration tracked in #19, following the same `reqwest`-wire-protocol
+  pattern as `-elasticsearch`/`-solr`/`-algolia` (`-meilisearch` goes
+  through the official `meilisearch-sdk` crate's document methods, which
+  take/return real `serde_json::Value`, rather than raw `reqwest` calls,
+  but the boundary is the same shape). **The workspace now builds as a
+  whole again** (`cargo build --workspace --all-features`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test --all-features` all clean) for the first time since
+  `rusty-search-core`'s swap landed - closing out the migration this
+  changelog has been tracking since the first entry above.
 - `rusty-search-tantivy` and `rusty-search-sqlite-fts5` depend on
   [`rusty_time`](https://github.com/baileyrd/rusty_time) instead of
   `time` for RFC 3339 date parsing/validation on `Date`-typed fields.
