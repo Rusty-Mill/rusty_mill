@@ -161,21 +161,30 @@ race in observed practice. Also added `WSAENOBUFS` to
 `ffi::win32_surface`'s re-exported constants (it wasn't bound at all
 before this).
 
-**Not yet re-confirmed on real Windows CI as of this commit** — pushed
-alongside this doc update, pending the next `rusty_prime_agent` CI run
-with the fix (not just the diagnostics) re-pinned in. Update this section
-once that lands, and only then remove the temporary DBG `eprintln!`s in
-`is_stale_socket`/`unix_listen` and promote this second finding into its
-own `docs/divergences.md` entry (or a revision of **016** — undecided
-until there's confirming evidence either way).
+**Re-confirmed on real Windows CI.** The `WSAENOBUFS` retry above helps
+but, per further real evidence from `rusty_prime_agent`'s own fuller
+integration scenario, is not sufficient on its own — it was observed
+persisting for a full 20+ continuous seconds there, well past what any
+bounded in-process retry can wait out. `rusty_prime_agent` closed the
+remaining gap with its own defense in depth: a `probe()`-based liveness
+check in its `transport::Listener::bind_with_retry` that authoritatively
+confirms liveness via a real request/response round trip rather than
+trusting any raw OS error code, independent of this crate's internal
+classification. With that fallback in place, `rusty_prime_agent`'s
+`tests/supervisor_restart_recovery.rs` (the original repro) passed on
+real `windows-latest` CI in 7.35s, alongside `worker_crash_recovery.rs`
+and `session_lifecycle.rs`, on Windows/macOS/Linux simultaneously. The
+temporary DBG `eprintln!`s in `is_stale_socket`/`unix_listen` (this
+crate) and in `rusty_prime_agent`'s own `daemon::run` have all been
+removed accordingly, and the `WSAENOBUFS` finding is recorded in
+`docs/divergences.md` **016** as a related symptom of the same
+OS-level race rather than a separate entry.
 
 ## Open questions for the owner
 
-The `WSAENOBUFS` finding above is the actual open item — everything below
-predates it and is otherwise resolved. Remaining follow-up is downstream,
-not in this repo: `rusty_prime_agent`'s own
-`tests/supervisor_restart_recovery.rs` integration test (the original
-repro) still needs a real, *passing* run of that test on Windows to close
-the loop end to end — that repo has no CI configured yet, so it depends on either
-a native Windows run or standing CI being added there. This crate's own
-fix and its own regression coverage are done.
+None outstanding. Both root causes (the `OsCode::Win32(0)` gate gap and
+the `WSAENOBUFS` probe misclassification) are fixed at this layer and
+confirmed on real Windows CI; the residual gap neither fix alone could
+close is covered by `rusty_prime_agent`'s own `probe()`-based fallback,
+also confirmed. `rustils#127` (this fix) and the corresponding
+`rusty_tokio`/`rusty_prime_agent` PRs are merged.
