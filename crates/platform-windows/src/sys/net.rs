@@ -21,6 +21,12 @@
 //! owns the path, left untouched. Mirrors the Linux backend's
 //! `sys::net::is_stale_socket` — same reasoning, same one-probe/
 //! one-retry shape, `DeleteFileW` in place of `unlinkat`.
+//!
+//! `unix_listen`'s stale-cleanup retry is also reached by one failure
+//! *other* than literal `WSAEADDRINUSE` — see [`is_stale_bind_candidate`]
+//! for the specific dead-listener race that motivates it, and
+//! `docs/decision-request-af-unix-stale-reclaim-race.md` for the full
+//! writeup.
 
 #![allow(unsafe_code)]
 
@@ -946,32 +952,114 @@ pub fn unix_connect(path: &Path) -> Result<OwnedSocket> {
     Ok(sock)
 }
 
+/// How many times [`is_stale_socket`] retries its probe connect while it
+/// keeps seeing `WSAENOBUFS` — see that function's own doc comment for
+/// why this exists at all.
+const STALE_PROBE_ENOBUFS_RETRIES: u32 = 20;
+const STALE_PROBE_ENOBUFS_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
+
 /// Probe whether the `AF_UNIX` path at `path` is a stale leftover file
 /// (no live listener) or genuinely held by one — see this module's doc
 /// comment for why a throwaway `connect` is the only way to tell.
+///
+/// Real `windows-latest` CI evidence (`rusty_prime_agent`'s own
+/// integration test) showed the probe connect reliably returning
+/// `WSAENOBUFS` (10055, "No buffer space available") — not
+/// `WSAECONNREFUSED` — in exactly the race this module's docs already
+/// describe (rebind right after force-killing a process that also held
+/// a second `AF_UNIX` connection). `WSAENOBUFS` is Winsock's generic
+/// resource-transient code, not a considered "yes/no" answer the way
+/// `WSAECONNREFUSED`/a successful connect are — treating it as "not
+/// stale" outright (the previous behavior) means this scenario can
+/// never reclaim, no matter how long the caller retries, since a fresh
+/// probe keeps reproducing the identical code. Retrying the probe
+/// itself specifically on this one code narrows the window (and is the
+/// right *shape* of fix, not a wrong one — the alternative of folding
+/// `WSAENOBUFS` straight into "definitely stale" risks deleting a path
+/// a live listener still legitimately holds if this code is ever
+/// genuinely resource-exhaustion-related, not just this race).
+///
+/// **This bounded retry is not sufficient on its own**, per further
+/// real `windows-latest` evidence from the same integration test: in
+/// its fuller, more realistic scenario (a real supervisor with a longer
+/// connection history than this crate's own dedicated regression test),
+/// `WSAENOBUFS` was observed persisting solidly for a full 20+ continuous
+/// seconds, identically on every fresh probe — well past what any bounded
+/// in-process retry here can afford to wait out. `rusty_prime_agent`
+/// closed the remaining gap with its own defense in depth
+/// (`transport::Listener::bind_with_retry`'s `probe()`-based fallback,
+/// which checks liveness via a real request/response round trip instead
+/// of trusting any raw OS error code) rather than waiting on a fix at
+/// this layer alone. See `docs/decision-request-af-unix-stale-reclaim-
+/// race.md` for the full trace across both layers.
 fn is_stale_socket(path: &Path) -> bool {
-    let Ok(probe) = new_unix_socket() else {
-        return false;
-    };
-    let r = match raw_connect_unix(probe.raw(), path) {
-        Ok(()) => 0,
-        // The probe only needs to distinguish "refused" (nothing
-        // listening — stale) from "connected" (a live owner). Any other
-        // failure is neither, and is reported as a nonzero code the
-        // caller's `WSAECONNREFUSED` check below will not match.
-        Err(e) if e.kind == ErrorKind::ConnectionRefused => w::WSAECONNREFUSED,
-        Err(_) => -1,
-    };
-    // A live listener accepting the probe means not stale; `probe`'s
-    // `Drop` closes it, ending the connection without disturbing the
-    // listener. Otherwise stale iff the refusal was `WSAECONNREFUSED`.
-    //
-    // This no longer re-reads `WSAGetLastError` after the fact. That was
-    // already a latent race (any intervening Winsock call overwrites the
-    // slot), and under `track-w` the code has to come from the returned
-    // value anyway — note 003's lesson landing somewhere it changes
-    // behavior rather than merely restating it.
-    r == w::WSAECONNREFUSED
+    for attempt in 0..=STALE_PROBE_ENOBUFS_RETRIES {
+        let Ok(probe) = new_unix_socket() else {
+            return false;
+        };
+        let connect_result = raw_connect_unix(probe.raw(), path);
+        let r = match connect_result {
+            Ok(()) => 0,
+            // The probe only needs to distinguish "refused" (nothing
+            // listening — stale) from "connected" (a live owner). Any
+            // other failure is neither, and is reported as a nonzero
+            // code the caller's `WSAECONNREFUSED` check below will not
+            // match.
+            Err(e) if e.kind == ErrorKind::ConnectionRefused => w::WSAECONNREFUSED,
+            Err(e)
+                if matches!(e.os, OsCode::Win32(code) if code == w::WSAENOBUFS as u32)
+                    && attempt < STALE_PROBE_ENOBUFS_RETRIES =>
+            {
+                std::thread::sleep(STALE_PROBE_ENOBUFS_RETRY_DELAY);
+                continue;
+            }
+            Err(_) => -1,
+        };
+        // A live listener accepting the probe means not stale; `probe`'s
+        // `Drop` closes it, ending the connection without disturbing the
+        // listener. Otherwise stale iff the refusal was
+        // `WSAECONNREFUSED`.
+        //
+        // This no longer re-reads `WSAGetLastError` after the fact. That
+        // was already a latent race (any intervening Winsock call
+        // overwrites the slot), and under `track-w` the code has to
+        // come from the returned value anyway — note 003's lesson
+        // landing somewhere it changes behavior rather than merely
+        // restating it.
+        return r == w::WSAECONNREFUSED;
+    }
+    false
+}
+
+/// Whether a failed `bind` is worth probing [`is_stale_socket`] over, not
+/// just the textbook `WSAEADDRINUSE` case.
+///
+/// A dead listener's leftover path is documented (this module's own doc
+/// comment) to always come back `WSAEADDRINUSE` — true on an idle system.
+/// It stops being true in one specific race: the previous owner is force-
+/// killed (`TerminateProcess`, not a graceful close) while it also holds
+/// a *second*, unrelated live `AF_UNIX` connection open (an outbound
+/// connection to some other path). Windows tears down a terminated
+/// process's whole socket table as one batch, and afunix.sys's bookkeeping
+/// for the path this function is trying to rebind can apparently still be
+/// mid-teardown when a fresh `bind` on it lands — Winsock reports the call
+/// as failed (`SOCKET_ERROR`) but leaves `WSAGetLastError` at `0`
+/// (success), which decodes to `OsCode::Win32(0)` / `ErrorKind::Other`
+/// here, not `AddrInUse`. See
+/// `docs/decision-request-af-unix-stale-reclaim-race.md` for the full
+/// writeup and the harness repro this was traced from — confirmed on
+/// real `windows-latest` CI, and promoted to `docs/divergences.md`
+/// **016**.
+///
+/// A fresh, just-created socket's `bind` genuinely cannot fail with
+/// success — treating that specific nonsensical combination as an
+/// `AddrInUse`-equivalent candidate is safe rather than permissive:
+/// [`is_stale_socket`]'s own probe-connect is still the only thing that
+/// actually authorizes deleting the path, so a *real* live listener is
+/// never at risk of being reclaimed out from under it just because this
+/// gate widened.
+fn is_stale_bind_candidate(e: &PlatformError) -> bool {
+    e.kind == ErrorKind::AddrInUse || matches!(e.os, OsCode::Win32(0))
 }
 
 /// `socket` + `bind` (stale-cleanup retried once — see this module's doc
@@ -989,7 +1077,7 @@ pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
     let first = raw_bind_unix(sock.raw(), path);
     let bound = match first {
         Ok(()) => Ok(()),
-        Err(e) if e.kind == ErrorKind::AddrInUse && is_stale_socket(path) => {
+        Err(e) if is_stale_bind_candidate(&e) && is_stale_socket(path) => {
             let wide = to_wide_nul(path.as_os_str());
             // Stays on windows-sys in both configurations: this is a
             // *filesystem* unlink sitting in a net module, and the
