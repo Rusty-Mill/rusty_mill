@@ -4,15 +4,13 @@ use rusty_search_core::{Document, FieldType as CoreFieldType, SearchError};
 use rusty_serde::Value as JsonValue;
 use rusty_sqlite::rusqlite::types::Value as SqlValue;
 use rusty_sqlite::rusqlite::Row;
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 use crate::schema_map::FieldMeta;
 
 /// Validates (but doesn't reformat) an RFC 3339 timestamp string, the same
 /// representation `rusty-search-tantivy` uses for `Date` fields.
 pub fn validate_date(value: &str) -> Result<(), SearchError> {
-    OffsetDateTime::parse(value, &Rfc3339)
+    rusty_time::DateTime::parse(value)
         .map(|_| ())
         .map_err(|e| SearchError::InvalidQuery(format!("invalid RFC 3339 date `{value}`: {e}")))
 }

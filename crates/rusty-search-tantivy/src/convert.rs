@@ -5,16 +5,19 @@ use serde_json::Value as JsonValue;
 use tantivy::schema::document::{Document as TantivyDocumentTrait, TantivyDocument};
 use tantivy::schema::{Field, OwnedValue, Schema as TantivySchema};
 use tantivy::Term;
-use time::format_description::well_known::Rfc3339;
-use time::OffsetDateTime;
 
 use crate::schema_map::{FieldMeta, ID_FIELD_NAME};
 
 /// Parses an RFC 3339 timestamp string into a Tantivy `DateTime`.
 pub fn parse_date(value: &str) -> Result<tantivy::DateTime, SearchError> {
-    let dt = OffsetDateTime::parse(value, &Rfc3339)
+    let dt = rusty_time::DateTime::parse(value)
         .map_err(|e| SearchError::InvalidQuery(format!("invalid RFC 3339 date `{value}`: {e}")))?;
-    Ok(tantivy::DateTime::from_utc(dt))
+    // rusty_time has no time::OffsetDateTime-shaped type to hand to
+    // tantivy::DateTime::from_utc, but from_timestamp_nanos takes a plain
+    // nanoseconds-since-epoch integer - reconstructed here from whole
+    // seconds plus the sub-second remainder, preserving full precision.
+    let nanos = dt.timestamp() * 1_000_000_000 + dt.time().nanosecond() as i64;
+    Ok(tantivy::DateTime::from_timestamp_nanos(nanos))
 }
 
 /// Builds a `Term` for exact matching (used by `Query::Term` and range
