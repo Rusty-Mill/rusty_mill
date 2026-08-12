@@ -16,7 +16,7 @@
 //!   version via `PRAGMA user_version` and applies pending steps in order,
 //!   each in its own transaction.
 //!
-//! Enable the `pool` feature for an [`r2d2`]-backed connection [`Pool`] for
+//! Enable the `pool` feature for a small built-in connection [`Pool`] for
 //! multi-threaded applications.
 
 mod connection;
@@ -31,6 +31,6 @@ pub use error::{Error, Result};
 pub use fts5::{Fts5TableBuilder, Fts5Tokenizer};
 pub use migration::{Migration, Migrations};
 #[cfg(feature = "pool")]
-pub use pool::{build_pool, Pool, PooledConnection};
+pub use pool::{build_pool, build_pool_with_timeout, Pool, PooledConnection};
 
 pub use rusqlite;

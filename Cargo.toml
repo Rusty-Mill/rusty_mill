@@ -11,13 +11,10 @@ readme = "README.md"
 
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
-thiserror = "1"
-r2d2 = { version = "0.8", optional = true }
-r2d2_sqlite = { version = "0.24", optional = true }
 
 [features]
 default = []
-pool = ["dep:r2d2", "dep:r2d2_sqlite"]
+pool = []
 
 [dev-dependencies]
 tempfile = "3"
