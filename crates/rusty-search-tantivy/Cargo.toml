@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# `tantivy::schema::document::TantivyDocument::from_json_object` hard-requires
+# real `serde_json::Map`/`Value` (tantivy itself depends on it) - kept
+# alongside `rusty_serde` for exactly that boundary; see convert.rs.
 serde_json = { workspace = true }
 tantivy = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
