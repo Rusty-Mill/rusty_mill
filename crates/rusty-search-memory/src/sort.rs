@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 
 use rusty_search_core::{Document, Sort, SortOrder};
-use serde_json::Value;
+use rusty_serde::Value;
 
 /// Sorts `scored` in place according to `sorts`, applied in priority order.
 /// An empty `sorts` list defaults to descending score, matching every
@@ -42,13 +42,17 @@ fn compare_field(a: &Document, b: &Document, name: &str) -> Ordering {
 
 fn compare_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a
-            .as_f64()
-            .partial_cmp(&b.as_f64())
-            .unwrap_or(Ordering::Equal),
         (Value::String(a), Value::String(b)) => a.cmp(b),
         (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        _ => Ordering::Equal,
+        // Covers any pair of `Int`/`UInt`/`Float` (matching, or mixed -
+        // e.g. an `Int` field compared against a `Float` one), the same
+        // way `serde_json::Number` compared two numbers regardless of
+        // subtype. A shape mismatch against a non-numeric variant falls
+        // through to `Ordering::Equal` below, same as before.
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
     }
 }
 

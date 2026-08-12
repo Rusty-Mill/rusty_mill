@@ -10,8 +10,7 @@ authors.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
+rusty_serde = { workspace = true }
 # The derive macro matches thiserror's #[error("...")]/#[from] shape;
 # BoxError (used by SearchError::Backend) is the anyhow::Error analog,
 # Send + Sync unconditionally so it satisfies async-trait's Send futures

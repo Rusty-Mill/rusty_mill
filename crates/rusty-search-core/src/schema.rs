@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use rusty_serde::{Deserialize, Serialize};
 
 /// The data type of a schema field.
 ///

@@ -1724,6 +1724,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_uuid",
  "serde_json",
  "tokio",
@@ -1737,6 +1738,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_uuid",
  "serde_json",
  "tokio",
@@ -1757,8 +1759,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty_err",
- "serde",
- "serde_json",
+ "rusty_serde",
  "tokio",
 ]
 
@@ -1769,6 +1770,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_uuid",
  "serde_json",
  "tokio",
@@ -1782,6 +1784,7 @@ dependencies = [
  "async-trait",
  "meilisearch-sdk",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_uuid",
  "serde_json",
  "tokio",
@@ -1794,7 +1797,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
- "serde_json",
+ "rusty_serde",
  "tokio",
 ]
 
@@ -1818,6 +1821,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_uuid",
  "serde_json",
  "tokio",
@@ -1830,10 +1834,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_sqlite",
  "rusty_time",
  "rusty_uuid",
- "serde_json",
  "tempfile",
  "tokio",
 ]
@@ -1844,6 +1848,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rusty-search-core",
+ "rusty_serde",
  "rusty_time",
  "rusty_uuid",
  "serde_json",
@@ -1875,6 +1880,25 @@ dependencies = [
 name = "rusty_libc"
 version = "0.0.1"
 source = "git+https://github.com/baileyrd/rusty_libc?rev=73bf01bf20dc8de55a583cbd5719ad829076ccca#73bf01bf20dc8de55a583cbd5719ad829076ccca"
+
+[[package]]
+name = "rusty_serde"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
+dependencies = [
+ "rusty_serde_derive",
+ "rusty_serde_erased",
+]
+
+[[package]]
+name = "rusty_serde_derive"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
+
+[[package]]
+name = "rusty_serde_erased"
+version = "0.1.0"
+source = "git+https://github.com/baileyrd/rusty_serde?rev=ed0a0bd0029e3bfa96e62c6064f296233e07fc35#ed0a0bd0029e3bfa96e62c6064f296233e07fc35"
 
 [[package]]
 name = "rusty_sqlite"

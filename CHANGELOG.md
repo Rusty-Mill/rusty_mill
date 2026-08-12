@@ -5,6 +5,69 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
 
 ## [Unreleased]
 ### Changed
+- `rusty-search-core` now depends on
+  [`rusty_serde`](https://github.com/baileyrd/rusty_serde) instead of
+  `serde`/`serde_json` - `Document`, `Query`, `VectorQuery`, `Sort`,
+  `SearchRequest`, `Hit`, `SearchResults`, and `Schema`'s types all derive
+  `rusty_serde::{Serialize, Deserialize}` now, and `Document::fields`
+  changes type from `serde_json::Map<String, serde_json::Value>` to
+  `rusty_serde::Value` (JSON wire shape unchanged). **Step 1 of an XL,
+  ecosystem-wide migration** (#19) - every backend crate still depends on
+  real `serde`/`serde_json` and expects the old `Document::fields` type, so
+  the workspace does not build as a whole until they're migrated too in
+  follow-up work. `rusty_serde` gained the `to_value`/`from_value` pair
+  `Document::from_serializable`/`into_serializable` need as a direct
+  prerequisite for this (`rusty_serde` #50). `Document::set` now uses
+  `rusty_serde`'s `Value::insert` (`rusty_serde` #51/#52) instead of the
+  hand-rolled find-or-push logic that gap originally forced.
+- `rusty-search-memory` now depends on `rusty_serde` instead of
+  `serde_json` - `eval.rs`/`sort.rs`'s field-value handling (term/range
+  matching, field sort comparison) updated for `rusty_serde::Value`'s
+  split `Int`/`UInt`/`Float` numeric variants and `Seq` (vs.
+  `serde_json::Value`'s single `Number` and `Array`). Second crate of the
+  migration tracked in #19, after `rusty-search-core`.
+- `rusty-search-sqlite-fts5` now depends on `rusty_serde` instead of
+  `serde_json` for its own `Document`/SQL-row conversion (`convert.rs`) -
+  this crate never needed `serde_json::Value` for a third-party API
+  contract (unlike `rusty-search-tantivy`'s `tantivy::Document::from_json_object`),
+  so it's a straightforward swap. Third crate of the migration tracked in
+  #19.
+- `rusty-search-tantivy` now depends on `rusty_serde` for its own
+  `Document`/`Query` handling, but keeps `serde_json` too -
+  `tantivy::schema::document::TantivyDocument::from_json_object` is
+  `tantivy`'s own API, hard-requiring literal `serde_json::Map`/`Value`
+  since `tantivy` itself depends on real `serde_json`. `convert.rs` gains
+  an explicit `rusty_value_to_json`/`json_value_to_rusty` conversion pair
+  used only at that one boundary (`document_to_tantivy`/
+  `tantivy_doc_to_document`), rather than threading `serde_json` through
+  the rest of the crate. Fourth crate of the migration tracked in #19.
+- `rusty-search-elasticsearch`, `-solr`, and `-algolia` follow the same
+  pattern as `-tantivy`: each keeps `serde_json` alongside `rusty_serde`,
+  since all three send/receive their `Document`s over HTTP through
+  `reqwest`'s real-serde-backed `.json()`/`resp.json()` methods - the wire
+  protocol, not one narrow API call like `tantivy`'s. Each crate's
+  `convert.rs` gains the same `rusty_value_to_json`/`json_value_to_rusty`
+  conversion pair, used only where a `Document` crosses that boundary;
+  `rusty_serde::Value` is the type everywhere else that touches
+  `Document`/`Query` (`compare_values` in each crate's `lib.rs`,
+  `numeric_literal`/`coerce_range_bound`/`range_literal` in each crate's
+  `query_map.rs`). Fifth, sixth, and seventh crates of the migration
+  tracked in #19. `rusty-search-opensearch` (wraps `-elasticsearch`
+  entirely - no `Document`/`Query` handling of its own, its one
+  `serde_json` reference is an unrelated `#[cfg(test)]` helper) and
+  `-cloud` (no `serde_json` at all) now build too, confirming neither
+  needed a fix of their own.
+- `rusty-search-meilisearch` and `rusty-search-azure-search` complete the
+  migration tracked in #19, following the same `reqwest`-wire-protocol
+  pattern as `-elasticsearch`/`-solr`/`-algolia` (`-meilisearch` goes
+  through the official `meilisearch-sdk` crate's document methods, which
+  take/return real `serde_json::Value`, rather than raw `reqwest` calls,
+  but the boundary is the same shape). **The workspace now builds as a
+  whole again** (`cargo build --workspace --all-features`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, and
+  `cargo test --all-features` all clean) for the first time since
+  `rusty-search-core`'s swap landed - closing out the migration this
+  changelog has been tracking since the first entry above.
 - `rusty-search-core` and all eight backend crates depend on
   [`rusty_err`](https://github.com/baileyrd/rusty_err) instead of
   `thiserror`/`anyhow`. `SearchError` derives via `rusty_err::Error`
@@ -45,6 +108,15 @@ Format: Added / Changed / Deprecated / Removed / Fixed / Security, newest first.
   #17.
 
 ### Fixed
+- CI: `actions/checkout@v4` now runs with `persist-credentials: false` in
+  the `check` job. Its default github.com-wide auth header broke Cargo's
+  fetch of the `rusty_serde` git dependency (pinned by commit, since it
+  isn't on crates.io) - "failed to authenticate"/"revision not found"
+  even though the commit was real and public, and unaffected by whether
+  Cargo used its bundled libgit2 or `CARGO_NET_GIT_FETCH_WITH_CLI`'s
+  system-git-CLI fallback (tried first; still failed under the same
+  header, so not the actual fix). Blocked CI on every PR touching a crate
+  migrated to `rusty_serde` (#19) until fixed.
 - Removed unused, unresolvable path dependencies (`rusty_regx`, `rusty_wire`,
   `rusty_tokio`, `rusty_std`, `rusty_json`, `rusty_request`) accidentally
   committed straight to `main` pointing at sibling directories that don't

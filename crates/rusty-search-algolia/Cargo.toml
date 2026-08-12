@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
+rusty_serde = { workspace = true }
+# Algolia's wire protocol goes through reqwest's real-serde-backed
+# `.json()` convenience methods, so this stays alongside rusty_serde
+# rather than being replaced by it - see convert.rs.
 serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 tokio = { workspace = true, features = ["sync", "time"] }

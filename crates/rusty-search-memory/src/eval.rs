@@ -1,5 +1,5 @@
 use rusty_search_core::{Document, Query};
-use serde_json::Value;
+use rusty_serde::Value;
 
 /// Evaluates `query` against `doc`, returning its relevance score if it
 /// matches or `None` if it doesn't.
@@ -29,7 +29,9 @@ pub fn matches(query: &Query, doc: &Document) -> Option<f32> {
 fn value_to_string(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
+        Value::Int(n) => Some(n.to_string()),
+        Value::UInt(n) => Some(n.to_string()),
+        Value::Float(n) => Some(n.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
@@ -37,7 +39,7 @@ fn value_to_string(value: &Value) -> Option<String> {
 
 fn term_matches(doc: &Document, field: &str, value: &str) -> bool {
     match doc.get(field) {
-        Some(Value::Array(items)) => items
+        Some(Value::Seq(items)) => items
             .iter()
             .any(|item| value_to_string(item).as_deref() == Some(value)),
         Some(other) => value_to_string(other).as_deref() == Some(value),

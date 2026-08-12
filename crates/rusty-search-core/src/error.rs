@@ -25,7 +25,7 @@ pub enum SearchError {
     InvalidQuery(String),
 
     #[error("serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
+    Serialization(#[from] rusty_serde::json::Error),
 
     /// Catch-all for backend-specific failures (I/O, network, the engine's
     /// own error type, etc). Backends should prefer the typed variants above
@@ -83,8 +83,8 @@ mod tests {
     }
 
     #[test]
-    fn serialization_from_serde_json_error_chains_source() {
-        let json_err = serde_json::from_str::<serde_json::Value>("not json").unwrap_err();
+    fn serialization_from_rusty_serde_json_error_chains_source() {
+        let json_err = rusty_serde::json::from_str::<rusty_serde::Value>("not json").unwrap_err();
         let err: SearchError = json_err.into();
         assert!(matches!(err, SearchError::Serialization(_)));
     }

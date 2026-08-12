@@ -1,5 +1,4 @@
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use rusty_serde::{Deserialize, Serialize, Value};
 
 /// An engine-agnostic query expression.
 ///
@@ -37,13 +36,13 @@ pub enum Query {
     /// least one `should` clause must match. `filter` behaves like `must`
     /// but does not contribute to relevance scoring.
     Bool {
-        #[serde(default)]
+        #[rusty_serde(default)]
         must: Vec<Query>,
-        #[serde(default)]
+        #[rusty_serde(default)]
         should: Vec<Query>,
-        #[serde(default)]
+        #[rusty_serde(default)]
         must_not: Vec<Query>,
-        #[serde(default)]
+        #[rusty_serde(default)]
         filter: Vec<Query>,
     },
 }
@@ -223,7 +222,7 @@ pub struct SearchRequest {
     /// before this field existed. Backends that don't support vector
     /// search must reject a `Some` value with [`crate::SearchError::InvalidQuery`]
     /// rather than silently ignoring it.
-    #[serde(default)]
+    #[rusty_serde(default)]
     pub vector: Option<VectorQuery>,
 }
 

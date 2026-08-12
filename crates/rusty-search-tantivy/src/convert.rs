@@ -1,12 +1,65 @@
 use std::collections::HashMap;
 
 use rusty_search_core::{Document, FieldType as CoreFieldType, SearchError};
-use serde_json::Value as JsonValue;
+use rusty_serde::Value as RustyValue;
 use tantivy::schema::document::{Document as TantivyDocumentTrait, TantivyDocument};
 use tantivy::schema::{Field, OwnedValue, Schema as TantivySchema};
 use tantivy::Term;
 
 use crate::schema_map::{FieldMeta, ID_FIELD_NAME};
+
+// `tantivy::schema::document::TantivyDocument::from_json_object` is
+// `tantivy`'s own API, hard-requiring literal `serde_json::Map`/`Value`
+// since `tantivy` itself depends on real `serde_json` - neither
+// `rusty_serde` nor any other internal replacement removes that
+// boundary. `document_to_tantivy`/`tantivy_doc_to_document` convert
+// between `rusty_serde::Value` (what `Document::fields` is) and
+// `serde_json::Value` (what `tantivy` needs) right at that boundary,
+// rather than anywhere else in this crate.
+
+fn rusty_value_to_json(value: RustyValue) -> serde_json::Value {
+    match value {
+        RustyValue::Null => serde_json::Value::Null,
+        RustyValue::Bool(b) => serde_json::Value::Bool(b),
+        RustyValue::Int(v) => serde_json::Value::Number(v.into()),
+        RustyValue::UInt(v) => serde_json::Value::Number(v.into()),
+        RustyValue::Float(v) => serde_json::Number::from_f64(v)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        RustyValue::String(s) => serde_json::Value::String(s),
+        RustyValue::Seq(items) => {
+            serde_json::Value::Array(items.into_iter().map(rusty_value_to_json).collect())
+        }
+        RustyValue::Map(entries) => serde_json::Value::Object(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, rusty_value_to_json(v)))
+                .collect(),
+        ),
+    }
+}
+
+fn json_value_to_rusty(value: serde_json::Value) -> RustyValue {
+    match value {
+        serde_json::Value::Null => RustyValue::Null,
+        serde_json::Value::Bool(b) => RustyValue::Bool(b),
+        serde_json::Value::Number(n) => match (n.as_i64(), n.as_u64(), n.as_f64()) {
+            (Some(v), _, _) => RustyValue::Int(v),
+            (None, Some(v), _) => RustyValue::UInt(v),
+            (None, None, Some(v)) => RustyValue::Float(v),
+            (None, None, None) => RustyValue::Null,
+        },
+        serde_json::Value::String(s) => RustyValue::String(s),
+        serde_json::Value::Array(items) => {
+            RustyValue::Seq(items.into_iter().map(json_value_to_rusty).collect())
+        }
+        serde_json::Value::Object(map) => RustyValue::Map(
+            map.into_iter()
+                .map(|(k, v)| (k, json_value_to_rusty(v)))
+                .collect(),
+        ),
+    }
+}
 
 /// Parses an RFC 3339 timestamp string into a Tantivy `DateTime`.
 pub fn parse_date(value: &str) -> Result<tantivy::DateTime, SearchError> {
@@ -46,12 +99,12 @@ pub fn value_to_term(
     }
 }
 
-/// Builds a `Term` for a numeric/date range bound expressed as a JSON value
+/// Builds a `Term` for a numeric/date range bound expressed as a `Value`
 /// (as carried by `Query::Range`).
 pub fn json_value_to_term(
     field: Field,
     field_type: CoreFieldType,
-    value: &JsonValue,
+    value: &RustyValue,
 ) -> Result<Term, SearchError> {
     match field_type {
         CoreFieldType::I64 => value
@@ -88,8 +141,14 @@ pub fn document_to_tantivy(
         .clone()
         .unwrap_or_else(|| rusty_uuid::Uuid::new_v4().to_string());
 
-    let mut object = document.fields;
-    object.insert(ID_FIELD_NAME.to_string(), JsonValue::String(id.clone()));
+    let mut object = match rusty_value_to_json(document.fields) {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    object.insert(
+        ID_FIELD_NAME.to_string(),
+        serde_json::Value::String(id.clone()),
+    );
 
     let tantivy_doc = TantivyDocument::from_json_object(tantivy_schema, object)
         .expect("document fields were already validated against this schema");
@@ -117,17 +176,20 @@ pub fn tantivy_doc_to_document(
         if !fields.contains_key(&name) {
             continue;
         }
-        let mut json_values: Vec<JsonValue> = values
+        let mut json_values: Vec<serde_json::Value> = values
             .into_iter()
-            .map(|v| serde_json::to_value(v).unwrap_or(JsonValue::Null))
+            .map(|v| serde_json::to_value(v).unwrap_or(serde_json::Value::Null))
             .collect();
         let value = if json_values.len() == 1 {
             json_values.pop().unwrap()
         } else {
-            JsonValue::Array(json_values)
+            serde_json::Value::Array(json_values)
         };
         object.insert(name, value);
     }
 
-    Document { id, fields: object }
+    Document {
+        id,
+        fields: json_value_to_rusty(serde_json::Value::Object(object)),
+    }
 }
