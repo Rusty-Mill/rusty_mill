@@ -606,8 +606,8 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
         assert_eq!(results.hits[0].score, 1.5);
         assert_eq!(
-            results.hits[0].document.get("title").unwrap(),
-            "Rust async search"
+            results.hits[0].document.get("title").unwrap().as_str(),
+            Some("Rust async search")
         );
     }
 

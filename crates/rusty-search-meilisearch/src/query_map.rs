@@ -1,5 +1,5 @@
 use rusty_search_core::{FieldType, Query as CoreQuery, SearchError};
-use serde_json::Value;
+use rusty_serde::Value;
 
 use crate::schema_map::{FieldMap, FieldMeta};
 
@@ -169,7 +169,7 @@ fn numeric_literal(value: &Value) -> Result<String, SearchError> {
     value
         .as_f64()
         .map(|v| {
-            if value.is_i64() || value.is_u64() {
+            if value.as_i64().is_some() || value.as_u64().is_some() {
                 // preserve integer formatting rather than "10.0"
                 value.to_string()
             } else {

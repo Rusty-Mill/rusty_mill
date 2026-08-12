@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 rusty-search-core = { workspace = true }
 async-trait = { workspace = true }
-serde_json = { workspace = true }
+rusty_serde = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt"] }
 # Wraps the same rusqlite = "0.31" (bundled) this crate would otherwise
 # depend on directly, applying sane connection pragmas (WAL, foreign keys,

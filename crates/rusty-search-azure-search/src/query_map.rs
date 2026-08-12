@@ -1,5 +1,5 @@
 use rusty_search_core::{FieldType, Query as CoreQuery, SearchError, Sort, SortOrder};
-use serde_json::Value;
+use rusty_serde::Value;
 
 use crate::schema_map::{FieldMap, FieldMeta};
 

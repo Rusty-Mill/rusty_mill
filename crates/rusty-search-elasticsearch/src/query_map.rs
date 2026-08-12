@@ -65,16 +65,16 @@ fn single_field(name: &str, value: Value) -> Value {
     Value::Object(object)
 }
 
-fn coerce_range_bound(meta: &FieldMeta, value: &Value) -> Result<Value, SearchError> {
+fn coerce_range_bound(meta: &FieldMeta, value: &rusty_serde::Value) -> Result<Value, SearchError> {
     use rusty_search_core::FieldType;
     let ok = match meta.field_type {
-        FieldType::I64 => value.is_i64() || value.is_u64(),
-        FieldType::F64 => value.is_number(),
-        FieldType::Date => value.is_string(),
+        FieldType::I64 => value.as_i64().is_some() || value.as_u64().is_some(),
+        FieldType::F64 => value.as_f64().is_some(),
+        FieldType::Date => value.as_str().is_some(),
         FieldType::Text | FieldType::Keyword | FieldType::Bool => false,
     };
     if ok {
-        Ok(value.clone())
+        Ok(crate::convert::rusty_value_to_json(value.clone()))
     } else {
         Err(SearchError::InvalidQuery(format!(
             "range queries are not supported on {:?} fields",

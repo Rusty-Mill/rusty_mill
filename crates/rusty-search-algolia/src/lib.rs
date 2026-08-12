@@ -433,15 +433,20 @@ fn compare_field(a: &Document, b: &Document, name: &str) -> Ordering {
     }
 }
 
-fn compare_values(a: &Value, b: &Value) -> Ordering {
+fn compare_values(a: &rusty_serde::Value, b: &rusty_serde::Value) -> Ordering {
+    use rusty_serde::Value as RustyValue;
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a
-            .as_f64()
-            .partial_cmp(&b.as_f64())
-            .unwrap_or(Ordering::Equal),
-        (Value::String(a), Value::String(b)) => a.cmp(b),
-        (Value::Bool(a), Value::Bool(b)) => a.cmp(b),
-        _ => Ordering::Equal,
+        (RustyValue::String(a), RustyValue::String(b)) => a.cmp(b),
+        (RustyValue::Bool(a), RustyValue::Bool(b)) => a.cmp(b),
+        // Covers any pair of `Int`/`UInt`/`Float` (matching, or mixed),
+        // the same way `serde_json::Number` compared two numbers
+        // regardless of subtype. A shape mismatch against a non-numeric
+        // variant falls through to `Ordering::Equal` below, same as
+        // before.
+        _ => match (a.as_f64(), b.as_f64()) {
+            (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
+            _ => Ordering::Equal,
+        },
     }
 }
 
@@ -655,8 +660,8 @@ mod tests {
         assert_eq!(results.hits[0].id, "1");
         assert_eq!(results.hits[0].score, 1.0);
         assert_eq!(
-            results.hits[0].document.get("title").unwrap(),
-            "Rust async search"
+            results.hits[0].document.get("title").unwrap().as_str(),
+            Some("Rust async search")
         );
 
         let requests = server.received_requests().await.unwrap();

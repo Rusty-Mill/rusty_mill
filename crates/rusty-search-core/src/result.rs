@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use rusty_serde::{Deserialize, Serialize};
 
 use crate::document::{Document, DocumentId};
 

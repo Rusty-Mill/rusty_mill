@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use rusty_search_core::{Document, FieldType as CoreFieldType, SearchError};
+use rusty_serde::Value as JsonValue;
 use rusty_sqlite::rusqlite::types::Value as SqlValue;
 use rusty_sqlite::rusqlite::Row;
-use serde_json::Value as JsonValue;
 
 use crate::schema_map::FieldMeta;
 
@@ -150,7 +150,7 @@ pub fn document_to_row(
 /// fields whose schema marks them `stored: false`.
 pub fn row_to_document(row: &Row<'_>, fields: &HashMap<String, FieldMeta>) -> Document {
     let id: String = row.get("_id").expect("_id column is always present");
-    let mut object = serde_json::Map::new();
+    let mut object = JsonValue::Map(Vec::new());
 
     for (name, meta) in fields {
         if !meta.stored {
@@ -179,13 +179,17 @@ fn sql_value_from_row(row: &Row<'_>, name: &str, field_type: CoreFieldType) -> O
             .get::<_, Option<i64>>(name)
             .ok()
             .flatten()
-            .map(|v| JsonValue::Number(v.into())),
+            .map(JsonValue::Int),
         CoreFieldType::F64 => row
             .get::<_, Option<f64>>(name)
             .ok()
             .flatten()
-            .and_then(serde_json::Number::from_f64)
-            .map(JsonValue::Number),
+            // Matches serde_json::Number::from_f64's rejection of
+            // non-finite values - JSON has no NaN/Infinity literal, so
+            // this crate drops the field rather than store one that would
+            // round-trip as `null` on the wire anyway.
+            .filter(|v| v.is_finite())
+            .map(JsonValue::Float),
         CoreFieldType::Bool => row
             .get::<_, Option<i64>>(name)
             .ok()
