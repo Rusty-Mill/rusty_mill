@@ -1,4 +1,8 @@
+#[cfg(not(feature = "tokio"))]
 use rusty_tokio::io::{AsyncRead, ReadBuf};
+#[cfg(feature = "tokio")]
+use tokio::io::{AsyncRead, ReadBuf};
+
 use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -128,10 +132,13 @@ impl StreamBody {
 }
 
 /// Delegates to a boxed `dyn AsyncRead` by implementing the trait
-/// itself. `rusty_tokio` has no blanket `impl AsyncRead for Box<dyn
+/// itself. Under the default (`rusty_tokio`) build this is required, not
+/// just tidy: `rusty_tokio` has no blanket `impl AsyncRead for Box<dyn
 /// AsyncRead>`, and this crate can't add one -- neither the trait nor
 /// `Box`/`Pin` are local types, so the orphan rule blocks it -- but this
-/// newtype *is* local, so delegating through it sidesteps that.
+/// newtype *is* local, so delegating through it sidesteps that. (Real
+/// `tokio` does have that blanket impl under the `tokio` feature, but
+/// using the same newtype for both keeps this one code path.)
 pub(crate) struct StreamSource(Box<dyn AsyncRead + Send + Unpin>);
 
 impl AsyncRead for StreamSource {

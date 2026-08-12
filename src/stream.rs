@@ -10,13 +10,25 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use rusty_tls::AsyncTlsStream;
-use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf, TcpStream};
+use rusty_tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+/// The socket type `Conn` actually wraps: `rusty_tokio`'s own `TcpStream`
+/// by default, or (behind the `tokio` feature) a real tokio `TcpStream`
+/// bridged through [`crate::tokio_compat::TokioIo`] so it still satisfies
+/// `rusty_tls`/`rusty_http`'s `rusty_tokio`-shaped generic bounds -- see
+/// that module's docs. Either way, `Conn`/`AsyncTlsStream`/`AsyncTransport`
+/// below stay unchanged; only which runtime actually drives the socket
+/// differs.
+#[cfg(not(feature = "tokio"))]
+pub(crate) type RawStream = rusty_tokio::io::TcpStream;
+#[cfg(feature = "tokio")]
+pub(crate) type RawStream = crate::tokio_compat::TokioIo<tokio::net::TcpStream>;
 
 pub(crate) enum Conn {
-    Plain(TcpStream),
+    Plain(RawStream),
     /// Boxed so the (larger) TLS variant doesn't grow every `Conn` --
     /// most requests in a mixed http/https workload are still plain TCP.
-    Tls(Box<AsyncTlsStream<TcpStream>>),
+    Tls(Box<AsyncTlsStream<RawStream>>),
 }
 
 impl AsyncRead for Conn {

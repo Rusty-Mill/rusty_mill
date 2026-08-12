@@ -3,8 +3,8 @@
 An async HTTP client for Rust -- a take on Python's `requests`, built on
 our own from-scratch async runtime
 ([`rusty_tokio`](https://github.com/baileyrd/rusty_tokio)) instead of
-`tokio`. URL parsing, HTTP/1.1 request/response framing, and the RFC
-6265 cookie jar come from
+`tokio` by default. URL parsing, HTTP/1.1 request/response framing, and
+the RFC 6265 cookie jar come from
 [`rusty_http`](https://github.com/baileyrd/rusty_http), the rusty
 ecosystem's one shared HTTP/1.1 message layer and `Url` type --
 [`rusty_tail`](https://github.com/baileyrd/rusty_tail) is the other
@@ -12,6 +12,30 @@ consumer, using the same crate for its ts2021/DERP protocol upgrades and
 its LocalAPI client/server. This crate's own connection pooling,
 retry/redirect policy, proxy routing, and JSON are still original code:
 no `hyper`, no `reqwest`, no `serde`, no `url` crate.
+
+## Running on real tokio instead
+
+The optional `tokio` feature (off by default) drives the connector over
+real crates.io `tokio` instead of `rusty_tokio` -- for a consumer (e.g.
+[`rusty_search`](https://github.com/baileyrd/rusty_search)) that's
+already running inside its own real tokio runtime and would otherwise end
+up running two async runtimes side by side just to make HTTP calls:
+
+```toml
+rusty_request = { git = "...", features = ["tokio"] }
+```
+
+With the feature on, `Body::streaming`'s reader bound switches from
+`rusty_tokio::io::AsyncRead` to `tokio::io::AsyncRead` too, so a caller
+can hand it a real tokio reader (`tokio::fs::File`, etc.) directly.
+Neither `rusty_tls` nor `rusty_http` has grown a real-tokio adapter of
+its own yet (unlike `rusty_http`, which already has a `tokio` feature
+alongside its `rusty-tokio` one) -- rather than block on that upstream
+work, this crate reaches their existing `rusty_tokio`-based adapters
+through a small compat shim (`src/tokio_compat.rs`) instead. Every actual
+read, write, and connect is still real tokio's own; `rusty_tokio`
+contributes only trait/type *definitions* the shim implements, never
+anything that runs, so this is exactly one runtime, not two.
 
 ## TLS/HTTPS
 
@@ -199,6 +223,11 @@ cargo test           # unit tests (url/header/json parsing) plus
                       # HTTP/1.1 servers (tests/common) -- including a
                       # TLS one and a CONNECT-tunneling proxy one -- so
                       # nothing requires real network access
+cargo test --features tokio  # tests/tokio_feature.rs: the same http(s)
+                      # round trip, but running entirely on real tokio
+                      # (tests/client.rs/https.rs don't apply under this
+                      # feature -- see their own doc comments)
 cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features tokio -- -D warnings
 cargo fmt --check
 ```

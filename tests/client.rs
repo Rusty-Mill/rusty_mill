@@ -1,3 +1,10 @@
+//! This whole suite drives the crate's default (`rusty_tokio`) backend
+//! directly through `tests/common`'s own `rusty_tokio`-based runtime and
+//! servers -- not meaningful (and not run) under the `tokio` feature,
+//! whose connector runs on a real tokio runtime instead. See
+//! `tests/tokio_feature.rs` for that feature's own smoke tests.
+#![cfg(not(feature = "tokio"))]
+
 mod common;
 
 use common::{http_chunked_response, http_response, run, start_test_server, MemoryReader};
