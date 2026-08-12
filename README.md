@@ -339,5 +339,12 @@ consistent with the rest of the project.
 
 - Const generics (`struct Foo<const N: usize>`) - rejected with a clear
   `compile_error!` rather than silently mishandled.
-- Zero-copy deserialization (`&'de str` borrows) - the JSON parser always
-  allocates `String`s for simplicity.
+- The `#[serde(borrow)]` attribute itself - not needed for the same reason
+  it exists upstream (serde's derive parses field types and is
+  conservative by default about which generic type parameters may borrow;
+  this crate's derive never parses field types at all, so there's no such
+  default to override). Zero-copy deserialization itself *is* supported
+  for `&'de str`/`Cow<'de, str>` fields (borrowing straight from the input
+  buffer when there's no escape sequence to resolve, falling back to an
+  owned allocation - or, for a bare `&str` field, a type error - when
+  there is); borrowed `&'de [u8]` isn't.
