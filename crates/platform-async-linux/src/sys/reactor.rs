@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::thread::JoinHandle;
@@ -40,7 +41,7 @@ const MAX_EVENTS: usize = 64;
 /// becomes readable.
 pub struct EpollReactor {
     epoll_fd: OwnedFd,
-    registry: Mutex<HashMap<RawFd, Waker>>,
+    registry: Mutex<HashMap<RawFd, (Arc<AtomicBool>, Waker)>>,
     shutdown: ShutdownSignal,
     handle: Mutex<Option<JoinHandle<()>>>,
 }
@@ -89,17 +90,27 @@ impl EpollReactor {
         Ok(reactor)
     }
 
-    /// Register `fd` for one edge of readiness (`EPOLLONESHOT`): the
-    /// caller's [`Waker`] is called exactly once, the next time `fd`
-    /// becomes readable, and the reactor forgets about it afterward —
-    /// matching this crate's one-shot use (a pidfd is read exactly
-    /// once, for exactly one termination event, and closed immediately
-    /// after).
-    pub fn register(&self, fd: RawFd, waker: Waker) -> Result<()> {
+    /// Register `fd` for one edge of readiness (`EPOLLONESHOT`). `ready`
+    /// is set to `true` and `waker` is called exactly once, the next
+    /// time `fd` becomes readable; the reactor forgets about the entry
+    /// afterward — matching this crate's one-shot use (a pidfd is read
+    /// exactly once, for exactly one termination event, and closed
+    /// immediately after).
+    ///
+    /// The `ready` flag exists because the `Waker` alone is not a
+    /// trustworthy signal on its own: a combinator like
+    /// [`platform_async::process::wait_any`](../../platform_async/process/fn.wait_any.html)
+    /// polls several registered futures through one shared waker, so a
+    /// wake caused by *sibling* `A` becoming ready would otherwise look,
+    /// from `B`'s perspective, indistinguishable from `B` itself having
+    /// been reported ready by this reactor. Checking `ready` on every
+    /// poll — not "was I polled again" — is what keeps each future
+    /// honest about its own fd.
+    pub fn register(&self, fd: RawFd, ready: Arc<AtomicBool>, waker: Waker) -> Result<()> {
         self.registry
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(fd, waker);
+            .insert(fd, (ready, waker));
 
         let mut event = libc::epoll_event {
             events: (libc::EPOLLIN | libc::EPOLLONESHOT) as u32,
@@ -162,7 +173,8 @@ impl EpollReactor {
             let mut registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());
             for event in &events[..n as usize] {
                 let fd = event.u64 as RawFd;
-                if let Some(waker) = registry.remove(&fd) {
+                if let Some((ready, waker)) = registry.remove(&fd) {
+                    ready.store(true, Ordering::Release);
                     drop(registry);
                     waker.wake();
                     registry = self.registry.lock().unwrap_or_else(|p| p.into_inner());

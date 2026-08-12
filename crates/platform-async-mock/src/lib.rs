@@ -97,6 +97,13 @@ impl AsyncChild for AsyncMockChild {
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
         self.inner.try_wait()
     }
+
+    fn ready(&self) -> BoxFuture<'_, Result<()>> {
+        // Same reasoning as `wait`: a scripted child's status is already
+        // decided at spawn time, so there is nothing to actually wait
+        // for — this always resolves on first poll.
+        Box::pin(std::future::ready(Ok(())))
+    }
 }
 
 #[cfg(test)]
@@ -136,5 +143,32 @@ mod tests {
         let child = spawner.spawn(&cmd).expect("spawn");
         let status = block_on(child.wait()).expect("wait");
         assert!(status.success());
+    }
+
+    #[test]
+    fn wait_any_reports_a_terminated_child_by_index() {
+        let spawner = AsyncMockSpawner::new()
+            .script("a", ExitStatus::Code(0))
+            .script("b", ExitStatus::Code(1));
+        let a = spawner.spawn(&Command::new("a", "/")).expect("spawn a");
+        let b = spawner.spawn(&Command::new("b", "/")).expect("spawn b");
+        let mut children: Vec<Box<dyn AsyncChild>> = vec![a, b];
+
+        let index = block_on(spawner.wait_any(&mut children, None))
+            .expect("wait_any")
+            .expect("Some(index), not a timeout");
+        // Both scripted children are "ready" immediately; the first one
+        // in the slice wins.
+        assert_eq!(index, 0);
+        let wait_fut = children.remove(index).wait();
+        assert!(block_on(wait_fut).unwrap().success());
+    }
+
+    #[test]
+    fn wait_any_rejects_an_empty_slice() {
+        let spawner = AsyncMockSpawner::new();
+        let mut children: Vec<Box<dyn AsyncChild>> = Vec::new();
+        let err = block_on(spawner.wait_any(&mut children, None)).expect_err("must fail");
+        assert_eq!(err.kind, platform::error::ErrorKind::InvalidInput);
     }
 }

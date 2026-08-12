@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 
-use platform::process::{Command, ExitStatus};
-use platform_async::process::AsyncSpawner;
+use platform::process::{Command, ExitStatus, Signal};
+use platform_async::process::{AsyncChild, AsyncSpawner};
 use platform_async_linux::AsyncLinuxSpawner;
 
 struct CountingWaker(AtomicUsize);
@@ -83,4 +83,73 @@ fn many_concurrent_waits_all_resolve() {
         let status = block_on(child.wait()).expect("async wait");
         assert!(status.success());
     }
+}
+
+#[test]
+fn wait_any_reports_the_first_real_child_to_exit() {
+    // A short-lived child and two much longer-lived ones, spawned
+    // together — wait_any must report the short one's index, not just
+    // "some" index, and must do so well before the long ones would ever
+    // exit on their own.
+    let spawner = AsyncLinuxSpawner::new().expect("construct reactor");
+    let fast = spawner
+        .spawn(&Command::new("/bin/sleep", "/").arg("0.2"))
+        .expect("spawn fast child");
+    let slow_a = spawner
+        .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+        .expect("spawn slow child a");
+    let slow_b = spawner
+        .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+        .expect("spawn slow child b");
+    let mut children: Vec<Box<dyn AsyncChild>> = vec![fast, slow_a, slow_b];
+
+    let index = block_on(spawner.wait_any(&mut children, Some(std::time::Duration::from_secs(5))))
+        .expect("wait_any")
+        .expect("Some(index), not a timeout");
+    assert_eq!(
+        index, 0,
+        "the fast child (index 0) should be reported first"
+    );
+
+    let fast_child = children.remove(0);
+    let status = block_on(fast_child.wait()).expect("wait on the reported child");
+    assert!(status.success());
+
+    // Clean up the still-running children rather than leaking them for
+    // 30s past the end of this test process.
+    for child in &children {
+        let _ = child.kill_single(Signal::Kill);
+    }
+    for child in children {
+        let _ = block_on(child.wait());
+    }
+}
+
+#[test]
+fn wait_any_times_out_when_nothing_exits_in_time() {
+    let spawner = AsyncLinuxSpawner::new().expect("construct reactor");
+    let child = spawner
+        .spawn(&Command::new("/bin/sleep", "/").arg("30"))
+        .expect("spawn slow child");
+    let mut children: Vec<Box<dyn AsyncChild>> = vec![child];
+
+    let result =
+        block_on(spawner.wait_any(&mut children, Some(std::time::Duration::from_millis(200))))
+            .expect("wait_any should not error on timeout");
+    assert_eq!(result, None, "must time out, not report a child as ready");
+
+    for child in &children {
+        let _ = child.kill_single(Signal::Kill);
+    }
+    for child in children {
+        let _ = block_on(child.wait());
+    }
+}
+
+#[test]
+fn wait_any_rejects_an_empty_slice() {
+    let spawner = AsyncLinuxSpawner::new().expect("construct reactor");
+    let mut children: Vec<Box<dyn AsyncChild>> = Vec::new();
+    let err = block_on(spawner.wait_any(&mut children, None)).expect_err("must fail");
+    assert_eq!(err.kind, platform::error::ErrorKind::InvalidInput);
 }
