@@ -141,8 +141,25 @@ impl Reactor {
 
     pub(crate) fn register(&self, fd: RawFd) -> io::Result<Arc<ScheduledIo>> {
         let io = Arc::new(ScheduledIo::new());
+        // `EPOLLET`: edge-triggered, matching `kqueue.rs`'s own
+        // `EV_CLEAR` (see that backend's registration for the identical
+        // reasoning) and the level this crate's own retry-until-
+        // `WouldBlock` design (`poll_io`'s loop, `ScheduledIo::clear`)
+        // already assumes. Without it, `epoll_wait` is level-triggered
+        // by default: a socket that's idle-but-writable (true for
+        // almost any connected socket almost all the time -- nothing
+        // about "no one is currently writing" makes the send buffer
+        // stop being reported ready) keeps reporting `EPOLLOUT` on
+        // *every* call, so the reactor thread's `epoll_wait(..., -1)`
+        // returns immediately forever instead of actually blocking --
+        // pegging a full CPU core in a tight spin for as long as any
+        // fd sits registered, not just this fd, since it shares one
+        // `epoll_wait` call with everything else registered on this
+        // reactor. Caught via `strace -c`: ~864k `epoll_wait` calls in
+        // a 12s wait for one slow HTTP response that should have needed
+        // exactly one (blocking) call.
         let mut ev = libc::epoll_event {
-            events: (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP) as u32,
+            events: (libc::EPOLLIN | libc::EPOLLOUT | libc::EPOLLRDHUP | libc::EPOLLET) as u32,
             u64: fd as u64,
         };
         // SAFETY: `epoll_fd` is valid for the reactor's lifetime; `fd`
@@ -186,5 +203,86 @@ impl Drop for Reactor {
             libc::close(self.wake_fd);
             libc::close(self.epoll_fd);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Regression test for the busy-spin `register`'s own doc comment
+    /// describes: without `EPOLLET`, a registered fd that's idle but
+    /// writable (true of almost any connected socket almost all the
+    /// time, since "no one is currently writing" doesn't make the send
+    /// buffer stop being reported ready) makes `epoll_wait` return
+    /// immediately on *every* call instead of actually blocking --
+    /// found via `strace -c` showing ~864k `epoll_wait` calls for a 12s
+    /// wait that should have needed exactly one.
+    ///
+    /// Drives `epoll_wait` directly against the reactor's own
+    /// `epoll_fd` (bypassing the background thread, so this test
+    /// controls its own timing) for a bounded window, counting calls
+    /// that return with events pending rather than timing out. A
+    /// correctly edge-triggered registration reports the fd's initial
+    /// writability once (maybe twice, allowing for scheduling jitter)
+    /// and then blocks for the rest of the window; the level-triggered
+    /// regression reports it on essentially every call, since nothing
+    /// about the socket ever changes.
+    #[test]
+    fn idle_writable_socket_does_not_busy_spin_epoll_wait() {
+        let reactor = Reactor::new().unwrap();
+
+        // A connected pair needs no networking/ports, and both ends are
+        // immediately writable and otherwise idle -- exactly the
+        // "idle-but-writable" condition that triggered the spin.
+        let mut fds = [0i32; 2];
+        // SAFETY: `fds` is a valid 2-element buffer for `socketpair` to
+        // write both new fds into.
+        let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
+        assert_eq!(r, 0, "socketpair failed: {}", io::Error::last_os_error());
+        let [a, b] = fds;
+
+        reactor.register(a).unwrap();
+
+        let mut events = vec![libc::epoll_event { events: 0, u64: 0 }; 16];
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut ready_calls = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // SAFETY: `events` is a valid, exclusively-borrowed buffer
+            // of at least `events.len()` `epoll_event`s; `epoll_fd` is
+            // valid for `reactor`'s whole lifetime, which outlives this
+            // call.
+            let n = unsafe {
+                libc::epoll_wait(
+                    reactor.epoll_fd,
+                    events.as_mut_ptr(),
+                    events.len() as i32,
+                    remaining.as_millis().min(i32::MAX as u128) as i32,
+                )
+            };
+            assert!(n >= 0, "epoll_wait failed: {}", io::Error::last_os_error());
+            if n > 0 {
+                ready_calls += 1;
+            }
+        }
+
+        // SAFETY: both fds are owned by this test and still open.
+        unsafe {
+            libc::close(a);
+            libc::close(b);
+        }
+
+        assert!(
+            ready_calls <= 5,
+            "epoll_wait returned with events {ready_calls} times in 500ms for an idle, \
+             nothing-changed fd -- expected edge-triggered semantics to report readiness \
+             once and then block, not busy-spin (this is the regression this test guards \
+             against)"
+        );
     }
 }
