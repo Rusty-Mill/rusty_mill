@@ -70,6 +70,10 @@ impl AsyncSpawner for AsyncLinuxSpawner {
     fn is_alive(&self, pid: u32) -> Result<bool> {
         self.inner.is_alive(pid)
     }
+
+    fn is_zombie(&self, pid: u32) -> Result<bool> {
+        self.inner.is_zombie(pid)
+    }
 }
 
 struct AsyncLinuxChild {

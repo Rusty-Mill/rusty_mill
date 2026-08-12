@@ -5,6 +5,31 @@ PR and (where one exists) to the doc that covers the change in full detail.
 
 ---
 
+## PR #11 — parity-gap: async liveness probe (is_zombie), closes #10
+**2026-08-12** · [#11](https://github.com/baileyrd/rustils_async/pull/11)
+
+- **Added:** `AsyncSpawner::is_zombie`, a pure pass-through to the wrapped
+  sync `Spawner::is_zombie` on both `platform-async-mock` and
+  `platform-async-linux` — already non-blocking on the sync side
+  (`/proc/<pid>/stat`'s state field on Linux), so `RM-DEV-ASYNC-0001` keeps
+  it synchronous, the same shape `is_alive`/`adopt`/`resolve` already use.
+- **Found on a rerun, not the original pass:** the first `parity-loop` run
+  against `rustils` (`gap-analysis.md`) filed three gaps (`wait_any`,
+  `take_stdin`/`take_stdout`/`take_stderr`, `wait_job`/`try_wait_job`) but
+  missed `is_zombie` — caught this time by re-diffing the *entire*
+  `Spawner`/`Child` trait surface against `rustils`' current tip rather than
+  re-checking only the previously-filed rows. `rustils`' `origin/main` had
+  moved (`83ab7a9` → `9d3ab36`) since the original pin, but the process
+  domain itself was untouched in that range (confirmed via `git diff` scoped
+  to `crates/platform/src/process.rs` and `crates/platform-linux/src/sys/spawn.rs`)
+  — the existing pin stayed valid, no re-pin needed.
+- Real end-to-end test: a spawned child probed while running (`false`),
+  killed but left unreaped (`true`), then reaped via `try_wait` (`false`
+  again, matching `rustils`' own `linux_is_zombie_detects_an_unreaped_child`)
+  — not a scripted mock.
+- Closes parity-gap #10, from the `parity-loop` rerun against `rustils`
+  (`gap-analysis.md`).
+
 ## PR #9 — parity-gap: async job-control wait (wait_job/try_wait_job), closes #6
 **2026-08-12** · [#9](https://github.com/baileyrd/rustils_async/pull/9)
 
