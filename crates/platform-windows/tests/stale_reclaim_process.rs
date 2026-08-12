@@ -39,6 +39,11 @@ use platform_windows::{WindowsUnixListener, WindowsUnixStream};
 const HELPER_ENV: &str = "RUSTILS_STALE_RECLAIM_HELPER";
 const PATH_ENV: &str = "RUSTILS_STALE_RECLAIM_PATH";
 const PEER_ENV: &str = "RUSTILS_STALE_RECLAIM_PEER";
+/// When set, the helper closes its outbound connection right after
+/// connecting (instead of holding it open until the kill) — see
+/// [`rebind_after_forced_kill_of_a_listener_whose_outbound_connection_was_already_closed`]'s
+/// own doc comment for why this variant exists.
+const CLOSE_OUTBOUND_ENV: &str = "RUSTILS_STALE_RECLAIM_CLOSE_OUTBOUND";
 
 const HELPER_READY_BUDGET: Duration = Duration::from_secs(15);
 const ACCEPT_BUDGET: Duration = Duration::from_secs(15);
@@ -46,11 +51,43 @@ const REBIND_BUDGET: Duration = Duration::from_secs(15);
 
 #[test]
 fn rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection() {
+    run_repro(
+        "rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection",
+        false,
+    );
+}
+
+/// Same repro shape, but the helper closes its outbound connection right
+/// after connecting instead of holding it open until the kill — matching
+/// `rusty_prime_agent`'s *actual* pattern (a supervisor relays one
+/// request to a worker over a short-lived connection, then closes it,
+/// possibly long before it's ever killed) more precisely than the
+/// held-open variant above, which was the original repro as first
+/// diagnosed. Added after that harness's own CI showed a fresh
+/// `unix_listen` on `daemon.sock` still failing with a *real*
+/// `AddrInUse` for the entire retry budget post-fix, in a scenario where
+/// the outbound connection was already closed well before the kill --
+/// this variant exists to check whether "closed before death" rather
+/// than "open at death" is what actually matters to `is_stale_socket`'s
+/// probe.
+#[test]
+fn rebind_after_forced_kill_of_a_listener_whose_outbound_connection_was_already_closed() {
+    run_repro(
+        "rebind_after_forced_kill_of_a_listener_whose_outbound_connection_was_already_closed",
+        true,
+    );
+}
+
+fn run_repro(test_name: &str, close_outbound: bool) {
     if std::env::var_os(HELPER_ENV).is_some() {
         run_as_helper();
     }
 
-    let dir = std::env::temp_dir().join(format!("rustils-stale-reclaim-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "rustils-stale-reclaim-{}-{}",
+        std::process::id(),
+        close_outbound as u8
+    ));
     std::fs::create_dir_all(&dir).expect("create test temp dir");
     let path = dir.join("owner.sock");
     let peer_path = dir.join("peer.sock");
@@ -60,14 +97,15 @@ fn rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection(
     // test (the owner-side listener's own reclaim).
     let peer_listener = WindowsUnixListener::bind(&peer_path).expect("bind peer listener");
 
-    let mut helper = spawn_helper(&path, &peer_path);
+    let mut helper = spawn_helper(test_name, &path, &peer_path, close_outbound);
     let mut helper_stdout =
         std::io::BufReader::new(helper.stdout.take().expect("helper stdout piped"));
     wait_for_ready_line(&mut helper_stdout, &mut helper);
 
     // Accept the helper's outbound connection so it's genuinely
     // established (not just sitting in the listen backlog) at the moment
-    // of the kill — the repro's own precondition.
+    // it (and, in the `close_outbound` variant, its close) actually
+    // happens.
     accept_with_budget(&peer_listener, ACCEPT_BUDGET);
 
     force_kill(&helper);
@@ -99,19 +137,21 @@ fn rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-fn spawn_helper(path: &Path, peer_path: &Path) -> Child {
+fn spawn_helper(test_name: &str, path: &Path, peer_path: &Path, close_outbound: bool) -> Child {
     let exe = std::env::current_exe().expect("current_exe");
-    Command::new(exe)
-        .arg("rebind_after_forced_kill_of_a_listener_that_also_held_an_outbound_connection")
+    let mut cmd = Command::new(exe);
+    cmd.arg(test_name)
         .arg("--exact")
         .arg("--nocapture")
         .env(HELPER_ENV, "1")
         .env(PATH_ENV, path)
         .env(PEER_ENV, peer_path)
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .expect("spawn helper process")
+        .stderr(Stdio::inherit());
+    if close_outbound {
+        cmd.env(CLOSE_OUTBOUND_ENV, "1");
+    }
+    cmd.spawn().expect("spawn helper process")
 }
 
 fn wait_for_ready_line(stdout: &mut impl BufRead, helper: &mut Child) {
@@ -176,16 +216,25 @@ fn force_kill(child: &Child) {
     }
 }
 
-/// The re-exec'd helper role: bind `path`, connect out to `peer_path`,
-/// announce readiness, then park until the parent kills this process.
-/// Never returns normally — the parent's `force_kill` is the only exit.
+/// The re-exec'd helper role: bind `path`, connect out to `peer_path`
+/// (closing that connection right back down first if `CLOSE_OUTBOUND_ENV`
+/// is set), announce readiness, then park until the parent kills this
+/// process. Never returns normally — the parent's `force_kill` is the
+/// only exit.
 fn run_as_helper() -> ! {
     let path = PathBuf::from(std::env::var_os(PATH_ENV).expect("helper path env"));
     let peer_path = PathBuf::from(std::env::var_os(PEER_ENV).expect("helper peer env"));
+    let close_outbound = std::env::var_os(CLOSE_OUTBOUND_ENV).is_some();
 
     let _owner_listener = WindowsUnixListener::bind(&path).expect("helper bind owner listener");
-    let _outbound =
+    let outbound =
         WindowsUnixStream::connect(&peer_path).expect("helper connect out to peer listener");
+    if close_outbound {
+        drop(outbound);
+    }
+    // Else: `outbound` stays bound here and this function never returns
+    // (the loop below diverges), so it's never dropped -- alive for the
+    // rest of this process's life without needing anything special.
 
     println!("ready");
     std::io::stdout().flush().ok();

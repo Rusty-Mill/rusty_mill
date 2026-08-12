@@ -957,9 +957,16 @@ pub fn unix_connect(path: &Path) -> Result<OwnedSocket> {
 /// comment for why a throwaway `connect` is the only way to tell.
 fn is_stale_socket(path: &Path) -> bool {
     let Ok(probe) = new_unix_socket() else {
+        // TEMPORARY, load-bearing for now -- do not remove until the
+        // rusty_prime_agent Windows CI failure this is diagnosing is
+        // confirmed resolved. See docs/decision-request-af-unix-stale-
+        // reclaim-race.md's "Open questions".
+        eprintln!("DBG: is_stale_socket: new_unix_socket() for the probe failed");
         return false;
     };
-    let r = match raw_connect_unix(probe.raw(), path) {
+    let connect_result = raw_connect_unix(probe.raw(), path);
+    eprintln!("DBG: is_stale_socket: probe connect to {path:?} -> {connect_result:?}");
+    let r = match connect_result {
         Ok(()) => 0,
         // The probe only needs to distinguish "refused" (nothing
         // listening — stale) from "connected" (a live owner). Any other
@@ -1025,9 +1032,20 @@ pub fn unix_listen(path: &Path) -> Result<OwnedSocket> {
     // only instant it was valid. Note 003's lesson, arriving where it
     // actually changes something.
     let first = raw_bind_unix(sock.raw(), path);
+    // TEMPORARY, load-bearing for now -- do not remove until the
+    // rusty_prime_agent Windows CI failure this is diagnosing is
+    // confirmed resolved. See docs/decision-request-af-unix-stale-
+    // reclaim-race.md's "Open questions".
+    if let Err(e) = &first {
+        eprintln!(
+            "DBG: unix_listen: first bind of {path:?} -> {e:?} (candidate={})",
+            is_stale_bind_candidate(e)
+        );
+    }
     let bound = match first {
         Ok(()) => Ok(()),
         Err(e) if is_stale_bind_candidate(&e) && is_stale_socket(path) => {
+            eprintln!("DBG: unix_listen: reclaiming {path:?}, deleting then retrying bind");
             let wide = to_wide_nul(path.as_os_str());
             // Stays on windows-sys in both configurations: this is a
             // *filesystem* unlink sitting in a net module, and the
