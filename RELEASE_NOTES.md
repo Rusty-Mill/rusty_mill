@@ -5,6 +5,43 @@ reverse chronological, each linking back to its PR.
 
 ---
 
+## Issue #25 — Swap thiserror + anyhow for rusty_err across the whole workspace
+**2026-08-12** · [#25](https://github.com/baileyrd/rusty_search/issues/25)
+
+- **Changed:** `rusty-search-core` and all eight backend crates depend on
+  [`rusty_err`](https://github.com/baileyrd/rusty_err) (pinned git
+  dependency) instead of `thiserror`/`anyhow`. `SearchError` derives via
+  `rusty_err::Error` - the same `#[error("...")]`/`#[from]` shape
+  `thiserror` used, so every variant's message and `Serialization`'s
+  `#[from] serde_json::Error` carried over unchanged. `Backend`'s field
+  becomes `rusty_err::BoxError` (the `anyhow::Error` analog) instead of
+  `anyhow::Error`, deliberately **without** `#[from]`/`#[source]` -
+  `BoxError` doesn't implement `rusty_err::Error` itself by design, so it
+  can't be used as a source field, matching `rusty_err`'s own test
+  suite's shape. A new `SearchError::backend_msg(msg)` covers every
+  `anyhow!("...")` ad-hoc-message call site (`rusty_err` has no
+  `anyhow!`-style macro), backed by a small `BackendMessage` wrapper
+  type. Added a `SearchError: Send + Sync` compile-time assertion test in
+  `rusty-search-core`, since that's the exact property this swap hinged
+  on.
+- **From:** the `sovereignty-loop` audit, completing the last row of its
+  original "immature candidate" bucket (`thiserror`/`anyhow`/`time`/
+  `uuid` - `time` and `uuid` landed in #23/#20) now that both
+  [`rusty_err#1`](https://github.com/baileyrd/rusty_err/issues/1) (derive
+  macro + `BoxError`) and [`rusty_err#4`](https://github.com/baileyrd/rusty_err/issues/4)
+  (`BoxError` made `Send + Sync`, found and reported after a probe
+  crate's `assert_send::<SearchError>()` failed to compile against the
+  first version) are merged upstream.
+- **Not included:** `reqwest` → `rusty_request`, the remaining audit row.
+  Investigated in detail (the API shape is a clean fit - raw-bytes
+  body/response methods mean `rusty_search` can keep using real
+  `serde_json` and use `rusty_request` purely as transport, and its error
+  type is already `Send`/`Sync`-safe) but still blocked on dependency
+  resolution: `rusty_tokio`/`rusty_tls`/`rusty_http` are `path`
+  dependencies in `rusty_request`'s own `Cargo.toml`, the same bug class
+  as the `rusty_time`/`rusty_std` issue fixed earlier. Filed as
+  [`rusty_request#28`](https://github.com/baileyrd/rusty_request/issues/28).
+
 ## Issue #23 — Swap time for rusty_time in rusty-search-tantivy and rusty-search-sqlite-fts5
 **2026-08-12** · [#23](https://github.com/baileyrd/rusty_search/issues/23)
 
