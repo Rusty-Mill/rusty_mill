@@ -1,3 +1,6 @@
+[workspace]
+members = ["derive"]
+
 [package]
 name = "rusty_err"
 version = "0.1.0"
@@ -11,6 +14,7 @@ categories = ["rust-patterns", "no-std"]
 
 [dependencies]
 rusty_std = { path = "../rusty_std" }
+rusty_err_derive = { path = "derive", version = "0.1.0" }
 
 [features]
 default = []
