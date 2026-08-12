@@ -79,7 +79,11 @@ symbol list and https://serde.rs/container-attrs.html against
 against the current symbol list): `field_identifier` / `variant_identifier`
 / `repr` (serde_derive-internal plumbing - used to hand-write a `Deserialize`
 impl for an identifier enum paired with a derive elsewhere; doesn't fit this
-crate's private, non-exposed `ident_enum` codegen), `borrow` (zero-copy
-deserialization is a standing, documented non-goal - see README's "What's
-not (yet)"), `no_std`, `deserialize_in_place`, exact error-message-wording
-parity, and a `serde_bytes`-equivalent format.
+crate's private, non-exposed `ident_enum` codegen), the `borrow` *attribute*
+itself (zero-copy deserialization for `&'de str`/`Cow<'de, str>` fields
+already works without it - `borrow` exists upstream because serde's derive
+parses field types and is conservative by default about which type
+parameters may borrow, a default this crate's type-blind derive never needs
+to override; see README's "What's not (yet)"), `no_std`,
+`deserialize_in_place`, exact error-message-wording parity, and a
+`serde_bytes`-equivalent format.
