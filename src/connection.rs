@@ -9,16 +9,25 @@ use crate::engine::{
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
+use crate::hooks::{Action, AuthContext, Authorization};
 use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::value::Value;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// A custom text-comparison function registered via
 /// [`Connection::create_collation`].
 type CollationFn = dyn Fn(&str, &str) -> Ordering;
+
+type TraceFn = dyn FnMut(&str);
+type ProfileFn = dyn FnMut(&str, Duration);
+type AuthorizerFn = dyn FnMut(&AuthContext) -> Authorization;
+type ProgressHandlerFn = dyn FnMut() -> bool;
+type UpdateHookFn = dyn FnMut(Action, &str, &str, i64);
 
 /// A table column's schema, as returned by [`Connection::column_metadata`].
 /// A subset of `rusqlite`'s equivalent (no collation sequence or
@@ -64,6 +73,21 @@ pub struct Connection {
     functions: HashMap<String, Box<ScalarFn>>,
     aggregates: HashMap<String, Aggregate>,
     collations: HashMap<String, Box<CollationFn>>,
+    commit_hook: Option<Box<dyn FnMut() -> bool>>,
+    rollback_hook: Option<Box<dyn FnMut()>>,
+    update_hook: Option<Box<UpdateHookFn>>,
+    // `trace`/`profile`/`authorizer`/`progress_handler` fire from
+    // `query_row`/`query_one`/`query_map`, which take `&self` (an
+    // already-shipped signature this crate won't break to add hook
+    // support — see the project's own breaking-change policy). `RefCell`
+    // gives them interior mutability so a `&self` query method can still
+    // invoke a `FnMut` callback. `commit_hook`/`rollback_hook`/
+    // `update_hook` only fire from `&mut self` paths (`execute`,
+    // `Transaction`), so they don't need it.
+    trace_hook: RefCell<Option<Box<TraceFn>>>,
+    profile_hook: RefCell<Option<Box<ProfileFn>>>,
+    authorizer: RefCell<Option<Box<AuthorizerFn>>>,
+    progress_handler: RefCell<Option<Box<ProgressHandlerFn>>>,
 }
 
 impl Connection {
@@ -82,6 +106,13 @@ impl Connection {
             functions: HashMap::new(),
             aggregates: aggregate::builtins(),
             collations: HashMap::new(),
+            commit_hook: None,
+            rollback_hook: None,
+            update_hook: None,
+            trace_hook: RefCell::new(None),
+            profile_hook: RefCell::new(None),
+            authorizer: RefCell::new(None),
+            progress_handler: RefCell::new(None),
         })
     }
 
@@ -433,6 +464,172 @@ impl Connection {
         Ok(())
     }
 
+    /// Registers a callback to run just before each top-level [`Connection::execute`]
+    /// statement's changes take effect. If the callback returns `true`,
+    /// the changes are rolled back and `execute` returns
+    /// [`Error::CommitHookVetoed`] instead. Pass `None` to unregister.
+    ///
+    /// **Fires per statement, not per explicit transaction:** this
+    /// crate's [`Connection::is_autocommit`] is always `true` (there's no
+    /// tracked distinction between "inside an explicit `BEGIN`" and not,
+    /// at the connection level — see that method's doc comment), so this
+    /// fires once for every `execute` call, including ones made through
+    /// an open [`crate::Transaction`]/[`crate::Savepoint`] guard. Real
+    /// SQLite only fires `commit_hook` at the actual `COMMIT` boundary.
+    pub fn commit_hook<F>(&mut self, hook: Option<F>)
+    where
+        F: FnMut() -> bool + 'static,
+    {
+        self.commit_hook = hook.map(|f| Box::new(f) as Box<dyn FnMut() -> bool>);
+    }
+
+    /// Registers a callback to run whenever a rollback actually happens:
+    /// [`crate::Transaction::rollback`]/[`crate::Savepoint::rollback`], a
+    /// guard dropped with [`crate::DropBehavior::Rollback`] (the
+    /// default), or a `commit_hook` veto. Pass `None` to unregister.
+    pub fn rollback_hook<F>(&mut self, hook: Option<F>)
+    where
+        F: FnMut() + 'static,
+    {
+        self.rollback_hook = hook.map(|f| Box::new(f) as Box<dyn FnMut()>);
+    }
+
+    /// Registers a callback invoked once per row inserted by
+    /// [`Connection::execute`]/[`Connection::execute_batch`], as
+    /// `(action, db_name, table_name, rowid)`. `db_name` is always
+    /// `"main"` (no `ATTACH` support). Pass `None` to unregister.
+    ///
+    /// **Design deviation, stated plainly:** `rowid` is this row's
+    /// position within the table at insert time (like
+    /// [`crate::Blob`]'s row addressing) — this crate's storage has no
+    /// real SQLite rowid concept yet. Only [`crate::hooks::Action::Insert`]
+    /// can fire today; `Update`/`Delete` have no statements to trigger
+    /// them yet.
+    pub fn update_hook<F>(&mut self, hook: Option<F>)
+    where
+        F: FnMut(Action, &str, &str, i64) + 'static,
+    {
+        self.update_hook = hook.map(|f| Box::new(f) as Box<UpdateHookFn>);
+    }
+
+    /// Registers a callback consulted before each `execute`/`query_*`
+    /// call runs, deciding whether the underlying `CREATE TABLE`/`INSERT`/
+    /// `SELECT` is allowed. Returning anything but
+    /// [`crate::hooks::Authorization::Allow`] fails the call with
+    /// [`Error::AuthorizationDenied`] before it touches storage. Pass
+    /// `None` to unregister.
+    ///
+    /// **Design deviation, stated plainly:** real SQLite's authorizer
+    /// fires once per *column/table reference* during statement
+    /// preparation (so it can deny reading one column while allowing the
+    /// rest of the row). This engine has no per-column granularity to
+    /// offer — it fires once per statement with the whole target table.
+    pub fn authorizer<F>(&self, hook: Option<F>)
+    where
+        F: FnMut(&AuthContext) -> Authorization + 'static,
+    {
+        *self.authorizer.borrow_mut() = hook.map(|f| Box::new(f) as Box<AuthorizerFn>);
+    }
+
+    /// Registers a callback invoked with the raw SQL text of every
+    /// `execute`/`query_*` call, before it runs. Pass `None` to
+    /// unregister.
+    pub fn trace<F>(&self, hook: Option<F>)
+    where
+        F: FnMut(&str) + 'static,
+    {
+        *self.trace_hook.borrow_mut() = hook.map(|f| Box::new(f) as Box<TraceFn>);
+    }
+
+    /// Registers a callback invoked with `(sql, elapsed)` after every
+    /// `execute`/`query_*` call finishes (successfully or not — timing is
+    /// reported either way, matching real SQLite's profile callback,
+    /// which fires regardless of the statement's outcome). Pass `None` to
+    /// unregister.
+    pub fn profile<F>(&self, hook: Option<F>)
+    where
+        F: FnMut(&str, Duration) + 'static,
+    {
+        *self.profile_hook.borrow_mut() = hook.map(|f| Box::new(f) as Box<ProfileFn>);
+    }
+
+    /// Registers a callback consulted before each `execute`/`query_*`
+    /// call runs; returning `true` aborts it with
+    /// [`Error::OperationAborted`] before it touches storage. Pass `None`
+    /// to unregister.
+    ///
+    /// **Design deviation, stated plainly:** real SQLite calls this every
+    /// `n_ops` virtual-machine instructions *during* a statement's
+    /// execution, so a slow query can be interrupted partway through.
+    /// This engine has no VM instruction loop to hook into (see
+    /// `ARCHITECTURE.md`) — the closest honest approximation is calling
+    /// it once, before the statement starts, which can prevent a
+    /// statement from running at all but can't interrupt one already in
+    /// progress. `n_ops` is accepted for signature compatibility but
+    /// unused.
+    pub fn progress_handler<F>(&self, _n_ops: u32, hook: Option<F>)
+    where
+        F: FnMut() -> bool + 'static,
+    {
+        *self.progress_handler.borrow_mut() = hook.map(|f| Box::new(f) as Box<ProgressHandlerFn>);
+    }
+
+    fn fire_trace(&self, sql: &str) {
+        if let Some(hook) = self.trace_hook.borrow_mut().as_mut() {
+            hook(sql);
+        }
+    }
+
+    fn fire_profile(&self, sql: &str, elapsed: Duration) {
+        if let Some(hook) = self.profile_hook.borrow_mut().as_mut() {
+            hook(sql, elapsed);
+        }
+    }
+
+    fn should_abort_via_progress_handler(&self) -> bool {
+        match self.progress_handler.borrow_mut().as_mut() {
+            Some(hook) => hook(),
+            None => false,
+        }
+    }
+
+    fn check_authorized(&self, action: Action, table_name: &str) -> Result<()> {
+        let mut authorizer = self.authorizer.borrow_mut();
+        let Some(hook) = authorizer.as_mut() else {
+            return Ok(());
+        };
+        let context = AuthContext {
+            action,
+            table_name: Some(table_name.to_string()),
+        };
+        match hook(&context) {
+            Authorization::Allow => Ok(()),
+            Authorization::Deny | Authorization::Ignore => Err(Error::AuthorizationDenied),
+        }
+    }
+
+    fn fire_commit_hook_vetoed(&mut self) -> bool {
+        match &mut self.commit_hook {
+            Some(hook) => hook(),
+            None => false,
+        }
+    }
+
+    /// Fires the rollback hook, if one is registered. `pub(crate)` so
+    /// [`crate::Transaction`]/[`crate::Savepoint`] (a different module)
+    /// can call it when a real rollback happens.
+    pub(crate) fn fire_rollback_hook(&mut self) {
+        if let Some(hook) = &mut self.rollback_hook {
+            hook();
+        }
+    }
+
+    fn fire_update_hook(&mut self, action: Action, table_name: &str, rowid: i64) {
+        if let Some(hook) = &mut self.update_hook {
+            hook(action, "main", table_name, rowid);
+        }
+    }
+
     /// Copies this connection's full table state into `dest`, replacing
     /// whatever `dest` had. Part B gap row "Connection + backup module:
     /// backup/restore between connections".
@@ -550,23 +747,60 @@ impl Connection {
     /// Executes a `CREATE TABLE` or `INSERT` statement, returning the
     /// number of rows affected (`0` for `CREATE TABLE`). Updates
     /// [`Connection::changes`]/[`Connection::total_changes`].
+    ///
+    /// Fires (in order) `progress_handler`, `trace`, the statement's
+    /// `authorizer` check, then — after the statement runs —
+    /// `commit_hook` (rolling back and firing `rollback_hook` on a veto),
+    /// `update_hook` per row inserted, and finally `profile`. See each
+    /// hook setter's doc comment for exactly what it observes here.
     pub fn execute(&mut self, sql: &str) -> Result<usize> {
         self.check_open()?;
+        if self.should_abort_via_progress_handler() {
+            return Err(Error::OperationAborted);
+        }
+        self.fire_trace(sql);
+        let start = Instant::now();
+
         let tokens = tokenize(sql)?;
-        let affected = match leading_keyword(&tokens) {
+        let snapshot = self.commit_hook.is_some().then(|| self.db.snapshot());
+
+        let (affected, table_name, action, rowids) = match leading_keyword(&tokens) {
             Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
                 let create = parse_create_table(&tokens)?;
+                self.check_authorized(Action::CreateTable, &create.table_name)?;
                 execute_create_table(&mut self.db, &create)?;
-                0
+                (0, create.table_name, Action::CreateTable, Vec::new())
             }
             Some(kw) if kw.eq_ignore_ascii_case("INSERT") => {
                 let insert = parse_insert(&tokens)?;
-                execute_insert(&mut self.db, &insert)?
+                self.check_authorized(Action::Insert, &insert.table_name)?;
+                let before = self
+                    .db
+                    .table(&insert.table_name)
+                    .map(|t| t.rows.len())
+                    .unwrap_or(0);
+                let affected = execute_insert(&mut self.db, &insert)?;
+                let rowids = (before..before + affected).map(|i| i as i64).collect();
+                (affected, insert.table_name, Action::Insert, rowids)
             }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
+
+        if self.fire_commit_hook_vetoed() {
+            if let Some(snapshot) = snapshot {
+                self.db.restore(snapshot);
+            }
+            self.fire_rollback_hook();
+            self.fire_profile(sql, start.elapsed());
+            return Err(Error::CommitHookVetoed);
+        }
+
+        for rowid in rowids {
+            self.fire_update_hook(action, &table_name, rowid);
+        }
         self.last_changes = affected;
         self.total_changes += affected;
+        self.fire_profile(sql, start.elapsed());
         Ok(affected)
     }
 
@@ -575,9 +809,16 @@ impl Connection {
     /// with [`Error::QueryReturnedNoRows`] if the query matched no rows.
     pub fn query_row(&self, sql: &str) -> Result<Vec<Value>> {
         self.check_open()?;
+        if self.should_abort_via_progress_handler() {
+            return Err(Error::OperationAborted);
+        }
+        self.fire_trace(sql);
+        let start = Instant::now();
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
+        self.check_authorized(Action::Select, &select.table_name)?;
         let (_, mut rows) = self.run_select(&select)?;
+        self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -591,9 +832,16 @@ impl Connection {
         F: FnOnce(Row<'_>) -> Result<T>,
     {
         self.check_open()?;
+        if self.should_abort_via_progress_handler() {
+            return Err(Error::OperationAborted);
+        }
+        self.fire_trace(sql);
+        let start = Instant::now();
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
+        self.check_authorized(Action::Select, &select.table_name)?;
         let (columns, mut rows) = self.run_select(&select)?;
+        self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -608,9 +856,16 @@ impl Connection {
         F: FnMut(Row<'_>) -> Result<T>,
     {
         self.check_open()?;
+        if self.should_abort_via_progress_handler() {
+            return Err(Error::OperationAborted);
+        }
+        self.fire_trace(sql);
+        let start = Instant::now();
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
+        self.check_authorized(Action::Select, &select.table_name)?;
         let (columns, rows) = self.run_select(&select)?;
+        self.fire_profile(sql, start.elapsed());
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -669,6 +924,7 @@ fn leading_keyword(tokens: &[Token]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
 
     #[test]
     fn open_in_memory_starts_open() {
@@ -1051,5 +1307,176 @@ mod tests {
         // removal don't error, same as busy_timeout/busy_handler.
         conn.remove_collation("NOCASE_LIKE").unwrap();
         assert!(conn.remove_collation("NEVER_REGISTERED").is_ok());
+    }
+
+    #[test]
+    fn update_hook_fires_once_per_inserted_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.update_hook(Some(move |action, db: &str, table: &str, rowid| {
+            events_clone
+                .borrow_mut()
+                .push((action, db.to_string(), table.to_string(), rowid));
+        }));
+
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                (Action::Insert, "main".to_string(), "t".to_string(), 0),
+                (Action::Insert, "main".to_string(), "t".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn update_hook_does_not_fire_for_create_table() {
+        let mut conn = Connection::open_in_memory().unwrap();
+
+        let fired = Rc::new(RefCell::new(false));
+        let fired_clone = Rc::clone(&fired);
+        conn.update_hook(Some(move |_, _: &str, _: &str, _| {
+            *fired_clone.borrow_mut() = true;
+        }));
+
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(!*fired.borrow());
+    }
+
+    #[test]
+    fn commit_hook_veto_rolls_back_and_fires_rollback_hook() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        conn.commit_hook(Some(|| true));
+        let rolled_back = Rc::new(RefCell::new(false));
+        let rolled_back_clone = Rc::clone(&rolled_back);
+        conn.rollback_hook(Some(move || {
+            *rolled_back_clone.borrow_mut() = true;
+        }));
+
+        let result = conn.execute("INSERT INTO t VALUES (1)");
+        assert_eq!(result, Err(Error::CommitHookVetoed));
+        assert!(*rolled_back.borrow());
+
+        let rows: Vec<i64> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn commit_hook_allowing_keeps_changes() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.commit_hook(Some(|| false));
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        let rows: Vec<i64> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn authorizer_deny_blocks_the_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.authorizer(Some(|ctx: &AuthContext| {
+            if ctx.action == Action::Insert {
+                Authorization::Deny
+            } else {
+                Authorization::Allow
+            }
+        }));
+
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::AuthorizationDenied)
+        );
+        let rows: Vec<i64> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn authorizer_allow_permits_the_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.authorizer(Some(|_: &AuthContext| Authorization::Allow));
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        let rows: Vec<i64> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn trace_hook_receives_sql_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        let traced = Rc::new(RefCell::new(Vec::new()));
+        let traced_clone = Rc::clone(&traced);
+        conn.trace(Some(move |sql: &str| {
+            traced_clone.borrow_mut().push(sql.to_string());
+        }));
+
+        assert!(matches!(
+            conn.query_row("SELECT * FROM missing"),
+            Err(Error::TableNotFound(_))
+        ));
+        assert_eq!(*traced.borrow(), vec!["SELECT * FROM missing".to_string()]);
+    }
+
+    #[test]
+    fn profile_hook_receives_sql_and_duration() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let profiled = Rc::new(RefCell::new(Vec::new()));
+        let profiled_clone = Rc::clone(&profiled);
+        conn.profile(Some(move |sql: &str, elapsed: std::time::Duration| {
+            profiled_clone.borrow_mut().push((sql.to_string(), elapsed));
+        }));
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        let calls = profiled.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "INSERT INTO t VALUES (1)");
+    }
+
+    #[test]
+    fn progress_handler_returning_true_aborts_before_running() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.progress_handler(1, Some(|| true));
+
+        assert_eq!(
+            conn.execute("CREATE TABLE t (a INTEGER)"),
+            Err(Error::OperationAborted)
+        );
+        assert!(!conn.table_exists("t"));
+    }
+
+    #[test]
+    fn progress_handler_returning_false_lets_statement_run() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.progress_handler(1, Some(|| false));
+
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(conn.table_exists("t"));
+    }
+
+    #[test]
+    fn clearing_a_hook_with_none_stops_it_firing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let count = Rc::new(RefCell::new(0));
+        let count_clone = Rc::clone(&count);
+        conn.update_hook(Some(move |_, _: &str, _: &str, _| {
+            *count_clone.borrow_mut() += 1;
+        }));
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(*count.borrow(), 1);
+
+        conn.update_hook::<fn(Action, &str, &str, i64)>(None);
+        conn.execute("INSERT INTO t VALUES (2)").unwrap();
+        assert_eq!(*count.borrow(), 1);
     }
 }

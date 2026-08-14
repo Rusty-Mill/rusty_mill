@@ -23,6 +23,48 @@ entry per PR.
 
 ---
 
+## PR #75 — Add commit/rollback/update/authorizer/trace/profile/progress hooks (closes #20)
+**2026-08-14** · [#75](https://github.com/baileyrd/rusty_-rusqlite/pull/75)
+
+- **Added:** `Connection::commit_hook`/`rollback_hook`/`update_hook`/
+  `authorizer`/`trace`/`profile`/`progress_handler`, plus the
+  `hooks::Action`/`AuthContext`/`Authorization`/`TransactionOperation`
+  types.
+- `commit_hook` fires once per top-level `execute` call (this crate's
+  `is_autocommit` is always `true`, so there's no explicit-transaction
+  boundary distinct from a single statement to defer to); returning
+  `true` rolls back the statement's changes and fires `rollback_hook`.
+  `rollback_hook` also fires from `Transaction::rollback`/
+  `Savepoint::rollback`/a drop-triggered rollback.
+- `update_hook` fires once per row inserted, as `(action, "main",
+  table_name, rowid)` — `rowid` is the row's position within the table
+  (this crate's storage has no real SQLite rowid concept yet, same
+  deviation as `Blob`'s row addressing). Only `Action::Insert` can fire
+  today; `Update`/`Delete` have no statements to trigger them.
+- `authorizer` runs once per `execute`/`query_*` call with the whole
+  target table (real SQLite's authorizer is column-granular during
+  statement preparation — no per-column read tracking here to offer
+  that).
+- `trace`/`profile` fire with the raw SQL text (and, for `profile`, the
+  elapsed `Duration`) around every `execute`/`query_*` call.
+- **Not fully enforced:** `progress_handler` fires once, before a
+  statement starts (so it can prevent a statement from running), not
+  periodically during execution — this engine has no VM instruction loop
+  to interrupt mid-statement the way real SQLite's does.
+- **Design, kept `&self`-compatible on purpose:** `trace`/`profile`/
+  `authorizer`/`progress_handler` fire from `query_row`/`query_one`/
+  `query_map`, which take `&self` — an already-shipped signature this
+  project won't break. Their hook storage uses `RefCell` for interior
+  mutability instead. `commit_hook`/`rollback_hook`/`update_hook` only
+  fire from `&mut self` paths (`execute`, `Transaction`), so they're
+  plain fields.
+- Excludes `wal_hook` (deferred with the rest of WAL — see
+  `ARCHITECTURE.md`'s non-goals).
+- 17 new unit tests (158 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #74 — Add whole-table aggregate functions + collation registration (part of issue 19)
 **2026-08-14** · [#74](https://github.com/baileyrd/rusty_-rusqlite/pull/74)
 

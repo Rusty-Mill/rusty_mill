@@ -66,6 +66,7 @@ impl<'conn> Transaction<'conn> {
     pub fn rollback(mut self) -> Result<()> {
         if let Some(snapshot) = self.snapshot.take() {
             self.conn.restore_db(snapshot);
+            self.conn.fire_rollback_hook();
         }
         self.finished = true;
         Ok(())
@@ -87,6 +88,7 @@ impl<'conn> Transaction<'conn> {
             DropBehavior::Rollback => {
                 if let Some(snapshot) = self.snapshot.take() {
                     self.conn.restore_db(snapshot);
+                    self.conn.fire_rollback_hook();
                 }
             }
             DropBehavior::Panic => panic!("Transaction dropped without commit or rollback"),
@@ -263,5 +265,55 @@ mod tests {
             .query_map("SELECT * FROM t", |row| row.get::<i64>(0))
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn explicit_rollback_fires_rollback_hook() {
+        let mut conn = conn_with_table();
+        let rolled_back = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let rolled_back_clone = std::rc::Rc::clone(&rolled_back);
+        conn.rollback_hook(Some(move || {
+            *rolled_back_clone.borrow_mut() = true;
+        }));
+
+        let mut tx = conn.transaction().unwrap();
+        tx.execute("INSERT INTO t VALUES (1)").unwrap();
+        tx.rollback().unwrap();
+
+        assert!(*rolled_back.borrow());
+    }
+
+    #[test]
+    fn drop_triggered_rollback_fires_rollback_hook() {
+        let mut conn = conn_with_table();
+        let rolled_back = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let rolled_back_clone = std::rc::Rc::clone(&rolled_back);
+        conn.rollback_hook(Some(move || {
+            *rolled_back_clone.borrow_mut() = true;
+        }));
+
+        {
+            let mut tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO t VALUES (1)").unwrap();
+            // no commit/rollback -- dropped here, defaults to Rollback
+        }
+
+        assert!(*rolled_back.borrow());
+    }
+
+    #[test]
+    fn commit_does_not_fire_rollback_hook() {
+        let mut conn = conn_with_table();
+        let rolled_back = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let rolled_back_clone = std::rc::Rc::clone(&rolled_back);
+        conn.rollback_hook(Some(move || {
+            *rolled_back_clone.borrow_mut() = true;
+        }));
+
+        let mut tx = conn.transaction().unwrap();
+        tx.execute("INSERT INTO t VALUES (1)").unwrap();
+        tx.commit().unwrap();
+
+        assert!(!*rolled_back.borrow());
     }
 }

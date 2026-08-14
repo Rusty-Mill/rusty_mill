@@ -46,6 +46,17 @@ pub enum Error {
     /// [`crate::blob::Blob::write_at`] was called on a blob opened
     /// read-only.
     ReadOnlyBlob,
+    /// A registered `Connection::authorizer` callback returned
+    /// `Authorization::Deny` (or `Ignore` — this engine has no per-column
+    /// read authorization to make that distinction meaningful) for the
+    /// statement being run.
+    AuthorizationDenied,
+    /// A registered `Connection::progress_handler` callback returned
+    /// `true`, aborting the statement before it ran.
+    OperationAborted,
+    /// A registered `Connection::commit_hook` callback returned `true`,
+    /// vetoing the commit — the statement's changes were rolled back.
+    CommitHookVetoed,
 }
 
 impl fmt::Display for Error {
@@ -72,6 +83,9 @@ impl fmt::Display for Error {
                 write!(f, "index {index} out of bounds (len {len})")
             }
             Error::ReadOnlyBlob => write!(f, "blob was opened read-only"),
+            Error::AuthorizationDenied => write!(f, "not authorized"),
+            Error::OperationAborted => write!(f, "operation aborted by progress handler"),
+            Error::CommitHookVetoed => write!(f, "commit vetoed by commit hook"),
         }
     }
 }
