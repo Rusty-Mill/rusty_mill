@@ -48,6 +48,7 @@ pub struct Connection {
     total_changes: usize,
     db_config: HashMap<DbConfig, bool>,
     limits: HashMap<Limit, i32>,
+    errmsg: Option<String>,
 }
 
 impl Connection {
@@ -60,6 +61,7 @@ impl Connection {
             total_changes: 0,
             db_config: HashMap::new(),
             limits: HashMap::new(),
+            errmsg: None,
         })
     }
 
@@ -202,6 +204,24 @@ impl Connection {
     /// paged cache over a file).
     pub fn cache_flush(&self) -> Result<()> {
         Ok(())
+    }
+
+    /// Sets a custom error message on the connection. In real SQLite,
+    /// this is how a custom function/virtual-table implementation
+    /// attaches a detailed message to the error SQLite itself will
+    /// report next. This crate has no such C-level error-reporting path
+    /// for custom functions/vtabs to hook into (neither exists yet), so
+    /// unlike `rusqlite::Connection::set_errmsg` this is paired with a
+    /// getter ([`Connection::errmsg`]) — otherwise a set value would be
+    /// unobservable and this method pointless.
+    pub fn set_errmsg(&mut self, msg: &str) {
+        self.errmsg = Some(msg.to_string());
+    }
+
+    /// Returns the message most recently set via
+    /// [`Connection::set_errmsg`], if any.
+    pub fn errmsg(&self) -> Option<&str> {
+        self.errmsg.as_deref()
     }
 
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
@@ -521,5 +541,13 @@ mod tests {
         let previous = conn.set_limit(Limit::Length, 1000);
         assert_eq!(previous, -1);
         assert_eq!(conn.limit(Limit::Length), 1000);
+    }
+
+    #[test]
+    fn errmsg_defaults_to_none_and_round_trips() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.errmsg(), None);
+        conn.set_errmsg("custom error");
+        assert_eq!(conn.errmsg(), Some("custom error"));
     }
 }

@@ -23,6 +23,19 @@ entry per PR.
 
 ---
 
+## PR #65 — Add Connection::set_errmsg (closes #24)
+**2026-08-14** · [#65](https://github.com/baileyrd/rusty_-rusqlite/pull/65)
+
+- **Added:** `Connection::set_errmsg`/`errmsg`. Paired with a getter,
+  unlike `rusqlite::Connection::set_errmsg` — this crate has no
+  custom-function/vtab C-level error-reporting path for the setter to
+  feed into (neither exists yet), so without a getter a set value would
+  be unobservable and the method pointless.
+- 1 new unit test (85 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #64 — Add Connection configuration knobs (closes #15)
 **2026-08-14** · [#64](https://github.com/baileyrd/rusty_-rusqlite/pull/64)
 
