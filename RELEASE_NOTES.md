@@ -23,6 +23,40 @@ entry per PR.
 
 ---
 
+## PR #70 — Add scalar SQL functions (closes #18)
+**2026-08-14** · [#70](https://github.com/baileyrd/rusty_-rusqlite/pull/70)
+
+- **Added:** `Connection::create_scalar_function`/`remove_function`,
+  callable from `WHERE` filters (e.g. `WHERE UPPER(name) = 'X'`).
+- **Added:** `Expr::FunctionCall` to the `SELECT` parser's expression
+  tree, plus parser support for `IDENT(args...)` call syntax.
+- **Design, kept non-breaking on purpose:** rather than changing already-
+  shipped `evaluate`/`evaluate_bool`/`execute_select`'s signatures (which
+  would break every existing caller), added `evaluate_with_functions`/
+  `evaluate_bool_with_functions`/`execute_select_with_functions`
+  alongside them. The originals are now defined in terms of the new ones
+  with an empty function registry, so there's one implementation, not two
+  drifting copies — and `Expr::FunctionCall` reaching plain `evaluate`
+  errors with `FunctionNotFound` rather than panicking or silently doing
+  nothing.
+- **Known limitation, stated plainly:** functions only work in `WHERE` —
+  result-column projection with function calls (`SELECT UPPER(name)
+  FROM t`) isn't supported, since `SelectColumns::Named` is a plain
+  column-name list, not a list of expressions. Also unlike
+  `rusqlite::Connection::create_scalar_function`, no `FunctionFlags` (no
+  query planner here to use deterministic/innocuous markers) and a raw
+  `Fn(&[Value]) -> Result<Value>` signature rather than one derived from
+  `ToSql`/`FromSql`.
+- **Caught by testing, not just reasoning:** a first draft of the
+  "removed function is no longer found" test passed against an *empty*
+  table, where the `WHERE` filter is never evaluated at all (so the
+  removed function's absence was never actually exercised) — silently
+  proving nothing. Fixed by inserting a row before asserting.
+- 11 new unit tests (110 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #69 — Add Connection::serialize/deserialize (closes #17)
 **2026-08-14** · [#69](https://github.com/baileyrd/rusty_-rusqlite/pull/69)
 

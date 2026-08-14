@@ -26,9 +26,13 @@ pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{parse_select, BinaryOp, Expr, Select, SelectColumns};
-pub use engine::{execute_create_table, execute_insert, execute_select};
+pub use engine::{
+    execute_create_table, execute_insert, execute_select, execute_select_with_functions,
+};
 pub use error::{Error, OptionalExtension, Result};
-pub use eval::{evaluate, evaluate_bool};
+pub use eval::{
+    evaluate, evaluate_bool, evaluate_bool_with_functions, evaluate_with_functions, ScalarFn,
+};
 pub use fromsql::{FromSql, FromSqlError, FromSqlResult};
 pub use hooks::{CheckpointMode, Wal};
 pub use row::{Row, RowIndex};

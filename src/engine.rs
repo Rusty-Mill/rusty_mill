@@ -7,9 +7,10 @@ use crate::ddl::CreateTable;
 use crate::dml_insert::Insert;
 use crate::dml_select::{Select, SelectColumns};
 use crate::error::{Error, Result};
-use crate::eval::evaluate_bool;
+use crate::eval::{evaluate_bool_with_functions, ScalarFn};
 use crate::storage::Database;
 use crate::value::Value;
+use std::collections::HashMap;
 
 /// Executes a `CREATE TABLE` statement.
 pub fn execute_create_table(db: &mut Database, create: &CreateTable) -> Result<()> {
@@ -55,14 +56,29 @@ fn expand_row(
 }
 
 /// Executes a single-table `SELECT`, returning the result's column names
-/// and rows.
+/// and rows. Errors if `select.filter` contains a function call — see
+/// [`execute_select_with_functions`].
 pub fn execute_select(db: &Database, select: &Select) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    execute_select_with_functions(db, select, &HashMap::new())
+}
+
+/// Like [`execute_select`], but resolves scalar function calls in
+/// `select.filter` against `functions` (name → implementation). Part B
+/// gap row "Connection + functions module: scalar SQL functions" —
+/// `Connection` registers functions here via `create_scalar_function`.
+pub fn execute_select_with_functions(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
     let table = db.table(&select.table_name)?;
 
     let mut matching_rows = Vec::new();
     for row in &table.rows {
         let keep = match &select.filter {
-            Some(filter) => evaluate_bool(filter, &table.column_names, row)?,
+            Some(filter) => {
+                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
+            }
             None => true,
         };
         if keep {
@@ -164,5 +180,32 @@ mod tests {
         execute_insert(&mut db, &insert).unwrap();
         let table = db.table("t").unwrap();
         assert_eq!(table.rows[0], vec![Value::Integer(1), Value::Null]);
+    }
+
+    #[test]
+    fn selects_with_registered_function_in_filter() {
+        let db = setup();
+        let select =
+            parse_select(&tokenize("SELECT * FROM t WHERE DOUBLE(a) = 4").unwrap()).unwrap();
+
+        let mut functions: HashMap<String, Box<crate::eval::ScalarFn>> = HashMap::new();
+        functions.insert(
+            "DOUBLE".to_string(),
+            Box::new(|args: &[Value]| match args {
+                [Value::Integer(n)] => Ok(Value::Integer(n * 2)),
+                _ => Err(Error::FunctionNotFound("DOUBLE".into())),
+            }),
+        );
+
+        let (_, rows) = execute_select_with_functions(&db, &select, &functions).unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(2), Value::Text("y".into())]]);
+    }
+
+    #[test]
+    fn execute_select_errors_on_unregistered_function() {
+        let db = setup();
+        let select =
+            parse_select(&tokenize("SELECT * FROM t WHERE DOUBLE(a) = 4").unwrap()).unwrap();
+        assert!(execute_select(&db, &select).is_err());
     }
 }
