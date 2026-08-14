@@ -23,6 +23,27 @@ entry per PR.
 
 ---
 
+## PR #88 — Add params_from_iter (part of issue 43)
+**2026-08-14** · [#88](https://github.com/baileyrd/rusty_-rusqlite/pull/88)
+
+- **Added:** `params_from_iter`/`ParamsFromIter<I>` — wraps any
+  `IntoIterator` of `ToSql` values as `Params`, binding each item
+  positionally. The counterpart to real `rusqlite::params_from_iter`,
+  for a runtime-length value list that doesn't fit the fixed-size
+  `Params` impls (`[T; N]`/tuples up to 4).
+- Unblocked by #25/#44's parameter-binding work; genuinely small once
+  `Params` existed to implement it against.
+- **Left open, not folded into this PR:** issue 43's `version`/
+  `version_number` still need a human decision on versioning semantics
+  — this crate isn't wrapping a real SQLite build to report a version
+  from, so inventing a number silently isn't the right call. `MAIN_DB`/
+  `TEMP_DB` (PR #82) and now `params_from_iter` are the two pieces of
+  issue 43 that didn't need that decision.
+- 2 new unit tests (261 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #87 — Add trace module: TraceEvent/TraceEventCodes/StmtRef/ConnRef/trace_v2 (closes #39)
 **2026-08-14** · [#87](https://github.com/baileyrd/rusty_-rusqlite/pull/87)
 

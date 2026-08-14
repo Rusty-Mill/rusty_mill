@@ -134,6 +134,35 @@ impl Params for NamedParams<'_> {
     }
 }
 
+/// Wraps an [`IntoIterator`] of [`ToSql`] values as [`Params`], binding
+/// each item positionally — for a runtime-length value list (a `Vec`, a
+/// filtered iterator, ...) that doesn't fit the fixed-size `Params`
+/// impls (`[T; N]`/tuples up to 4). Built with [`params_from_iter`].
+pub struct ParamsFromIter<I>(I);
+
+/// Builds a [`ParamsFromIter`] from any [`IntoIterator`] of [`ToSql`]
+/// values — the counterpart to real `rusqlite::params_from_iter`.
+pub fn params_from_iter<I>(iter: I) -> ParamsFromIter<I>
+where
+    I: IntoIterator,
+    I::Item: ToSql,
+{
+    ParamsFromIter(iter)
+}
+
+impl<I> Params for ParamsFromIter<I>
+where
+    I: IntoIterator,
+    I::Item: ToSql,
+{
+    fn bind_all(self, stmt: &mut Statement<'_>) -> Result<()> {
+        for (i, value) in self.0.into_iter().enumerate() {
+            stmt.raw_bind_parameter(i + 1, value.to_sql())?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +245,39 @@ mod tests {
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
         let mut stmt = conn.prepare("INSERT INTO t VALUES (?)").unwrap();
         ().bind_all(&mut stmt).unwrap();
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Null]);
+    }
+
+    #[test]
+    fn params_from_iter_binds_a_runtime_length_vec() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)")
+            .unwrap();
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?, ?, ?)").unwrap();
+
+        let values: Vec<i64> = vec![1, 2, 3];
+        params_from_iter(values).bind_all(&mut stmt).unwrap();
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(
+            row,
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)]
+        );
+    }
+
+    #[test]
+    fn params_from_iter_with_no_items_binds_nothing() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?)").unwrap();
+
+        params_from_iter(Vec::<i64>::new())
+            .bind_all(&mut stmt)
+            .unwrap();
         stmt.execute().unwrap();
 
         let row = conn.query_row("SELECT * FROM t").unwrap();
