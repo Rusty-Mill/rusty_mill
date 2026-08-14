@@ -51,7 +51,8 @@ fn write_table(out: &mut Vec<u8>, table: &Table) {
         write_column_def(out, col);
     }
     write_u32(out, table.rows.len() as u32);
-    for row in &table.rows {
+    for (row, rowid) in table.rows.iter().zip(&table.row_ids) {
+        out.extend_from_slice(&rowid.to_le_bytes());
         write_u32(out, row.len() as u32);
         for value in row {
             write_value(out, value);
@@ -193,7 +194,9 @@ impl<'a> Reader<'a> {
 
         let row_count = self.read_u32()?;
         let mut rows = Vec::with_capacity(row_count as usize);
+        let mut row_ids = Vec::with_capacity(row_count as usize);
         for _ in 0..row_count {
+            row_ids.push(self.read_i64()?);
             let value_count = self.read_u32()?;
             let mut row = Vec::with_capacity(value_count as usize);
             for _ in 0..value_count {
@@ -206,6 +209,7 @@ impl<'a> Reader<'a> {
             column_names,
             columns,
             rows,
+            row_ids,
         })
     }
 }
@@ -240,6 +244,21 @@ mod tests {
         assert_eq!(original_table.column_names, restored_table.column_names);
         assert_eq!(original_table.rows, restored_table.rows);
         assert_eq!(original_table.columns, restored_table.columns);
+        assert_eq!(original_table.row_ids, restored_table.row_ids);
+    }
+
+    #[test]
+    fn round_trips_row_ids_so_rowid_assignment_continues_correctly() {
+        let db = sample_db();
+        let bytes = serialize(&db);
+        let mut restored = deserialize(&bytes).unwrap();
+
+        assert_eq!(restored.table("t").unwrap().row_ids, vec![1, 2]);
+
+        let next_rowid = restored
+            .insert_row_returning_rowid("t", vec![Value::Integer(3), Value::Text("c".into())])
+            .unwrap();
+        assert_eq!(next_rowid, 3);
     }
 
     #[test]

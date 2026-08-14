@@ -2,17 +2,20 @@
 //! blob_open, incremental BLOB I/O"), opened via [`crate::Connection::blob_open`].
 //!
 //! **Design deviation, stated plainly:** real SQLite (and `rusqlite::Blob`)
-//! addresses a blob by `rowid`. This crate's storage has no rowid concept
-//! yet (see issue #14's `last_insert_rowid` discussion), so [`Blob`] is
-//! instead addressed by `row_index` — the row's plain position within
-//! `Table::rows` at the time [`crate::Connection::blob_open`] was called.
-//! That position is stable only as long as no earlier row is removed —
-//! weaker than a real rowid's stability — worth revisiting once this
-//! crate has a real rowid concept. `Blob` also doesn't implement
-//! `std::io::{Read, Write, Seek}` like `rusqlite::Blob` does; its
-//! `read_at`/`write_at` cover the same random-access use case directly,
-//! without pulling in `std::io::Error` conversion machinery this crate's
-//! simpler [`crate::Error`] type doesn't map onto.
+//! addresses a blob by `rowid`. [`Blob`] here is instead addressed by
+//! `row_index` — the row's plain position within `Table::rows` at the
+//! time [`crate::Connection::blob_open`] was called — kept that way even
+//! though storage now tracks real rowids (`Table::row_ids`, added
+//! alongside `Connection::last_insert_rowid`): switching `blob_open`'s
+//! existing `row_index: usize` parameter to mean "look up by rowid"
+//! would silently change already-shipped behavior without a signature
+//! change to signal it, so that's left for a deliberate follow-up rather
+//! than folded in here. `row_index` is stable only as long as no earlier
+//! row is removed — weaker than a real rowid's stability. `Blob` also
+//! doesn't implement `std::io::{Read, Write, Seek}` like `rusqlite::Blob`
+//! does; its `read_at`/`write_at` cover the same random-access use case
+//! directly, without pulling in `std::io::Error` conversion machinery
+//! this crate's simpler [`crate::Error`] type doesn't map onto.
 
 use crate::connection::Connection;
 use crate::error::{Error, Result};

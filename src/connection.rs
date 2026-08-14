@@ -4,7 +4,7 @@ use crate::ddl::{parse_create_table, ColumnDef};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
-    execute_create_table, execute_insert, execute_select_with_aggregates,
+    execute_create_table, execute_insert_returning_rowids, execute_select_with_aggregates,
     execute_select_with_functions,
 };
 use crate::error::{Error, Result};
@@ -94,6 +94,7 @@ pub struct Connection {
     /// [`Connection::open_with_flags`].
     path: Option<PathBuf>,
     read_only: bool,
+    last_insert_rowid: i64,
 }
 
 impl Connection {
@@ -128,6 +129,7 @@ impl Connection {
             progress_handler: RefCell::new(None),
             path: None,
             read_only: flags.contains(OpenFlags::READ_ONLY),
+            last_insert_rowid: 0,
         })
     }
 
@@ -281,6 +283,13 @@ impl Connection {
     /// connection was opened.
     pub fn total_changes(&self) -> usize {
         self.total_changes
+    }
+
+    /// Returns the rowid of the most recent successful `INSERT` on this
+    /// connection (across any table), or `0` if none has happened yet.
+    /// For a multi-row `INSERT`, this is the last row's rowid.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.last_insert_rowid
     }
 
     fn require_main_database(&self, db_name: &str) -> Result<()> {
@@ -580,14 +589,12 @@ impl Connection {
     /// Registers a callback invoked once per row inserted by
     /// [`Connection::execute`]/[`Connection::execute_batch`], as
     /// `(action, db_name, table_name, rowid)`. `db_name` is always
-    /// `"main"` (no `ATTACH` support). Pass `None` to unregister.
+    /// `"main"` (no `ATTACH` support). `rowid` is the row's real,
+    /// persistent SQLite-style rowid — see [`Connection::last_insert_rowid`].
+    /// Pass `None` to unregister.
     ///
-    /// **Design deviation, stated plainly:** `rowid` is this row's
-    /// position within the table at insert time (like
-    /// [`crate::Blob`]'s row addressing) — this crate's storage has no
-    /// real SQLite rowid concept yet. Only [`crate::hooks::Action::Insert`]
-    /// can fire today; `Update`/`Delete` have no statements to trigger
-    /// them yet.
+    /// Only [`crate::hooks::Action::Insert`] can fire today; `Update`/
+    /// `Delete` have no statements to trigger them yet.
     pub fn update_hook<F>(&mut self, hook: Option<F>)
     where
         F: FnMut(Action, &str, &str, i64) + 'static,
@@ -860,14 +867,8 @@ impl Connection {
             Some(kw) if kw.eq_ignore_ascii_case("INSERT") => {
                 let insert = parse_insert(&tokens)?;
                 self.check_authorized(Action::Insert, &insert.table_name)?;
-                let before = self
-                    .db
-                    .table(&insert.table_name)
-                    .map(|t| t.rows.len())
-                    .unwrap_or(0);
-                let affected = execute_insert(&mut self.db, &insert)?;
-                let rowids = (before..before + affected).map(|i| i as i64).collect();
-                (affected, insert.table_name, Action::Insert, rowids)
+                let rowids = execute_insert_returning_rowids(&mut self.db, &insert)?;
+                (rowids.len(), insert.table_name, Action::Insert, rowids)
             }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
@@ -881,6 +882,9 @@ impl Connection {
             return Err(Error::CommitHookVetoed);
         }
 
+        if let Some(&last) = rowids.last() {
+            self.last_insert_rowid = last;
+        }
         for rowid in rowids {
             self.fire_update_hook(action, &table_name, rowid);
         }
@@ -1414,8 +1418,8 @@ mod tests {
         assert_eq!(
             *events.borrow(),
             vec![
-                (Action::Insert, "main".to_string(), "t".to_string(), 0),
                 (Action::Insert, "main".to_string(), "t".to_string(), 1),
+                (Action::Insert, "main".to_string(), "t".to_string(), 2),
             ]
         );
     }
@@ -1679,5 +1683,57 @@ mod tests {
         assert!(conn.table_exists("t"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn last_insert_rowid_starts_at_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.last_insert_rowid(), 0);
+    }
+
+    #[test]
+    fn last_insert_rowid_tracks_the_most_recent_insert() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 1);
+
+        conn.execute("INSERT INTO t VALUES (2)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 2);
+    }
+
+    #[test]
+    fn last_insert_rowid_is_the_last_row_of_a_multi_row_insert() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 3);
+    }
+
+    #[test]
+    fn last_insert_rowid_tracks_whichever_table_was_last_inserted_into() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t1 (a INTEGER)").unwrap();
+        conn.execute("CREATE TABLE t2 (a INTEGER)").unwrap();
+
+        conn.execute("INSERT INTO t1 VALUES (1), (2)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 2);
+
+        conn.execute("INSERT INTO t2 VALUES (1)").unwrap();
+        assert_eq!(conn.last_insert_rowid(), 1);
+    }
+
+    #[test]
+    fn commit_hook_veto_does_not_update_last_insert_rowid() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.commit_hook(Some(|| true));
+
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::CommitHookVetoed)
+        );
+        assert_eq!(conn.last_insert_rowid(), 0);
     }
 }

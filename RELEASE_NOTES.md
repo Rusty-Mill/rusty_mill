@@ -23,6 +23,40 @@ entry per PR.
 
 ---
 
+## PR #77 — Add rowid tracking + Connection::last_insert_rowid (closes #14)
+**2026-08-14** · [#77](https://github.com/baileyrd/rusty_-rusqlite/pull/77)
+
+- **Added:** `Table` now tracks each row's SQLite-style rowid
+  (`row_ids: Vec<i64>`, index-aligned with `rows`) — monotonically
+  increasing per table, assigned in `Database::insert_row`, never reused
+  (no `DELETE` yet, so the reuse question doesn't arise). Persisted
+  through `serialize`/`deserialize`, so a file-backed connection (PR #76)
+  keeps assigning rowids correctly across reopens.
+- **Added:** `Connection::last_insert_rowid()` — the rowid of the most
+  recent successful `INSERT` on this connection, across any table (`0`
+  before any `INSERT`). For a multi-row `INSERT`, this is the last row's
+  rowid. Unaffected by a vetoed/rolled-back `commit_hook`.
+- **Non-breaking additions, not signature changes:** `Database::insert_row`
+  and `execute_insert` keep their existing `Result<()>`/`Result<usize>`
+  signatures untouched — the new rowid-returning behavior lives in new
+  `Database::insert_row_returning_rowid`/`engine::execute_insert_returning_rowids`
+  functions instead, following this project's established pattern for
+  extending an already-shipped signature without breaking it.
+- **Improved as a direct consequence:** `Connection::update_hook`'s
+  `rowid` argument (added in PR #75) now reports the row's real,
+  persistent rowid instead of PR #75's row-position placeholder, now
+  that storage actually tracks one.
+- **Scope note:** `Connection::blob_open`'s existing `row_index`
+  parameter still addresses by row position, not rowid — left alone
+  deliberately (see `blob.rs`'s updated doc comment) since reinterpreting
+  an already-shipped parameter's meaning is exactly the kind of
+  behavior change this project treats as needing its own deliberate
+  follow-up, not something to fold into an unrelated PR.
+- 9 new unit tests (177 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #76 — Add file-backed Connection::open + OpenFlags (closes #11)
 **2026-08-14** · [#76](https://github.com/baileyrd/rusty_-rusqlite/pull/76)
 
