@@ -66,6 +66,13 @@ pub fn evaluate_with_functions(
                 .collect::<Result<Vec<Value>>>()?;
             f(&arg_values)
         }
+        // No bindings are available here — `crate::Statement` resolves
+        // `Parameter` nodes to a concrete `Literal` (bound value, or
+        // `Value::Null` if unbound) before this ever runs; a caller that
+        // reaches this some other way (e.g. `Connection::query_map` given
+        // SQL text with a literal `?`) gets the same `Value::Null` real
+        // SQLite would give an unbound parameter.
+        Expr::Parameter(_) => Ok(Value::Null),
     }
 }
 

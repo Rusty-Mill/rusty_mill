@@ -6,7 +6,7 @@
 use crate::aggregate::Aggregate;
 use crate::ddl::CreateTable;
 use crate::dml_insert::Insert;
-use crate::dml_select::{AggregateArg, Select, SelectColumns};
+use crate::dml_select::{AggregateArg, Expr, Select, SelectColumns};
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
 use crate::storage::Database;
@@ -42,16 +42,38 @@ pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Re
             None => row.clone(),
             Some(names) => expand_row(&table_column_names, names, row)?,
         };
-        rowids.push(db.insert_row_returning_rowid(&insert.table_name, expanded)?);
+        let values = expanded
+            .iter()
+            .map(resolve_insert_value)
+            .collect::<Result<Vec<Value>>>()?;
+        rowids.push(db.insert_row_returning_rowid(&insert.table_name, values)?);
     }
     Ok(rowids)
+}
+
+/// Resolves an `INSERT` value slot into a concrete [`Value`] —
+/// [`Expr::Literal`] as-is, [`Expr::Parameter`] as [`Value::Null`]
+/// (matching real SQLite's unbound-parameter default; `crate::Statement`
+/// pre-substitutes bound values into a `Literal`-only tree before this
+/// ever runs, so this fallback only fires for callers with no bindings
+/// to consult). The `INSERT` parser never produces any other `Expr`
+/// variant here, but the match stays exhaustive rather than assuming
+/// that forever.
+fn resolve_insert_value(expr: &Expr) -> Result<Value> {
+    match expr {
+        Expr::Literal(v) => Ok(v.clone()),
+        Expr::Parameter(_) => Ok(Value::Null),
+        other => Err(Error::UnrecognizedStatement(format!(
+            "unsupported INSERT value expression: {other:?}"
+        ))),
+    }
 }
 
 fn expand_row(
     table_column_names: &[String],
     given_names: &[String],
-    given_values: &[Value],
-) -> Result<Vec<Value>> {
+    given_values: &[Expr],
+) -> Result<Vec<Expr>> {
     if given_names.len() != given_values.len() {
         return Err(Error::ColumnCountMismatch {
             expected: given_names.len(),
@@ -62,7 +84,7 @@ fn expand_row(
         .iter()
         .map(|col| match given_names.iter().position(|n| n == col) {
             Some(idx) => Ok(given_values[idx].clone()),
-            None => Ok(Value::Null),
+            None => Ok(Expr::Literal(Value::Null)),
         })
         .collect()
 }

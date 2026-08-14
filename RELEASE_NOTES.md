@@ -23,6 +23,57 @@ entry per PR.
 
 ---
 
+## PR #83 — Add real `?`/`:name` parameter binding (closes #25)
+**2026-08-14** · [#83](https://github.com/baileyrd/rusty_-rusqlite/pull/83)
+
+This makes the parameter-marker design decision every Statement-adjacent
+issue (#25, #26–#30, #42, #44, part of #39/#43) had been flagged as
+blocked on since early in this project's history, and implements it —
+see `docs/adr/0002-parameter-markers.md` for the full decision record.
+
+- **Added:** the tokenizer recognizes `?`/`?N`/`:name`/`@name`/`$name` as
+  a new `Token::Param`; the AST gains `ParamMarker` and `Expr::Parameter`.
+- **The authorized breaking change:** `Insert::rows` changes from
+  `Vec<Vec<Value>>` to `Vec<Vec<Expr>>` (each slot is now
+  `Expr::Literal`/`Expr::Parameter`) — this is the exact change #25's
+  original triage flagged as needing human sign-off, now made
+  deliberately per the ADR.
+- **Added:** `Statement::raw_bind_parameter`/`clear_bindings`, closing
+  #25. `Connection::prepare` resolves every marker to a 1-based index
+  (SQLite's own numbering: bare `?` auto-increments, `?N` claims index
+  `N` and bumps the counter past it, a repeated `:name`/`@name`/`$name`
+  reuses its first index) once, at prepare time. `execute`/`query*`
+  substitute bound values (or `Value::Null` for unbound, matching real
+  SQLite) into a fully-concrete copy before handing it to the existing
+  engine/eval functions — **their already-shipped signatures didn't
+  change**, only gained the one unavoidable new `Expr::Parameter` match
+  arm.
+- **Updated to be real:** `Statement::parameter_count`/`parameter_name`/
+  `parameter_index` (previously always `0`/`None`, honestly, since no
+  parameters could exist) and `Statement::expanded_sql` (previously
+  always the original text; now does real value substitution via a
+  string-literal-aware text scan, independent of but
+  index-assignment-consistent with the AST-level resolution).
+- **Added:** `ToSql for &str` (the existing `ToSql for str` impl doesn't
+  satisfy a `T: ToSql` bound, since that implies `T: Sized` and `str`
+  isn't) — needed for `stmt.raw_bind_parameter(1, "text")` to work
+  directly.
+- **Discovered along the way:** this crate's `WHERE` grammar only
+  supports a single comparison — no `AND`/`OR` combining multiple
+  conditions. Pre-existing, unrelated to this change; worked around in
+  tests needing two parameters in one statement by using a function
+  call's argument list instead. Not fixed here — a separate,
+  already-known gap in the expression grammar, not a parameter-binding
+  concern.
+- Unblocks (not implemented here — natural follow-ups): #44's
+  `BindIndex`/`Params`/`Name` traits, #42's `params!`/`named_params!`
+  macros, #43's `params_from_iter`, and #39's `TraceEvent`/`ConnRef`/
+  `StmtRef` (still needs its own scoping pass even so).
+- 16 new unit tests (223 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #82 — Add MAIN_DB/TEMP_DB constants (part of issue 43)
 **2026-08-14** · [#82](https://github.com/baileyrd/rusty_-rusqlite/pull/82)
 

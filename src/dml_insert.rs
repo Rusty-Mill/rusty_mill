@@ -1,8 +1,10 @@
-//! SQL parser: `INSERT` (DML subset, foundation-tier `A4a`). Literal values
-//! only — no expressions (that's `A6`, the expression evaluator).
+//! SQL parser: `INSERT` (DML subset, foundation-tier `A4a`). Each `VALUES`
+//! slot is a literal or a bound-parameter marker — no other expressions
+//! (that's `A6`, the expression evaluator, and `SELECT`'s `WHERE` clause).
 //! Grammar reference: <https://www.sqlite.org/lang_insert.html>.
 
 use crate::ddl::ParseError;
+use crate::dml_select::{parse_param_marker, Expr};
 use crate::token::Token;
 use crate::value::Value;
 
@@ -14,7 +16,10 @@ pub struct Insert {
     /// `None` means "all columns, in table-definition order" (unresolvable
     /// without a catalog — left to the caller until `A5` exists).
     pub columns: Option<Vec<String>>,
-    pub rows: Vec<Vec<Value>>,
+    /// Each `VALUES` slot, as [`Expr::Literal`] or [`Expr::Parameter`]
+    /// (never any other `Expr` variant — this parser only ever produces
+    /// those two) — see `docs/adr/0002-parameter-markers.md`.
+    pub rows: Vec<Vec<Expr>>,
 }
 
 /// Parses an `INSERT INTO ... VALUES (...)` statement from a token stream
@@ -49,7 +54,7 @@ pub fn parse_insert(tokens: &[Token]) -> Result<Insert, ParseError> {
         p.expect_punct("(")?;
         let mut row = Vec::new();
         loop {
-            row.push(p.parse_literal()?);
+            row.push(p.parse_value_or_param()?);
             if p.peek_punct(",") {
                 p.advance();
                 continue;
@@ -116,13 +121,16 @@ impl<'a> InsertParser<'a> {
         }
     }
 
-    fn parse_literal(&mut self) -> Result<Value, ParseError> {
+    fn parse_value_or_param(&mut self) -> Result<Expr, ParseError> {
         match self.advance() {
-            Some(Token::Integer(n)) => Ok(Value::Integer(*n)),
-            Some(Token::Real(f)) => Ok(Value::Real(*f)),
-            Some(Token::String(s)) => Ok(Value::Text(s.clone())),
-            Some(Token::Blob(b)) => Ok(Value::Blob(b.clone())),
-            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("NULL") => Ok(Value::Null),
+            Some(Token::Integer(n)) => Ok(Expr::Literal(Value::Integer(*n))),
+            Some(Token::Real(f)) => Ok(Expr::Literal(Value::Real(*f))),
+            Some(Token::String(s)) => Ok(Expr::Literal(Value::Text(s.clone()))),
+            Some(Token::Blob(b)) => Ok(Expr::Literal(Value::Blob(b.clone()))),
+            Some(Token::Ident(s)) if s.eq_ignore_ascii_case("NULL") => {
+                Ok(Expr::Literal(Value::Null))
+            }
+            Some(Token::Param(spec)) => Ok(Expr::Parameter(parse_param_marker(spec))),
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
         }
@@ -143,9 +151,9 @@ mod tests {
         assert_eq!(
             insert.rows,
             vec![vec![
-                Value::Integer(1),
-                Value::Text("x".into()),
-                Value::Null
+                Expr::Literal(Value::Integer(1)),
+                Expr::Literal(Value::Text("x".into())),
+                Expr::Literal(Value::Null)
             ]]
         );
     }
@@ -157,7 +165,10 @@ mod tests {
         assert_eq!(insert.columns, Some(vec!["a".into(), "b".into()]));
         assert_eq!(
             insert.rows,
-            vec![vec![Value::Integer(1), Value::Integer(2)]]
+            vec![vec![
+                Expr::Literal(Value::Integer(1)),
+                Expr::Literal(Value::Integer(2))
+            ]]
         );
     }
 
@@ -181,5 +192,18 @@ mod tests {
     fn unterminated_row_is_an_error() {
         let tokens = tokenize("INSERT INTO t VALUES (1, 2").unwrap();
         assert_eq!(parse_insert(&tokens), Err(ParseError::UnexpectedEof));
+    }
+
+    #[test]
+    fn parses_anonymous_and_named_parameter_markers() {
+        let tokens = tokenize("INSERT INTO t VALUES (?, :name)").unwrap();
+        let insert = parse_insert(&tokens).unwrap();
+        assert_eq!(
+            insert.rows,
+            vec![vec![
+                Expr::Parameter(crate::dml_select::ParamMarker::Anonymous),
+                Expr::Parameter(crate::dml_select::ParamMarker::Named(":name".into())),
+            ]]
+        );
     }
 }

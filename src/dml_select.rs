@@ -66,6 +66,41 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// A `?`/`?N`/`:name`/`@name`/`$name` bound-parameter marker — see
+    /// `docs/adr/0002-parameter-markers.md`. `crate::Statement` resolves
+    /// these to a bound value (or `Value::Null`, for an unbound one)
+    /// before evaluation; the plain `eval`/`engine` functions (given no
+    /// bindings to consult) also treat every `Parameter` as `Value::Null`,
+    /// matching real SQLite's own unbound-parameter default.
+    Parameter(ParamMarker),
+}
+
+/// A `?`/`?N`/`:name`/`@name`/`$name`-style bound-parameter marker, as
+/// parsed. Not yet resolved to a concrete index — see
+/// `docs/adr/0002-parameter-markers.md`'s index-resolution rule, applied
+/// by `crate::Statement` at prepare time.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamMarker {
+    /// Bare `?` — positional, auto-numbered by left-to-right occurrence
+    /// order starting at 1 (SQLite's convention).
+    Anonymous,
+    /// `?N` — an explicit 1-based positional index.
+    Numbered(usize),
+    /// `:name`/`@name`/`$name`, sigil included — SQLite treats these as
+    /// distinct namespaces even for matching name text (`:foo` and
+    /// `@foo` are different parameters).
+    Named(String),
+}
+
+/// Parses a `Token::Param`'s stored spec text into a [`ParamMarker`].
+pub(crate) fn parse_param_marker(spec: &str) -> ParamMarker {
+    if spec.is_empty() {
+        ParamMarker::Anonymous
+    } else if let Ok(n) = spec.parse::<usize>() {
+        ParamMarker::Numbered(n)
+    } else {
+        ParamMarker::Named(spec.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,6 +290,10 @@ impl<'a> SelectParser<'a> {
             Some(Token::Blob(b)) => {
                 self.advance();
                 Ok(Expr::Literal(Value::Blob(b)))
+            }
+            Some(Token::Param(spec)) => {
+                self.advance();
+                Ok(Expr::Parameter(parse_param_marker(&spec)))
             }
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
