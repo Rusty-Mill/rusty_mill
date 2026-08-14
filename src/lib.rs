@@ -44,6 +44,7 @@
 //!   introspection response's `cnf` confirmation claim -- not the TLS
 //!   handshake or certificate verification itself)
 //! - RFC 9126 -- Pushed Authorization Requests (PAR)
+//! - RFC 9449 -- Demonstrating Proof of Possession (DPoP)
 //! - OAuth 2.1 (draft-ietf-oauth-v2-1): PKCE is applied by default to every
 //!   authorization-code flow, and the deprecated Implicit and Resource
 //!   Owner Password Credentials grants are intentionally not implemented.
@@ -78,6 +79,7 @@ pub mod bearer;
 pub mod client;
 pub mod crypto;
 pub mod device;
+pub mod dpop;
 pub mod encoding;
 pub mod error;
 pub mod introspection;
