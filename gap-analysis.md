@@ -124,7 +124,7 @@ API shape).
 
 | Symbol group | Category | Platforms | Est. size | Notes |
 | --- | --- | --- | --- | --- |
-| Entire module (`VTab`/`VTabCursor`/`CreateVTab`/`UpdateVTab`/`IndexInfo`/etc., ~25 items) | type/trait | both | L | Large, self-contained subsystem; defer whole-module planning to its own future gap-analysis pass rather than sizing 25 rows now |
+| Entire module (`VTab`/`VTabCursor`/`CreateVTab`/`UpdateVTab`/`IndexInfo`/etc., ~25 items) | type/trait | both | L | Scoped in `docs/gap-analysis-vtab.md` (issue #38's follow-up pass) into 8 sequenced sub-issues (#90–#97), starting from an architectural prerequisite — this crate's storage/execution layer has no trait boundary a virtual row source could stand in for yet |
 
 ### `blob` module
 

@@ -23,6 +23,33 @@ entry per PR.
 
 ---
 
+## PR #98 — Add vtab module scoping pass (part of issue 38)
+**2026-08-14** · [#98](https://github.com/baileyrd/rusty_-rusqlite/pull/98)
+
+Docs only — no code changes.
+
+- **Added:** `docs/gap-analysis-vtab.md`, the module-scoped gap-analysis
+  pass issue #38 required before any `vtab` implementation. Checked
+  `rusty_dbs`/`rusty_sqlite` siblings first (neither has a from-scratch
+  vtab implementation — `rusty_sqlite` wraps real SQLite's own C-level
+  vtab engine), then verified the full real `vtab` surface (~30 items)
+  against docs.rs.
+- **Key finding:** unlike every other gap closed this project, `vtab`
+  isn't an additive slice — real `rusqlite`'s vtab traits back C
+  callbacks SQLite's own query planner/VM invoke, and this crate's
+  storage layer has no trait boundary a virtual row source could stand
+  in for. Nearly everything is blocked on that one architectural
+  decision.
+- **Split into 8 sequenced `parity-gap` issues:** #90 (the architectural
+  prerequisite, `needs-human`), #91 (core `VTab`/`VTabCursor` traits),
+  #92 (`Connection::create_module`), #93 (`CREATE VIRTUAL TABLE`
+  parsing), #94 (`best_index` constraint pushdown, `needs-human`), #95
+  (writable vtabs), #96 (built-in `array` module), #97 (optional
+  `csvtab`/`series` examples).
+- Updated `gap-analysis.md`'s `vtab` row to point at the new doc.
+
+---
+
 ## PR #89 — Add version/version_number (closes #43)
 **2026-08-14** · [#89](https://github.com/baileyrd/rusty_-rusqlite/pull/89)
 
