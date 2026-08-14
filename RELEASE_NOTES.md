@@ -23,6 +23,25 @@ entry per PR.
 
 ---
 
+## PR #57 — Add hooks::Wal/CheckpointMode types (closes #40)
+**2026-08-14** · [#57](https://github.com/baileyrd/rusty_-rusqlite/pull/57)
+
+- **Added:** `CheckpointMode`/`Wal` — inert scaffolding for the
+  not-yet-implemented `Connection::wal_hook`. This crate has no WAL
+  support (per `ARCHITECTURE.md`'s non-goals), so nothing constructs a
+  `Wal` yet; these types exist so that decision doesn't block on WAL
+  support landing first.
+- **Also flagged:** issue #25 (`Statement` parameter binding) is deferred
+  and labeled `needs-human` — implementing it requires `?`-marker syntax
+  the tokenizer/parser don't support, which means changing already-shipped
+  `Insert::rows`'s element type from `Value` to something parameter-aware.
+  That's a breaking change to a merged public field (#48), so it's a
+  stop-and-ask per this loop's own rule rather than a silent reshape.
+- 2 new unit tests (58 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #56 — Add FromSql trait (closes #37)
 **2026-08-14** · [#56](https://github.com/baileyrd/rusty_-rusqlite/pull/56)
 
