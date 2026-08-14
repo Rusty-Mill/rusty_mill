@@ -149,6 +149,57 @@ impl Connection {
         }
     }
 
+    /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
+    /// rollback support.
+    pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
+        self.db.snapshot()
+    }
+
+    /// Restores table state previously captured by
+    /// [`Connection::snapshot_db`].
+    pub(crate) fn restore_db(
+        &mut self,
+        snapshot: std::collections::HashMap<String, crate::storage::Table>,
+    ) {
+        self.db.restore(snapshot);
+    }
+
+    /// Begins a transaction, returning a guard that rolls back on drop
+    /// unless [`crate::Transaction::commit`] is called first (or its drop
+    /// behavior is changed via [`crate::Transaction::set_drop_behavior`]).
+    pub fn transaction(&mut self) -> Result<crate::transaction::Transaction<'_>> {
+        crate::transaction::Transaction::new(self)
+    }
+
+    /// Like [`Connection::transaction`], but the given `behavior` is
+    /// accepted for API compatibility only — this crate's single-writer
+    /// in-memory model doesn't distinguish `Deferred`/`Immediate`/
+    /// `Exclusive` locking, so all three behave identically today.
+    pub fn transaction_with_behavior(
+        &mut self,
+        _behavior: crate::transaction::TransactionBehavior,
+    ) -> Result<crate::transaction::Transaction<'_>> {
+        crate::transaction::Transaction::new(self)
+    }
+
+    /// Like [`Connection::transaction`], but doesn't check whether a
+    /// transaction is already active (this crate has no such check to
+    /// skip yet — the two are equivalent today, kept as separate methods
+    /// for API-shape parity).
+    pub fn unchecked_transaction(&mut self) -> Result<crate::transaction::Transaction<'_>> {
+        crate::transaction::Transaction::new(self)
+    }
+
+    /// Begins a savepoint with an auto-generated name.
+    pub fn savepoint(&mut self) -> Result<crate::transaction::Savepoint<'_>> {
+        crate::transaction::Savepoint::new(self, None)
+    }
+
+    /// Begins a savepoint with the given name.
+    pub fn savepoint_with_name(&mut self, name: &str) -> Result<crate::transaction::Savepoint<'_>> {
+        crate::transaction::Savepoint::new(self, Some(name.to_string()))
+    }
+
     /// Returns whether the connection is still open.
     pub fn is_open(&self) -> bool {
         self.open

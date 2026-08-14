@@ -76,6 +76,20 @@ impl Database {
             .get(table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))
     }
+
+    /// Snapshots the current table state, for transaction/savepoint
+    /// rollback. A full clone — simple and correct for this in-memory
+    /// engine's current scale, not the copy-on-write/undo-log approach a
+    /// real storage engine would use. Worth revisiting if profiling ever
+    /// shows it matters.
+    pub fn snapshot(&self) -> HashMap<String, Table> {
+        self.tables.clone()
+    }
+
+    /// Restores table state from a snapshot taken by [`Database::snapshot`].
+    pub fn restore(&mut self, snapshot: HashMap<String, Table>) {
+        self.tables = snapshot;
+    }
 }
 
 #[cfg(test)]

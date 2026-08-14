@@ -17,6 +17,7 @@ mod rows;
 mod storage;
 mod token;
 mod tosql;
+mod transaction;
 mod value;
 
 pub use config::{DbConfig, Limit};
@@ -34,4 +35,5 @@ pub use rows::{AndThenRows, MappedRows, Rows};
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
+pub use transaction::{DropBehavior, Savepoint, Transaction, TransactionBehavior};
 pub use value::{Type, Value, ValueRef};

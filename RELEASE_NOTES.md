@@ -23,6 +23,34 @@ entry per PR.
 
 ---
 
+## PR #63 — Add Transaction/Savepoint (part of #13)
+**2026-08-14** · [#63](https://github.com/baileyrd/rusty_-rusqlite/pull/63)
+
+- **Added:** `Connection::transaction`/`transaction_with_behavior`/
+  `unchecked_transaction`/`savepoint`/`savepoint_with_name`, plus
+  `Transaction`/`Savepoint`/`DropBehavior`/`TransactionBehavior`. Real
+  rollback: each guard snapshots table state on entry and restores it on
+  drop unless `commit` was called (or `DropBehavior::Commit` was set) —
+  not a no-op stub.
+- **Added:** `Database::snapshot`/`restore` on the storage layer,
+  backing the above. Full-clone based (documented as such) rather than a
+  copy-on-write/undo-log, appropriate for this engine's current scale.
+- **Design note:** `rusqlite::DropBehavior::Ignore` has no equivalent
+  here — this crate's guards are ownership-based, so there's no "still
+  open, nothing references it" state for `Ignore` to leave a transaction
+  in.
+- **Issue #13's remaining scope:** `transaction_state`/
+  `set_transaction_behavior` are not implemented — they'd need a
+  persistent "am I inside a transaction" flag on `Connection` itself,
+  which the current borrow-based guard design (the guard holds `&mut
+  Connection`, so `Connection` itself has no such flag) doesn't have
+  anywhere to put without a larger redesign. Left open, not folded into
+  this PR's "closes" list.
+- 6 new unit tests (82 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #62 — Add Connection metadata introspection (part of #14)
 **2026-08-14** · [#62](https://github.com/baileyrd/rusty_-rusqlite/pull/62)
 
