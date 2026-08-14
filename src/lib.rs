@@ -4,12 +4,10 @@
 
 /// The name of the always-present default database (Part B gap row
 /// "Top-level: params_from_iter, version, version_number, MAIN_DB/TEMP_DB
-/// constants" — the constants slice; `version`/`version_number` need a
-/// human decision on versioning semantics, so neither is implemented
-/// here. `params_from_iter` was blocked on the parameter-binding design
-/// decision issue #25 made (see `docs/adr/0002-parameter-markers.md`
-/// and [`crate::Params`]) — no longer blocked, but not yet implemented
-/// as its own function; tracked as the rest of issue #43).
+/// constants" — the constants slice; see [`crate::params_from_iter`] for
+/// that piece. `version`/`version_number` still need a human decision on
+/// versioning semantics (this crate isn't wrapping a real SQLite build
+/// to report a version from) — the rest of issue #43).
 pub const MAIN_DB: &str = "main";
 
 /// The name SQLite's temporary-table database would use. This crate has
@@ -63,7 +61,7 @@ pub use eval::{
 };
 pub use fromsql::{FromSql, FromSqlError, FromSqlResult};
 pub use hooks::{Action, AuthContext, Authorization, CheckpointMode, TransactionOperation, Wal};
-pub use params::{BindIndex, Name, NamedParams, Params};
+pub use params::{params_from_iter, BindIndex, Name, NamedParams, Params, ParamsFromIter};
 pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
