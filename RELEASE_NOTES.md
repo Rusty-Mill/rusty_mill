@@ -23,6 +23,18 @@ entry per PR.
 
 ---
 
+## PR #48 — Add INSERT parser (closes #5)
+**2026-08-14** · [#48](https://github.com/baileyrd/rusty_-rusqlite/pull/48)
+
+- **Added:** `parse_insert`/`Insert` — parses `INSERT INTO ... [(cols)]
+  VALUES (...)` with literal values (no expressions yet — that's `A6`).
+  Split from the original combined `INSERT`/`SELECT` gap row per the
+  skill's issue-sizing rule.
+- 5 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #47 — Add CREATE TABLE parser (closes #4)
 **2026-08-14** · [#47](https://github.com/baileyrd/rusty_-rusqlite/pull/47)
 

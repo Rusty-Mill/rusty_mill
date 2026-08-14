@@ -4,12 +4,14 @@
 
 mod connection;
 mod ddl;
+mod dml_insert;
 mod error;
 mod token;
 mod value;
 
 pub use connection::Connection;
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
+pub use dml_insert::{parse_insert, Insert};
 pub use error::{Error, Result};
 pub use token::{tokenize, Token, TokenError};
 pub use value::{Type, Value};
