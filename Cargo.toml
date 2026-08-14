@@ -1,0 +1,14 @@
+[package]
+name = "rusty_oauth"
+version = "0.1.0"
+edition = "2021"
+description = "A hand-rolled, zero-dependency OAuth 2.0 / 2.1 protocol implementation for Rust."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/baileyrd/rusty_oauth"
+readme = "README.md"
+keywords = ["oauth", "oauth2", "pkce", "jwt", "authentication"]
+categories = ["authentication", "web-programming"]
+
+[dependencies]
+
+[dev-dependencies]
