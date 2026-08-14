@@ -20,6 +20,23 @@ pub enum TransactionBehavior {
     Exclusive,
 }
 
+/// The transaction-lock state for a database, as returned by
+/// [`crate::Connection::transaction_state`].
+///
+/// **Design deviation, stated plainly:** real SQLite distinguishes `Read`
+/// (a read transaction is open) from `Write` (a write transaction is
+/// open) lock states. This crate's single-writer in-memory snapshot
+/// model has no separate read/write lock to distinguish — any open
+/// [`Transaction`]/[`Savepoint`] (at any nesting depth) reports as
+/// `Write`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    /// No transaction is open.
+    None,
+    /// A transaction (or nested savepoint) is open.
+    Write,
+}
+
 /// What happens to an unfinished [`Transaction`]/[`Savepoint`] when it's
 /// dropped. Missing `rusqlite::DropBehavior::Ignore`: that variant leaves
 /// the transaction open past the guard's lifetime, which doesn't fit this
@@ -47,6 +64,7 @@ pub struct Transaction<'conn> {
 impl<'conn> Transaction<'conn> {
     pub(crate) fn new(conn: &'conn mut Connection) -> Result<Transaction<'conn>> {
         let snapshot = conn.snapshot_db();
+        conn.increment_transaction_depth();
         Ok(Transaction {
             conn,
             snapshot: Some(snapshot),
@@ -58,7 +76,7 @@ impl<'conn> Transaction<'conn> {
     /// Commits: keeps the changes made since the transaction began.
     pub fn commit(mut self) -> Result<()> {
         self.snapshot = None;
-        self.finished = true;
+        self.mark_finished();
         Ok(())
     }
 
@@ -68,7 +86,7 @@ impl<'conn> Transaction<'conn> {
             self.conn.restore_db(snapshot);
             self.conn.fire_rollback_hook();
         }
-        self.finished = true;
+        self.mark_finished();
         Ok(())
     }
 
@@ -93,8 +111,17 @@ impl<'conn> Transaction<'conn> {
             }
             DropBehavior::Panic => panic!("Transaction dropped without commit or rollback"),
         }
-        self.finished = true;
+        self.mark_finished();
         Ok(())
+    }
+
+    /// Marks this guard as finished and lets the connection know its
+    /// transaction depth has decreased by one. The single place all of
+    /// `commit`/`rollback`/`finish_mut` funnel through, so depth
+    /// tracking can't drift out of sync with which of those actually ran.
+    fn mark_finished(&mut self) {
+        self.conn.decrement_transaction_depth();
+        self.finished = true;
     }
 
     /// Returns what will happen if this guard is dropped without an
@@ -315,5 +342,57 @@ mod tests {
         tx.commit().unwrap();
 
         assert!(!*rolled_back.borrow());
+    }
+
+    #[test]
+    fn transaction_state_reflects_open_and_closed_transactions() {
+        let mut conn = conn_with_table();
+        assert_eq!(
+            conn.transaction_state(None).unwrap(),
+            TransactionState::None
+        );
+
+        let tx = conn.transaction().unwrap();
+        assert_eq!(tx.transaction_state(None).unwrap(), TransactionState::Write);
+        tx.commit().unwrap();
+
+        assert_eq!(
+            conn.transaction_state(Some("main")).unwrap(),
+            TransactionState::None
+        );
+    }
+
+    #[test]
+    fn transaction_state_tracks_nested_savepoint_depth() {
+        let mut conn = conn_with_table();
+        let mut tx = conn.transaction().unwrap();
+        assert_eq!(tx.transaction_state(None).unwrap(), TransactionState::Write);
+
+        let sp = tx.savepoint().unwrap();
+        assert_eq!(sp.transaction_state(None).unwrap(), TransactionState::Write);
+        sp.rollback().unwrap();
+
+        // Still inside the outer transaction after the inner savepoint
+        // finished.
+        assert_eq!(tx.transaction_state(None).unwrap(), TransactionState::Write);
+        tx.rollback().unwrap();
+        assert_eq!(
+            conn.transaction_state(None).unwrap(),
+            TransactionState::None
+        );
+    }
+
+    #[test]
+    fn transaction_state_on_non_main_database_is_an_error() {
+        let conn = conn_with_table();
+        assert!(conn.transaction_state(Some("other")).is_err());
+    }
+
+    #[test]
+    fn transaction_behavior_defaults_to_deferred_and_round_trips() {
+        let mut conn = conn_with_table();
+        assert_eq!(conn.transaction_behavior(), TransactionBehavior::Deferred);
+        conn.set_transaction_behavior(TransactionBehavior::Exclusive);
+        assert_eq!(conn.transaction_behavior(), TransactionBehavior::Exclusive);
     }
 }
