@@ -375,6 +375,30 @@ impl Connection {
         Ok(())
     }
 
+    /// Copies this connection's full table state into `dest`, replacing
+    /// whatever `dest` had. Part B gap row "Connection + backup module:
+    /// backup/restore between connections".
+    ///
+    /// **Design, kept simple on purpose:** real `rusqlite::Connection::backup`
+    /// (via `backup::Backup`/`Progress`/`StepResult`) copies a real SQLite
+    /// database incrementally, page by page, so a caller can observe and
+    /// pause progress on a large file. This engine's storage is a plain
+    /// in-memory `HashMap` (see `ARCHITECTURE.md`) with no page concept to
+    /// step through, so `backup` is a single all-at-once copy built on
+    /// [`Connection::serialize`]/[`Connection::deserialize`] — there's no
+    /// `Backup`/`Progress`/`StepResult` types because there's no
+    /// multi-step operation for them to describe.
+    pub fn backup(&self, dest: &mut Connection) -> Result<()> {
+        dest.deserialize(&self.serialize())
+    }
+
+    /// Copies `source`'s full table state into this connection, replacing
+    /// whatever this connection had. The mirror of [`Connection::backup`]
+    /// — `a.backup(&mut b)` and `b.restore(&a)` do the same thing.
+    pub fn restore(&mut self, source: &Connection) -> Result<()> {
+        self.deserialize(&source.serialize())
+    }
+
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
     pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
@@ -815,5 +839,43 @@ mod tests {
     fn removing_unregistered_function_is_not_an_error() {
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(conn.remove_function("NEVER_REGISTERED").is_ok());
+    }
+
+    #[test]
+    fn backup_copies_table_state_into_destination() {
+        let mut src = Connection::open_in_memory().unwrap();
+        src.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        src.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let mut dest = Connection::open_in_memory().unwrap();
+        src.backup(&mut dest).unwrap();
+
+        let values: Vec<i64> = dest.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn backup_replaces_destination_state() {
+        let src = Connection::open_in_memory().unwrap();
+
+        let mut dest = Connection::open_in_memory().unwrap();
+        dest.execute("CREATE TABLE old (a INTEGER)").unwrap();
+
+        src.backup(&mut dest).unwrap();
+
+        assert!(!dest.table_exists("old"));
+    }
+
+    #[test]
+    fn restore_is_the_mirror_of_backup() {
+        let mut a = Connection::open_in_memory().unwrap();
+        a.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        a.execute("INSERT INTO t VALUES (7)").unwrap();
+
+        let mut b = Connection::open_in_memory().unwrap();
+        b.restore(&a).unwrap();
+
+        let values: Vec<i64> = b.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![7]);
     }
 }

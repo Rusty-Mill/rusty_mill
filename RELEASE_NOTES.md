@@ -23,6 +23,22 @@ entry per PR.
 
 ---
 
+## PR #71 — Add Connection::backup/restore (closes #22)
+**2026-08-14** · [#71](https://github.com/baileyrd/rusty_-rusqlite/pull/71)
+
+- **Added:** `Connection::backup`/`restore` — copies full table state
+  between two connections, built on `serialize`/`deserialize` from #69.
+- **Design, kept simple on purpose:** real `rusqlite::Connection::backup`
+  (via `backup::Backup`/`Progress`/`StepResult`) copies incrementally,
+  page by page, so a caller can observe/pause progress on a large file.
+  This engine's storage has no page concept to step through, so `backup`
+  is a single all-at-once copy — no `Backup`/`Progress`/`StepResult`
+  types, since there's no multi-step operation for them to describe.
+- 3 new unit tests (113 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #70 — Add scalar SQL functions (closes #18)
 **2026-08-14** · [#70](https://github.com/baileyrd/rusty_-rusqlite/pull/70)
 
