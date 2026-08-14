@@ -23,6 +23,17 @@ entry per PR.
 
 ---
 
+## PR #46 — Add SQL tokenizer (closes #3)
+**2026-08-14** · [#46](https://github.com/baileyrd/rusty_-rusqlite/pull/46)
+
+- **Added:** `tokenize`/`Token`/`TokenError` — lexes identifiers, keywords,
+  integer/real/string/blob literals, and punctuation/operators. No
+  statement-level grammar yet (that's the parser, A3/A4).
+- 6 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #45 — Add Value/Type model (closes #2)
 **2026-08-14** · [#45](https://github.com/baileyrd/rusty_-rusqlite/pull/45)
 

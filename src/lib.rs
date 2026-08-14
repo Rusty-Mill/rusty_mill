@@ -4,8 +4,10 @@
 
 mod connection;
 mod error;
+mod token;
 mod value;
 
 pub use connection::Connection;
 pub use error::{Error, Result};
+pub use token::{tokenize, Token, TokenError};
 pub use value::{Type, Value};
