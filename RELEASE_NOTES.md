@@ -23,6 +23,17 @@ entry per PR.
 
 ---
 
+## PR #45 — Add Value/Type model (closes #2)
+**2026-08-14** · [#45](https://github.com/baileyrd/rusty_-rusqlite/pull/45)
+
+- **Added:** `Value`/`Type` — the SQLite five-storage-class model
+  (Null/Integer/Real/Text/Blob), foundation for the tokenizer, parser, and
+  storage layer that build on it.
+- 2 new unit tests; both passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## Initial commit — repo-config governance files + crate skeleton
 **2026-08-14** · (pushed directly — no default branch existed yet to PR against)
 

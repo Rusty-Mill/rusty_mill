@@ -4,6 +4,8 @@
 
 mod connection;
 mod error;
+mod value;
 
 pub use connection::Connection;
 pub use error::{Error, Result};
+pub use value::{Type, Value};
