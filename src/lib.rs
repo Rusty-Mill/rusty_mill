@@ -4,10 +4,8 @@
 
 /// The name of the always-present default database (Part B gap row
 /// "Top-level: params_from_iter, version, version_number, MAIN_DB/TEMP_DB
-/// constants" — the constants slice; see [`crate::params_from_iter`] for
-/// that piece. `version`/`version_number` still need a human decision on
-/// versioning semantics (this crate isn't wrapping a real SQLite build
-/// to report a version from) — the rest of issue #43).
+/// constants" — the constants slice; see [`crate::params_from_iter`] and
+/// [`version`]/[`version_number`] for the rest of issue #43).
 pub const MAIN_DB: &str = "main";
 
 /// The name SQLite's temporary-table database would use. This crate has
@@ -15,6 +13,27 @@ pub const MAIN_DB: &str = "main";
 /// nothing produces or accepts this name yet — provided for API-shape
 /// parity, same status as [`crate::hooks::Wal`]/[`crate::hooks::CheckpointMode`].
 pub const TEMP_DB: &str = "temp";
+
+/// This crate's own Cargo package version (e.g. `"0.0.1"`) — **not** a
+/// SQLite library version, since this crate wraps no real SQLite build
+/// to report one from. A deliberate human decision (issue #43), not a
+/// silently invented number: real `rusqlite::version()` reports the
+/// linked SQLite C library's version string, and the closest honest
+/// equivalent for a from-scratch engine is this crate's own version.
+pub fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// [`version`], encoded the way SQLite encodes its own version number —
+/// `major * 1_000_000 + minor * 1_000 + patch` (e.g. real SQLite's
+/// `3.40.1` becomes `3040001`) — applied here to this crate's own
+/// major/minor/patch instead.
+pub fn version_number() -> i32 {
+    let major: i32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+    let minor: i32 = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap();
+    let patch: i32 = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap();
+    major * 1_000_000 + minor * 1_000 + patch
+}
 
 mod aggregate;
 mod blob;
@@ -90,5 +109,18 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(conn.db_name(0).unwrap(), MAIN_DB);
         assert!(!conn.is_readonly(MAIN_DB).unwrap());
+    }
+
+    #[test]
+    fn version_matches_this_crates_own_cargo_version() {
+        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn version_number_encodes_major_minor_patch() {
+        let major: i32 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+        let minor: i32 = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap();
+        let patch: i32 = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap();
+        assert_eq!(version_number(), major * 1_000_000 + minor * 1_000 + patch);
     }
 }
