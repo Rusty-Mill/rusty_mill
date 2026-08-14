@@ -78,3 +78,47 @@ impl From<FromSqlError> for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Turns [`Error::QueryReturnedNoRows`] into `Ok(None)` instead of an
+/// error, for callers that treat "no matching row" as a normal outcome
+/// rather than a failure. Part B gap row "Top-level traits: BindIndex,
+/// Params, RowIndex, Name, OptionalExtension" (the `OptionalExtension`
+/// slice — see `row.rs` for `RowIndex`; `BindIndex`/`Params`/`Name` are
+/// parameter-binding traits blocked on the same `?`-marker design
+/// decision as issue #25).
+pub trait OptionalExtension<T> {
+    fn optional(self) -> Result<Option<T>>;
+}
+
+impl<T> OptionalExtension<T> for Result<T> {
+    fn optional(self) -> Result<Option<T>> {
+        match self {
+            Ok(v) => Ok(Some(v)),
+            Err(Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[cfg(test)]
+mod optional_extension_tests {
+    use super::*;
+
+    #[test]
+    fn ok_becomes_some() {
+        let result: Result<i64> = Ok(42);
+        assert_eq!(result.optional(), Ok(Some(42)));
+    }
+
+    #[test]
+    fn no_rows_becomes_none() {
+        let result: Result<i64> = Err(Error::QueryReturnedNoRows);
+        assert_eq!(result.optional(), Ok(None));
+    }
+
+    #[test]
+    fn other_errors_pass_through() {
+        let result: Result<i64> = Err(Error::ConnectionClosed);
+        assert_eq!(result.optional(), Err(Error::ConnectionClosed));
+    }
+}
