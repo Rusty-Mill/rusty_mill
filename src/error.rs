@@ -1,4 +1,5 @@
 use crate::ddl::ParseError;
+use crate::fromsql::FromSqlError;
 use crate::token::TokenError;
 use std::fmt;
 
@@ -26,6 +27,8 @@ pub enum Error {
     UnrecognizedStatement(String),
     /// `Connection::query_row` found no rows.
     QueryReturnedNoRows,
+    /// A [`crate::FromSql`] conversion failed while reading a column.
+    FromSql(FromSqlError),
 }
 
 impl fmt::Display for Error {
@@ -44,6 +47,7 @@ impl fmt::Display for Error {
                 write!(f, "statement not recognized by this connection: {sql:?}")
             }
             Error::QueryReturnedNoRows => write!(f, "query returned no rows"),
+            Error::FromSql(e) => write!(f, "column conversion error: {e:?}"),
         }
     }
 }
@@ -59,6 +63,12 @@ impl From<TokenError> for Error {
 impl From<ParseError> for Error {
     fn from(e: ParseError) -> Error {
         Error::Parse(e)
+    }
+}
+
+impl From<FromSqlError> for Error {
+    fn from(e: FromSqlError) -> Error {
+        Error::FromSql(e)
     }
 }
 
