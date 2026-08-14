@@ -113,6 +113,14 @@ cargo test    # 153 unit tests + 1 doc-test, including known-answer vectors
 cargo clippy --all-targets -- -D warnings
 ```
 
+### Live provider smoke test
+
+`examples/live_provider_test.rs` exercises the crate against real, running OAuth 2.0/OIDC servers over the network -- not part of `cargo test` (it needs network access and a third-party server to stay up), but a genuine end-to-end check: RFC 8414/OIDC discovery and JWKS parsing against Google, plus a full `client_credentials` round trip (token request → introspection → revocation) and a DPoP-bound `client_credentials` request against [Duende's public IdentityServer demo instance](https://demo.duendesoftware.com), which exists specifically for testing OAuth/OIDC clients against and publishes its demo client credentials on its own site. It shells out to `curl` as its HTTP transport -- exactly the "bring your own client" pattern this crate is designed around; the library itself never touches the network.
+
+```sh
+cargo run --example live_provider_test
+```
+
 ## Non-goals
 
 - OpenID Connect as a full spec (ID token *parsing/verification* is supported via `jwt`; discovery/UserInfo/dynamic registration are not).
