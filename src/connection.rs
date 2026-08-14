@@ -399,6 +399,33 @@ impl Connection {
         self.deserialize(&source.serialize())
     }
 
+    /// Read-only access to this connection's storage, for modules (e.g.
+    /// [`crate::blob`]) that need to look up table/row/column state
+    /// without going through the SQL-text `execute`/`query_*` surface.
+    pub(crate) fn db(&self) -> &Database {
+        &self.db
+    }
+
+    /// Mutable access to this connection's storage. See [`Connection::db`].
+    pub(crate) fn db_mut(&mut self) -> &mut Database {
+        &mut self.db
+    }
+
+    /// Opens a handle for incremental byte-range reads (and, unless
+    /// `read_only`, writes) into a single existing `BLOB` column value,
+    /// without reading or rewriting the whole row. See [`crate::blob::Blob`]
+    /// for the full API and its row-index-instead-of-rowid addressing
+    /// deviation from `rusqlite::Connection::blob_open`.
+    pub fn blob_open(
+        &mut self,
+        table: &str,
+        column: &str,
+        row_index: usize,
+        read_only: bool,
+    ) -> Result<crate::blob::Blob<'_>> {
+        crate::blob::Blob::open(self, table, column, row_index, read_only)
+    }
+
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
     pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
