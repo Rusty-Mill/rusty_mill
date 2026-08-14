@@ -23,6 +23,21 @@ entry per PR.
 
 ---
 
+## PR #50 — Add in-memory storage backend (closes #7)
+**2026-08-14** · [#50](https://github.com/baileyrd/rusty_-rusqlite/pull/50)
+
+- **Added:** `Database`/`Table` — in-memory table storage: `create_table`
+  (from a parsed `CreateTable`), `insert_row`, `table` (schema + row scan).
+  Deliberately in-memory-only per `ARCHITECTURE.md`'s non-goals.
+- **Added:** `Error::TableAlreadyExists`/`TableNotFound`/
+  `ColumnCountMismatch` — extends the crate's error type rather than
+  introducing a second one for the storage layer. `Error` now derives
+  `PartialEq` so tests can assert on it directly.
+- 5 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #49 — Add single-table SELECT parser (closes #6)
 **2026-08-14** · [#49](https://github.com/baileyrd/rusty_-rusqlite/pull/49)
 
