@@ -61,6 +61,14 @@ pub struct IntrospectionResponse {
     pub aud: Option<String>,
     pub iss: Option<String>,
     pub jti: Option<String>,
+    /// RFC 8705 §3.3: the SHA-256 thumbprint of the client certificate
+    /// this token is bound to (the introspection response's top-level
+    /// `cnf.x5t#S256` member), for mutual-TLS certificate-bound access
+    /// tokens. Verifying that a *presented* certificate's thumbprint
+    /// matches this value is the caller's responsibility -- this crate
+    /// doesn't compute certificate thumbprints or touch TLS at all (see
+    /// the crate-level docs).
+    pub cnf_x5t_s256: Option<String>,
     pub raw: Value,
 }
 
@@ -120,6 +128,11 @@ pub fn parse_introspection_response(status: u16, body: &str) -> Result<Introspec
         aud,
         iss: value.get("iss").and_then(Value::as_str).map(str::to_string),
         jti: value.get("jti").and_then(Value::as_str).map(str::to_string),
+        cnf_x5t_s256: value
+            .get("cnf")
+            .and_then(|cnf| cnf.get("x5t#S256"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
         raw: value,
     })
 }
@@ -188,5 +201,40 @@ mod tests {
         assert!(body.contains("client_assertion="));
         assert!(!body.contains("client_secret="));
         assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
+    }
+
+    #[test]
+    fn parses_certificate_bound_token_confirmation() {
+        let json = r#"{
+            "active": true,
+            "cnf": {"x5t#S256": "bwcA0ODeqXRVryZFuqHai1RVUsCyqmzYijkzoAmkGz0"}
+        }"#;
+        let resp = parse_introspection_response(200, json).unwrap();
+        assert_eq!(
+            resp.cnf_x5t_s256.as_deref(),
+            Some("bwcA0ODeqXRVryZFuqHai1RVUsCyqmzYijkzoAmkGz0")
+        );
+    }
+
+    #[test]
+    fn cnf_absent_is_none() {
+        let resp = parse_introspection_response(200, r#"{"active": true}"#).unwrap();
+        assert_eq!(resp.cnf_x5t_s256, None);
+    }
+
+    #[test]
+    fn tls_client_auth_sends_only_client_id() {
+        let client = Client::public(ClientId::new("mtls-client"))
+            .with_auth_method(AuthMethod::TlsClientAuth);
+        let req = introspection_request(
+            "https://auth.example.com/introspect",
+            &client,
+            "some-token",
+            None,
+        )
+        .unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("client_id=mtls-client"));
+        assert!(!body.contains("client_secret"));
     }
 }

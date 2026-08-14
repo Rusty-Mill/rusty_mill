@@ -67,6 +67,23 @@ pub enum AuthMethod {
     /// `private_key_jwt` (RFC 7523 / OIDC Core §9): a JWT assertion
     /// signed with an asymmetric key registered with the server.
     PrivateKeyJwt,
+    /// `tls_client_auth` (RFC 8705 §2.1): the client authenticates by
+    /// presenting an X.509 certificate matching one registered with the
+    /// server (via a subject DN, SAN, etc.), verified at the TLS layer.
+    /// Since this crate never performs TLS itself (see the crate-level
+    /// docs), the certificate presentation and verification is entirely
+    /// the caller's HTTP client's responsibility; this variant only
+    /// controls how the request *body* is shaped -- `client_id` is sent,
+    /// but never a `client_secret`, since the certificate is the proof of
+    /// identity.
+    TlsClientAuth,
+    /// `self_signed_tls_client_auth` (RFC 8705 §2.2): like
+    /// `TlsClientAuth`, but the server trusts a specific self-signed
+    /// certificate registered out-of-band rather than a CA-issued one.
+    /// Produces an identical request body to `TlsClientAuth`; the
+    /// distinction only matters to the server's own certificate
+    /// validation policy.
+    SelfSignedTlsClientAuth,
 }
 
 /// An OAuth client's identity and authentication configuration.

@@ -36,6 +36,11 @@
 //! - RFC 8414 -- Authorization Server Metadata
 //! - RFC 8628 -- Device Authorization Grant
 //! - RFC 8693 -- OAuth 2.0 Token Exchange
+//! - RFC 8705 -- OAuth 2.0 Mutual-TLS Client Authentication and
+//!   Certificate-Bound Access Tokens (the `tls_client_auth` /
+//!   `self_signed_tls_client_auth` request shape, and reading the
+//!   introspection response's `cnf` confirmation claim -- not the TLS
+//!   handshake or certificate verification itself)
 //! - RFC 9126 -- Pushed Authorization Requests (PAR)
 //! - OAuth 2.1 (draft-ietf-oauth-v2-1): PKCE is applied by default to every
 //!   authorization-code flow, and the deprecated Implicit and Resource

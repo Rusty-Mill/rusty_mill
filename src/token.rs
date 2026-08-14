@@ -585,4 +585,28 @@ mod tests {
             Some(token_type::ACCESS_TOKEN)
         );
     }
+
+    #[test]
+    fn tls_client_auth_sends_client_id_but_never_a_secret() {
+        let client = Client::public(ClientId::new("mtls-client"))
+            .with_auth_method(AuthMethod::TlsClientAuth);
+        let req =
+            client_credentials_request("https://auth.example.com/token", &client, None).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("client_id=mtls-client"));
+        assert!(!body.contains("client_secret"));
+        assert!(!body.contains("client_assertion"));
+        assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
+    }
+
+    #[test]
+    fn self_signed_tls_client_auth_same_shape_as_tls_client_auth() {
+        let client = Client::public(ClientId::new("mtls-client"))
+            .with_auth_method(AuthMethod::SelfSignedTlsClientAuth);
+        let req =
+            client_credentials_request("https://auth.example.com/token", &client, None).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("client_id=mtls-client"));
+        assert!(!body.contains("client_secret"));
+    }
 }
