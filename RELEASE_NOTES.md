@@ -23,6 +23,19 @@ entry per PR.
 
 ---
 
+## PR #66 — Add Connection busy handling (closes #23)
+**2026-08-14** · [#66](https://github.com/baileyrd/rusty_-rusqlite/pull/66)
+
+- **Added:** `Connection::busy_timeout`/`busy_handler`. Stored honestly
+  (same pattern as `db_config`/`limit`) but **never invoked**: this
+  crate's single-writer in-memory model has no lock contention to wait
+  out, so `is_busy` can never observe `true` and neither setting has
+  anything to trigger it.
+- 1 new unit test (86 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #65 — Add Connection::set_errmsg (closes #24)
 **2026-08-14** · [#65](https://github.com/baileyrd/rusty_-rusqlite/pull/65)
 

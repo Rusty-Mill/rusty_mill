@@ -49,6 +49,8 @@ pub struct Connection {
     db_config: HashMap<DbConfig, bool>,
     limits: HashMap<Limit, i32>,
     errmsg: Option<String>,
+    busy_timeout: Option<std::time::Duration>,
+    busy_handler: Option<fn(i32) -> bool>,
 }
 
 impl Connection {
@@ -62,6 +64,8 @@ impl Connection {
             db_config: HashMap::new(),
             limits: HashMap::new(),
             errmsg: None,
+            busy_timeout: None,
+            busy_handler: None,
         })
     }
 
@@ -222,6 +226,25 @@ impl Connection {
     /// [`Connection::set_errmsg`], if any.
     pub fn errmsg(&self) -> Option<&str> {
         self.errmsg.as_deref()
+    }
+
+    /// Sets how long a busy operation would wait before giving up.
+    /// **Never actually waited on**: this crate's single-writer in-memory
+    /// model has no lock contention to wait out — there's nothing that
+    /// would ever make [`Connection::is_busy`] observe `true`, so this
+    /// value is stored but never consulted. Stored honestly rather than
+    /// silently ignored, same reasoning as `db_config`/`limit`.
+    pub fn busy_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.busy_timeout = Some(timeout);
+        Ok(())
+    }
+
+    /// Sets a callback to run when a busy operation would otherwise
+    /// block. Same caveat as [`Connection::busy_timeout`]: never actually
+    /// invoked, since nothing in this engine blocks.
+    pub fn busy_handler(&mut self, callback: Option<fn(i32) -> bool>) -> Result<()> {
+        self.busy_handler = callback;
+        Ok(())
     }
 
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
@@ -549,5 +572,16 @@ mod tests {
         assert_eq!(conn.errmsg(), None);
         conn.set_errmsg("custom error");
         assert_eq!(conn.errmsg(), Some("custom error"));
+    }
+
+    #[test]
+    fn busy_timeout_and_handler_are_settable() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        conn.busy_handler(Some(|_retries| false)).unwrap();
+        // Never invoked -- there's no blocking path in this engine to
+        // invoke them from. This test only confirms both are settable
+        // without erroring.
     }
 }
