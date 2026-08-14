@@ -23,6 +23,44 @@ entry per PR.
 
 ---
 
+## PR #86 — Add window functions (closes #19)
+**2026-08-14** · [#86](https://github.com/baileyrd/rusty_-rusqlite/pull/86)
+
+Closes the remaining piece of #19 — PR #74 already shipped aggregate
+functions and collation registration; this adds window functions.
+
+- **Added:** `SUM(a) OVER (PARTITION BY b)`-style window select lists —
+  new `SelectColumns::Window`/`WindowCall` AST, parser support (`OVER
+  (PARTITION BY col, ...)` after any aggregate-shaped call), and
+  `execute_select_with_window` (dispatched from `Connection::run_select`
+  alongside the existing aggregate/plain paths).
+- **Added:** `Connection::create_window_function`/`remove_window_function`.
+- **Scope, stated plainly:** only `PARTITION BY`, no `ORDER BY` or frame
+  clause (`ROWS`/`RANGE BETWEEN ...`) — every row in a partition gets
+  the same whole-partition aggregate value, not a running/cumulative
+  one. Building real per-row-varying results (running totals, `RANK`,
+  `LAG`/`LEAD`) needs per-partition ordering and frame-boundary
+  machinery — a comparable amount of new grammar and execution logic to
+  the vtab epic (#38), not a small addition. `ROW_NUMBER`/`RANK`/
+  `DENSE_RANK`/`NTILE`/`LAG`/`LEAD` aren't supported for the same
+  reason — they're inherently row-position-dependent, not whole-partition
+  aggregates.
+- **Design deviation:** real `rusqlite::Connection::create_window_function`
+  takes a `WindowAggregate` trait (`step`/`inverse`/`value`/`finalize`)
+  so SQLite can slide a frame's boundaries incrementally. Since this
+  crate's window functions only ever compute over a whole partition
+  (no frame to slide), `create_window_function` is a thin alias over
+  the same registry `create_aggregate_function` already uses — any
+  aggregate is automatically usable as a window function too.
+- **Partition lookup is linear, not hashed:** `Value` doesn't implement
+  `Hash`/`Eq` (a `Real(f64)` payload can't), so partition grouping scans
+  a `Vec<(Vec<Value>, accumulator)>` instead of using a `HashMap`. Fine
+  at this crate's table scale; would need revisiting for large tables.
+- 11 new unit tests (252 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #85 — Add params!/named_params!/prepare_and_bind! macros (closes #42)
 **2026-08-14** · [#85](https://github.com/baileyrd/rusty_-rusqlite/pull/85)
 

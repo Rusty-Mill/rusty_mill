@@ -20,6 +20,35 @@ pub enum SelectColumns {
     /// yet, so grouped aggregation (multiple output rows, one per group)
     /// isn't supported; only whole-table aggregation is.
     Aggregates(Vec<AggregateCall>),
+    /// A select list that's entirely window-function calls, e.g.
+    /// `SELECT SUM(a) OVER (PARTITION BY b) FROM t`. See [`WindowCall`]'s
+    /// doc comment for this crate's "whole partition, no frame" scope.
+    Window(Vec<WindowCall>),
+}
+
+/// One window-function call in a window select list, e.g. the
+/// `SUM(a) OVER (PARTITION BY b)` in
+/// `SELECT SUM(a) OVER (PARTITION BY b) FROM t`.
+///
+/// **Scope, stated plainly:** real SQLite window functions support an
+/// `ORDER BY` inside `OVER (...)` plus an explicit frame clause
+/// (`ROWS`/`RANGE BETWEEN ...`), which together let a window function's
+/// result differ row-by-row within a partition (a running total, a rank,
+/// `LAG`/`LEAD`, ...). Building that needs real per-partition ordering
+/// and frame-boundary machinery — a comparable amount of new grammar and
+/// execution logic to the vtab epic (#38), not a small addition. This
+/// crate only supports `PARTITION BY` with no `ORDER BY`/frame: every
+/// row in a partition gets the same whole-partition aggregate value
+/// (built on the same [`crate::Aggregate`] used for whole-table
+/// aggregation — see [`crate::Connection::create_window_function`]).
+/// `ROW_NUMBER`/`RANK`/`DENSE_RANK`/`NTILE`/`LAG`/`LEAD` (which are
+/// inherently row-position-dependent, not whole-partition aggregates)
+/// aren't supported for the same reason.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowCall {
+    pub name: String,
+    pub arg: AggregateArg,
+    pub partition_by: Vec<String>,
 }
 
 /// One aggregate-function call in an aggregate select list, e.g. the
@@ -123,12 +152,23 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
         p.advance();
         SelectColumns::All
     } else if p.starts_aggregate_call() {
-        let mut calls = vec![p.parse_aggregate_call()?];
-        while p.peek_punct(",") {
-            p.advance();
-            calls.push(p.parse_aggregate_call()?);
+        let first = p.parse_aggregate_call()?;
+        if p.peek_ident("OVER") {
+            let mut windows = vec![p.parse_window_call(first)?];
+            while p.peek_punct(",") {
+                p.advance();
+                let call = p.parse_aggregate_call()?;
+                windows.push(p.parse_window_call(call)?);
+            }
+            SelectColumns::Window(windows)
+        } else {
+            let mut calls = vec![first];
+            while p.peek_punct(",") {
+                p.advance();
+                calls.push(p.parse_aggregate_call()?);
+            }
+            SelectColumns::Aggregates(calls)
         }
-        SelectColumns::Aggregates(calls)
     } else {
         let mut cols = vec![p.expect_any_ident()?];
         while p.peek_punct(",") {
@@ -192,6 +232,31 @@ impl<'a> SelectParser<'a> {
         };
         self.expect_punct(")")?;
         Ok(AggregateCall { name, arg })
+    }
+
+    /// Parses `OVER (PARTITION BY col1, col2, ...)` (or `OVER ()`, no
+    /// partitioning) following an already-parsed [`AggregateCall`], into
+    /// a [`WindowCall`] — see that type's doc comment for the "no
+    /// `ORDER BY`/frame clause" scope limit.
+    fn parse_window_call(&mut self, call: AggregateCall) -> Result<WindowCall, ParseError> {
+        self.expect_ident("OVER")?;
+        self.expect_punct("(")?;
+        let mut partition_by = Vec::new();
+        if self.peek_ident("PARTITION") {
+            self.advance();
+            self.expect_ident("BY")?;
+            partition_by.push(self.expect_any_ident()?);
+            while self.peek_punct(",") {
+                self.advance();
+                partition_by.push(self.expect_any_ident()?);
+            }
+        }
+        self.expect_punct(")")?;
+        Ok(WindowCall {
+            name: call.name,
+            arg: call.arg,
+            partition_by,
+        })
     }
 
     fn peek_punct(&self, p: &str) -> bool {
@@ -459,6 +524,58 @@ mod tests {
         assert_eq!(
             select.columns,
             SelectColumns::Named(vec!["a".into(), "b".into()])
+        );
+    }
+
+    #[test]
+    fn parses_window_call_with_partition_by() {
+        let tokens = tokenize("SELECT SUM(a) OVER (PARTITION BY b) FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Window(vec![WindowCall {
+                name: "SUM".into(),
+                arg: AggregateArg::Expr(Box::new(Expr::Column("a".into()))),
+                partition_by: vec!["b".into()],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_window_call_with_no_partition() {
+        let tokens = tokenize("SELECT COUNT(*) OVER () FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Window(vec![WindowCall {
+                name: "COUNT".into(),
+                arg: AggregateArg::Star,
+                partition_by: vec![],
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_multiple_window_calls_and_multi_column_partition() {
+        let tokens = tokenize(
+            "SELECT SUM(a) OVER (PARTITION BY b, c), COUNT(*) OVER (PARTITION BY b) FROM t",
+        )
+        .unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Window(vec![
+                WindowCall {
+                    name: "SUM".into(),
+                    arg: AggregateArg::Expr(Box::new(Expr::Column("a".into()))),
+                    partition_by: vec!["b".into(), "c".into()],
+                },
+                WindowCall {
+                    name: "COUNT".into(),
+                    arg: AggregateArg::Star,
+                    partition_by: vec!["b".into()],
+                },
+            ])
         );
     }
 }

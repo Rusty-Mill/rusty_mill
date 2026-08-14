@@ -45,7 +45,8 @@ use crate::dml_select::{
     SelectColumns,
 };
 use crate::engine::{
-    describe_aggregate_call, execute_create_table, execute_insert_returning_rowids,
+    describe_aggregate_call, describe_window_call, execute_create_table,
+    execute_insert_returning_rowids,
 };
 use crate::error::{Error, Result};
 use crate::row::Row;
@@ -111,6 +112,13 @@ impl<'conn> Statement<'conn> {
             }
             StatementKind::Select(select) => {
                 if let SelectColumns::Aggregates(calls) = &mut select.columns {
+                    for call in calls {
+                        if let AggregateArg::Expr(e) = &mut call.arg {
+                            resolver.rewrite(e);
+                        }
+                    }
+                }
+                if let SelectColumns::Window(calls) = &mut select.columns {
                     for call in calls {
                         if let AggregateArg::Expr(e) = &mut call.arg {
                             resolver.rewrite(e);
@@ -223,6 +231,13 @@ impl<'conn> Statement<'conn> {
         }
     }
 
+    fn resolve_aggregate_arg(&self, arg: &AggregateArg) -> AggregateArg {
+        match arg {
+            AggregateArg::Star => AggregateArg::Star,
+            AggregateArg::Expr(e) => AggregateArg::Expr(Box::new(self.resolve_expr(e))),
+        }
+    }
+
     fn resolved_select(&self) -> Result<Select> {
         let select = self.select()?;
         let columns = match &select.columns {
@@ -231,12 +246,17 @@ impl<'conn> Statement<'conn> {
                     .iter()
                     .map(|c| AggregateCall {
                         name: c.name.clone(),
-                        arg: match &c.arg {
-                            AggregateArg::Star => AggregateArg::Star,
-                            AggregateArg::Expr(e) => {
-                                AggregateArg::Expr(Box::new(self.resolve_expr(e)))
-                            }
-                        },
+                        arg: self.resolve_aggregate_arg(&c.arg),
+                    })
+                    .collect(),
+            ),
+            SelectColumns::Window(calls) => SelectColumns::Window(
+                calls
+                    .iter()
+                    .map(|c| crate::dml_select::WindowCall {
+                        name: c.name.clone(),
+                        arg: self.resolve_aggregate_arg(&c.arg),
+                        partition_by: c.partition_by.clone(),
                     })
                     .collect(),
             ),
@@ -378,6 +398,7 @@ impl<'conn> Statement<'conn> {
             SelectColumns::Aggregates(calls) => {
                 Ok(calls.iter().map(describe_aggregate_call).collect())
             }
+            SelectColumns::Window(calls) => Ok(calls.iter().map(describe_window_call).collect()),
         }
     }
 
@@ -771,6 +792,39 @@ mod tests {
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
         let stmt = conn.prepare("SELECT COUNT(*), SUM(a) FROM t").unwrap();
         assert_eq!(stmt.column_names().unwrap(), vec!["COUNT(*)", "SUM(a)"]);
+    }
+
+    #[test]
+    fn column_names_for_window_select() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (grp TEXT, a INTEGER)")
+            .unwrap();
+        let stmt = conn
+            .prepare("SELECT SUM(a) OVER (PARTITION BY grp), COUNT(*) OVER () FROM t")
+            .unwrap();
+        assert_eq!(
+            stmt.column_names().unwrap(),
+            vec!["SUM(a) OVER (PARTITION BY grp)", "COUNT(*) OVER ()"]
+        );
+    }
+
+    #[test]
+    fn bound_parameter_usable_inside_a_window_call_argument() {
+        // This crate's expression grammar has no infix arithmetic (`+`),
+        // so the bound parameter is the window call's whole argument
+        // rather than part of a larger expression like `a + ?`.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (grp TEXT, a INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('x', 1), ('x', 2)")
+            .unwrap();
+
+        let mut stmt = conn
+            .prepare("SELECT SUM(?) OVER (PARTITION BY grp) FROM t")
+            .unwrap();
+        stmt.raw_bind_parameter(1, 10i64).unwrap();
+        let sums: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        assert_eq!(sums, vec![20, 20]);
     }
 
     #[test]

@@ -145,6 +145,9 @@ pub fn execute_select_with_functions(
         SelectColumns::Aggregates(_) => Err(Error::UnrecognizedStatement(
             "aggregate select lists need execute_select_with_aggregates".to_string(),
         )),
+        SelectColumns::Window(_) => Err(Error::UnrecognizedStatement(
+            "window select lists need execute_select_with_window".to_string(),
+        )),
     }
 }
 
@@ -224,6 +227,132 @@ pub(crate) fn describe_aggregate_call(call: &crate::dml_select::AggregateCall) -
         },
     };
     format!("{}({arg})", call.name)
+}
+
+/// Executes a window-function `SELECT` (e.g.
+/// `SELECT SUM(a) OVER (PARTITION BY b) FROM t`). Every matching row
+/// (per `select.filter`) keeps its own output row — unlike
+/// [`execute_select_with_aggregates`], this doesn't collapse to one row
+/// — but per [`crate::dml_select::WindowCall`]'s documented scope, every
+/// row within the same partition gets the same whole-partition aggregate
+/// value (no `ORDER BY`/running-frame support). Errors if
+/// `select.columns` isn't [`SelectColumns::Window`].
+pub fn execute_select_with_window(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let table = db.table(&select.table_name)?;
+    let calls = match &select.columns {
+        SelectColumns::Window(calls) => calls,
+        _ => {
+            return Err(Error::UnrecognizedStatement(
+                "execute_select_with_window called on a non-window SELECT".to_string(),
+            ))
+        }
+    };
+
+    let mut matching_rows = Vec::new();
+    for row in &table.rows {
+        let keep = match &select.filter {
+            Some(filter) => {
+                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
+            }
+            None => true,
+        };
+        if keep {
+            matching_rows.push(row);
+        }
+    }
+
+    let mut result_columns: Vec<Vec<Value>> = Vec::with_capacity(calls.len());
+    for call in calls {
+        let agg = aggregates
+            .get(&call.name)
+            .ok_or_else(|| Error::FunctionNotFound(call.name.clone()))?;
+
+        // Linear (not hashed) partition lookup: `Value` doesn't
+        // implement `Hash`/`Eq` (a `Real(f64)` payload can't), so a
+        // `HashMap<Vec<Value>, _>` isn't available here — partition
+        // counts in this crate's tables are small enough that this
+        // isn't a practical concern.
+        let mut partitions: Vec<(Vec<Value>, Value)> = Vec::new();
+        let mut row_partition: Vec<usize> = Vec::with_capacity(matching_rows.len());
+
+        for row in &matching_rows {
+            let key = partition_key(&call.partition_by, &table.column_names, row)?;
+            let arg_value = match &call.arg {
+                AggregateArg::Star => Value::Integer(1),
+                AggregateArg::Expr(expr) => {
+                    evaluate_with_functions(expr, &table.column_names, row, functions)?
+                }
+            };
+            let idx = match partitions.iter().position(|(k, _)| *k == key) {
+                Some(idx) => idx,
+                None => {
+                    partitions.push((key, agg.init.clone()));
+                    partitions.len() - 1
+                }
+            };
+            partitions[idx].1 = (agg.step)(&partitions[idx].1, &[arg_value])?;
+            row_partition.push(idx);
+        }
+
+        let values = row_partition
+            .iter()
+            .map(|&idx| (agg.finalize)(partitions[idx].1.clone()))
+            .collect::<Result<Vec<Value>>>()?;
+        result_columns.push(values);
+    }
+
+    let rows = (0..matching_rows.len())
+        .map(|i| result_columns.iter().map(|col| col[i].clone()).collect())
+        .collect();
+    let column_names = calls.iter().map(describe_window_call).collect();
+
+    Ok((column_names, rows))
+}
+
+/// Looks up `partition_by`'s column values in `row`, for grouping rows
+/// into partitions in [`execute_select_with_window`].
+fn partition_key(
+    partition_by: &[String],
+    column_names: &[String],
+    row: &[Value],
+) -> Result<Vec<Value>> {
+    partition_by
+        .iter()
+        .map(|col| {
+            column_names
+                .iter()
+                .position(|c| c == col)
+                .map(|idx| row[idx].clone())
+                .ok_or_else(|| Error::UnknownColumn(col.clone()))
+        })
+        .collect()
+}
+
+/// A result-column name for a window call, e.g. `SUM(a) OVER (PARTITION
+/// BY b)` or `COUNT(*) OVER ()`. `pub(crate)` so [`crate::Statement`]
+/// can reuse it for `Statement::column_names` on a window `SELECT`.
+pub(crate) fn describe_window_call(call: &crate::dml_select::WindowCall) -> String {
+    let arg = match &call.arg {
+        AggregateArg::Star => "*".to_string(),
+        AggregateArg::Expr(expr) => match expr.as_ref() {
+            crate::dml_select::Expr::Column(name) => name.clone(),
+            _ => "expr".to_string(),
+        },
+    };
+    if call.partition_by.is_empty() {
+        format!("{}({arg}) OVER ()", call.name)
+    } else {
+        format!(
+            "{}({arg}) OVER (PARTITION BY {})",
+            call.name,
+            call.partition_by.join(", ")
+        )
+    }
 }
 
 #[cfg(test)]

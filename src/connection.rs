@@ -5,7 +5,7 @@ use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
     execute_create_table, execute_insert_returning_rowids, execute_select_with_aggregates,
-    execute_select_with_functions,
+    execute_select_with_functions, execute_select_with_window,
 };
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
@@ -532,6 +532,36 @@ impl Connection {
     pub fn remove_aggregate_function(&mut self, name: &str) -> Result<()> {
         self.aggregates.remove(name);
         Ok(())
+    }
+
+    /// Registers `aggregate` as usable in a window function's `OVER (...)`
+    /// clause (e.g. `SELECT SUM(a) OVER (PARTITION BY b) FROM t`) — see
+    /// [`crate::dml_select::WindowCall`] for this crate's "whole
+    /// partition, no `ORDER BY`/frame clause" scope.
+    ///
+    /// **Design deviation, stated plainly:** real
+    /// `rusqlite::Connection::create_window_function` takes a
+    /// `functions::WindowAggregate` trait (`step`/`inverse`/`value`/
+    /// `finalize`), designed so SQLite can slide a frame's boundaries
+    /// incrementally without recomputing from scratch. This crate's
+    /// window functions only ever compute over a whole partition — no
+    /// frame to slide — so there's no `inverse` step to provide, and any
+    /// [`Aggregate`] already has everything a whole-partition window
+    /// function needs. `create_window_function` is a thin alias over the
+    /// same registry [`Connection::create_aggregate_function`] uses, not
+    /// a separate one — registering under either name makes `name`
+    /// usable both ways.
+    pub fn create_window_function(&mut self, name: &str, aggregate: Aggregate) -> Result<()> {
+        self.create_aggregate_function(name, aggregate)
+    }
+
+    /// Unregisters a window function (built-in or custom) previously
+    /// registered via [`Connection::create_window_function`] or
+    /// [`Connection::create_aggregate_function`] — the mirror of
+    /// [`Connection::remove_aggregate_function`], since both draw from
+    /// the same registry. A no-op if `name` wasn't registered.
+    pub fn remove_window_function(&mut self, name: &str) -> Result<()> {
+        self.remove_aggregate_function(name)
     }
 
     /// Registers a custom text-comparison function under `name`.
@@ -1090,9 +1120,11 @@ impl Connection {
 
     /// Runs a parsed `SELECT`, dispatching to
     /// [`execute_select_with_aggregates`] for an aggregate select list
-    /// ([`SelectColumns::Aggregates`]) and [`execute_select_with_functions`]
-    /// for everything else. `pub(crate)` so [`crate::Statement`] (a
-    /// different module) can reuse it for already-parsed `SELECT`s.
+    /// ([`SelectColumns::Aggregates`]), [`execute_select_with_window`] for
+    /// a window select list ([`SelectColumns::Window`]), and
+    /// [`execute_select_with_functions`] for everything else.
+    /// `pub(crate)` so [`crate::Statement`] (a different module) can
+    /// reuse it for already-parsed `SELECT`s.
     pub(crate) fn run_select(
         &self,
         select: &crate::dml_select::Select,
@@ -1100,6 +1132,9 @@ impl Connection {
         match &select.columns {
             SelectColumns::Aggregates(_) => {
                 execute_select_with_aggregates(&self.db, select, &self.functions, &self.aggregates)
+            }
+            SelectColumns::Window(_) => {
+                execute_select_with_window(&self.db, select, &self.functions, &self.aggregates)
             }
             _ => execute_select_with_functions(&self.db, select, &self.functions),
         }
@@ -1514,6 +1549,106 @@ mod tests {
         conn.remove_aggregate_function("COUNT").unwrap();
 
         assert!(conn.query_row("SELECT COUNT(*) FROM t").is_err());
+    }
+
+    #[test]
+    fn window_function_broadcasts_whole_partition_value_to_every_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (grp TEXT, a INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('x', 1), ('x', 2), ('y', 10), ('y', 20), ('y', 30)")
+            .unwrap();
+
+        let sums: Vec<i64> = conn
+            .query_map("SELECT SUM(a) OVER (PARTITION BY grp) FROM t", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(sums, vec![3, 3, 60, 60, 60]);
+    }
+
+    #[test]
+    fn window_function_with_no_partition_by_treats_whole_table_as_one_partition() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let counts: Vec<i64> = conn
+            .query_map("SELECT COUNT(*) OVER () FROM t", |row| row.get(0))
+            .unwrap();
+        assert_eq!(counts, vec![3, 3, 3]);
+    }
+
+    #[test]
+    fn window_function_respects_where_filter() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (grp TEXT, a INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('x', 1), ('x', 2), ('x', 3)")
+            .unwrap();
+
+        let sums: Vec<i64> = conn
+            .query_map(
+                "SELECT SUM(a) OVER (PARTITION BY grp) FROM t WHERE a = 2",
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sums, vec![2]);
+    }
+
+    #[test]
+    fn create_window_function_registers_a_custom_window_aggregate() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (grp TEXT, a INTEGER)")
+            .unwrap();
+        conn.execute("INSERT INTO t VALUES ('x', 2), ('x', 3)")
+            .unwrap();
+
+        conn.create_window_function(
+            "PRODUCT",
+            Aggregate::simple(Value::Integer(1), |acc, args| match (acc, args.first()) {
+                (Value::Integer(n), Some(Value::Integer(v))) => Ok(Value::Integer(n * v)),
+                (acc, _) => Ok(acc.clone()),
+            }),
+        )
+        .unwrap();
+
+        let products: Vec<i64> = conn
+            .query_map("SELECT PRODUCT(a) OVER (PARTITION BY grp) FROM t", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(products, vec![6, 6]);
+    }
+
+    #[test]
+    fn create_window_function_is_also_usable_as_a_plain_aggregate() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (2), (3)").unwrap();
+
+        conn.create_window_function(
+            "PRODUCT",
+            Aggregate::simple(Value::Integer(1), |acc, args| match (acc, args.first()) {
+                (Value::Integer(n), Some(Value::Integer(v))) => Ok(Value::Integer(n * v)),
+                (acc, _) => Ok(acc.clone()),
+            }),
+        )
+        .unwrap();
+
+        let row = conn.query_row("SELECT PRODUCT(a) FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(6)]);
+    }
+
+    #[test]
+    fn removed_window_function_is_no_longer_found() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        conn.remove_window_function("COUNT").unwrap();
+
+        assert!(conn.query_row("SELECT COUNT(*) OVER () FROM t").is_err());
     }
 
     #[test]
