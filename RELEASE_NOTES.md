@@ -23,6 +23,34 @@ entry per PR.
 
 ---
 
+## PR #85 — Add params!/named_params!/prepare_and_bind! macros (closes #42)
+**2026-08-14** · [#85](https://github.com/baileyrd/rusty_-rusqlite/pull/85)
+
+- **Added:** `params!`, `named_params!`, `prepare_and_bind!`,
+  `prepare_cached_and_bind!` — all four macros #42 named, built on
+  `Params`/`BindIndex` (#44) and `Statement::raw_bind_parameter` (#25).
+- **`named_params!` syntax deviation, stated plainly:** uses `name =>
+  value` pairs instead of real `rusqlite`'s `name: value` — `macro_rules!`
+  only allows `=>`/`,`/`;` to follow an `expr` fragment in a matcher, and
+  `:` isn't one of them.
+- **`prepare_cached_and_bind!` deviation:** identical to
+  `prepare_and_bind!` — this crate has no prepared-statement cache to
+  consult yet (same documented no-op status as
+  `Connection::set_prepared_statement_cache_capacity`).
+- **New:** `NamedParams<'a>(&'a [(&'a str, Value)])`, a `Params` impl
+  that binds by name (via `BindIndex`) rather than position — the type
+  `named_params!` produces.
+- **A genuine borrow-checker subtlety, worth recording:** `prepare_and_bind!`
+  expands to a plain block, not a closure — a closure would trap the
+  `Statement<'_>` it returns (which borrows from `conn`) inside its own
+  scope, since a basic closure can't express returning a borrow of its
+  own captured environment past the call. The block form lets `?`
+  propagate through whichever function the macro is invoked in instead.
+- 6 new unit tests (241 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #84 — Add BindIndex/Params/Name traits (closes #44)
 **2026-08-14** · [#84](https://github.com/baileyrd/rusty_-rusqlite/pull/84)
 

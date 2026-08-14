@@ -30,6 +30,7 @@ mod error;
 mod eval;
 mod fromsql;
 mod hooks;
+mod macros;
 mod params;
 mod row;
 mod rows;
@@ -60,7 +61,7 @@ pub use eval::{
 };
 pub use fromsql::{FromSql, FromSqlError, FromSqlResult};
 pub use hooks::{Action, AuthContext, Authorization, CheckpointMode, TransactionOperation, Wal};
-pub use params::{BindIndex, Name, Params};
+pub use params::{BindIndex, Name, NamedParams, Params};
 pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};

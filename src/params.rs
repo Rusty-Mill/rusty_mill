@@ -11,6 +11,7 @@
 use crate::error::{Error, Result};
 use crate::statement::Statement;
 use crate::tosql::ToSql;
+use crate::value::Value;
 
 /// Resolves to a 1-based bound-parameter index — either directly
 /// (`usize`) or by name (`&str`, via [`Statement::parameter_index`]).
@@ -115,6 +116,23 @@ impl_params_tuple!(A: 0);
 impl_params_tuple!(A: 0, B: 1);
 impl_params_tuple!(A: 0, B: 1, C: 2);
 impl_params_tuple!(A: 0, B: 1, C: 2, D: 3);
+
+/// A named-parameter binding set, as produced by [`crate::named_params!`].
+/// Binds each `(name, value)` pair by resolving `name` through
+/// [`BindIndex`]/[`Statement::parameter_index`] — unlike [`Params`]'s
+/// positional impls, pair order doesn't matter (each name is resolved
+/// to its own index independently).
+pub struct NamedParams<'a>(pub &'a [(&'a str, Value)]);
+
+impl Params for NamedParams<'_> {
+    fn bind_all(self, stmt: &mut Statement<'_>) -> Result<()> {
+        for (name, value) in self.0 {
+            let idx = name.idx(stmt)?;
+            stmt.raw_bind_parameter(idx, value.clone())?;
+        }
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
