@@ -11,6 +11,7 @@ mod error;
 mod eval;
 mod storage;
 mod token;
+mod tosql;
 mod value;
 
 pub use connection::Connection;
@@ -22,4 +23,5 @@ pub use error::{Error, Result};
 pub use eval::{evaluate, evaluate_bool};
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
+pub use tosql::ToSql;
 pub use value::{Type, Value, ValueRef};
