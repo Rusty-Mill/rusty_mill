@@ -13,6 +13,7 @@ use crate::hooks::{Action, AuthContext, Authorization};
 use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
+use crate::trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
 use crate::value::Value;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -26,6 +27,7 @@ type CollationFn = dyn Fn(&str, &str) -> Ordering;
 
 type TraceFn = dyn FnMut(&str);
 type ProfileFn = dyn FnMut(&str, Duration);
+type TraceV2Fn = dyn FnMut(TraceEvent<'_>);
 type AuthorizerFn = dyn FnMut(&AuthContext) -> Authorization;
 type ProgressHandlerFn = dyn FnMut() -> bool;
 type UpdateHookFn = dyn FnMut(Action, &str, &str, i64);
@@ -87,6 +89,9 @@ pub struct Connection {
     // `Transaction`), so they don't need it.
     trace_hook: RefCell<Option<Box<TraceFn>>>,
     profile_hook: RefCell<Option<Box<ProfileFn>>>,
+    /// Registered via [`Connection::trace_v2`]; fires only for event
+    /// kinds `mask` includes.
+    trace_v2_hook: RefCell<Option<(TraceEventCodes, Box<TraceV2Fn>)>>,
     authorizer: RefCell<Option<Box<AuthorizerFn>>>,
     progress_handler: RefCell<Option<Box<ProgressHandlerFn>>>,
     /// The file this connection persists to, or `None` for a purely
@@ -127,6 +132,7 @@ impl Connection {
             update_hook: None,
             trace_hook: RefCell::new(None),
             profile_hook: RefCell::new(None),
+            trace_v2_hook: RefCell::new(None),
             authorizer: RefCell::new(None),
             progress_handler: RefCell::new(None),
             path: None,
@@ -677,6 +683,21 @@ impl Connection {
         *self.profile_hook.borrow_mut() = hook.map(|f| Box::new(f) as Box<ProfileFn>);
     }
 
+    /// Registers a single callback for the [`crate::TraceEventCodes`] event
+    /// kinds `mask` selects, replacing real SQLite's separate `trace`/
+    /// `profile` callbacks with one keyed by [`crate::TraceEvent`] — see
+    /// `trace.rs`'s module doc comment for how this relates to
+    /// [`Connection::trace`]/[`Connection::profile`] (both still work;
+    /// this is additive, not a replacement for them) and for the `Row`
+    /// event kind real SQLite has that this crate can't fire. Pass
+    /// `None` to unregister.
+    pub fn trace_v2<F>(&self, mask: TraceEventCodes, hook: Option<F>)
+    where
+        F: FnMut(TraceEvent<'_>) + 'static,
+    {
+        *self.trace_v2_hook.borrow_mut() = hook.map(|f| (mask, Box::new(f) as Box<TraceV2Fn>));
+    }
+
     /// Registers a callback consulted before each `execute`/`query_*`
     /// call runs; returning `true` aborts it with
     /// [`Error::OperationAborted`] before it touches storage. Pass `None`
@@ -702,11 +723,33 @@ impl Connection {
         if let Some(hook) = self.trace_hook.borrow_mut().as_mut() {
             hook(sql);
         }
+        if let Some((mask, hook)) = self.trace_v2_hook.borrow_mut().as_mut() {
+            if mask.contains(TraceEventCodes::STMT) {
+                // No parameter substitution to do -- `Connection::execute`/
+                // `query_*` don't support parameters at all (see
+                // `crate::Statement` for the type that does), so the
+                // "expanded" SQL is always identical to the original here.
+                hook(TraceEvent::Stmt(StmtRef::new(sql), sql));
+            }
+        }
     }
 
     fn fire_profile(&self, sql: &str, elapsed: Duration) {
         if let Some(hook) = self.profile_hook.borrow_mut().as_mut() {
             hook(sql, elapsed);
+        }
+        if let Some((mask, hook)) = self.trace_v2_hook.borrow_mut().as_mut() {
+            if mask.contains(TraceEventCodes::PROFILE) {
+                hook(TraceEvent::Profile(StmtRef::new(sql), elapsed));
+            }
+        }
+    }
+
+    fn fire_trace_v2_close(&self) {
+        if let Some((mask, hook)) = self.trace_v2_hook.borrow_mut().as_mut() {
+            if mask.contains(TraceEventCodes::CLOSE) {
+                hook(TraceEvent::Close(ConnRef::new(self)));
+            }
         }
     }
 
@@ -923,6 +966,7 @@ impl Connection {
     /// Closes the connection.
     pub fn close(mut self) -> Result<()> {
         self.check_open()?;
+        self.fire_trace_v2_close();
         self.open = false;
         Ok(())
     }
@@ -1794,6 +1838,97 @@ mod tests {
         let calls = profiled.borrow();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "INSERT INTO t VALUES (1)");
+    }
+
+    #[test]
+    fn trace_v2_fires_stmt_and_profile_events_when_both_are_in_the_mask() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.trace_v2(
+            crate::TraceEventCodes::STMT | crate::TraceEventCodes::PROFILE,
+            Some(move |event: crate::TraceEvent<'_>| {
+                let label = match event {
+                    crate::TraceEvent::Stmt(stmt, _) => format!("stmt:{}", stmt.sql()),
+                    crate::TraceEvent::Profile(stmt, _) => format!("profile:{}", stmt.sql()),
+                    crate::TraceEvent::Close(_) => "close".to_string(),
+                };
+                events_clone.borrow_mut().push(label);
+            }),
+        );
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(
+            *events.borrow(),
+            vec![
+                "stmt:INSERT INTO t VALUES (1)".to_string(),
+                "profile:INSERT INTO t VALUES (1)".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn trace_v2_only_fires_event_kinds_in_the_mask() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.trace_v2(
+            crate::TraceEventCodes::PROFILE,
+            Some(move |event: crate::TraceEvent<'_>| {
+                events_clone
+                    .borrow_mut()
+                    .push(matches!(event, crate::TraceEvent::Profile(_, _)));
+            }),
+        );
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert_eq!(*events.borrow(), vec![true]);
+    }
+
+    #[test]
+    fn trace_v2_fires_close_event_on_connection_close() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        let closed = Rc::new(RefCell::new(false));
+        let closed_clone = Rc::clone(&closed);
+        conn.trace_v2(
+            crate::TraceEventCodes::CLOSE,
+            Some(move |event: crate::TraceEvent<'_>| {
+                if let crate::TraceEvent::Close(conn_ref) = event {
+                    assert!(conn_ref.is_open());
+                    *closed_clone.borrow_mut() = true;
+                }
+            }),
+        );
+
+        conn.close().unwrap();
+        assert!(*closed.borrow());
+    }
+
+    #[test]
+    fn trace_v2_none_unregisters_the_hook() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let events_clone = Rc::clone(&events);
+        conn.trace_v2(
+            crate::TraceEventCodes::STMT,
+            Some(move |_event: crate::TraceEvent<'_>| {
+                events_clone.borrow_mut().push(());
+            }),
+        );
+        conn.trace_v2(
+            crate::TraceEventCodes::STMT,
+            None::<fn(crate::TraceEvent<'_>)>,
+        );
+
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+        assert!(events.borrow().is_empty());
     }
 
     #[test]

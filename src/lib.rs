@@ -39,6 +39,7 @@ mod statement;
 mod storage;
 mod token;
 mod tosql;
+mod trace;
 mod transaction;
 mod value;
 
@@ -70,6 +71,7 @@ pub use statement::{Statement, StatementStatus};
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
+pub use trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};
 pub use transaction::{
     DropBehavior, Savepoint, Transaction, TransactionBehavior, TransactionState,
 };
