@@ -57,6 +57,20 @@ pub enum Error {
     /// A registered `Connection::commit_hook` callback returned `true`,
     /// vetoing the commit — the statement's changes were rolled back.
     CommitHookVetoed,
+    /// A filesystem operation failed while opening or persisting a
+    /// file-backed [`crate::Connection`]. Carries the underlying
+    /// `std::io::Error`'s message rather than the error itself, since
+    /// `std::io::Error` doesn't implement `PartialEq` and this crate's
+    /// `Error` derives it.
+    Io(String),
+    /// [`crate::Connection::open_with_flags`] was given a path that
+    /// doesn't exist, and [`crate::OpenFlags::CREATE`] wasn't set — so a
+    /// nonexistent path isn't silently created.
+    DatabaseDoesNotExist(String),
+    /// A mutating call (`execute`, `execute_batch`, or opening a
+    /// [`crate::Transaction`]/[`crate::Savepoint`]) was made on a
+    /// connection opened with [`crate::OpenFlags::READ_ONLY`].
+    ReadOnlyConnection,
 }
 
 impl fmt::Display for Error {
@@ -86,6 +100,12 @@ impl fmt::Display for Error {
             Error::AuthorizationDenied => write!(f, "not authorized"),
             Error::OperationAborted => write!(f, "operation aborted by progress handler"),
             Error::CommitHookVetoed => write!(f, "commit vetoed by commit hook"),
+            Error::Io(msg) => write!(f, "I/O error: {msg}"),
+            Error::DatabaseDoesNotExist(path) => write!(
+                f,
+                "unable to open database {path:?}: does not exist and OpenFlags::CREATE wasn't set"
+            ),
+            Error::ReadOnlyConnection => write!(f, "attempt to write a readonly connection"),
         }
     }
 }

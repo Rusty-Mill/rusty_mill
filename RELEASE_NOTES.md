@@ -23,6 +23,42 @@ entry per PR.
 
 ---
 
+## PR #76 — Add file-backed Connection::open + OpenFlags (closes #11)
+**2026-08-14** · [#76](https://github.com/baileyrd/rusty_-rusqlite/pull/76)
+
+- **Added:** `Connection::open`/`open_with_flags`/`open_with_flags_and_vfs`
+  (file-backed) and `open_in_memory_with_flags`/
+  `open_in_memory_with_flags_and_vfs`, plus the `OpenFlags` type (a
+  hand-rolled bitmask — no new dependency).
+- **Added:** `Connection::flush`, and `Connection::path`/`is_readonly`
+  now report real state instead of always `None`/`false`.
+- **Design deviation, stated plainly:** the file `open` reads/writes is
+  this crate's own binary format (`serialize.rs`), not a real SQLite
+  database file — matching `ARCHITECTURE.md`'s non-goal of matching
+  SQLite's on-disk format/C ABI. Persistence is write-through: the full
+  database is re-serialized and the file rewritten after every
+  successful `execute` call, not incrementally at the page level like
+  real SQLite — simple and correct at this engine's scale, same tradeoff
+  as `Database::snapshot`.
+- Only `OpenFlags::READ_ONLY` (enforced: `execute` on a read-only
+  connection errors) and `CREATE` (enforced: opening a nonexistent path
+  without it errors instead of silently starting empty) change behavior;
+  `URI`/`NO_MUTEX`/`FULL_MUTEX`/`SHARED_CACHE`/`PRIVATE_CACHE` are
+  accepted for shape parity but inert — no URI parsing, shared-cache
+  mode, or per-connection-vs-shared mutex distinction to vary.
+- **Scope note:** `from_handle`/`from_handle_owned` (wrapping a raw C
+  `sqlite3*`) aren't implemented — there's no C handle to wrap in a
+  pure-Rust engine with no `libsqlite3-sys` dependency, per
+  `ARCHITECTURE.md`'s own non-goals. `*_and_vfs` variants accept and
+  ignore the VFS name — no pluggable I/O backend exists for one to
+  select between.
+- New errors: `Error::Io`, `Error::DatabaseDoesNotExist`,
+  `Error::ReadOnlyConnection`.
+- 10 new unit tests (168 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #75 — Add commit/rollback/update/authorizer/trace/profile/progress hooks (closes #20)
 **2026-08-14** · [#75](https://github.com/baileyrd/rusty_-rusqlite/pull/75)
 

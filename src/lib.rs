@@ -25,7 +25,7 @@ mod value;
 
 pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
-pub use config::{DbConfig, Limit};
+pub use config::{DbConfig, Limit, OpenFlags};
 pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};

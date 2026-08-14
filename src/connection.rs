@@ -1,5 +1,5 @@
 use crate::aggregate::{self, Aggregate};
-use crate::config::{DbConfig, Limit};
+use crate::config::{DbConfig, Limit, OpenFlags};
 use crate::ddl::{parse_create_table, ColumnDef};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
@@ -17,6 +17,7 @@ use crate::value::Value;
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// A custom text-comparison function registered via
@@ -88,11 +89,23 @@ pub struct Connection {
     profile_hook: RefCell<Option<Box<ProfileFn>>>,
     authorizer: RefCell<Option<Box<AuthorizerFn>>>,
     progress_handler: RefCell<Option<Box<ProgressHandlerFn>>>,
+    /// The file this connection persists to, or `None` for a purely
+    /// in-memory connection. Set by [`Connection::open`]/
+    /// [`Connection::open_with_flags`].
+    path: Option<PathBuf>,
+    read_only: bool,
 }
 
 impl Connection {
     /// Opens a new in-memory connection.
     pub fn open_in_memory() -> Result<Connection> {
+        Self::open_in_memory_with_flags(OpenFlags::default())
+    }
+
+    /// Like [`Connection::open_in_memory`], with `flags` controlling how
+    /// the connection is opened — only [`OpenFlags::READ_ONLY`] changes
+    /// behavior (see [`OpenFlags`]'s doc comment for which bits are inert).
+    pub fn open_in_memory_with_flags(flags: OpenFlags) -> Result<Connection> {
         Ok(Connection {
             db: Database::new(),
             open: true,
@@ -113,14 +126,84 @@ impl Connection {
             profile_hook: RefCell::new(None),
             authorizer: RefCell::new(None),
             progress_handler: RefCell::new(None),
+            path: None,
+            read_only: flags.contains(OpenFlags::READ_ONLY),
         })
     }
 
+    /// Like [`Connection::open_in_memory_with_flags`], but `vfs` (a
+    /// virtual-filesystem name in real SQLite) is accepted and ignored —
+    /// this engine has no pluggable I/O backend for a VFS name to select
+    /// between.
+    pub fn open_in_memory_with_flags_and_vfs(flags: OpenFlags, _vfs: &str) -> Result<Connection> {
+        Self::open_in_memory_with_flags(flags)
+    }
+
+    /// Opens (or creates) a file-backed connection at `path`.
+    ///
+    /// **Design deviation, stated plainly:** the file this writes is this
+    /// crate's own binary format (see `serialize.rs`), not a real SQLite
+    /// database file — `ARCHITECTURE.md`'s non-goals rule out matching
+    /// SQLite's on-disk format. Persistence is write-through: the full
+    /// database is re-serialized and the file is rewritten after every
+    /// successful [`Connection::execute`] call, not incrementally at the
+    /// page level like real SQLite — simple and correct for this engine's
+    /// current scale, not the most efficient approach for a large
+    /// database, same tradeoff already made for `Database::snapshot`.
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<Connection> {
+        Self::open_with_flags(path, OpenFlags::default())
+    }
+
+    /// Like [`Connection::open`], with `flags` controlling how the
+    /// connection is opened. Without [`OpenFlags::CREATE`], opening a
+    /// path that doesn't exist yet fails with
+    /// [`Error::DatabaseDoesNotExist`] instead of silently starting an
+    /// empty database.
+    pub fn open_with_flags<P: AsRef<Path>>(path: P, flags: OpenFlags) -> Result<Connection> {
+        let path = path.as_ref().to_path_buf();
+        let db = if path.exists() {
+            let bytes = std::fs::read(&path).map_err(|e| Error::Io(e.to_string()))?;
+            crate::serialize::deserialize(&bytes)?
+        } else if flags.contains(OpenFlags::CREATE) {
+            Database::new()
+        } else {
+            return Err(Error::DatabaseDoesNotExist(path.display().to_string()));
+        };
+
+        let mut conn = Self::open_in_memory_with_flags(flags)?;
+        conn.db = db;
+        conn.path = Some(path);
+        Ok(conn)
+    }
+
+    /// Like [`Connection::open_with_flags`], but `vfs` is accepted and
+    /// ignored — see [`Connection::open_in_memory_with_flags_and_vfs`].
+    pub fn open_with_flags_and_vfs<P: AsRef<Path>>(
+        path: P,
+        flags: OpenFlags,
+        _vfs: &str,
+    ) -> Result<Connection> {
+        Self::open_with_flags(path, flags)
+    }
+
+    /// Writes this connection's current state to its backing file, if it
+    /// has one (a no-op for an in-memory connection). Called
+    /// automatically after every successful [`Connection::execute`] — see
+    /// [`Connection::open`]'s doc comment — so callers don't normally need
+    /// this directly; exposed for explicit use (e.g. right before
+    /// process exit).
+    pub fn flush(&self) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let bytes = crate::serialize::serialize(&self.db);
+        std::fs::write(path, bytes).map_err(|e| Error::Io(e.to_string()))
+    }
+
     /// Returns the path to the database file, or `None` for an in-memory
-    /// connection. Always `None` today — this crate has no on-disk
-    /// backend yet (see `ARCHITECTURE.md`'s non-goals).
+    /// connection.
     pub fn path(&self) -> Option<&str> {
-        None
+        self.path.as_ref().and_then(|p| p.to_str())
     }
 
     /// Returns whether the connection is currently in autocommit mode
@@ -139,12 +222,12 @@ impl Connection {
         false
     }
 
-    /// Returns whether `db_name` (only `"main"` exists) is read-only.
-    /// Always `Ok(false)` for `"main"` — there's no read-only-open mode
-    /// yet.
+    /// Returns whether `db_name` (only `"main"` exists) is read-only —
+    /// i.e. whether this connection was opened with
+    /// [`OpenFlags::READ_ONLY`].
     pub fn is_readonly(&self, db_name: &str) -> Result<bool> {
         self.require_main_database(db_name)?;
-        Ok(false)
+        Ok(self.read_only)
     }
 
     /// Returns whether the connection's current operation has been
@@ -755,6 +838,9 @@ impl Connection {
     /// hook setter's doc comment for exactly what it observes here.
     pub fn execute(&mut self, sql: &str) -> Result<usize> {
         self.check_open()?;
+        if self.read_only {
+            return Err(Error::ReadOnlyConnection);
+        }
         if self.should_abort_via_progress_handler() {
             return Err(Error::OperationAborted);
         }
@@ -800,6 +886,7 @@ impl Connection {
         }
         self.last_changes = affected;
         self.total_changes += affected;
+        self.flush()?;
         self.fire_profile(sql, start.elapsed());
         Ok(affected)
     }
@@ -1478,5 +1565,119 @@ mod tests {
         conn.update_hook::<fn(Action, &str, &str, i64)>(None);
         conn.execute("INSERT INTO t VALUES (2)").unwrap();
         assert_eq!(*count.borrow(), 1);
+    }
+
+    fn temp_db_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("rusty_rusqlite_test_{name}.db"))
+    }
+
+    #[test]
+    fn open_creates_a_new_file_and_persists_across_reopen() {
+        let path = temp_db_path("creates_and_persists");
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+            conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+        }
+        assert!(path.exists());
+
+        let mut reopened = Connection::open(&path).unwrap();
+        let values: Vec<i64> = reopened
+            .query_map("SELECT * FROM t", |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, vec![1, 2]);
+
+        reopened.execute("INSERT INTO t VALUES (3)").unwrap();
+        let values: Vec<i64> = Connection::open(&path)
+            .unwrap()
+            .query_map("SELECT * FROM t", |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, vec![1, 2, 3]);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_reports_its_path() {
+        let path = temp_db_path("reports_path");
+        let _ = std::fs::remove_file(&path);
+
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(conn.path(), Some(path.to_str().unwrap()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn in_memory_connection_has_no_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.path(), None);
+    }
+
+    #[test]
+    fn open_without_create_flag_on_missing_path_is_an_error() {
+        let path = temp_db_path("no_create_flag");
+        let _ = std::fs::remove_file(&path);
+
+        let flags = OpenFlags::READ_WRITE;
+        assert!(matches!(
+            Connection::open_with_flags(&path, flags),
+            Err(Error::DatabaseDoesNotExist(_))
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn read_only_connection_rejects_execute() {
+        let path = temp_db_path("read_only_rejects");
+        let _ = std::fs::remove_file(&path);
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        }
+
+        let mut conn =
+            Connection::open_with_flags(&path, OpenFlags::READ_ONLY | OpenFlags::READ_WRITE)
+                .unwrap();
+        assert!(conn.is_readonly("main").unwrap());
+        assert_eq!(
+            conn.execute("INSERT INTO t VALUES (1)"),
+            Err(Error::ReadOnlyConnection)
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_only_in_memory_connection_rejects_execute() {
+        let mut conn = Connection::open_in_memory_with_flags(OpenFlags::READ_ONLY).unwrap();
+        assert_eq!(
+            conn.execute("CREATE TABLE t (a INTEGER)"),
+            Err(Error::ReadOnlyConnection)
+        );
+    }
+
+    #[test]
+    fn flush_on_in_memory_connection_is_a_noop() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(conn.flush().is_ok());
+    }
+
+    #[test]
+    fn vfs_variants_ignore_the_vfs_name_and_still_work() {
+        let conn =
+            Connection::open_in_memory_with_flags_and_vfs(OpenFlags::default(), "unix").unwrap();
+        assert!(!conn.is_readonly("main").unwrap());
+
+        let path = temp_db_path("vfs_ignored");
+        let _ = std::fs::remove_file(&path);
+        let mut conn =
+            Connection::open_with_flags_and_vfs(&path, OpenFlags::default(), "unix").unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(conn.table_exists("t"));
+
+        let _ = std::fs::remove_file(&path);
     }
 }
