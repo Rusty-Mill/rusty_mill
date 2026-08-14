@@ -840,6 +840,15 @@ impl Connection {
         self.db.restore(snapshot);
     }
 
+    /// Prepares `sql` (`CREATE TABLE`/`INSERT`/`SELECT`), tokenizing and
+    /// parsing it once so the returned [`crate::Statement`] can be
+    /// executed/queried repeatedly without re-parsing. See
+    /// [`crate::Statement`]'s module doc comment for what's deliberately
+    /// out of scope in this first cut (parameter binding, hook firing).
+    pub fn prepare(&mut self, sql: &str) -> Result<crate::statement::Statement<'_>> {
+        crate::statement::Statement::prepare(self, sql)
+    }
+
     /// Begins a transaction, returning a guard that rolls back on drop
     /// unless [`crate::Transaction::commit`] is called first (or its drop
     /// behavior is changed via [`crate::Transaction::set_drop_behavior`]).
@@ -1045,8 +1054,9 @@ impl Connection {
     /// Runs a parsed `SELECT`, dispatching to
     /// [`execute_select_with_aggregates`] for an aggregate select list
     /// ([`SelectColumns::Aggregates`]) and [`execute_select_with_functions`]
-    /// for everything else.
-    fn run_select(
+    /// for everything else. `pub(crate)` so [`crate::Statement`] (a
+    /// different module) can reuse it for already-parsed `SELECT`s.
+    pub(crate) fn run_select(
         &self,
         select: &crate::dml_select::Select,
     ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
@@ -1059,7 +1069,9 @@ impl Connection {
     }
 }
 
-fn leading_keyword(tokens: &[Token]) -> Option<&str> {
+/// `pub(crate)` so [`crate::Statement`] (a different module) can reuse it
+/// to identify a statement's kind when preparing.
+pub(crate) fn leading_keyword(tokens: &[Token]) -> Option<&str> {
     match tokens.first() {
         Some(Token::Ident(s)) => Some(s.as_str()),
         _ => None,
