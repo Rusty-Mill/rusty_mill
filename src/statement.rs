@@ -60,6 +60,7 @@ enum StatementKind {
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     kind: StatementKind,
+    sql: String,
     /// The most recent [`Statement::query`]/[`Statement::raw_query`]
     /// result set, kept alive on `self` so the [`Rows`] handed back can
     /// borrow from it instead of the query needing to return owned data.
@@ -84,6 +85,7 @@ impl<'conn> Statement<'conn> {
         Ok(Statement {
             conn,
             kind,
+            sql: sql.to_string(),
             last_result: None,
         })
     }
@@ -246,6 +248,84 @@ impl<'conn> Statement<'conn> {
     pub fn is_query(&self) -> bool {
         matches!(self.kind, StatementKind::Select(_))
     }
+
+    /// The number of `?`/`:name`-style parameters in this statement.
+    /// Always `0` — [`Statement`] doesn't support parameter binding yet
+    /// (see this module's doc comment), so no statement can have any.
+    pub fn parameter_count(&self) -> usize {
+        0
+    }
+
+    /// The name of the parameter at `index` (1-based, matching SQLite's
+    /// own convention), if any. Always `None` — see
+    /// [`Statement::parameter_count`].
+    pub fn parameter_name(&self, _index: usize) -> Option<&str> {
+        None
+    }
+
+    /// The index of the parameter named `name`, if this statement has
+    /// one. Always `Ok(None)` — see [`Statement::parameter_count`].
+    pub fn parameter_index(&self, _name: &str) -> Result<Option<usize>> {
+        Ok(None)
+    }
+
+    /// This statement's original SQL text. Real
+    /// `rusqlite::Statement::expanded_sql` substitutes bound parameter
+    /// values into the text; since [`Statement`] never has any bound
+    /// parameters to substitute (see this module's doc comment), this is
+    /// always just the SQL [`Connection::prepare`] was given.
+    pub fn expanded_sql(&self) -> Option<String> {
+        Some(self.sql.clone())
+    }
+
+    /// Returns whether this statement can't modify the database — `true`
+    /// for a `SELECT`, `false` for `CREATE TABLE`/`INSERT`.
+    pub fn readonly(&self) -> bool {
+        self.is_query()
+    }
+
+    /// Returns whether this statement is `EXPLAIN`/`EXPLAIN QUERY PLAN`
+    /// (`0` = neither, `1` = `EXPLAIN`, `2` = `EXPLAIN QUERY PLAN`,
+    /// matching `sqlite3_stmt_isexplain`'s convention). Always `0` — this
+    /// crate's parser doesn't recognize the `EXPLAIN` keyword at all yet,
+    /// so no statement can be one.
+    pub fn is_explain(&self) -> i32 {
+        0
+    }
+
+    /// A per-statement execution counter, as SQLite's
+    /// `sqlite3_stmt_status` would report. Always `0` — this crate's
+    /// engine has no virtual machine (see `ARCHITECTURE.md`) to count
+    /// fetch/sort/index/etc. operations for; stored as an honest `0`
+    /// rather than omitted, matching the "not enforced, not silently
+    /// dropped" treatment already given to `Connection::busy_timeout`.
+    pub fn get_status(&self, _status: StatementStatus) -> i32 {
+        0
+    }
+
+    /// The mirror of [`Statement::get_status`]: resets its counters. A
+    /// no-op, for the same reason `get_status` always reports `0`.
+    pub fn reset_status(&self) {}
+
+    /// Finalizes this statement, consuming it. A no-op beyond dropping
+    /// the guard — there's no separate C-level statement handle to
+    /// release, so this exists purely for call-site parity with real
+    /// `rusqlite`.
+    pub fn finalize(self) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// A counter [`Statement::get_status`] would report on, mirroring
+/// SQLite's `SQLITE_STMTSTATUS_*` constants. Inert scaffolding today —
+/// see [`Statement::get_status`]'s doc comment for why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatementStatus {
+    FullscanStep,
+    Sort,
+    AutoIndex,
+    VmStep,
+    RunExplainQueryPlan,
 }
 
 #[cfg(test)]
@@ -463,5 +543,68 @@ mod tests {
         let stmt = conn.prepare("SELECT * FROM t").unwrap();
         assert_eq!(stmt.column_index("b").unwrap(), 1);
         assert!(stmt.column_index("missing").is_err());
+    }
+
+    #[test]
+    fn parameter_introspection_always_reports_none_or_zero() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t").unwrap();
+
+        assert_eq!(stmt.parameter_count(), 0);
+        assert_eq!(stmt.parameter_name(0), None);
+        assert_eq!(stmt.parameter_index("anything").unwrap(), None);
+    }
+
+    #[test]
+    fn expanded_sql_returns_the_original_text() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t WHERE a = 1").unwrap();
+        assert_eq!(
+            stmt.expanded_sql(),
+            Some("SELECT * FROM t WHERE a = 1".to_string())
+        );
+    }
+
+    #[test]
+    fn readonly_distinguishes_select_from_mutating_statements() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let select = conn.prepare("SELECT * FROM t").unwrap();
+        assert!(select.readonly());
+
+        let create = conn.prepare("CREATE TABLE t2 (a INTEGER)").unwrap();
+        assert!(!create.readonly());
+
+        let insert = conn.prepare("INSERT INTO t VALUES (1)").unwrap();
+        assert!(!insert.readonly());
+    }
+
+    #[test]
+    fn is_explain_is_always_false() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t").unwrap();
+        assert_eq!(stmt.is_explain(), 0);
+    }
+
+    #[test]
+    fn status_is_inert() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t").unwrap();
+        assert_eq!(stmt.get_status(StatementStatus::FullscanStep), 0);
+        stmt.reset_status();
+        assert_eq!(stmt.get_status(StatementStatus::Sort), 0);
+    }
+
+    #[test]
+    fn finalize_consumes_the_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t").unwrap();
+        assert!(stmt.finalize().is_ok());
     }
 }

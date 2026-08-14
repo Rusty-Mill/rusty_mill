@@ -23,6 +23,33 @@ entry per PR.
 
 ---
 
+## PR #81 — Add Statement parameter introspection + diagnostics (closes #29, #30)
+**2026-08-14** · [#81](https://github.com/baileyrd/rusty_-rusqlite/pull/81)
+
+- **Added:** `Statement::parameter_count`/`parameter_name`/
+  `parameter_index` (issue #29) — all honestly report `0`/`None` since
+  `Statement` doesn't support parameter binding yet (see `statement.rs`'s
+  module doc comment), so no statement can ever have any.
+- **Added:** `Statement::expanded_sql`/`readonly`/`is_explain`/
+  `get_status`/`reset_status`/`finalize` (issue #30). `expanded_sql` is
+  just the original SQL text — there's nothing bound to substitute in.
+  `readonly` distinguishes `SELECT` from `CREATE TABLE`/`INSERT`.
+  `is_explain` always reports `0` (not `EXPLAIN`) — this crate's parser
+  doesn't recognize the `EXPLAIN` keyword at all yet.
+  `get_status`/`reset_status` (plus the new `StatementStatus` type) are
+  stored-but-inert — this engine has no virtual machine to count
+  fetch/sort/index operations for, same "not enforced, not silently
+  dropped" treatment already given to `Connection::busy_timeout`.
+  `finalize` is a no-op consuming method — no separate C-level statement
+  handle exists to release.
+- This closes out the `Statement`/`Connection::prepare` group started in
+  PR #79 (issues #26–#30) — everything reachable without the
+  parameter-marker decision flagged in #25 is now implemented.
+- 6 new unit tests (205 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #80 — Add Statement::query/query_and_then/exists/raw_query/column_index (closes #27, #28)
 **2026-08-14** · [#80](https://github.com/baileyrd/rusty_-rusqlite/pull/80)
 
