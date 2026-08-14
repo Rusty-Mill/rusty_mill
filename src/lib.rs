@@ -46,7 +46,7 @@ pub use hooks::{Action, AuthContext, Authorization, CheckpointMode, TransactionO
 pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
-pub use statement::Statement;
+pub use statement::{Statement, StatementStatus};
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
