@@ -28,7 +28,9 @@
 //! - RFC 7591 -- OAuth 2.0 Dynamic Client Registration Protocol
 //!   (registration only; RFC 7592's client configuration management
 //!   protocol is not implemented)
-//! - RFC 7515 -- JSON Web Signature (JWS), HS256 and RS256
+//! - RFC 7515 -- JSON Web Signature (JWS), HS256, RS256, and ES256
+//! - RFC 6979 -- Deterministic ECDSA (used for all `ES256` signing, to
+//!   avoid ECDSA's classic nonce-reuse/bias key-recovery failure mode)
 //! - RFC 7523 -- JWT Profile for OAuth 2.0 Client Authentication and
 //!   Authorization Grants (bearer assertions)
 //! - RFC 7636 -- Proof Key for Code Exchange (PKCE)

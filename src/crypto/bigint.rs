@@ -1,7 +1,10 @@
-//! A minimal unsigned big-integer type, used only for RSA signature
-//! verification ([`crate::jwt::rsa`]). Deliberately small: it implements
-//! exactly the operations RSA verification needs (multiply, modulo,
-//! modular exponentiation with a small public exponent) and nothing more.
+//! A minimal unsigned big-integer type, backing RSA ([`crate::jwt::rsa`])
+//! and elliptic-curve ([`crate::crypto::ecc`], `ES256`) arithmetic.
+//! Deliberately small: it implements exactly the operations those need
+//! (add, subtract, multiply, modulo, modular exponentiation) and nothing
+//! more. Not constant-time -- see the security note on
+//! [`modpow`](BigUint::modpow) and the crate-level docs of
+//! [`crate::crypto::ecc`].
 
 use std::cmp::Ordering;
 
@@ -96,8 +99,28 @@ impl BigUint {
         Ordering::Equal
     }
 
+    /// `self + other`.
+    pub(crate) fn add(&self, other: &BigUint) -> BigUint {
+        let len = self.limbs.len().max(other.limbs.len());
+        let mut result = Vec::with_capacity(len + 1);
+        let mut carry = 0u64;
+        for i in 0..len {
+            let a = *self.limbs.get(i).unwrap_or(&0) as u64;
+            let b = *other.limbs.get(i).unwrap_or(&0) as u64;
+            let sum = a + b + carry;
+            result.push(sum as u32);
+            carry = sum >> 32;
+        }
+        if carry > 0 {
+            result.push(carry as u32);
+        }
+        let mut r = BigUint { limbs: result };
+        r.trim();
+        r
+    }
+
     /// `self - other`, assuming `self >= other`.
-    fn sub(&self, other: &BigUint) -> BigUint {
+    pub(crate) fn sub(&self, other: &BigUint) -> BigUint {
         let mut result = Vec::with_capacity(self.limbs.len());
         let mut borrow: i64 = 0;
         for i in 0..self.limbs.len() {
@@ -118,7 +141,7 @@ impl BigUint {
     }
 
     /// `self * other`, schoolbook multiplication.
-    fn mul(&self, other: &BigUint) -> BigUint {
+    pub(crate) fn mul(&self, other: &BigUint) -> BigUint {
         if self.is_zero() || other.is_zero() {
             return BigUint::zero();
         }
@@ -165,7 +188,7 @@ impl BigUint {
     }
 
     /// Returns `self`'s bit at position `i` (0 = least significant).
-    fn bit(&self, i: usize) -> bool {
+    pub(crate) fn bit(&self, i: usize) -> bool {
         let limb = i / 32;
         let offset = i % 32;
         self.limbs
@@ -247,6 +270,21 @@ mod tests {
             n.to_bytes_be_padded(4).unwrap(),
             vec![0x00, 0x00, 0x00, 0x01]
         );
+    }
+
+    #[test]
+    fn addition() {
+        let a = BigUint::from_bytes_be(&[0xff, 0xff, 0xff, 0xff]);
+        let b = BigUint::from_u32(1);
+        // 0xffffffff + 1 overflows a single limb.
+        assert_eq!(
+            a.add(&b),
+            BigUint::from_bytes_be(&[0x01, 0x00, 0x00, 0x00, 0x00])
+        );
+
+        let c = BigUint::from_u32(123456789);
+        let d = BigUint::from_u32(987654321);
+        assert_eq!(c.add(&d), BigUint::from_u32(1111111110));
     }
 
     #[test]
