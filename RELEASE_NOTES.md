@@ -23,6 +23,19 @@ entry per PR.
 
 ---
 
+## PR #54 — Add ValueRef (closes #35)
+**2026-08-14** · [#54](https://github.com/baileyrd/rusty_-rusqlite/pull/54)
+
+- **Added:** `ValueRef`/`Value::as_ref`/`ValueRef::to_owned` — a
+  borrowed, non-owning view over `Value` that avoids cloning `Text`/`Blob`
+  payloads. `Value`/`Type` already existed from `A1`; this issue's `Value`/
+  `Type` portion was effectively already satisfied, so this PR is scoped
+  to just the missing `ValueRef` piece.
+- 2 new unit tests (48 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #53 — Wire Connection to the execution engine (closes #10)
 **2026-08-14** · [#53](https://github.com/baileyrd/rusty_-rusqlite/pull/53)
 

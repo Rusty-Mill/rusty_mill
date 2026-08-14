@@ -39,6 +39,53 @@ impl Value {
             Value::Blob(_) => Type::Blob,
         }
     }
+
+    /// Borrows this value as a [`ValueRef`], avoiding a clone of any
+    /// `Text`/`Blob` payload.
+    pub fn as_ref(&self) -> ValueRef<'_> {
+        match self {
+            Value::Null => ValueRef::Null,
+            Value::Integer(i) => ValueRef::Integer(*i),
+            Value::Real(f) => ValueRef::Real(*f),
+            Value::Text(s) => ValueRef::Text(s),
+            Value::Blob(b) => ValueRef::Blob(b),
+        }
+    }
+}
+
+/// A borrowed, non-owning view over a [`Value`] — avoids cloning
+/// `Text`/`Blob` payloads when the caller only needs to read them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ValueRef<'a> {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(&'a str),
+    Blob(&'a [u8]),
+}
+
+impl<'a> ValueRef<'a> {
+    /// Returns this value's storage class.
+    pub fn value_type(&self) -> Type {
+        match self {
+            ValueRef::Null => Type::Null,
+            ValueRef::Integer(_) => Type::Integer,
+            ValueRef::Real(_) => Type::Real,
+            ValueRef::Text(_) => Type::Text,
+            ValueRef::Blob(_) => Type::Blob,
+        }
+    }
+
+    /// Clones the borrowed payload (if any) into an owned [`Value`].
+    pub fn to_owned(self) -> Value {
+        match self {
+            ValueRef::Null => Value::Null,
+            ValueRef::Integer(i) => Value::Integer(i),
+            ValueRef::Real(f) => Value::Real(f),
+            ValueRef::Text(s) => Value::Text(s.to_string()),
+            ValueRef::Blob(b) => Value::Blob(b.to_vec()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -59,5 +106,19 @@ mod tests {
         assert_eq!(Value::Integer(7), Value::Integer(7));
         assert_ne!(Value::Integer(7), Value::Integer(8));
         assert_ne!(Value::Integer(0), Value::Null);
+    }
+
+    #[test]
+    fn as_ref_borrows_without_cloning_payload() {
+        let v = Value::Text("hello".into());
+        assert_eq!(v.as_ref(), ValueRef::Text("hello"));
+        assert_eq!(v.as_ref().value_type(), Type::Text);
+    }
+
+    #[test]
+    fn value_ref_round_trips_to_owned() {
+        let v = Value::Blob(vec![1, 2, 3]);
+        let owned = v.as_ref().to_owned();
+        assert_eq!(owned, v);
     }
 }
