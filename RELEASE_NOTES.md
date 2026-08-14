@@ -23,6 +23,27 @@ entry per PR.
 
 ---
 
+## PR #82 — Add MAIN_DB/TEMP_DB constants (part of issue 43)
+**2026-08-14** · [#82](https://github.com/baileyrd/rusty_-rusqlite/pull/82)
+
+- **Added:** top-level `MAIN_DB`/`TEMP_DB` string constants, plus wired
+  the existing hardcoded `"main"` literals in `Connection::db_name`/
+  `require_main_database`/`fire_update_hook` and `Statement::execute`'s
+  read-only check to use `MAIN_DB` instead.
+- **Scope note:** issue #43 also covers `version`/`version_number`
+  (explicitly flagged `needs-human` in the issue body — this crate isn't
+  wrapping a real SQLite build to report a version from, so the
+  versioning-scheme question needs an explicit decision, not a silently
+  invented number) and `params_from_iter` (blocked on the same
+  parameter-binding decision as issue #25). Neither is implemented here;
+  `MAIN_DB`/`TEMP_DB` were the one genuinely unblocked piece — found by
+  re-reading the issue body closely rather than treating its
+  `needs-human` label as covering all of it.
+- 2 new unit tests (207 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #81 — Add Statement parameter introspection + diagnostics (closes #29, #30)
 **2026-08-14** · [#81](https://github.com/baileyrd/rusty_-rusqlite/pull/81)
 

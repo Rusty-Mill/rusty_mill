@@ -2,6 +2,20 @@
 //! API parity. See `ARCHITECTURE.md` for the engine/API boundary and
 //! `gap-analysis.md` for what's tracked toward that parity target.
 
+/// The name of the always-present default database (Part B gap row
+/// "Top-level: params_from_iter, version, version_number, MAIN_DB/TEMP_DB
+/// constants" — the constants slice; `version`/`version_number` need a
+/// human decision on versioning semantics, and `params_from_iter` is
+/// blocked on the same parameter-binding design decision as issue #25,
+/// so neither is implemented here).
+pub const MAIN_DB: &str = "main";
+
+/// The name SQLite's temporary-table database would use. This crate has
+/// no temporary-table support (no `ATTACH`, no `CREATE TEMP TABLE`), so
+/// nothing produces or accepts this name yet — provided for API-shape
+/// parity, same status as [`crate::hooks::Wal`]/[`crate::hooks::CheckpointMode`].
+pub const TEMP_DB: &str = "temp";
+
 mod aggregate;
 mod blob;
 mod config;
@@ -54,3 +68,21 @@ pub use transaction::{
     DropBehavior, Savepoint, Transaction, TransactionBehavior, TransactionState,
 };
 pub use value::{Type, Value, ValueRef};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn main_db_and_temp_db_have_the_expected_names() {
+        assert_eq!(MAIN_DB, "main");
+        assert_eq!(TEMP_DB, "temp");
+    }
+
+    #[test]
+    fn main_db_matches_connection_db_name() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.db_name(0).unwrap(), MAIN_DB);
+        assert!(!conn.is_readonly(MAIN_DB).unwrap());
+    }
+}
