@@ -23,6 +23,17 @@ entry per PR.
 
 ---
 
+## PR #58 — Add DbConfig/Limit enums (closes #41)
+**2026-08-14** · [#58](https://github.com/baileyrd/rusty_-rusqlite/pull/58)
+
+- **Added:** `DbConfig`/`Limit` — definitions only, matching `rusqlite`'s
+  `config`/`limits` module enums. Nothing reads or enforces these yet;
+  that's `Connection`'s configuration-knobs issue (#15).
+- 2 new unit tests (60 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #57 — Add hooks::Wal/CheckpointMode types (closes #40)
 **2026-08-14** · [#57](https://github.com/baileyrd/rusty_-rusqlite/pull/57)
 

@@ -2,6 +2,7 @@
 //! API parity. See `ARCHITECTURE.md` for the engine/API boundary and
 //! `gap-analysis.md` for what's tracked toward that parity target.
 
+mod config;
 mod connection;
 mod ddl;
 mod dml_insert;
@@ -16,6 +17,7 @@ mod token;
 mod tosql;
 mod value;
 
+pub use config::{DbConfig, Limit};
 pub use connection::Connection;
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
