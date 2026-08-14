@@ -191,7 +191,9 @@ pub fn execute_select_with_aggregates(
 /// A result-column name for an aggregate call, e.g. `COUNT(*)` or
 /// `SUM(a)`. Simplified relative to real SQLite's full result-column-name
 /// inference: any non-column expression argument is just shown as `expr`.
-fn describe_aggregate_call(call: &crate::dml_select::AggregateCall) -> String {
+/// `pub(crate)` so [`crate::Statement`] (a different module) can reuse it
+/// for `Statement::column_names` on an aggregate `SELECT`.
+pub(crate) fn describe_aggregate_call(call: &crate::dml_select::AggregateCall) -> String {
     let arg = match &call.arg {
         AggregateArg::Star => "*".to_string(),
         AggregateArg::Expr(expr) => match expr.as_ref() {

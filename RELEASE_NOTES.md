@@ -23,6 +23,38 @@ entry per PR.
 
 ---
 
+## PR #79 — Add Statement: prepare, execute/query, column introspection (closes #26, #27, #28)
+**2026-08-14** · [#79](https://github.com/baileyrd/rusty_-rusqlite/pull/79)
+
+- **Added:** `Connection::prepare` and a new `Statement` type —
+  `execute`/`query_map`/`query_row`/`query_one`/`column_names`/
+  `column_count`/`column_name`/`is_query`. Tokenizes/parses SQL once;
+  a prepared `INSERT`/`SELECT` can be run repeatedly without re-parsing.
+- **Scope, stated plainly:** real `rusqlite::Statement::execute`/`query*`
+  always take a `params: impl Params` argument. This crate's tokenizer
+  doesn't recognize `?`/`:name` parameter markers yet (the same blocker
+  flagged in #25 — representing them needs an AST decision that would
+  change the already-shipped `Insert::rows` field), so `Statement` only
+  supports parameter-free SQL: no `params` argument, because nothing can
+  bind into one yet. This wasn't as fully blocked by #25 as first
+  assumed, though — re-reading #26/#27/#28's own "Depends on" lines (just
+  `A7`/`A8`, not the parameter-binding issue #42/#39 explicitly cited)
+  turned up real, shippable scope: parsing once and reusing the parsed
+  form is the actual performance point of a prepared statement,
+  independent of parameter binding.
+- **Also out of scope for now:** unlike `Connection::execute`,
+  `Statement::execute` doesn't fire `trace`/`profile`/`commit_hook`/
+  `update_hook`/the authorizer, or update `last_insert_rowid`/`changes`/
+  `total_changes` — wiring a prepared statement into that hook machinery
+  is real work, left for a deliberate follow-up rather than folded into
+  an already-large first cut. `Statement::execute` does still respect
+  `OpenFlags::READ_ONLY` and persist to a file-backed connection, since
+  those are correctness guarantees, not observability.
+- 13 new unit tests (194 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #78 — Add Connection::transaction_state/set_transaction_behavior (closes #13)
 **2026-08-14** · [#78](https://github.com/baileyrd/rusty_-rusqlite/pull/78)
 
