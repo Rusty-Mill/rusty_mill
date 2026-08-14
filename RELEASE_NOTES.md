@@ -23,6 +23,32 @@ entry per PR.
 
 ---
 
+## PR #68 — Add RowIndex/OptionalExtension (part of issue 44)
+**2026-08-14** · [#68](https://github.com/baileyrd/rusty_-rusqlite/pull/68)
+
+- **Added:** `RowIndex` (trait + `usize`/`&str` impls) and
+  `OptionalExtension` (turns `Err(QueryReturnedNoRows)` into `Ok(None)`
+  for callers that treat "no matching row" as normal, not a failure).
+- **Reverted mid-PR, worth recording:** first attempt wired `RowIndex`
+  into `Row::get`/`get_unwrap`/`get_ref`/`get_ref_unwrap` (changing them
+  from `get<T>(usize)` to `get<T, I: RowIndex>(idx: I)`) so column
+  lookups could take a name or a position. That breaks every existing
+  `row.get::<i64>(0)`-style turbofish call site crate-wide — Rust
+  doesn't infer a trailing type parameter once a leading one is given
+  explicitly and the method takes more than one. Caught this by actually
+  building, not just reasoning about it — reverted `Row`'s signatures
+  back to `usize`-only (matching what's already shipped since #59) and
+  kept `RowIndex` defined but unconsumed. Wiring it in is a breaking-API
+  decision that needs sign-off, not something to push through because
+  the trait itself was easy to write.
+- **Issue 44's remaining scope:** `BindIndex`/`Params`/`Name` are
+  parameter-binding traits, blocked on the same `?`-marker design
+  decision as issue #25. Left open, not folded into this PR.
+- 9 new/changed unit tests (93 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #67 — Add starter pragma support (closes #16)
 **2026-08-14** · [#67](https://github.com/baileyrd/rusty_-rusqlite/pull/67)
 

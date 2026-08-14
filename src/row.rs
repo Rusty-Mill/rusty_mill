@@ -3,10 +3,47 @@
 //! get_ref_unwrap, get_pointer)". `get_pointer` is a raw-FFI-handle
 //! accessor in `rusqlite` — not applicable here (no C backend to expose a
 //! pointer into), so it's intentionally omitted rather than stubbed.
+//!
+//! Also home to [`RowIndex`] (Part B gap row "Top-level traits:
+//! BindIndex, Params, RowIndex, Name, OptionalExtension" — the `RowIndex`
+//! slice of it; `BindIndex`/`Params`/`Name` are parameter-binding traits
+//! blocked on the same `?`-marker design decision as issue #25).
+//!
+//! `RowIndex` is defined but **not** wired into [`Row::get`]/`get_ref`/etc
+//! as their parameter type — doing so would change those methods' generic
+//! arity (`get<T>` → `get<T, I>`), which breaks every existing
+//! `row.get::<i64>(0)`-style turbofish call site (Rust doesn't infer a
+//! trailing type parameter when a leading one is given explicitly via
+//! turbofish and the method takes more than one). That's a breaking
+//! change to an already-shipped public signature (`Row::get`, merged in
+//! #59) — a stop-and-ask per this loop's rules, not something to push
+//! through silently. Left as a follow-up decision.
 
 use crate::error::{Error, Result};
 use crate::fromsql::FromSql;
 use crate::value::{Value, ValueRef};
+
+/// Converts `self` into a 0-based column index within `column_names`.
+/// Not yet consumed by [`Row`]'s own methods — see this module's doc
+/// comment for why.
+pub trait RowIndex {
+    fn idx(&self, column_names: &[String]) -> Result<usize>;
+}
+
+impl RowIndex for usize {
+    fn idx(&self, _column_names: &[String]) -> Result<usize> {
+        Ok(*self)
+    }
+}
+
+impl RowIndex for &str {
+    fn idx(&self, column_names: &[String]) -> Result<usize> {
+        column_names
+            .iter()
+            .position(|c| c == self)
+            .ok_or_else(|| Error::UnknownColumn((*self).to_string()))
+    }
+}
 
 /// A borrowed view over one result row's column names and values.
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +96,9 @@ impl<'a> Row<'a> {
         self.get_ref(idx).expect("Row::get_ref_unwrap failed")
     }
 
-    /// Returns the 0-based index of the named column, if present.
+    /// Returns the 0-based index of the named column, if present. This is
+    /// how a column name is resolved today (e.g. by callers that want
+    /// name-based lookup) until `RowIndex` is wired into `get`/`get_ref`.
     pub fn column_index(&self, name: &str) -> Option<usize> {
         self.column_names.iter().position(|c| c == name)
     }
@@ -118,5 +157,13 @@ mod tests {
         let row = Row::new(&cols, &vals);
         assert_eq!(row.column_index("b"), Some(1));
         assert_eq!(row.column_index("z"), None);
+    }
+
+    #[test]
+    fn row_index_resolves_usize_and_name() {
+        let (cols, _vals) = row_data();
+        assert_eq!(RowIndex::idx(&0usize, &cols).unwrap(), 0);
+        assert_eq!(RowIndex::idx(&"b", &cols).unwrap(), 1);
+        assert!(RowIndex::idx(&"z", &cols).is_err());
     }
 }
