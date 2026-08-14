@@ -23,6 +23,22 @@ entry per PR.
 
 ---
 
+## PR #89 — Add version/version_number (closes #43)
+**2026-08-14** · [#89](https://github.com/baileyrd/rusty_-rusqlite/pull/89)
+
+- **Added:** `version()`/`version_number()`, closing out the last piece
+  of issue #43.
+- **Versioning-semantics decision, made explicitly (not invented):**
+  since this crate wraps no real SQLite build, there's no SQLite library
+  version to report — `version()` returns this crate's own Cargo package
+  version (`env!("CARGO_PKG_VERSION")`) instead. `version_number()`
+  encodes it the way SQLite encodes its own (`major * 1_000_000 +
+  minor * 1_000 + patch`), applied to this crate's major/minor/patch.
+- 2 new unit tests (263 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #88 — Add params_from_iter (part of issue 43)
 **2026-08-14** · [#88](https://github.com/baileyrd/rusty_-rusqlite/pull/88)
 
