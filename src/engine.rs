@@ -24,16 +24,27 @@ pub fn execute_create_table(db: &mut Database, create: &CreateTable) -> Result<(
 /// partial) column list, each row is expanded into full
 /// table-definition order, filling any column not named with `NULL`.
 pub fn execute_insert(db: &mut Database, insert: &Insert) -> Result<usize> {
+    execute_insert_returning_rowids(db, insert).map(|rowids| rowids.len())
+}
+
+/// Like [`execute_insert`], but returns each inserted row's newly
+/// assigned rowid, in insertion order — added alongside the original
+/// (rather than changing its return type) so this doesn't break the
+/// already-shipped `Result<usize>` signature. `Connection::execute` uses
+/// this to power `last_insert_rowid` and real (rather than
+/// row-position-based) `update_hook` rowids.
+pub fn execute_insert_returning_rowids(db: &mut Database, insert: &Insert) -> Result<Vec<i64>> {
     let table_column_names = db.table(&insert.table_name)?.column_names.clone();
 
+    let mut rowids = Vec::with_capacity(insert.rows.len());
     for row in &insert.rows {
         let expanded = match &insert.columns {
             None => row.clone(),
             Some(names) => expand_row(&table_column_names, names, row)?,
         };
-        db.insert_row(&insert.table_name, expanded)?;
+        rowids.push(db.insert_row_returning_rowid(&insert.table_name, expanded)?);
     }
-    Ok(insert.rows.len())
+    Ok(rowids)
 }
 
 fn expand_row(
