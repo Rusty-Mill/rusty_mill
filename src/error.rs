@@ -12,6 +12,8 @@ pub enum Error {
     /// An `INSERT` row had a different number of values than the table
     /// has columns.
     ColumnCountMismatch { expected: usize, actual: usize },
+    /// An expression referenced a column that doesn't exist in scope.
+    UnknownColumn(String),
 }
 
 impl fmt::Display for Error {
@@ -23,6 +25,7 @@ impl fmt::Display for Error {
             Error::ColumnCountMismatch { expected, actual } => {
                 write!(f, "{actual} values for {expected} columns")
             }
+            Error::UnknownColumn(name) => write!(f, "no such column: {name:?}"),
         }
     }
 }

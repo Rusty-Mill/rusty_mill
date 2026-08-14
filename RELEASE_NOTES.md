@@ -23,6 +23,19 @@ entry per PR.
 
 ---
 
+## PR #51 — Add expression evaluator (closes #8)
+**2026-08-14** · [#51](https://github.com/baileyrd/rusty_-rusqlite/pull/51)
+
+- **Added:** `evaluate`/`evaluate_bool` — evaluates the `SELECT` parser's
+  `Expr` tree (literals, column refs, the six comparison operators)
+  against a single row, following SQLite's storage-class ordering for
+  cross-type comparisons and truthiness rules for boolean filtering.
+- **Added:** `Error::UnknownColumn`.
+- 6 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #50 — Add in-memory storage backend (closes #7)
 **2026-08-14** · [#50](https://github.com/baileyrd/rusty_-rusqlite/pull/50)
 
