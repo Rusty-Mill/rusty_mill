@@ -187,6 +187,97 @@ pub fn jwt_bearer_request(
     HttpRequest::form_post(token_endpoint, body)
 }
 
+/// RFC 8693 §3: the standard token type identifier URIs used for
+/// `subject_token_type`, `actor_token_type`, `requested_token_type`, and
+/// the response's `issued_token_type`.
+pub mod token_type {
+    pub const ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
+    pub const REFRESH_TOKEN: &str = "urn:ietf:params:oauth:token-type:refresh_token";
+    pub const ID_TOKEN: &str = "urn:ietf:params:oauth:token-type:id_token";
+    pub const SAML1: &str = "urn:ietf:params:oauth:token-type:saml1";
+    pub const SAML2: &str = "urn:ietf:params:oauth:token-type:saml2";
+    pub const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
+}
+
+/// The parameters of an RFC 8693 §2.1 token exchange request. `resource`
+/// and `audience` may each be repeated, per the spec, so both take a
+/// slice; every other field appears at most once.
+#[derive(Debug, Clone, Default)]
+pub struct TokenExchangeRequest<'a> {
+    pub subject_token: &'a str,
+    pub subject_token_type: &'a str,
+    /// A token representing the identity of the acting party, for
+    /// delegation scenarios (RFC 8693 §1.1). `actor_token_type` is
+    /// required whenever this is set.
+    pub actor_token: Option<&'a str>,
+    pub actor_token_type: Option<&'a str>,
+    pub resource: &'a [&'a str],
+    pub audience: &'a [&'a str],
+    pub scope: Option<&'a str>,
+    pub requested_token_type: Option<&'a str>,
+}
+
+/// Builds the RFC 8693 §2.1 token exchange request:
+/// `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, plus
+/// client authentication like every other grant on this endpoint.
+pub fn token_exchange_request(
+    token_endpoint: &str,
+    client: &Client,
+    request: &TokenExchangeRequest,
+) -> Result<HttpRequest> {
+    let mut params = vec![
+        (
+            "grant_type",
+            "urn:ietf:params:oauth:grant-type:token-exchange",
+        ),
+        ("subject_token", request.subject_token),
+        ("subject_token_type", request.subject_token_type),
+    ];
+
+    if let Some(actor_token) = request.actor_token {
+        let actor_token_type = request.actor_token_type.ok_or_else(|| {
+            Error::Validation("actor_token_type is required when actor_token is set".to_string())
+        })?;
+        params.push(("actor_token", actor_token));
+        params.push(("actor_token_type", actor_token_type));
+    }
+    for resource in request.resource {
+        params.push(("resource", resource));
+    }
+    for audience in request.audience {
+        params.push(("audience", audience));
+    }
+    if let Some(scope) = request.scope {
+        params.push(("scope", scope));
+    }
+    if let Some(requested_token_type) = request.requested_token_type {
+        params.push(("requested_token_type", requested_token_type));
+    }
+
+    let uses_body_auth = client.auth_method != crate::client::AuthMethod::ClientSecretBasic;
+    let secret_str;
+    if uses_body_auth {
+        params.push(("client_id", client.client_id.as_str()));
+        if client.auth_method == crate::client::AuthMethod::ClientSecretPost {
+            if let Some(secret) = &client.client_secret {
+                secret_str = secret.as_str().to_string();
+                params.push(("client_secret", &secret_str));
+            }
+        }
+    }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(token_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
+
+    let body = form_urlencode(params);
+    Ok(HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client))
+}
+
 /// A successful token response (RFC 6749 §5.1). Fields beyond the
 /// standard set (e.g. OIDC's `id_token`) are preserved in `raw` for
 /// callers that need them.
@@ -200,6 +291,10 @@ pub struct TokenResponse {
     /// Present when the authorization server also implements OpenID
     /// Connect and the request included `scope=openid`.
     pub id_token: Option<String>,
+    /// RFC 8693 §2.2.1: which of the standard [`token_type`] URIs
+    /// `access_token` actually is. Only present on token exchange
+    /// responses.
+    pub issued_token_type: Option<String>,
     /// The complete parsed JSON response body, for accessing any
     /// non-standard fields.
     pub raw: Value,
@@ -246,6 +341,10 @@ pub fn parse_token_response(status: u16, body: &str) -> Result<TokenResponse> {
             .map(str::to_string),
         id_token: value
             .get("id_token")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        issued_token_type: value
+            .get("issued_token_type")
             .and_then(Value::as_str)
             .map(str::to_string),
         raw: value,
@@ -402,5 +501,88 @@ mod tests {
         let err = client_credentials_request("https://auth.example.com/token", &client, None)
             .unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
+    }
+
+    #[test]
+    fn token_exchange_plain_downscope_request() {
+        let client = Client::confidential(ClientId::new("id"), ClientSecret::new("secret"));
+        let request = TokenExchangeRequest {
+            subject_token: "eyJhbGciOiJSUzI1NiIsImtpZCI6...",
+            subject_token_type: token_type::ACCESS_TOKEN,
+            requested_token_type: Some(token_type::ACCESS_TOKEN),
+            scope: Some("read"),
+            ..Default::default()
+        };
+        let req =
+            token_exchange_request("https://auth.example.com/token", &client, &request).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(
+            body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange")
+        );
+        assert!(body.contains("subject_token=eyJhbGciOiJSUzI1NiIsImtpZCI6..."));
+        assert!(body.contains(
+            "subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aaccess_token"
+        ));
+        assert!(body.contains("scope=read"));
+        assert!(!body.contains("actor_token"));
+        assert!(req
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v.starts_with("Basic ")));
+    }
+
+    #[test]
+    fn token_exchange_delegation_with_actor_and_repeated_params() {
+        let client = Client::public(ClientId::new("delegate-app"));
+        let resources = [
+            "https://api.example.com/orders",
+            "https://api.example.com/invoices",
+        ];
+        let request = TokenExchangeRequest {
+            subject_token: "subject-jwt",
+            subject_token_type: token_type::JWT,
+            actor_token: Some("actor-jwt"),
+            actor_token_type: Some(token_type::JWT),
+            resource: &resources,
+            audience: &["downstream-service"],
+            ..Default::default()
+        };
+        let req =
+            token_exchange_request("https://auth.example.com/token", &client, &request).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        let pairs = crate::encoding::percent::form_urldecode(&body).unwrap();
+        assert!(pairs.contains(&("actor_token".to_string(), "actor-jwt".to_string())));
+        assert!(pairs.contains(&("actor_token_type".to_string(), token_type::JWT.to_string())));
+        let resource_count = pairs.iter().filter(|(k, _)| k == "resource").count();
+        assert_eq!(resource_count, 2);
+    }
+
+    #[test]
+    fn token_exchange_actor_token_without_type_errors() {
+        let client = Client::public(ClientId::new("id"));
+        let request = TokenExchangeRequest {
+            subject_token: "subject-jwt",
+            subject_token_type: token_type::JWT,
+            actor_token: Some("actor-jwt"),
+            ..Default::default()
+        };
+        let err = token_exchange_request("https://auth.example.com/token", &client, &request)
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
+    }
+
+    #[test]
+    fn parses_issued_token_type_in_response() {
+        let json = r#"{
+            "access_token": "downscoped-token",
+            "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+            "token_type": "Bearer",
+            "expires_in": 60
+        }"#;
+        let resp = parse_token_response(200, json).unwrap();
+        assert_eq!(
+            resp.issued_token_type.as_deref(),
+            Some(token_type::ACCESS_TOKEN)
+        );
     }
 }
