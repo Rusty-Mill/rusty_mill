@@ -95,7 +95,7 @@ impl<'conn> Statement<'conn> {
     /// `SELECT` — use [`Statement::query_map`]/[`Statement::query_row`]/
     /// [`Statement::query_one`] instead.
     pub fn execute(&mut self) -> Result<usize> {
-        if self.conn.is_readonly("main")? {
+        if self.conn.is_readonly(crate::MAIN_DB)? {
             return Err(Error::ReadOnlyConnection);
         }
         let affected = match &self.kind {

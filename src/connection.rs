@@ -248,7 +248,7 @@ impl Connection {
     /// `ATTACH` support, so no other database ever exists.
     pub fn db_name(&self, index: usize) -> Result<String> {
         if index == 0 {
-            Ok("main".to_string())
+            Ok(crate::MAIN_DB.to_string())
         } else {
             Err(Error::NoSuchDatabase(format!("index {index}")))
         }
@@ -297,7 +297,7 @@ impl Connection {
     }
 
     fn require_main_database(&self, db_name: &str) -> Result<()> {
-        if db_name == "main" {
+        if db_name == crate::MAIN_DB {
             Ok(())
         } else {
             Err(Error::NoSuchDatabase(db_name.to_string()))
@@ -770,7 +770,7 @@ impl Connection {
 
     fn fire_update_hook(&mut self, action: Action, table_name: &str, rowid: i64) {
         if let Some(hook) = &mut self.update_hook {
-            hook(action, "main", table_name, rowid);
+            hook(action, crate::MAIN_DB, table_name, rowid);
         }
     }
 
