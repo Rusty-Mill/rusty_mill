@@ -23,6 +23,39 @@ entry per PR.
 
 ---
 
+## PR #87 — Add trace module: TraceEvent/TraceEventCodes/StmtRef/ConnRef/trace_v2 (closes #39)
+**2026-08-14** · [#87](https://github.com/baileyrd/rusty_-rusqlite/pull/87)
+
+Re-investigated #39, which had been left open after an earlier pass
+found it blocked on `Statement` not existing yet. `Statement` now
+exists (issue #25's PR), so the blocker no longer applies — implemented.
+
+- **Added:** `TraceEventCodes` (bitmask: `STMT`/`PROFILE`/`CLOSE`),
+  `TraceEvent` (`Stmt`/`Profile`/`Close`), `StmtRef`, `ConnRef`, and
+  `Connection::trace_v2` — a single callback unifying real SQLite's
+  separate `trace`/`profile` callbacks (both of which
+  [`Connection::trace`]/[`Connection::profile`] from PR #75 still
+  provide unchanged; `trace_v2` is additive).
+- **`StmtRef`/`ConnRef` are simplified from real `rusqlite`'s:** the
+  real types wrap a raw `sqlite3_stmt`/`sqlite3` C handle so a callback
+  can query things like `expanded_sql()` off it. This engine has no such
+  handle — `StmtRef` exposes just the SQL text (`sql()`), `ConnRef` just
+  read-only `Connection` methods (`is_open()`).
+- **No `Row` event kind:** real SQLite fires it once per row as a
+  statement steps incrementally. This engine's queries run to completion
+  in one call (no virtual machine to step — see `ARCHITECTURE.md`), so
+  there's no per-row moment to fire it at.
+- **`config_log`/`log` still not implemented, on purpose:** `config_log`
+  hooks SQLite's internal C-level diagnostic log, which has no
+  equivalent in this from-scratch engine (no `libsqlite3-sys` dependency,
+  no internal log stream) — implementing it as inert scaffolding would
+  misrepresent it as more functional than it could ever be, unlike
+  genuinely-inert-but-honest settings like `busy_timeout`.
+- 7 new unit tests (259 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #86 — Add window functions (closes #19)
 **2026-08-14** · [#86](https://github.com/baileyrd/rusty_-rusqlite/pull/86)
 
