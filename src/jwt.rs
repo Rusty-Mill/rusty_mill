@@ -12,6 +12,7 @@
 //! algorithm is always rejected, closing off the classic "alg confusion"
 //! forgery class.
 
+pub mod es256;
 pub mod rsa;
 
 use crate::crypto::hmac::{constant_time_eq, hmac_sha256};

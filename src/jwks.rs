@@ -71,11 +71,28 @@ impl Jwk {
         RsaPublicKey::from_jwk_base64url(n, e)
     }
 
+    /// Converts this key to an [`EcPublicKey`](crate::jwt::es256::EcPublicKey),
+    /// if it's a P-256 EC key (`kty: "EC"`, `crv: "P-256"`) with the
+    /// required `x`/`y` members (RFC 7518 §6.2.1). Other curves (e.g.
+    /// `P-384`, `P-521`) aren't supported -- this crate's elliptic-curve
+    /// arithmetic is specialized to P-256, the curve `ES256` uses.
+    pub fn to_ec_public_key(&self) -> Result<crate::jwt::es256::EcPublicKey> {
+        let components = self.ec_components()?;
+        if components.crv != "P-256" {
+            return Err(Error::Validation(format!(
+                "JWK crv `{}` is not P-256 (the only curve this crate implements)",
+                components.crv
+            )));
+        }
+        let x = crate::encoding::base64::decode_url_safe(&components.x)?;
+        let y = crate::encoding::base64::decode_url_safe(&components.y)?;
+        crate::jwt::es256::EcPublicKey::from_affine_coordinates(&x, &y)
+    }
+
     /// The EC curve/coordinate components (`crv`, `x`, `y`, RFC 7518
     /// §6.2.1) as raw base64url strings, if this is an EC key (`kty:
-    /// "EC"`). Exposed structurally only: this crate doesn't yet
-    /// implement elliptic-curve point construction, so there's no
-    /// `EcPublicKey` to convert into.
+    /// "EC"`). Lower-level than [`to_ec_public_key`](Self::to_ec_public_key);
+    /// mainly useful for curves that method doesn't support.
     pub fn ec_components(&self) -> Result<EcComponents> {
         if self.kty != "EC" {
             return Err(Error::Validation(format!(
@@ -152,6 +169,16 @@ impl JwkSet {
             .ok_or_else(|| Error::Validation(format!("no JWK found with kid `{kid}`")))?
             .to_rsa_public_key()
     }
+
+    /// Finds a key by `kid` and converts it to an
+    /// [`EcPublicKey`](crate::jwt::es256::EcPublicKey) in one step -- the
+    /// common case for verifying an `ES256` JWT against a `jwks_uri`
+    /// document.
+    pub fn ec_key(&self, kid: &str) -> Result<crate::jwt::es256::EcPublicKey> {
+        self.find(kid)
+            .ok_or_else(|| Error::Validation(format!("no JWK found with kid `{kid}`")))?
+            .to_ec_public_key()
+    }
 }
 
 #[cfg(test)]
@@ -168,7 +195,7 @@ mod tests {
         format!(
             r#"{{"keys": [
                 {{"kty": "RSA", "kid": "key-1", "use": "sig", "alg": "RS256", "n": "{N_B64}", "e": "{E_B64}"}},
-                {{"kty": "EC", "kid": "key-2", "use": "sig", "alg": "ES256", "crv": "P-256", "x": "MKBCTNIcKUSDii11ySs3526iDZ8AiTo7Tu6KPAqv7D4", "y": "4Etl4P43YdWimU3PkrmrPPWU59tpaOKrytmZUCeF9BM"}},
+                {{"kty": "EC", "kid": "key-2", "use": "sig", "alg": "ES256", "crv": "P-256", "x": "mVjjDRscopQ_sIwZFAC-qxcnKQhehDzxMEItaGv4Gns", "y": "p2E6hrrGZpPdat6tOD6eHwQHQk3HKBBJvOBsP--pHm8"}},
                 {{"kty": "oct", "kid": "key-3", "k": "GawgguFyGrWKav7AX4VKUg"}}
             ]}}"#
         )
@@ -227,6 +254,30 @@ mod tests {
         let components = key.ec_components().unwrap();
         assert_eq!(components.crv, "P-256");
         assert!(key.to_rsa_public_key().is_err());
+    }
+
+    #[test]
+    fn ec_key_converts_selected_key() {
+        // Same real P-256 key pair used throughout crypto::ecc's and
+        // jwt::es256's tests (openssl ecparam -genkey), reached here via
+        // kid lookup instead of constructing EcPublicKey directly.
+        let set = JwkSet::parse(&sample_jwks()).unwrap();
+        let key = set.ec_key("key-2").unwrap();
+        let expected = crate::jwt::es256::EcPublicKey::from_jwk_base64url(
+            "mVjjDRscopQ_sIwZFAC-qxcnKQhehDzxMEItaGv4Gns",
+            "p2E6hrrGZpPdat6tOD6eHwQHQk3HKBBJvOBsP--pHm8",
+        )
+        .unwrap();
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn ec_key_rejects_non_p256_curve() {
+        let json = r#"{"keys": [
+            {"kty": "EC", "kid": "p384-key", "crv": "P-384", "x": "AAAA", "y": "AAAA"}
+        ]}"#;
+        let set = JwkSet::parse(json).unwrap();
+        assert!(set.ec_key("p384-key").is_err());
     }
 
     #[test]
