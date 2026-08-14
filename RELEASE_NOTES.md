@@ -23,6 +23,38 @@ entry per PR.
 
 ---
 
+## PR #78 — Add Connection::transaction_state/set_transaction_behavior (closes #13)
+**2026-08-14** · [#78](https://github.com/baileyrd/rusty_-rusqlite/pull/78)
+
+- **Added:** `Connection::transaction_state`/`transaction_behavior`/
+  `set_transaction_behavior`, plus the `TransactionState` type
+  (`None`/`Write`).
+- `Transaction::new` increments a new `transaction_depth` counter on the
+  connection; `commit`/`rollback`/a drop-triggered finish all funnel
+  through one `mark_finished` helper that decrements it, so tracking
+  can't drift out of sync with whichever path actually ran. `Savepoint`
+  wraps `Transaction`, so nested savepoints are covered by the same
+  counter with no extra plumbing.
+- **Design deviation, stated plainly:** real SQLite's `TransactionState`
+  distinguishes a `Read` lock from a `Write` lock. This crate's
+  single-writer in-memory snapshot model has no separate read/write lock
+  state — any open transaction (at any nesting depth) reports as
+  `Write`.
+- **Not enforced:** `set_transaction_behavior` stores the default for
+  future `Connection::transaction()` calls, same "accepted for API-shape
+  parity only" treatment already given to `transaction_with_behavior`'s
+  explicit override — this crate's transactions don't distinguish
+  `Deferred`/`Immediate`/`Exclusive` locking.
+- This was the scope `#63` (transaction/savepoint management) left open,
+  originally deferred as needing "a larger redesign" for a
+  transaction-state flag — revisited and found narrower than that: a
+  simple depth counter, incremented/decremented at the one funnel point
+  every finish path already goes through, was enough.
+- 4 new unit tests (181 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #77 — Add rowid tracking + Connection::last_insert_rowid (closes #14)
 **2026-08-14** · [#77](https://github.com/baileyrd/rusty_-rusqlite/pull/77)
 

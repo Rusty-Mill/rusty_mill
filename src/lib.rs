@@ -48,5 +48,7 @@ pub use serialize::{deserialize as deserialize_database, serialize as serialize_
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
-pub use transaction::{DropBehavior, Savepoint, Transaction, TransactionBehavior};
+pub use transaction::{
+    DropBehavior, Savepoint, Transaction, TransactionBehavior, TransactionState,
+};
 pub use value::{Type, Value, ValueRef};

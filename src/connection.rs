@@ -95,6 +95,8 @@ pub struct Connection {
     path: Option<PathBuf>,
     read_only: bool,
     last_insert_rowid: i64,
+    transaction_depth: u32,
+    default_transaction_behavior: crate::transaction::TransactionBehavior,
 }
 
 impl Connection {
@@ -130,6 +132,8 @@ impl Connection {
             path: None,
             read_only: flags.contains(OpenFlags::READ_ONLY),
             last_insert_rowid: 0,
+            transaction_depth: 0,
+            default_transaction_behavior: crate::transaction::TransactionBehavior::Deferred,
         })
     }
 
@@ -712,6 +716,56 @@ impl Connection {
         if let Some(hook) = &mut self.rollback_hook {
             hook();
         }
+    }
+
+    /// Increments the open-transaction depth. `pub(crate)` so
+    /// [`crate::Transaction`] can call it on construction — [`crate::Savepoint`]
+    /// wraps a `Transaction`, so nesting is covered without extra plumbing.
+    pub(crate) fn increment_transaction_depth(&mut self) {
+        self.transaction_depth += 1;
+    }
+
+    /// The mirror of [`Connection::increment_transaction_depth`], called
+    /// once a [`crate::Transaction`]/[`crate::Savepoint`] guard finishes
+    /// (however it finishes — commit, rollback, or a drop-triggered
+    /// finish; see `Transaction::mark_finished`, the single call site
+    /// that funnels all three through here).
+    pub(crate) fn decrement_transaction_depth(&mut self) {
+        self.transaction_depth = self.transaction_depth.saturating_sub(1);
+    }
+
+    /// Returns whether a transaction (or nested savepoint) is currently
+    /// open on `db_name` (`None` also means `"main"` — the only database
+    /// that exists, no `ATTACH` support).
+    pub fn transaction_state(
+        &self,
+        db_name: Option<&str>,
+    ) -> Result<crate::transaction::TransactionState> {
+        if let Some(name) = db_name {
+            self.require_main_database(name)?;
+        }
+        Ok(if self.transaction_depth > 0 {
+            crate::transaction::TransactionState::Write
+        } else {
+            crate::transaction::TransactionState::None
+        })
+    }
+
+    /// Returns the behavior new transactions default to (see
+    /// [`Connection::set_transaction_behavior`]).
+    pub fn transaction_behavior(&self) -> crate::transaction::TransactionBehavior {
+        self.default_transaction_behavior
+    }
+
+    /// Sets the behavior [`Connection::transaction`] (as opposed to
+    /// [`Connection::transaction_with_behavior`], which takes an explicit
+    /// override) defaults to. **Not enforced**, same caveat as
+    /// `transaction_with_behavior`'s own doc comment: this crate's
+    /// single-writer in-memory model doesn't distinguish
+    /// `Deferred`/`Immediate`/`Exclusive` locking, so this is stored for
+    /// API-shape parity, not consulted by `transaction()`.
+    pub fn set_transaction_behavior(&mut self, behavior: crate::transaction::TransactionBehavior) {
+        self.default_transaction_behavior = behavior;
     }
 
     fn fire_update_hook(&mut self, action: Action, table_name: &str, rowid: i64) {
