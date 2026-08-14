@@ -65,44 +65,58 @@ impl<'a> AuthorizationRequest<'a> {
         self
     }
 
-    /// Builds the final request, generating a random `state` if one
-    /// wasn't set explicitly. The caller must persist `state` (and the
-    /// PKCE `code_verifier`, if used) until the callback arrives.
-    pub fn build(self) -> crate::error::Result<BuiltAuthorizationRequest> {
+    /// Resolves this request into its ordered `(key, value)` parameter
+    /// list (RFC 6749 §4.1.1, extended with PKCE) and the `state` that
+    /// list carries -- generating a random one if none was set
+    /// explicitly. Shared by [`build`](Self::build), which turns this
+    /// into a query string, and
+    /// [`crate::par::pushed_authorization_request`], which POSTs it as a
+    /// form body instead (RFC 9126).
+    pub(crate) fn resolve(self) -> crate::error::Result<(Vec<(String, String)>, String)> {
         let state = match self.state {
             Some(s) => s,
             None => encode_url_safe_no_pad(&random_bytes(24)?),
         };
 
+        let mut params = vec![
+            ("response_type".to_string(), "code".to_string()),
+            ("client_id".to_string(), self.client_id.to_string()),
+            ("redirect_uri".to_string(), self.redirect_uri.to_string()),
+            ("state".to_string(), state.clone()),
+        ];
+
+        if let Some(scope) = &self.scope {
+            params.push(("scope".to_string(), scope.clone()));
+        }
+
+        if let Some((challenge, method)) = self.pkce {
+            params.push(("code_challenge".to_string(), challenge.to_string()));
+            params.push(("code_challenge_method".to_string(), method.to_string()));
+        }
+
+        params.extend(self.extra_params.iter().cloned());
+
+        Ok((params, state))
+    }
+
+    /// Builds the final request, generating a random `state` if one
+    /// wasn't set explicitly. The caller must persist `state` (and the
+    /// PKCE `code_verifier`, if used) until the callback arrives.
+    pub fn build(self) -> crate::error::Result<BuiltAuthorizationRequest> {
+        let authorization_endpoint = self.authorization_endpoint;
+        let (params, state) = self.resolve()?;
+
         let mut url = String::new();
-        url.push_str(self.authorization_endpoint);
-        url.push(if self.authorization_endpoint.contains('?') {
+        url.push_str(authorization_endpoint);
+        url.push(if authorization_endpoint.contains('?') {
             '&'
         } else {
             '?'
         });
-        url.push_str("response_type=code");
-        url.push_str("&client_id=");
-        url.push_str(&percent_encode(self.client_id));
-        url.push_str("&redirect_uri=");
-        url.push_str(&percent_encode(self.redirect_uri));
-        url.push_str("&state=");
-        url.push_str(&percent_encode(&state));
-
-        if let Some(scope) = &self.scope {
-            url.push_str("&scope=");
-            url.push_str(&percent_encode(scope));
-        }
-
-        if let Some((challenge, method)) = self.pkce {
-            url.push_str("&code_challenge=");
-            url.push_str(&percent_encode(challenge));
-            url.push_str("&code_challenge_method=");
-            url.push_str(&percent_encode(method));
-        }
-
-        for (k, v) in &self.extra_params {
-            url.push('&');
+        for (i, (k, v)) in params.iter().enumerate() {
+            if i > 0 {
+                url.push('&');
+            }
             url.push_str(&percent_encode(k));
             url.push('=');
             url.push_str(&percent_encode(v));

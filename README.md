@@ -34,6 +34,7 @@ most serious OAuth libraries (e.g. `oauth2-rs`).
 | RFC 7662 | Token Introspection | `introspection` |
 | RFC 8414 | Authorization Server Metadata | `metadata` |
 | RFC 8628 | Device Authorization Grant | `device` |
+| RFC 9126 | Pushed Authorization Requests (PAR) | `par` |
 | OAuth 2.1 (draft) | Consolidated best current practice | see below |
 
 OAuth 2.1 compliance notes:
@@ -95,7 +96,7 @@ let token = parse_token_response(status_code, &response_body)?;
 ## Testing
 
 ```sh
-cargo test    # 100 unit tests + 1 doc-test, including known-answer vectors
+cargo test    # 106 unit tests + 1 doc-test, including known-answer vectors
               # from RFC 4231 (HMAC), RFC 7636 (PKCE), and a JWT signed
               # by `openssl dgst -sign` outside this crate, verified
               # entirely with the hand-rolled RSA implementation.
@@ -107,7 +108,6 @@ cargo clippy --all-targets -- -D warnings
 - OpenID Connect as a full spec (ID token *parsing/verification* is supported via `jwt`; discovery/UserInfo/dynamic registration are not).
 - Dynamic Client Registration (RFC 7591).
 - Token Exchange (RFC 8693).
-- Pushed Authorization Requests (RFC 9126).
 - An HTTP or TLS client (see "Scope" above).
 
 Contributions extending coverage of the above are welcome, provided they hold the zero-dependency line.
