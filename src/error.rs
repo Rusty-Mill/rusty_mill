@@ -29,6 +29,10 @@ pub enum Error {
     QueryReturnedNoRows,
     /// A [`crate::FromSql`] conversion failed while reading a column.
     FromSql(FromSqlError),
+    /// A database-name/index lookup referenced something other than the
+    /// single implicit `"main"` database — this crate has no `ATTACH`
+    /// support, so no other database ever exists.
+    NoSuchDatabase(String),
 }
 
 impl fmt::Display for Error {
@@ -48,6 +52,7 @@ impl fmt::Display for Error {
             }
             Error::QueryReturnedNoRows => write!(f, "query returned no rows"),
             Error::FromSql(e) => write!(f, "column conversion error: {e:?}"),
+            Error::NoSuchDatabase(name) => write!(f, "no such database: {name:?}"),
         }
     }
 }

@@ -20,7 +20,7 @@ mod tosql;
 mod value;
 
 pub use config::{DbConfig, Limit};
-pub use connection::Connection;
+pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{parse_select, BinaryOp, Expr, Select, SelectColumns};

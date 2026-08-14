@@ -2,7 +2,7 @@
 //! Deliberately in-memory-only — see `ARCHITECTURE.md`'s non-goals for why
 //! the on-disk file format isn't in scope yet.
 
-use crate::ddl::CreateTable;
+use crate::ddl::{ColumnDef, CreateTable};
 use crate::error::{Error, Result};
 use crate::value::Value;
 use std::collections::HashMap;
@@ -11,6 +11,11 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct Table {
     pub column_names: Vec<String>,
+    /// Full column definitions (type name, `PRIMARY KEY`/`NOT NULL`), in
+    /// the same order as `column_names`. Kept alongside `column_names`
+    /// rather than replacing it, since most existing call sites only need
+    /// the names.
+    pub columns: Vec<ColumnDef>,
     pub rows: Vec<Vec<Value>>,
 }
 
@@ -39,6 +44,7 @@ impl Database {
             create.table_name.clone(),
             Table {
                 column_names,
+                columns: create.columns.clone(),
                 rows: Vec::new(),
             },
         );
