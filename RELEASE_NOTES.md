@@ -23,6 +23,26 @@ entry per PR.
 
 ---
 
+## PR #61 — Add Connection query_one/query_map/execute_batch (closes #12)
+**2026-08-14** · [#61](https://github.com/baileyrd/rusty_-rusqlite/pull/61)
+
+- **Added:** `Connection::query_one`/`query_map`/`execute_batch` — typed
+  single-row and multi-row query access via `Row`, plus running each
+  `;`-separated statement in a batch through `execute`.
+- **Known limitation, stated plainly:** `execute_batch` splits on literal
+  `;` characters, so a string literal containing `;` would currently be
+  split incorrectly. Not a concern for today's supported statement types
+  (`CREATE TABLE`/`INSERT`), but worth revisiting once statements with
+  richer string literals are supported.
+- **Scope note:** `prepare*` (returning a reusable, bindable `Statement`)
+  is still not implemented — blocked on the same parameter-marker design
+  decision flagged on issue #25. `Connection::query_row`/`query_one`/
+  `query_map` cover the immediate-execution query path in the meantime.
+- 4 new unit tests (72 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #60 — Add Rows/MappedRows/AndThenRows iterators (closes #32)
 **2026-08-14** · [#60](https://github.com/baileyrd/rusty_-rusqlite/pull/60)
 

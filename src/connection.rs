@@ -3,15 +3,21 @@ use crate::dml_insert::parse_insert;
 use crate::dml_select::parse_select;
 use crate::engine::{execute_create_table, execute_insert, execute_select};
 use crate::error::{Error, Result};
+use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::value::Value;
 
 /// A connection to a database.
 ///
-/// Currently supports only an in-memory backend. `execute` recognizes
-/// `CREATE TABLE` and `INSERT`; `query_row` recognizes `SELECT`. The full
-/// `rusqlite`-shaped `Statement`/`Row` API is tracked separately as
+/// Currently supports only an in-memory backend. `execute`/`execute_batch`
+/// recognize `CREATE TABLE` and `INSERT`; `query_row`/`query_one`/
+/// `query_map` recognize `SELECT`. `prepare*` (returning a reusable,
+/// bindable `Statement`) isn't implemented yet — it's blocked on the same
+/// parameter-marker design decision as issue #25 (see that issue's
+/// comments): binding `?`-style parameters requires the parser to
+/// represent them in the AST, which isn't decided yet. The full
+/// `rusqlite`-shaped `Statement` API is tracked separately as
 /// `parity-gap` issues in `gap-analysis.md`'s Part B.
 pub struct Connection {
     db: Database,
@@ -70,6 +76,57 @@ impl Connection {
             return Err(Error::QueryReturnedNoRows);
         }
         Ok(rows.remove(0))
+    }
+
+    /// Like [`Connection::query_row`], but maps the single matching row
+    /// through `f` instead of returning its raw values.
+    pub fn query_one<T, F>(&self, sql: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(Row<'_>) -> Result<T>,
+    {
+        self.check_open()?;
+        let tokens = tokenize(sql)?;
+        let select = parse_select(&tokens)?;
+        let (columns, mut rows) = execute_select(&self.db, &select)?;
+        if rows.is_empty() {
+            return Err(Error::QueryReturnedNoRows);
+        }
+        let values = rows.remove(0);
+        f(Row::new(&columns, &values))
+    }
+
+    /// Executes a `SELECT`, mapping every matching row through `f` and
+    /// collecting the results.
+    pub fn query_map<T, F>(&self, sql: &str, mut f: F) -> Result<Vec<T>>
+    where
+        F: FnMut(Row<'_>) -> Result<T>,
+    {
+        self.check_open()?;
+        let tokens = tokenize(sql)?;
+        let select = parse_select(&tokens)?;
+        let (columns, rows) = execute_select(&self.db, &select)?;
+        rows.iter()
+            .map(|values| f(Row::new(&columns, values)))
+            .collect()
+    }
+
+    /// Executes each `;`-separated statement in `sql` in turn via
+    /// [`Connection::execute`]. Unlike `rusqlite::Connection::execute_batch`,
+    /// this crate's tokenizer doesn't yet split on `;` inside string
+    /// literals containing the character — not a concern for the
+    /// statement types currently supported (`CREATE TABLE`/`INSERT`
+    /// literals are simple enough that this hasn't come up), but worth
+    /// revisiting if a future statement type's literals can contain `;`.
+    pub fn execute_batch(&mut self, sql: &str) -> Result<()> {
+        self.check_open()?;
+        for statement in sql.split(';') {
+            let statement = statement.trim();
+            if statement.is_empty() {
+                continue;
+            }
+            self.execute(statement)?;
+        }
+        Ok(())
     }
 
     fn check_open(&self) -> Result<()> {
@@ -131,5 +188,40 @@ mod tests {
             conn.execute("DROP TABLE t"),
             Err(Error::UnrecognizedStatement(_))
         ));
+    }
+
+    #[test]
+    fn query_one_maps_single_row() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (7)").unwrap();
+        let doubled: i64 = conn
+            .query_one("SELECT * FROM t", |row| row.get::<i64>(0).map(|n| n * 2))
+            .unwrap();
+        assert_eq!(doubled, 14);
+    }
+
+    #[test]
+    fn query_map_collects_all_matching_rows() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        let values: Vec<i64> = conn
+            .query_map("SELECT * FROM t", |row| row.get::<i64>(0))
+            .unwrap();
+        assert_eq!(values, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn execute_batch_runs_each_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+        )
+        .unwrap();
+        let values: Vec<i64> = conn
+            .query_map("SELECT * FROM t", |row| row.get::<i64>(0))
+            .unwrap();
+        assert_eq!(values, vec![1, 2]);
     }
 }
