@@ -23,6 +23,24 @@ entry per PR.
 
 ---
 
+## PR #59 — Add Row accessors (closes #31)
+**2026-08-14** · [#59](https://github.com/baileyrd/rusty_-rusqlite/pull/59)
+
+- **Added:** `Row`/`Row::get`/`get_unwrap`/`get_ref`/`get_ref_unwrap`/
+  `column_index` — a borrowed view over one result row with typed access
+  via `FromSql`. `get_unwrap`/`get_ref_unwrap` panic on error by design,
+  mirroring `rusqlite`'s documented panicking contract for these two
+  methods rather than being incidental `unwrap()` use.
+- **Added:** `Error::FromSql`/`From<FromSqlError>` so column-conversion
+  failures compose into the crate's error type.
+- **Known limitation, intentional:** `rusqlite::Row::get_pointer` (a raw
+  FFI-handle accessor) is not implemented — there's no C backend to
+  expose a pointer into, so it doesn't apply here.
+- 6 new unit tests (66 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #58 — Add DbConfig/Limit enums (closes #41)
 **2026-08-14** · [#58](https://github.com/baileyrd/rusty_-rusqlite/pull/58)
 
