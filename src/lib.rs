@@ -25,6 +25,9 @@
 //! - RFC 7517 -- JSON Web Key (JWK), including JWK Set parsing and
 //!   `kid`-based key selection
 //! - RFC 7519 -- JSON Web Token (JWT)
+//! - RFC 7591 -- OAuth 2.0 Dynamic Client Registration Protocol
+//!   (registration only; RFC 7592's client configuration management
+//!   protocol is not implemented)
 //! - RFC 7515 -- JSON Web Signature (JWS), HS256 and RS256
 //! - RFC 7523 -- JWT Profile for OAuth 2.0 Client Authentication and
 //!   Authorization Grants (bearer assertions)
@@ -78,6 +81,7 @@ pub mod metadata;
 pub mod par;
 pub mod pkce;
 pub mod rand;
+pub mod registration;
 pub mod request;
 pub mod revocation;
 pub mod token;

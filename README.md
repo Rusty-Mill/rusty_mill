@@ -28,6 +28,7 @@ most serious OAuth libraries (e.g. `oauth2-rs`).
 | RFC 7009 | Token Revocation | `revocation` |
 | RFC 7517 | JSON Web Key (JWK) — JWK Set parsing, `kid` selection | `jwks` |
 | RFC 7519 | JSON Web Token (JWT) | `jwt` |
+| RFC 7591 | Dynamic Client Registration (registration only, not RFC 7592 management) | `registration` |
 | RFC 7515 | JSON Web Signature (JWS) — HS256, RS256 | `jwt`, `jwt::rsa` |
 | RFC 7523 | JWT Profile for OAuth 2.0 Client Authentication and Authorization Grants | `token::jwt_bearer_request` |
 | RFC 7636 | Proof Key for Code Exchange (PKCE) | `pkce` |
@@ -97,7 +98,7 @@ let token = parse_token_response(status_code, &response_body)?;
 ## Testing
 
 ```sh
-cargo test    # 110 unit tests + 1 doc-test, including known-answer vectors
+cargo test    # 116 unit tests + 1 doc-test, including known-answer vectors
               # from RFC 4231 (HMAC), RFC 7636 (PKCE), and a JWT signed
               # by `openssl dgst -sign` outside this crate, verified
               # entirely with the hand-rolled RSA implementation.
@@ -107,7 +108,7 @@ cargo clippy --all-targets -- -D warnings
 ## Non-goals
 
 - OpenID Connect as a full spec (ID token *parsing/verification* is supported via `jwt`; discovery/UserInfo/dynamic registration are not).
-- Dynamic Client Registration (RFC 7591).
+- RFC 7592 client configuration management (read/update/delete an existing dynamic registration) -- only the initial registration (RFC 7591) is implemented.
 - An HTTP or TLS client (see "Scope" above).
 
 Contributions extending coverage of the above are welcome, provided they hold the zero-dependency line.
