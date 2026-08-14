@@ -23,6 +23,25 @@ entry per PR.
 
 ---
 
+## PR #52 — Add execution engine (closes #9)
+**2026-08-14** · [#52](https://github.com/baileyrd/rusty_-rusqlite/pull/52)
+
+- **Added:** `execute_create_table`/`execute_insert`/`execute_select` —
+  ties the parser ASTs, storage layer, and expression evaluator together
+  into a real query path: single-table scan + `WHERE` filter + column
+  projection. `INSERT`'s explicit column list (reordered or partial) is
+  now expanded into full table-definition order, missing columns filled
+  with `NULL`.
+- This is the last of foundation-tier Part A except `A8` (wiring
+  `Connection`/`Statement` to this engine) — `CREATE TABLE`/`INSERT`/
+  `SELECT` now work end-to-end against the in-memory backend via direct
+  function calls; only the public `Connection` API surface is still
+  stubbed.
+- 5 new unit tests (43 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #51 — Add expression evaluator (closes #8)
 **2026-08-14** · [#51](https://github.com/baileyrd/rusty_-rusqlite/pull/51)
 
