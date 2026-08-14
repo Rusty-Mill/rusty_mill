@@ -23,6 +23,28 @@ entry per PR.
 
 ---
 
+## PR #64 — Add Connection configuration knobs (closes #15)
+**2026-08-14** · [#64](https://github.com/baileyrd/rusty_-rusqlite/pull/64)
+
+- **Added:** `Connection::db_config`/`set_db_config`/`limit`/`set_limit`/
+  `set_prepared_statement_cache_capacity`/`flush_prepared_statement_cache`/
+  `cache_flush`. `db_config`/`limit` are genuinely stored (a real
+  `HashMap`, round-trips correctly) but **not enforced** anywhere in the
+  engine yet — each doc comment says so explicitly. The three
+  cache-related methods are no-ops: there's no prepared-statement cache
+  (`prepare_cached` isn't implemented) or page cache (storage is a plain
+  `HashMap`, not a paged file cache) for them to act on.
+- **Added:** `Hash` derive on `DbConfig`/`Limit` so they work as
+  `HashMap` keys.
+- **Bonus, no new PR needed:** issues #33 (`Transaction`'s own methods)
+  and #34 (`Savepoint`'s `Deref` nesting) turned out to already be fully
+  satisfied by #63 — closed with explanatory comments rather than
+  re-implementing something that already existed.
+- 2 new unit tests (84 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #63 — Add Transaction/Savepoint (part of #13)
 **2026-08-14** · [#63](https://github.com/baileyrd/rusty_-rusqlite/pull/63)
 

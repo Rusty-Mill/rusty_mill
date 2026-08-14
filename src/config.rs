@@ -1,11 +1,13 @@
 //! `config`/`limits` module enums (Part B gap row "config/limits modules:
-//! DbConfig, Limit enums"). Definitions only — nothing reads or enforces
-//! these yet; that's `Connection`'s configuration-knobs issue.
+//! DbConfig, Limit enums"). Stored (but not yet enforced anywhere in the
+//! engine) via `Connection::db_config`/`set_db_config`/`limit`/
+//! `set_limit` — see that issue's PR for what "enforced" would mean for
+//! each variant.
 
 /// A boolean-valued connection configuration option, set via
-/// `Connection::db_config`/`set_db_config` (not yet implemented). See
-/// <https://www.sqlite.org/c3ref/c_dbconfig_defensive.html>.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// [`crate::Connection::db_config`]/[`crate::Connection::set_db_config`].
+/// See <https://www.sqlite.org/c3ref/c_dbconfig_defensive.html>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DbConfig {
     /// Enable/disable foreign key constraint enforcement.
     EnableForeignKeys,
@@ -16,9 +18,10 @@ pub enum DbConfig {
     Defensive,
 }
 
-/// A resource limit, set via `Connection::limit`/`set_limit` (not yet
-/// implemented). See <https://www.sqlite.org/c3ref/c_limit_attached.html>.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A resource limit, set via [`crate::Connection::limit`]/
+/// [`crate::Connection::set_limit`]. See
+/// <https://www.sqlite.org/c3ref/c_limit_attached.html>.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Limit {
     /// Maximum length, in bytes, of any string or blob.
     Length,
