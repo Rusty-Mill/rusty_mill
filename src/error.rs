@@ -26,6 +26,10 @@ pub enum ErrorCode {
     AuthorizationPending,
     SlowDown,
     ExpiredToken,
+    /// RFC 9449 §8: the server wants a fresh DPoP proof carrying a
+    /// `nonce` claim, provided via the accompanying `DPoP-Nonce` response
+    /// header. Retry with that nonce attached to the next proof.
+    UseDpopNonce,
     /// Any error code not covered above (extension grants, vendor codes).
     Other(String),
 }
@@ -46,6 +50,7 @@ impl ErrorCode {
             ErrorCode::AuthorizationPending => "authorization_pending",
             ErrorCode::SlowDown => "slow_down",
             ErrorCode::ExpiredToken => "expired_token",
+            ErrorCode::UseDpopNonce => "use_dpop_nonce",
             ErrorCode::Other(s) => s,
         }
     }
@@ -67,6 +72,7 @@ impl From<&str> for ErrorCode {
             "authorization_pending" => ErrorCode::AuthorizationPending,
             "slow_down" => ErrorCode::SlowDown,
             "expired_token" => ErrorCode::ExpiredToken,
+            "use_dpop_nonce" => ErrorCode::UseDpopNonce,
             other => ErrorCode::Other(other.to_string()),
         }
     }

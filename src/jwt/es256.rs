@@ -50,6 +50,15 @@ impl EcPublicKey {
         let y = decode_url_safe(y_b64)?;
         Self::from_affine_coordinates(&x, &y)
     }
+
+    /// This key's raw big-endian `(x, y)` affine coordinates, each padded
+    /// to 32 bytes -- e.g. for embedding as a JWK (RFC 7518 §6.2.1) in a
+    /// DPoP proof's `jwk` header (RFC 9449 §4.2).
+    pub fn to_affine_coordinates(&self) -> (Vec<u8>, Vec<u8>) {
+        self.point
+            .to_affine_bytes()
+            .expect("EcPublicKey is never constructed as the point at infinity")
+    }
 }
 
 /// An ECDSA P-256 private key (a scalar `d` in `[1, n-1]`), used to sign
