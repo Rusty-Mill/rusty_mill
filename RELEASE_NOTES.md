@@ -23,6 +23,31 @@ entry per PR.
 
 ---
 
+## PR #62 — Add Connection metadata introspection (part of #14)
+**2026-08-14** · [#62](https://github.com/baileyrd/rusty_-rusqlite/pull/62)
+
+- **Added:** `Connection::path`/`is_autocommit`/`is_busy`/`is_readonly`/
+  `is_interrupted`/`db_name`/`column_exists`/`table_exists`/
+  `column_metadata`/`changes`/`total_changes`, plus `ColumnMetadata`.
+  `changes`/`total_changes` are tracked for real (updated on every
+  `execute`); the rest are honest constants given what this crate
+  currently has no concept of (transactions, concurrent access, `ATTACH`,
+  on-disk files) — each documents why, rather than silently returning a
+  plausible-looking value with no backing state.
+- **Added:** `Table::columns: Vec<ColumnDef>` (alongside the existing
+  `column_names: Vec<String>`, not replacing it) so `column_metadata` has
+  declared type/constraint data to report — purely additive to an
+  existing internal type.
+- **Deferred, stated plainly:** `last_insert_rowid` is not implemented —
+  this crate's storage has no implicit rowid concept yet (rows are plain
+  `Vec<Value>` with no per-row identifier), so faking a value would be
+  worse than omitting the method. Needs a storage-layer decision, not a
+  quick add.
+- 4 new unit tests (76 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #61 — Add Connection query_one/query_map/execute_batch (closes #12)
 **2026-08-14** · [#61](https://github.com/baileyrd/rusty_-rusqlite/pull/61)
 
