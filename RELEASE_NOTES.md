@@ -23,6 +23,29 @@ entry per PR.
 
 ---
 
+## PR #53 — Wire Connection to the execution engine (closes #10)
+**2026-08-14** · [#53](https://github.com/baileyrd/rusty_-rusqlite/pull/53)
+
+- **Changed:** `Connection::execute` and `Connection::query_row` are now
+  real — they tokenize, parse, and dispatch to the engine (`CREATE
+  TABLE`/`INSERT` for `execute`, `SELECT` for `query_row`) instead of
+  being stubs. This closes out foundation-tier Part A entirely (`A1`–`A8`
+  from `gap-analysis.md`): a full `CREATE TABLE` → `INSERT` → `SELECT`
+  round trip now works through the public `Connection` API.
+- **Added:** `Error::Token`/`Parse`/`UnrecognizedStatement`/
+  `QueryReturnedNoRows`, plus `From<TokenError>`/`From<ParseError>` for
+  `Error` so the tokenizer/parser's own error types compose with `?`
+  instead of needing per-call-site `map_err`.
+- **Known limitation:** only `CREATE TABLE`/`INSERT`/`SELECT` are wired
+  up; other statement types return `UnrecognizedStatement`. The
+  `rusqlite`-shaped `Statement`/`Row` API (multi-row iteration, prepared
+  statements, parameter binding) is Part B scope — tracked in the
+  existing open `parity-gap` issues (#11 onward), not part of this PR.
+- 4 new unit tests (46 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #52 — Add execution engine (closes #9)
 **2026-08-14** · [#52](https://github.com/baileyrd/rusty_-rusqlite/pull/52)
 
