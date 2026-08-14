@@ -14,6 +14,29 @@ pub enum SelectColumns {
     All,
     /// `SELECT a, b FROM ...`
     Named(Vec<String>),
+    /// A select list that's entirely aggregate-function calls, e.g.
+    /// `SELECT COUNT(*), SUM(a) FROM t`. Evaluated over every row matching
+    /// `filter` into a single output row — this crate has no `GROUP BY`
+    /// yet, so grouped aggregation (multiple output rows, one per group)
+    /// isn't supported; only whole-table aggregation is.
+    Aggregates(Vec<AggregateCall>),
+}
+
+/// One aggregate-function call in an aggregate select list, e.g. the
+/// `COUNT(*)` in `SELECT COUNT(*) FROM t`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateCall {
+    pub name: String,
+    pub arg: AggregateArg,
+}
+
+/// An aggregate call's argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateArg {
+    /// `*`, as in `COUNT(*)`. The parser only accepts this for `COUNT` —
+    /// real SQLite doesn't allow `SUM(*)`/`MIN(*)`/etc. either.
+    Star,
+    Expr(Box<Expr>),
 }
 
 /// A parsed single-table `SELECT` statement.
@@ -64,6 +87,13 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
     let columns = if p.peek_punct("*") {
         p.advance();
         SelectColumns::All
+    } else if p.starts_aggregate_call() {
+        let mut calls = vec![p.parse_aggregate_call()?];
+        while p.peek_punct(",") {
+            p.advance();
+            calls.push(p.parse_aggregate_call()?);
+        }
+        SelectColumns::Aggregates(calls)
     } else {
         let mut cols = vec![p.expect_any_ident()?];
         while p.peek_punct(",") {
@@ -98,6 +128,35 @@ struct SelectParser<'a> {
 impl<'a> SelectParser<'a> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<&Token> {
+        self.tokens.get(self.pos + offset)
+    }
+
+    /// Whether the select list starting at the current position looks like
+    /// `IDENT(` — an aggregate call — rather than a plain column name.
+    fn starts_aggregate_call(&self) -> bool {
+        matches!(self.peek(), Some(Token::Ident(_)))
+            && matches!(self.peek_at(1), Some(Token::Punct(s)) if *s == "(")
+    }
+
+    fn parse_aggregate_call(&mut self) -> Result<AggregateCall, ParseError> {
+        let name = self.expect_any_ident()?;
+        self.expect_punct("(")?;
+        let arg = if self.peek_punct("*") {
+            if !name.eq_ignore_ascii_case("COUNT") {
+                return Err(ParseError::UnexpectedToken(
+                    "'*' is only a valid argument to COUNT".to_string(),
+                ));
+            }
+            self.advance();
+            AggregateArg::Star
+        } else {
+            AggregateArg::Expr(Box::new(self.parse_operand()?))
+        };
+        self.expect_punct(")")?;
+        Ok(AggregateCall { name, arg })
     }
 
     fn peek_punct(&self, p: &str) -> bool {
@@ -310,6 +369,57 @@ mod tests {
                 name: "RANDOM".into(),
                 args: vec![],
             }
+        );
+    }
+
+    #[test]
+    fn parses_count_star() {
+        let tokens = tokenize("SELECT COUNT(*) FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Aggregates(vec![AggregateCall {
+                name: "COUNT".into(),
+                arg: AggregateArg::Star,
+            }])
+        );
+    }
+
+    #[test]
+    fn parses_multiple_aggregate_calls() {
+        let tokens = tokenize("SELECT SUM(a), MAX(b) FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Aggregates(vec![
+                AggregateCall {
+                    name: "SUM".into(),
+                    arg: AggregateArg::Expr(Box::new(Expr::Column("a".into()))),
+                },
+                AggregateCall {
+                    name: "MAX".into(),
+                    arg: AggregateArg::Expr(Box::new(Expr::Column("b".into()))),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn star_arg_only_valid_for_count() {
+        let tokens = tokenize("SELECT SUM(*) FROM t").unwrap();
+        assert!(matches!(
+            parse_select(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn plain_column_list_still_parses_as_named() {
+        let tokens = tokenize("SELECT a, b FROM t").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.columns,
+            SelectColumns::Named(vec!["a".into(), "b".into()])
         );
     }
 }

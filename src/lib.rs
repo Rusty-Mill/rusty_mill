@@ -2,6 +2,7 @@
 //! API parity. See `ARCHITECTURE.md` for the engine/API boundary and
 //! `gap-analysis.md` for what's tracked toward that parity target.
 
+mod aggregate;
 mod blob;
 mod config;
 mod connection;
@@ -22,14 +23,18 @@ mod tosql;
 mod transaction;
 mod value;
 
+pub use aggregate::Aggregate;
 pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit};
 pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
-pub use dml_select::{parse_select, BinaryOp, Expr, Select, SelectColumns};
+pub use dml_select::{
+    parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, Select, SelectColumns,
+};
 pub use engine::{
-    execute_create_table, execute_insert, execute_select, execute_select_with_functions,
+    execute_create_table, execute_insert, execute_select, execute_select_with_aggregates,
+    execute_select_with_functions,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{

@@ -3,11 +3,12 @@
 //! Deliberately scoped to single-table scan + filter + project — no
 //! joins, aggregates, subqueries, or indexes yet.
 
+use crate::aggregate::Aggregate;
 use crate::ddl::CreateTable;
 use crate::dml_insert::Insert;
-use crate::dml_select::{Select, SelectColumns};
+use crate::dml_select::{AggregateArg, Select, SelectColumns};
 use crate::error::{Error, Result};
-use crate::eval::{evaluate_bool_with_functions, ScalarFn};
+use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
 use crate::storage::Database;
 use crate::value::Value;
 use std::collections::HashMap;
@@ -108,7 +109,86 @@ pub fn execute_select_with_functions(
                 .collect();
             Ok((names.clone(), rows))
         }
+        SelectColumns::Aggregates(_) => Err(Error::UnrecognizedStatement(
+            "aggregate select lists need execute_select_with_aggregates".to_string(),
+        )),
     }
+}
+
+/// Executes a whole-table aggregate `SELECT` (e.g. `SELECT COUNT(*), SUM(a)
+/// FROM t`), folding every row matching `select.filter` through each
+/// aggregate call's `step` and producing exactly one output row — this
+/// crate has no `GROUP BY`, so there's no per-group fan-out. Errors if
+/// `select.columns` isn't [`SelectColumns::Aggregates`].
+pub fn execute_select_with_aggregates(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let table = db.table(&select.table_name)?;
+    let calls = match &select.columns {
+        SelectColumns::Aggregates(calls) => calls,
+        _ => {
+            return Err(Error::UnrecognizedStatement(
+                "execute_select_with_aggregates called on a non-aggregate SELECT".to_string(),
+            ))
+        }
+    };
+
+    let mut aggs = Vec::with_capacity(calls.len());
+    let mut accumulators = Vec::with_capacity(calls.len());
+    for call in calls {
+        let agg = aggregates
+            .get(&call.name)
+            .ok_or_else(|| Error::FunctionNotFound(call.name.clone()))?;
+        accumulators.push(agg.init.clone());
+        aggs.push(agg);
+    }
+
+    for row in &table.rows {
+        let keep = match &select.filter {
+            Some(filter) => {
+                evaluate_bool_with_functions(filter, &table.column_names, row, functions)?
+            }
+            None => true,
+        };
+        if !keep {
+            continue;
+        }
+        for (i, call) in calls.iter().enumerate() {
+            let arg_value = match &call.arg {
+                AggregateArg::Star => Value::Integer(1),
+                AggregateArg::Expr(expr) => {
+                    evaluate_with_functions(expr, &table.column_names, row, functions)?
+                }
+            };
+            accumulators[i] = (aggs[i].step)(&accumulators[i], &[arg_value])?;
+        }
+    }
+
+    let result_row = aggs
+        .iter()
+        .zip(accumulators)
+        .map(|(agg, acc)| (agg.finalize)(acc))
+        .collect::<Result<Vec<Value>>>()?;
+    let column_names = calls.iter().map(describe_aggregate_call).collect();
+
+    Ok((column_names, vec![result_row]))
+}
+
+/// A result-column name for an aggregate call, e.g. `COUNT(*)` or
+/// `SUM(a)`. Simplified relative to real SQLite's full result-column-name
+/// inference: any non-column expression argument is just shown as `expr`.
+fn describe_aggregate_call(call: &crate::dml_select::AggregateCall) -> String {
+    let arg = match &call.arg {
+        AggregateArg::Star => "*".to_string(),
+        AggregateArg::Expr(expr) => match expr.as_ref() {
+            crate::dml_select::Expr::Column(name) => name.clone(),
+            _ => "expr".to_string(),
+        },
+    };
+    format!("{}({arg})", call.name)
 }
 
 #[cfg(test)]
