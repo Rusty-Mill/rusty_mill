@@ -23,6 +23,23 @@ entry per PR.
 
 ---
 
+## PR #60 — Add Rows/MappedRows/AndThenRows iterators (closes #32)
+**2026-08-14** · [#60](https://github.com/baileyrd/rusty_-rusqlite/pull/60)
+
+- **Added:** `Rows`/`MappedRows`/`AndThenRows` — thin iterator wrappers
+  over a multi-row result set. `Rows::mapped`/`Rows::and_then` adapt to
+  `MappedRows`/`AndThenRows`, matching `rusqlite`'s combinator naming;
+  `AndThenRows` supports any error type `E: From<Error>`, not just
+  `Error` itself.
+- **Known limitation:** not yet wired to `Connection` — there's no
+  multi-row query method on `Connection` yet (only `query_row` for a
+  single row). That's part of the existing "Connection: query execution"
+  issue (#12), not this one.
+- 3 new unit tests (69 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #59 — Add Row accessors (closes #31)
 **2026-08-14** · [#59](https://github.com/baileyrd/rusty_-rusqlite/pull/59)
 
