@@ -45,7 +45,7 @@ pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{
-    parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, Select, SelectColumns,
+    parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, ParamMarker, Select, SelectColumns,
 };
 pub use engine::{
     execute_create_table, execute_insert, execute_select, execute_select_with_aggregates,

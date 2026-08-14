@@ -1,20 +1,20 @@
 //! `Statement`: a prepared, reusable SQL statement (Part B gap rows
 //! "Statement: execution", "Statement: querying", "Statement: column
-//! introspection").
+//! introspection", "Statement: parameter introspection", "Statement:
+//! parameter binding", "Statement: diagnostics").
 //!
-//! **Scope, stated plainly:** real `rusqlite::Statement::execute`/`query*`
-//! always take a `params: impl Params` argument — even a parameter-free
-//! statement is called as `stmt.execute([])`. This crate's tokenizer
-//! doesn't recognize `?`/`:name` parameter markers at all yet (the same
-//! blocker flagged in issue #25: representing them needs a parser-level
-//! AST decision that would change the already-shipped `Insert::rows`
-//! field), so [`Statement`] only supports parameter-free SQL — there's no
-//! `params` argument to plumb through because nothing can bind into one
-//! yet. What *is* real here: `Connection::prepare` tokenizes/parses once,
-//! and [`Statement::execute`]/[`Statement::query_map`] reuse that parsed
-//! form on every call, skipping re-tokenizing/re-parsing — the actual
-//! performance point of a prepared statement, independent of parameter
-//! binding.
+//! **Parameter binding** (`?`/`?N`/`:name`/`@name`/`$name`) is real: see
+//! `docs/adr/0002-parameter-markers.md` for the design.
+//! [`Connection::prepare`] resolves every marker to a 1-based index
+//! (SQLite's own numbering rule) once, at prepare time;
+//! [`Statement::raw_bind_parameter`] stores a value against an index; and
+//! [`Statement::execute`]/`query*` substitute bound values (or
+//! `Value::Null` for an unbound index, matching real SQLite) into a
+//! fully-concrete copy of the parsed statement before handing it to the
+//! existing (parameter-oblivious) `engine`/`eval` functions — so those
+//! functions' already-shipped signatures never needed to change; they
+//! only gained one new `Expr::Parameter` match arm, unavoidable for any
+//! new AST variant.
 //!
 //! **`columns`/`columns_with_metadata`/`column_metadata` aren't
 //! provided:** in real `rusqlite`, all three are behind opt-in Cargo
@@ -40,7 +40,10 @@
 use crate::connection::{leading_keyword, Connection};
 use crate::ddl::{parse_create_table, CreateTable};
 use crate::dml_insert::{parse_insert, Insert};
-use crate::dml_select::{parse_select, Select, SelectColumns};
+use crate::dml_select::{
+    parse_param_marker, parse_select, AggregateArg, AggregateCall, Expr, ParamMarker, Select,
+    SelectColumns,
+};
 use crate::engine::{
     describe_aggregate_call, execute_create_table, execute_insert_returning_rowids,
 };
@@ -48,7 +51,9 @@ use crate::error::{Error, Result};
 use crate::row::Row;
 use crate::rows::{AndThenRows, Rows};
 use crate::token::tokenize;
+use crate::tosql::ToSql;
 use crate::value::Value;
+use std::collections::HashMap;
 
 enum StatementKind {
     CreateTable(CreateTable),
@@ -61,6 +66,13 @@ pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     kind: StatementKind,
     sql: String,
+    /// `param_names[i]` is index `i + 1`'s name, if it was a
+    /// `:name`/`@name`/`$name` marker (`None` for `?`/`?N`). Computed
+    /// once at prepare time — see `docs/adr/0002-parameter-markers.md`.
+    param_names: Vec<Option<String>>,
+    /// Values bound via [`Statement::raw_bind_parameter`], keyed by
+    /// 1-based index.
+    bindings: HashMap<usize, Value>,
     /// The most recent [`Statement::query`]/[`Statement::raw_query`]
     /// result set, kept alive on `self` so the [`Rows`] handed back can
     /// borrow from it instead of the query needing to return owned data.
@@ -70,7 +82,7 @@ pub struct Statement<'conn> {
 impl<'conn> Statement<'conn> {
     pub(crate) fn prepare(conn: &'conn mut Connection, sql: &str) -> Result<Statement<'conn>> {
         let tokens = tokenize(sql)?;
-        let kind = match leading_keyword(&tokens) {
+        let mut kind = match leading_keyword(&tokens) {
             Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
                 StatementKind::CreateTable(parse_create_table(&tokens)?)
             }
@@ -82,11 +94,123 @@ impl<'conn> Statement<'conn> {
             }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
+
+        // Left-to-right over the SQL text: select-list (aggregate args)
+        // before `WHERE`, matching where each would appear in the
+        // original text -- needed so index assignment agrees with
+        // `expanded_sql`'s independent text-level scan.
+        let mut resolver = ParamResolver::new();
+        match &mut kind {
+            StatementKind::CreateTable(_) => {}
+            StatementKind::Insert(insert) => {
+                for row in &mut insert.rows {
+                    for expr in row {
+                        resolver.rewrite(expr);
+                    }
+                }
+            }
+            StatementKind::Select(select) => {
+                if let SelectColumns::Aggregates(calls) = &mut select.columns {
+                    for call in calls {
+                        if let AggregateArg::Expr(e) = &mut call.arg {
+                            resolver.rewrite(e);
+                        }
+                    }
+                }
+                if let Some(filter) = &mut select.filter {
+                    resolver.rewrite(filter);
+                }
+            }
+        }
+
         Ok(Statement {
             conn,
             kind,
             sql: sql.to_string(),
+            param_names: resolver.names,
+            bindings: HashMap::new(),
             last_result: None,
+        })
+    }
+
+    /// Binds `value` to the parameter at `index` (1-based, matching
+    /// SQLite's own convention — see [`Statement::parameter_index`] to
+    /// look one up by name). Overwrites any previous binding for that
+    /// index. Takes effect on the next [`Statement::execute`]/`query*`
+    /// call.
+    pub fn raw_bind_parameter<T: ToSql>(&mut self, index: usize, value: T) -> Result<()> {
+        self.bindings.insert(index, value.to_sql());
+        Ok(())
+    }
+
+    /// Clears every binding set via [`Statement::raw_bind_parameter`] —
+    /// every parameter reverts to unbound (`Value::Null` when next
+    /// executed/queried, matching real SQLite's unbound-parameter
+    /// default).
+    pub fn clear_bindings(&mut self) {
+        self.bindings.clear();
+    }
+
+    /// Substitutes `expr`'s `Parameter` nodes with their bound value (or
+    /// `Value::Null` if unbound) into a fully-concrete copy. Every
+    /// `Parameter` here is already `ParamMarker::Numbered` — resolved by
+    /// [`Statement::prepare`]'s [`ParamResolver`] pass.
+    fn resolve_expr(&self, expr: &Expr) -> Expr {
+        match expr {
+            Expr::Parameter(ParamMarker::Numbered(idx)) => {
+                Expr::Literal(self.bindings.get(idx).cloned().unwrap_or(Value::Null))
+            }
+            Expr::Parameter(_) => {
+                unreachable!("Statement::prepare resolves every Parameter to Numbered")
+            }
+            Expr::BinaryOp { op, left, right } => Expr::BinaryOp {
+                op: *op,
+                left: Box::new(self.resolve_expr(left)),
+                right: Box::new(self.resolve_expr(right)),
+            },
+            Expr::FunctionCall { name, args } => Expr::FunctionCall {
+                name: name.clone(),
+                args: args.iter().map(|a| self.resolve_expr(a)).collect(),
+            },
+            Expr::Column(_) | Expr::Literal(_) => expr.clone(),
+        }
+    }
+
+    fn resolved_insert(&self, insert: &Insert) -> Insert {
+        Insert {
+            table_name: insert.table_name.clone(),
+            columns: insert.columns.clone(),
+            rows: insert
+                .rows
+                .iter()
+                .map(|row| row.iter().map(|e| self.resolve_expr(e)).collect())
+                .collect(),
+        }
+    }
+
+    fn resolved_select(&self) -> Result<Select> {
+        let select = self.select()?;
+        let columns = match &select.columns {
+            SelectColumns::Aggregates(calls) => SelectColumns::Aggregates(
+                calls
+                    .iter()
+                    .map(|c| AggregateCall {
+                        name: c.name.clone(),
+                        arg: match &c.arg {
+                            AggregateArg::Star => AggregateArg::Star,
+                            AggregateArg::Expr(e) => {
+                                AggregateArg::Expr(Box::new(self.resolve_expr(e)))
+                            }
+                        },
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
+        Ok(Select {
+            columns,
+            table_name: select.table_name.clone(),
+            filter: select.filter.as_ref().map(|f| self.resolve_expr(f)),
         })
     }
 
@@ -104,7 +228,8 @@ impl<'conn> Statement<'conn> {
                 0
             }
             StatementKind::Insert(insert) => {
-                execute_insert_returning_rowids(self.conn.db_mut(), insert)?.len()
+                let resolved = self.resolved_insert(insert);
+                execute_insert_returning_rowids(self.conn.db_mut(), &resolved)?.len()
             }
             StatementKind::Select(_) => {
                 return Err(Error::UnrecognizedStatement(
@@ -130,7 +255,8 @@ impl<'conn> Statement<'conn> {
     where
         F: FnMut(Row<'_>) -> Result<T>,
     {
-        let (columns, rows) = self.conn.run_select(self.select()?)?;
+        let select = self.resolved_select()?;
+        let (columns, rows) = self.conn.run_select(&select)?;
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -140,7 +266,8 @@ impl<'conn> Statement<'conn> {
     /// values in result-column order. Errors with
     /// [`Error::QueryReturnedNoRows`] if no row matched.
     pub fn query_row(&self) -> Result<Vec<Value>> {
-        let (_, mut rows) = self.conn.run_select(self.select()?)?;
+        let select = self.resolved_select()?;
+        let (_, mut rows) = self.conn.run_select(&select)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -153,7 +280,8 @@ impl<'conn> Statement<'conn> {
     where
         F: FnOnce(Row<'_>) -> Result<T>,
     {
-        let (columns, mut rows) = self.conn.run_select(self.select()?)?;
+        let select = self.resolved_select()?;
+        let (columns, mut rows) = self.conn.run_select(&select)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -166,7 +294,8 @@ impl<'conn> Statement<'conn> {
     /// collects into a `Vec`), this is the same shape as real
     /// `rusqlite::Statement::query`.
     pub fn query(&mut self) -> Result<Rows<'_>> {
-        let result = self.conn.run_select(self.select()?)?;
+        let select = self.resolved_select()?;
+        let result = self.conn.run_select(&select)?;
         self.last_result = Some(result);
         let (columns, rows) = self.last_result.as_ref().expect("just assigned Some above");
         Ok(Rows::new(columns, rows))
@@ -184,14 +313,16 @@ impl<'conn> Statement<'conn> {
 
     /// Runs this `SELECT`, returning whether it matched at least one row.
     pub fn exists(&self) -> Result<bool> {
-        let (_, rows) = self.conn.run_select(self.select()?)?;
+        let select = self.resolved_select()?;
+        let (_, rows) = self.conn.run_select(&select)?;
         Ok(!rows.is_empty())
     }
 
     /// Like [`Statement::query`]. Real `rusqlite::Statement::raw_query`
-    /// skips the params-binding step `query` otherwise requires; since
-    /// [`Statement`] has no parameter binding to skip (see this module's
-    /// doc comment), the two are identical here — kept as a separate
+    /// skips the higher-level `Params`-trait binding step `query`
+    /// otherwise goes through; since [`Statement`] binds only through
+    /// [`Statement::raw_bind_parameter`] (no `Params` trait yet — see
+    /// issue #44), the two are identical here — kept as a separate
     /// method purely for name-level parity with call sites migrating
     /// from `rusqlite`.
     pub fn raw_query(&mut self) -> Result<Rows<'_>> {
@@ -249,33 +380,41 @@ impl<'conn> Statement<'conn> {
         matches!(self.kind, StatementKind::Select(_))
     }
 
-    /// The number of `?`/`:name`-style parameters in this statement.
-    /// Always `0` — [`Statement`] doesn't support parameter binding yet
-    /// (see this module's doc comment), so no statement can have any.
+    /// The number of `?`/`:name`-style parameters in this statement,
+    /// per SQLite's own index-assignment rule (see
+    /// `docs/adr/0002-parameter-markers.md`) — e.g. `WHERE a = ? AND b = ?`
+    /// has 2, but `WHERE a = :x AND b = :x` has 1 (the repeated name
+    /// reuses its first index).
     pub fn parameter_count(&self) -> usize {
-        0
+        self.param_names.len()
     }
 
     /// The name of the parameter at `index` (1-based, matching SQLite's
-    /// own convention), if any. Always `None` — see
-    /// [`Statement::parameter_count`].
-    pub fn parameter_name(&self, _index: usize) -> Option<&str> {
-        None
+    /// own convention), if it was a `:name`/`@name`/`$name` marker —
+    /// `None` for a `?`/`?N` marker, or if `index` is out of range.
+    pub fn parameter_name(&self, index: usize) -> Option<&str> {
+        index
+            .checked_sub(1)
+            .and_then(|i| self.param_names.get(i))
+            .and_then(|n| n.as_deref())
     }
 
-    /// The index of the parameter named `name`, if this statement has
-    /// one. Always `Ok(None)` — see [`Statement::parameter_count`].
-    pub fn parameter_index(&self, _name: &str) -> Result<Option<usize>> {
-        Ok(None)
+    /// The index of the parameter named `name` (sigil included, e.g.
+    /// `":foo"`), if this statement has one.
+    pub fn parameter_index(&self, name: &str) -> Result<Option<usize>> {
+        Ok(self
+            .param_names
+            .iter()
+            .position(|n| n.as_deref() == Some(name))
+            .map(|i| i + 1))
     }
 
-    /// This statement's original SQL text. Real
-    /// `rusqlite::Statement::expanded_sql` substitutes bound parameter
-    /// values into the text; since [`Statement`] never has any bound
-    /// parameters to substitute (see this module's doc comment), this is
-    /// always just the SQL [`Connection::prepare`] was given.
+    /// This statement's SQL text with every bound parameter substituted
+    /// in as a literal (unbound parameters become `NULL`, matching real
+    /// SQLite). A parameter-free statement's `expanded_sql` is just its
+    /// original text.
     pub fn expanded_sql(&self) -> Option<String> {
-        Some(self.sql.clone())
+        Some(substitute_params(&self.sql, &self.bindings))
     }
 
     /// Returns whether this statement can't modify the database — `true`
@@ -326,6 +465,175 @@ pub enum StatementStatus {
     AutoIndex,
     VmStep,
     RunExplainQueryPlan,
+}
+
+/// Assigns each [`ParamMarker`] encountered, in left-to-right occurrence
+/// order, a 1-based index per SQLite's own rule — see
+/// `docs/adr/0002-parameter-markers.md`. Used once by [`Statement::prepare`]
+/// to rewrite the parsed tree's `Parameter` nodes to `ParamMarker::Numbered`,
+/// and independently by [`substitute_params`] to walk `expanded_sql`'s raw
+/// SQL text in the same order.
+struct ParamResolver {
+    next_auto: usize,
+    named_index: HashMap<String, usize>,
+    /// `names[i]` is index `i + 1`'s name, if any.
+    names: Vec<Option<String>>,
+}
+
+impl ParamResolver {
+    fn new() -> ParamResolver {
+        ParamResolver {
+            next_auto: 1,
+            named_index: HashMap::new(),
+            names: Vec::new(),
+        }
+    }
+
+    fn ensure_len(&mut self, len: usize) {
+        while self.names.len() < len {
+            self.names.push(None);
+        }
+    }
+
+    fn resolve(&mut self, marker: &ParamMarker) -> usize {
+        match marker {
+            ParamMarker::Anonymous => {
+                let idx = self.next_auto;
+                self.next_auto += 1;
+                self.ensure_len(idx);
+                idx
+            }
+            ParamMarker::Numbered(n) => {
+                self.ensure_len(*n);
+                if *n >= self.next_auto {
+                    self.next_auto = n + 1;
+                }
+                *n
+            }
+            ParamMarker::Named(name) => {
+                if let Some(&idx) = self.named_index.get(name) {
+                    idx
+                } else {
+                    let idx = self.next_auto;
+                    self.next_auto += 1;
+                    self.ensure_len(idx);
+                    self.names[idx - 1] = Some(name.clone());
+                    self.named_index.insert(name.clone(), idx);
+                    idx
+                }
+            }
+        }
+    }
+
+    fn rewrite(&mut self, expr: &mut Expr) {
+        match expr {
+            Expr::Parameter(marker) => {
+                let idx = self.resolve(marker);
+                *marker = ParamMarker::Numbered(idx);
+            }
+            Expr::BinaryOp { left, right, .. } => {
+                self.rewrite(left);
+                self.rewrite(right);
+            }
+            Expr::FunctionCall { args, .. } => {
+                for a in args {
+                    self.rewrite(a);
+                }
+            }
+            Expr::Column(_) | Expr::Literal(_) => {}
+        }
+    }
+}
+
+/// Renders `value` as it would appear as a SQL literal (used by
+/// [`substitute_params`]).
+fn value_to_sql_literal(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(f) => f.to_string(),
+        Value::Text(s) => format!("'{}'", s.replace('\'', "''")),
+        Value::Blob(b) => {
+            let hex: String = b.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("X'{hex}'")
+        }
+    }
+}
+
+/// A minimal, string-literal-aware re-scan of `sql`, replacing each
+/// `?`/`?N`/`:name`/`@name`/`$name` marker with its bound value's SQL
+/// literal text (or `NULL` if unbound) — powers [`Statement::expanded_sql`].
+/// Independent of (but index-assignment-consistent with) the AST-level
+/// [`ParamResolver`] pass `Statement::prepare` already ran, since
+/// `expanded_sql` only has the original text to work from, not the parsed
+/// tree.
+fn substitute_params(sql: &str, bindings: &HashMap<usize, Value>) -> String {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut out = String::new();
+    let mut resolver = ParamResolver::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+
+        if c == '\'' {
+            let start = i;
+            i += 1;
+            while i < chars.len() {
+                if chars[i] == '\'' {
+                    if chars.get(i + 1) == Some(&'\'') {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.extend(&chars[start..i]);
+            continue;
+        }
+
+        if c == '?' {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            let spec: String = chars[start + 1..i].iter().collect();
+            let idx = resolver.resolve(&parse_param_marker(&spec));
+            out.push_str(
+                &bindings
+                    .get(&idx)
+                    .map(value_to_sql_literal)
+                    .unwrap_or_else(|| "NULL".to_string()),
+            );
+            continue;
+        }
+
+        if c == ':' || c == '@' || c == '$' {
+            let start = i;
+            let mut j = i + 1;
+            while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+                j += 1;
+            }
+            if j > start + 1 {
+                let spec: String = chars[start..j].iter().collect();
+                let idx = resolver.resolve(&parse_param_marker(&spec));
+                out.push_str(
+                    &bindings
+                        .get(&idx)
+                        .map(value_to_sql_literal)
+                        .unwrap_or_else(|| "NULL".to_string()),
+                );
+                i = j;
+                continue;
+            }
+        }
+
+        out.push(c);
+        i += 1;
+    }
+    out
 }
 
 #[cfg(test)]
@@ -546,28 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn parameter_introspection_always_reports_none_or_zero() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
-        let stmt = conn.prepare("SELECT * FROM t").unwrap();
-
-        assert_eq!(stmt.parameter_count(), 0);
-        assert_eq!(stmt.parameter_name(0), None);
-        assert_eq!(stmt.parameter_index("anything").unwrap(), None);
-    }
-
-    #[test]
-    fn expanded_sql_returns_the_original_text() {
-        let mut conn = Connection::open_in_memory().unwrap();
-        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
-        let stmt = conn.prepare("SELECT * FROM t WHERE a = 1").unwrap();
-        assert_eq!(
-            stmt.expanded_sql(),
-            Some("SELECT * FROM t WHERE a = 1".to_string())
-        );
-    }
-
-    #[test]
     fn readonly_distinguishes_select_from_mutating_statements() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
@@ -606,5 +892,189 @@ mod tests {
         conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
         let stmt = conn.prepare("SELECT * FROM t").unwrap();
         assert!(stmt.finalize().is_ok());
+    }
+
+    #[test]
+    fn parameter_count_and_name_for_anonymous_and_named_markers() {
+        // This crate's `WHERE` grammar is a single comparison -- no
+        // `AND`/`OR` combining yet (a pre-existing limitation, unrelated
+        // to parameter binding) -- so both markers are placed inside one
+        // function call's argument list instead.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        let stmt = conn
+            .prepare("SELECT * FROM t WHERE F(?, :name) = 1")
+            .unwrap();
+        assert_eq!(stmt.parameter_count(), 2);
+        assert_eq!(stmt.parameter_name(1), None);
+        assert_eq!(stmt.parameter_name(2), Some(":name"));
+        assert_eq!(stmt.parameter_index(":name").unwrap(), Some(2));
+        assert_eq!(stmt.parameter_index(":missing").unwrap(), None);
+    }
+
+    #[test]
+    fn repeated_named_parameter_reuses_one_index() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER)")
+            .unwrap();
+        let stmt = conn.prepare("SELECT * FROM t WHERE F(:x, :x) = 1").unwrap();
+        assert_eq!(stmt.parameter_count(), 1);
+        assert_eq!(stmt.parameter_name(1), Some(":x"));
+    }
+
+    #[test]
+    fn numbered_parameter_bumps_the_auto_counter() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER)")
+            .unwrap();
+        // ?2 claims index 2; the next bare `?` should become index 3, not 2.
+        let stmt = conn
+            .prepare("SELECT * FROM t WHERE F(?2, ?, ?1) = 1")
+            .unwrap();
+        assert_eq!(stmt.parameter_count(), 3);
+    }
+
+    #[test]
+    fn raw_bind_parameter_and_execute_insert_with_anonymous_markers() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?, ?)").unwrap();
+        stmt.raw_bind_parameter(1, 42i64).unwrap();
+        stmt.raw_bind_parameter(2, "hi").unwrap();
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(42), Value::Text("hi".into())]);
+    }
+
+    #[test]
+    fn unbound_parameter_defaults_to_null() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?, ?)").unwrap();
+        stmt.raw_bind_parameter(1, 1i64).unwrap();
+        // Index 2 left unbound on purpose.
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Null]);
+    }
+
+    #[test]
+    fn clear_bindings_reverts_to_unbound() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?)").unwrap();
+        stmt.raw_bind_parameter(1, 9i64).unwrap();
+        stmt.clear_bindings();
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Null]);
+    }
+
+    #[test]
+    fn rebinding_an_index_overwrites_the_previous_value() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?)").unwrap();
+        stmt.raw_bind_parameter(1, 1i64).unwrap();
+        stmt.raw_bind_parameter(1, 2i64).unwrap();
+        stmt.execute().unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(2)]);
+    }
+
+    #[test]
+    fn bound_parameter_usable_in_where_clause() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t WHERE a = ?").unwrap();
+        stmt.raw_bind_parameter(1, 2i64).unwrap();
+        let values: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        assert_eq!(values, vec![2]);
+    }
+
+    #[test]
+    fn named_parameter_usable_in_where_clause() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t WHERE a = :target").unwrap();
+        let idx = stmt.parameter_index(":target").unwrap().unwrap();
+        stmt.raw_bind_parameter(idx, 3i64).unwrap();
+        let values: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        assert_eq!(values, vec![3]);
+    }
+
+    #[test]
+    fn rebinding_and_reexecuting_a_where_clause_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t WHERE a = ?").unwrap();
+        stmt.raw_bind_parameter(1, 1i64).unwrap();
+        assert_eq!(stmt.query_map(|row| row.get::<i64>(0)).unwrap(), vec![1]);
+
+        stmt.raw_bind_parameter(1, 2i64).unwrap();
+        assert_eq!(stmt.query_map(|row| row.get::<i64>(0)).unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn expanded_sql_with_no_bindings_is_the_original_text() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t WHERE a = 1").unwrap();
+        assert_eq!(
+            stmt.expanded_sql(),
+            Some("SELECT * FROM t WHERE a = 1".to_string())
+        );
+    }
+
+    #[test]
+    fn expanded_sql_substitutes_bound_values() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        let mut stmt = conn
+            .prepare("SELECT * FROM t WHERE a = ? AND b = :name")
+            .unwrap();
+        stmt.raw_bind_parameter(1, 5i64).unwrap();
+        stmt.raw_bind_parameter(2, "it's").unwrap();
+        assert_eq!(
+            stmt.expanded_sql(),
+            Some("SELECT * FROM t WHERE a = 5 AND b = 'it''s'".to_string())
+        );
+    }
+
+    #[test]
+    fn expanded_sql_substitutes_unbound_as_null() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t WHERE a = ?").unwrap();
+        assert_eq!(
+            stmt.expanded_sql(),
+            Some("SELECT * FROM t WHERE a = NULL".to_string())
+        );
+    }
+
+    #[test]
+    fn parameter_inside_string_literal_is_not_mistaken_for_a_marker() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a TEXT)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t WHERE a = '?'").unwrap();
+        assert_eq!(stmt.parameter_count(), 0);
+        assert_eq!(
+            stmt.expanded_sql(),
+            Some("SELECT * FROM t WHERE a = '?'".to_string())
+        );
     }
 }

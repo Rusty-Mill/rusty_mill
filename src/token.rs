@@ -21,6 +21,13 @@ pub enum Token {
     /// A single- or multi-character punctuation/operator token, e.g. `,`,
     /// `(`, `)`, `=`, `<>`, `<=`.
     Punct(&'static str),
+    /// A `?`/`?N`/`:name`/`@name`/`$name`-style bound-parameter marker
+    /// (see `docs/adr/0002-parameter-markers.md`). The stored text is the
+    /// digits after `?` (empty for a bare `?`), or the sigil-plus-name
+    /// text for the named forms — SQLite treats `:foo`/`@foo`/`$foo` as
+    /// distinct parameters even when the name matches, so the sigil is
+    /// part of the identity, not decoration.
+    Param(String),
     /// End of input.
     Eof,
 }
@@ -67,6 +74,29 @@ pub fn tokenize(sql: &str) -> Result<Vec<Token>, TokenError> {
             let (tok, next) = read_number(&chars, i);
             tokens.push(tok);
             i = next;
+            continue;
+        }
+
+        if c == '?' {
+            let start = i;
+            i += 1;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            tokens.push(Token::Param(chars[start + 1..i].iter().collect()));
+            continue;
+        }
+
+        if c == ':' || c == '@' || c == '$' {
+            let start = i;
+            i += 1;
+            while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            if i == start + 1 {
+                return Err(TokenError::UnexpectedChar(c));
+            }
+            tokens.push(Token::Param(chars[start..i].iter().collect()));
             continue;
         }
 
@@ -266,6 +296,47 @@ mod tests {
 
     #[test]
     fn unexpected_char_is_an_error() {
+        assert_eq!(tokenize("a # b"), Err(TokenError::UnexpectedChar('#')));
+    }
+
+    #[test]
+    fn bare_sigil_with_no_name_is_an_error() {
         assert_eq!(tokenize("a @ b"), Err(TokenError::UnexpectedChar('@')));
+        assert_eq!(tokenize("a : b"), Err(TokenError::UnexpectedChar(':')));
+        assert_eq!(tokenize("a $ b"), Err(TokenError::UnexpectedChar('$')));
+    }
+
+    #[test]
+    fn tokenizes_anonymous_and_numbered_params() {
+        let tokens = tokenize("a = ? AND b = ?2").unwrap();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Ident("a".into()),
+                Token::Punct("="),
+                Token::Param("".into()),
+                Token::Ident("AND".into()),
+                Token::Ident("b".into()),
+                Token::Punct("="),
+                Token::Param("2".into()),
+                Token::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizes_named_params_with_distinct_sigils() {
+        assert_eq!(
+            tokenize(":foo").unwrap(),
+            vec![Token::Param(":foo".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokenize("@foo").unwrap(),
+            vec![Token::Param("@foo".into()), Token::Eof]
+        );
+        assert_eq!(
+            tokenize("$foo").unwrap(),
+            vec![Token::Param("$foo".into()), Token::Eof]
+        );
     }
 }

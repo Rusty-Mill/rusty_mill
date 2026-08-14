@@ -60,6 +60,17 @@ impl ToSql for str {
     }
 }
 
+impl ToSql for &str {
+    /// A separate impl from [`ToSql for str`] (the unsized one), rather
+    /// than relying on it alone: a bound like `T: ToSql` (used by e.g.
+    /// [`crate::Statement::raw_bind_parameter`]) implicitly requires
+    /// `T: Sized`, which only `&str` — not `str` itself — satisfies. This
+    /// is what lets `stmt.raw_bind_parameter(1, "hi")` work directly.
+    fn to_sql(&self) -> Value {
+        Value::Text(self.to_string())
+    }
+}
+
 impl ToSql for Vec<u8> {
     fn to_sql(&self) -> Value {
         Value::Blob(self.clone())
