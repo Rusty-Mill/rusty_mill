@@ -958,6 +958,27 @@ impl Connection {
         Ok(affected)
     }
 
+    /// Prepares `sql`, binds `params` (see [`crate::Params`]), and runs
+    /// it in one call — the ergonomic counterpart to real
+    /// `rusqlite::Connection::execute(sql, params)`. Kept as a new
+    /// method rather than changing [`Connection::execute`]'s
+    /// already-shipped no-params signature.
+    ///
+    /// **Narrower than [`Connection::execute`]:** built on
+    /// [`crate::Statement::execute`], which — per that method's own doc
+    /// comment — doesn't fire `trace`/`profile`/`commit_hook`/
+    /// `update_hook`/the authorizer the way [`Connection::execute`]
+    /// does.
+    pub fn execute_with_params<P: crate::params::Params>(
+        &mut self,
+        sql: &str,
+        params: P,
+    ) -> Result<usize> {
+        self.check_open()?;
+        let mut stmt = self.prepare(sql)?;
+        stmt.execute_with_params(params)
+    }
+
     /// Executes a `SELECT` expected to return exactly one row, returning
     /// that row's values in the statement's result-column order. Errors
     /// with [`Error::QueryReturnedNoRows`] if the query matched no rows.
@@ -1023,6 +1044,22 @@ impl Connection {
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
+    }
+
+    /// Prepares `sql`, binds `params` (see [`crate::Params`]), and maps
+    /// every matching row through `f`. The ergonomic counterpart to real
+    /// `rusqlite::Connection`-adjacent `query_map(sql, params, f)` call
+    /// sites — see [`Connection::execute_with_params`] for the same
+    /// "narrower than the plain method" caveat (no `trace`/`profile`/
+    /// authorizer here either).
+    pub fn query_map_with_params<P, T, F>(&mut self, sql: &str, params: P, f: F) -> Result<Vec<T>>
+    where
+        P: crate::params::Params,
+        F: FnMut(Row<'_>) -> Result<T>,
+    {
+        self.check_open()?;
+        let mut stmt = self.prepare(sql)?;
+        stmt.query_map_with_params(params, f)
     }
 
     /// Executes each `;`-separated statement in `sql` in turn via
@@ -1104,6 +1141,32 @@ mod tests {
 
         let row = conn.query_row("SELECT * FROM t WHERE a = 1").unwrap();
         assert_eq!(row, vec![Value::Integer(1), Value::Text("x".into())]);
+    }
+
+    #[test]
+    fn execute_with_params_binds_and_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+
+        let affected = conn
+            .execute_with_params("INSERT INTO t VALUES (?, ?)", (1i64, "x"))
+            .unwrap();
+        assert_eq!(affected, 1);
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Text("x".into())]);
+    }
+
+    #[test]
+    fn query_map_with_params_binds_and_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let values: Vec<i64> = conn
+            .query_map_with_params("SELECT * FROM t WHERE a = ?", (2i64,), |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, vec![2]);
     }
 
     #[test]
