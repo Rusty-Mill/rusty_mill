@@ -23,6 +23,27 @@ entry per PR.
 
 ---
 
+## PR #67 — Add starter pragma support (closes #16)
+**2026-08-14** · [#67](https://github.com/baileyrd/rusty_-rusqlite/pull/67)
+
+- **Added:** `Connection::pragma_query_value`/`pragma_table_info`/
+  `pragma_update`/`pragma_update_and_check` for exactly two pragmas —
+  `foreign_keys` (routes to the existing `DbConfig::EnableForeignKeys`
+  flag from #64) and `table_info` (reads the real column schema captured
+  since #62's `Table::columns` addition). Any other pragma name errors
+  with `UnrecognizedStatement` — full pragma coverage is its own future
+  gap-analysis pass, not this issue's scope.
+- **Design deviation, stated plainly:** real `rusqlite` routes
+  `table_info` through its generic `pragma(name, value, f)` method rather
+  than a dedicated method. This crate has a dedicated
+  `pragma_table_info` instead, and doesn't implement the fully generic
+  `pragma`/`pragma_query` (no-value multi-row) methods — narrower, but
+  covers both pragmas the issue names.
+- 4 new unit tests (89 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #66 — Add Connection busy handling (closes #23)
 **2026-08-14** · [#66](https://github.com/baileyrd/rusty_-rusqlite/pull/66)
 
