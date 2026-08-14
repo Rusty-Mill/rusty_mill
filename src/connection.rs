@@ -2,8 +2,9 @@ use crate::config::{DbConfig, Limit};
 use crate::ddl::{parse_create_table, ColumnDef};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::parse_select;
-use crate::engine::{execute_create_table, execute_insert, execute_select};
+use crate::engine::{execute_create_table, execute_insert, execute_select_with_functions};
 use crate::error::{Error, Result};
+use crate::eval::ScalarFn;
 use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
@@ -51,6 +52,7 @@ pub struct Connection {
     errmsg: Option<String>,
     busy_timeout: Option<std::time::Duration>,
     busy_handler: Option<fn(i32) -> bool>,
+    functions: HashMap<String, Box<ScalarFn>>,
 }
 
 impl Connection {
@@ -66,6 +68,7 @@ impl Connection {
             errmsg: None,
             busy_timeout: None,
             busy_handler: None,
+            functions: HashMap::new(),
         })
     }
 
@@ -342,6 +345,36 @@ impl Connection {
         Ok(())
     }
 
+    /// Registers a scalar SQL function callable from `WHERE` filter
+    /// expressions (e.g. `WHERE UPPER(name) = 'X'`). Only usable in
+    /// `WHERE` today — result-column projection with function calls
+    /// (`SELECT UPPER(name) FROM t`) isn't supported yet, since
+    /// `SelectColumns::Named` is a plain column-name list, not a list of
+    /// expressions.
+    ///
+    /// **Design deviation, stated plainly:** unlike
+    /// `rusqlite::Connection::create_scalar_function`, this takes a raw
+    /// `Fn(&[Value]) -> Result<Value>` rather than a generic signature
+    /// derived from `ToSql`/`FromSql` argument/return types, and there's
+    /// no `FunctionFlags` (deterministic/innocuous markers the query
+    /// planner would use — this engine has no query planner to use them).
+    pub fn create_scalar_function<F>(&mut self, name: &str, f: F) -> Result<()>
+    where
+        F: Fn(&[Value]) -> Result<Value> + 'static,
+    {
+        self.functions.insert(name.to_string(), Box::new(f));
+        Ok(())
+    }
+
+    /// Unregisters a scalar function previously registered via
+    /// [`Connection::create_scalar_function`]. A no-op (not an error) if
+    /// `name` wasn't registered, matching `rusqlite`'s own tolerance of
+    /// removing a function that isn't there.
+    pub fn remove_function(&mut self, name: &str) -> Result<()> {
+        self.functions.remove(name);
+        Ok(())
+    }
+
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
     pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
@@ -435,7 +468,7 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (_, mut rows) = execute_select(&self.db, &select)?;
+        let (_, mut rows) = execute_select_with_functions(&self.db, &select, &self.functions)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -451,7 +484,8 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (columns, mut rows) = execute_select(&self.db, &select)?;
+        let (columns, mut rows) =
+            execute_select_with_functions(&self.db, &select, &self.functions)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -468,7 +502,7 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (columns, rows) = execute_select(&self.db, &select)?;
+        let (columns, rows) = execute_select_with_functions(&self.db, &select, &self.functions)?;
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -739,5 +773,47 @@ mod tests {
     fn deserialize_rejects_garbage() {
         let mut conn = Connection::open_in_memory().unwrap();
         assert!(conn.deserialize(b"not a real database").is_err());
+    }
+
+    #[test]
+    fn scalar_function_usable_in_where_clause() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        conn.create_scalar_function("DOUBLE", |args| match args {
+            [Value::Integer(n)] => Ok(Value::Integer(n * 2)),
+            _ => Err(Error::FunctionNotFound("DOUBLE".into())),
+        })
+        .unwrap();
+
+        let values: Vec<i64> = conn
+            .query_map("SELECT * FROM t WHERE DOUBLE(a) = 4", |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, vec![2]);
+    }
+
+    #[test]
+    fn removed_function_is_no_longer_found() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (2)").unwrap();
+        conn.create_scalar_function("DOUBLE", |args| match args {
+            [Value::Integer(n)] => Ok(Value::Integer(n * 2)),
+            _ => Err(Error::FunctionNotFound("DOUBLE".into())),
+        })
+        .unwrap();
+        conn.remove_function("DOUBLE").unwrap();
+
+        assert!(conn
+            .query_map("SELECT * FROM t WHERE DOUBLE(a) = 4", |row| row
+                .get::<i64>(0))
+            .is_err());
+    }
+
+    #[test]
+    fn removing_unregistered_function_is_not_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(conn.remove_function("NEVER_REGISTERED").is_ok());
     }
 }

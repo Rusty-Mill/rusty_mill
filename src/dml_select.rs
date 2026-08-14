@@ -35,6 +35,14 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    /// A scalar function call, e.g. `UPPER(name)`. Evaluated only by
+    /// `eval::evaluate_with_functions` — plain `evaluate`/`evaluate_bool`
+    /// (which predate function-call support) error on this variant rather
+    /// than silently treating it as something else.
+    FunctionCall {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +130,14 @@ impl<'a> SelectParser<'a> {
         }
     }
 
+    fn expect_punct(&mut self, p: &str) -> Result<(), ParseError> {
+        match self.advance() {
+            Some(Token::Punct(s)) if *s == p => Ok(()),
+            Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
+            Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+        }
+    }
+
     fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_operand()?;
         let op = match self.advance() {
@@ -143,12 +159,44 @@ impl<'a> SelectParser<'a> {
     }
 
     fn parse_operand(&mut self) -> Result<Expr, ParseError> {
-        match self.advance() {
-            Some(Token::Ident(s)) => Ok(Expr::Column(s.clone())),
-            Some(Token::Integer(n)) => Ok(Expr::Literal(Value::Integer(*n))),
-            Some(Token::Real(f)) => Ok(Expr::Literal(Value::Real(*f))),
-            Some(Token::String(s)) => Ok(Expr::Literal(Value::Text(s.clone()))),
-            Some(Token::Blob(b)) => Ok(Expr::Literal(Value::Blob(b.clone()))),
+        match self.peek().cloned() {
+            Some(Token::Ident(name)) => {
+                self.advance();
+                if self.peek_punct("(") {
+                    self.advance();
+                    let mut args = Vec::new();
+                    if !self.peek_punct(")") {
+                        loop {
+                            args.push(self.parse_operand()?);
+                            if self.peek_punct(",") {
+                                self.advance();
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect_punct(")")?;
+                    Ok(Expr::FunctionCall { name, args })
+                } else {
+                    Ok(Expr::Column(name))
+                }
+            }
+            Some(Token::Integer(n)) => {
+                self.advance();
+                Ok(Expr::Literal(Value::Integer(n)))
+            }
+            Some(Token::Real(f)) => {
+                self.advance();
+                Ok(Expr::Literal(Value::Real(f)))
+            }
+            Some(Token::String(s)) => {
+                self.advance();
+                Ok(Expr::Literal(Value::Text(s)))
+            }
+            Some(Token::Blob(b)) => {
+                self.advance();
+                Ok(Expr::Literal(Value::Blob(b)))
+            }
             Some(Token::Eof) | None => Err(ParseError::UnexpectedEof),
             Some(other) => Err(ParseError::UnexpectedToken(format!("{other:?}"))),
         }
@@ -214,5 +262,54 @@ mod tests {
             parse_select(&tokens),
             Err(ParseError::UnexpectedToken(_))
         ));
+    }
+
+    #[test]
+    fn parses_function_call_in_where() {
+        let tokens = tokenize("SELECT * FROM t WHERE UPPER(name) = 'X'").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(
+            select.filter,
+            Some(Expr::BinaryOp {
+                op: BinaryOp::Eq,
+                left: Box::new(Expr::FunctionCall {
+                    name: "UPPER".into(),
+                    args: vec![Expr::Column("name".into())],
+                }),
+                right: Box::new(Expr::Literal(Value::Text("X".into()))),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_function_call_with_multiple_args() {
+        let tokens = tokenize("SELECT * FROM t WHERE ADD(a, 1) = 2").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        let Some(Expr::BinaryOp { left, .. }) = select.filter else {
+            panic!("expected BinaryOp");
+        };
+        assert_eq!(
+            *left,
+            Expr::FunctionCall {
+                name: "ADD".into(),
+                args: vec![Expr::Column("a".into()), Expr::Literal(Value::Integer(1))],
+            }
+        );
+    }
+
+    #[test]
+    fn parses_function_call_with_no_args() {
+        let tokens = tokenize("SELECT * FROM t WHERE RANDOM() = 0").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        let Some(Expr::BinaryOp { left, .. }) = select.filter else {
+            panic!("expected BinaryOp");
+        };
+        assert_eq!(
+            *left,
+            Expr::FunctionCall {
+                name: "RANDOM".into(),
+                args: vec![],
+            }
+        );
     }
 }

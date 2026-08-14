@@ -37,6 +37,10 @@ pub enum Error {
     /// valid output from [`crate::serialize::serialize`] (bad magic,
     /// truncated data, or an unrecognized value tag).
     Deserialize,
+    /// An expression called a scalar function that isn't registered on
+    /// the connection (or, for plain `eval::evaluate`, any function call
+    /// at all — see that function's doc comment).
+    FunctionNotFound(String),
 }
 
 impl fmt::Display for Error {
@@ -58,6 +62,7 @@ impl fmt::Display for Error {
             Error::FromSql(e) => write!(f, "column conversion error: {e:?}"),
             Error::NoSuchDatabase(name) => write!(f, "no such database: {name:?}"),
             Error::Deserialize => write!(f, "invalid serialized database data"),
+            Error::FunctionNotFound(name) => write!(f, "no such function: {name:?}"),
         }
     }
 }

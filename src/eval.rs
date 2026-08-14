@@ -1,15 +1,38 @@
 //! Expression evaluator (foundation-tier `A6`). Evaluates the [`Expr`]
 //! tree the `SELECT` parser produces against a single row, without
 //! knowledge of scanning or storage — those are `A7`.
+//!
+//! Also home to scalar-function-call evaluation (Part B gap row
+//! "Connection + functions module: scalar SQL functions") via
+//! [`evaluate_with_functions`], added without changing [`evaluate`]'s
+//! signature — [`evaluate`] is now defined in terms of it (an empty
+//! registry), so both stay in sync from one implementation.
 
 use crate::dml_select::{BinaryOp, Expr};
 use crate::error::{Error, Result};
 use crate::value::Value;
 use std::cmp::Ordering;
+use std::collections::HashMap;
+
+/// A registered scalar SQL function: takes evaluated argument values,
+/// returns the function's result.
+pub type ScalarFn = dyn Fn(&[Value]) -> Result<Value>;
 
 /// Evaluates an expression against one row, given the row's column names
-/// in the same order as its values.
+/// in the same order as its values. Errors on [`Expr::FunctionCall`] —
+/// use [`evaluate_with_functions`] for expressions that may contain one.
 pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<Value> {
+    evaluate_with_functions(expr, column_names, row, &HashMap::new())
+}
+
+/// Like [`evaluate`], but resolves [`Expr::FunctionCall`] against
+/// `functions` (name → implementation).
+pub fn evaluate_with_functions(
+    expr: &Expr,
+    column_names: &[String],
+    row: &[Value],
+    functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<Value> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Column(name) => {
@@ -20,8 +43,8 @@ pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<V
             Ok(row[idx].clone())
         }
         Expr::BinaryOp { op, left, right } => {
-            let l = evaluate(left, column_names, row)?;
-            let r = evaluate(right, column_names, row)?;
+            let l = evaluate_with_functions(left, column_names, row, functions)?;
+            let r = evaluate_with_functions(right, column_names, row, functions)?;
             let ord = compare_values(&l, &r);
             let result = match op {
                 BinaryOp::Eq => ord == Ordering::Equal,
@@ -33,13 +56,38 @@ pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<V
             };
             Ok(Value::Integer(result as i64))
         }
+        Expr::FunctionCall { name, args } => {
+            let f = functions
+                .get(name)
+                .ok_or_else(|| Error::FunctionNotFound(name.clone()))?;
+            let arg_values = args
+                .iter()
+                .map(|a| evaluate_with_functions(a, column_names, row, functions))
+                .collect::<Result<Vec<Value>>>()?;
+            f(&arg_values)
+        }
     }
 }
 
 /// Evaluates an expression as a boolean filter (SQLite's convention: any
 /// non-zero, non-null value is true).
 pub fn evaluate_bool(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<bool> {
-    Ok(match evaluate(expr, column_names, row)? {
+    to_bool(evaluate(expr, column_names, row)?)
+}
+
+/// Like [`evaluate_bool`], but resolves function calls against
+/// `functions` — see [`evaluate_with_functions`].
+pub fn evaluate_bool_with_functions(
+    expr: &Expr,
+    column_names: &[String],
+    row: &[Value],
+    functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<bool> {
+    to_bool(evaluate_with_functions(expr, column_names, row, functions)?)
+}
+
+fn to_bool(value: Value) -> Result<bool> {
+    Ok(match value {
         Value::Null => false,
         Value::Integer(n) => n != 0,
         Value::Real(f) => f != 0.0,
@@ -131,5 +179,48 @@ mod tests {
     #[test]
     fn null_is_falsy() {
         assert!(!evaluate_bool(&Expr::Literal(Value::Null), &cols(), &[]).unwrap());
+    }
+
+    #[test]
+    fn plain_evaluate_errors_on_function_call() {
+        let expr = Expr::FunctionCall {
+            name: "UPPER".into(),
+            args: vec![],
+        };
+        assert_eq!(
+            evaluate(&expr, &cols(), &[]),
+            Err(Error::FunctionNotFound("UPPER".into()))
+        );
+    }
+
+    #[test]
+    fn evaluate_with_functions_calls_registered_function() {
+        let mut functions: HashMap<String, Box<ScalarFn>> = HashMap::new();
+        functions.insert(
+            "DOUBLE".to_string(),
+            Box::new(|args: &[Value]| match args {
+                [Value::Integer(n)] => Ok(Value::Integer(n * 2)),
+                _ => Err(Error::FunctionNotFound("DOUBLE".into())),
+            }),
+        );
+        let expr = Expr::FunctionCall {
+            name: "DOUBLE".into(),
+            args: vec![Expr::Literal(Value::Integer(21))],
+        };
+        let result = evaluate_with_functions(&expr, &cols(), &[], &functions).unwrap();
+        assert_eq!(result, Value::Integer(42));
+    }
+
+    #[test]
+    fn evaluate_with_functions_errors_on_unregistered_function() {
+        let functions: HashMap<String, Box<ScalarFn>> = HashMap::new();
+        let expr = Expr::FunctionCall {
+            name: "MISSING".into(),
+            args: vec![],
+        };
+        assert_eq!(
+            evaluate_with_functions(&expr, &cols(), &[], &functions),
+            Err(Error::FunctionNotFound("MISSING".into()))
+        );
     }
 }
