@@ -23,6 +23,18 @@ entry per PR.
 
 ---
 
+## PR #56 — Add FromSql trait (closes #37)
+**2026-08-14** · [#56](https://github.com/baileyrd/rusty_-rusqlite/pull/56)
+
+- **Added:** `FromSql`/`FromSqlError`/`FromSqlResult` — converts a stored
+  `Value` back into a Rust type (`Value`/`i64`/`i32`/`f64`/`bool`/
+  `String`/`Vec<u8>`/`Option<T>`), erroring on storage-class mismatch or
+  (for `i32`) out-of-range values.
+- 6 new unit tests (56 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #55 — Add ToSql trait (closes #36)
 **2026-08-14** · [#55](https://github.com/baileyrd/rusty_-rusqlite/pull/55)
 
