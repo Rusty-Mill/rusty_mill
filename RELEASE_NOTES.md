@@ -23,6 +23,32 @@ entry per PR.
 
 ---
 
+## PR #84 — Add BindIndex/Params/Name traits (closes #44)
+**2026-08-14** · [#84](https://github.com/baileyrd/rusty_-rusqlite/pull/84)
+
+- **Added:** a new `params` module with `BindIndex` (resolve a `usize` or
+  `&str` name to a bound-parameter index, via `Statement::parameter_index`)
+  and `Params` (bind a whole positional value set at once — implemented
+  for `()`, `&[T]`, `[T; N]`, and tuples up to 4 elements).
+  `RowIndex`/`OptionalExtension` — the other two traits #44 named — were
+  already implemented earlier in this project's history; this closes the
+  remaining gap.
+- **Provenance caveat, stated plainly:** #44 also named a top-level
+  `Name` trait, but no such trait could be confirmed in real `rusqlite`'s
+  current public API. Implemented as a best-effort interpretation — "the
+  name half of a named-parameter pair" (`&str`/`String` → the name text)
+  — documented in `params.rs` as unverified rather than presented as a
+  faithful port.
+- **Added, consuming the new traits:** `Statement::bind_parameter`
+  (`raw_bind_parameter` + `BindIndex` name resolution in one call),
+  `Statement::execute_with_params`/`query_map_with_params`, and
+  `Connection::execute_with_params`/`query_map_with_params` — all new
+  methods alongside the existing no-params ones, not signature changes.
+- 12 new unit tests (235 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #83 — Add real `?`/`:name` parameter binding (closes #25)
 **2026-08-14** · [#83](https://github.com/baileyrd/rusty_-rusqlite/pull/83)
 

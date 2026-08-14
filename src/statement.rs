@@ -151,6 +151,41 @@ impl<'conn> Statement<'conn> {
         self.bindings.clear();
     }
 
+    /// Like [`Statement::raw_bind_parameter`], but resolves `index`
+    /// through [`crate::BindIndex`] first — so a `&str` name works
+    /// directly (`stmt.bind_parameter(":name", value)`) instead of
+    /// needing a separate [`Statement::parameter_index`] lookup.
+    pub fn bind_parameter<I: crate::params::BindIndex, T: ToSql>(
+        &mut self,
+        index: I,
+        value: T,
+    ) -> Result<()> {
+        let idx = index.idx(self)?;
+        self.raw_bind_parameter(idx, value)
+    }
+
+    /// Binds `params` (see [`crate::Params`]) into every `?`/`?N`
+    /// position in order, then runs [`Statement::execute`]. The
+    /// ergonomic counterpart to real `rusqlite::Statement::execute(params)`
+    /// — kept as a new method rather than changing
+    /// [`Statement::execute`]'s already-shipped no-argument signature.
+    pub fn execute_with_params<P: crate::params::Params>(&mut self, params: P) -> Result<usize> {
+        params.bind_all(self)?;
+        self.execute()
+    }
+
+    /// Binds `params` (see [`crate::Params`]), then runs
+    /// [`Statement::query_map`]. The ergonomic counterpart to real
+    /// `rusqlite::Statement::query_map(params, f)`.
+    pub fn query_map_with_params<P, T, F>(&mut self, params: P, f: F) -> Result<Vec<T>>
+    where
+        P: crate::params::Params,
+        F: FnMut(Row<'_>) -> Result<T>,
+    {
+        params.bind_all(self)?;
+        self.query_map(f)
+    }
+
     /// Substitutes `expr`'s `Parameter` nodes with their bound value (or
     /// `Value::Null` if unbound) into a fully-concrete copy. Every
     /// `Parameter` here is already `ParamMarker::Numbered` — resolved by
@@ -999,6 +1034,42 @@ mod tests {
         let mut stmt = conn.prepare("SELECT * FROM t WHERE a = ?").unwrap();
         stmt.raw_bind_parameter(1, 2i64).unwrap();
         let values: Vec<i64> = stmt.query_map(|row| row.get(0)).unwrap();
+        assert_eq!(values, vec![2]);
+    }
+
+    #[test]
+    fn bind_parameter_resolves_a_name_directly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t WHERE a = :x").unwrap();
+        stmt.bind_parameter(":x", 2i64).unwrap();
+        assert_eq!(stmt.query_map(|row| row.get::<i64>(0)).unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn execute_with_params_binds_and_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+
+        let mut stmt = conn.prepare("INSERT INTO t VALUES (?, ?)").unwrap();
+        stmt.execute_with_params((1i64, "x")).unwrap();
+
+        let row = conn.query_row("SELECT * FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(1), Value::Text("x".into())]);
+    }
+
+    #[test]
+    fn query_map_with_params_binds_and_runs() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t WHERE a = ?").unwrap();
+        let values: Vec<i64> = stmt
+            .query_map_with_params((2i64,), |row| row.get(0))
+            .unwrap();
         assert_eq!(values, vec![2]);
     }
 
