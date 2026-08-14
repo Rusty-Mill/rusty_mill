@@ -23,6 +23,18 @@ entry per PR.
 
 ---
 
+## PR #49 — Add single-table SELECT parser (closes #6)
+**2026-08-14** · [#49](https://github.com/baileyrd/rusty_-rusqlite/pull/49)
+
+- **Added:** `parse_select`/`Select`/`SelectColumns`/`Expr`/`BinaryOp` —
+  parses `SELECT * | cols FROM table [WHERE <comparison>]` for a single
+  table, no joins/aggregates/subqueries. `WHERE` parses into an `Expr`
+  tree but isn't evaluated yet (that's `A6`).
+- 5 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #48 — Add INSERT parser (closes #5)
 **2026-08-14** · [#48](https://github.com/baileyrd/rusty_-rusqlite/pull/48)
 
