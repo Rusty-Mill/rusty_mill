@@ -26,6 +26,7 @@ most serious OAuth libraries (e.g. `oauth2-rs`).
 | RFC 6749 | The OAuth 2.0 Authorization Framework | `authorization`, `token` |
 | RFC 6750 | Bearer Token Usage | `bearer` |
 | RFC 7009 | Token Revocation | `revocation` |
+| RFC 7517 | JSON Web Key (JWK) — JWK Set parsing, `kid` selection | `jwks` |
 | RFC 7519 | JSON Web Token (JWT) | `jwt` |
 | RFC 7515 | JSON Web Signature (JWS) — HS256, RS256 | `jwt`, `jwt::rsa` |
 | RFC 7523 | JWT Profile for OAuth 2.0 Client Authentication and Authorization Grants | `token::jwt_bearer_request` |
@@ -94,7 +95,7 @@ let token = parse_token_response(status_code, &response_body)?;
 ## Testing
 
 ```sh
-cargo test    # 92 unit tests + 1 doc-test, including known-answer vectors
+cargo test    # 100 unit tests + 1 doc-test, including known-answer vectors
               # from RFC 4231 (HMAC), RFC 7636 (PKCE), and a JWT signed
               # by `openssl dgst -sign` outside this crate, verified
               # entirely with the hand-rolled RSA implementation.
