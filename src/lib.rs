@@ -22,7 +22,7 @@ mod tosql;
 mod transaction;
 mod value;
 
-pub use blob::Blob;
+pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit};
 pub use connection::{ColumnMetadata, Connection};
 pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
