@@ -32,6 +32,7 @@
 //! - RFC 7662 -- Token Introspection
 //! - RFC 8414 -- Authorization Server Metadata
 //! - RFC 8628 -- Device Authorization Grant
+//! - RFC 8693 -- OAuth 2.0 Token Exchange
 //! - RFC 9126 -- Pushed Authorization Requests (PAR)
 //! - OAuth 2.1 (draft-ietf-oauth-v2-1): PKCE is applied by default to every
 //!   authorization-code flow, and the deprecated Implicit and Resource
