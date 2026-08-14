@@ -23,6 +23,41 @@ entry per PR.
 
 ---
 
+## PR #74 — Add whole-table aggregate functions + collation registration (part of issue 19)
+**2026-08-14** · [#74](https://github.com/baileyrd/rusty_-rusqlite/pull/74)
+
+- **Added:** aggregate select lists — `SELECT COUNT(*), SUM(a) FROM t
+  WHERE ...` — via a new `SelectColumns::Aggregates` AST variant, folding
+  every row matching the `WHERE` filter into one output row. No `GROUP
+  BY` yet, so this is whole-table aggregation only, not grouped.
+- **Added:** `Connection::create_aggregate_function`/
+  `remove_aggregate_function` and the `Aggregate` type (starting
+  accumulator + `step`/`finalize` closures) for custom aggregates.
+  `COUNT`/`SUM`/`MIN`/`MAX` are seeded as built-ins on every new
+  connection, matching how real SQLite treats them as engine-core rather
+  than something a caller must register.
+- **Added:** `Connection::create_collation`/`remove_collation` for
+  registering a named text-comparison function.
+- **Design deviation, stated plainly:** `Aggregate` isn't
+  `rusqlite::functions::Aggregate<A, T>`'s generic trait with an
+  associated state type — it's a plain `Value` accumulator plus two
+  closures, which can't express something like `AVG` (needs a running
+  sum *and* count) or `GROUP_CONCAT`. Not provided as a built-in here.
+- **Not enforced:** collations are stored but never consulted — there's
+  no `COLLATE name` clause in the `WHERE`/`ORDER BY` grammar yet for a
+  query to opt into one. Same "stored honestly, not silently discarded"
+  treatment as `busy_timeout`/`db_config`.
+- **Scope note:** issue #19 also covers window functions
+  (`create_window_function`, `WindowAggregate`, `OVER`/`PARTITION BY`
+  parsing). Left for a follow-up — that's a comparable amount of new
+  parsing/execution machinery to the vtab epic (#38), not a small
+  addition on top of this PR. Issue stays open; see its tracking
+  comment.
+- 15 new unit tests (141 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #73 — Add ZeroBlob (finishes issue 21)
 **2026-08-14** · [#73](https://github.com/baileyrd/rusty_-rusqlite/pull/73)
 

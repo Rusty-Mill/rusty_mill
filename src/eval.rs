@@ -99,7 +99,7 @@ fn to_bool(value: Value) -> Result<bool> {
 /// Orders two values per SQLite's storage-class ordering (`NULL` <
 /// `INTEGER`/`REAL` < `TEXT` < `BLOB`), comparing within a class when both
 /// sides share it. See <https://www.sqlite.org/datatype3.html#sort_order>.
-fn compare_values(a: &Value, b: &Value) -> Ordering {
+pub(crate) fn compare_values(a: &Value, b: &Value) -> Ordering {
     fn class_rank(v: &Value) -> u8 {
         match v {
             Value::Null => 0,

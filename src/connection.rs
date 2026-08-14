@@ -1,15 +1,24 @@
+use crate::aggregate::{self, Aggregate};
 use crate::config::{DbConfig, Limit};
 use crate::ddl::{parse_create_table, ColumnDef};
 use crate::dml_insert::parse_insert;
-use crate::dml_select::parse_select;
-use crate::engine::{execute_create_table, execute_insert, execute_select_with_functions};
+use crate::dml_select::{parse_select, SelectColumns};
+use crate::engine::{
+    execute_create_table, execute_insert, execute_select_with_aggregates,
+    execute_select_with_functions,
+};
 use crate::error::{Error, Result};
 use crate::eval::ScalarFn;
 use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::value::Value;
+use std::cmp::Ordering;
 use std::collections::HashMap;
+
+/// A custom text-comparison function registered via
+/// [`Connection::create_collation`].
+type CollationFn = dyn Fn(&str, &str) -> Ordering;
 
 /// A table column's schema, as returned by [`Connection::column_metadata`].
 /// A subset of `rusqlite`'s equivalent (no collation sequence or
@@ -53,6 +62,8 @@ pub struct Connection {
     busy_timeout: Option<std::time::Duration>,
     busy_handler: Option<fn(i32) -> bool>,
     functions: HashMap<String, Box<ScalarFn>>,
+    aggregates: HashMap<String, Aggregate>,
+    collations: HashMap<String, Box<CollationFn>>,
 }
 
 impl Connection {
@@ -69,6 +80,8 @@ impl Connection {
             busy_timeout: None,
             busy_handler: None,
             functions: HashMap::new(),
+            aggregates: aggregate::builtins(),
+            collations: HashMap::new(),
         })
     }
 
@@ -375,6 +388,51 @@ impl Connection {
         Ok(())
     }
 
+    /// Registers an aggregate SQL function, usable in a whole-table
+    /// aggregate select list (e.g. `SELECT MEDIAN(a) FROM t`) — see
+    /// [`crate::Aggregate`] and [`crate::dml_select::SelectColumns::Aggregates`].
+    /// `COUNT`/`SUM`/`MIN`/`MAX` are already registered on every new
+    /// connection; registering under one of those names replaces the
+    /// built-in.
+    pub fn create_aggregate_function(&mut self, name: &str, aggregate: Aggregate) -> Result<()> {
+        self.aggregates.insert(name.to_string(), aggregate);
+        Ok(())
+    }
+
+    /// Unregisters an aggregate function (built-in or custom) previously
+    /// registered via [`Connection::create_aggregate_function`] or seeded
+    /// by default. A no-op if `name` wasn't registered.
+    pub fn remove_aggregate_function(&mut self, name: &str) -> Result<()> {
+        self.aggregates.remove(name);
+        Ok(())
+    }
+
+    /// Registers a custom text-comparison function under `name`.
+    ///
+    /// **Stored, not enforced:** this crate's `WHERE`/`ORDER BY` parsing
+    /// and evaluation (`eval::compare_values`) has no `COLLATE name`
+    /// clause to opt into a registered collation — there's no comparison
+    /// site that consults `collations` yet. Kept, same reasoning as
+    /// `Connection::busy_timeout`/`db_config`: stored honestly so a future
+    /// PR that adds `COLLATE` parsing has a registry to read from, rather
+    /// than silently discarding what's registered.
+    pub fn create_collation<F>(&mut self, name: &str, collation: F) -> Result<()>
+    where
+        F: Fn(&str, &str) -> Ordering + 'static,
+    {
+        self.collations
+            .insert(name.to_string(), Box::new(collation));
+        Ok(())
+    }
+
+    /// Unregisters a collation previously registered via
+    /// [`Connection::create_collation`]. A no-op if `name` wasn't
+    /// registered.
+    pub fn remove_collation(&mut self, name: &str) -> Result<()> {
+        self.collations.remove(name);
+        Ok(())
+    }
+
     /// Copies this connection's full table state into `dest`, replacing
     /// whatever `dest` had. Part B gap row "Connection + backup module:
     /// backup/restore between connections".
@@ -519,7 +577,7 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (_, mut rows) = execute_select_with_functions(&self.db, &select, &self.functions)?;
+        let (_, mut rows) = self.run_select(&select)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -535,8 +593,7 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (columns, mut rows) =
-            execute_select_with_functions(&self.db, &select, &self.functions)?;
+        let (columns, mut rows) = self.run_select(&select)?;
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
         }
@@ -553,7 +610,7 @@ impl Connection {
         self.check_open()?;
         let tokens = tokenize(sql)?;
         let select = parse_select(&tokens)?;
-        let (columns, rows) = execute_select_with_functions(&self.db, &select, &self.functions)?;
+        let (columns, rows) = self.run_select(&select)?;
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
             .collect()
@@ -583,6 +640,22 @@ impl Connection {
             return Err(Error::ConnectionClosed);
         }
         Ok(())
+    }
+
+    /// Runs a parsed `SELECT`, dispatching to
+    /// [`execute_select_with_aggregates`] for an aggregate select list
+    /// ([`SelectColumns::Aggregates`]) and [`execute_select_with_functions`]
+    /// for everything else.
+    fn run_select(
+        &self,
+        select: &crate::dml_select::Select,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        match &select.columns {
+            SelectColumns::Aggregates(_) => {
+                execute_select_with_aggregates(&self.db, select, &self.functions, &self.aggregates)
+            }
+            _ => execute_select_with_functions(&self.db, select, &self.functions),
+        }
     }
 }
 
@@ -904,5 +977,79 @@ mod tests {
 
         let values: Vec<i64> = b.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
         assert_eq!(values, vec![7]);
+    }
+
+    #[test]
+    fn count_star_and_sum_are_builtin_aggregates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let row = conn.query_row("SELECT COUNT(*), SUM(a) FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(3), Value::Integer(6)]);
+    }
+
+    #[test]
+    fn aggregate_respects_where_filter() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let row = conn
+            .query_row("SELECT COUNT(*) FROM t WHERE a = 2")
+            .unwrap();
+        assert_eq!(row, vec![Value::Integer(1)]);
+    }
+
+    #[test]
+    fn min_max_over_empty_table_are_null() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        let row = conn.query_row("SELECT MIN(a), MAX(a) FROM t").unwrap();
+        assert_eq!(row, vec![Value::Null, Value::Null]);
+    }
+
+    #[test]
+    fn custom_aggregate_function_is_usable() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (2), (3)").unwrap();
+
+        conn.create_aggregate_function(
+            "PRODUCT",
+            Aggregate::simple(Value::Integer(1), |acc, args| match (acc, args.first()) {
+                (Value::Integer(n), Some(Value::Integer(v))) => Ok(Value::Integer(n * v)),
+                (acc, _) => Ok(acc.clone()),
+            }),
+        )
+        .unwrap();
+
+        let row = conn.query_row("SELECT PRODUCT(a) FROM t").unwrap();
+        assert_eq!(row, vec![Value::Integer(6)]);
+    }
+
+    #[test]
+    fn removed_aggregate_function_is_no_longer_found() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        conn.remove_aggregate_function("COUNT").unwrap();
+
+        assert!(conn.query_row("SELECT COUNT(*) FROM t").is_err());
+    }
+
+    #[test]
+    fn collation_is_registered_and_removable_though_not_yet_consulted() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.create_collation("NOCASE_LIKE", |a, b| {
+            a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
+        })
+        .unwrap();
+        // Not enforced anywhere yet -- this only confirms registration and
+        // removal don't error, same as busy_timeout/busy_handler.
+        conn.remove_collation("NOCASE_LIKE").unwrap();
+        assert!(conn.remove_collation("NEVER_REGISTERED").is_ok());
     }
 }
