@@ -36,6 +36,7 @@ most serious OAuth libraries (e.g. `oauth2-rs`).
 | RFC 8414 | Authorization Server Metadata | `metadata` |
 | RFC 8628 | Device Authorization Grant | `device` |
 | RFC 8693 | OAuth 2.0 Token Exchange | `token::token_exchange_request` |
+| RFC 8705 | Mutual-TLS Client Authentication (request shape + `cnf` claim only, not the TLS handshake) | `client::AuthMethod::TlsClientAuth`, `introspection::IntrospectionResponse::cnf_x5t_s256` |
 | RFC 9126 | Pushed Authorization Requests (PAR) | `par` |
 | OAuth 2.1 (draft) | Consolidated best current practice | see below |
 
@@ -94,11 +95,12 @@ let token = parse_token_response(status_code, &response_body)?;
 - **RSA verification only, never signing.** `RS256` verification needs only modular exponentiation with a small public exponent, which doesn't need to run in constant time. RSA *signing*, by contrast, needs a constant-time modular exponentiation and secure prime generation to be safe — a much bigger undertaking this crate deliberately doesn't take on. This is also why `private_key_jwt` client authentication (RFC 7523 §2.2) takes a caller-supplied, already-signed assertion via `Client::with_client_assertion` rather than signing one itself — `client_secret_jwt` (HMAC-based) is signed internally, since HS256 signing is already implemented.
 - **Constant-time comparisons** for MACs, PKCE verifiers, and CSRF `state` checks (`crypto::hmac::constant_time_eq`).
 - **Redacted `Debug` for secrets.** `ClientSecret`'s `Debug` impl never prints the underlying value.
+- **mTLS is a request-shape concern, not a TLS concern.** `AuthMethod::TlsClientAuth`/`SelfSignedTlsClientAuth` only change how the request body looks (`client_id`, no secret); presenting the client certificate and verifying a `cnf.x5t#S256` thumbprint against it happens in your TLS stack, not here.
 
 ## Testing
 
 ```sh
-cargo test    # 116 unit tests + 1 doc-test, including known-answer vectors
+cargo test    # 121 unit tests + 1 doc-test, including known-answer vectors
               # from RFC 4231 (HMAC), RFC 7636 (PKCE), and a JWT signed
               # by `openssl dgst -sign` outside this crate, verified
               # entirely with the hand-rolled RSA implementation.
