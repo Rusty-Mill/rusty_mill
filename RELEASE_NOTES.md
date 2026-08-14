@@ -23,6 +23,22 @@ entry per PR.
 
 ---
 
+## PR #55 — Add ToSql trait (closes #36)
+**2026-08-14** · [#55](https://github.com/baileyrd/rusty_-rusqlite/pull/55)
+
+- **Added:** `ToSql` trait + blanket impls for `Value`/`i64`/`i32`/`f64`/
+  `bool`/`String`/`str`/`Vec<u8>`/`Option<T>`.
+- **Design deviation, stated plainly:** unlike `rusqlite::ToSql`,
+  `to_sql` here isn't fallible — none of these impls have a failure case,
+  so wrapping the return in `Result` would be error handling for a
+  scenario that can't happen. A future impl that genuinely can fail can
+  introduce a fallible variant then, without forcing today's impls to
+  pretend they can fail.
+- 3 new unit tests (51 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #54 — Add ValueRef (closes #35)
 **2026-08-14** · [#54](https://github.com/baileyrd/rusty_-rusqlite/pull/54)
 
