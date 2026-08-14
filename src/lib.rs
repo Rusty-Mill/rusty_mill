@@ -41,7 +41,7 @@ pub use eval::{
     evaluate, evaluate_bool, evaluate_bool_with_functions, evaluate_with_functions, ScalarFn,
 };
 pub use fromsql::{FromSql, FromSqlError, FromSqlResult};
-pub use hooks::{CheckpointMode, Wal};
+pub use hooks::{Action, AuthContext, Authorization, CheckpointMode, TransactionOperation, Wal};
 pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
