@@ -22,4 +22,4 @@ pub use error::{Error, Result};
 pub use eval::{evaluate, evaluate_bool};
 pub use storage::{Database, Table};
 pub use token::{tokenize, Token, TokenError};
-pub use value::{Type, Value};
+pub use value::{Type, Value, ValueRef};
