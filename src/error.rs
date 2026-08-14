@@ -33,6 +33,10 @@ pub enum Error {
     /// single implicit `"main"` database — this crate has no `ATTACH`
     /// support, so no other database ever exists.
     NoSuchDatabase(String),
+    /// [`crate::serialize::deserialize`] was given bytes that aren't
+    /// valid output from [`crate::serialize::serialize`] (bad magic,
+    /// truncated data, or an unrecognized value tag).
+    Deserialize,
 }
 
 impl fmt::Display for Error {
@@ -53,6 +57,7 @@ impl fmt::Display for Error {
             Error::QueryReturnedNoRows => write!(f, "query returned no rows"),
             Error::FromSql(e) => write!(f, "column conversion error: {e:?}"),
             Error::NoSuchDatabase(name) => write!(f, "no such database: {name:?}"),
+            Error::Deserialize => write!(f, "invalid serialized database data"),
         }
     }
 }

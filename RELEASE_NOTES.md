@@ -23,6 +23,28 @@ entry per PR.
 
 ---
 
+## PR #69 — Add Connection::serialize/deserialize (closes #17)
+**2026-08-14** · [#69](https://github.com/baileyrd/rusty_-rusqlite/pull/69)
+
+- **Added:** `Connection::serialize`/`deserialize`, backed by a
+  hand-rolled binary encoding of `Database`'s table state
+  (`src/serialize.rs`) — magic bytes, then length-prefixed tables,
+  columns, and values.
+- **Design deviation, stated plainly:** **not byte-compatible with real
+  SQLite's file format** — this crate has no page/B-tree file format at
+  all. Adding a real dependency (a serde-based crate) to build a more
+  conventional format would be a new-dependency decision needing
+  sign-off, so this is hand-rolled with only `std`. No
+  `deserialize_bytes`/`deserialize_read_exact` split either — this
+  crate's format has no ownership-transfer or partial-read story (real
+  SQLite's does, tied to its C memory model) for those to distinguish.
+- **Added:** `Database::tables`/`insert_table_raw` (read/raw-write access
+  for the serializer) and `Error::Deserialize`.
+- 6 new unit tests (99 total); all passing. `cargo clippy -- -D warnings`
+  and `cargo fmt --check` clean.
+
+---
+
 ## PR #68 — Add RowIndex/OptionalExtension (part of issue 44)
 **2026-08-14** · [#68](https://github.com/baileyrd/rusty_-rusqlite/pull/68)
 

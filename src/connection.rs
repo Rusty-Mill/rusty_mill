@@ -322,6 +322,26 @@ impl Connection {
         self.pragma_query_value(pragma_name, f)
     }
 
+    /// Serializes this connection's full table state into this crate's
+    /// own binary format (see `serialize.rs` — **not** byte-compatible
+    /// with real SQLite's file format, which this crate doesn't
+    /// implement).
+    pub fn serialize(&self) -> Vec<u8> {
+        crate::serialize::serialize(&self.db)
+    }
+
+    /// Replaces this connection's table state with what's encoded in
+    /// `bytes` (as produced by [`Connection::serialize`]). Unlike
+    /// `rusqlite::Connection::deserialize`, there's no separate
+    /// `deserialize_bytes`/`deserialize_read_exact` variant — this
+    /// crate's format has no ownership-transfer or partial-read story
+    /// (real SQLite's does, tied to its C memory model) for those to
+    /// distinguish.
+    pub fn deserialize(&mut self, bytes: &[u8]) -> Result<()> {
+        self.db = crate::serialize::deserialize(bytes)?;
+        Ok(())
+    }
+
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
     pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
@@ -697,5 +717,27 @@ mod tests {
         assert!(conn
             .pragma_query_value::<i64, _>("journal_mode", |row| row.get(0))
             .is_err());
+    }
+
+    #[test]
+    fn serialize_and_deserialize_round_trip() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let bytes = conn.serialize();
+
+        let mut restored = Connection::open_in_memory().unwrap();
+        restored.deserialize(&bytes).unwrap();
+        let values: Vec<i64> = restored
+            .query_map("SELECT * FROM t", |row| row.get(0))
+            .unwrap();
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn deserialize_rejects_garbage() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(conn.deserialize(b"not a real database").is_err());
     }
 }

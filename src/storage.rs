@@ -90,6 +90,22 @@ impl Database {
     pub fn restore(&mut self, snapshot: HashMap<String, Table>) {
         self.tables = snapshot;
     }
+
+    /// Returns all tables by name, for callers (e.g. `serialize`) that
+    /// need to walk the full set rather than look up one table.
+    pub fn tables(&self) -> &HashMap<String, Table> {
+        &self.tables
+    }
+
+    /// Inserts a table directly, bypassing [`Database::create_table`]'s
+    /// validation (no duplicate-name check, no `CREATE TABLE`-derived
+    /// column list). Used by [`crate::serialize::deserialize`] to
+    /// reconstruct a `Database` from previously-serialized state, which
+    /// is already known-valid — re-validating it through the normal
+    /// creation path would be redundant.
+    pub fn insert_table_raw(&mut self, name: String, table: Table) {
+        self.tables.insert(name, table);
+    }
 }
 
 #[cfg(test)]
