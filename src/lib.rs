@@ -22,6 +22,8 @@
 //! - RFC 6749 -- The OAuth 2.0 Authorization Framework
 //! - RFC 6750 -- Bearer Token Usage
 //! - RFC 7009 -- Token Revocation
+//! - RFC 7517 -- JSON Web Key (JWK), including JWK Set parsing and
+//!   `kid`-based key selection
 //! - RFC 7519 -- JSON Web Token (JWT)
 //! - RFC 7515 -- JSON Web Signature (JWS), HS256 and RS256
 //! - RFC 7523 -- JWT Profile for OAuth 2.0 Client Authentication and
@@ -68,6 +70,7 @@ pub mod encoding;
 pub mod error;
 pub mod introspection;
 pub mod json;
+pub mod jwks;
 pub mod jwt;
 pub mod metadata;
 pub mod pkce;
