@@ -247,6 +247,81 @@ impl Connection {
         Ok(())
     }
 
+    /// Runs a value-returning pragma query and maps its single result row
+    /// through `f`. **Starter subset**: only `foreign_keys` is
+    /// recognized (real SQLite has dozens of pragmas — full coverage is
+    /// its own future gap-analysis pass, not this issue's scope).
+    pub fn pragma_query_value<T, F>(&self, pragma_name: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(Row<'_>) -> Result<T>,
+    {
+        match pragma_name {
+            "foreign_keys" => {
+                let columns = vec!["foreign_keys".to_string()];
+                let values = vec![Value::Integer(
+                    self.db_config(DbConfig::EnableForeignKeys) as i64
+                )];
+                f(Row::new(&columns, &values))
+            }
+            other => Err(Error::UnrecognizedStatement(format!("PRAGMA {other}"))),
+        }
+    }
+
+    /// Runs `PRAGMA table_info(table_name)`, mapping each column's row
+    /// through `f`. Columns match SQLite's real `table_info` shape:
+    /// `cid`, `name`, `type`, `notnull`, `pk` (`dflt_value`/`cid`'s exact
+    /// semantics around dropped columns are omitted — this crate has no
+    /// concept of either).
+    pub fn pragma_table_info<F>(&self, table_name: &str, mut f: F) -> Result<()>
+    where
+        F: FnMut(Row<'_>) -> Result<()>,
+    {
+        let table = self.db.table(table_name)?;
+        let columns = vec![
+            "cid".to_string(),
+            "name".to_string(),
+            "type".to_string(),
+            "notnull".to_string(),
+            "pk".to_string(),
+        ];
+        for (cid, col) in table.columns.iter().enumerate() {
+            let values = vec![
+                Value::Integer(cid as i64),
+                Value::Text(col.name.clone()),
+                Value::Text(col.type_name.clone().unwrap_or_default()),
+                Value::Integer(col.not_null as i64),
+                Value::Integer(col.primary_key as i64),
+            ];
+            f(Row::new(&columns, &values))?;
+        }
+        Ok(())
+    }
+
+    /// Sets a pragma's value. **Starter subset**: only `foreign_keys` is
+    /// recognized.
+    pub fn pragma_update(&mut self, pragma_name: &str, value: bool) -> Result<()> {
+        match pragma_name {
+            "foreign_keys" => self.set_db_config(DbConfig::EnableForeignKeys, value),
+            other => Err(Error::UnrecognizedStatement(format!("PRAGMA {other}"))),
+        }
+    }
+
+    /// Like [`Connection::pragma_update`], but reads the value back
+    /// afterward and passes it through `f` to confirm what was actually
+    /// applied.
+    pub fn pragma_update_and_check<T, F>(
+        &mut self,
+        pragma_name: &str,
+        value: bool,
+        f: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(Row<'_>) -> Result<T>,
+    {
+        self.pragma_update(pragma_name, value)?;
+        self.pragma_query_value(pragma_name, f)
+    }
+
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
     /// rollback support.
     pub(crate) fn snapshot_db(&self) -> std::collections::HashMap<String, crate::storage::Table> {
@@ -583,5 +658,44 @@ mod tests {
         // Never invoked -- there's no blocking path in this engine to
         // invoke them from. This test only confirms both are settable
         // without erroring.
+    }
+
+    #[test]
+    fn pragma_foreign_keys_defaults_to_off_and_updates() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        let initial: i64 = conn
+            .pragma_query_value("foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert_eq!(initial, 0);
+
+        conn.pragma_update("foreign_keys", true).unwrap();
+        let updated: i64 = conn
+            .pragma_query_value("foreign_keys", |row| row.get(0))
+            .unwrap();
+        assert_eq!(updated, 1);
+    }
+
+    #[test]
+    fn pragma_table_info_reports_columns() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            .unwrap();
+
+        let mut names = Vec::new();
+        conn.pragma_table_info("t", |row| {
+            let name: String = row.get(1)?;
+            names.push(name);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(names, vec!["id".to_string(), "name".to_string()]);
+    }
+
+    #[test]
+    fn pragma_on_unrecognized_name_is_an_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert!(conn
+            .pragma_query_value::<i64, _>("journal_mode", |row| row.get(0))
+            .is_err());
     }
 }
