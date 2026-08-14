@@ -77,6 +77,36 @@ impl Database {
             .ok_or_else(|| Error::TableNotFound(table_name.to_string()))
     }
 
+    /// Returns a mutable reference to a single cell, addressed by its row's
+    /// plain position within `Table::rows` (**not** a SQLite rowid — this
+    /// crate's storage has no rowid concept yet) and column position
+    /// within `Table::column_names`. Used by [`crate::blob::Blob`] for
+    /// in-place incremental writes.
+    pub fn cell_mut(
+        &mut self,
+        table_name: &str,
+        row_index: usize,
+        column_index: usize,
+    ) -> Result<&mut Value> {
+        let table = self
+            .tables
+            .get_mut(table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+        let row_count = table.rows.len();
+        let row = table
+            .rows
+            .get_mut(row_index)
+            .ok_or(Error::IndexOutOfBounds {
+                index: row_index,
+                len: row_count,
+            })?;
+        let col_count = row.len();
+        row.get_mut(column_index).ok_or(Error::IndexOutOfBounds {
+            index: column_index,
+            len: col_count,
+        })
+    }
+
     /// Snapshots the current table state, for transaction/savepoint
     /// rollback. A full clone — simple and correct for this in-memory
     /// engine's current scale, not the copy-on-write/undo-log approach a
@@ -160,6 +190,35 @@ mod tests {
             db.insert_row("missing", vec![Value::Integer(1)]),
             Err(Error::TableNotFound(_))
         ));
+    }
+
+    #[test]
+    fn cell_mut_allows_in_place_write() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        *db.cell_mut("t", 0, 0).unwrap() = Value::Integer(99);
+
+        assert_eq!(db.table("t").unwrap().rows[0][0], Value::Integer(99));
+    }
+
+    #[test]
+    fn cell_mut_reports_out_of_range_row_and_column() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        assert_eq!(
+            db.cell_mut("t", 5, 0),
+            Err(Error::IndexOutOfBounds { index: 5, len: 1 })
+        );
+        assert_eq!(
+            db.cell_mut("t", 0, 5),
+            Err(Error::IndexOutOfBounds { index: 5, len: 1 })
+        );
     }
 
     #[test]

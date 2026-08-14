@@ -23,6 +23,30 @@ entry per PR.
 
 ---
 
+## PR #72 — Add Connection::blob_open / incremental BLOB I/O (closes #21)
+**2026-08-14** · [#72](https://github.com/baileyrd/rusty_-rusqlite/pull/72)
+
+- **Added:** `Connection::blob_open(table, column, row_index, read_only)`
+  returning a `Blob` handle with `len`/`is_empty`/`is_read_only`/
+  `read_all`/`read_at`/`write_at`. `write_at` can't resize the blob
+  (matching real SQLite's `sqlite3_blob_write` constraint) and errors on
+  a read-only handle.
+- **Design deviation, stated plainly:** real SQLite (and `rusqlite::Blob`)
+  addresses a blob by rowid. This crate's storage has no rowid concept
+  yet (same gap flagged in #14's `last_insert_rowid` discussion), so
+  `Blob` is addressed by `row_index` — a row's plain position within
+  `Table::rows` at open time — which is only stable as long as no earlier
+  row is removed. `Blob` also doesn't implement `std::io::{Read, Write,
+  Seek}` like `rusqlite::Blob`; `read_at`/`write_at` cover the same
+  random-access use case directly.
+- **Storage layer:** added `Database::cell_mut` (mutable single-cell
+  access by table/row-index/column-index) to support in-place writes.
+- **New errors:** `Error::IndexOutOfBounds`, `Error::ReadOnlyBlob`.
+- 11 new unit tests (124 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
 ## PR #71 — Add Connection::backup/restore (closes #22)
 **2026-08-14** · [#71](https://github.com/baileyrd/rusty_-rusqlite/pull/71)
 

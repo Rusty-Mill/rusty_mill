@@ -41,6 +41,11 @@ pub enum Error {
     /// the connection (or, for plain `eval::evaluate`, any function call
     /// at all — see that function's doc comment).
     FunctionNotFound(String),
+    /// A [`crate::blob::Blob`] row or byte-range index was out of range.
+    IndexOutOfBounds { index: usize, len: usize },
+    /// [`crate::blob::Blob::write_at`] was called on a blob opened
+    /// read-only.
+    ReadOnlyBlob,
 }
 
 impl fmt::Display for Error {
@@ -63,6 +68,10 @@ impl fmt::Display for Error {
             Error::NoSuchDatabase(name) => write!(f, "no such database: {name:?}"),
             Error::Deserialize => write!(f, "invalid serialized database data"),
             Error::FunctionNotFound(name) => write!(f, "no such function: {name:?}"),
+            Error::IndexOutOfBounds { index, len } => {
+                write!(f, "index {index} out of bounds (len {len})")
+            }
+            Error::ReadOnlyBlob => write!(f, "blob was opened read-only"),
         }
     }
 }
