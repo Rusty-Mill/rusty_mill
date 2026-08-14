@@ -24,7 +24,7 @@ pub fn authorization_code_request(
     code: &str,
     redirect_uri: &str,
     code_verifier: Option<&str>,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
@@ -42,12 +42,20 @@ pub fn authorization_code_request(
             params.push(("client_secret", &secret_str));
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(token_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
     if let Some(verifier) = code_verifier {
         params.push(("code_verifier", verifier));
     }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// Builds the RFC 6749 §6 refresh token request.
@@ -56,7 +64,7 @@ pub fn refresh_token_request(
     client: &Client,
     refresh_token: &str,
     scope: Option<&str>,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -73,12 +81,20 @@ pub fn refresh_token_request(
             params.push(("client_secret", &secret_str));
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(token_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
     if let Some(scope) = scope {
         params.push(("scope", scope));
     }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// Builds the RFC 6749 §4.4.2 client credentials request. Requires a
@@ -87,7 +103,7 @@ pub fn client_credentials_request(
     token_endpoint: &str,
     client: &Client,
     scope: Option<&str>,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![("grant_type", "client_credentials")];
 
     let uses_body_auth = client.auth_method != crate::client::AuthMethod::ClientSecretBasic;
@@ -101,12 +117,20 @@ pub fn client_credentials_request(
             }
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(token_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
     if let Some(scope) = scope {
         params.push(("scope", scope));
     }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// Builds the RFC 8628 §3.4 device access token polling request.
@@ -114,7 +138,7 @@ pub fn device_code_request(
     token_endpoint: &str,
     client: &Client,
     device_code: &str,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![
         ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ("device_code", device_code),
@@ -131,9 +155,17 @@ pub fn device_code_request(
             }
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(token_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(token_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// Builds an RFC 7523 §2.1 JWT bearer assertion grant request, e.g. for
@@ -234,7 +266,8 @@ mod tests {
             "auth-code",
             "https://app.example.com/cb",
             Some("verifier123"),
-        );
+        )
+        .unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("grant_type=authorization_code"));
         assert!(body.contains("code=auth-code"));
@@ -255,7 +288,8 @@ mod tests {
             "code",
             "https://app/cb",
             Some("v"),
-        );
+        )
+        .unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("client_id=public-id"));
         assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
@@ -266,7 +300,8 @@ mod tests {
         let client = Client::confidential(ClientId::new("id"), ClientSecret::new("s3cr3t"))
             .with_auth_method(AuthMethod::ClientSecretPost);
         let req =
-            client_credentials_request("https://auth.example.com/token", &client, Some("read"));
+            client_credentials_request("https://auth.example.com/token", &client, Some("read"))
+                .unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("client_id=id"));
         assert!(body.contains("client_secret=s3cr3t"));
@@ -304,9 +339,68 @@ mod tests {
     #[test]
     fn device_code_request_has_correct_grant_type() {
         let client = Client::public(ClientId::new("device-app"));
-        let req = device_code_request("https://auth.example.com/token", &client, "dev-code-abc");
+        let req =
+            device_code_request("https://auth.example.com/token", &client, "dev-code-abc").unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"));
         assert!(body.contains("device_code=dev-code-abc"));
+    }
+
+    #[test]
+    fn client_secret_jwt_attaches_generated_assertion() {
+        let client = Client::confidential(ClientId::new("id"), ClientSecret::new("s3cr3t"))
+            .with_auth_method(AuthMethod::ClientSecretJwt);
+        let req =
+            client_credentials_request("https://auth.example.com/token", &client, None).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+
+        assert!(body.contains(
+            "client_assertion_type=urn%3Aietf%3Aparams%3Aoauth%3Aclient-assertion-type%3Ajwt-bearer"
+        ));
+        assert!(!body.contains("client_secret=")); // never sent in the clear alongside an assertion
+        assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
+
+        let pairs = crate::encoding::percent::form_urldecode(&body).unwrap();
+        let assertion = pairs
+            .iter()
+            .find(|(k, _)| k == "client_assertion")
+            .map(|(_, v)| v.clone())
+            .expect("client_assertion present");
+        let claims = crate::jwt::verify_hs256(&assertion, b"s3cr3t").unwrap();
+        assert_eq!(claims.get("iss").unwrap().as_str(), Some("id"));
+        assert_eq!(claims.get("sub").unwrap().as_str(), Some("id"));
+        assert_eq!(
+            claims.get("aud").unwrap().as_str(),
+            Some("https://auth.example.com/token")
+        );
+    }
+
+    #[test]
+    fn client_secret_jwt_without_secret_errors() {
+        let client =
+            Client::public(ClientId::new("id")).with_auth_method(AuthMethod::ClientSecretJwt);
+        let err = client_credentials_request("https://auth.example.com/token", &client, None)
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
+    }
+
+    #[test]
+    fn private_key_jwt_uses_caller_supplied_assertion() {
+        let client = Client::public(ClientId::new("id"))
+            .with_auth_method(AuthMethod::PrivateKeyJwt)
+            .with_client_assertion("pre-signed.jwt.value");
+        let req =
+            client_credentials_request("https://auth.example.com/token", &client, None).unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("client_assertion=pre-signed.jwt.value"));
+    }
+
+    #[test]
+    fn private_key_jwt_without_assertion_errors() {
+        let client =
+            Client::public(ClientId::new("id")).with_auth_method(AuthMethod::PrivateKeyJwt);
+        let err = client_credentials_request("https://auth.example.com/token", &client, None)
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(_)));
     }
 }

@@ -75,6 +75,15 @@ pub struct Client {
     pub client_id: ClientId,
     pub client_secret: Option<ClientSecret>,
     pub auth_method: AuthMethod,
+    /// A pre-signed JWT client assertion, required when `auth_method` is
+    /// [`AuthMethod::PrivateKeyJwt`] (RFC 7523 §2.2). This crate does not
+    /// perform private-key signing itself (see the crate-level docs on
+    /// RSA verify-only), so the caller must sign the assertion with
+    /// whatever key material and library they trust and hand it over via
+    /// [`Client::with_client_assertion`]. Not used for
+    /// [`AuthMethod::ClientSecretJwt`], which this crate signs itself
+    /// with HS256 using `client_secret`.
+    pub client_assertion: Option<String>,
 }
 
 impl Client {
@@ -85,6 +94,7 @@ impl Client {
             client_id,
             client_secret: None,
             auth_method: AuthMethod::None,
+            client_assertion: None,
         }
     }
 
@@ -95,6 +105,7 @@ impl Client {
             client_id,
             client_secret: Some(client_secret),
             auth_method: AuthMethod::ClientSecretBasic,
+            client_assertion: None,
         }
     }
 
@@ -102,6 +113,14 @@ impl Client {
     /// or one of the JWT-assertion methods).
     pub fn with_auth_method(mut self, method: AuthMethod) -> Self {
         self.auth_method = method;
+        self
+    }
+
+    /// Sets a pre-signed JWT client assertion for `private_key_jwt`
+    /// authentication (RFC 7523 §2.2). Ignored unless `auth_method` is
+    /// [`AuthMethod::PrivateKeyJwt`].
+    pub fn with_client_assertion(mut self, assertion: impl Into<String>) -> Self {
+        self.client_assertion = Some(assertion.into());
         self
     }
 
@@ -118,7 +137,72 @@ impl Client {
         );
         Some(format!("Basic {}", encode_standard(credentials.as_bytes())))
     }
+
+    /// Builds the `client_assertion_type`/`client_assertion` parameter
+    /// pair for `client_secret_jwt` / `private_key_jwt` authentication
+    /// (RFC 7523 §2.2), if this client uses either method. Returns `None`
+    /// for every other [`AuthMethod`], and the pair's second element is
+    /// always [`JWT_BEARER_CLIENT_ASSERTION_TYPE`].
+    ///
+    /// For `client_secret_jwt`, the assertion is generated fresh on every
+    /// call (a new `jti`/`exp`, bound to `token_endpoint` as `aud`) using
+    /// HS256 over `client_secret` -- this crate already implements HMAC
+    /// signing, so there's no reason to make the caller do it. For
+    /// `private_key_jwt`, `client_assertion` must already be set via
+    /// [`Client::with_client_assertion`]; this crate does not perform
+    /// private-key signing.
+    pub(crate) fn build_client_assertion(
+        &self,
+        token_endpoint: &str,
+    ) -> crate::error::Result<Option<(&'static str, String)>> {
+        match self.auth_method {
+            AuthMethod::ClientSecretJwt => {
+                let secret = self.client_secret.as_ref().ok_or_else(|| {
+                    crate::error::Error::Validation(
+                        "client_secret_jwt requires a client secret".to_string(),
+                    )
+                })?;
+                let now = crate::jwt::now_unix();
+                let jti = crate::encoding::base64::encode_url_safe_no_pad(
+                    &crate::rand::random_bytes(16)?,
+                );
+                let claims = crate::json::Value::object([
+                    (
+                        "iss".to_string(),
+                        crate::json::Value::from(self.client_id.as_str()),
+                    ),
+                    (
+                        "sub".to_string(),
+                        crate::json::Value::from(self.client_id.as_str()),
+                    ),
+                    ("aud".to_string(), crate::json::Value::from(token_endpoint)),
+                    ("exp".to_string(), crate::json::Value::from(now + 60)),
+                    ("iat".to_string(), crate::json::Value::from(now)),
+                    ("jti".to_string(), crate::json::Value::from(jti)),
+                ]);
+                let assertion = crate::jwt::encode_hs256(&claims, secret.as_str().as_bytes(), &[]);
+                Ok(Some((JWT_BEARER_CLIENT_ASSERTION_TYPE, assertion)))
+            }
+            AuthMethod::PrivateKeyJwt => {
+                let assertion = self.client_assertion.clone().ok_or_else(|| {
+                    crate::error::Error::Validation(
+                        "private_key_jwt requires a pre-signed assertion set via \
+                         Client::with_client_assertion (this crate does not perform \
+                         private-key signing)"
+                            .to_string(),
+                    )
+                })?;
+                Ok(Some((JWT_BEARER_CLIENT_ASSERTION_TYPE, assertion)))
+            }
+            _ => Ok(None),
+        }
+    }
 }
+
+/// RFC 7523 §2.2: the `client_assertion_type` value for JWT bearer client
+/// authentication.
+pub const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
 
 #[cfg(test)]
 mod tests {

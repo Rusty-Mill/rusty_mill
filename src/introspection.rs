@@ -14,7 +14,7 @@ pub fn introspection_request(
     client: &Client,
     token: &str,
     token_type_hint: Option<&str>,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![("token", token)];
     if let Some(hint) = token_type_hint {
         params.push(("token_type_hint", hint));
@@ -31,9 +31,17 @@ pub fn introspection_request(
             }
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(introspection_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(introspection_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(introspection_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// The RFC 7662 §2.2 introspection response. Only `active` is guaranteed
@@ -119,7 +127,7 @@ pub fn parse_introspection_response(status: u16, body: &str) -> Result<Introspec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::{Client, ClientId, ClientSecret};
+    use crate::client::{AuthMethod, Client, ClientId, ClientSecret};
 
     #[test]
     fn builds_request_with_basic_auth() {
@@ -129,7 +137,8 @@ mod tests {
             &client,
             "mF_9.B5f-4.1JqM",
             Some("access_token"),
-        );
+        )
+        .unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("token=mF_9.B5f-4.1JqM"));
         assert!(body.contains("token_type_hint=access_token"));
@@ -162,5 +171,22 @@ mod tests {
         let resp =
             parse_introspection_response(200, r#"{"active": true, "aud": ["a", "b"]}"#).unwrap();
         assert_eq!(resp.aud.as_deref(), Some("a,b"));
+    }
+
+    #[test]
+    fn client_secret_jwt_attaches_assertion_instead_of_secret() {
+        let client = Client::confidential(ClientId::new("res-server"), ClientSecret::new("secret"))
+            .with_auth_method(AuthMethod::ClientSecretJwt);
+        let req = introspection_request(
+            "https://auth.example.com/introspect",
+            &client,
+            "mF_9.B5f-4.1JqM",
+            None,
+        )
+        .unwrap();
+        let body = String::from_utf8(req.body).unwrap();
+        assert!(body.contains("client_assertion="));
+        assert!(!body.contains("client_secret="));
+        assert!(req.headers.iter().all(|(k, _)| k != "Authorization"));
     }
 }

@@ -78,7 +78,11 @@ pub fn parse_device_authorization_response(
 }
 
 /// Builds the RFC 8628 §3.4 polling request against the token endpoint.
-pub fn poll_request(token_endpoint: &str, client: &Client, device_code: &str) -> HttpRequest {
+pub fn poll_request(
+    token_endpoint: &str,
+    client: &Client,
+    device_code: &str,
+) -> Result<HttpRequest> {
     crate::token::device_code_request(token_endpoint, client, device_code)
 }
 
