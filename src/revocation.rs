@@ -12,7 +12,7 @@ pub fn revocation_request(
     client: &Client,
     token: &str,
     token_type_hint: Option<&str>,
-) -> HttpRequest {
+) -> Result<HttpRequest> {
     let mut params = vec![("token", token)];
     if let Some(hint) = token_type_hint {
         params.push(("token_type_hint", hint));
@@ -29,9 +29,17 @@ pub fn revocation_request(
             }
         }
     }
+    let assertion;
+    if let Some((assertion_type, assertion_value)) =
+        client.build_client_assertion(revocation_endpoint)?
+    {
+        assertion = assertion_value;
+        params.push(("client_assertion_type", assertion_type));
+        params.push(("client_assertion", &assertion));
+    }
 
     let body = form_urlencode(params);
-    HttpRequest::form_post(revocation_endpoint, body).with_basic_auth_if_applicable(client)
+    Ok(HttpRequest::form_post(revocation_endpoint, body).with_basic_auth_if_applicable(client))
 }
 
 /// Validates an RFC 7009 §2.2 revocation response. A bare `200 OK` (empty
@@ -68,7 +76,8 @@ mod tests {
             &client,
             "45ghiukldjahdnhzdauz",
             Some("refresh_token"),
-        );
+        )
+        .unwrap();
         let body = String::from_utf8(req.body).unwrap();
         assert!(body.contains("token=45ghiukldjahdnhzdauz"));
         assert!(body.contains("token_type_hint=refresh_token"));

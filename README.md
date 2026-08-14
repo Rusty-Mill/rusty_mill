@@ -78,7 +78,7 @@ let req = authorization_code_request(
     &response.code,
     "https://app.example.com/callback",
     Some(&pkce.code_verifier),
-);
+)?; // fails only if `client` uses `private_key_jwt` with no assertion set
 // send `req` with your HTTP client, then:
 let token = parse_token_response(status_code, &response_body)?;
 ```
@@ -87,14 +87,14 @@ let token = parse_token_response(status_code, &response_body)?;
 
 - **Transport-agnostic.** See above.
 - **No `alg` auto-negotiation for JWTs.** You call `verify_hs256(token, secret)` or `rsa::verify_rs256(token, key)`; the crate refuses to let the token pick its own verification path.
-- **RSA verification only, never signing.** `RS256` verification needs only modular exponentiation with a small public exponent, which doesn't need to run in constant time. RSA *signing*, by contrast, needs a constant-time modular exponentiation and secure prime generation to be safe — a much bigger undertaking this crate deliberately doesn't take on.
+- **RSA verification only, never signing.** `RS256` verification needs only modular exponentiation with a small public exponent, which doesn't need to run in constant time. RSA *signing*, by contrast, needs a constant-time modular exponentiation and secure prime generation to be safe — a much bigger undertaking this crate deliberately doesn't take on. This is also why `private_key_jwt` client authentication (RFC 7523 §2.2) takes a caller-supplied, already-signed assertion via `Client::with_client_assertion` rather than signing one itself — `client_secret_jwt` (HMAC-based) is signed internally, since HS256 signing is already implemented.
 - **Constant-time comparisons** for MACs, PKCE verifiers, and CSRF `state` checks (`crypto::hmac::constant_time_eq`).
 - **Redacted `Debug` for secrets.** `ClientSecret`'s `Debug` impl never prints the underlying value.
 
 ## Testing
 
 ```sh
-cargo test    # 87 unit tests + 1 doc-test, including known-answer vectors
+cargo test    # 92 unit tests + 1 doc-test, including known-answer vectors
               # from RFC 4231 (HMAC), RFC 7636 (PKCE), and a JWT signed
               # by `openssl dgst -sign` outside this crate, verified
               # entirely with the hand-rolled RSA implementation.

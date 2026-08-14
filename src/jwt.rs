@@ -32,7 +32,7 @@ pub struct DecodedJwt {
     pub signature: Vec<u8>,
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
