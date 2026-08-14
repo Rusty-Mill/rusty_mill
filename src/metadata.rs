@@ -41,6 +41,12 @@ pub struct AuthorizationServerMetadata {
     pub revocation_endpoint: Option<String>,
     pub device_authorization_endpoint: Option<String>,
     pub jwks_uri: Option<String>,
+    /// RFC 9126 §5: the Pushed Authorization Request endpoint. Not part
+    /// of RFC 8414 itself, but registered in the same metadata document.
+    pub pushed_authorization_request_endpoint: Option<String>,
+    /// RFC 9126 §5: `true` if the server rejects authorization requests
+    /// that don't go through PAR first. Defaults to `false` when absent.
+    pub require_pushed_authorization_requests: bool,
     pub scopes_supported: Vec<String>,
     pub response_types_supported: Vec<String>,
     pub grant_types_supported: Vec<String>,
@@ -81,6 +87,14 @@ pub fn parse_metadata(body: &str) -> Result<AuthorizationServerMetadata> {
         revocation_endpoint: string_field(&value, "revocation_endpoint"),
         device_authorization_endpoint: string_field(&value, "device_authorization_endpoint"),
         jwks_uri: string_field(&value, "jwks_uri"),
+        pushed_authorization_request_endpoint: string_field(
+            &value,
+            "pushed_authorization_request_endpoint",
+        ),
+        require_pushed_authorization_requests: value
+            .get("require_pushed_authorization_requests")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         scopes_supported: string_array(&value, "scopes_supported"),
         response_types_supported: string_array(&value, "response_types_supported"),
         grant_types_supported: string_array(&value, "grant_types_supported"),
@@ -144,5 +158,22 @@ mod tests {
         );
         assert!(verify_issuer(&metadata, "https://example.com"));
         assert!(!verify_issuer(&metadata, "https://evil.example.com"));
+        assert_eq!(metadata.pushed_authorization_request_endpoint, None);
+        assert!(!metadata.require_pushed_authorization_requests);
+    }
+
+    #[test]
+    fn parses_par_metadata_fields() {
+        let json = r#"{
+            "issuer": "https://example.com",
+            "pushed_authorization_request_endpoint": "https://example.com/as/par",
+            "require_pushed_authorization_requests": true
+        }"#;
+        let metadata = parse_metadata(json).unwrap();
+        assert_eq!(
+            metadata.pushed_authorization_request_endpoint.as_deref(),
+            Some("https://example.com/as/par")
+        );
+        assert!(metadata.require_pushed_authorization_requests);
     }
 }
