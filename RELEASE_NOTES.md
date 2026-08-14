@@ -23,7 +23,35 @@ entry per PR.
 
 ---
 
-## PR #79 — Add Statement: prepare, execute/query, column introspection (closes #26, #27, #28)
+## PR #80 — Add Statement::query/query_and_then/exists/raw_query/column_index (closes #27, #28)
+**2026-08-14** · [#80](https://github.com/baileyrd/rusty_-rusqlite/pull/80)
+
+- **Found:** PR #79's "Closes #26, #27, #28" only actually auto-closed
+  #26 — GitHub's issue-linking keyword apparently only links the first
+  number in a comma-separated list, not all of them. #27/#28 stayed
+  open, which is correct: PR #79 only covered part of each (`query_map`/
+  `query_row`/`query_one` for #27, `column_names`/`column_count`/
+  `column_name` for #28) — this PR finishes both.
+- **Added:** `Statement::query`/`query_and_then` (lazy `Rows`-based, the
+  same shape as real `rusqlite`, unlike PR #79's eager
+  `query_map`/`query_row`/`query_one`), `exists`, `raw_query` (identical
+  to `query` here, since there's no params-binding step to skip), and
+  `column_index`.
+- **`columns`/`columns_with_metadata`/`column_metadata` not provided:**
+  checked against real `rusqlite` 0.40.2 docs — all three are behind
+  opt-in Cargo features (`column_decltype`/`column_metadata`), not part
+  of the default API surface this crate targets.
+  `column_metadata` in particular returns a raw `&CStr`-tuple straight
+  out of SQLite's C API, with no honest equivalent here.
+- **Lesson for future multi-issue PRs:** use a separate `Closes #N` per
+  issue (or verify after merge) rather than one comma-separated list —
+  GitHub's keyword linking doesn't reliably chain through commas.
+- 5 new unit tests (199 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
+## PR #79 — Add Statement: prepare, execute/query, column introspection (closes #26; part of #27, #28)
 **2026-08-14** · [#79](https://github.com/baileyrd/rusty_-rusqlite/pull/79)
 
 - **Added:** `Connection::prepare` and a new `Statement` type —

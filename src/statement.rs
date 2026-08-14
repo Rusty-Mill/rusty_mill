@@ -16,6 +16,16 @@
 //! performance point of a prepared statement, independent of parameter
 //! binding.
 //!
+//! **`columns`/`columns_with_metadata`/`column_metadata` aren't
+//! provided:** in real `rusqlite`, all three are behind opt-in Cargo
+//! features (`column_decltype`/`column_metadata`), not part of the
+//! default API surface this crate targets. `column_metadata` in
+//! particular returns a raw `&CStr`-tuple straight out of SQLite's C
+//! API, which has no honest equivalent in a from-scratch engine with no
+//! C interop. [`Statement::column_names`]/[`Statement::column_name`]/
+//! [`Statement::column_index`]/[`Statement::column_count`] (all part of
+//! the default surface) cover the rest of column introspection.
+//!
 //! **Also out of scope for now:** unlike [`crate::Connection::execute`],
 //! [`Statement::execute`] doesn't fire `trace`/`profile`/`commit_hook`/
 //! `update_hook`/the authorizer, or update `last_insert_rowid`/`changes`/
@@ -36,6 +46,7 @@ use crate::engine::{
 };
 use crate::error::{Error, Result};
 use crate::row::Row;
+use crate::rows::{AndThenRows, Rows};
 use crate::token::tokenize;
 use crate::value::Value;
 
@@ -49,6 +60,10 @@ enum StatementKind {
 pub struct Statement<'conn> {
     conn: &'conn mut Connection,
     kind: StatementKind,
+    /// The most recent [`Statement::query`]/[`Statement::raw_query`]
+    /// result set, kept alive on `self` so the [`Rows`] handed back can
+    /// borrow from it instead of the query needing to return owned data.
+    last_result: Option<(Vec<String>, Vec<Vec<Value>>)>,
 }
 
 impl<'conn> Statement<'conn> {
@@ -66,7 +81,11 @@ impl<'conn> Statement<'conn> {
             }
             _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
         };
-        Ok(Statement { conn, kind })
+        Ok(Statement {
+            conn,
+            kind,
+            last_result: None,
+        })
     }
 
     /// Runs this statement (`CREATE TABLE`/`INSERT`), returning the number
@@ -140,6 +159,43 @@ impl<'conn> Statement<'conn> {
         f(Row::new(&columns, &values))
     }
 
+    /// Runs this `SELECT`, returning a lazy [`Rows`] iterator over the
+    /// result set. Unlike [`Statement::query_map`] (which eagerly
+    /// collects into a `Vec`), this is the same shape as real
+    /// `rusqlite::Statement::query`.
+    pub fn query(&mut self) -> Result<Rows<'_>> {
+        let result = self.conn.run_select(self.select()?)?;
+        self.last_result = Some(result);
+        let (columns, rows) = self.last_result.as_ref().expect("just assigned Some above");
+        Ok(Rows::new(columns, rows))
+    }
+
+    /// Like [`Statement::query`], with each row mapped through a
+    /// fallible-in-any-error-type closure — see [`AndThenRows`].
+    pub fn query_and_then<T, E, F>(&mut self, f: F) -> Result<AndThenRows<'_, F>>
+    where
+        F: FnMut(Row<'_>) -> std::result::Result<T, E>,
+        E: From<Error>,
+    {
+        Ok(self.query()?.and_then(f))
+    }
+
+    /// Runs this `SELECT`, returning whether it matched at least one row.
+    pub fn exists(&self) -> Result<bool> {
+        let (_, rows) = self.conn.run_select(self.select()?)?;
+        Ok(!rows.is_empty())
+    }
+
+    /// Like [`Statement::query`]. Real `rusqlite::Statement::raw_query`
+    /// skips the params-binding step `query` otherwise requires; since
+    /// [`Statement`] has no parameter binding to skip (see this module's
+    /// doc comment), the two are identical here — kept as a separate
+    /// method purely for name-level parity with call sites migrating
+    /// from `rusqlite`.
+    pub fn raw_query(&mut self) -> Result<Rows<'_>> {
+        self.query()
+    }
+
     /// This statement's result-column names, in order. Errors if this
     /// isn't a `SELECT`.
     pub fn column_names(&self) -> Result<Vec<String>> {
@@ -172,6 +228,16 @@ impl<'conn> Statement<'conn> {
             .into_iter()
             .nth(index)
             .ok_or(Error::IndexOutOfBounds { index, len })
+    }
+
+    /// The position of the result column named `name`. Errors if this
+    /// isn't a `SELECT`, or if no result column has that name.
+    pub fn column_index(&self, name: &str) -> Result<usize> {
+        let names = self.column_names()?;
+        names
+            .iter()
+            .position(|n| n == name)
+            .ok_or_else(|| Error::UnknownColumn(name.to_string()))
     }
 
     /// Returns whether this statement is a `SELECT` (and so is run via
@@ -308,5 +374,94 @@ mod tests {
         assert!(conn.prepare("CREATE TABLE t (a INTEGER)").is_ok());
         let mut stmt = conn.prepare("CREATE TABLE t (a INTEGER)").unwrap();
         assert_eq!(stmt.execute(), Err(Error::ReadOnlyConnection));
+    }
+
+    #[test]
+    fn query_returns_a_lazy_rows_iterator() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t").unwrap();
+        let values: Result<Vec<i64>> = stmt
+            .query()
+            .unwrap()
+            .map(|r| r.and_then(|row| row.get::<i64>(0)))
+            .collect();
+        assert_eq!(values.unwrap(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn raw_query_behaves_like_query() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (5)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t").unwrap();
+        let values: Result<Vec<i64>> = stmt
+            .raw_query()
+            .unwrap()
+            .map(|r| r.and_then(|row| row.get::<i64>(0)))
+            .collect();
+        assert_eq!(values.unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn query_and_then_propagates_custom_errors() {
+        #[derive(Debug, PartialEq)]
+        enum MyError {
+            Inner(Error),
+            TooBig,
+        }
+        impl From<Error> for MyError {
+            fn from(e: Error) -> MyError {
+                MyError::Inner(e)
+            }
+        }
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (5)").unwrap();
+
+        let mut stmt = conn.prepare("SELECT * FROM t").unwrap();
+        let result: std::result::Result<Vec<i64>, MyError> = stmt
+            .query_and_then(|row| {
+                let n = row.get::<i64>(0)?;
+                if n > 3 {
+                    Err(MyError::TooBig)
+                } else {
+                    Ok(n)
+                }
+            })
+            .unwrap()
+            .collect();
+        assert_eq!(result, Err(MyError::TooBig));
+    }
+
+    #[test]
+    fn exists_reflects_whether_any_row_matched() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1)").unwrap();
+
+        assert!(conn
+            .prepare("SELECT * FROM t WHERE a = 1")
+            .unwrap()
+            .exists()
+            .unwrap());
+        assert!(!conn
+            .prepare("SELECT * FROM t WHERE a = 2")
+            .unwrap()
+            .exists()
+            .unwrap());
+    }
+
+    #[test]
+    fn column_index_finds_a_named_column() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        let stmt = conn.prepare("SELECT * FROM t").unwrap();
+        assert_eq!(stmt.column_index("b").unwrap(), 1);
+        assert!(stmt.column_index("missing").is_err());
     }
 }
