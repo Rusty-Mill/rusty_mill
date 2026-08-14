@@ -23,6 +23,18 @@ entry per PR.
 
 ---
 
+## PR #47 — Add CREATE TABLE parser (closes #4)
+**2026-08-14** · [#47](https://github.com/baileyrd/rusty_-rusqlite/pull/47)
+
+- **Added:** `parse_create_table`/`CreateTable`/`ColumnDef`/`ParseError` —
+  parses `CREATE TABLE` with a column list, declared type names, and
+  `PRIMARY KEY`/`NOT NULL` constraints. No other statement types yet
+  (`INSERT`/`SELECT` are A4a/A4b).
+- 5 new unit tests; all passing. `cargo clippy -- -D warnings` and
+  `cargo fmt --check` clean.
+
+---
+
 ## PR #46 — Add SQL tokenizer (closes #3)
 **2026-08-14** · [#46](https://github.com/baileyrd/rusty_-rusqlite/pull/46)
 

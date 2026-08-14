@@ -3,11 +3,13 @@
 //! `gap-analysis.md` for what's tracked toward that parity target.
 
 mod connection;
+mod ddl;
 mod error;
 mod token;
 mod value;
 
 pub use connection::Connection;
+pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use error::{Error, Result};
 pub use token::{tokenize, Token, TokenError};
 pub use value::{Type, Value};
