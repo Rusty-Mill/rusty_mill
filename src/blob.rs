@@ -17,7 +17,29 @@
 use crate::connection::Connection;
 use crate::error::{Error, Result};
 use crate::fromsql::FromSqlError;
+use crate::tosql::ToSql;
 use crate::value::{Type, Value};
+
+/// A `ToSql`-implementing marker that inserts as a `BLOB` of `self.0`
+/// zero bytes — the usual way to allocate a blob upfront for later
+/// [`Blob::write_at`] calls, e.g. `INSERT INTO t (data) VALUES (?1)` bound
+/// to `ZeroBlob(1024)`.
+///
+/// **Design note:** unlike real SQLite's `zeroblob()`, which lets the
+/// engine defer allocating the zero-filled buffer, this crate's storage
+/// already keeps every value fully materialized in memory (see
+/// `ARCHITECTURE.md`), so `ZeroBlob::to_sql` just allocates the
+/// zero-filled `Vec<u8>` directly — there's no lazy-allocation win to be
+/// had here, only the API-parity convenience of not writing
+/// `Value::Blob(vec![0; n])` by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZeroBlob(pub usize);
+
+impl ToSql for ZeroBlob {
+    fn to_sql(&self) -> Value {
+        Value::Blob(vec![0u8; self.0])
+    }
+}
 
 /// A handle for incremental reads (and, unless opened read-only, writes)
 /// into a single `BLOB` column value.
@@ -156,6 +178,25 @@ mod tests {
         conn.execute("CREATE TABLE t (id INTEGER, data BLOB)")
             .unwrap();
         conn
+    }
+
+    #[test]
+    fn zero_blob_converts_to_a_zero_filled_blob_value() {
+        assert_eq!(ZeroBlob(4).to_sql(), Value::Blob(vec![0, 0, 0, 0]));
+        assert_eq!(ZeroBlob(0).to_sql(), Value::Blob(vec![]));
+    }
+
+    #[test]
+    fn zero_blob_is_openable_and_writable_via_blob_open() {
+        let mut conn = setup();
+        conn.db_mut()
+            .insert_row("t", vec![Value::Integer(1), ZeroBlob(4).to_sql()])
+            .unwrap();
+
+        let mut blob = conn.blob_open("t", "data", 0, false).unwrap();
+        assert_eq!(blob.read_all(), vec![0, 0, 0, 0]);
+        blob.write_at(1, &[7, 7]).unwrap();
+        assert_eq!(blob.read_all(), vec![0, 7, 7, 0]);
     }
 
     #[test]

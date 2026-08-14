@@ -23,7 +23,26 @@ entry per PR.
 
 ---
 
-## PR #72 — Add Connection::blob_open / incremental BLOB I/O (closes #21)
+## PR #73 — Add ZeroBlob (finishes issue 21)
+**2026-08-14** · [#73](https://github.com/baileyrd/rusty_-rusqlite/pull/73)
+
+- **Added:** `ZeroBlob(usize)`, a `ToSql` marker that inserts as an
+  `N`-byte zero-filled `BLOB` — the usual pattern for allocating a blob
+  upfront to write into incrementally via `Blob::write_at`. Closes out
+  the last unimplemented piece of #21's gap description
+  (`blob::Blob`/`ZeroBlob`) that PR #72 left out.
+- **Design note:** unlike real SQLite's `zeroblob()`, which lets the
+  engine defer allocating the zero-filled buffer, this crate's storage
+  already keeps every value fully materialized in memory, so
+  `ZeroBlob::to_sql` just allocates the `Vec<u8>` directly — there's no
+  lazy-allocation win here, only the API-parity convenience of not
+  writing `Value::Blob(vec![0; n])` by hand.
+- 2 new unit tests (126 total); all passing. `cargo clippy -- -D
+  warnings` and `cargo fmt --check` clean.
+
+---
+
+## PR #72 — Add Connection::blob_open / incremental BLOB I/O (part of issue 21)
 **2026-08-14** · [#72](https://github.com/baileyrd/rusty_-rusqlite/pull/72)
 
 - **Added:** `Connection::blob_open(table, column, row_index, read_only)`
