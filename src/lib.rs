@@ -50,10 +50,11 @@ pub use ddl::{parse_create_table, ColumnDef, CreateTable, ParseError};
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{
     parse_select, AggregateArg, AggregateCall, BinaryOp, Expr, ParamMarker, Select, SelectColumns,
+    WindowCall,
 };
 pub use engine::{
     execute_create_table, execute_insert, execute_select, execute_select_with_aggregates,
-    execute_select_with_functions,
+    execute_select_with_functions, execute_select_with_window,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{
