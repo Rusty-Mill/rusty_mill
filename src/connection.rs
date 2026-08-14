@@ -1,3 +1,4 @@
+use crate::config::{DbConfig, Limit};
 use crate::ddl::{parse_create_table, ColumnDef};
 use crate::dml_insert::parse_insert;
 use crate::dml_select::parse_select;
@@ -7,6 +8,7 @@ use crate::row::Row;
 use crate::storage::Database;
 use crate::token::{tokenize, Token};
 use crate::value::Value;
+use std::collections::HashMap;
 
 /// A table column's schema, as returned by [`Connection::column_metadata`].
 /// A subset of `rusqlite`'s equivalent (no collation sequence or
@@ -44,6 +46,8 @@ pub struct Connection {
     open: bool,
     last_changes: usize,
     total_changes: usize,
+    db_config: HashMap<DbConfig, bool>,
+    limits: HashMap<Limit, i32>,
 }
 
 impl Connection {
@@ -54,6 +58,8 @@ impl Connection {
             open: true,
             last_changes: 0,
             total_changes: 0,
+            db_config: HashMap::new(),
+            limits: HashMap::new(),
         })
     }
 
@@ -147,6 +153,55 @@ impl Connection {
         } else {
             Err(Error::NoSuchDatabase(db_name.to_string()))
         }
+    }
+
+    /// Returns whether `config` is currently enabled. Defaults to `false`
+    /// for any option that hasn't been set. **Not enforced**: setting
+    /// `EnableForeignKeys`, for example, doesn't make the engine actually
+    /// check foreign keys yet — there's no foreign-key constraint
+    /// tracking in the storage layer to enforce. Stored honestly as a
+    /// flag, not silently ignored, so a future PR that adds real
+    /// enforcement has something to read.
+    pub fn db_config(&self, config: DbConfig) -> bool {
+        self.db_config.get(&config).copied().unwrap_or(false)
+    }
+
+    /// Sets `config`'s enabled state. See [`Connection::db_config`] for
+    /// what "not enforced yet" means here.
+    pub fn set_db_config(&mut self, config: DbConfig, enabled: bool) -> Result<()> {
+        self.db_config.insert(config, enabled);
+        Ok(())
+    }
+
+    /// Returns `limit`'s current value, or `-1` if it hasn't been set
+    /// (matching SQLite's convention that a negative limit means
+    /// "unset"/"query current value only"). **Not enforced**: no
+    /// operation currently checks these limits before proceeding.
+    pub fn limit(&self, limit: Limit) -> i32 {
+        self.limits.get(&limit).copied().unwrap_or(-1)
+    }
+
+    /// Sets `limit`'s value, returning its previous value.
+    pub fn set_limit(&mut self, limit: Limit, value: i32) -> i32 {
+        let previous = self.limit(limit);
+        self.limits.insert(limit, value);
+        previous
+    }
+
+    /// No-op: there's no prepared-statement cache yet — `prepare_cached`
+    /// isn't implemented (it needs a real `Statement` type, tracked
+    /// separately; see the note on `prepare*` above).
+    pub fn set_prepared_statement_cache_capacity(&mut self, _capacity: usize) {}
+
+    /// No-op, for the same reason as
+    /// [`Connection::set_prepared_statement_cache_capacity`].
+    pub fn flush_prepared_statement_cache(&mut self) {}
+
+    /// No-op: this engine has no page cache to flush (see
+    /// `ARCHITECTURE.md` — storage is a plain in-memory `HashMap`, not a
+    /// paged cache over a file).
+    pub fn cache_flush(&self) -> Result<()> {
+        Ok(())
     }
 
     /// Snapshots table state for [`crate::Transaction`]/[`crate::Savepoint`]
@@ -448,5 +503,23 @@ mod tests {
         conn.execute("INSERT INTO t VALUES (3)").unwrap();
         assert_eq!(conn.changes(), 1);
         assert_eq!(conn.total_changes(), 3);
+    }
+
+    #[test]
+    fn db_config_defaults_to_false_and_round_trips() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(!conn.db_config(DbConfig::EnableForeignKeys));
+        conn.set_db_config(DbConfig::EnableForeignKeys, true)
+            .unwrap();
+        assert!(conn.db_config(DbConfig::EnableForeignKeys));
+    }
+
+    #[test]
+    fn limit_defaults_to_negative_one_and_round_trips() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert_eq!(conn.limit(Limit::Length), -1);
+        let previous = conn.set_limit(Limit::Length, 1000);
+        assert_eq!(previous, -1);
+        assert_eq!(conn.limit(Limit::Length), 1000);
     }
 }
