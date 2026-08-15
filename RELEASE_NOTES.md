@@ -30,6 +30,16 @@ this file carries the reasoning and the deliberate scope cuts behind them.
   crate *is* the deliverable (`bytes`, `futures-io`, `tracing`), and two
   documented decisions left standing (`crossbeam-deque`, `io-uring`).
   `libc`/`windows-sys` excluded as the deliberate rustils RFC v2 floor.
+- **Fixed:** `udp_socket_bind_device_set_and_read_back_then_cleared`
+  (`tests/net.rs`) and `bind_device_set_and_read_back_then_cleared`
+  (`tests/tcp_socket.rs`) both failed with `EPERM` the moment CI first ran
+  them. Pre-existing — they had simply never run in CI before. The kernel
+  gates `SO_BINDTODEVICE` on `CAP_NET_RAW` only when the bound ifindex
+  actually changes, so binding to `lo` succeeds unprivileged and only the
+  final clear does not. Each test now tolerates that one error on that one
+  call and skips the clear half; any other error still panics. **Known
+  limitation:** nothing exercises the unbind path on an unprivileged runner
+  — a gap CI cannot close without elevated capabilities.
 - **Known limitation:** `ARCHITECTURE.md` notes that several load-bearing
   decisions (#8's `crossbeam-deque` adoption, #9's io_uring scope limit, the
   Windows socket-layer split) still live in issue threads and manifest
