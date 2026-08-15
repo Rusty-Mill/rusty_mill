@@ -117,8 +117,20 @@ fn bind_device_set_and_read_back_then_cleared() {
         socket.bind_device(Some(b"lo")).unwrap();
         assert_eq!(socket.device().unwrap().as_deref(), Some(&b"lo"[..]));
 
-        socket.bind_device(None).unwrap();
-        assert_eq!(socket.device().unwrap(), None);
+        // Needs `CAP_NET_RAW` -- see the matching comment in `tests/net.rs`'s
+        // `udp_socket_bind_device_set_and_read_back_then_cleared` for why only
+        // this transition does, and why the skip is scoped this narrowly.
+        match socket.bind_device(None) {
+            Ok(()) => assert_eq!(socket.device().unwrap(), None),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping the clear half of \
+                     bind_device_set_and_read_back_then_cleared: clearing \
+                     SO_BINDTODEVICE on a bound socket needs CAP_NET_RAW"
+                );
+            }
+            Err(e) => panic!("unexpected error clearing bind_device: {e}"),
+        }
     });
 }
 
