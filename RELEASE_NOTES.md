@@ -7,6 +7,37 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Gate `bytes` behind a Cargo feature
+**2026-08-15** · [#267](https://github.com/baileyrd/rusty_tokio/issues/267) · PR pending
+
+- **Changed:** `bytes` is now `optional = true` behind a `bytes` feature, off by
+  default. A default build of `rusty_tokio` now pulls **no optional external
+  crates at all** — only `crossbeam-deque` and the deliberate
+  `libc`/`windows-sys` floor.
+- **Why this is a gating and not a removal:** `bytes` is used at 13 sites and
+  every one is a generic bound (`B: bytes::BufMut`), never a concrete type. The
+  dependency *is* the interop contract — the point is accepting a caller's own
+  `bytes::BytesMut`. `rusty_wire` was evaluated as an internal replacement and
+  rejected: it's a concrete byte cursor, not the `Buf`/`BufMut` trait ecosystem,
+  so swapping it in would break the feature rather than internalize it. See
+  `dependency-audit.md`.
+- **Breaking, but asymmetrically so** (`ATLAS-IFACE-0001`): the four gated
+  ext-trait methods (`read_buf`, `write_buf`, `write_all_buf`, plus
+  `UdpSocket::{recv_buf, recv_buf_from}` and `TcpStream::try_read_buf`) are
+  *provided* methods, so gating them off is **not** a breaking change for
+  anything implementing `AsyncRead`/`AsyncWrite` — only for callers of those
+  methods, who now need `features = ["bytes"]`.
+- **Changed:** `MAX_UDP_DATAGRAM_SIZE` stays ungated — the cap is a property of
+  UDP and is useful to callers sizing their own buffers regardless. Its doc links
+  to `bytes::BufMut` became plain code spans so they don't dangle when the
+  feature is off.
+- **Changed:** CI now runs the default build and the feature-enabled build as
+  separate steps. The default step is what keeps the no-optional-crates claim
+  honest and must not be folded into the other.
+- Verified: 59 test targets pass by default (`tests/buf.rs` correctly excluded,
+  `bytes` absent from `cargo tree -e normal`); 60 pass with `--features bytes`,
+  including all 9 `buf` tests.
+
 ## Repo governance file set + dependency sovereignty audit
 **2026-08-15** · PR pending
 
