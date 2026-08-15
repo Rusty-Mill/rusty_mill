@@ -7,6 +7,27 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Correct the `syn` row in `dependency-audit.md`
+**2026-08-15** · [#268](https://github.com/baileyrd/rusty_tokio/issues/268) · [#270](https://github.com/baileyrd/rusty_tokio/pull/270) (closed unmerged)
+
+- **Fixed:** the audit claimed `syn`/`quote`/`proc-macro2` were "the only row
+  with a real path to elimination." They aren't. Removing them from
+  `rusty_tokio-macros` leaves them in the build anyway, via `platform` →
+  `thiserror` → `thiserror-impl` — 38 lockfile packages either way.
+- **Why it was missed:** the audit's scope was direct, non-dev, non-build
+  dependencies. A row can look eliminable at that level while remaining in the
+  graph transitively, so hand-roll candidates now need a `cargo tree -i <crate>`
+  check before being called eliminable.
+- **Outcome:** a working hand-rolled replacement was built and verified (span
+  fidelity preserved, all five diagnostics located, 11 new tests), then declined
+  — ~250 lines of token parsing to maintain for no change in what compiles. The
+  branch is preserved on closed PR #270. `syn`/`quote`/`proc-macro2` stay.
+- **Follow-up identified:** `thiserror` in `rustils`' `platform` crate is the
+  single dependency keeping `syn`, `quote`, `proc-macro2`, and `unicode-ident`
+  in every consumer of the platform layer. That's the real lever, and it's in a
+  different repo.
+- Documentation only — no code change.
+
 ## Gate `bytes` behind a Cargo feature
 **2026-08-15** · [#267](https://github.com/baileyrd/rusty_tokio/issues/267) · PR pending
 
