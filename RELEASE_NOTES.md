@@ -7,6 +7,20 @@ this file carries the reasoning and the deliberate scope cuts behind them.
 
 ---
 
+## Normalize line endings on the generated governance files
+**2026-08-15** · PR [#271](https://github.com/baileyrd/rusty_tokio/pull/271)
+
+- **Fixed:** `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and
+  `docs/adr/0001-template.md` landed with CRLF line endings. They were copied
+  verbatim from a tooling skill whose entire template payload is CRLF, and it
+  went unnoticed because the two files rewritten by hand
+  (`ARCHITECTURE.md`, `RELEASE_NOTES.md`) came out LF and looked
+  representative. Now all LF.
+- **Added:** `.gitattributes` with `* text=auto eol=lf`. The generator still
+  emits CRLF, so without this the next regeneration reintroduces it — fixing it
+  at the repo boundary is what makes the fix durable rather than a one-off
+  cleanup.
+
 ## Correct the `syn` row in `dependency-audit.md`
 **2026-08-15** · [#268](https://github.com/baileyrd/rusty_tokio/issues/268) · [#270](https://github.com/baileyrd/rusty_tokio/pull/270) (closed unmerged)
 
