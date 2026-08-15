@@ -22,7 +22,7 @@ already sovereign.
 
 | Dependency | Purpose | Classification | Internal candidate | Size | Recommended action | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `syn` (full) + `quote` + `proc-macro2` | Parse/emit for `#[main]`/`#[test]` attribute macros | hand-roll candidate | none found | M | Hand-roll on raw `proc_macro::TokenStream` if approved | The only row with a real path to elimination. Whole macro crate is 216 lines; the entire accepted argument surface is `worker_threads = N` + `flavor = "..."`. `syn`'s `features = ["full"]` is pulled in for exactly one thing — `parse_macro_input!(item as ItemFn)`. Also the highest-trust-cost row: proc macros execute arbitrary code at compile time. |
+| `syn` (full) + `quote` + `proc-macro2` | Parse/emit for `#[main]`/`#[test]` attribute macros | ~~hand-roll candidate~~ → **keep external** | none found | M | **Attempted and declined** — see the correction below (#268, PR #270) | Originally classified as the only row with a real path to elimination. That was wrong: removing them from `rusty_tokio-macros` doesn't remove them from the build, because `platform` → `thiserror` → `thiserror-impl` pulls all three regardless. A working hand-rolled replacement was built and verified, then declined — ~250 lines of token parsing to maintain in exchange for no reduction in what actually compiles. |
 | `bytes` | `Buf`/`BufMut` trait bounds for `read_buf`/`write_buf`/`write_all_buf`, `recv_buf`, `try_read_buf` | keep external | `rusty_wire` (not equivalent) | — | Keep — but make it **optional** (see below) | Used at 13 sites, every one a generic bound (`B: bytes::BufMut`), never a concrete type. The dependency *is* the interop contract: the point is accepting a caller's own `bytes::BytesMut`. `rusty_wire` is a concrete zero-dep byte cursor, not the trait ecosystem — swapping it in would break the feature rather than internalize it. |
 | `futures-io` | `AsyncRead`/`AsyncWrite` shim for third-party codec/framing crates (`io/compat.rs`) | keep external | none | — | Keep | Same class as `bytes`: the whole deliverable is `impl futures_io::AsyncRead for Compat<T>`. An internal replacement would implement a trait nobody else speaks. Already optional, off by default. |
 | `tracing` | `tracing::Span` per spawned task, shaped to tokio's console wire format | keep external | none | — | Keep | Same class again — the value is that `console-subscriber`/`tokio-console`, built against that format, work unmodified. Already optional, off by default. |
@@ -58,10 +58,54 @@ build, which is the part that matters for a constrained-network consumer.
 Size S/M: the 13 call sites are provided methods on ext traits plus inherent
 methods on `UdpSocket`/`TcpStream`, all `cfg`-gateable.
 
+## Correction: the `syn` row was wrong (#268, PR #270)
+
+The audit called `syn`/`quote`/`proc-macro2` "the only row with a real path to
+elimination." That was **wrong**, and it's corrected here rather than quietly
+edited out, because the reason it was wrong generalizes.
+
+Removing the three from `rusty_tokio-macros` does not remove them from the
+build. `cargo tree -i syn`, with the hand-rolled replacement in place:
+
+```
+syn v2.0.119
+└── thiserror-impl v1.0.69 (proc-macro)
+    └── thiserror v1.0.69
+        └── platform v0.27.0 (rustils)
+            └── rusty_tokio v0.2.0
+```
+
+38 packages in the lockfile either way.
+
+**Why the audit missed it:** the scope was direct, non-dev, non-build
+dependencies — the skill's default, and the right default for most rows. But a
+row can look eliminable at the direct level while remaining in the graph
+transitively. That distinction is invisible at this scope and needs a
+`cargo tree -i <crate>` check per hand-roll candidate before the row is called
+eliminable at all.
+
+**What happened:** a full hand-rolled replacement was built on raw
+`proc_macro::TokenStream` and verified (span fidelity preserved, all five
+diagnostics located, 11 new tests). It was then **declined** — ~250 lines of
+token parsing to maintain, in exchange for no change in what gets compiled. The
+branch is preserved on closed PR #270 if `rustils` ever changes the picture.
+
+**The real lever is elsewhere.** `thiserror` in `rustils`' `platform` crate is
+the single dependency keeping `syn`, `quote`, `proc-macro2`, and
+`unicode-ident` in every consumer of the platform layer. That's a different
+repo and its own decision — worth its own audit, and worth doing before anyone
+revisits this row.
+
 ## Bottom line
 
-Of six audited external dependencies, **one is a genuine drop candidate**
-(the `syn`/`quote`/`proc-macro2` trio). Three are interop contracts where
-the external crate is the whole point of the dependency, and two are
-documented decisions with benchmark or verification-tooling rationale that
-this audit found no reason to overturn — no internal repo covers either.
+Of six audited external dependencies, **none can be removed from the build
+today**. Three are interop contracts where the external crate is the whole
+point of the dependency (`bytes`, `futures-io`, `tracing`), two are documented
+decisions with benchmark or verification-tooling rationale that this audit
+found no reason to overturn (`crossbeam-deque`, `io-uring`), and the sixth
+turned out to be reachable transitively regardless.
+
+One change did land: `bytes` moved out of the default build (#267), so a
+default build now pulls no optional external crates at all. That's narrower
+than removing a dependency, but it's the part that matters for a
+constrained-network consumer.
