@@ -44,13 +44,16 @@ platform = { git = "https://github.com/baileyrd/rustils", rev = "ce9259d465ef7d9
 # one narrowly-scoped sub-crate for a piece this project already decided
 # isn't its point to hand-roll unverified).
 crossbeam-deque = "0.8"
-# `Buf`/`BufMut` integration for `AsyncReadExt::read_buf`/
-# `AsyncWriteExt::{write_buf,write_all_buf}` (issue #120) -- the small,
-# stable, widely-depended-on crate that defines those traits in the
-# first place; there's no reasonable way to accept a caller's own
-# `bytes::BytesMut`/etc. without depending on the crate that defines
-# the trait it implements.
-bytes = "1"
+# Optional (see the `bytes` feature below): `Buf`/`BufMut` integration
+# for `AsyncReadExt::read_buf`/`AsyncWriteExt::{write_buf,write_all_buf}`
+# (issue #120) -- the small, stable, widely-depended-on crate that defines
+# those traits in the first place; there's no reasonable way to accept a
+# caller's own `bytes::BytesMut`/etc. without depending on the crate that
+# defines the trait it implements. Optional for the same reason
+# `futures-io` and `tracing` are: it's an interop contract, valuable only
+# to a consumer who already speaks it, so a consumer who doesn't
+# shouldn't carry it. See #267.
+bytes = { version = "1", optional = true }
 # Optional (see the `futures-io-compat` feature below): a small, stable,
 # widely-depended-on crate that exists specifically to let unrelated
 # async I/O implementations interoperate -- issue #7's second option,
@@ -68,6 +71,19 @@ tracing = { version = "0.1", optional = true, default-features = false, features
 ] }
 
 [features]
+# `Buf`/`BufMut` integration: `AsyncReadExt::read_buf`,
+# `AsyncWriteExt::{write_buf,write_all_buf}`, `UdpSocket::{recv_buf,
+# recv_buf_from}`, and `TcpStream::try_read_buf`. Off by default so a
+# consumer who never hands this crate a `bytes::BytesMut` doesn't carry
+# the dependency -- the same posture `futures-io-compat` and `tracing`
+# already take, and what makes a default build free of optional external
+# crates entirely (see #267).
+#
+# Note the asymmetry, per ATLAS-IFACE-0001: the gated ext-trait methods
+# are *provided* methods, so turning this off is not a breaking change for
+# anything implementing `AsyncRead`/`AsyncWrite` -- only for callers of
+# those four methods.
+bytes = ["dep:bytes"]
 # Implements `futures_io::{AsyncRead, AsyncWrite}` for a `Compat<T>`
 # wrapper around anything implementing this crate's own traits (see
 # `io::compat`'s docs) -- lets third-party codec/framing crates written
@@ -188,6 +204,11 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+# Same reasoning as `futures-io`/`tracing` below: `tests/buf.rs` drives the
+# `Buf`/`BufMut` surface through real `bytes::BytesMut` values, so it needs
+# the crate unconditionally even though `required-features` skips that test
+# target unless the `bytes` feature is actually enabled.
+bytes = "1"
 # Unconditional here (unlike the optional `[dependencies]` entry above)
 # so `tests/futures_io_compat.rs` can call the trait's methods directly
 # -- `required-features` below still skips building that one test
@@ -222,6 +243,10 @@ harness = false
 [[bench]]
 name = "scheduler"
 harness = false
+
+[[test]]
+name = "buf"
+required-features = ["bytes"]
 
 [[test]]
 name = "futures_io_compat"

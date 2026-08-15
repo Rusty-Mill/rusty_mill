@@ -552,11 +552,13 @@ impl TcpStream {
         })
     }
 
-    /// Like [`try_read`](Self::try_read), but into a [`bytes::BufMut`]'s
+    /// Like [`try_read`](Self::try_read), but into a `bytes::BufMut`'s
     /// spare capacity instead of a plain `&mut [u8]` -- see
-    /// [`AsyncReadExt::read_buf`](super::AsyncReadExt::read_buf) for why
-    /// this crate copies through a stack buffer rather than tokio's own
-    /// zero-copy uninitialized-memory path.
+    /// `AsyncReadExt::read_buf` for why this crate copies through a stack
+    /// buffer rather than tokio's own zero-copy uninitialized-memory path.
+    ///
+    /// Requires the `bytes` Cargo feature.
+    #[cfg(feature = "bytes")]
     pub fn try_read_buf<B: bytes::BufMut>(&self, buf: &mut B) -> io::Result<usize> {
         if !buf.has_remaining_mut() {
             return Ok(0);

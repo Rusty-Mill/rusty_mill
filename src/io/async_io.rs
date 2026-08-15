@@ -305,6 +305,9 @@ pub trait AsyncReadExt: AsyncRead {
     /// zero-copy path; not worth the unsafe `MaybeUninit` plumbing this
     /// crate's `ReadBuf` deliberately avoids elsewhere for how rarely
     /// `bytes::Buf` integration is the hot path.
+    ///
+    /// Requires the `bytes` Cargo feature.
+    #[cfg(feature = "bytes")]
     fn read_buf<B: bytes::BufMut + Send>(
         &mut self,
         buf: &mut B,
@@ -566,6 +569,9 @@ pub trait AsyncWriteExt: AsyncWrite {
     /// Unlike [`read_buf`](AsyncReadExt::read_buf), this needs no extra
     /// copy: `Buf::chunk` already hands back ordinary initialized
     /// `&[u8]`, so it goes straight to `write`.
+    ///
+    /// Requires the `bytes` Cargo feature.
+    #[cfg(feature = "bytes")]
     fn write_buf<B: bytes::Buf + Send>(
         &mut self,
         buf: &mut B,
@@ -585,6 +591,9 @@ pub trait AsyncWriteExt: AsyncWrite {
 
     /// Like [`write_buf`](Self::write_buf), but loops until `buf` is
     /// completely drained -- the `Buf`-based counterpart of `write_all`.
+    ///
+    /// Requires the `bytes` Cargo feature.
+    #[cfg(feature = "bytes")]
     fn write_all_buf<B: bytes::Buf + Send>(
         &mut self,
         buf: &mut B,
