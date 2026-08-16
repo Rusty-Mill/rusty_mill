@@ -23,6 +23,49 @@ entry per PR.
 
 ---
 
+## PR #151 — Add subqueries: scalar + IN (SELECT ...) (closes #131)
+**2026-08-16** · [#151](https://github.com/baileyrd/rusty_-rusqlite/pull/151)
+
+- **Added:** a scalar subquery in expression position (`WHERE x =
+  (SELECT MAX(a) FROM t)`) and `IN (SELECT ...)`, the subquery form of
+  `IN` alongside the pre-existing literal-list form. New `Expr::
+  ScalarSubquery`/`Expr::InSubquery` AST variants.
+- **The architectural boundary crossing this issue's own sign-off asked
+  for a design note on:** `eval.rs` still has no direct dependency on
+  `engine`/`Database` — a subquery executor is threaded through as a
+  callback (`eval::SubqueryFn`), the same dependency-inversion shape
+  already established for registered scalar functions
+  (`eval::ScalarFn`), just one layer deeper (a whole nested query
+  instead of one function call). `engine.rs` is the only module that
+  ever passes a real (`Some`) callback; every other evaluator caller
+  passes `None`, so those get a clear error rather than reaching a
+  dead end silently.
+- Wired into a `SELECT`'s own `WHERE`/`HAVING` and a `JOIN`'s `ON`
+  condition, dispatching a subquery through the exact same plain/
+  aggregate/window logic a top-level query would — `WHERE a = (SELECT
+  MAX(b) FROM t)` (a subquery with an aggregate select list, easily the
+  most common real-world shape) works, not just a bare `SELECT`.
+- **Uncorrelated only, stated plainly:** a subquery can't reference the
+  outer row (e.g. `WHERE a = (SELECT MAX(b) FROM t2 WHERE t2.x = t1.x)`
+  errors with a clear `UnknownColumn`, not silently wrong results) —
+  real correlated-subquery support needs per-outer-row re-execution, a
+  substantially larger feature than this issue's own explicit examples
+  call for. This was one of the two documented "how to scope this"
+  options the issue's sign-off offered, and the one taken.
+- **Scope cut, stated plainly:** a subquery in `UPDATE`/`DELETE`'s
+  `WHERE` parses but errors clearly at execution time — `Database::
+  update_rows`/`delete_rows` can't hand out a subquery-executing
+  closure without a `&mut self`-vs-`&self` borrow conflict. Not silently
+  ignored or a panic.
+- Zero result rows for a scalar subquery is `NULL`; more than one row
+  uses the first row's value (matching real SQLite's own behavior for
+  an over-returning scalar subquery); more than one *column* is a clear
+  `Error::ColumnCountMismatch`.
+- Bound parameters (`?`/`:name`) inside a subquery resolve correctly
+  through a prepared statement, same as everywhere else.
+
+---
+
 ## PR #150 — Add JOIN (INNER/LEFT/CROSS) (closes #130)
 **2026-08-16** · [#150](https://github.com/baileyrd/rusty_-rusqlite/pull/150)
 

@@ -8,7 +8,7 @@
 //! signature — [`evaluate`] is now defined in terms of it (an empty
 //! registry), so both stay in sync from one implementation.
 
-use crate::dml_select::{BinaryOp, Expr};
+use crate::dml_select::{BinaryOp, Expr, Select};
 use crate::error::{Error, Result};
 use crate::value::Value;
 use std::cmp::Ordering;
@@ -21,8 +21,12 @@ pub type ScalarFn = dyn Fn(&[Value]) -> Result<Value>;
 /// Evaluates an expression against one row, given the row's column names
 /// in the same order as its values. Errors on [`Expr::FunctionCall`] —
 /// use [`evaluate_with_functions`] for expressions that may contain one.
+/// Also errors on [`Expr::ScalarSubquery`]/[`Expr::InSubquery`] (issue
+/// #131) — those need a subquery executor, which only [`crate::engine`]
+/// (a different module, to avoid a circular dependency — see
+/// [`SubqueryFn`]'s own doc comment) can supply.
 pub fn evaluate(expr: &Expr, column_names: &[String], row: &[Value]) -> Result<Value> {
-    evaluate_with_functions(expr, column_names, row, &HashMap::new())
+    evaluate_with_context(expr, column_names, row, &HashMap::new(), None)
 }
 
 /// Resolves `name` to its index in `column_names`. Tries an exact match
@@ -60,12 +64,54 @@ pub(crate) fn resolve_column_index(column_names: &[String], name: &str) -> Resul
 }
 
 /// Like [`evaluate`], but resolves [`Expr::FunctionCall`] against
-/// `functions` (name → implementation).
+/// `functions` (name → implementation). Still errors on
+/// [`Expr::ScalarSubquery`]/[`Expr::InSubquery`] — see
+/// [`evaluate_with_context`], which [`crate::engine`] actually calls
+/// (with a real subquery executor) to run those.
 pub fn evaluate_with_functions(
     expr: &Expr,
     column_names: &[String],
     row: &[Value],
     functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<Value> {
+    evaluate_with_context(expr, column_names, row, functions, None)
+}
+
+/// A subquery executor (issue #131): given a parsed, uncorrelated
+/// `SELECT`, runs it and returns its result rows. Passed as a callback
+/// rather than `eval.rs` importing `engine`/`Database` directly to run
+/// it itself — `engine.rs` already depends on `eval.rs` (calls
+/// `evaluate_with_context` to evaluate `WHERE`/`ON`/`HAVING`), so the
+/// reverse dependency would be circular. This is the same dependency-
+/// inversion shape [`ScalarFn`] already established for scalar function
+/// calls, just one layer deeper (a whole nested query instead of one
+/// function).
+///
+/// **Uncorrelated only, stated plainly:** the callback takes no row
+/// context from the outer query, so a subquery referencing an outer
+/// row's column (e.g. `WHERE a = (SELECT MAX(b) FROM t2 WHERE t2.x =
+/// t1.x)`) errors with [`Error::UnknownColumn`] rather than resolving
+/// against the outer scope — real correlated-subquery support needs
+/// per-outer-row re-execution, a substantially larger feature than this
+/// issue's own explicit examples (`WHERE a = (SELECT ...)`, `IN (SELECT
+/// ...)`) call for.
+pub type SubqueryFn<'a> = dyn Fn(&Select) -> Result<Vec<Vec<Value>>> + 'a;
+
+/// The full evaluator every other `evaluate*` function is defined in
+/// terms of: [`evaluate`]/[`evaluate_with_functions`] both call this
+/// with `subqueries: None`. `crate::engine` is the only caller that
+/// passes `Some` — see [`SubqueryFn`]'s own doc comment for why a
+/// callback instead of a direct `engine`/`Database` dependency here.
+/// `pub(crate)`: not part of this crate's public API surface (unlike
+/// [`evaluate`]/[`evaluate_with_functions`]) since actually running a
+/// subquery needs a [`crate::storage::Database`] reference no bare
+/// `Expr`-evaluation caller outside `engine.rs` has to hand.
+pub(crate) fn evaluate_with_context(
+    expr: &Expr,
+    column_names: &[String],
+    row: &[Value],
+    functions: &HashMap<String, Box<ScalarFn>>,
+    subqueries: Option<&SubqueryFn>,
 ) -> Result<Value> {
     match expr {
         Expr::Literal(v) => Ok(v.clone()),
@@ -74,8 +120,8 @@ pub fn evaluate_with_functions(
             Ok(row[idx].clone())
         }
         Expr::BinaryOp { op, left, right } => {
-            let l = evaluate_with_functions(left, column_names, row, functions)?;
-            let r = evaluate_with_functions(right, column_names, row, functions)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
+            let r = evaluate_with_context(right, column_names, row, functions, subqueries)?;
             let ord = compare_values(&l, &r);
             let result = match op {
                 BinaryOp::Eq => ord == Ordering::Equal,
@@ -93,17 +139,24 @@ pub fn evaluate_with_functions(
                 .ok_or_else(|| Error::FunctionNotFound(name.clone()))?;
             let arg_values = args
                 .iter()
-                .map(|a| evaluate_with_functions(a, column_names, row, functions))
+                .map(|a| evaluate_with_context(a, column_names, row, functions, subqueries))
                 .collect::<Result<Vec<Value>>>()?;
             f(&arg_values)
         }
         Expr::And(left, right) => {
-            let l = to_bool3(evaluate_with_functions(left, column_names, row, functions)?)?;
-            let r = to_bool3(evaluate_with_functions(
+            let l = to_bool3(evaluate_with_context(
+                left,
+                column_names,
+                row,
+                functions,
+                subqueries,
+            )?)?;
+            let r = to_bool3(evaluate_with_context(
                 right,
                 column_names,
                 row,
                 functions,
+                subqueries,
             )?)?;
             let result = match (l, r) {
                 (Some(false), _) | (_, Some(false)) => Some(false),
@@ -113,12 +166,19 @@ pub fn evaluate_with_functions(
             Ok(bool3_to_value(result))
         }
         Expr::Or(left, right) => {
-            let l = to_bool3(evaluate_with_functions(left, column_names, row, functions)?)?;
-            let r = to_bool3(evaluate_with_functions(
+            let l = to_bool3(evaluate_with_context(
+                left,
+                column_names,
+                row,
+                functions,
+                subqueries,
+            )?)?;
+            let r = to_bool3(evaluate_with_context(
                 right,
                 column_names,
                 row,
                 functions,
+                subqueries,
             )?)?;
             let result = match (l, r) {
                 (Some(true), _) | (_, Some(true)) => Some(true),
@@ -128,11 +188,12 @@ pub fn evaluate_with_functions(
             Ok(bool3_to_value(result))
         }
         Expr::Not(inner) => {
-            let v = to_bool3(evaluate_with_functions(
+            let v = to_bool3(evaluate_with_context(
                 inner,
                 column_names,
                 row,
                 functions,
+                subqueries,
             )?)?;
             Ok(bool3_to_value(v.map(|b| !b)))
         }
@@ -142,15 +203,17 @@ pub fn evaluate_with_functions(
             escape,
             negate,
         } => {
-            let l = evaluate_with_functions(left, column_names, row, functions)?;
-            let p = evaluate_with_functions(pattern, column_names, row, functions)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
+            let p = evaluate_with_context(pattern, column_names, row, functions, subqueries)?;
             let esc = match escape {
-                Some(e) => match evaluate_with_functions(e, column_names, row, functions)? {
-                    Value::Null => return Ok(Value::Null),
-                    other => Some(value_as_text(&other)?.chars().next().ok_or_else(|| {
-                        Error::UnrecognizedStatement("ESCAPE must be one character".to_string())
-                    })?),
-                },
+                Some(e) => {
+                    match evaluate_with_context(e, column_names, row, functions, subqueries)? {
+                        Value::Null => return Ok(Value::Null),
+                        other => Some(value_as_text(&other)?.chars().next().ok_or_else(|| {
+                            Error::UnrecognizedStatement("ESCAPE must be one character".to_string())
+                        })?),
+                    }
+                }
                 None => None,
             };
             Ok(match (value_as_text_opt(&l), value_as_text_opt(&p)) {
@@ -166,8 +229,8 @@ pub fn evaluate_with_functions(
             pattern,
             negate,
         } => {
-            let l = evaluate_with_functions(left, column_names, row, functions)?;
-            let p = evaluate_with_functions(pattern, column_names, row, functions)?;
+            let l = evaluate_with_context(left, column_names, row, functions, subqueries)?;
+            let p = evaluate_with_context(pattern, column_names, row, functions, subqueries)?;
             Ok(match (value_as_text_opt(&l), value_as_text_opt(&p)) {
                 (Some(text), Some(pat)) => {
                     let matched = crate::like::glob_match(&text, &pat);
@@ -182,9 +245,9 @@ pub fn evaluate_with_functions(
             high,
             negate,
         } => {
-            let v = evaluate_with_functions(expr, column_names, row, functions)?;
-            let lo = evaluate_with_functions(low, column_names, row, functions)?;
-            let hi = evaluate_with_functions(high, column_names, row, functions)?;
+            let v = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
+            let lo = evaluate_with_context(low, column_names, row, functions, subqueries)?;
+            let hi = evaluate_with_context(high, column_names, row, functions, subqueries)?;
             if v == Value::Null || lo == Value::Null || hi == Value::Null {
                 return Ok(Value::Null);
             }
@@ -193,14 +256,14 @@ pub fn evaluate_with_functions(
             Ok(bool3_to_value(Some(matched != *negate)))
         }
         Expr::InList { expr, list, negate } => {
-            let x = evaluate_with_functions(expr, column_names, row, functions)?;
+            let x = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
             if x == Value::Null {
                 return Ok(Value::Null);
             }
             let mut found = false;
             let mut saw_null = false;
             for item in list {
-                let v = evaluate_with_functions(item, column_names, row, functions)?;
+                let v = evaluate_with_context(item, column_names, row, functions, subqueries)?;
                 if v == Value::Null {
                     saw_null = true;
                     continue;
@@ -219,19 +282,98 @@ pub fn evaluate_with_functions(
             };
             Ok(bool3_to_value(result.map(|b| b != *negate)))
         }
+        // `expr IN (SELECT ...)` (issue #131) -- runs the subquery once
+        // (uncorrelated -- see `SubqueryFn`'s doc comment), then the
+        // same membership-with-NULL-propagation logic as `Expr::InList`
+        // above, sourcing its candidate values from the subquery's rows
+        // instead of a literal list. A subquery returning more than one
+        // column is a column-count error, matching `ScalarSubquery`.
+        Expr::InSubquery {
+            expr,
+            query,
+            negate,
+        } => {
+            let run = subqueries.ok_or_else(|| {
+                Error::UnrecognizedStatement(
+                    "IN (SELECT ...) is not supported in this evaluation context".to_string(),
+                )
+            })?;
+            let x = evaluate_with_context(expr, column_names, row, functions, subqueries)?;
+            if x == Value::Null {
+                return Ok(Value::Null);
+            }
+            let subquery_rows = run(query)?;
+            let mut found = false;
+            let mut saw_null = false;
+            for subquery_row in &subquery_rows {
+                if subquery_row.len() != 1 {
+                    return Err(Error::ColumnCountMismatch {
+                        expected: 1,
+                        actual: subquery_row.len(),
+                    });
+                }
+                let v = &subquery_row[0];
+                if *v == Value::Null {
+                    saw_null = true;
+                    continue;
+                }
+                if compare_values(&x, v) == Ordering::Equal {
+                    found = true;
+                    break;
+                }
+            }
+            let result = if found {
+                Some(true)
+            } else if saw_null {
+                None
+            } else {
+                Some(false)
+            };
+            Ok(bool3_to_value(result.map(|b| b != *negate)))
+        }
+        // `(SELECT ...)` in expression position (issue #131) --
+        // uncorrelated (see `SubqueryFn`'s doc comment), run once. Zero
+        // rows is `NULL`; more than one row uses the first row's value,
+        // matching real SQLite's own behavior for an over-returning
+        // scalar subquery (it doesn't error, it just picks one). A
+        // result row with anything other than exactly one column is a
+        // clear error rather than an arbitrary "pick the first column".
+        Expr::ScalarSubquery(query) => {
+            let run = subqueries.ok_or_else(|| {
+                Error::UnrecognizedStatement(
+                    "scalar subqueries are not supported in this evaluation context".to_string(),
+                )
+            })?;
+            let rows = run(query)?;
+            match rows.first() {
+                None => Ok(Value::Null),
+                Some(row) if row.len() == 1 => Ok(row[0].clone()),
+                Some(row) => Err(Error::ColumnCountMismatch {
+                    expected: 1,
+                    actual: row.len(),
+                }),
+            }
+        }
         Expr::Case {
             operand,
             branches,
             else_result,
         } => {
             let operand_value = match operand {
-                Some(o) => Some(evaluate_with_functions(o, column_names, row, functions)?),
+                Some(o) => Some(evaluate_with_context(
+                    o,
+                    column_names,
+                    row,
+                    functions,
+                    subqueries,
+                )?),
                 None => None,
             };
             for (cond, result) in branches {
                 let matched = match &operand_value {
                     Some(ov) => {
-                        let cv = evaluate_with_functions(cond, column_names, row, functions)?;
+                        let cv =
+                            evaluate_with_context(cond, column_names, row, functions, subqueries)?;
                         // Simple-form matching is `=` comparison; a NULL
                         // operand or NULL WHEN value never matches (same
                         // "unknown isn't true" rule as every other
@@ -241,16 +383,17 @@ pub fn evaluate_with_functions(
                             && compare_values(ov, &cv) == Ordering::Equal
                     }
                     None => {
-                        let cv = evaluate_with_functions(cond, column_names, row, functions)?;
+                        let cv =
+                            evaluate_with_context(cond, column_names, row, functions, subqueries)?;
                         to_bool3(cv)?.unwrap_or(false)
                     }
                 };
                 if matched {
-                    return evaluate_with_functions(result, column_names, row, functions);
+                    return evaluate_with_context(result, column_names, row, functions, subqueries);
                 }
             }
             match else_result {
-                Some(e) => evaluate_with_functions(e, column_names, row, functions),
+                Some(e) => evaluate_with_context(e, column_names, row, functions, subqueries),
                 None => Ok(Value::Null),
             }
         }
@@ -279,6 +422,26 @@ pub fn evaluate_bool_with_functions(
     functions: &HashMap<String, Box<ScalarFn>>,
 ) -> Result<bool> {
     to_bool(evaluate_with_functions(expr, column_names, row, functions)?)
+}
+
+/// Like [`evaluate_bool_with_functions`], but also resolves
+/// [`Expr::ScalarSubquery`]/[`Expr::InSubquery`] (issue #131) against
+/// `subqueries` — see [`evaluate_with_context`]/[`SubqueryFn`].
+/// `pub(crate)`, same reasoning as `evaluate_with_context` itself.
+pub(crate) fn evaluate_bool_with_context(
+    expr: &Expr,
+    column_names: &[String],
+    row: &[Value],
+    functions: &HashMap<String, Box<ScalarFn>>,
+    subqueries: Option<&SubqueryFn>,
+) -> Result<bool> {
+    to_bool(evaluate_with_context(
+        expr,
+        column_names,
+        row,
+        functions,
+        subqueries,
+    )?)
 }
 
 /// Like [`evaluate_bool`], but distinguishes `NULL` (`None`) from a

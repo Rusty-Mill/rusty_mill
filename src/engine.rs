@@ -1,7 +1,9 @@
 //! Execution engine (foundation-tier `A7`): ties the parser ASTs, storage
 //! layer, and expression evaluator together into an actual query path.
-//! Deliberately scoped to single-table scan + filter + project — no
-//! joins, aggregates, subqueries, or indexes yet.
+//! Extended well past its original single-table scan + filter + project
+//! scope by many later issues — aggregates, `GROUP BY`/`HAVING`, window
+//! functions, `JOIN` (issue #130), and uncorrelated scalar/`IN`
+//! subqueries (issue #131). No index-accelerated scans yet.
 
 use crate::aggregate::Aggregate;
 use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
@@ -14,7 +16,7 @@ use crate::dml_select::{
 use crate::dml_update::Update;
 use crate::error::{Error, Result};
 use crate::eval::{
-    evaluate_bool_with_functions, evaluate_with_functions, resolve_column_index, ScalarFn,
+    evaluate_bool_with_context, evaluate_with_functions, resolve_column_index, ScalarFn, SubqueryFn,
 };
 use crate::storage::Database;
 use crate::value::Value;
@@ -251,10 +253,37 @@ pub fn execute_select(db: &Database, select: &Select) -> Result<(Vec<String>, Ve
 /// `select.filter` against `functions` (name → implementation). Part B
 /// gap row "Connection + functions module: scalar SQL functions" —
 /// `Connection` registers functions here via `create_scalar_function`.
+/// A scalar/`IN` subquery (issue #131) in `select.filter` is supported,
+/// but — since this already-shipped 3-argument signature has no
+/// `aggregates` to dispatch one with — only if the subquery's own select
+/// list isn't itself aggregate/window-shaped; use
+/// [`execute_select_with_functions_and_aggregates`] for that.
 pub fn execute_select_with_functions(
     db: &Database,
     select: &Select,
     functions: &HashMap<String, Box<ScalarFn>>,
+) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    execute_select_with_functions_and_aggregates(db, select, functions, &HashMap::new())
+}
+
+/// Like [`execute_select_with_functions`], but also resolves `aggregates`
+/// — needed so a subquery (issue #131) in `select.filter`/a joined
+/// `ON` condition can itself have an aggregate or window select list
+/// (e.g. `WHERE a = (SELECT MAX(b) FROM t)`, easily the single most
+/// common real-world scalar-subquery shape). Added as a new function
+/// rather than widening `execute_select_with_functions`'s own
+/// already-shipped signature — the same "extend without breaking"
+/// pattern `evaluate`/`evaluate_with_functions`/`evaluate_with_context`
+/// already established in `eval.rs`. `pub(crate)`: `Connection::
+/// run_select` (the real top-level dispatch point, where a `Connection`'s
+/// registered aggregates actually live) and [`dispatch_select`] (this
+/// file's own free-function equivalent) call this instead of the plain
+/// form so a top-level query's subqueries get full dispatch too.
+pub(crate) fn execute_select_with_functions_and_aggregates(
+    db: &Database,
+    select: &Select,
+    functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
     // GROUP BY/HAVING (issue #125) only make sense alongside an
     // aggregate select list -- see execute_select_with_aggregates.
@@ -270,13 +299,23 @@ pub fn execute_select_with_functions(
     let (column_names, rows) = if select.joins.is_empty() {
         db.scan(&select.table_name, select.filter.as_ref())?
     } else {
-        scan_joined(db, select, functions)?
+        scan_joined(db, select, functions, aggregates)?
     };
+
+    // A scalar/`IN` subquery (issue #131) in `select.filter` dispatches
+    // through `dispatch_select`, exactly like a top-level query would --
+    // any select-list shape (plain, aggregate, or window) is supported,
+    // as long as the subquery itself is uncorrelated (see `SubqueryFn`'s
+    // own doc comment).
+    let subqueries: &SubqueryFn =
+        &|nested: &Select| dispatch_select(db, nested, functions, aggregates).map(|(_, r)| r);
 
     let mut matching_rows = Vec::new();
     for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
+            Some(filter) => {
+                evaluate_bool_with_context(filter, &column_names, row, functions, Some(subqueries))?
+            }
             None => true,
         };
         if keep {
@@ -340,15 +379,24 @@ pub(crate) fn bare_name(qualified: &str) -> String {
 /// [`crate::eval::resolve_column_index`] for how an unqualified
 /// reference can still resolve against these when unambiguous.
 ///
-/// **Scope, stated plainly:** only [`execute_select_with_functions`]
-/// calls this. `GROUP BY`/aggregate and window `SELECT` lists don't
-/// support `select.joins` being non-empty — a documented scope cut (see
-/// each function's own guard), not a silently wrong combination.
+/// **Scope, stated plainly:** only [`execute_select_with_functions_and_
+/// aggregates`] calls this. `GROUP BY`/aggregate and window `SELECT`
+/// lists don't support `select.joins` being non-empty — a documented
+/// scope cut (see each function's own guard), not a silently wrong
+/// combination.
 fn scan_joined(
     db: &Database,
     select: &Select,
     functions: &HashMap<String, Box<ScalarFn>>,
+    aggregates: &HashMap<String, Aggregate>,
 ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    // A scalar/`IN` subquery (issue #131) in a join's `ON` condition
+    // dispatches through `dispatch_select`, same as `execute_select_
+    // with_functions_and_aggregates`'s own identical closure -- see
+    // that function's doc comment for the full explanation.
+    let subqueries: &SubqueryFn =
+        &|nested: &Select| dispatch_select(db, nested, functions, aggregates).map(|(_, r)| r);
+
     let left_qualifier = select
         .table_alias
         .clone()
@@ -400,9 +448,13 @@ fn scan_joined(
                     JoinCondition::Using(_) => using_pairs
                         .iter()
                         .all(|&(li, ri)| combined[li] == combined[ri]),
-                    JoinCondition::On(cond) => {
-                        evaluate_bool_with_functions(cond, &combined_columns, &combined, functions)?
-                    }
+                    JoinCondition::On(cond) => evaluate_bool_with_context(
+                        cond,
+                        &combined_columns,
+                        &combined,
+                        functions,
+                        Some(subqueries),
+                    )?,
                 };
                 if keep {
                     matched = true;
@@ -444,7 +496,7 @@ fn dispatch_select(
             execute_select_with_aggregates(db, select, functions, aggregates)
         }
         SelectColumns::Window(_) => execute_select_with_window(db, select, functions, aggregates),
-        _ => execute_select_with_functions(db, select, functions),
+        _ => execute_select_with_functions_and_aggregates(db, select, functions, aggregates),
     }
 }
 
@@ -616,6 +668,13 @@ pub fn execute_select_with_aggregates(
         );
     }
 
+    // A scalar/`IN` subquery (issue #131) in `select.filter`/`select.
+    // having` dispatches through `dispatch_select` -- see
+    // `execute_select_with_functions_and_aggregates`'s identical
+    // closure for the full explanation.
+    let subqueries: &SubqueryFn =
+        &|nested: &Select| dispatch_select(db, nested, functions, aggregates).map(|(_, r)| r);
+
     // (group key, one accumulator per aggregate call), in
     // first-occurrence order -- linear (not hashed) group lookup, same
     // `Value`-has-no-`Hash`/`Eq` constraint as `execute_select_with_
@@ -623,7 +682,9 @@ pub fn execute_select_with_aggregates(
     let mut groups: Vec<(Vec<Value>, Vec<Value>)> = Vec::new();
     for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
+            Some(filter) => {
+                evaluate_bool_with_context(filter, &column_names, row, functions, Some(subqueries))?
+            }
             None => true,
         };
         if !keep {
@@ -673,8 +734,13 @@ pub fn execute_select_with_aggregates(
 
         if let Some(having) = &select.having {
             let having_row: Vec<Value> = key.into_iter().chain(result_row.clone()).collect();
-            let keep =
-                evaluate_bool_with_functions(having, &having_column_names, &having_row, functions)?;
+            let keep = evaluate_bool_with_context(
+                having,
+                &having_column_names,
+                &having_row,
+                functions,
+                Some(subqueries),
+            )?;
             if !keep {
                 continue;
             }
@@ -726,10 +792,18 @@ pub fn execute_select_with_window(
         }
     };
 
+    // A scalar/`IN` subquery (issue #131) in `select.filter` dispatches
+    // through `dispatch_select` -- see `execute_select_with_functions_
+    // and_aggregates`'s identical closure for the full explanation.
+    let subqueries: &SubqueryFn =
+        &|nested: &Select| dispatch_select(db, nested, functions, aggregates).map(|(_, r)| r);
+
     let mut matching_rows = Vec::new();
     for row in &rows {
         let keep = match &select.filter {
-            Some(filter) => evaluate_bool_with_functions(filter, &column_names, row, functions)?,
+            Some(filter) => {
+                evaluate_bool_with_context(filter, &column_names, row, functions, Some(subqueries))?
+            }
             None => true,
         };
         if keep {
