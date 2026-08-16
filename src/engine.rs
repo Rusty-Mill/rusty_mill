@@ -4,7 +4,7 @@
 //! joins, aggregates, subqueries, or indexes yet.
 
 use crate::aggregate::Aggregate;
-use crate::ddl::{AlterTable, CreateTable, DropTable};
+use crate::ddl::{AlterTable, CreateIndex, CreateTable, DropIndex, DropTable};
 use crate::dml_insert::Insert;
 use crate::dml_select::{AggregateArg, Expr, Select, SelectColumns};
 use crate::error::{Error, Result};
@@ -26,6 +26,22 @@ pub fn execute_drop_table(db: &mut Database, drop: &DropTable) -> Result<()> {
 /// Executes an `ALTER TABLE` statement (issue #121).
 pub fn execute_alter_table(db: &mut Database, alter: &AlterTable) -> Result<()> {
     db.alter_table(&alter.table_name, &alter.action)
+}
+
+/// Executes a `CREATE INDEX` statement (issue #122) — records metadata
+/// only, see [`crate::ddl::CreateIndex`]'s doc comment.
+pub fn execute_create_index(db: &mut Database, create: &CreateIndex) -> Result<()> {
+    db.create_index(
+        &create.index_name,
+        &create.table_name,
+        &create.columns,
+        create.if_not_exists,
+    )
+}
+
+/// Executes a `DROP INDEX` statement (issue #122).
+pub fn execute_drop_index(db: &mut Database, drop: &DropIndex) -> Result<()> {
+    db.drop_index(&drop.index_name, drop.if_exists)
 }
 
 /// Executes an `INSERT` statement, returning the number of rows inserted.

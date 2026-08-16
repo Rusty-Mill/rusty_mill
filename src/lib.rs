@@ -70,9 +70,9 @@ pub use blob::{Blob, ZeroBlob};
 pub use config::{DbConfig, Limit, OpenFlags};
 pub use connection::{ColumnMetadata, Connection, InterruptHandle};
 pub use ddl::{
-    parse_alter_table, parse_create_table, parse_create_virtual_table, parse_drop_table,
-    AlterTable, AlterTableAction, ColumnDef, CreateTable, CreateVirtualTable, DropTable,
-    ParseError,
+    parse_alter_table, parse_create_index, parse_create_table, parse_create_virtual_table,
+    parse_drop_index, parse_drop_table, AlterTable, AlterTableAction, ColumnDef, CreateIndex,
+    CreateTable, CreateVirtualTable, DropIndex, DropTable, ParseError,
 };
 pub use dml_insert::{parse_insert, Insert};
 pub use dml_select::{
@@ -80,9 +80,9 @@ pub use dml_select::{
     WindowCall,
 };
 pub use engine::{
-    execute_alter_table, execute_create_table, execute_drop_table, execute_insert,
-    execute_insert_into_virtual_table, execute_select, execute_select_with_aggregates,
-    execute_select_with_functions, execute_select_with_window,
+    execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
+    execute_drop_table, execute_insert, execute_insert_into_virtual_table, execute_select,
+    execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
 };
 pub use error::{Error, OptionalExtension, Result};
 pub use eval::{
@@ -95,7 +95,7 @@ pub use row::{Row, RowIndex};
 pub use rows::{AndThenRows, MappedRows, Rows};
 pub use serialize::{deserialize as deserialize_database, serialize as serialize_database};
 pub use statement::{Statement, StatementStatus};
-pub use storage::{Database, Table, TableSource};
+pub use storage::{Database, IndexMetadata, Table, TableSource};
 pub use token::{tokenize, Token, TokenError};
 pub use tosql::ToSql;
 pub use trace::{ConnRef, StmtRef, TraceEvent, TraceEventCodes};

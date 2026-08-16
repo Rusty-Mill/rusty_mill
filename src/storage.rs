@@ -78,6 +78,15 @@ pub struct Table {
     pub row_ids: Vec<i64>,
 }
 
+/// A `CREATE INDEX`-recorded index's metadata (issue #122) — see
+/// [`crate::ddl::CreateIndex`]'s doc comment for why this is
+/// non-accelerating (recorded schema metadata only).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexMetadata {
+    pub table_name: String,
+    pub columns: Vec<String>,
+}
+
 /// The full set of tables in a database. This is the storage layer that
 /// [`crate::Connection`] will be wired to in `A8`.
 #[derive(Default)]
@@ -88,6 +97,10 @@ pub struct Database {
     /// Checked by [`Database::scan`] after native tables — see
     /// `docs/adr/0003-tablesource.md`.
     virtual_tables: HashMap<String, Box<dyn TableSource>>,
+    /// Recorded via [`Database::create_index`] (issue #122) — metadata
+    /// only, never consulted by [`Database::scan`]. See
+    /// [`IndexMetadata`]'s doc comment.
+    indexes: HashMap<String, IndexMetadata>,
 }
 
 impl fmt::Debug for Database {
@@ -97,6 +110,7 @@ impl fmt::Debug for Database {
         f.debug_struct("Database")
             .field("tables", &self.tables)
             .field("virtual_table_count", &self.virtual_tables.len())
+            .field("indexes", &self.indexes)
             .finish()
     }
 }
@@ -107,6 +121,7 @@ impl Database {
         Database {
             tables: HashMap::new(),
             virtual_tables: HashMap::new(),
+            indexes: HashMap::new(),
         }
     }
 
@@ -243,6 +258,68 @@ impl Database {
                 Ok(())
             }
         }
+    }
+
+    /// Records a `CREATE INDEX` statement's metadata (issue #122) —
+    /// non-accelerating, see [`crate::ddl::CreateIndex`]'s doc comment.
+    /// A name collision is [`Error::IndexAlreadyExists`], unless
+    /// `if_not_exists` is set — then it's a silent no-op, mirroring
+    /// [`Database::create_table`]'s own `IF NOT EXISTS` convention.
+    /// `table_name` must exist and every column in `columns` must be one
+    /// of its columns — both checked eagerly rather than only at index
+    /// creation time going unnoticed, since there's no later "does this
+    /// index still make sense" check without real index storage.
+    pub fn create_index(
+        &mut self,
+        index_name: &str,
+        table_name: &str,
+        columns: &[String],
+        if_not_exists: bool,
+    ) -> Result<()> {
+        if self.indexes.contains_key(index_name) {
+            if if_not_exists {
+                return Ok(());
+            }
+            return Err(Error::IndexAlreadyExists(index_name.to_string()));
+        }
+        let table = self
+            .tables
+            .get(table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+        for column in columns {
+            if !table.column_names.contains(column) {
+                return Err(Error::UnknownColumn(column.clone()));
+            }
+        }
+        self.indexes.insert(
+            index_name.to_string(),
+            IndexMetadata {
+                table_name: table_name.to_string(),
+                columns: columns.to_vec(),
+            },
+        );
+        Ok(())
+    }
+
+    /// Removes a `CREATE INDEX`-recorded index's metadata (issue #122).
+    /// A missing index is [`Error::IndexNotFound`], unless `if_exists`
+    /// is set — then it's a silent no-op, mirroring [`Database::
+    /// drop_table`]'s own `IF EXISTS` convention.
+    pub fn drop_index(&mut self, index_name: &str, if_exists: bool) -> Result<()> {
+        if self.indexes.remove(index_name).is_some() {
+            return Ok(());
+        }
+        if if_exists {
+            return Ok(());
+        }
+        Err(Error::IndexNotFound(index_name.to_string()))
+    }
+
+    /// Returns a recorded index's metadata, if one by this name exists —
+    /// used by tests and by anything wanting to introspect what's been
+    /// declared (e.g. a future `PRAGMA index_list`).
+    pub fn index(&self, index_name: &str) -> Option<&IndexMetadata> {
+        self.indexes.get(index_name)
     }
 
     /// Inserts one row into `table_name`, given values in the table's
@@ -800,6 +877,112 @@ mod tests {
             ),
             Err(Error::DuplicateColumn(_))
         ));
+    }
+
+    #[test]
+    fn create_index_records_metadata() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
+            .unwrap();
+        db.create_index("idx_a", "t", &["a".to_string()], false)
+            .unwrap();
+
+        assert_eq!(
+            db.index("idx_a"),
+            Some(&IndexMetadata {
+                table_name: "t".to_string(),
+                columns: vec!["a".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn create_index_on_a_missing_table_is_an_error() {
+        let mut db = Database::new();
+        assert!(matches!(
+            db.create_index("idx_a", "missing", &["a".to_string()], false),
+            Err(Error::TableNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn create_index_on_a_missing_column_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        assert!(matches!(
+            db.create_index("idx_z", "t", &["z".to_string()], false),
+            Err(Error::UnknownColumn(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_create_index_is_an_error() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.create_index("idx_a", "t", &["a".to_string()], false)
+            .unwrap();
+        assert!(matches!(
+            db.create_index("idx_a", "t", &["a".to_string()], false),
+            Err(Error::IndexAlreadyExists(_))
+        ));
+    }
+
+    #[test]
+    fn create_index_if_not_exists_is_a_no_op_on_collision() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
+            .unwrap();
+        db.create_index("idx_a", "t", &["a".to_string()], false)
+            .unwrap();
+        db.create_index("idx_a", "t", &["b".to_string()], true)
+            .unwrap();
+
+        // Left untouched -- still indexing "a", not "b".
+        assert_eq!(db.index("idx_a").unwrap().columns, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn drop_index_removes_metadata() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.create_index("idx_a", "t", &["a".to_string()], false)
+            .unwrap();
+        db.drop_index("idx_a", false).unwrap();
+        assert_eq!(db.index("idx_a"), None);
+    }
+
+    #[test]
+    fn drop_missing_index_without_if_exists_is_an_error() {
+        let mut db = Database::new();
+        assert!(matches!(
+            db.drop_index("missing", false),
+            Err(Error::IndexNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn drop_missing_index_with_if_exists_is_a_no_op() {
+        let mut db = Database::new();
+        assert!(db.drop_index("missing", true).is_ok());
+    }
+
+    #[test]
+    fn an_indexed_table_still_scans_and_queries_normally() {
+        // Indexes are recorded metadata only (issue #122) -- creating
+        // one has no effect on scanning/querying the underlying table.
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+        db.insert_row("t", vec![Value::Integer(2)]).unwrap();
+        db.create_index("idx_a", "t", &["a".to_string()], false)
+            .unwrap();
+
+        let (_, rows) = db.scan("t", None).unwrap();
+        assert_eq!(rows, vec![vec![Value::Integer(1)], vec![Value::Integer(2)]]);
     }
 
     #[test]

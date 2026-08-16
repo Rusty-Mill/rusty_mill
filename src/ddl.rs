@@ -113,6 +113,34 @@ pub enum AlterTableAction {
     RenameColumn { old_name: String, new_name: String },
 }
 
+/// A parsed `CREATE INDEX [IF NOT EXISTS] index_name ON table_name
+/// (col, ...)` statement (issue #122).
+///
+/// **Non-accelerating, stated plainly:** this crate's storage is a plain
+/// `HashMap`/`Vec` (`ARCHITECTURE.md`'s non-goal — no B-tree/page
+/// storage), so an index can't actually speed up anything here. This
+/// parses and records the metadata only — the same honest-inert-plumbing
+/// precedent `PRAGMA foreign_keys` already established. Every scan stays
+/// a full scan regardless of what's indexed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    pub index_name: String,
+    pub table_name: String,
+    pub columns: Vec<String>,
+    /// Whether `IF NOT EXISTS` followed `CREATE INDEX` — mirrors `CREATE
+    /// TABLE IF NOT EXISTS`'s own no-op-on-collision convention (#119).
+    pub if_not_exists: bool,
+}
+
+/// A parsed `DROP INDEX [IF EXISTS] index_name` statement (issue #122).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndex {
+    pub index_name: String,
+    /// Whether `IF EXISTS` followed `DROP INDEX` — mirrors `DROP TABLE
+    /// IF EXISTS`'s own no-op-on-missing convention (#120).
+    pub if_exists: bool,
+}
+
 /// An error produced while parsing.
 #[derive(Debug, PartialEq)]
 pub enum ParseError {
@@ -253,6 +281,72 @@ pub fn parse_alter_table(tokens: &[Token]) -> Result<AlterTable, ParseError> {
     };
 
     Ok(AlterTable { table_name, action })
+}
+
+/// Parses a `CREATE INDEX [IF NOT EXISTS] index_name ON table_name
+/// (col, ...)` statement from a token stream (as produced by
+/// [`crate::tokenize`]) — see [`CreateIndex`]'s doc comment for why this
+/// records metadata only.
+pub fn parse_create_index(tokens: &[Token]) -> Result<CreateIndex, ParseError> {
+    let mut p = Parser { tokens, pos: 0 };
+    p.expect_ident("CREATE")?;
+    p.expect_ident("INDEX")?;
+    let if_not_exists = if p.peek_ident("IF") {
+        p.advance();
+        p.expect_ident("NOT")?;
+        p.expect_ident("EXISTS")?;
+        true
+    } else {
+        false
+    };
+    let index_name = p.expect_any_ident()?;
+    p.expect_ident("ON")?;
+    let table_name = p.expect_any_ident()?;
+    p.expect_punct("(")?;
+
+    let mut columns = Vec::new();
+    loop {
+        columns.push(p.expect_any_ident()?);
+        match p.peek() {
+            Some(Token::Punct(",")) => {
+                p.advance();
+                continue;
+            }
+            Some(Token::Punct(")")) => {
+                p.advance();
+                break;
+            }
+            Some(Token::Eof) | None => return Err(ParseError::UnexpectedEof),
+            Some(other) => return Err(ParseError::UnexpectedToken(format!("{other:?}"))),
+        }
+    }
+
+    Ok(CreateIndex {
+        index_name,
+        table_name,
+        columns,
+        if_not_exists,
+    })
+}
+
+/// Parses a `DROP INDEX [IF EXISTS] index_name` statement from a token
+/// stream (as produced by [`crate::tokenize`]).
+pub fn parse_drop_index(tokens: &[Token]) -> Result<DropIndex, ParseError> {
+    let mut p = Parser { tokens, pos: 0 };
+    p.expect_ident("DROP")?;
+    p.expect_ident("INDEX")?;
+    let if_exists = if p.peek_ident("IF") {
+        p.advance();
+        p.expect_ident("EXISTS")?;
+        true
+    } else {
+        false
+    };
+    let index_name = p.expect_any_ident()?;
+    Ok(DropIndex {
+        index_name,
+        if_exists,
+    })
 }
 
 struct Parser<'a> {
@@ -842,5 +936,47 @@ mod tests {
             parse_alter_table(&tokens),
             Err(ParseError::UnexpectedToken(_))
         ));
+    }
+
+    #[test]
+    fn parses_create_index() {
+        let tokens = tokenize("CREATE INDEX idx_a ON t (a)").unwrap();
+        let create = parse_create_index(&tokens).unwrap();
+        assert_eq!(create.index_name, "idx_a");
+        assert_eq!(create.table_name, "t");
+        assert_eq!(create.columns, vec!["a"]);
+        assert!(!create.if_not_exists);
+    }
+
+    #[test]
+    fn parses_create_index_with_multiple_columns_and_if_not_exists() {
+        let tokens = tokenize("CREATE INDEX IF NOT EXISTS idx_ab ON t (a, b)").unwrap();
+        let create = parse_create_index(&tokens).unwrap();
+        assert_eq!(create.columns, vec!["a", "b"]);
+        assert!(create.if_not_exists);
+    }
+
+    #[test]
+    fn empty_column_list_in_create_index_is_an_error() {
+        let tokens = tokenize("CREATE INDEX idx ON t ()").unwrap();
+        assert!(matches!(
+            parse_create_index(&tokens),
+            Err(ParseError::UnexpectedToken(_))
+        ));
+    }
+
+    #[test]
+    fn parses_drop_index() {
+        let tokens = tokenize("DROP INDEX idx_a").unwrap();
+        let drop = parse_drop_index(&tokens).unwrap();
+        assert_eq!(drop.index_name, "idx_a");
+        assert!(!drop.if_exists);
+    }
+
+    #[test]
+    fn parses_drop_index_if_exists() {
+        let tokens = tokenize("DROP INDEX IF EXISTS idx_a").unwrap();
+        let drop = parse_drop_index(&tokens).unwrap();
+        assert!(drop.if_exists);
     }
 }

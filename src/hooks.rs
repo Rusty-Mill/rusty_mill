@@ -22,6 +22,10 @@ pub enum Action {
     DropTable,
     /// `ALTER TABLE` (issue #121).
     AlterTable,
+    /// `CREATE INDEX` (issue #122).
+    CreateIndex,
+    /// `DROP INDEX` (issue #122).
+    DropIndex,
     Insert,
     Select,
     /// Not yet reachable — no `UPDATE` statement exists yet. Kept so

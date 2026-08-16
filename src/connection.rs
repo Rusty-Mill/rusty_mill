@@ -1,14 +1,14 @@
 use crate::aggregate::{self, Aggregate};
 use crate::config::{DbConfig, Limit, OpenFlags};
 use crate::ddl::{
-    parse_alter_table, parse_create_table, parse_create_virtual_table, parse_drop_table, ColumnDef,
-    CreateVirtualTable,
+    parse_alter_table, parse_create_index, parse_create_table, parse_create_virtual_table,
+    parse_drop_index, parse_drop_table, ColumnDef, CreateVirtualTable,
 };
 use crate::dml_insert::parse_insert;
 use crate::dml_select::{parse_select, SelectColumns};
 use crate::engine::{
-    execute_alter_table, execute_create_table, execute_drop_table,
-    execute_insert_into_virtual_table, execute_insert_returning_rowids,
+    execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
+    execute_drop_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
     execute_select_with_aggregates, execute_select_with_functions, execute_select_with_window,
 };
 use crate::error::{Error, Result};
@@ -1217,6 +1217,12 @@ impl Connection {
                 self.execute_create_virtual_table(create)?;
                 (0, table_name, Action::CreateTable, Vec::new())
             }
+            Some(kw) if kw.eq_ignore_ascii_case("CREATE") && is_index_statement(&tokens) => {
+                let create = parse_create_index(&tokens)?;
+                self.check_authorized(Action::CreateIndex, &create.table_name)?;
+                execute_create_index(&mut self.db, &create)?;
+                (0, create.table_name, Action::CreateIndex, Vec::new())
+            }
             Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
                 let create = parse_create_table(&tokens)?;
                 self.check_authorized(Action::CreateTable, &create.table_name)?;
@@ -1240,6 +1246,12 @@ impl Connection {
                     // rather than inventing a placeholder value.
                     (affected, insert.table_name, Action::Insert, Vec::new())
                 }
+            }
+            Some(kw) if kw.eq_ignore_ascii_case("DROP") && is_index_statement(&tokens) => {
+                let drop = parse_drop_index(&tokens)?;
+                self.check_authorized(Action::DropIndex, &drop.index_name)?;
+                execute_drop_index(&mut self.db, &drop)?;
+                (0, drop.index_name, Action::DropIndex, Vec::new())
             }
             Some(kw) if kw.eq_ignore_ascii_case("DROP") => {
                 let drop = parse_drop_table(&tokens)?;
@@ -1450,6 +1462,14 @@ pub(crate) fn leading_keyword(tokens: &[Token]) -> Option<&str> {
 /// this peeks the second token to tell them apart.
 fn is_create_virtual_table(tokens: &[Token]) -> bool {
     matches!(tokens.get(1), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("VIRTUAL"))
+}
+
+/// Whether `tokens` starts `CREATE INDEX ...`/`DROP INDEX ...` rather
+/// than `CREATE TABLE ...`/`DROP TABLE ...` — both `CREATE`/`DROP` share
+/// their leading keyword with the `TABLE` forms, so this peeks the
+/// second token to tell them apart (issue #122).
+fn is_index_statement(tokens: &[Token]) -> bool {
+    matches!(tokens.get(1), Some(Token::Ident(s)) if s.eq_ignore_ascii_case("INDEX"))
 }
 
 #[cfg(test)]
@@ -2135,6 +2155,39 @@ mod tests {
 
         let rows: Vec<i64> = conn.query_map("SELECT b FROM t", |row| row.get(0)).unwrap();
         assert_eq!(rows, vec![1]);
+    }
+
+    #[test]
+    fn create_index_and_drop_index_round_trip_without_affecting_queries() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        let affected = conn.execute("CREATE INDEX idx_a ON t (a)").unwrap();
+        assert_eq!(affected, 0);
+
+        let rows: Vec<i64> = conn.query_map("SELECT a FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(rows, vec![1, 2]);
+
+        conn.execute("DROP INDEX idx_a").unwrap();
+        assert!(matches!(
+            conn.execute("DROP INDEX idx_a"),
+            Err(Error::IndexNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_create_index_without_if_not_exists_is_an_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("CREATE INDEX idx_a ON t (a)").unwrap();
+        assert!(matches!(
+            conn.execute("CREATE INDEX idx_a ON t (a)"),
+            Err(Error::IndexAlreadyExists(_))
+        ));
+        assert!(conn
+            .execute("CREATE INDEX IF NOT EXISTS idx_a ON t (a)")
+            .is_ok());
     }
 
     /// A `CreateVTab` test double: `USING arange(start, end)` builds a
