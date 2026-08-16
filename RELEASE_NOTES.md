@@ -23,6 +23,44 @@ entry per PR.
 
 ---
 
+## PR #150 — Add JOIN (INNER/LEFT/CROSS) (closes #130)
+**2026-08-16** · [#150](https://github.com/baileyrd/rusty_-rusqlite/pull/150)
+
+- **Added:** `[INNER | LEFT [OUTER] | CROSS] JOIN table [[AS] alias]
+  (ON expr | USING (col, ...))`, chainable for 3+-table joins. New
+  `JoinKind`/`JoinCondition`/`TableRef`/`Join` AST, `Select.table_alias`/
+  `Select.joins` (both empty/`None` for a plain single-table `SELECT` —
+  every pre-#130 query is unaffected), and `engine::scan_joined` (a
+  nested-loop join — the natural fit for this crate's in-memory,
+  index-free model).
+- **New multi-table row-source model, as the issue's own sign-off asked
+  for a design note on:** a joined row source's column names are always
+  `"qualifier.column"` (a table's alias, or its own name if unaliased).
+  `eval::resolve_column_index` resolves an exact `"t1.a"` match first,
+  falling back to a bare `"a"` only when exactly one joined column ends
+  in `.a` — ambiguous, it's `Error::AmbiguousColumn`; matching real
+  SQLite's own rejection rather than silently picking whichever table
+  scanned first. This is a no-op for every non-joined query: a bare
+  column name with no `.` in it and a unique exact match resolves
+  exactly like it always has.
+- `t1.a`-qualified columns now parse (`WHERE`/`ON`/select list) as one
+  dotted `Expr::Column` string.
+- `LEFT JOIN`'s unmatched left rows are NULL-padded on the right side;
+  `INNER`/`CROSS` simply drop them. `WHERE` runs once, after the full
+  join, since it may reference more than one joined table's columns
+  (can't be pushed into a single table's scan the way a non-joined
+  filter can).
+- Result-column naming for `SELECT *`/a qualified `SELECT` list on a
+  join uses bare (unqualified) names, matching real SQLite — both
+  `Statement::column_names()` and actual query rows agree, via a shared
+  `bare_name` helper.
+- **Scope cut, stated plainly:** a `GROUP BY`/aggregate or window
+  `SELECT` list combined with a `JOIN` isn't supported yet — errors
+  clearly (`JOIN is not yet supported with an aggregate/window SELECT
+  list`) rather than silently aggregating over just the first table.
+
+---
+
 ## PR #149 — Add DELETE statement (closes #129)
 **2026-08-16** · [#149](https://github.com/baileyrd/rusty_-rusqlite/pull/149)
 
