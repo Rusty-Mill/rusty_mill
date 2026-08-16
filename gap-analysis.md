@@ -179,6 +179,38 @@ API shape).
 
 ---
 
+## Re-scan (2026-08-16) — post-vtab-epic pass
+
+The `vtab` module (issues #90–#97) is done as of this pass, so this round
+re-checked every other row above against the actual issue tracker
+(`gh issue list --label parity-gap`) instead of re-diffing the reference
+crate from scratch. Every row has a corresponding filed issue **except**
+two items that were noted in this doc's own "Notes" column but never
+actually turned into an issue — they fell through between assessment and
+filing rather than being a deliberate exclusion:
+
+- **`Connection::prepare_cached`** (statement caching) — the
+  Configuration row (issue #15) explicitly deferred this ("no
+  prepared-statement cache yet ... tracked separately"), but nothing
+  ever tracked it. The blocker it cited (needs a real `Statement` type)
+  has been resolved since #25–#30 landed. Filed as its own issue.
+- **`Connection::get_interrupt_handle`/`release_memory`** — the original
+  "Interruption & raw access" row bundled these with `handle`/`close`.
+  `close` already shipped (#10/#12-era work); `handle` (raw FFI pointer
+  exposure) is correctly out of scope under this crate's standing
+  no-C-dependency decision, same reasoning as `load_extension*` below.
+  `get_interrupt_handle`/`release_memory` were never actually decided
+  either way — the row's own note ("likely another non-goal candidate")
+  was a guess, not a resolution. On a second look, `get_interrupt_handle`
+  doesn't actually need a C backend — cooperative cancellation (an
+  `AtomicBool` checked at each `execute`/query entry point) is a small,
+  real, additive capability; `release_memory` is a legitimate no-op, the
+  same honest-no-op precedent `Connection::cache_flush` already
+  established for "this engine has no page cache." Filed as its own
+  issue.
+
+No other row was missing a filed issue.
+
 ## Explicitly deferred (not filed as issues this round)
 
 Logged so scope trimming is visible, not silent:

@@ -23,6 +23,30 @@ entry per PR.
 
 ---
 
+## PR #108 — Add Connection::prepare_cached (closes #106)
+**2026-08-16** · [#108](https://github.com/baileyrd/rusty_-rusqlite/pull/108)
+
+- **Added:** `Connection::prepare_cached`, backed by a new
+  `StatementCache` keyed by exact SQL text — a cache hit skips
+  re-tokenizing/re-parsing and hands back a fresh `Statement` built
+  from a clone of the cached parse, with empty bindings.
+- **Changed:** `Connection::set_prepared_statement_cache_capacity`/
+  `flush_prepared_statement_cache` were no-op stubs; they now actually
+  control/clear the cache. Default capacity: 16, matching real
+  `rusqlite`.
+- **Scope cut:** real `rusqlite::Connection::prepare_cached` returns a
+  `CachedStatement` that returns the *same* live statement object to
+  the cache on `Drop`. This crate's cache instead holds the parsed
+  form (cheap to clone) and always returns a fresh `Statement` — same
+  performance win (skip re-parsing), simpler mechanism, no
+  `Drop`-based return-to-cache dance.
+- Surfaced by this session's re-scan of `gap-analysis.md` against the
+  issue tracker — see the doc's new "Re-scan" section. `gap-analysis.md`
+  itself is included in this PR.
+- 333 tests passing.
+
+---
+
 ## PR #105 — Add ArrayTab vtab module (closes #96)
 **2026-08-16** · [#105](https://github.com/baileyrd/rusty_-rusqlite/pull/105)
 

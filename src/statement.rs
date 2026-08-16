@@ -56,10 +56,172 @@ use crate::tosql::ToSql;
 use crate::value::Value;
 use std::collections::HashMap;
 
-enum StatementKind {
+#[derive(Clone)]
+pub(crate) enum StatementKind {
     CreateTable(CreateTable),
     Insert(Insert),
     Select(Select),
+}
+
+/// Tokenizes and parses `sql`, resolving parameter markers to 1-based
+/// indices the same way [`Statement::prepare`] always has. Split out from
+/// [`Statement::prepare`] so [`Connection::prepare_cached`] can reuse it
+/// on a cache miss without needing a `&mut Connection` yet — parsing
+/// itself doesn't touch the connection at all.
+pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<String>>)> {
+    let tokens = tokenize(sql)?;
+    let mut kind = match leading_keyword(&tokens) {
+        Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
+            StatementKind::CreateTable(parse_create_table(&tokens)?)
+        }
+        Some(kw) if kw.eq_ignore_ascii_case("INSERT") => {
+            StatementKind::Insert(parse_insert(&tokens)?)
+        }
+        Some(kw) if kw.eq_ignore_ascii_case("SELECT") => {
+            StatementKind::Select(parse_select(&tokens)?)
+        }
+        _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
+    };
+
+    // Left-to-right over the SQL text: select-list (aggregate args)
+    // before `WHERE`, matching where each would appear in the
+    // original text -- needed so index assignment agrees with
+    // `expanded_sql`'s independent text-level scan.
+    let mut resolver = ParamResolver::new();
+    match &mut kind {
+        StatementKind::CreateTable(_) => {}
+        StatementKind::Insert(insert) => {
+            for row in &mut insert.rows {
+                for expr in row {
+                    resolver.rewrite(expr);
+                }
+            }
+        }
+        StatementKind::Select(select) => {
+            if let SelectColumns::Aggregates(calls) = &mut select.columns {
+                for call in calls {
+                    if let AggregateArg::Expr(e) = &mut call.arg {
+                        resolver.rewrite(e);
+                    }
+                }
+            }
+            if let SelectColumns::Window(calls) = &mut select.columns {
+                for call in calls {
+                    if let AggregateArg::Expr(e) = &mut call.arg {
+                        resolver.rewrite(e);
+                    }
+                }
+            }
+            if let Some(filter) = &mut select.filter {
+                resolver.rewrite(filter);
+            }
+        }
+    }
+
+    Ok((kind, resolver.names))
+}
+
+/// Default capacity of a fresh [`Connection`]'s prepared-statement cache
+/// (issue #106), matching real `rusqlite`'s own default.
+pub(crate) const DEFAULT_STATEMENT_CACHE_CAPACITY: usize = 16;
+
+/// A cached SQL string's already-tokenized-and-parsed form, keyed by exact
+/// SQL text (byte-for-byte — no normalization, matching real `rusqlite`'s
+/// cache key). Backs [`Connection::prepare_cached`].
+///
+/// **Design deviation, stated plainly:** real `rusqlite::Connection::
+/// prepare_cached` returns a `CachedStatement` that, when dropped, returns
+/// the *same* underlying prepared-statement object to the cache for reuse
+/// — the cache holds live statement handles. This crate's cache instead
+/// holds the parsed [`StatementKind`]/parameter-name list (cheap to
+/// `Clone`) and hands back a fresh [`Statement`] built from a clone of it
+/// on every call — no `Drop`-based return-to-cache dance, no shared
+/// mutable statement object between calls. Achieves the same real
+/// benefit (skip re-tokenizing/re-parsing the SQL text) through a
+/// simpler mechanism; each returned `Statement` starts with fresh
+/// (empty) bindings, same as [`Connection::prepare`].
+pub(crate) struct StatementCache {
+    capacity: usize,
+    entries: HashMap<String, CachedPlan>,
+    /// Recency order, least-recently-used first. Small (`capacity`-bounded)
+    /// by construction, so a linear scan on touch/evict is fine — same
+    /// "simplicity over micro-optimization" tradeoff this crate makes
+    /// elsewhere (e.g. `Database`'s `HashMap`-backed tables).
+    order: Vec<String>,
+}
+
+#[derive(Clone)]
+struct CachedPlan {
+    kind: StatementKind,
+    param_names: Vec<Option<String>>,
+}
+
+impl StatementCache {
+    pub(crate) fn new(capacity: usize) -> StatementCache {
+        StatementCache {
+            capacity,
+            entries: HashMap::new(),
+            order: Vec::new(),
+        }
+    }
+
+    /// Changes the cache's capacity, evicting least-recently-used entries
+    /// immediately if the new capacity is smaller than the current entry
+    /// count. A capacity of `0` disables caching (every
+    /// [`Connection::prepare_cached`] call re-parses).
+    pub(crate) fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity;
+        self.evict_to_capacity();
+    }
+
+    /// Discards every cached entry. Capacity is unchanged.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+
+    fn touch(&mut self, sql: &str) {
+        if let Some(pos) = self.order.iter().position(|s| s == sql) {
+            let key = self.order.remove(pos);
+            self.order.push(key);
+        }
+    }
+
+    fn evict_to_capacity(&mut self) {
+        while self.order.len() > self.capacity {
+            let oldest = self.order.remove(0);
+            self.entries.remove(&oldest);
+        }
+    }
+
+    /// Returns a clone of `sql`'s cached parsed form, marking it as
+    /// most-recently-used. `None` on a cache miss.
+    pub(crate) fn get(&mut self, sql: &str) -> Option<(StatementKind, Vec<Option<String>>)> {
+        let plan = self.entries.get(sql)?.clone();
+        self.touch(sql);
+        Some((plan.kind, plan.param_names))
+    }
+
+    /// Caches `sql`'s already-parsed form. A no-op if the cache's capacity
+    /// is `0`.
+    pub(crate) fn insert(
+        &mut self,
+        sql: &str,
+        kind: StatementKind,
+        param_names: Vec<Option<String>>,
+    ) {
+        if self.capacity == 0 {
+            return;
+        }
+        if self.entries.contains_key(sql) {
+            self.touch(sql);
+        } else {
+            self.order.push(sql.to_string());
+        }
+        self.entries
+            .insert(sql.to_string(), CachedPlan { kind, param_names });
+        self.evict_to_capacity();
+    }
 }
 
 /// A prepared, reusable SQL statement, created via [`Connection::prepare`].
@@ -82,63 +244,29 @@ pub struct Statement<'conn> {
 
 impl<'conn> Statement<'conn> {
     pub(crate) fn prepare(conn: &'conn mut Connection, sql: &str) -> Result<Statement<'conn>> {
-        let tokens = tokenize(sql)?;
-        let mut kind = match leading_keyword(&tokens) {
-            Some(kw) if kw.eq_ignore_ascii_case("CREATE") => {
-                StatementKind::CreateTable(parse_create_table(&tokens)?)
-            }
-            Some(kw) if kw.eq_ignore_ascii_case("INSERT") => {
-                StatementKind::Insert(parse_insert(&tokens)?)
-            }
-            Some(kw) if kw.eq_ignore_ascii_case("SELECT") => {
-                StatementKind::Select(parse_select(&tokens)?)
-            }
-            _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
-        };
+        let (kind, param_names) = parse_statement(sql)?;
+        Ok(Statement::from_parsed(conn, sql, kind, param_names))
+    }
 
-        // Left-to-right over the SQL text: select-list (aggregate args)
-        // before `WHERE`, matching where each would appear in the
-        // original text -- needed so index assignment agrees with
-        // `expanded_sql`'s independent text-level scan.
-        let mut resolver = ParamResolver::new();
-        match &mut kind {
-            StatementKind::CreateTable(_) => {}
-            StatementKind::Insert(insert) => {
-                for row in &mut insert.rows {
-                    for expr in row {
-                        resolver.rewrite(expr);
-                    }
-                }
-            }
-            StatementKind::Select(select) => {
-                if let SelectColumns::Aggregates(calls) = &mut select.columns {
-                    for call in calls {
-                        if let AggregateArg::Expr(e) = &mut call.arg {
-                            resolver.rewrite(e);
-                        }
-                    }
-                }
-                if let SelectColumns::Window(calls) = &mut select.columns {
-                    for call in calls {
-                        if let AggregateArg::Expr(e) = &mut call.arg {
-                            resolver.rewrite(e);
-                        }
-                    }
-                }
-                if let Some(filter) = &mut select.filter {
-                    resolver.rewrite(filter);
-                }
-            }
-        }
-
-        Ok(Statement {
+    /// Builds a [`Statement`] from an already-parsed `kind`/`param_names`
+    /// pair — either freshly produced by [`parse_statement`], or a clone
+    /// handed back by [`StatementCache`] (issue #106,
+    /// [`Connection::prepare_cached`]). Always starts with fresh (empty)
+    /// bindings and no result set, same as [`Statement::prepare`].
+    pub(crate) fn from_parsed(
+        conn: &'conn mut Connection,
+        sql: &str,
+        kind: StatementKind,
+        param_names: Vec<Option<String>>,
+    ) -> Statement<'conn> {
+        Statement {
             conn,
             kind,
             sql: sql.to_string(),
-            param_names: resolver.names,
+            param_names,
             bindings: HashMap::new(),
             last_result: None,
-        })
+        }
     }
 
     /// Binds `value` to the parameter at `index` (1-based, matching
@@ -1201,5 +1329,135 @@ mod tests {
             stmt.expanded_sql(),
             Some("SELECT * FROM t WHERE a = '?'".to_string())
         );
+    }
+
+    #[test]
+    fn statement_cache_hit_returns_an_equivalent_parsed_form() {
+        let mut cache = StatementCache::new(4);
+        let (kind, names) = parse_statement("SELECT * FROM t WHERE a = ?").unwrap();
+        cache.insert("SELECT * FROM t WHERE a = ?", kind, names.clone());
+
+        let (_, cached_names) = cache.get("SELECT * FROM t WHERE a = ?").unwrap();
+        assert_eq!(cached_names, names);
+    }
+
+    #[test]
+    fn statement_cache_miss_returns_none() {
+        let mut cache = StatementCache::new(4);
+        assert!(cache.get("SELECT 1").is_none());
+    }
+
+    #[test]
+    fn statement_cache_evicts_least_recently_used_entry_over_capacity() {
+        let mut cache = StatementCache::new(2);
+        for sql in ["CREATE TABLE a (x INTEGER)", "CREATE TABLE b (x INTEGER)"] {
+            let (kind, names) = parse_statement(sql).unwrap();
+            cache.insert(sql, kind, names);
+        }
+        // Touch "a" so "b" becomes the least-recently-used entry.
+        assert!(cache.get("CREATE TABLE a (x INTEGER)").is_some());
+
+        let (kind, names) = parse_statement("CREATE TABLE c (x INTEGER)").unwrap();
+        cache.insert("CREATE TABLE c (x INTEGER)", kind, names);
+
+        assert!(cache.get("CREATE TABLE a (x INTEGER)").is_some());
+        assert!(cache.get("CREATE TABLE b (x INTEGER)").is_none());
+        assert!(cache.get("CREATE TABLE c (x INTEGER)").is_some());
+    }
+
+    #[test]
+    fn statement_cache_capacity_zero_never_caches() {
+        let mut cache = StatementCache::new(0);
+        let sql = "CREATE TABLE t (a INTEGER)";
+        let (kind, names) = parse_statement(sql).unwrap();
+        cache.insert(sql, kind, names);
+        assert!(cache.get(sql).is_none());
+    }
+
+    #[test]
+    fn statement_cache_shrinking_capacity_evicts_immediately() {
+        let mut cache = StatementCache::new(4);
+        for sql in [
+            "CREATE TABLE a (x INTEGER)",
+            "CREATE TABLE b (x INTEGER)",
+            "CREATE TABLE c (x INTEGER)",
+        ] {
+            let (kind, names) = parse_statement(sql).unwrap();
+            cache.insert(sql, kind, names);
+        }
+        cache.set_capacity(1);
+        assert!(cache.get("CREATE TABLE a (x INTEGER)").is_none());
+        assert!(cache.get("CREATE TABLE b (x INTEGER)").is_none());
+        assert!(cache.get("CREATE TABLE c (x INTEGER)").is_some());
+    }
+
+    #[test]
+    fn prepare_cached_reuses_a_previously_parsed_statement() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2)").unwrap();
+
+        {
+            let stmt = conn.prepare_cached("SELECT * FROM t").unwrap();
+            let values: Vec<i64> = stmt.query_map(|row: Row<'_>| row.get(0)).unwrap();
+            assert_eq!(values, vec![1, 2]);
+        }
+        // Second call is a cache hit on the same SQL text.
+        {
+            let stmt = conn.prepare_cached("SELECT * FROM t").unwrap();
+            let values: Vec<i64> = stmt.query_map(|row: Row<'_>| row.get(0)).unwrap();
+            assert_eq!(values, vec![1, 2]);
+        }
+    }
+
+    #[test]
+    fn prepare_cached_starts_with_fresh_bindings_on_a_cache_hit() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+
+        {
+            let mut stmt = conn.prepare_cached("INSERT INTO t VALUES (?)").unwrap();
+            stmt.raw_bind_parameter(1, 1i64).unwrap();
+            assert_eq!(stmt.execute().unwrap(), 1);
+        }
+        // A fresh prepare_cached call must not inherit the previous
+        // call's binding — an unbound `?` reports NULL, same as a brand
+        // new `prepare`.
+        {
+            let mut stmt = conn.prepare_cached("INSERT INTO t VALUES (?)").unwrap();
+            assert_eq!(stmt.execute().unwrap(), 1);
+        }
+
+        let values: Vec<Option<i64>> = conn.query_map("SELECT * FROM t", |row| row.get(0)).unwrap();
+        assert_eq!(values, vec![Some(1), None]);
+    }
+
+    #[test]
+    fn prepare_cached_propagates_a_parse_error() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        assert!(conn.prepare_cached("NOT VALID SQL").is_err());
+    }
+
+    #[test]
+    fn set_prepared_statement_cache_capacity_zero_disables_caching_end_to_end() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.set_prepared_statement_cache_capacity(0);
+
+        // Still works with caching disabled -- every call just re-parses.
+        assert!(conn.prepare_cached("SELECT * FROM t").is_ok());
+        assert!(conn.prepare_cached("SELECT * FROM t").is_ok());
+    }
+
+    #[test]
+    fn flush_prepared_statement_cache_clears_cached_entries() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        assert!(conn.prepare_cached("SELECT * FROM t").is_ok());
+
+        conn.flush_prepared_statement_cache();
+
+        // Still works after a flush -- just re-parses and re-caches.
+        assert!(conn.prepare_cached("SELECT * FROM t").is_ok());
     }
 }
