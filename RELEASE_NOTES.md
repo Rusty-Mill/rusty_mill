@@ -23,6 +23,28 @@ entry per PR.
 
 ---
 
+## PR #134 — Add IN operator, literal-list form (closes #114)
+**2026-08-16** · [#134](https://github.com/baileyrd/rusty_-rusqlite/pull/134)
+
+- **Added:** `Expr::InList` (`x IN (v1, v2, ...)`) and `NOT IN`, parsed
+  alongside `LIKE`/`GLOB`/`BETWEEN` in the same infix-negation grammar.
+- **Added:** real SQL NULL-aware `IN` semantics — `NULL IN (...)` is
+  always `NULL`; a non-null, non-matching value against a list
+  containing `NULL` is `NULL` too (it could equal the unknown value),
+  not `FALSE` — only a list with no `NULL`s and no match is
+  definitively `FALSE`.
+- **Scope note:** `IN (SELECT ...)` (subquery form) stays out of
+  scope, tracked under the existing new-subsystem subqueries issue
+  (#131) rather than duplicated here.
+- Fourth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 404 tests passing.
+- Note: PR #133's CI hit a GitHub Actions billing/concurrency issue
+  (4 consecutive instant failures across 2 commits, confirmed
+  unrelated to the code) — merged on a verified-clean local gate
+  instead. Flagging here in case it recurs on this PR.
+
+---
+
 ## PR #133 — Add LIKE/GLOB/BETWEEN operators (closes #113)
 **2026-08-16** · [#133](https://github.com/baileyrd/rusty_-rusqlite/pull/133)
 
