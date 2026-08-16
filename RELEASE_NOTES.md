@@ -23,6 +23,32 @@ entry per PR.
 
 ---
 
+## PR #144 — Add INSERT ... SELECT (closes #124)
+**2026-08-16** · [#144](https://github.com/baileyrd/rusty_-rusqlite/pull/144)
+
+- **Added:** `INSERT INTO t [(cols...)] SELECT ...` — new `InsertSource`
+  enum (`Values`/`Select`) replacing `Insert.rows`, parsed and executed
+  end to end (including `OR REPLACE`/`OR IGNORE` and bound `?`/`:name`
+  parameters in the nested `SELECT`'s `WHERE`).
+- **Scope, per the issue's own note:** the source `SELECT` is fully
+  materialized before insertion (eager, not streaming) — the same
+  pattern `TableSource::scan` already uses. No new execution capability.
+- Column-count mismatches between the `SELECT`'s output and the target
+  table's schema (or an explicit column list) surface as the same
+  `Error::ColumnCountMismatch` a mismatched `VALUES` row already would;
+  an empty `SELECT` result inserts zero rows without erroring.
+- **Scope note:** the engine-level `INSERT ... SELECT` path (used
+  directly, without a `Connection`) can't resolve scalar functions or
+  aggregates inside the nested `SELECT` — it reuses the plain
+  `execute_select`, which has no access to a connection's registered
+  functions. `INSERT ... SELECT` into a *virtual* table is also not
+  supported (errors clearly) — this issue's `INSERT ... SELECT` support
+  is native-table-only.
+- Fourteenth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 523 tests passing.
+
+---
+
 ## PR #143 — Add INSERT OR REPLACE / OR IGNORE conflict resolution (closes #123)
 **2026-08-16** · [#143](https://github.com/baileyrd/rusty_-rusqlite/pull/143)
 
