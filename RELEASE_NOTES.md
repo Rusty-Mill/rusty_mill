@@ -23,6 +23,24 @@ entry per PR.
 
 ---
 
+## PR #135 — Add CASE WHEN expressions (closes #115)
+**2026-08-16** · [#135](https://github.com/baileyrd/rusty_-rusqlite/pull/135)
+
+- **Added:** `Expr::Case`, both simple form (`CASE operand WHEN val
+  THEN ...`) and searched form (`CASE WHEN cond THEN ...`), parsed as
+  a new primary expression — usable anywhere an operand can appear,
+  not just at the top of `WHERE`. Searched-form conditions parse via
+  the full boolean grammar (`AND`/`OR`/comparisons), not just a bare
+  comparison.
+- No matching branch and no `ELSE` returns `NULL`, matching SQLite.
+  Simple form matches by equality; a `NULL` operand or `NULL` `WHEN`
+  value never matches (falls through to `ELSE`) — same "unknown isn't
+  true" rule already used for `LIKE`/`GLOB`/`BETWEEN`/`IN`.
+- Fifth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 415 tests passing.
+
+---
+
 ## PR #134 — Add IN operator, literal-list form (closes #114)
 **2026-08-16** · [#134](https://github.com/baileyrd/rusty_-rusqlite/pull/134)
 
