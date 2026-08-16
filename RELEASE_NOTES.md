@@ -23,6 +23,45 @@ entry per PR.
 
 ---
 
+## PR #145 — Add GROUP BY / HAVING (closes #125)
+**2026-08-16** · [#145](https://github.com/baileyrd/rusty_-rusqlite/pull/145)
+
+- **Added:** `GROUP BY col, ...` buckets matching rows by key before
+  aggregating, one output row per distinct group; `HAVING expr` filters
+  groups post-aggregation, and — unlike `WHERE` — can reference an
+  aggregate result (e.g. `HAVING COUNT(*) > 1`). An empty `GROUP BY` is
+  one implicit whole-table group, matching this crate's pre-#125
+  aggregate behavior exactly (always exactly one row, even over zero
+  matching rows); genuine grouping with zero matching rows instead
+  produces zero groups. `NULL` grouping keys form their own group.
+- **How `HAVING COUNT(*) > 1` parses:** `dml_select.rs`'s parser
+  recognizes `IDENT(...)` inside `HAVING` specifically as an
+  aggregate-call reference (reusing the exact same grammar the select
+  list's own aggregate calls use, including proper `COUNT(*)` support),
+  represented as a synthetic column reference under that call's display
+  name — so the ordinary three-valued boolean evaluator can evaluate it
+  against each group's already-finalized aggregate value, with no
+  special-cased "is this an aggregate?" logic needed in `eval.rs`. Scoped
+  to `HAVING` only (via a `SelectParser::in_having` flag, reset right
+  after) — `WHERE`/`CHECK`/`DEFAULT` parsing is unaffected, so
+  `IDENT(...)` there still means a scalar function call.
+- **Scope, stated plainly:** the `GROUP BY` column(s) aren't projected
+  into the output row — `SelectColumns::Aggregates` is still calls-only
+  (no mixing a bare grouped column into the select list alongside
+  aggregate calls, e.g. `SELECT category, COUNT(*) ...` isn't
+  parseable). Extending the select-list grammar to mix plain columns
+  with aggregate calls is a larger, separate change than this issue's
+  own "extends the existing whole-table aggregation path" scope.
+  `GROUP BY`/`HAVING` are rejected clearly (not silently ignored) with a
+  non-aggregate or window select list.
+- `SELECT DISTINCT` (#116) is no longer always a no-op for an aggregate
+  `SELECT` — it dedups the grouped output rows, since `GROUP BY` can now
+  produce more than one.
+- Fifteenth sub-issue of `[epic] SQL dialect coverage` (#111).
+- 538 tests passing.
+
+---
+
 ## PR #144 — Add INSERT ... SELECT (closes #124)
 **2026-08-16** · [#144](https://github.com/baileyrd/rusty_-rusqlite/pull/144)
 
