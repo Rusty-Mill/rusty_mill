@@ -37,7 +37,8 @@ pub async fn start_daemon_detached(root: &Path) -> Result<()> {
     use rusty_tokio::process::{Command, Stdio};
 
     paths::ensure_dir("creating the state root", root)?;
-    let exe = std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
     let log_path = paths::daemon_log(root);
     let log = std::fs::File::create(&log_path)
         .map_err(|e| Error::io("creating the daemon log", log_path, e))?;
@@ -99,21 +100,17 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 /// One request, one response, against a possibly-auto-started daemon.
 async fn request(root: &Path, request: Request) -> Result<Response> {
     let mut conn = connect(root).await?;
-    let response: Response = match rusty_tokio::time::timeout(
-        REQUEST_TIMEOUT,
-        conn.request(&request),
-    )
-    .await
-    {
-        Ok(result) => result?,
-        Err(_) => {
-            return Err(Error::conflict(format!(
-                "the daemon accepted the request but did not answer within {}s; see {}",
-                REQUEST_TIMEOUT.as_secs(),
-                paths::daemon_log(root).display()
-            )))
-        }
-    };
+    let response: Response =
+        match rusty_tokio::time::timeout(REQUEST_TIMEOUT, conn.request(&request)).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Err(Error::conflict(format!(
+                    "the daemon accepted the request but did not answer within {}s; see {}",
+                    REQUEST_TIMEOUT.as_secs(),
+                    paths::daemon_log(root).display()
+                )))
+            }
+        };
     match response {
         Response::Error { kind, message } => Err(match kind {
             sessionmgr_protocol::ErrorKind::NotFound => Error::NotFound { id: message },
@@ -189,7 +186,10 @@ pub async fn session_attach(root: &Path, id: SessionId) -> Result<()> {
                 id: id.clone(),
                 data: format!("{line}\n").into_bytes(),
             };
-            if transport::write_framed(&mut writer, &request).await.is_err() {
+            if transport::write_framed(&mut writer, &request)
+                .await
+                .is_err()
+            {
                 return;
             }
         }
@@ -251,7 +251,9 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
     if sessions.is_empty() {
         return "no sessions".to_owned();
     }
-    let mut out = String::from("ID            STATUS       KIND            BRANCH                    COMMAND\n");
+    let mut out = String::from(
+        "ID            STATUS       KIND            BRANCH                    COMMAND\n",
+    );
     for session in sessions {
         out.push_str(&format!(
             "{:<13} {:<12} {:<15} {:<25} {}\n",

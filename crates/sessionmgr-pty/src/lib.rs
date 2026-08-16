@@ -382,7 +382,10 @@ mod tests {
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "stty size".into()],
             cwd: std::env::temp_dir().into_os_string(),
-            size: TerminalSize { rows: 40, cols: 132 },
+            size: TerminalSize {
+                rows: 40,
+                cols: 132,
+            },
         })
         .expect("spawn");
         let output = String::from_utf8_lossy(&read_to_end(&session, 4096)).into_owned();
@@ -401,7 +404,10 @@ mod tests {
         // forever.
         let session = PtySession::spawn(sh("sleep 0.2; stty size")).expect("spawn");
         session
-            .resize(TerminalSize { rows: 50, cols: 200 })
+            .resize(TerminalSize {
+                rows: 50,
+                cols: 200,
+            })
             .expect("resize");
         let output = String::from_utf8_lossy(&read_to_end(&session, 4096)).into_owned();
         assert!(

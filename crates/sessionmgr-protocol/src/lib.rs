@@ -98,11 +98,7 @@ pub enum Request {
     /// so a session whose terminal is never resized renders to whatever
     /// size it was given at creation -- which for a session created by a
     /// background client is a default, not the user's actual window.
-    SessionResize {
-        id: SessionId,
-        rows: u16,
-        cols: u16,
-    },
+    SessionResize { id: SessionId, rows: u16, cols: u16 },
 
     /// Tear a session down: graceful shutdown first, then terminate the
     /// recorded worker **and** child pids if it does not ack in time.

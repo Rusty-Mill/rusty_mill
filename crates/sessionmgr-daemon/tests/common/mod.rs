@@ -444,7 +444,9 @@ pub fn transcript_output(root: &Path, id: &str) -> Vec<u8> {
             continue;
         }
         let needle = "\"data\":\"";
-        let Some(start) = line.find(needle) else { continue };
+        let Some(start) = line.find(needle) else {
+            continue;
+        };
         let rest = &line[start + needle.len()..];
         let Some(end) = rest.find('"') else { continue };
         if let Ok(decoded) = sessionmgr_protocol::base64::decode(&rest[..end]) {

@@ -58,7 +58,7 @@ pub fn encode(input: &[u8]) -> String {
 /// a terminal, which interprets what it is given.
 pub fn decode(input: &str) -> Result<Vec<u8>, DecodeError> {
     let bytes = input.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err(DecodeError::BadLength { got: bytes.len() });
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);

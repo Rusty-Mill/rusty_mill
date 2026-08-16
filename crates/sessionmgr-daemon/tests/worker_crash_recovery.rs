@@ -70,7 +70,11 @@ fn attaching_to_a_crashed_session_still_shows_what_it_produced() {
     // explains *why* it crashed -- exactly when the user needs it most.
     let root = TempRoot::new("attach-crashed");
     let command = if cfg!(windows) {
-        vec!["cmd", "/C", "echo before-the-crash && ping -n 600 127.0.0.1 > NUL"]
+        vec![
+            "cmd",
+            "/C",
+            "echo before-the-crash && ping -n 600 127.0.0.1 > NUL",
+        ]
     } else {
         vec!["sh", "-c", "echo before-the-crash; sleep 600"]
     };

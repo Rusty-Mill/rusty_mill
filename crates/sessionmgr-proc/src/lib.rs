@@ -658,11 +658,8 @@ mod tests {
         // is the failure mode a typo here would produce.
         let rt = rusty_tokio::Runtime::new().expect("runtime");
         rt.block_on(async {
-            let mut cmd = rusty_tokio::process::Command::new(if cfg!(windows) {
-                "cmd"
-            } else {
-                "true"
-            });
+            let mut cmd =
+                rusty_tokio::process::Command::new(if cfg!(windows) { "cmd" } else { "true" });
             if cfg!(windows) {
                 cmd.arg("/C").arg("exit");
             }

@@ -12,7 +12,12 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# Verified, not guessed. 1.75 was inherited from a sibling project's
+# manifest and was wrong by thirteen releases: `rusty_libc` (transitive,
+# via `rustils`) requires 1.88, and edition-2024 dependencies rule out
+# anything below 1.85 regardless. CI pins a job to exactly this version
+# so the claim cannot silently drift again.
+rust-version = "1.88"
 license = "MIT"
 publish = false
 

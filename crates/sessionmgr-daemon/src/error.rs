@@ -52,7 +52,11 @@ impl From<sessionmgr_core::TransitionError> for Error {
 }
 
 impl Error {
-    pub fn io(context: &'static str, path: impl Into<Option<PathBuf>>, source: std::io::Error) -> Self {
+    pub fn io(
+        context: &'static str,
+        path: impl Into<Option<PathBuf>>,
+        source: std::io::Error,
+    ) -> Self {
         Error::Io {
             context,
             path: path.into(),

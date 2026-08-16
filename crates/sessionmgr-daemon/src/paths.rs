@@ -208,7 +208,10 @@ mod tests {
         let root = PathBuf::from("/r");
         let id = SessionId::new(1_700_000_000_000, 7);
         let flat = worker_socket(&root, &id).as_os_str().len();
-        let obvious = session_dir(&root, &id).join("worker.sock").as_os_str().len();
+        let obvious = session_dir(&root, &id)
+            .join("worker.sock")
+            .as_os_str()
+            .len();
         assert!(
             flat < obvious,
             "the flat socket layout ({flat}) must be shorter than the co-located one ({obvious})"

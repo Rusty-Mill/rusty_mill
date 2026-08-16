@@ -29,11 +29,11 @@
 
 use std::path::Path;
 
+use sessionmgr_core::ports::ProcessPort;
 use sessionmgr_core::{
     decide_recovery, Liveness, RecoveryAction, Session, SessionId, SessionStatus,
 };
 use sessionmgr_proc::SystemProcessPort;
-use sessionmgr_core::ports::ProcessPort;
 use sessionmgr_protocol::{SessionEvent, SessionSummary};
 
 use crate::error::{Error, Result};

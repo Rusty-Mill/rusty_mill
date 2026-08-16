@@ -37,8 +37,8 @@ use rusty_tokio::sync::{broadcast, Mutex, Notify};
 use sessionmgr_core::ports::worker_ref;
 use sessionmgr_core::{SessionId, SessionStatus};
 use sessionmgr_proc::SystemProcessPort;
-use sessionmgr_pty::{PtyOptions, PtySession, TerminalSize};
 use sessionmgr_protocol::{ErrorKind, Request, Response, SessionEvent};
+use sessionmgr_pty::{PtyOptions, PtySession, TerminalSize};
 
 use crate::error::{Error, Result};
 use crate::{catalog, paths, transport};
@@ -187,7 +187,11 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
                 let pid = child.id();
                 // Taken now, because the `Backend` owns it from here on.
                 let stdin = child.stdin.take();
-                (Backend::Piped(Mutex::new(stdin)), pid, Started::Piped(child))
+                (
+                    Backend::Piped(Mutex::new(stdin)),
+                    pid,
+                    Started::Piped(child),
+                )
             }
             Err(e) => return record_start_failure(&root, &mut session, program, e),
         }

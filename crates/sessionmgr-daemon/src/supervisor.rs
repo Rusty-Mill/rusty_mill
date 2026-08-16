@@ -88,8 +88,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
     }
 
     paths::ensure_dir("creating the state root", &root)?;
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::io("locating this executable", None, e))?;
+    let exe =
+        std::env::current_exe().map_err(|e| Error::io("locating this executable", None, e))?;
 
     let supervisor = Arc::new(Supervisor {
         root: root.clone(),
@@ -109,7 +109,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
     // reading a session as `Running` a moment before it is marked crashed.
     supervisor.reconcile_all()?;
 
-    let listener = transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
+    let listener =
+        transport::Listener::bind("binding the daemon socket", &paths::daemon_socket(&root))?;
 
     // Written after the bind succeeds, never before: a pointer file
     // advertising a daemon that then failed to bind would send every
@@ -120,11 +121,8 @@ pub async fn run(root: PathBuf) -> Result<()> {
         start_fingerprint: sessionmgr_proc::start_fingerprint(me).ok().flatten(),
     };
     let state_path = paths::daemon_state(&root);
-    std::fs::write(
-        &state_path,
-        serde_json::to_string_pretty(&state)?,
-    )
-    .map_err(|e| Error::io("writing the daemon pointer file", state_path.clone(), e))?;
+    std::fs::write(&state_path, serde_json::to_string_pretty(&state)?)
+        .map_err(|e| Error::io("writing the daemon pointer file", state_path.clone(), e))?;
 
     let accept_loop = rusty_tokio::spawn({
         let supervisor = Arc::clone(&supervisor);
@@ -194,9 +192,7 @@ impl Supervisor {
             Request::SessionList => self.session_list(),
             Request::SessionInput { id, data } => self.session_input(id, data).await,
             Request::SessionResize { id, rows, cols } => self.session_resize(id, rows, cols).await,
-            Request::SessionClose { id, disposition } => {
-                self.session_close(id, disposition).await
-            }
+            Request::SessionClose { id, disposition } => self.session_close(id, disposition).await,
             Request::DaemonShutdown => {
                 self.shutdown.notify_one();
                 Ok(Response::Ok)
@@ -394,7 +390,9 @@ impl Supervisor {
             // Reconciled on every list, not only at startup: a worker can
             // die at any moment, and a status this tool reports as
             // `Running` when the process is gone is worse than useless.
-            sessions.push(catalog::summarize(&catalog::reconcile(&self.root, session)?));
+            sessions.push(catalog::summarize(&catalog::reconcile(
+                &self.root, session,
+            )?));
         }
         Ok(Response::Sessions { sessions })
     }
@@ -428,7 +426,8 @@ impl Supervisor {
             &paths::worker_socket(&self.root, &id),
         )
         .await?;
-        conn.request(&Request::SessionResize { id, rows, cols }).await
+        conn.request(&Request::SessionResize { id, rows, cols })
+            .await
     }
 
     /// Graceful first, then force, then record.
@@ -451,7 +450,8 @@ impl Supervisor {
         //    exits, which is cleaner than anything done from outside.
         let socket = paths::worker_socket(&self.root, &id);
         let graceful = rusty_tokio::time::timeout(GRACEFUL_CLOSE_TIMEOUT, async {
-            let mut conn = transport::Connection::connect("connecting to a worker", &socket).await?;
+            let mut conn =
+                transport::Connection::connect("connecting to a worker", &socket).await?;
             let response: Response = conn.request(&Request::WorkerShutdown).await?;
             Ok::<_, Error>(response)
         })

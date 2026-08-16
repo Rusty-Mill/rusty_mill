@@ -224,8 +224,17 @@ mod tests {
     fn staged_and_unstaged_states_are_preserved_distinctly() {
         // The two columns mean different things; collapsing them would
         // lose information the diff view uses.
-        assert_eq!(parse_status_line("M  a.rs").map(|c| c.status), Some("M ".to_owned()));
-        assert_eq!(parse_status_line(" M a.rs").map(|c| c.status), Some(" M".to_owned()));
-        assert_eq!(parse_status_line("MM a.rs").map(|c| c.status), Some("MM".to_owned()));
+        assert_eq!(
+            parse_status_line("M  a.rs").map(|c| c.status),
+            Some("M ".to_owned())
+        );
+        assert_eq!(
+            parse_status_line(" M a.rs").map(|c| c.status),
+            Some(" M".to_owned())
+        );
+        assert_eq!(
+            parse_status_line("MM a.rs").map(|c| c.status),
+            Some("MM".to_owned())
+        );
     }
 }

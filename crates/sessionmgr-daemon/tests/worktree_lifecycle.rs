@@ -101,7 +101,10 @@ fn closing_with_merge_fast_forwards_the_work_back() {
         Duration::from_secs(30)
     ));
 
-    assert_success("close --merge", &run(root.path(), &["close", &id, "--merge"]));
+    assert_success(
+        "close --merge",
+        &run(root.path(), &["close", &id, "--merge"]),
+    );
 
     assert!(
         repo.log_contains("add-merged.txt"),
@@ -198,7 +201,13 @@ fn merging_a_diverged_branch_fails_loudly_and_keeps_the_work() {
     // Move the main branch on independently, so a fast-forward is
     // impossible.
     let out = std::process::Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "main-side", "--no-gpg-sign"])
+        .args([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "main-side",
+            "--no-gpg-sign",
+        ])
         .current_dir(repo.path())
         .env("GIT_AUTHOR_NAME", "sessionmgr tests")
         .env("GIT_AUTHOR_EMAIL", "tests@example.invalid")
@@ -302,12 +311,7 @@ fn a_session_created_from_a_subdirectory_resolves_to_the_repository_root() {
 
     let id = session_new_in(
         root.path(),
-        &[
-            "--kind",
-            "worktree",
-            "--repo",
-            &subdir.to_string_lossy(),
-        ],
+        &["--kind", "worktree", "--repo", &subdir.to_string_lossy()],
         &long_running(),
     );
 

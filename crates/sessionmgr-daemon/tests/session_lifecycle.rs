@@ -23,7 +23,10 @@ fn a_new_session_is_created_running_and_listed() {
 fn a_client_starts_a_daemon_transparently() {
     // The user should not have to know this tool has a daemon at all.
     let root = TempRoot::new("lifecycle-autostart");
-    assert_eq!(stdout_of(&run(root.path(), &["daemon", "status"])), "not running");
+    assert_eq!(
+        stdout_of(&run(root.path(), &["daemon", "status"])),
+        "not running"
+    );
 
     session_new(root.path(), &long_running());
     assert!(stdout_of(&run(root.path(), &["daemon", "status"])).starts_with("running"));
@@ -78,7 +81,11 @@ fn a_session_that_exits_non_zero_is_recorded_as_errored() {
 fn attaching_streams_the_sessions_output() {
     let root = TempRoot::new("lifecycle-attach");
     let command = if cfg!(windows) {
-        vec!["cmd", "/C", "echo streamed-output && ping -n 600 127.0.0.1 > NUL"]
+        vec![
+            "cmd",
+            "/C",
+            "echo streamed-output && ping -n 600 127.0.0.1 > NUL",
+        ]
     } else {
         vec!["sh", "-c", "echo streamed-output; sleep 600"]
     };
@@ -270,7 +277,11 @@ fn terminal_output_survives_the_round_trip_to_an_attached_client() {
     // unit tests.
     let root = TempRoot::new("lifecycle-bytes");
     let command: Vec<&str> = if cfg!(windows) {
-        vec!["cmd", "/C", "echo colour-test && ping -n 600 127.0.0.1 > NUL"]
+        vec![
+            "cmd",
+            "/C",
+            "echo colour-test && ping -n 600 127.0.0.1 > NUL",
+        ]
     } else {
         vec![
             "sh",
