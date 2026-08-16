@@ -110,9 +110,16 @@ impl Database {
         }
     }
 
-    /// Creates a table from a parsed `CREATE TABLE` statement.
+    /// Creates a table from a parsed `CREATE TABLE` statement. A name
+    /// collision is [`Error::TableAlreadyExists`], unless `create`
+    /// carries `IF NOT EXISTS` (issue #119) — then it's a silent no-op,
+    /// keeping the existing table as-is (no schema comparison against
+    /// `create`'s columns).
     pub fn create_table(&mut self, create: &CreateTable) -> Result<()> {
         if self.tables.contains_key(&create.table_name) {
+            if create.if_not_exists {
+                return Ok(());
+            }
             return Err(Error::TableAlreadyExists(create.table_name.clone()));
         }
         let column_names = create.columns.iter().map(|c| c.name.clone()).collect();
@@ -386,6 +393,32 @@ mod tests {
     }
 
     #[test]
+    fn create_table_if_not_exists_is_a_no_op_on_collision() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE t (a INTEGER)"))
+            .unwrap();
+        db.insert_row("t", vec![Value::Integer(1)]).unwrap();
+
+        // A second CREATE TABLE IF NOT EXISTS (even with a different
+        // schema) is a silent no-op -- the original table, rows
+        // included, is left untouched.
+        db.create_table(&create("CREATE TABLE IF NOT EXISTS t (a INTEGER, b TEXT)"))
+            .unwrap();
+
+        let table = db.table("t").unwrap();
+        assert_eq!(table.column_names, vec!["a"]);
+        assert_eq!(table.rows, vec![vec![Value::Integer(1)]]);
+    }
+
+    #[test]
+    fn create_table_if_not_exists_still_creates_a_new_table() {
+        let mut db = Database::new();
+        db.create_table(&create("CREATE TABLE IF NOT EXISTS t (a INTEGER)"))
+            .unwrap();
+        assert!(db.table("t").is_ok());
+    }
+
+    #[test]
     fn inserts_and_scans_rows() {
         let mut db = Database::new();
         db.create_table(&create("CREATE TABLE t (a INTEGER, b TEXT)"))
@@ -501,6 +534,7 @@ mod tests {
                 check: Some(Expr::Column("flag".into())),
                 ..Default::default()
             }],
+            if_not_exists: false,
         })
         .unwrap();
         assert!(db.insert_row("t", vec![Value::Null]).is_ok());
