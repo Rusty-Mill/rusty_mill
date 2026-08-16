@@ -119,6 +119,32 @@ pub struct Select {
     pub having: Option<Expr>,
 }
 
+/// `UNION`/`UNION ALL`/`INTERSECT`/`EXCEPT` (issue #126) — how two
+/// `SELECT`s' result sets combine in a [`CompoundSelect`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompoundOp {
+    /// Concatenates both sides, then dedups the combined rows.
+    Union,
+    /// Concatenates both sides with no deduplication.
+    UnionAll,
+    /// Only rows present on both sides, deduped.
+    Intersect,
+    /// Only the left side's rows absent from the right side, deduped.
+    Except,
+}
+
+/// A parsed compound `SELECT`: `select-core (UNION [ALL] | INTERSECT |
+/// EXCEPT select-core)*` (issue #126) — a plain, non-compound `SELECT`
+/// is `rest: vec![]`. Each side executes independently through the same
+/// path a standalone [`Select`] would (`first`, then each `rest` entry,
+/// left-associative); combining is a pure Rust-side `Vec` operation over
+/// the two sides' already-materialized rows — no new execution model.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundSelect {
+    pub first: Select,
+    pub rest: Vec<(CompoundOp, Select)>,
+}
+
 /// A minimal expression tree — enough to represent `WHERE` filters.
 /// Evaluated by `A6`, not here.
 #[derive(Debug, Clone, PartialEq)]
@@ -241,11 +267,26 @@ pub enum BinaryOp {
 }
 
 /// Parses a single-table `SELECT` statement from a token stream (as
-/// produced by [`crate::tokenize`]).
+/// produced by [`crate::tokenize`]). Any trailing tokens past the parsed
+/// `SELECT` (e.g. a `UNION`/`INTERSECT`/`EXCEPT` clause) are left
+/// unconsumed rather than erroring — see [`parse_select_at`], which
+/// [`parse_compound_select`] (issue #126) uses to chain multiple
+/// `SELECT`s from one token stream instead of erroring on the first
+/// one's trailing tokens.
 pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
+    let (select, _) = parse_select_at(tokens, 0)?;
+    Ok(select)
+}
+
+/// Parses a single-table `SELECT` statement starting at `tokens[pos]`.
+/// Returns the parsed [`Select`] and the index of the first token past
+/// it — the same "parse at an offset, report where it stopped" shape as
+/// [`parse_expr_at`]/[`parse_operand_at`], letting [`parse_compound_select`]
+/// chain multiple `SELECT`s from one token stream.
+pub(crate) fn parse_select_at(tokens: &[Token], pos: usize) -> Result<(Select, usize), ParseError> {
     let mut p = SelectParser {
         tokens,
-        pos: 0,
+        pos,
         in_having: false,
     };
     p.expect_ident("SELECT")?;
@@ -317,14 +358,60 @@ pub fn parse_select(tokens: &[Token]) -> Result<Select, ParseError> {
         None
     };
 
-    Ok(Select {
-        columns,
-        table_name,
-        filter,
-        distinct,
-        group_by,
-        having,
-    })
+    Ok((
+        Select {
+            columns,
+            table_name,
+            filter,
+            distinct,
+            group_by,
+            having,
+        },
+        p.pos,
+    ))
+}
+
+/// Parses a compound `SELECT` — `select-core (UNION [ALL] | INTERSECT |
+/// EXCEPT select-core)*` (issue #126) — from a token stream (as produced
+/// by [`crate::tokenize`]). A plain, non-compound `SELECT` parses fine
+/// here too (`rest` is just empty) — this is the entry point every
+/// actual statement-dispatch site (`Statement::prepare`,
+/// `Connection::query_row`/`query_map`/`query_one`) should use instead
+/// of [`parse_select`] directly, so a `UNION`/`INTERSECT`/`EXCEPT`
+/// clause is never silently dropped as unconsumed trailing tokens.
+pub fn parse_compound_select(tokens: &[Token]) -> Result<CompoundSelect, ParseError> {
+    let (first, mut pos) = parse_select_at(tokens, 0)?;
+
+    let mut rest = Vec::new();
+    loop {
+        let op = if token_is_ident(tokens, pos, "UNION") {
+            pos += 1;
+            if token_is_ident(tokens, pos, "ALL") {
+                pos += 1;
+                CompoundOp::UnionAll
+            } else {
+                CompoundOp::Union
+            }
+        } else if token_is_ident(tokens, pos, "INTERSECT") {
+            pos += 1;
+            CompoundOp::Intersect
+        } else if token_is_ident(tokens, pos, "EXCEPT") {
+            pos += 1;
+            CompoundOp::Except
+        } else {
+            break;
+        };
+
+        let (next_select, next_pos) = parse_select_at(tokens, pos)?;
+        pos = next_pos;
+        rest.push((op, next_select));
+    }
+
+    Ok(CompoundSelect { first, rest })
+}
+
+fn token_is_ident(tokens: &[Token], pos: usize, keyword: &str) -> bool {
+    matches!(tokens.get(pos), Some(Token::Ident(s)) if s.eq_ignore_ascii_case(keyword))
 }
 
 /// Parses a single expression (the full boolean/comparison precedence
@@ -1448,5 +1535,66 @@ mod tests {
                 right: Box::new(Expr::Literal(Value::Text("X".into()))),
             })
         );
+    }
+
+    #[test]
+    fn plain_select_is_a_compound_with_an_empty_rest() {
+        let tokens = tokenize("SELECT * FROM t").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.first.table_name, "t");
+        assert!(compound.rest.is_empty());
+    }
+
+    #[test]
+    fn parses_union() {
+        let tokens = tokenize("SELECT a FROM t UNION SELECT a FROM u").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.rest.len(), 1);
+        assert_eq!(compound.rest[0].0, CompoundOp::Union);
+        assert_eq!(compound.rest[0].1.table_name, "u");
+    }
+
+    #[test]
+    fn parses_union_all() {
+        let tokens = tokenize("SELECT a FROM t UNION ALL SELECT a FROM u").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.rest[0].0, CompoundOp::UnionAll);
+    }
+
+    #[test]
+    fn parses_intersect() {
+        let tokens = tokenize("SELECT a FROM t INTERSECT SELECT a FROM u").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.rest[0].0, CompoundOp::Intersect);
+    }
+
+    #[test]
+    fn parses_except() {
+        let tokens = tokenize("SELECT a FROM t EXCEPT SELECT a FROM u").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.rest[0].0, CompoundOp::Except);
+    }
+
+    #[test]
+    fn parses_a_chain_of_three_selects() {
+        let tokens =
+            tokenize("SELECT a FROM t UNION SELECT a FROM u INTERSECT SELECT a FROM v").unwrap();
+        let compound = parse_compound_select(&tokens).unwrap();
+        assert_eq!(compound.rest.len(), 2);
+        assert_eq!(compound.rest[0].0, CompoundOp::Union);
+        assert_eq!(compound.rest[0].1.table_name, "u");
+        assert_eq!(compound.rest[1].0, CompoundOp::Intersect);
+        assert_eq!(compound.rest[1].1.table_name, "v");
+    }
+
+    #[test]
+    fn plain_parse_select_leaves_a_trailing_union_unconsumed() {
+        // Documents parse_select's own lenient trailing-token behavior
+        // (see its doc comment) -- parse_compound_select is what actual
+        // statement dispatch uses instead, precisely so this doesn't
+        // silently drop the UNION clause.
+        let tokens = tokenize("SELECT a FROM t UNION SELECT a FROM u").unwrap();
+        let select = parse_select(&tokens).unwrap();
+        assert_eq!(select.table_name, "t");
     }
 }

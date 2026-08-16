@@ -5,7 +5,7 @@ use crate::ddl::{
     parse_drop_index, parse_drop_table, ColumnDef, CreateVirtualTable,
 };
 use crate::dml_insert::parse_insert;
-use crate::dml_select::{parse_select, SelectColumns};
+use crate::dml_select::{parse_compound_select, SelectColumns};
 use crate::engine::{
     execute_alter_table, execute_create_index, execute_create_table, execute_drop_index,
     execute_drop_table, execute_insert_into_virtual_table, execute_insert_returning_rowids,
@@ -1324,9 +1324,9 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let select = parse_select(&tokens)?;
-        self.check_authorized(Action::Select, &select.table_name)?;
-        let (_, mut rows) = self.run_select(&select)?;
+        let compound = parse_compound_select(&tokens)?;
+        self.check_authorized(Action::Select, &compound.first.table_name)?;
+        let (_, mut rows) = self.run_compound_select(&compound)?;
         self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
@@ -1348,9 +1348,9 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let select = parse_select(&tokens)?;
-        self.check_authorized(Action::Select, &select.table_name)?;
-        let (columns, mut rows) = self.run_select(&select)?;
+        let compound = parse_compound_select(&tokens)?;
+        self.check_authorized(Action::Select, &compound.first.table_name)?;
+        let (columns, mut rows) = self.run_compound_select(&compound)?;
         self.fire_profile(sql, start.elapsed());
         if rows.is_empty() {
             return Err(Error::QueryReturnedNoRows);
@@ -1373,9 +1373,9 @@ impl Connection {
         self.fire_trace(sql);
         let start = Instant::now();
         let tokens = tokenize(sql)?;
-        let select = parse_select(&tokens)?;
-        self.check_authorized(Action::Select, &select.table_name)?;
-        let (columns, rows) = self.run_select(&select)?;
+        let compound = parse_compound_select(&tokens)?;
+        self.check_authorized(Action::Select, &compound.first.table_name)?;
+        let (columns, rows) = self.run_compound_select(&compound)?;
         self.fire_profile(sql, start.elapsed());
         rows.iter()
             .map(|values| f(Row::new(&columns, values)))
@@ -1445,6 +1445,30 @@ impl Connection {
             }
             _ => execute_select_with_functions(&self.db, select, &self.functions),
         }
+    }
+
+    /// Runs a parsed compound `SELECT` (`UNION`/`UNION ALL`/`INTERSECT`/
+    /// `EXCEPT` — issue #126): [`Connection::run_select`] on `compound.
+    /// first`, then folds each `compound.rest` entry in via
+    /// [`crate::engine::combine_rows`] — left-associative, same as real
+    /// SQLite. `pub(crate)` so [`crate::Statement`] can reuse it for
+    /// already-parsed compound `SELECT`s.
+    pub(crate) fn run_compound_select(
+        &self,
+        compound: &crate::dml_select::CompoundSelect,
+    ) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+        let (column_names, mut rows) = self.run_select(&compound.first)?;
+        for (op, select) in &compound.rest {
+            let (next_column_names, next_rows) = self.run_select(select)?;
+            if next_column_names.len() != column_names.len() {
+                return Err(Error::ColumnCountMismatch {
+                    expected: column_names.len(),
+                    actual: next_column_names.len(),
+                });
+            }
+            rows = crate::engine::combine_rows(*op, rows, next_rows);
+        }
+        Ok((column_names, rows))
     }
 }
 
@@ -2633,6 +2657,90 @@ mod tests {
         assert!(matches!(
             conn.query_row("SELECT a FROM t GROUP BY a"),
             Err(Error::UnrecognizedStatement(_))
+        ));
+    }
+
+    fn setup_compound_tables(conn: &mut Connection) {
+        conn.execute("CREATE TABLE t (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO t VALUES (1), (2), (3)").unwrap();
+        conn.execute("CREATE TABLE u (a INTEGER)").unwrap();
+        conn.execute("INSERT INTO u VALUES (2), (4)").unwrap();
+    }
+
+    #[test]
+    fn union_combines_and_dedups_via_query_map() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_compound_tables(&mut conn);
+
+        let mut rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t UNION SELECT a FROM u", |row| row.get(0))
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn union_all_keeps_duplicates_via_query_map() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_compound_tables(&mut conn);
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t UNION ALL SELECT a FROM u", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn intersect_via_query_map() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_compound_tables(&mut conn);
+
+        let rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t INTERSECT SELECT a FROM u", |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, vec![2]);
+    }
+
+    #[test]
+    fn except_via_query_map() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_compound_tables(&mut conn);
+
+        let mut rows: Vec<i64> = conn
+            .query_map("SELECT a FROM t EXCEPT SELECT a FROM u", |row| row.get(0))
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![1, 3]);
+    }
+
+    #[test]
+    fn compound_select_works_through_a_prepared_statement_with_bound_params() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        setup_compound_tables(&mut conn);
+
+        let mut rows: Vec<i64> = conn
+            .query_map_with_params(
+                "SELECT a FROM t WHERE a > ? UNION SELECT a FROM u",
+                (1i64,),
+                |row| row.get(0),
+            )
+            .unwrap();
+        rows.sort_unstable();
+        assert_eq!(rows, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn compound_select_column_count_mismatch_errors_clearly() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE t (a INTEGER, b TEXT)").unwrap();
+        conn.execute("CREATE TABLE u (a INTEGER)").unwrap();
+        assert!(matches!(
+            conn.query_row("SELECT a, b FROM t UNION SELECT a FROM u"),
+            Err(Error::ColumnCountMismatch { .. })
         ));
     }
 
