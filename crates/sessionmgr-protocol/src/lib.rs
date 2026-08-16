@@ -21,8 +21,10 @@
 //! readable with `cat`. `SessionEvent`s are the only high-volume message
 //! and are still one line each.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
-use sessionmgr_core::{SessionId, SessionKind, SessionStatus};
+use sessionmgr_core::{Disposition, SessionId, SessionKind, SessionStatus};
 
 /// A request from a client to the daemon, or from the daemon to a worker.
 ///
@@ -51,6 +53,16 @@ pub enum Request {
         /// shell", resolved by the daemon rather than the client so every
         /// client role agrees.
         command: Vec<String>,
+        /// The repository to create the session against, for the two
+        /// kinds that need one.
+        ///
+        /// Sent as the **client's** working directory rather than a
+        /// repository root: the client is the process standing in the
+        /// user's directory, and the daemon is not. Resolving it to a
+        /// root is the daemon's job, so that a session created from a
+        /// subdirectory lands in the same repository as one created from
+        /// the top.
+        repo: Option<PathBuf>,
     },
 
     /// List every known session.
@@ -65,7 +77,14 @@ pub enum Request {
 
     /// Tear a session down: graceful shutdown first, then terminate the
     /// recorded worker **and** child pids if it does not ack in time.
-    SessionClose { id: SessionId },
+    SessionClose {
+        id: SessionId,
+        /// What to do with the session's branch. `None` leaves the
+        /// worktree and branch in place, tearing down only the processes
+        /// -- the safe default, since discarding work is not something to
+        /// infer from a bare `close`.
+        disposition: Option<Disposition>,
+    },
 
     /// Shut the daemon down. Deliberately does **not** stop running
     /// sessions: workers are detached precisely so they outlive this.
@@ -134,6 +153,12 @@ pub struct SessionSummary {
     pub kind: SessionKind,
     pub status: SessionStatus,
     pub command: Vec<String>,
+    /// Where the session's command runs. `None` for a plain terminal.
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    /// The branch a worktree session owns.
+    #[serde(default)]
+    pub branch: Option<String>,
     pub created_at_millis: u64,
     pub exit_code: Option<i32>,
 }
@@ -190,6 +215,7 @@ mod tests {
             Request::SessionNew {
                 kind: SessionKind::PlainTerminal,
                 command: vec!["sh".to_owned()],
+                repo: None,
             },
             Request::SessionList,
             Request::SessionAttach { id: id.clone() },
@@ -197,7 +223,10 @@ mod tests {
                 id: id.clone(),
                 data: "echo hi".to_owned(),
             },
-            Request::SessionClose { id },
+            Request::SessionClose {
+                id,
+                disposition: Some(Disposition::Merge),
+            },
             Request::DaemonShutdown,
             Request::WorkerShutdown,
         ] {

@@ -1,11 +1,12 @@
 //! The ports: traits the domain defines and adapter crates implement.
 //!
-//! Only ports Phase 1 actually has an implementation *and* a caller for
-//! live here. `GitPort` (Phase 2) and `AgentAdapterPort` (Phase 3) are
-//! named in PLAN.md but deliberately not declared yet -- a trait with no
-//! implementor is a guess about an interface, and PLAN.md is explicit
-//! that the agent-adapter interface in particular depends on the outcome
-//! of spikes that have not run.
+//! Only ports that actually have an implementation *and* a caller live
+//! here. `AgentAdapterPort` (Phase 3) is named in the plan but
+//! deliberately not declared yet -- a trait with no implementor is a
+//! guess about an interface, and the agent-adapter interface in
+//! particular depends on the outcome of spikes that have not all run.
+
+use std::path::Path;
 
 use crate::session::WorkerRef;
 
@@ -40,6 +41,79 @@ pub trait ProcessPort {
     /// already true.
     fn terminate(&self, pid: u32) -> std::io::Result<()>;
 }
+
+/// A file changed in a session's workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Two-character porcelain status (`" M"`, `"??"`, `"A "`, …), kept
+    /// raw rather than parsed into an enum: git's porcelain v1 codes
+    /// carry staged-vs-unstaged in the two positions, and collapsing
+    /// that into a friendlier type would lose information the diff view
+    /// wants.
+    pub status: String,
+    pub path: String,
+}
+
+/// Everything the domain needs from git.
+///
+/// Every method takes an explicit path rather than the adapter holding
+/// one: a single daemon serves sessions across many repositories at once,
+/// so an adapter bound to one repository would need one instance per
+/// session and would make "which repo did this operate on" implicit at
+/// exactly the moments it matters most.
+pub trait GitPort {
+    /// Is `path` inside a git repository, and if so where is its root?
+    ///
+    /// Returns the root rather than a bool because every caller that
+    /// wants the answer also wants the root: worktrees are placed
+    /// relative to it, and a session created from a subdirectory must
+    /// still resolve to the same repository as one created from the top.
+    fn repo_root(&self, path: &Path) -> Result<std::path::PathBuf, GitError>;
+
+    /// Creates a worktree at `worktree` on a new branch `branch`.
+    fn worktree_add(&self, repo: &Path, worktree: &Path, branch: &str) -> Result<(), GitError>;
+
+    /// Removes a worktree.
+    ///
+    /// `force` corresponds to `git worktree remove --force`, which is
+    /// what discards a worktree with uncommitted changes in it.
+    fn worktree_remove(&self, repo: &Path, worktree: &Path, force: bool) -> Result<(), GitError>;
+
+    /// Deletes a branch this tool created.
+    fn branch_delete(&self, repo: &Path, branch: &str, force: bool) -> Result<(), GitError>;
+
+    /// Merges `branch` into the repository's current branch,
+    /// **fast-forward only**.
+    fn merge_fast_forward_only(&self, repo: &Path, branch: &str) -> Result<(), GitError>;
+
+    /// The files changed in `workspace`, staged or not.
+    fn changed_files(&self, workspace: &Path) -> Result<Vec<ChangedFile>, GitError>;
+
+    /// A unified diff of `workspace`. `path` narrows it to one file.
+    fn diff(&self, workspace: &Path, path: Option<&str>) -> Result<String, GitError>;
+}
+
+/// A git operation that failed.
+///
+/// Carries git's own stderr rather than replacing it with a friendlier
+/// message: git's diagnostics for the failures that actually happen here
+/// ("cannot remove a locked working tree", "not something we can merge")
+/// are better than anything this layer could invent, and hiding them
+/// would make the one thing a user needs -- what git objected to --
+/// unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitError {
+    pub operation: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for GitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "git {} failed: {}", self.operation, self.message.trim())
+    }
+}
+
+impl std::error::Error for GitError {}
 
 /// Convenience: build a [`WorkerRef`] for a pid this process just
 /// spawned, capturing its fingerprint immediately.

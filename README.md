@@ -50,7 +50,8 @@ PID is never mistaken for a live worker.
 
 ## Status
 
-**Phase 1 complete** — the walking skeleton works and its exit criterion is met.
+**Phase 2 complete** — worktree isolation works and is tested against real
+repositories.
 
 - **Phase 0**: `rusty_tokio` confirmed as the async runtime —
   [ADR-0001](docs/decisions/0001-async-runtime-rusty-tokio.md), including its
@@ -64,6 +65,11 @@ PID is never mistaken for a live worker.
     worker, so Phase 3's hook-based design stands.
   - A real PTY turns out to be **mandatory**, not preferable, for interactive
     agent sessions — [ADR-0002](docs/decisions/0002-pty-required-for-agent-sessions.md).
+- **Phase 2**: git worktree isolation, all three session kinds, and
+  merge/discard teardown. 105 tests pass. See the
+  [Phase 2 report](docs/phase-2-report.md) — including the Windows work that is
+  declared but not yet finished (the `longPathAware` manifest is written but
+  not wired into the build, and the Defender smoke test needs a Windows box).
 
 Phase order is deliberate and gated: the highest-uncertainty work (agent-CLI
 "needs input" detection, runtime availability) is proven earliest, and no phase

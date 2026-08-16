@@ -23,7 +23,7 @@ pub mod worker;
 
 use std::path::{Path, PathBuf};
 
-use sessionmgr_core::{SessionId, SessionKind};
+use sessionmgr_core::{Disposition, SessionId, SessionKind};
 
 use crate::error::{Error, Result};
 
@@ -34,10 +34,23 @@ USAGE:
     sessionmgr <COMMAND>
 
 COMMANDS:
-    new [--kind terminal] [-- <command>...]   create a session and start it
+    new [--kind KIND] [--repo <path>] [-- <command>...]
+                                              create a session and start it
     list                                      list every session
     attach <id>                               stream a session's output
-    close <id>                                tear a session down
+    close <id> [--merge|--discard]            tear a session down
+
+SESSION KINDS:
+    worktree     isolated in its own git worktree and branch (needs a repo)
+    same-dir     runs in the repository's own working copy -- NOT isolated;
+                 concurrent same-dir sessions can collide with each other
+    terminal     a plain shell, no repository (the default)
+
+CLOSING:
+    close <id>              stop the processes; leave any worktree in place
+    close <id> --merge      also merge the session's branch back
+                            (fast-forward only; fails loudly if diverged)
+    close <id> --discard    also delete the session's worktree and branch
     daemon run                                run the supervisor in the foreground
     daemon start                              start the supervisor detached
     daemon status                             is a supervisor running?
@@ -70,12 +83,7 @@ pub async fn run(args: &[String]) -> Result<()> {
             let id = parse_id(rest.first())?;
             client::session_attach(&root, id).await
         }
-        "close" => {
-            let id = parse_id(rest.first())?;
-            client::session_close(&root, id).await?;
-            println!("closed");
-            Ok(())
-        }
+        "close" => cmd_close(&root, rest).await,
         "daemon" => cmd_daemon(&root, rest).await,
         "__worker-main" => {
             let mut rest = rest.to_vec();
@@ -107,24 +115,33 @@ pub async fn run(args: &[String]) -> Result<()> {
 async fn cmd_new(root: &Path, args: &[String]) -> Result<()> {
     let mut args = args.to_vec();
     let kind = match take_option(&mut args, "--kind")?.as_deref() {
-        // Phase 1 knows exactly one kind. `--kind` exists now so the
-        // interface does not change shape when Phase 2 adds the other
-        // two, and so an unsupported value fails with a clear message
-        // rather than being silently ignored.
         None | Some("terminal") => SessionKind::PlainTerminal,
+        Some("worktree") => SessionKind::Worktree,
+        Some("same-dir") | Some("same-directory") => SessionKind::SameDirectory,
         Some(other) => {
             return Err(Error::usage(format!(
-                "unknown session kind `{other}` (this phase supports `terminal` only; \
-                 worktree and same-directory sessions arrive with Phase 2's worktree lifecycle)"
+                "unknown session kind `{other}` (expected `worktree`, `same-dir`, or `terminal`)"
             )))
         }
+    };
+    // Defaults to the client's own working directory, since that is the
+    // one process standing where the user is. The daemon resolves it to a
+    // repository root; it is not resolved here, so that `--repo` and the
+    // implicit case go through exactly the same code path.
+    let repo = match take_option(&mut args, "--repo")? {
+        Some(path) => Some(PathBuf::from(path)),
+        None if kind.needs_repo() => Some(
+            std::env::current_dir()
+                .map_err(|e| Error::io("locating the current directory", None, e))?,
+        ),
+        None => None,
     };
     // Everything after `--` is the command to run.
     let command = match args.iter().position(|arg| arg == "--") {
         Some(index) => args[index + 1..].to_vec(),
         None => Vec::new(),
     };
-    let id = client::session_new(root, kind, command).await?;
+    let id = client::session_new(root, kind, command, repo).await?;
     println!("{id}");
     Ok(())
 }
@@ -149,6 +166,35 @@ async fn cmd_daemon(root: &Path, args: &[String]) -> Result<()> {
         Some(other) => Err(Error::usage(format!("unknown daemon command `{other}`"))),
         None => Err(Error::usage("daemon requires a subcommand")),
     }
+}
+
+async fn cmd_close(root: &Path, args: &[String]) -> Result<()> {
+    let merge = args.iter().any(|a| a == "--merge");
+    let discard = args.iter().any(|a| a == "--discard");
+    // Refused rather than resolved by precedence: the two mean opposite
+    // things about the user's work, and guessing which one was meant is
+    // exactly the wrong thing to do when one of them is irreversible.
+    let disposition = match (merge, discard) {
+        (true, true) => {
+            return Err(Error::usage(
+                "--merge and --discard are opposites; pass at most one",
+            ))
+        }
+        (true, false) => Some(Disposition::Merge),
+        (false, true) => Some(Disposition::Discard),
+        (false, false) => None,
+    };
+    let id = parse_id(args.iter().find(|a| !a.starts_with("--")))?;
+    client::session_close(root, id, disposition).await?;
+    println!(
+        "{}",
+        match disposition {
+            Some(Disposition::Merge) => "closed and merged",
+            Some(Disposition::Discard) => "closed and discarded",
+            None => "closed",
+        }
+    );
+    Ok(())
 }
 
 fn parse_id(raw: Option<&String>) -> Result<SessionId> {

@@ -119,6 +119,7 @@ mod tests {
             SessionId::new(1_700_000_000_000, 7),
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
+            None,
             1_700_000_000_000,
         );
         s.status = status;

@@ -202,9 +202,17 @@ dependencies = [
  "serde",
  "serde_json",
  "sessionmgr-core",
+ "sessionmgr-git",
  "sessionmgr-proc",
  "sessionmgr-protocol",
  "thiserror",
+]
+
+[[package]]
+name = "sessionmgr-git"
+version = "0.1.0"
+dependencies = [
+ "sessionmgr-core",
 ]
 
 [[package]]

@@ -129,6 +129,14 @@ pub async fn run(args: WorkerArgs) -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // The whole point of a worktree session: the command runs *in the
+    // worktree*, not wherever this worker happens to have been spawned
+    // from. Without this, an isolated session would quietly operate on
+    // the user's main working copy -- the exact collision the isolation
+    // exists to prevent, and one that would look like it was working.
+    if let Some(workspace) = session.workspace.as_ref() {
+        cmd.current_dir(&workspace.cwd);
+    }
     // Deliberately *not* `prepare_detached`: this worker owns its child.
     // Detachment is about surviving the *daemon*, and this worker is
     // already detached from it. Detaching the child too would mean

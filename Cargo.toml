@@ -4,6 +4,7 @@ members = [
     "crates/sessionmgr-core",
     "crates/sessionmgr-protocol",
     "crates/sessionmgr-proc",
+    "crates/sessionmgr-git",
     "crates/sessionmgr-daemon",
 ]
 
@@ -35,3 +36,4 @@ thiserror = "1"
 sessionmgr-core = { path = "crates/sessionmgr-core" }
 sessionmgr-protocol = { path = "crates/sessionmgr-protocol" }
 sessionmgr-proc = { path = "crates/sessionmgr-proc" }
+sessionmgr-git = { path = "crates/sessionmgr-git" }

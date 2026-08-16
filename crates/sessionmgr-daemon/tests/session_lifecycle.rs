@@ -150,17 +150,42 @@ fn a_malformed_session_id_is_rejected_before_reaching_the_daemon() {
 }
 
 #[test]
-fn an_unsupported_session_kind_fails_with_a_clear_message() {
-    // Phase 1 has one kind. An unknown `--kind` must say so rather than
-    // being silently ignored and creating something the user did not ask
-    // for.
+fn an_unknown_session_kind_fails_with_a_clear_message() {
+    // An unrecognised `--kind` must say so rather than being silently
+    // ignored and creating something the user did not ask for.
     let root = TempRoot::new("lifecycle-kind");
-    let output = run(root.path(), &["new", "--kind", "worktree"]);
+    let output = run(root.path(), &["new", "--kind", "nonsense"]);
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("Phase 2") || stderr.contains("worktree"),
-        "the error should explain what is and is not supported yet: {stderr}"
+        stderr.contains("worktree") && stderr.contains("same-dir"),
+        "the error should list the kinds that do exist: {stderr}"
+    );
+}
+
+#[test]
+fn a_repo_backed_kind_outside_a_repository_fails_clearly() {
+    // `--kind worktree` pointed somewhere that is not a repository must
+    // explain that, rather than failing somewhere deep in a git command.
+    let root = TempRoot::new("lifecycle-norepo");
+    let elsewhere = std::env::temp_dir().join(format!("smnr{}", std::process::id()));
+    std::fs::create_dir_all(&elsewhere).expect("mkdir");
+    let output = run(
+        root.path(),
+        &[
+            "new",
+            "--kind",
+            "worktree",
+            "--repo",
+            &elsewhere.to_string_lossy(),
+        ],
+    );
+    let _ = std::fs::remove_dir_all(&elsewhere);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+    assert!(
+        stderr.contains("repository") || stderr.contains("git"),
+        "the error should name the actual problem: {stderr}"
     );
 }
 

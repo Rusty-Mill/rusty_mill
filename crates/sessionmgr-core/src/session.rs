@@ -3,6 +3,24 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::workspace::Workspace;
+
+/// What to do with a worktree session's branch when tearing it down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Disposition {
+    /// Merge the session's branch back into the repository.
+    ///
+    /// **Fast-forward only.** A session that has diverged from its base
+    /// fails loudly rather than being silently three-way merged: this
+    /// tool is tearing down a workspace, which is the worst possible
+    /// moment to invent a merge commit the user did not ask for and is
+    /// not watching.
+    Merge,
+    /// Throw the session's branch and worktree away.
+    Discard,
+}
+
 /// Crockford base32 alphabet, minus `I`/`L`/`O`/`U` -- the standard set
 /// chosen so a transcribed id can't confuse `1`/`I`/`l` or `0`/`O`, and
 /// so no id can accidentally spell a word.
@@ -144,23 +162,40 @@ impl From<SessionId> for String {
 
 /// What kind of workspace a session runs against.
 ///
-/// **Phase 1 models only [`SessionKind::PlainTerminal`].** PLAN.md's
-/// three-way split (`SameDirectory`/`Worktree`/`PlainTerminal`,
-/// replicated from the three distinct session-start actions in
-/// CAPABILITIES.md rather than collapsed into "always isolate") arrives
-/// in Phase 2, together with the git worktree lifecycle that gives the
-/// other two variants any meaning. Adding them here first would be
-/// building ahead of the phase.
-///
-/// `PlainTerminal` is deliberately the one built first: it carries zero
-/// agent-CLI uncertainty -- it is a shell, not an agent -- so the walking
-/// skeleton proves the daemon/worker/detach architecture without also
-/// depending on the unresolved "needs input" detection problem.
+/// The three-way split is replicated deliberately rather than simplified
+/// away. It would be tempting to always isolate -- it is simpler and
+/// safer -- but the three distinct session-start actions are a real part
+/// of the model being matched, and a same-directory session is a
+/// legitimate choice a user makes knowingly, not an oversight to be
+/// protected from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionKind {
-    /// A plain shell. No agent CLI, no git worktree.
+    /// A plain shell. No agent CLI, no git worktree, no repository.
+    ///
+    /// Built first, in the walking skeleton, because it carries zero
+    /// agent-CLI uncertainty -- it is a shell, not an agent -- so it
+    /// proved the daemon/worker/detach architecture without also
+    /// depending on the unresolved "needs input" detection problem.
     PlainTerminal,
+    /// Runs directly in the repository's own working copy.
+    ///
+    /// **Unisolated, and deliberately unprotected**: concurrent
+    /// same-directory sessions share a working copy and an index and can
+    /// collide. See [`crate::workspace::Workspace::same_directory`].
+    SameDirectory,
+    /// Isolated in its own git worktree on its own branch.
+    ///
+    /// The reason this project exists: it is the one capability nothing
+    /// on the market combines with Windows support.
+    Worktree,
+}
+
+impl SessionKind {
+    /// Does this kind need a repository to be created against?
+    pub fn needs_repo(self) -> bool {
+        matches!(self, SessionKind::SameDirectory | SessionKind::Worktree)
+    }
 }
 
 /// Where a session is in its lifecycle.
@@ -199,18 +234,30 @@ pub enum SessionStatus {
     /// The worker process died without reporting an outcome.
     Crashed,
     /// Torn down by the user.
+    ///
+    /// The terminal state for sessions with no branch of their own --
+    /// `PlainTerminal` and `SameDirectory`. Worktree sessions end in
+    /// [`Self::Merged`] or [`Self::Discarded`] instead, which say what
+    /// happened to the work rather than merely that it stopped.
     Closed,
+    /// Torn down, and the session's branch was merged back.
+    Merged,
+    /// Torn down, and the session's branch and worktree were thrown away.
+    Discarded,
 }
 
 impl SessionStatus {
     /// Is this a state nothing further happens from?
     ///
     /// Note `Finished`/`Errored`/`Crashed` are **not** terminal: a session
-    /// whose process has exited still holds a transcript and (from Phase
-    /// 2) a worktree, so it remains closeable. Only [`Self::Closed`] ends
-    /// the line.
+    /// whose process has exited still holds a transcript and a worktree,
+    /// so it remains closeable. Only the three torn-down states end the
+    /// line.
     pub fn is_terminal(self) -> bool {
-        matches!(self, SessionStatus::Closed)
+        matches!(
+            self,
+            SessionStatus::Closed | SessionStatus::Merged | SessionStatus::Discarded
+        )
     }
 
     /// Has the underlying process finished, one way or another?
@@ -289,6 +336,17 @@ pub struct Session {
     /// remediation path (adversarial finding #2). A pid this record does
     /// not carry is a pid nothing can clean up after a crash.
     pub child: Option<WorkerRef>,
+    /// The repository, working directory, and branch this session runs
+    /// against. `None` for a [`SessionKind::PlainTerminal`] session,
+    /// which has no repository at all.
+    ///
+    /// `#[serde(default)]` so records written before worktree support
+    /// existed still load: a `state.json` is read by whatever version of
+    /// this tool is installed later, not necessarily the one that wrote
+    /// it, and a session that survived an upgrade is exactly the kind
+    /// this project promises not to lose.
+    #[serde(default)]
+    pub workspace: Option<Workspace>,
     /// Millisecond timestamp, supplied by the caller (this crate does not
     /// read the clock).
     pub created_at_millis: u64,
@@ -297,7 +355,13 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(id: SessionId, kind: SessionKind, command: Vec<String>, created_at_millis: u64) -> Self {
+    pub fn new(
+        id: SessionId,
+        kind: SessionKind,
+        command: Vec<String>,
+        workspace: Option<Workspace>,
+        created_at_millis: u64,
+    ) -> Self {
         Session {
             id,
             kind,
@@ -305,8 +369,37 @@ impl Session {
             command,
             worker: None,
             child: None,
+            workspace,
             created_at_millis,
             exit_code: None,
+        }
+    }
+
+    /// The teardown status appropriate to how this session was closed.
+    ///
+    /// `Merged`/`Discarded` record what happened to the *work*, so they
+    /// are only ever reached when something actually happened to it:
+    ///
+    /// - **No disposition** is `Closed` — the processes were stopped and
+    ///   the worktree and branch were left exactly where they were.
+    ///   Reporting that as `Discarded` would tell the user their work was
+    ///   thrown away when it is still sitting on disk, which is a lie in
+    ///   the more alarming direction.
+    /// - **A session owning no branch** is always `Closed`, whatever was
+    ///   asked for. `--discard` on a same-directory session cannot mean
+    ///   "delete the user's repository", and there is nothing else it
+    ///   could refer to.
+    pub fn teardown_status(&self, disposition: Option<Disposition>) -> SessionStatus {
+        let owns_branch = self
+            .workspace
+            .as_ref()
+            .map(|w| w.branch.is_some())
+            .unwrap_or(false);
+        match disposition {
+            None => SessionStatus::Closed,
+            _ if !owns_branch => SessionStatus::Closed,
+            Some(Disposition::Merge) => SessionStatus::Merged,
+            Some(Disposition::Discard) => SessionStatus::Discarded,
         }
     }
 
@@ -318,12 +411,13 @@ impl Session {
     pub fn can_transition_to(&self, to: SessionStatus) -> bool {
         use SessionStatus::*;
         match (self.status, to) {
-            // Nothing leaves a closed session. This is what makes
+            // Nothing leaves a torn-down session. This is what makes
             // double-close an error rather than a silent no-op.
-            (Closed, _) => false,
+            (from, _) if from.is_terminal() => false,
 
-            // Any non-closed session can be torn down.
-            (_, Closed) => true,
+            // Any live session can be torn down, by any of the three
+            // teardown outcomes.
+            (_, Closed | Merged | Discarded) => true,
 
             // A session can crash from any state where a worker was
             // supposed to be running -- that is precisely the case the
@@ -397,6 +491,7 @@ mod tests {
             SessionId::new(1_700_000_000_000, 42),
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
+            None,
             1_700_000_000_000,
         )
     }
@@ -586,6 +681,75 @@ mod tests {
         let mut s = session();
         assert!(s.record_exit(Some(127)).is_ok());
         assert_eq!(s.status, SessionStatus::Errored);
+    }
+
+    fn worktree_session() -> Session {
+        let id = SessionId::new(1_700_000_000_000, 42);
+        Session::new(
+            id.clone(),
+            SessionKind::Worktree,
+            vec!["sh".to_owned()],
+            Some(Workspace::worktree(std::path::PathBuf::from("/repo"), &id)),
+            1_700_000_000_000,
+        )
+    }
+
+    #[test]
+    fn a_close_with_no_disposition_never_reports_work_as_discarded() {
+        // The bug this guards was real and was caught by the worktree
+        // tests: a bare `close` left the worktree on disk (correctly) but
+        // recorded the session as `Discarded`, telling the user their
+        // work had been thrown away when it had not.
+        assert_eq!(
+            worktree_session().teardown_status(None),
+            SessionStatus::Closed
+        );
+    }
+
+    #[test]
+    fn dispositions_map_to_outcome_statuses_for_a_session_that_owns_a_branch() {
+        assert_eq!(
+            worktree_session().teardown_status(Some(Disposition::Merge)),
+            SessionStatus::Merged
+        );
+        assert_eq!(
+            worktree_session().teardown_status(Some(Disposition::Discard)),
+            SessionStatus::Discarded
+        );
+    }
+
+    #[test]
+    fn a_session_owning_no_branch_always_closes_whatever_was_asked_for() {
+        // `--discard` on a same-directory session cannot mean "delete the
+        // user's repository"; there is no branch of ours to discard.
+        let mut s = session();
+        s.kind = SessionKind::SameDirectory;
+        s.workspace = Some(Workspace::same_directory(std::path::PathBuf::from("/repo")));
+        for disposition in [None, Some(Disposition::Merge), Some(Disposition::Discard)] {
+            assert_eq!(s.teardown_status(disposition), SessionStatus::Closed);
+        }
+        // And a plain terminal has no workspace at all.
+        assert_eq!(
+            session().teardown_status(Some(Disposition::Discard)),
+            SessionStatus::Closed
+        );
+    }
+
+    #[test]
+    fn the_outcome_statuses_are_terminal_just_like_closed() {
+        for terminal in [
+            SessionStatus::Closed,
+            SessionStatus::Merged,
+            SessionStatus::Discarded,
+        ] {
+            let mut s = worktree_session();
+            s.status = terminal;
+            assert!(terminal.is_terminal());
+            assert!(
+                s.transition_to(SessionStatus::Closed).is_err(),
+                "{terminal:?} must not be closeable again"
+            );
+        }
     }
 
     #[test]

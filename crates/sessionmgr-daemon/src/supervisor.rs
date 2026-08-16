@@ -22,7 +22,11 @@ use std::time::Duration;
 
 use rusty_tokio::sync::Notify;
 use serde::{Deserialize, Serialize};
-use sessionmgr_core::{RecoveryAction, SessionId, SessionKind, SessionStatus};
+use sessionmgr_core::ports::GitPort;
+use sessionmgr_core::{
+    Disposition, RecoveryAction, SessionId, SessionKind, SessionStatus, Workspace,
+};
+use sessionmgr_git::SystemGit;
 use sessionmgr_protocol::{Request, Response, SessionEvent};
 
 use crate::error::{Error, Result};
@@ -171,10 +175,16 @@ impl Supervisor {
             Request::Ping => Ok(Response::Pong {
                 pid: std::process::id(),
             }),
-            Request::SessionNew { kind, command } => self.session_new(kind, command).await,
+            Request::SessionNew {
+                kind,
+                command,
+                repo,
+            } => self.session_new(kind, command, repo).await,
             Request::SessionList => self.session_list(),
             Request::SessionInput { id, data } => self.session_input(id, data).await,
-            Request::SessionClose { id } => self.session_close(id).await,
+            Request::SessionClose { id, disposition } => {
+                self.session_close(id, disposition).await
+            }
             Request::DaemonShutdown => {
                 self.shutdown.notify_one();
                 Ok(Response::Ok)
@@ -189,7 +199,12 @@ impl Supervisor {
         }
     }
 
-    async fn session_new(&self, kind: SessionKind, command: Vec<String>) -> Result<Response> {
+    async fn session_new(
+        &self,
+        kind: SessionKind,
+        command: Vec<String>,
+        repo: Option<PathBuf>,
+    ) -> Result<Response> {
         let command = if command.is_empty() {
             default_shell()
         } else {
@@ -197,10 +212,13 @@ impl Supervisor {
         };
         let id = sessionmgr_proc::session_id()
             .map_err(|e| Error::io("generating a session id", None, e))?;
+
+        let workspace = self.prepare_workspace(kind, repo, &id)?;
         let session = sessionmgr_core::Session::new(
             id.clone(),
             kind,
             command,
+            workspace,
             sessionmgr_proc::now_millis(),
         );
         // Written before the spawn, never after: if this process dies in
@@ -249,6 +267,113 @@ impl Supervisor {
         }
     }
 
+    /// Resolves the repository and creates the worktree, if the session's
+    /// kind calls for one.
+    ///
+    /// Done **before** the session record is written, so a failure here
+    /// leaves nothing behind at all. Writing the record first would leave
+    /// a session pointing at a worktree that does not exist -- visible in
+    /// `list`, impossible to attach to, and needing its own cleanup path.
+    fn prepare_workspace(
+        &self,
+        kind: SessionKind,
+        repo: Option<PathBuf>,
+        id: &SessionId,
+    ) -> Result<Option<Workspace>> {
+        if !kind.needs_repo() {
+            return Ok(None);
+        }
+        let from = repo.ok_or_else(|| {
+            Error::usage(format!(
+                "a {kind:?} session needs a repository; run this from inside one \
+                 or pass --repo <path>"
+            ))
+        })?;
+        let git = SystemGit;
+        // Resolved from the client's directory to a repository root, so a
+        // session created deep inside a repo lands in the same place as
+        // one created at the top.
+        let root = git
+            .repo_root(&from)
+            .map_err(|e| Error::usage(e.to_string()))?;
+
+        match kind {
+            SessionKind::SameDirectory => Ok(Some(Workspace::same_directory(root))),
+            SessionKind::Worktree => {
+                let workspace = Workspace::worktree(root.clone(), id);
+                let branch = workspace.branch.clone().unwrap_or_default();
+                git.worktree_add(&root, &workspace.cwd, &branch)
+                    .map_err(|e| Error::conflict(e.to_string()))?;
+                Ok(Some(workspace))
+            }
+            SessionKind::PlainTerminal => Ok(None),
+        }
+    }
+
+    /// Removes a worktree session's worktree and branch according to
+    /// `disposition`.
+    ///
+    /// Runs **after** the session's processes are dead. A worktree cannot
+    /// be removed while something still holds a file open inside it, and
+    /// on Windows that is not advisory -- an open handle makes the
+    /// directory genuinely undeletable. Ordering teardown as
+    /// processes-then-files is what makes the removal likely to succeed
+    /// at all.
+    fn dispose_workspace(
+        &self,
+        session: &sessionmgr_core::Session,
+        disposition: Option<Disposition>,
+    ) -> Result<()> {
+        let Some(workspace) = session.workspace.as_ref() else {
+            return Ok(());
+        };
+        if !workspace.owns_worktree() {
+            // A same-directory session's "workspace" is the user's own
+            // repository. There is nothing here this tool created and
+            // nothing it may remove.
+            return Ok(());
+        }
+        let Some(disposition) = disposition else {
+            // A bare `close` stops the processes and leaves the worktree
+            // and branch in place. Work is not thrown away on an
+            // ambiguous instruction.
+            return Ok(());
+        };
+        let git = SystemGit;
+        let branch = workspace.branch.clone().unwrap_or_default();
+
+        if disposition == Disposition::Merge {
+            // Merge first, and propagate a failure. A fast-forward-only
+            // merge that fails means the branch has diverged -- and
+            // removing the worktree anyway would destroy exactly the work
+            // that could not be merged.
+            git.merge_fast_forward_only(&workspace.repo, &branch)
+                .map_err(|e| {
+                    Error::conflict(format!(
+                        "{e}\nThe session's worktree and branch have been left in place. \
+                         Merge `{branch}` by hand, or close with --discard to throw it away."
+                    ))
+                })?;
+        }
+
+        let force = disposition == Disposition::Discard;
+        if let Err(e) = git.worktree_remove(&workspace.repo, &workspace.cwd, force) {
+            return Err(Error::conflict(format!(
+                "{e}\nSomething may still be holding a file open in {}.",
+                workspace.cwd.display()
+            )));
+        }
+        // The branch outlives the worktree unless it was merged (nothing
+        // left to lose) or explicitly discarded (the user said so).
+        if let Err(e) = git.branch_delete(&workspace.repo, &branch, force) {
+            // Not fatal: the worktree is gone, which is the part that
+            // matters, and a branch left behind is recoverable by hand
+            // whereas failing the whole close here is not.
+            eprintln!("sessionmgr daemon: could not delete branch {branch}: {e}");
+        }
+        Ok(())
+    }
+
     fn session_list(&self) -> Result<Response> {
         let mut sessions = Vec::new();
         for session in catalog::list_sessions(&self.root)? {
@@ -282,7 +407,11 @@ impl Supervisor {
     /// the record is written, because that is the one window where the
     /// daemon and a worker could otherwise both write `state.json`. Once
     /// the pids are gone there is provably no other writer.
-    async fn session_close(&self, id: SessionId) -> Result<Response> {
+    async fn session_close(
+        &self,
+        id: SessionId,
+        disposition: Option<Disposition>,
+    ) -> Result<Response> {
         let mut session = catalog::read_session(&self.root, &id)?;
         if session.status.is_terminal() {
             return Err(Error::conflict(format!("session {id} is already closed")));
@@ -314,10 +443,13 @@ impl Supervisor {
             }
         }
 
-        // 3. Now, with no other possible writer, record the outcome.
-        session.transition_to(SessionStatus::Closed).map_err(|e| {
-            Error::conflict(e.to_string())
-        })?;
+        // 3. Only once nothing is running: dispose of the worktree. A
+        //    live process holding a file open inside it would make the
+        //    removal fail, and on Windows that is not advisory.
+        self.dispose_workspace(&session, disposition)?;
+
+        // 4. Now, with no other possible writer, record the outcome.
+        session.transition_to(session.teardown_status(disposition))?;
         catalog::write_session(&self.root, &session)?;
         Ok(Response::Ok)
     }

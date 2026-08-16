@@ -150,6 +150,8 @@ pub fn summarize(session: &Session) -> SessionSummary {
         kind: session.kind,
         status: session.status,
         command: session.command.clone(),
+        cwd: session.workspace.as_ref().map(|w| w.cwd.clone()),
+        branch: session.workspace.as_ref().and_then(|w| w.branch.clone()),
         created_at_millis: session.created_at_millis,
         exit_code: session.exit_code,
     }
@@ -228,6 +230,7 @@ mod tests {
             SessionId::new(1_700_000_000_000, 5),
             SessionKind::PlainTerminal,
             vec!["sh".to_owned()],
+            None,
             1_700_000_000_000,
         )
     }

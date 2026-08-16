@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use rusty_tokio::io::AsyncBufReadExt;
-use sessionmgr_core::{SessionId, SessionKind};
+use sessionmgr_core::{Disposition, SessionId, SessionKind};
 use sessionmgr_protocol::{Request, Response, SessionEvent, SessionSummary};
 
 use crate::error::{Error, Result};
@@ -96,8 +96,22 @@ async fn request(root: &Path, request: Request) -> Result<Response> {
     }
 }
 
-pub async fn session_new(root: &Path, kind: SessionKind, command: Vec<String>) -> Result<SessionId> {
-    match request(root, Request::SessionNew { kind, command }).await? {
+pub async fn session_new(
+    root: &Path,
+    kind: SessionKind,
+    command: Vec<String>,
+    repo: Option<PathBuf>,
+) -> Result<SessionId> {
+    match request(
+        root,
+        Request::SessionNew {
+            kind,
+            command,
+            repo,
+        },
+    )
+    .await?
+    {
         Response::SessionCreated { id } => Ok(id),
         other => Err(Error::protocol(format!(
             "unexpected answer to session-new: {other:?}"
@@ -114,8 +128,12 @@ pub async fn session_list(root: &Path) -> Result<Vec<SessionSummary>> {
     }
 }
 
-pub async fn session_close(root: &Path, id: SessionId) -> Result<()> {
-    match request(root, Request::SessionClose { id }).await? {
+pub async fn session_close(
+    root: &Path,
+    id: SessionId,
+    disposition: Option<Disposition>,
+) -> Result<()> {
+    match request(root, Request::SessionClose { id, disposition }).await? {
         Response::Ok => Ok(()),
         other => Err(Error::protocol(format!(
             "unexpected answer to session-close: {other:?}"
@@ -198,13 +216,17 @@ pub fn render_sessions(sessions: &[SessionSummary]) -> String {
     if sessions.is_empty() {
         return "no sessions".to_owned();
     }
-    let mut out = String::from("ID            STATUS       KIND            COMMAND\n");
+    let mut out = String::from("ID            STATUS       KIND            BRANCH                    COMMAND\n");
     for session in sessions {
         out.push_str(&format!(
-            "{:<13} {:<12} {:<15} {}\n",
+            "{:<13} {:<12} {:<15} {:<25} {}\n",
             session.id,
             format!("{:?}", session.status),
             format!("{:?}", session.kind),
+            // A same-directory session deliberately shows no branch: it
+            // works on whatever the repository is already on, which is
+            // exactly the property that makes it the unisolated choice.
+            session.branch.as_deref().unwrap_or("-"),
             session.command.join(" "),
         ));
     }
@@ -236,6 +258,8 @@ mod tests {
             kind: SessionKind::PlainTerminal,
             status: sessionmgr_core::SessionStatus::Running,
             command: vec!["/bin/sh".to_owned()],
+            cwd: None,
+            branch: None,
             created_at_millis: 1_700_000_000_000,
             exit_code: None,
         };

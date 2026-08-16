@@ -13,18 +13,14 @@
 //! processes, and no filesystem. See `docs/plan/PLAN.md` § Testing
 //! strategy.
 //!
-//! # Phase scope
-//!
-//! Phase 1 (walking skeleton) deliberately models only
-//! [`SessionKind::PlainTerminal`]. `SameDirectory` and `Worktree` arrive
-//! in Phase 2 along with the worktree lifecycle they need, rather than
-//! being stubbed in ahead of the code that gives them meaning.
-
 pub mod ports;
 pub mod recovery;
 pub mod session;
+pub mod workspace;
 
 pub use recovery::{decide_recovery, Liveness, RecoveryAction};
 pub use session::{
-    Session, SessionId, SessionIdError, SessionKind, SessionStatus, TransitionError, WorkerRef,
+    Disposition, Session, SessionId, SessionIdError, SessionKind, SessionStatus, TransitionError,
+    WorkerRef,
 };
+pub use workspace::Workspace;

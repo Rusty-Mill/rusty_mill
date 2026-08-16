@@ -85,6 +85,119 @@ pub fn bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_sessionmgr"))
 }
 
+/// A throwaway git repository with one commit, removed on drop.
+///
+/// **Tests must never run against the repository they live in.** An
+/// earlier version of the worktree test did exactly that, and left two
+/// real worktrees and two real branches behind in this project's own
+/// checkout. Worktree operations mutate a repository's administrative
+/// state, so a test that points at the working repo is modifying the
+/// thing it is being run from.
+pub struct TempRepo {
+    dir: PathBuf,
+}
+
+impl TempRepo {
+    pub fn new(label: &str) -> Self {
+        use std::hash::{Hash, Hasher};
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (label, "repo", std::process::id(), nanos).hash(&mut hasher);
+        let dir = std::env::temp_dir().join(format!("smr{:x}", hasher.finish() & 0xffff_ffff));
+        std::fs::create_dir_all(&dir).expect("create the temp repo");
+
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                // A deterministic identity and no signing: the machine
+                // running the tests may have neither configured, or may
+                // have commit signing on, and neither should be able to
+                // make this fail.
+                .env("GIT_AUTHOR_NAME", "sessionmgr tests")
+                .env("GIT_AUTHOR_EMAIL", "tests@example.invalid")
+                .env("GIT_COMMITTER_NAME", "sessionmgr tests")
+                .env("GIT_COMMITTER_EMAIL", "tests@example.invalid")
+                .output()
+                .expect("run git");
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        // An explicit initial branch name, rather than whatever this
+        // machine's `init.defaultBranch` happens to be.
+        git(&["init", "--initial-branch=main"]);
+        git(&["commit", "--allow-empty", "-m", "initial", "--no-gpg-sign"]);
+        TempRepo { dir }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.dir
+    }
+
+    pub fn path_str(&self) -> String {
+        self.dir.to_string_lossy().into_owned()
+    }
+
+    /// Branches in this repository, one per line.
+    pub fn branches(&self) -> String {
+        let out = Command::new("git")
+            .args(["branch", "--list"])
+            .current_dir(&self.dir)
+            .output()
+            .expect("run git branch");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Worktrees registered with this repository.
+    pub fn worktrees(&self) -> String {
+        let out = Command::new("git")
+            .args(["worktree", "list"])
+            .current_dir(&self.dir)
+            .output()
+            .expect("run git worktree list");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// Does a commit whose message is `message` exist on the current
+    /// branch?
+    pub fn log_contains(&self, message: &str) -> bool {
+        let out = Command::new("git")
+            .args(["log", "--oneline"])
+            .current_dir(&self.dir)
+            .output()
+            .expect("run git log");
+        String::from_utf8_lossy(&out.stdout).contains(message)
+    }
+}
+
+impl Drop for TempRepo {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A command that commits a file inside whatever directory it runs in,
+/// so a worktree session produces something a merge can actually move.
+pub fn commit_a_file(name: &str) -> Vec<String> {
+    let script = format!(
+        "git config user.email tests@example.invalid && \
+         git config user.name 'sessionmgr tests' && \
+         echo hello > {name} && git add {name} && \
+         git commit --no-gpg-sign -m 'add {name}'"
+    );
+    if cfg!(windows) {
+        vec!["cmd".into(), "/C".into(), script]
+    } else {
+        vec!["sh".into(), "-c".into(), script]
+    }
+}
+
 /// Runs one CLI invocation to completion.
 ///
 /// Stdin is explicitly nulled rather than inherited: `attach` reads
@@ -116,7 +229,15 @@ pub fn assert_success(label: &str, output: &std::process::Output) {
 
 /// Creates a session running `command`, returning its id.
 pub fn session_new(root: &Path, command: &[&str]) -> String {
-    let mut args = vec!["new", "--"];
+    session_new_in(root, &[], command)
+}
+
+/// As [`session_new`], but with extra flags (`--kind`, `--repo`) before
+/// the `--` separator.
+pub fn session_new_in(root: &Path, flags: &[&str], command: &[&str]) -> String {
+    let mut args = vec!["new"];
+    args.extend_from_slice(flags);
+    args.push("--");
     args.extend_from_slice(command);
     let output = run(root, &args);
     if !output.status.success() {
