@@ -28,9 +28,7 @@ pub enum Action {
     DropIndex,
     Insert,
     Select,
-    /// Not yet reachable — no `UPDATE` statement exists yet. Kept so
-    /// `update_hook` callers can match on it now rather than needing a
-    /// breaking enum change once `UPDATE` lands.
+    /// `UPDATE` (issue #128).
     Update,
     /// Not yet reachable — no `DELETE` statement exists yet. Same
     /// reasoning as `Update`.

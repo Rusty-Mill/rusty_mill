@@ -10,6 +10,7 @@ use crate::dml_select::{
     describe_aggregate_call, AggregateArg, CompoundOp, CompoundSelect, Expr, Select, SelectColumns,
     WithSelect,
 };
+use crate::dml_update::Update;
 use crate::error::{Error, Result};
 use crate::eval::{evaluate_bool_with_functions, evaluate_with_functions, ScalarFn};
 use crate::storage::Database;
@@ -24,6 +25,18 @@ pub fn execute_create_table(db: &mut Database, create: &CreateTable) -> Result<(
 /// Executes a `DROP TABLE` statement (issue #120).
 pub fn execute_drop_table(db: &mut Database, drop: &DropTable) -> Result<()> {
     db.drop_table(&drop.table_name, drop.if_exists)
+}
+
+/// Executes an `UPDATE` statement (issue #128), returning each updated
+/// row's rowid (in table row order) — the same "affected count via
+/// `.len()`, plus real rowids for `update_hook`" shape
+/// [`execute_insert_returning_rowids`] already established for `INSERT`.
+pub fn execute_update(db: &mut Database, update: &Update) -> Result<Vec<i64>> {
+    db.update_rows(
+        &update.table_name,
+        &update.assignments,
+        update.filter.as_ref(),
+    )
 }
 
 /// Executes an `ALTER TABLE` statement (issue #121).

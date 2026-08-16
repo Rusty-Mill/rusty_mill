@@ -368,7 +368,7 @@ impl Database {
                 actual: row.len(),
             });
         }
-        check_constraints(table, table_name, &row)?;
+        check_constraints(table, table_name, &row, None)?;
         let rowid = table.row_ids.iter().max().copied().unwrap_or(0) + 1;
         table.rows.push(row);
         table.row_ids.push(rowid);
@@ -430,6 +430,68 @@ impl Database {
                 self.insert_row_returning_rowid(table_name, row).map(Some)
             }
         }
+    }
+
+    /// Applies an `UPDATE table SET col = expr, ... [WHERE ...]` statement
+    /// (issue #128). For every row matching `filter` (`None` matches every
+    /// row, same as a `WHERE`-less `SELECT`/`DELETE`), each `assignments`
+    /// expression is evaluated against that row's *pre-update* values —
+    /// so `SET a = a, b = a` sees `a`'s old value on both sides, matching
+    /// real SQLite's own "evaluate against the pre-`UPDATE` row" rule —
+    /// then just those columns are replaced, leaving the rest of the row
+    /// untouched. Every updated row is fully re-validated against the
+    /// table's constraints (`NOT NULL`/`PRIMARY KEY`/`UNIQUE`/`CHECK`),
+    /// excluding the row's own pre-update values from the `PRIMARY KEY`/
+    /// `UNIQUE` conflict scan (see [`check_constraints`]'s `exclude`
+    /// parameter) — a constraint violation on any single row aborts the
+    /// whole statement (no partial update), matching this crate's
+    /// existing all-or-nothing `INSERT` constraint behavior. Returns
+    /// every updated row's rowid, in table row order, for
+    /// `Connection::execute`'s `update_hook` firing.
+    pub fn update_rows(
+        &mut self,
+        table_name: &str,
+        assignments: &[(String, Expr)],
+        filter: Option<&Expr>,
+    ) -> Result<Vec<i64>> {
+        let table = self
+            .tables
+            .get_mut(table_name)
+            .ok_or_else(|| Error::TableNotFound(table_name.to_string()))?;
+
+        let assign_indices = assignments
+            .iter()
+            .map(|(name, expr)| {
+                let idx = table
+                    .column_names
+                    .iter()
+                    .position(|c| c == name)
+                    .ok_or_else(|| Error::UnknownColumn(name.clone()))?;
+                Ok((idx, expr))
+            })
+            .collect::<Result<Vec<(usize, &Expr)>>>()?;
+
+        let mut updated_rowids = Vec::new();
+        for i in 0..table.rows.len() {
+            let old_row = table.rows[i].clone();
+            let keep = match filter {
+                Some(f) => evaluate_bool3(f, &table.column_names, &old_row)?.unwrap_or(false),
+                None => true,
+            };
+            if !keep {
+                continue;
+            }
+
+            let mut new_row = old_row.clone();
+            for (idx, expr) in &assign_indices {
+                new_row[*idx] = evaluate(expr, &table.column_names, &old_row)?;
+            }
+
+            check_constraints(table, table_name, &new_row, Some(i))?;
+            table.rows[i] = new_row;
+            updated_rowids.push(table.row_ids[i]);
+        }
+        Ok(updated_rowids)
     }
 
     /// Returns a table's schema and rows for scanning.
@@ -612,7 +674,19 @@ impl Database {
 /// `eval.rs`, out of scope here), so e.g. `CHECK (age >= 0)` with `age`
 /// `NULL` currently evaluates to plain `FALSE`, not `NULL` — a real
 /// SQLite would let that row through.
-fn check_constraints(table: &Table, table_name: &str, row: &[Value]) -> Result<()> {
+/// `exclude`, when given, is a `table.rows` index the `PRIMARY KEY`/
+/// `UNIQUE` conflict scan skips — [`Database::update_rows`] (issue #128)
+/// passes the row's own (pre-update) index here, since without it every
+/// `UPDATE` would spuriously conflict with the very row it's updating
+/// (e.g. `UPDATE t SET a = a` on a `PRIMARY KEY` column). [`Database::
+/// insert_row_returning_rowid`] passes `None` — a freshly inserted row
+/// was never itself in `table.rows` to begin with.
+fn check_constraints(
+    table: &Table,
+    table_name: &str,
+    row: &[Value],
+    exclude: Option<usize>,
+) -> Result<()> {
     for (i, col) in table.columns.iter().enumerate() {
         let value = &row[i];
 
@@ -625,7 +699,11 @@ fn check_constraints(table: &Table, table_name: &str, row: &[Value]) -> Result<(
 
         if (col.primary_key || col.unique)
             && *value != Value::Null
-            && table.rows.iter().any(|existing| existing[i] == *value)
+            && table
+                .rows
+                .iter()
+                .enumerate()
+                .any(|(row_idx, existing)| Some(row_idx) != exclude && existing[i] == *value)
         {
             let kind = if col.primary_key {
                 "PRIMARY KEY"

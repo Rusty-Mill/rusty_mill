@@ -72,13 +72,14 @@ pub trait VTab {
     /// adjacent docs follow, matching real `rusqlite`'s
     /// `VTab`/`UpdateVTab` split.
     ///
-    /// **Also out of scope:** `UPDATE`/`DELETE`. This crate's SQL
-    /// engine has no `UPDATE`/`DELETE` grammar or execution path at
-    /// all yet, for *any* table (native or virtual) — adding them here
-    /// first would mean inventing `UPDATE`/`DELETE` support
-    /// specifically for virtual tables before it exists for ordinary
-    /// ones, which is backwards. Revisit once native `UPDATE`/`DELETE`
-    /// exists.
+    /// **Also out of scope:** `UPDATE`/`DELETE` *into a virtual table*.
+    /// Native `UPDATE` now exists (issue #128, `DELETE` still pending —
+    /// see the epic), but only for ordinary tables via
+    /// [`crate::storage::Database::update_rows`] — there's no
+    /// `VTab`-level method for a virtual table to accept a row update
+    /// yet (this trait's `insert` above is `INSERT`'s own equivalent
+    /// hook; nothing parallel exists for `UPDATE`/`DELETE`). Revisit
+    /// once that's worth adding.
     fn insert(&self, _row: Vec<Value>) -> Result<()> {
         Err(Error::ReadOnlyVirtualTable)
     }

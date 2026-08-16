@@ -45,7 +45,10 @@ use crate::dml_select::{
     AggregateArg, AggregateCall, CompoundSelect, Cte, Expr, ParamMarker, Select, SelectColumns,
     WithSelect,
 };
-use crate::engine::{describe_window_call, execute_create_table, execute_insert_returning_rowids};
+use crate::dml_update::{parse_update, Update};
+use crate::engine::{
+    describe_window_call, execute_create_table, execute_insert_returning_rowids, execute_update,
+};
 use crate::error::{Error, Result};
 use crate::row::Row;
 use crate::rows::{AndThenRows, Rows};
@@ -60,6 +63,7 @@ pub(crate) enum StatementKind {
     Insert(Insert),
     Select(CompoundSelect),
     With(WithSelect),
+    Update(Update),
 }
 
 /// Tokenizes and parses `sql`, resolving parameter markers to 1-based
@@ -78,6 +82,9 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
         }
         Some(kw) if kw.eq_ignore_ascii_case("SELECT") => {
             StatementKind::Select(parse_compound_select(&tokens)?)
+        }
+        Some(kw) if kw.eq_ignore_ascii_case("UPDATE") => {
+            StatementKind::Update(parse_update(&tokens)?)
         }
         _ if is_with_select(&tokens) => StatementKind::With(parse_with_select(&tokens)?),
         _ => return Err(Error::UnrecognizedStatement(sql.to_string())),
@@ -116,6 +123,16 @@ pub(crate) fn parse_statement(sql: &str) -> Result<(StatementKind, Vec<Option<St
             rewrite_select_params(&mut with_select.body.first, &mut resolver);
             for (_, select) in &mut with_select.body.rest {
                 rewrite_select_params(select, &mut resolver);
+            }
+        }
+        StatementKind::Update(update) => {
+            // Left-to-right over the SQL text: `SET` assignments before
+            // `WHERE`, matching where each appears in the original text.
+            for (_, expr) in &mut update.assignments {
+                resolver.rewrite(expr);
+            }
+            if let Some(filter) = &mut update.filter {
+                resolver.rewrite(filter);
             }
         }
     }
@@ -451,6 +468,22 @@ impl<'conn> Statement<'conn> {
         }
     }
 
+    /// Resolves every `Expr::Parameter` in an `UPDATE` statement's `SET`
+    /// assignments and `WHERE` filter (issue #128) — the same
+    /// bound-value-substitution [`Statement::resolved_insert`] does for
+    /// `INSERT`.
+    fn resolved_update(&self, update: &Update) -> Update {
+        Update {
+            table_name: update.table_name.clone(),
+            assignments: update
+                .assignments
+                .iter()
+                .map(|(name, expr)| (name.clone(), self.resolve_expr(expr)))
+                .collect(),
+            filter: update.filter.as_ref().map(|f| self.resolve_expr(f)),
+        }
+    }
+
     fn resolve_aggregate_arg(&self, arg: &AggregateArg) -> AggregateArg {
         match arg {
             AggregateArg::Star => AggregateArg::Star,
@@ -559,10 +592,11 @@ impl<'conn> Statement<'conn> {
         }
     }
 
-    /// Runs this statement (`CREATE TABLE`/`INSERT`), returning the number
-    /// of rows affected (`0` for `CREATE TABLE`). Errors if this is a
-    /// `SELECT` — use [`Statement::query_map`]/[`Statement::query_row`]/
-    /// [`Statement::query_one`] instead.
+    /// Runs this statement (`CREATE TABLE`/`INSERT`/`UPDATE` — issue
+    /// #128), returning the number of rows affected (`0` for `CREATE
+    /// TABLE`). Errors if this is a `SELECT` — use [`Statement::
+    /// query_map`]/[`Statement::query_row`]/[`Statement::query_one`]
+    /// instead.
     pub fn execute(&mut self) -> Result<usize> {
         if self.conn.is_readonly(crate::MAIN_DB)? {
             return Err(Error::ReadOnlyConnection);
@@ -575,6 +609,10 @@ impl<'conn> Statement<'conn> {
             StatementKind::Insert(insert) => {
                 let resolved = self.resolved_insert(insert);
                 execute_insert_returning_rowids(self.conn.db_mut(), &resolved)?.len()
+            }
+            StatementKind::Update(update) => {
+                let resolved = self.resolved_update(update);
+                execute_update(self.conn.db_mut(), &resolved)?.len()
             }
             StatementKind::Select(_) | StatementKind::With(_) => {
                 return Err(Error::UnrecognizedStatement(
@@ -778,7 +816,7 @@ impl<'conn> Statement<'conn> {
     }
 
     /// Returns whether this statement can't modify the database — `true`
-    /// for a `SELECT`, `false` for `CREATE TABLE`/`INSERT`.
+    /// for a `SELECT`, `false` for `CREATE TABLE`/`INSERT`/`UPDATE`.
     pub fn readonly(&self) -> bool {
         self.is_query()
     }
